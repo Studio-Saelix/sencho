@@ -14,6 +14,7 @@ interface DeleteFileConfirmProps {
   stackName: string;
   relPath: string;
   entry: FileEntry | null;
+  rootId?: string;
   onDeleted: () => void;
 }
 
@@ -23,6 +24,7 @@ export function DeleteFileConfirm({
   stackName,
   relPath,
   entry,
+  rootId,
   onDeleted,
 }: DeleteFileConfirmProps) {
   const [deleting, setDeleting] = useState(false);
@@ -47,7 +49,7 @@ export function DeleteFileConfirm({
   const executeDelete = async (recursive: boolean) => {
     setDeleting(true);
     try {
-      await deleteStackPath(stackName, relPath, recursive || undefined);
+      await deleteStackPath(stackName, relPath, recursive || undefined, rootId);
       onDeleted();
       onOpenChange(false);
     } catch (e: unknown) {

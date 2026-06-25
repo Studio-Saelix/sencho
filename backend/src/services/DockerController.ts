@@ -54,11 +54,45 @@ export function selectMainWebPort(
   return chosen?.PublicPort;
 }
 
+/**
+ * Pull the exit code out of a Docker container Status string. listContainers
+ * exposes the code only inside Status (e.g. "Exited (137) 2 minutes ago"); the
+ * structured code would otherwise need a per-container inspect. Returns null when
+ * no parenthesized code is present (e.g. "Up 3 hours", "Created").
+ */
+export function parseExitCode(status: string | undefined): number | null {
+  if (!status) return null;
+  const match = /\((\d+)\)/.exec(status);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Whether a container represents a genuine failure (a crash) rather than a clean
+ * completion. A dead container always counts. An exited or restarting container
+ * counts only when it left with a non-zero exit code (read from its Status
+ * string), so a finished init job (exit 0) or a container cleanly cycling under a
+ * restart policy does not mark its stack as degraded, while a crash loop (e.g.
+ * "Restarting (1)") does. An exited or restarting container with an unreadable
+ * code is treated as failed, erring toward surfacing a crash.
+ */
+export function isContainerFailed(state: string, status: string | undefined): boolean {
+  if (state === 'dead') return true;
+  if (state === 'exited' || state === 'restarting') {
+    const code = parseExitCode(status);
+    return code === null ? true : code !== 0;
+  }
+  return false;
+}
+
 export interface BulkStackInfo {
-  status: 'running' | 'exited' | 'unknown';
+  status: 'running' | 'exited' | 'unknown' | 'partial';
   mainPort?: number;
   /** Unix seconds of the oldest running container's last start (approximates stack uptime). */
   runningSince?: number;
+  /** Running container count for the stack (set when the stack has containers). */
+  running?: number;
+  /** Total container count for the stack; paired with `running` for the sidebar tooltip. */
+  total?: number;
 }
 
 export interface ClassifiedImage {
@@ -1144,6 +1178,14 @@ class DockerController {
     // only used if an inspect fails, since it never moves on restart.
     const runningByStack: Record<string, { ids: string[]; oldestCreated?: number }> = {};
 
+    // Per stack, tally running, genuinely-failed (crashed), and total containers
+    // so the status can distinguish a fully-up stack from one that is partially
+    // degraded (some running, some crashed).
+    const countsByStack: Record<string, { running: number; failed: number; total: number }> = {};
+    for (const name of stackNames) {
+      countsByStack[name] = { running: 0, failed: 0, total: 0 };
+    }
+
     for (const container of allContainers as any[]) {
       const stackDir = DockerController.resolveContainerStack(
         container.Labels, projectToStack, knownStackSet, absDirToStack, resolvedBase,
@@ -1151,8 +1193,11 @@ class DockerController {
 
       if (!stackDir || !result[stackDir]) continue;
 
+      const counts = countsByStack[stackDir];
+      counts.total += 1;
+
       if (container.State === 'running') {
-        result[stackDir].status = 'running';
+        counts.running += 1;
 
         const acc = (runningByStack[stackDir] ??= { ids: [] });
         if (typeof container.Id === 'string') acc.ids.push(container.Id);
@@ -1168,9 +1213,23 @@ class DockerController {
           );
           if (mainPort) result[stackDir].mainPort = mainPort;
         }
-      } else if (result[stackDir].status !== 'running') {
-        result[stackDir].status = 'exited';
+      } else if (isContainerFailed(container.State, container.Status)) {
+        counts.failed += 1;
       }
+    }
+
+    // Classify each stack from its tallies. "partial" requires at least one
+    // running and at least one crashed container, so a stack with a cleanly
+    // finished one-shot container (exit 0) stays "running". A stack with no
+    // containers keeps its seeded "unknown".
+    for (const name of stackNames) {
+      const { running, failed, total } = countsByStack[name];
+      if (total === 0) continue;
+      if (running === 0) result[name].status = 'exited';
+      else if (failed > 0) result[name].status = 'partial';
+      else result[name].status = 'running';
+      result[name].running = running;
+      result[name].total = total;
     }
 
     // Resolve real uptime: oldest StartedAt across each stack's running

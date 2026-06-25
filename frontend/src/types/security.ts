@@ -18,6 +18,8 @@ export interface TrivyStatus {
   autoUpdate: boolean;
   honorSuppressionsOnDeploy: boolean;
   preDeployScanAdvisory: boolean;
+  /** Outbound CVE exploit-intel (KEV + EPSS) fetch is enabled for this node. */
+  cveIntelEnabled: boolean;
   busy: boolean;
 }
 
@@ -68,6 +70,9 @@ export interface VulnerabilityScan {
   error: string | null;
   stack_context: string | null;
   policy_evaluation?: ScanPolicyEvaluation | null;
+  /** Tri-state Compose exposure for the scan-sheet badge: true = publicly
+   *  exposed, false = internal only, null/absent = no descriptor cached. */
+  publicly_exposed?: boolean | null;
 }
 
 export interface SecretFinding {
@@ -122,10 +127,29 @@ export interface VulnerabilityDetail {
   title: string | null;
   description: string | null;
   primary_url: string | null;
+  // Scan-intrinsic enrichment (nullable; absent on older scans). Drives the
+  // CVSS chip and evidence tags. `status`: fixed / will_not_fix / end_of_life.
+  status?: string | null;
+  cvss_score?: number | null;
+  cvss_vector?: string | null;
+  cvss_source?: string | null;
+  vendor_severity?: VulnSeverity | null;
+  purl?: string | null;
+  pkg_path?: string | null;
+  layer_digest?: string | null;
+  // Read-time exploit intel join (KEV / EPSS), attached by the vulnerabilities
+  // endpoint. Optional: absent until the intel cache has populated.
+  kev?: boolean;
+  epss_score?: number | null;
+  epss_percentile?: number | null;
   suppressed?: boolean;
   suppression_id?: number;
   suppression_reason?: string;
 }
+
+/** Triage decision states (mirrors the backend TriageStatus). */
+export type TriageStatus =
+  | 'needs_review' | 'affected' | 'not_affected' | 'accepted' | 'fixed' | 'false_positive' | 'ignored';
 
 export interface CveSuppression {
   id: number;
@@ -138,6 +162,8 @@ export interface CveSuppression {
   expires_at: number | null;
   replicated_from_control: number;
   active: boolean;
+  status?: TriageStatus;
+  justification?: string | null;
 }
 
 export interface ScanSummary {
@@ -165,6 +191,12 @@ export interface ScanPolicy {
   max_severity: VulnSeverity;
   block_on_deploy: number;
   enabled: number;
+  /** Block when an image's highest non-suppressed severity meets max_severity. */
+  block_on_severity: number;
+  /** Block when any non-suppressed CVE is in the CISA known-exploited (KEV) set. */
+  block_on_kev: number;
+  /** Block when any non-suppressed Critical/High finding has a fix available. */
+  block_on_fixable: number;
   replicated_from_control: number;
   created_at: number;
   updated_at: number;
@@ -194,6 +226,10 @@ export interface ScanCompareResult {
   row_limit?: number;
 }
 
+/** The Security page's action posture (the masthead verdict). Mirrors the
+ *  backend `SecurityPostureState`. */
+export type SecurityPostureState = 'Action needed' | 'Monitoring' | 'Secure' | 'Unknown';
+
 /** Node-scoped security posture rollup for the Security page Overview. */
 export interface SecurityOverview {
   scannedImages: number;
@@ -216,6 +252,23 @@ export interface SecurityOverview {
     /** Approximate count of enabled block-on-deploy policies eligible for this node. */
     eligibleBlockPolicies: number;
   };
+  // Posture facts. Optional because an older remote node (reached through the
+  // proxy) may not report them; the masthead falls back to a local derivation.
+  // Counts are facts; `posture` is the authoritative derived verb.
+  rawCritical?: number;
+  rawHigh?: number;
+  fixableCriticalHigh?: number;
+  knownExploited?: number;
+  publiclyExposed?: number;
+  dangerousCompose?: number;
+  needsReview?: number;
+  accepted?: number;
+  notAffected?: number;
+  /** Total actionable items, for the "N actions" affordance. */
+  actionable?: number;
+  posture?: SecurityPostureState;
+  /** True when the bounded posture pass hit its row cap on this node. */
+  posturePartial?: boolean;
 }
 
 /** Which detail tab the scan sheet opens on. Matches VulnerabilityScanSheet's tabs. */
@@ -229,4 +282,24 @@ export interface SecurityRiskTrendPoint {
   date: string;
   critical: number;
   high: number;
+}
+
+/** One actionable Critical/High finding for the overview exploit-intel charts
+ *  (Top exploit-risk list + CVSS-by-EPSS quadrant). Intel fields are null until
+ *  CveIntelService has fetched; cvss_score is null on pre-enrichment scans. */
+export interface ExploitIntelFinding {
+  vulnerability_id: string;
+  image_ref: string;
+  scan_id: number;
+  severity: VulnSeverity;
+  cvss_score: number | null;
+  epss_score: number | null;
+  epss_percentile: number | null;
+  kev: boolean;
+  fixed_version: string | null;
+}
+
+export interface ExploitIntelOverview {
+  items: ExploitIntelFinding[];
+  truncated: boolean;
 }

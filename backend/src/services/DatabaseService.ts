@@ -3,8 +3,10 @@ import path from 'path';
 import fs from 'fs';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
+import { evaluatePolicyRisk, policyInputs } from '../utils/policy-risk';
 import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
+import type { BackendScheduledAction } from './scheduledActionRegistry';
 
 function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
@@ -90,6 +92,8 @@ export interface StackDossier extends StackDossierFields {
     source_hash?: string | null;
     /** SHA-256 of the parsed compose model at the last deploy (ignores comments/whitespace). */
     rendered_hash?: string | null;
+    /** When the drift ledger was last reconciled for this stack (re-check, deploy, or background scan); null if never. */
+    last_drift_check_at?: number | null;
     created_at: number;
     updated_at: number;
 }
@@ -105,6 +109,15 @@ export interface PreflightRunRow {
     highest_severity: string | null;
     created_at: number;
     created_by: string | null;
+}
+
+/** Per-stack per-service Compose exposure descriptor (one row per node+stack). */
+export interface StackExposureRow {
+    node_id: number;
+    stack_name: string;
+    /** JSON StackExposure from preflight/exposure.ts. */
+    descriptor: string;
+    computed_at: number;
 }
 
 /** One post-update health gate observation run. */
@@ -502,7 +515,7 @@ export interface ScheduledTask {
     target_type: 'stack' | 'fleet' | 'system';
     target_id: string | null;
     node_id: number | null;
-    action: 'restart' | 'snapshot' | 'prune' | 'update' | 'scan' | 'auto_backup' | 'auto_stop' | 'auto_down' | 'auto_start';
+    action: BackendScheduledAction;
     cron_expression: string;
     enabled: number;
     created_by: string;
@@ -636,6 +649,17 @@ export interface VulnerabilityDetail {
     title: string | null;
     description: string | null;
     primary_url: string | null;
+    // Scan-intrinsic enrichment captured from Trivy. Optional because older rows
+    // (pre-enrichment) and callers that don't enrich omit them; the insert binds
+    // null. `status` is the posture-relevant one (fixed / will_not_fix / ...).
+    status?: string | null;
+    cvss_score?: number | null;
+    cvss_vector?: string | null;
+    cvss_source?: string | null;
+    vendor_severity?: VulnSeverity | null;
+    purl?: string | null;
+    pkg_path?: string | null;
+    layer_digest?: string | null;
 }
 
 export interface SecretFinding {
@@ -674,6 +698,12 @@ export interface ScanPolicy {
     block_on_deploy: number;
     enabled: number;
     replicated_from_control: number;
+    /** Block when an image's highest non-suppressed severity meets max_severity. */
+    block_on_severity: number;
+    /** Block when any non-suppressed CVE is in the CISA known-exploited (KEV) set. */
+    block_on_kev: number;
+    /** Block when any non-suppressed Critical/High finding has a fix available. */
+    block_on_fixable: number;
     created_at: number;
     updated_at: number;
 }
@@ -699,6 +729,11 @@ export interface CveSuppression {
     created_at: number;
     expires_at: number | null;
     replicated_from_control: number;
+    // Triage decision layered on the suppression. Optional on inputs (callers may
+    // omit them; the insert defaults `status` to 'accepted', the back-compat value
+    // for pre-triage rows). `justification` is an optional OpenVEX reason code.
+    status?: string;
+    justification?: string | null;
 }
 
 /**
@@ -715,6 +750,14 @@ export interface MisconfigAcknowledgement {
     created_at: number;
     expires_at: number | null;
     replicated_from_control: number;
+}
+
+/** Read-time exploit intelligence joined to a CVE id (CveIntelService cache). */
+export interface CveIntel {
+    kev: boolean;
+    kevDate: string | null;
+    epssScore: number | null;
+    epssPercentile: number | null;
 }
 
 export interface ScanSummary {
@@ -789,6 +832,7 @@ export class DatabaseService {
         this.migrateNotificationRoutesMatchers();
         this.migrateNotificationHistoryContext();
         this.migrateScanPolicyFleetColumns();
+        this.migrateScanPolicyRiskColumns();
         this.migrateSecretMisconfigColumns();
         this.migrateAgentsAndNotificationsNodeId();
         this.migratePolicyEvaluationColumn();
@@ -1122,6 +1166,9 @@ export class DatabaseService {
         max_severity TEXT NOT NULL DEFAULT 'CRITICAL',
         block_on_deploy INTEGER NOT NULL DEFAULT 0,
         enabled INTEGER NOT NULL DEFAULT 1,
+        block_on_severity INTEGER NOT NULL DEFAULT 1,
+        block_on_kev INTEGER NOT NULL DEFAULT 0,
+        block_on_fixable INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -1166,6 +1213,20 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_misconfig_ack_expires ON misconfig_acknowledgements(expires_at);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_misconfig_ack_unique
         ON misconfig_acknowledgements(rule_id, COALESCE(stack_pattern, ''));
+
+      -- Time-varying exploit intelligence (CISA KEV + FIRST EPSS), refreshed by
+      -- CveIntelService and joined to findings at read time by CVE id. Never
+      -- frozen onto vulnerability_details, so a CVE entering KEV later lights up
+      -- on scans already stored.
+      CREATE TABLE IF NOT EXISTS cve_intel (
+        cve_id TEXT PRIMARY KEY,
+        kev INTEGER NOT NULL DEFAULT 0,
+        kev_date TEXT,
+        epss_score REAL,
+        epss_percentile REAL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_cve_intel_kev ON cve_intel(kev);
 
       CREATE TABLE IF NOT EXISTS stack_labels (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1284,6 +1345,7 @@ export class DatabaseService {
         custom_notes TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
+        last_drift_check_at INTEGER,
         UNIQUE(node_id, stack_name)
       );
 
@@ -1344,6 +1406,14 @@ export class DatabaseService {
       );
       CREATE INDEX IF NOT EXISTS idx_preflight_findings_run
         ON preflight_findings(run_id);
+
+      CREATE TABLE IF NOT EXISTS stack_exposure (
+        node_id INTEGER NOT NULL DEFAULT 0,
+        stack_name TEXT NOT NULL,
+        descriptor TEXT NOT NULL,
+        computed_at INTEGER NOT NULL,
+        PRIMARY KEY (node_id, stack_name)
+      );
 
       CREATE TABLE IF NOT EXISTS health_gate_runs (
         id TEXT PRIMARY KEY,
@@ -1433,6 +1503,23 @@ export class DatabaseService {
         // Captured Stack Dossier metadata (opt-in documentation snapshots)
         maybeAddCol('fleet_snapshots', 'documentation', "TEXT NOT NULL DEFAULT ''");
 
+        // Scan finding enrichment: scan-intrinsic fields Trivy returns that the
+        // triage/action posture surfaces (status, CVSS, vendor severity, purl,
+        // package path, layer). Nullable; older rows simply have no enrichment.
+        maybeAddCol('vulnerability_details', 'status', 'TEXT');
+        maybeAddCol('vulnerability_details', 'cvss_score', 'REAL');
+        maybeAddCol('vulnerability_details', 'cvss_vector', 'TEXT');
+        maybeAddCol('vulnerability_details', 'cvss_source', 'TEXT');
+        maybeAddCol('vulnerability_details', 'vendor_severity', 'TEXT');
+        maybeAddCol('vulnerability_details', 'purl', 'TEXT');
+        maybeAddCol('vulnerability_details', 'pkg_path', 'TEXT');
+        maybeAddCol('vulnerability_details', 'layer_digest', 'TEXT');
+
+        // Triage decisions layered on CVE suppressions (status + optional OpenVEX
+        // justification). Existing rows default to 'accepted' (the prior behavior).
+        maybeAddCol('cve_suppressions', 'status', "TEXT NOT NULL DEFAULT 'accepted'");
+        maybeAddCol('cve_suppressions', 'justification', 'TEXT');
+
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
         maybeAddCol('scheduled_tasks', 'prune_targets', 'TEXT DEFAULT NULL');
@@ -1488,6 +1575,10 @@ export class DatabaseService {
         stmt.run('trivy_last_notified_version', '');
         stmt.run('deploy_block_honor_suppressions', '0');
         stmt.run('pre_deploy_scan_advisory', '0');
+        // Outbound CVE exploit-intel (KEV + EPSS) fetch. On by default (a safe
+        // convenience that degrades gracefully offline); operators on air-gapped
+        // or firewalled hosts can turn it off.
+        stmt.run('cve_intel_enabled', '1');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
         stmt.run('reclaim_hero', '1');
@@ -1670,6 +1761,7 @@ export class DatabaseService {
     private migrateStackDossierHashes(): void {
         this.tryAddColumn('stack_dossiers', 'source_hash', 'TEXT');
         this.tryAddColumn('stack_dossiers', 'rendered_hash', 'TEXT');
+        this.tryAddColumn('stack_dossiers', 'last_drift_check_at', 'INTEGER');
     }
 
     private migrateGitSourceMultiFile(): void {
@@ -1690,6 +1782,17 @@ export class DatabaseService {
     private migrateScanPolicyFleetColumns(): void {
         this.tryAddColumn('scan_policies', 'node_identity', "TEXT NOT NULL DEFAULT ''");
         this.tryAddColumn('scan_policies', 'replicated_from_control', 'INTEGER NOT NULL DEFAULT 0');
+    }
+
+    /**
+     * Risk-based deploy-gate inputs. The defaults preserve existing rows as
+     * severity-only (block_on_severity=1, KEV/fixable off); new policies set
+     * these explicitly to the risk-first posture at their create path.
+     */
+    private migrateScanPolicyRiskColumns(): void {
+        this.tryAddColumn('scan_policies', 'block_on_severity', 'INTEGER NOT NULL DEFAULT 1');
+        this.tryAddColumn('scan_policies', 'block_on_kev', 'INTEGER NOT NULL DEFAULT 0');
+        this.tryAddColumn('scan_policies', 'block_on_fixable', 'INTEGER NOT NULL DEFAULT 0');
     }
 
     private migrateSecretMisconfigColumns(): void {
@@ -2339,6 +2442,22 @@ export class DatabaseService {
         ).run(nodeId, stackName, sourceHash, renderedHash, now, now);
     }
 
+    /**
+     * Stamp when the drift ledger was last reconciled for a stack (re-check, deploy,
+     * or background scan). Mirrors setStackDossierHashes: creates a notes-empty row
+     * if none exists, otherwise updates only this column so operator notes and their
+     * updated_at are left untouched.
+     */
+    public setStackDossierDriftCheck(nodeId: number, stackName: string, checkedAt: number): void {
+        const now = Date.now();
+        this.db.prepare(
+            `INSERT INTO stack_dossiers (node_id, stack_name, last_drift_check_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(node_id, stack_name) DO UPDATE SET
+                last_drift_check_at = excluded.last_drift_check_at`
+        ).run(nodeId, stackName, checkedAt, now, now);
+    }
+
     // --- Stack Drift Findings (the persisted drift ledger) ---
 
     public insertDriftFinding(f: Omit<StackDriftFindingRow, 'id' | 'resolved_at'>): number {
@@ -2401,6 +2520,42 @@ export class DatabaseService {
     /** Clear every intent row for a stack (used when the stack is deleted). */
     public deleteStackExposureIntents(nodeId: number, stackName: string): void {
         this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+    }
+
+    // --- Stack Exposure (Compose reachability descriptor) ---
+
+    /** Store a per-stack exposure descriptor, replacing any prior row. */
+    public upsertStackExposure(nodeId: number, stackName: string, descriptor: string, computedAt: number): void {
+        this.db.prepare(
+            `INSERT INTO stack_exposure (node_id, stack_name, descriptor, computed_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (node_id, stack_name) DO UPDATE SET
+               descriptor = excluded.descriptor,
+               computed_at = excluded.computed_at`
+        ).run(nodeId, stackName, descriptor, computedAt);
+    }
+
+    /** Return every cached exposure descriptor for a node. Malformed rows are
+     *  skipped (logged) so a single corrupt row cannot fail the overview. */
+    public getStackExposures(nodeId: number): StackExposureRow[] {
+        const rows = this.db.prepare(
+            'SELECT node_id, stack_name, descriptor, computed_at FROM stack_exposure WHERE node_id = ?'
+        ).all(nodeId) as StackExposureRow[];
+        return rows.filter((r) => {
+            try {
+                JSON.parse(r.descriptor);
+                return true;
+            } catch {
+                console.warn('[DatabaseService] Dropping malformed stack_exposure row for node=%d stack=%s',
+                    r.node_id, r.stack_name);
+                return false;
+            }
+        });
+    }
+
+    /** Remove the exposure row for a single stack. */
+    public deleteStackExposure(nodeId: number, stackName: string): void {
+        this.db.prepare('DELETE FROM stack_exposure WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
     // --- Compose Doctor / Preflight ---
@@ -2838,6 +2993,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM preflight_findings WHERE run_id IN (SELECT id FROM preflight_runs WHERE node_id = ?)').run(id);
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM stack_exposure WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM health_gate_runs WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
@@ -4382,8 +4538,10 @@ export class DatabaseService {
         const stmt = this.db.prepare(
             `INSERT INTO vulnerability_details (
                 scan_id, vulnerability_id, pkg_name, installed_version,
-                fixed_version, severity, title, description, primary_url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                fixed_version, severity, title, description, primary_url,
+                status, cvss_score, cvss_vector, cvss_source, vendor_severity,
+                purl, pkg_path, layer_digest
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         );
         const txn = this.db.transaction((rows: typeof details) => {
             for (const d of rows) {
@@ -4397,6 +4555,14 @@ export class DatabaseService {
                     d.title,
                     d.description,
                     d.primary_url,
+                    d.status ?? null,
+                    d.cvss_score ?? null,
+                    d.cvss_vector ?? null,
+                    d.cvss_source ?? null,
+                    d.vendor_severity ?? null,
+                    d.purl ?? null,
+                    d.pkg_path ?? null,
+                    d.layer_digest ?? null,
                 );
             }
         });
@@ -4618,6 +4784,212 @@ export class DatabaseService {
     }
 
     /**
+     * Critical/High vulnerability findings from the latest completed scan per
+     * image on a node, for read-time posture math (suppression-aware fixable and
+     * accepted counts). Selects only the identity columns posture needs and is
+     * capped: `truncated` is set when the cap is hit so the caller can mark the
+     * posture partial rather than silently undercount. Phase 2 intentionally
+     * omits `status` (added by the findings-enrichment phase) so this runs
+     * standalone against a not-yet-migrated `vulnerability_details`.
+     */
+    public getLatestCritHighVulnFindingsForNode(
+        nodeId: number,
+        limit = 5000,
+    ): {
+        items: Array<{ image_ref: string; vulnerability_id: string; pkg_name: string; fixed_version: string | null }>;
+        truncated: boolean;
+    } {
+        const rows = this.db
+            .prepare(
+                `SELECT vs.image_ref, vd.vulnerability_id, vd.pkg_name, vd.fixed_version
+                 FROM vulnerability_details vd
+                 INNER JOIN vulnerability_scans vs ON vs.id = vd.scan_id
+                 INNER JOIN (
+                   SELECT image_ref, MAX(scanned_at) AS max_scanned
+                   FROM vulnerability_scans
+                   WHERE node_id = ? AND status = 'completed'
+                   GROUP BY image_ref
+                 ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
+                 WHERE vs.node_id = ? AND vs.status = 'completed'
+                   AND vd.severity IN ('CRITICAL', 'HIGH')
+                 LIMIT ?`,
+            )
+            .all(nodeId, nodeId, limit + 1) as Array<{
+                image_ref: string;
+                vulnerability_id: string;
+                pkg_name: string;
+                fixed_version: string | null;
+            }>;
+        const truncated = rows.length > limit;
+        return { items: truncated ? rows.slice(0, limit) : rows, truncated };
+    }
+
+    /**
+     * High-severity misconfiguration findings from the latest completed scan per
+     * image on a node, for the acknowledgement-aware `dangerousCompose` posture
+     * fact. Same bounded shape as `getLatestCritHighVulnFindingsForNode`.
+     */
+    public getLatestHighMisconfigFindingsForNode(
+        nodeId: number,
+        limit = 5000,
+    ): { items: Array<{ rule_id: string; stack_context: string | null }>; truncated: boolean } {
+        const rows = this.db
+            .prepare(
+                `SELECT mf.rule_id, vs.stack_context
+                 FROM misconfig_findings mf
+                 INNER JOIN vulnerability_scans vs ON vs.id = mf.scan_id
+                 INNER JOIN (
+                   SELECT image_ref, MAX(scanned_at) AS max_scanned
+                   FROM vulnerability_scans
+                   WHERE node_id = ? AND status = 'completed'
+                   GROUP BY image_ref
+                 ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
+                 WHERE vs.node_id = ? AND vs.status = 'completed'
+                   AND mf.severity IN ('CRITICAL', 'HIGH')
+                 LIMIT ?`,
+            )
+            .all(nodeId, nodeId, limit + 1) as Array<{ rule_id: string; stack_context: string | null }>;
+        const truncated = rows.length > limit;
+        return { items: truncated ? rows.slice(0, limit) : rows, truncated };
+    }
+
+    /**
+     * Critical/High findings from the latest completed scan per image, with the
+     * severity + CVSS the overview's exploit-intel charts need. Same bounded
+     * shape as getLatestCritHighVulnFindingsForNode (single latest-per-image
+     * JOIN, capped, `truncated` flagged). Intel (KEV/EPSS) and suppression
+     * filtering are applied by the caller at read time.
+     */
+    public getLatestCritHighFindingsWithCvssForNode(
+        nodeId: number,
+        limit = 2000,
+    ): {
+        items: Array<{
+            image_ref: string;
+            scan_id: number;
+            vulnerability_id: string;
+            pkg_name: string;
+            severity: VulnSeverity;
+            cvss_score: number | null;
+            fixed_version: string | null;
+        }>;
+        truncated: boolean;
+    } {
+        const rows = this.db
+            .prepare(
+                `SELECT vs.image_ref, vs.id AS scan_id, vd.vulnerability_id, vd.pkg_name,
+                        vd.severity, vd.cvss_score, vd.fixed_version
+                 FROM vulnerability_details vd
+                 INNER JOIN vulnerability_scans vs ON vs.id = vd.scan_id
+                 INNER JOIN (
+                   SELECT image_ref, MAX(scanned_at) AS max_scanned
+                   FROM vulnerability_scans
+                   WHERE node_id = ? AND status = 'completed'
+                   GROUP BY image_ref
+                 ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
+                 WHERE vs.node_id = ? AND vs.status = 'completed'
+                   AND vd.severity IN ('CRITICAL', 'HIGH')
+                 LIMIT ?`,
+            )
+            .all(nodeId, nodeId, limit + 1) as Array<{
+                image_ref: string;
+                scan_id: number;
+                vulnerability_id: string;
+                pkg_name: string;
+                severity: VulnSeverity;
+                cvss_score: number | null;
+                fixed_version: string | null;
+            }>;
+        const truncated = rows.length > limit;
+        return { items: truncated ? rows.slice(0, limit) : rows, truncated };
+    }
+
+    /**
+     * Distinct CVE ids present in stored findings, for the intel service to fetch
+     * EPSS only for what exists (EPSS covers CVEs, not GHSA, so filter to CVE-*).
+     */
+    public getDistinctVulnerabilityCveIds(limit = 20000): string[] {
+        const rows = this.db
+            .prepare(
+                `SELECT DISTINCT vulnerability_id FROM vulnerability_details
+                 WHERE vulnerability_id LIKE 'CVE-%' LIMIT ?`,
+            )
+            .all(limit) as Array<{ vulnerability_id: string }>;
+        return rows.map((r) => r.vulnerability_id);
+    }
+
+    /**
+     * Replace the KEV membership set. Clears kev on every row first, then marks
+     * the supplied CVEs, so a CVE removed from CISA's feed stops being flagged.
+     * Preserves EPSS columns (ON CONFLICT only touches the kev fields).
+     */
+    public replaceKev(entries: Array<{ cve_id: string; date_added: string | null }>, now: number): void {
+        const clear = this.db.prepare('UPDATE cve_intel SET kev = 0');
+        const upsert = this.db.prepare(
+            `INSERT INTO cve_intel (cve_id, kev, kev_date, updated_at)
+             VALUES (?, 1, ?, ?)
+             ON CONFLICT(cve_id) DO UPDATE SET kev = 1, kev_date = excluded.kev_date, updated_at = excluded.updated_at`,
+        );
+        const txn = this.db.transaction((rows: typeof entries) => {
+            clear.run();
+            for (const e of rows) upsert.run(e.cve_id, e.date_added, now);
+        });
+        txn(entries);
+    }
+
+    /** Upsert EPSS scores. Preserves kev columns (ON CONFLICT touches only EPSS). */
+    public upsertEpss(entries: Array<{ cve_id: string; epss_score: number; epss_percentile: number }>, now: number): void {
+        if (entries.length === 0) return;
+        const upsert = this.db.prepare(
+            `INSERT INTO cve_intel (cve_id, epss_score, epss_percentile, updated_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT(cve_id) DO UPDATE SET epss_score = excluded.epss_score,
+               epss_percentile = excluded.epss_percentile, updated_at = excluded.updated_at`,
+        );
+        const txn = this.db.transaction((rows: typeof entries) => {
+            for (const e of rows) upsert.run(e.cve_id, e.epss_score, e.epss_percentile, now);
+        });
+        txn(entries);
+    }
+
+    /**
+     * Read-time intel join. Returns a map keyed by CVE id for the supplied ids
+     * only (chunked to stay under SQLite's bound-parameter ceiling). Absent ids
+     * simply have no entry.
+     */
+    public getCveIntel(cveIds: string[]): Map<string, CveIntel> {
+        const out = new Map<string, CveIntel>();
+        if (cveIds.length === 0) return out;
+        const unique = [...new Set(cveIds)];
+        const CHUNK = 900;
+        for (let i = 0; i < unique.length; i += CHUNK) {
+            const chunk = unique.slice(i, i + CHUNK);
+            const placeholders = chunk.map(() => '?').join(', ');
+            const rows = this.db
+                .prepare(
+                    `SELECT cve_id, kev, kev_date, epss_score, epss_percentile
+                     FROM cve_intel WHERE cve_id IN (${placeholders})`,
+                )
+                .all(...chunk) as Array<{
+                    cve_id: string;
+                    kev: number;
+                    kev_date: string | null;
+                    epss_score: number | null;
+                    epss_percentile: number | null;
+                }>;
+            for (const r of rows) {
+                out.set(r.cve_id, {
+                    kev: r.kev === 1,
+                    kevDate: r.kev_date,
+                    epssScore: r.epss_score,
+                    epssPercentile: r.epss_percentile,
+                });
+            }
+        }
+        return out;
+    }
+
+    /**
      * Uncapped count of scans in a given status for a node. Unlike
      * `getVulnerabilityScans`, this never applies the per-image history cap, so
      * the Security overview reports the true number of (for example) failed
@@ -4754,8 +5126,8 @@ export class DatabaseService {
         const now = Date.now();
         const result = this.db
             .prepare(
-                `INSERT INTO scan_policies (name, node_id, node_identity, stack_pattern, max_severity, block_on_deploy, enabled, replicated_from_control, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                `INSERT INTO scan_policies (name, node_id, node_identity, stack_pattern, max_severity, block_on_deploy, enabled, block_on_severity, block_on_kev, block_on_fixable, replicated_from_control, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
                 policy.name,
@@ -4765,6 +5137,9 @@ export class DatabaseService {
                 policy.max_severity,
                 policy.block_on_deploy,
                 policy.enabled,
+                policy.block_on_severity,
+                policy.block_on_kev,
+                policy.block_on_fixable,
                 policy.replicated_from_control ?? 0,
                 now,
                 now,
@@ -4787,7 +5162,8 @@ export class DatabaseService {
         if (!existing) return null;
         const ALLOWED_COLUMNS = new Set([
             'name', 'node_id', 'node_identity', 'stack_pattern', 'max_severity',
-            'block_on_deploy', 'enabled', 'replicated_from_control',
+            'block_on_deploy', 'enabled', 'block_on_severity', 'block_on_kev',
+            'block_on_fixable', 'replicated_from_control',
         ]);
         const fields: string[] = [];
         const values: unknown[] = [];
@@ -4838,8 +5214,8 @@ export class DatabaseService {
         const now = Date.now();
         const deleteStmt = this.db.prepare('DELETE FROM scan_policies WHERE replicated_from_control = 1');
         const insertStmt = this.db.prepare(
-            `INSERT INTO scan_policies (name, node_id, node_identity, stack_pattern, max_severity, block_on_deploy, enabled, replicated_from_control, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+            `INSERT INTO scan_policies (name, node_id, node_identity, stack_pattern, max_severity, block_on_deploy, enabled, block_on_severity, block_on_kev, block_on_fixable, replicated_from_control, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
         );
         const txn = this.db.transaction((policies: ScanPolicy[]) => {
             deleteStmt.run();
@@ -4852,6 +5228,11 @@ export class DatabaseService {
                     p.max_severity,
                     p.block_on_deploy,
                     p.enabled,
+                    // A legacy control omits the risk columns; default replicated rows
+                    // to severity-only so an older control's intent is preserved.
+                    p.block_on_severity ?? 1,
+                    p.block_on_kev ?? 0,
+                    p.block_on_fixable ?? 0,
                     p.created_at ?? now,
                     p.updated_at ?? now,
                 );
@@ -4927,11 +5308,25 @@ export class DatabaseService {
     ): PolicyEvaluation | null {
         const policy = this.getMatchingPolicy(nodeId, scan.stack_context, selfIdentity);
         if (!policy) return null;
+        const inputs = policyInputs(policy);
+        let violated: boolean;
+        if (!inputs.blockOnKev && !inputs.blockOnFixable) {
+            // Severity-only banner from the stored aggregate: no per-finding read.
+            violated = inputs.blockOnSeverity && isSeverityAtLeast(scan.highest_severity, policy.max_severity);
+        } else {
+            // Best-effort banner: scores the raw findings without honoring
+            // suppressions or the truncation fail-closed rule. The pre-deploy gate
+            // is authoritative; this only drives the informational scan banner.
+            const findings = this.getAllVulnerabilityDetails(scan.id);
+            const intel = inputs.blockOnKev ? this.getCveIntel(findings.map((f) => f.vulnerability_id)) : null;
+            const outcome = evaluatePolicyRisk(findings, (cveId) => intel?.get(cveId)?.kev === true, inputs);
+            violated = outcome.reasons.length > 0;
+        }
         return {
             policyId: policy.id,
             policyName: policy.name,
             maxSeverity: policy.max_severity,
-            violated: isSeverityAtLeast(scan.highest_severity, policy.max_severity),
+            violated,
             evaluatedAt: Date.now(),
         };
     }
@@ -5087,8 +5482,8 @@ export class DatabaseService {
         const result = this.db
             .prepare(
                 `INSERT INTO cve_suppressions
-                    (cve_id, pkg_name, image_pattern, reason, created_by, created_at, expires_at, replicated_from_control)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                    (cve_id, pkg_name, image_pattern, reason, created_by, created_at, expires_at, replicated_from_control, status, justification)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
             .run(
                 suppression.cve_id,
@@ -5099,17 +5494,24 @@ export class DatabaseService {
                 suppression.created_at,
                 suppression.expires_at,
                 suppression.replicated_from_control ?? 0,
+                suppression.status ?? 'accepted',
+                suppression.justification ?? null,
             );
-        return { ...suppression, id: result.lastInsertRowid as number };
+        return {
+            ...suppression,
+            status: suppression.status ?? 'accepted',
+            justification: suppression.justification ?? null,
+            id: result.lastInsertRowid as number,
+        };
     }
 
     public updateCveSuppression(
         id: number,
-        updates: Partial<Pick<CveSuppression, 'reason' | 'image_pattern' | 'expires_at'>>,
+        updates: Partial<Pick<CveSuppression, 'reason' | 'image_pattern' | 'expires_at' | 'status' | 'justification'>>,
     ): CveSuppression | null {
         const existing = this.getCveSuppression(id);
         if (!existing) return null;
-        const ALLOWED = new Set(['reason', 'image_pattern', 'expires_at']);
+        const ALLOWED = new Set(['reason', 'image_pattern', 'expires_at', 'status', 'justification']);
         const fields: string[] = [];
         const values: unknown[] = [];
         for (const [key, value] of Object.entries(updates)) {
@@ -5137,8 +5539,8 @@ export class DatabaseService {
         const deleteStmt = this.db.prepare('DELETE FROM cve_suppressions WHERE replicated_from_control = 1');
         const insertStmt = this.db.prepare(
             `INSERT INTO cve_suppressions
-                (cve_id, pkg_name, image_pattern, reason, created_by, created_at, expires_at, replicated_from_control)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 1)`,
+                (cve_id, pkg_name, image_pattern, reason, created_by, created_at, expires_at, replicated_from_control, status, justification)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
         );
         const txn = this.db.transaction((items: Array<Omit<CveSuppression, 'id'>>) => {
             deleteStmt.run();
@@ -5151,6 +5553,9 @@ export class DatabaseService {
                     s.created_by,
                     s.created_at,
                     s.expires_at,
+                    // Back-compat: a control on an older version omits these in its push.
+                    s.status ?? 'accepted',
+                    s.justification ?? null,
                 );
             }
         });

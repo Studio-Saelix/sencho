@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, Fragment } from 'react';
-import type { ReactNode, DragEvent } from 'react';
+import type { ReactNode, DragEvent, KeyboardEvent } from 'react';
 import { Search, X } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -23,17 +23,30 @@ interface FileTreeProps {
   onSelectFile: (relPath: string, entry: FileEntry) => void;
   onNavigateToCompose?: () => void;
   onNavigateToEnv?: () => void;
+  /** When true (stack source only), clicking compose/.env redirects to their
+   *  dedicated editors. For volume roots a file named .env is just an ordinary
+   *  file and opens in the viewer. */
+  redirectProtected?: boolean;
   // Context menu wiring
   canEdit?: boolean;
   onContextMenuRename?: (relPath: string) => void;
   onContextMenuMove?: (relPath: string, entry: FileEntry) => void;
+  onContextMenuDuplicate?: (relPath: string, entry: FileEntry) => void;
+  onContextMenuCopy?: (relPath: string, entry: FileEntry) => void;
   onContextMenuNewFile?: (dirRelPath: string) => void;
   onContextMenuNewFolder?: (dirRelPath: string) => void;
   onContextMenuDelete?: (relPath: string, entry: FileEntry) => void;
   onContextMenuPermissions?: (relPath: string, entry: FileEntry) => void;
   /** Relocate `fromRel` into `destDir` (''=stack root) via drag-and-drop. */
   onMove?: (fromRel: string, entryName: string, destDir: string) => void;
+  /** Current bulk selection (rel paths). Drives the per-row checkboxes. Read-only
+   *  here; FileTree emits the next set via onSelectionChange. */
+  selectedPaths?: ReadonlySet<string>;
+  /** Emit the next bulk selection after a checkbox click or modifier-click. */
+  onSelectionChange?: (next: Set<string>) => void;
 }
+
+const EMPTY_SELECTION: ReadonlySet<string> = new Set<string>();
 
 const COMPOSE_NAMES = new Set(['compose.yaml', 'compose.yml']);
 const ENV_NAMES = new Set(['.env']);
@@ -50,14 +63,19 @@ export function FileTree({
   onSelectFile,
   onNavigateToCompose,
   onNavigateToEnv,
+  redirectProtected = true,
   canEdit = false,
   onContextMenuRename = () => undefined,
   onContextMenuMove = () => undefined,
+  onContextMenuDuplicate = () => undefined,
+  onContextMenuCopy = () => undefined,
   onContextMenuNewFile = () => undefined,
   onContextMenuNewFolder = () => undefined,
   onContextMenuDelete = () => undefined,
   onContextMenuPermissions = () => undefined,
   onMove = () => undefined,
+  selectedPaths = EMPTY_SELECTION,
+  onSelectionChange = () => undefined,
 }: FileTreeProps) {
   const [rootEntries, setRootEntries] = useState<FileEntry[] | null>(null);
   const [rootLoading, setRootLoading] = useState(true);
@@ -67,6 +85,23 @@ export function FileTree({
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState('');
   const [isRootDropTarget, setIsRootDropTarget] = useState(false);
+
+  // Roving-tabindex state for keyboard tree navigation: exactly one visible node
+  // is focusable at a time. `activeRelPath` is the intended focus; DOM focus is
+  // moved imperatively (only when a key press requested it, via shouldFocusRef)
+  // so a re-render never steals focus from elsewhere on the page.
+  const [activeRelPath, setActiveRelPath] = useState<string | null>(null);
+  const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const shouldFocusRef = useRef(false);
+  // Anchor for Shift+click range selection (the last row toggled on its own).
+  const selectionAnchorRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (shouldFocusRef.current && activeRelPath) {
+      nodeRefs.current.get(activeRelPath)?.focus();
+      shouldFocusRef.current = false;
+    }
+  }, [activeRelPath]);
 
   // The scroll area is the stack-root drop target. Folder nodes stop propagation
   // on their own drops, so an event only reaches here when it lands on a file
@@ -166,12 +201,14 @@ export function FileTree({
   }
 
   function handleFileClick(relPath: string, entry: FileEntry) {
-    if (COMPOSE_NAMES.has(entry.name)) {
+    // Only the stack source root redirects compose/.env to their dedicated
+    // editors; on a volume root these are ordinary files opened in the viewer.
+    if (redirectProtected && relPath === entry.name && COMPOSE_NAMES.has(entry.name)) {
       if (onNavigateToCompose) onNavigateToCompose();
       else toast.info('Open the Compose tab to edit this file.');
       return;
     }
-    if (ENV_NAMES.has(entry.name)) {
+    if (redirectProtected && relPath === entry.name && ENV_NAMES.has(entry.name)) {
       if (onNavigateToEnv) onNavigateToEnv();
       else toast.info('Open the Env tab to edit this file.');
       return;
@@ -199,32 +236,160 @@ export function FileTree({
     return false;
   }
 
-  function renderEntries(entries: FileEntry[], parentRelPath: string, depth: number): ReactNode {
-    // When the filter is active, keep entries that either match by name OR
-    // are directories with a matching loaded descendant. Without the
-    // ancestor-keep rule, the parent directory of a match would be filtered
-    // out at this level and its loaded children would never render.
+  // The entries kept at one level: name matches, or directories with a matching
+  // loaded descendant while filtering, capped at MAX_ENTRIES.
+  function keptEntries(entries: FileEntry[], parentRelPath: string): { visible: FileEntry[]; capped: boolean; total: number } {
     const filtered = filter
       ? entries.filter(e => {
           if (matchesFilter(e.name)) return true;
           if (e.type !== 'directory') return false;
-          const path = parentRelPath ? `${parentRelPath}/${e.name}` : e.name;
-          return hasMatchingDescendant(path);
+          const childPath = parentRelPath ? `${parentRelPath}/${e.name}` : e.name;
+          return hasMatchingDescendant(childPath);
         })
       : entries;
     const capped = filtered.length > MAX_ENTRIES;
-    const visible = capped ? filtered.slice(0, MAX_ENTRIES) : filtered;
+    return { visible: capped ? filtered.slice(0, MAX_ENTRIES) : filtered, capped, total: filtered.length };
+  }
+
+  // A row renders expanded when the user expanded it, or while a filter is active
+  // and it has a matching descendant (auto-expanded into view). Files are never
+  // in expandedDirs and have no descendants, so this is safe to call for any row.
+  function computeExpanded(entryRelPath: string): boolean {
+    return expandedDirs.has(entryRelPath) || (filter !== '' && hasMatchingDescendant(entryRelPath));
+  }
+
+  // The flattened, in-order list of visible treeitems. It mirrors the recursive
+  // render and drives keyboard navigation and roving focus (a later bulk-select
+  // feature can reuse this ordering for shift-click ranges).
+  function buildVisibleNodes(): { relPath: string; entry: FileEntry; depth: number }[] {
+    const out: { relPath: string; entry: FileEntry; depth: number }[] = [];
+    const walk = (entries: FileEntry[], parent: string, depth: number) => {
+      for (const entry of keptEntries(entries, parent).visible) {
+        const relPath = parent ? `${parent}/${entry.name}` : entry.name;
+        out.push({ relPath, entry, depth });
+        if (entry.type === 'directory' && computeExpanded(relPath)) {
+          const children = dirContents.get(relPath);
+          if (children) walk(children, relPath, depth + 1);
+        }
+      }
+    };
+    if (rootEntries) walk(rootEntries, '', 0);
+    return out;
+  }
+  const visibleNodes = buildVisibleNodes();
+
+  // The single roving-focusable node: a prior keyboard target if still visible,
+  // else the selected file, else the first node.
+  function computeActiveKey(): string | null {
+    if (activeRelPath && visibleNodes.some(n => n.relPath === activeRelPath)) return activeRelPath;
+    if (visibleNodes.some(n => n.relPath === selectedPath)) return selectedPath;
+    return visibleNodes[0]?.relPath ?? null;
+  }
+  const activeKey = computeActiveKey();
+
+  const registerNodeRef = (relPath: string, el: HTMLDivElement | null) => {
+    if (el) nodeRefs.current.set(relPath, el);
+    else nodeRefs.current.delete(relPath);
+  };
+
+  // Keep the roving target in sync when a row is focused by click or Tab,
+  // without requesting a re-focus (which would fight the user's own click).
+  const handleFocusNode = (relPath: string) => setActiveRelPath(relPath);
+
+  // Move the roving focus to `relPath` and pull DOM focus there after the render.
+  const moveActive = (relPath: string) => {
+    shouldFocusRef.current = true;
+    setActiveRelPath(relPath);
+  };
+
+  // Toggle one row in the bulk selection (checkbox or Ctrl/Cmd+click) and set the
+  // range anchor to it.
+  const handleToggleSelect = (relPath: string) => {
+    selectionAnchorRef.current = relPath;
+    const next = new Set(selectedPaths);
+    if (next.has(relPath)) next.delete(relPath);
+    else next.add(relPath);
+    onSelectionChange(next);
+  };
+
+  // Add the contiguous range from the anchor (or this row, if none) to this row,
+  // using the flattened visible order so it matches what the user sees.
+  const handleRangeSelect = (relPath: string) => {
+    const order = visibleNodes.map((n) => n.relPath);
+    const anchor = selectionAnchorRef.current && order.includes(selectionAnchorRef.current)
+      ? selectionAnchorRef.current
+      : relPath;
+    const from = order.indexOf(anchor);
+    const to = order.indexOf(relPath);
+    if (from === -1 || to === -1) return;
+    const [lo, hi] = from <= to ? [from, to] : [to, from];
+    const next = new Set(selectedPaths);
+    for (let k = lo; k <= hi; k++) next.add(order[k]);
+    onSelectionChange(next);
+  };
+
+  function handleTreeKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    if (visibleNodes.length === 0) return;
+    const idx = visibleNodes.findIndex(n => n.relPath === activeKey);
+    const cur = idx >= 0 ? visibleNodes[idx] : undefined;
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        moveActive(visibleNodes[Math.min(idx + 1, visibleNodes.length - 1)]?.relPath ?? visibleNodes[0].relPath);
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        if (idx > 0) moveActive(visibleNodes[idx - 1].relPath);
+        break;
+      case 'Home':
+        e.preventDefault();
+        moveActive(visibleNodes[0].relPath);
+        break;
+      case 'End':
+        e.preventDefault();
+        moveActive(visibleNodes[visibleNodes.length - 1].relPath);
+        break;
+      case 'ArrowRight':
+        if (!cur || cur.entry.type !== 'directory') break;
+        e.preventDefault();
+        if (!computeExpanded(cur.relPath)) {
+          handleDirClick(cur.relPath); // expand in place
+        } else if (visibleNodes[idx + 1] && visibleNodes[idx + 1].depth > cur.depth) {
+          moveActive(visibleNodes[idx + 1].relPath); // step into the first child
+        }
+        break;
+      case 'ArrowLeft': {
+        if (!cur) break;
+        e.preventDefault();
+        // Only collapse a directory the user actually expanded. A directory that
+        // is open only because the active filter auto-expanded it is not in
+        // expandedDirs, so toggling it would wrongly ADD it; fall through to
+        // move-to-parent instead.
+        if (cur.entry.type === 'directory' && expandedDirs.has(cur.relPath)) {
+          handleDirClick(cur.relPath); // collapse in place
+          break;
+        }
+        const parent = relPathParentDir(cur.relPath);
+        if (parent && visibleNodes.some(n => n.relPath === parent)) moveActive(parent);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  function renderEntries(entries: FileEntry[], parentRelPath: string, depth: number): ReactNode {
+    // keptEntries applies the filter (keeping ancestors of matches) and the
+    // per-level MAX_ENTRIES cap; it is the same logic the flat visible-node list
+    // uses, so the rendered rows and the keyboard order stay in lockstep.
+    const { visible, capped, total } = keptEntries(entries, parentRelPath);
 
     return (
       <>
         {visible.map((entry) => {
           const entryRelPath = parentRelPath ? `${parentRelPath}/${entry.name}` : entry.name;
           const isDir = entry.type === 'directory';
-          // While a filter is active, auto-expand any directory that is being
-          // kept solely because it has a matching descendant. The user gets
-          // the match in view without manually expanding every ancestor.
-          const isExpanded = expandedDirs.has(entryRelPath)
-            || (filter !== '' && isDir && hasMatchingDescendant(entryRelPath));
+          const isExpanded = computeExpanded(entryRelPath);
           const isLoading = loadingDirs.has(entryRelPath);
           const children = dirContents.get(entryRelPath);
 
@@ -234,6 +399,13 @@ export function FileTree({
                 entry={entry}
                 relPath={entryRelPath}
                 depth={depth}
+                isActive={entryRelPath === activeKey}
+                registerRef={registerNodeRef}
+                onFocusNode={handleFocusNode}
+                isChecked={selectedPaths.has(entryRelPath)}
+                selectionActive={selectedPaths.size > 0}
+                onToggleSelect={() => handleToggleSelect(entryRelPath)}
+                onRangeSelect={() => handleRangeSelect(entryRelPath)}
                 isSelected={selectedPath === entryRelPath}
                 isExpanded={isExpanded}
                 isLoading={isLoading}
@@ -247,6 +419,8 @@ export function FileTree({
                 canEdit={canEdit}
                 onContextMenuRename={onContextMenuRename}
                 onContextMenuMove={onContextMenuMove}
+                onContextMenuDuplicate={onContextMenuDuplicate}
+                onContextMenuCopy={onContextMenuCopy}
                 onContextMenuNewFile={onContextMenuNewFile}
                 onContextMenuNewFolder={onContextMenuNewFolder}
                 onContextMenuDelete={onContextMenuDelete}
@@ -267,10 +441,10 @@ export function FileTree({
         })}
         {capped && (
           <div className="text-xs text-muted-foreground pl-4 py-0.5">
-            Showing {MAX_ENTRIES} of {filtered.length} - refine the filter or use a shell
+            Showing {MAX_ENTRIES} of {total} - refine the filter or use a shell
           </div>
         )}
-        {filter && filtered.length === 0 && depth === 0 && (
+        {filter && total === 0 && depth === 0 && (
           <div className="text-xs text-muted-foreground pl-4 py-0.5 italic">
             No entries match &ldquo;{filter}&rdquo;
           </div>
@@ -328,10 +502,14 @@ export function FileTree({
           </button>
         )}
       </div>
-      <ScrollArea type="hover" className="flex-1 min-h-0">
+      <ScrollArea type="hover" horizontal className="flex-1 min-h-0">
         <div
           data-testid="file-tree-root-dropzone"
-          className={cn('py-1 min-h-full', isRootDropTarget && 'bg-accent/20')}
+          role="tree"
+          aria-label="Files"
+          aria-multiselectable
+          className={cn('py-1 min-h-full min-w-full w-max', isRootDropTarget && 'bg-accent/20')}
+          onKeyDown={handleTreeKeyDown}
           onDragOver={handleRootDragOver}
           onDragLeave={() => setIsRootDropTarget(false)}
           onDrop={handleRootDrop}
@@ -339,6 +517,10 @@ export function FileTree({
           {renderEntries(rootEntries, '', 0)}
         </div>
       </ScrollArea>
+      {/* Announce the selected file to assistive tech without a visual change. */}
+      <div aria-live="polite" className="sr-only">
+        {selectedPath ? `Selected ${selectedPath.split('/').pop()}` : ''}
+      </div>
     </div>
   );
 }

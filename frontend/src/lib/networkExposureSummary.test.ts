@@ -31,7 +31,15 @@ describe('buildNetworkExposureSummary', () => {
     expect(s).toEqual({
       stackIntent: 'internal',
       networks: [{ name: 'app_backend', external: false, internal: true }],
-      services: [{ name: 'web', intent: 'public', ports: ['8080/tcp (all interfaces)', '9000/tcp (loopback)'] }],
+      services: [{ name: 'web', intent: 'public', ports: ['8080/tcp (all interfaces)', '9000/tcp (loopback)'], hostNetwork: false }],
+    });
+  });
+  it('flags a host-network service as host-exposed even with no published ports', () => {
+    const s = buildNetworkExposureSummary({ renderable: true, networks: [], services: [{ name: 'app', publishedPorts: [], networkMode: 'host' }] }, []);
+    expect(s).toEqual({
+      stackIntent: null,
+      networks: [],
+      services: [{ name: 'app', intent: null, ports: [], hostNetwork: true }],
     });
   });
 });
@@ -46,6 +54,10 @@ describe('networkExposureSection', () => {
   });
   it('returns null for a null summary', () => {
     expect(networkExposureSection(null)).toBeNull();
+  });
+  it('renders the host-network phrase for a host-mode service', () => {
+    const md = networkExposureSection(buildNetworkExposureSummary({ renderable: true, networks: [], services: [{ name: 'app', publishedPorts: [], networkMode: 'host' }] }, [])) ?? '';
+    expect(md).toContain('host network (all ports exposed on host)');
   });
   it('never includes a value that lives in an ignored field (no env or label leak)', () => {
     // A secret planted in fields the builder does not read must not surface.

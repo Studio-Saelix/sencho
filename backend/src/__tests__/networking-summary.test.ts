@@ -105,6 +105,47 @@ describe('networking summary', () => {
     expect(res.body.unknownExposure.stacks).toContain(STACK);
   });
 
+  it('marks a host-network stack exposed and unknown-exposure even with no published ports', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx:latest\n    network_mode: host\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unknownExposure.stacks).toContain(STACK);
+  });
+
+  it('drops a host-network stack from unknown-exposure once an intent is set', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx:latest\n    network_mode: host\n');
+    DatabaseService.getInstance().setStackExposureIntent(1, STACK, '', 'lan', 'admin');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unknownExposure.stacks).not.toContain(STACK);
+  });
+
+  it('keeps a stack unknown when an unclassified host-network service sits beside a classified ports service', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'),
+      'services:\n  metrics:\n    image: nginx:latest\n    network_mode: host\n  web:\n    image: nginx:latest\n    ports:\n      - "8080:80"\n');
+    // web classified, the host-network metrics service still unset, so the stack stays unknown.
+    DatabaseService.getInstance().setStackExposureIntent(1, STACK, 'web', 'public', 'admin');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).toContain(STACK);
+    expect(res.body.unknownExposure.stacks).toContain(STACK);
+  });
+
+  it('does not treat a non-host network_mode (none) as exposed', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx:latest\n    network_mode: none\n');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+    expect(res.body.exposed.stacks).not.toContain(STACK);
+    expect(res.body.unknownExposure.stacks).not.toContain(STACK);
+  });
+
+  it('the fleet aggregate counts a host-network stack as exposed', async () => {
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx:latest\n    network_mode: host\n');
+    const res = await request(app).get('/api/fleet/networking-summary').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    const local = res.body.nodes.find((n: { summary: { exposed: { stacks: string[] } } | null }) => n.summary?.exposed.stacks.includes(STACK));
+    expect(local).toBeDefined();
+  });
+
   it('the fleet aggregate returns a per-node summary for the hub', async () => {
     const res = await request(app).get('/api/fleet/networking-summary').set('Authorization', authHeader);
     expect(res.status).toBe(200);

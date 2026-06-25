@@ -206,7 +206,7 @@ function StackReadinessCard({
           <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle/80">
             Stack
           </span>
-          <span className="font-display italic text-2xl leading-tight tracking-tight text-stat-value truncate">
+          <span className="font-heading text-2xl leading-tight tracking-tight text-stat-value truncate">
             {stack}
           </span>
         </div>
@@ -334,7 +334,7 @@ function ReadinessHero({
           <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-brand">
             Fleet readiness
           </span>
-          <span className="font-display italic text-3xl leading-tight tracking-tight text-stat-value">
+          <span className="font-heading text-3xl leading-tight tracking-tight text-stat-value">
             {headline}
           </span>
           {total > 0 && (
@@ -389,7 +389,7 @@ function NodeGroupSection({
     <section className="flex flex-col gap-4">
       <div className="flex items-baseline gap-3 border-b border-card-border/60 pb-2">
         <TypeIcon className="h-4 w-4 text-stat-subtitle self-center" strokeWidth={1.5} aria-hidden="true" />
-        <span className="font-display italic text-xl leading-tight tracking-tight text-stat-value truncate">
+        <span className="font-heading text-xl leading-tight tracking-tight text-stat-value truncate">
           {group.nodeName}
         </span>
         <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 shrink-0 self-center">
@@ -428,7 +428,7 @@ export function MobileReadinessCard({ card, onApply }: { card: StackCard; onAppl
       <div className="flex items-start justify-between gap-[10px]">
         <div className="min-w-0 flex-1">
           <Kicker>stack</Kicker>
-          <div className="mt-px truncate font-display italic text-[23px] leading-[26px] text-stat-value">{stack}</div>
+          <div className="mt-px truncate font-heading text-[23px] leading-[26px] text-stat-value">{stack}</div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {!autoUpdateEnabled && (
@@ -483,7 +483,7 @@ function MobileNodeSection({ group, onApply }: { group: NodeGroup; onApply: (sta
   return (
     <section>
       <div className="mb-[13px] flex items-baseline gap-2 border-b border-hairline pb-2">
-        <span className="truncate font-display italic text-[19px] leading-tight text-stat-value">{group.nodeName}</span>
+        <span className="truncate font-heading text-[19px] leading-tight text-stat-value">{group.nodeName}</span>
         <span className="shrink-0 rounded-[5px] border border-card-border px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.1em] text-stat-subtitle">{group.nodeType}</span>
         <span className="shrink-0 font-mono text-[11px] text-stat-icon">{group.cards.length} {group.cards.length === 1 ? 'stack' : 'stacks'}</span>
       </div>

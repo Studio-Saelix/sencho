@@ -24,6 +24,7 @@ interface DbStub {
   getGlobalSettings: ReturnType<typeof vi.fn>;
   getAllVulnerabilityDetails: ReturnType<typeof vi.fn>;
   getCveSuppressions: ReturnType<typeof vi.fn>;
+  getCveIntel: ReturnType<typeof vi.fn>;
 }
 interface NotificationStub {
   dispatchAlert: ReturnType<typeof vi.fn>;
@@ -42,6 +43,7 @@ const dbStub: DbStub = {
   getGlobalSettings: vi.fn(),
   getAllVulnerabilityDetails: vi.fn(),
   getCveSuppressions: vi.fn(),
+  getCveIntel: vi.fn(),
 };
 const notificationStub: NotificationStub = {
   dispatchAlert: vi.fn(),
@@ -79,6 +81,9 @@ function mkPolicy(overrides: Partial<ScanPolicy> = {}): ScanPolicy {
     max_severity: 'HIGH',
     block_on_deploy: 1,
     enabled: 1,
+    block_on_severity: 1,
+    block_on_kev: 0,
+    block_on_fixable: 0,
     replicated_from_control: 0,
     created_at: Date.now(),
     updated_at: Date.now(),
@@ -131,6 +136,7 @@ describe('enforcePolicyPreDeploy', () => {
     dbStub.getGlobalSettings.mockReturnValue({});
     dbStub.getAllVulnerabilityDetails.mockReturnValue([]);
     dbStub.getCveSuppressions.mockReturnValue([]);
+    dbStub.getCveIntel.mockReset().mockReturnValue(new Map());
     notificationStub.dispatchAlert.mockReset();
     _resetTrivyMissingNotificationStateForTests();
   });
@@ -411,10 +417,11 @@ interface FindingStub {
   vulnerability_id: string;
   pkg_name: string;
   severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
+  fixed_version: string | null;
 }
 
 function mkFinding(overrides: Partial<FindingStub> = {}): FindingStub {
-  return { vulnerability_id: 'CVE-2026-0001', pkg_name: 'openssl', severity: 'CRITICAL', ...overrides };
+  return { vulnerability_id: 'CVE-2026-0001', pkg_name: 'openssl', severity: 'CRITICAL', fixed_version: null, ...overrides };
 }
 
 function mkSuppression(overrides: Record<string, unknown> = {}) {
@@ -442,6 +449,7 @@ describe('enforcePolicyForImageRefs with suppression-aware blocking', () => {
     dbStub.getGlobalSettings.mockReset().mockReturnValue({ deploy_block_honor_suppressions: '1' });
     dbStub.getAllVulnerabilityDetails.mockReset().mockReturnValue([]);
     dbStub.getCveSuppressions.mockReset().mockReturnValue([]);
+    dbStub.getCveIntel.mockReset().mockReturnValue(new Map());
     notificationStub.dispatchAlert.mockReset();
     _resetTrivyMissingNotificationStateForTests();
   });
@@ -624,5 +632,155 @@ describe('enforcePolicyForImageRefs with suppression-aware blocking', () => {
     expect(result.violations[0]).toMatchObject({ severity: 'CRITICAL', scanId: 12 });
     expect(dbStub.getAllVulnerabilityDetails).not.toHaveBeenCalled();
     expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
+  });
+});
+
+describe('enforcePolicyForImageRefs - risk-based inputs (KEV / fixable / optional severity)', () => {
+  beforeEach(() => {
+    trivyStub.isTrivyAvailable.mockReset().mockReturnValue(true);
+    trivyStub.scanImagePreflight.mockReset();
+    composeStub.listStackImages.mockReset();
+    dbStub.getMatchingPolicy.mockReset();
+    dbStub.insertAuditLog.mockReset();
+    // Suppressions off by default; KEV/fixable still force a detail read.
+    dbStub.getGlobalSettings.mockReset().mockReturnValue({});
+    dbStub.getAllVulnerabilityDetails.mockReset().mockReturnValue([]);
+    dbStub.getCveSuppressions.mockReset().mockReturnValue([]);
+    dbStub.getCveIntel.mockReset().mockReturnValue(new Map());
+    notificationStub.dispatchAlert.mockReset();
+    _resetTrivyMissingNotificationStateForTests();
+  });
+
+  const kevIntel = (cve: string) => new Map([[cve, { kev: true, kevDate: null, epssScore: null, epssPercentile: null }]]);
+
+  it('blocks a KEV-only policy when a known-exploited CVE is present, even at LOW severity', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1, block_on_fixable: 0 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 40, highest_severity: 'LOW', total_vulnerabilities: 1 }));
+    dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-1000', severity: 'LOW' })]);
+    dbStub.getCveIntel.mockReturnValue(kevIntel('CVE-2026-1000'));
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatchObject({ reasons: ['kev'], kevCount: 1, scanId: 40 });
+  });
+
+  it('allows a KEV-only policy when no finding is known-exploited', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1, block_on_fixable: 0 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 41, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
+    dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-2000', severity: 'CRITICAL' })]);
+    dbStub.getCveIntel.mockReturnValue(new Map());
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(true);
+    expect(result.violations).toEqual([]);
+  });
+
+  it('blocks a fixable-only policy when a Critical/High finding has a fix available', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 0, block_on_fixable: 1 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 42, highest_severity: 'HIGH', high_count: 1, total_vulnerabilities: 1 }));
+    dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-3000', severity: 'HIGH', fixed_version: '1.2.3' })]);
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatchObject({ reasons: ['fixable'], fixableCount: 1, scanId: 42 });
+  });
+
+  it('allows a fixable-only policy when the Critical/High findings have no fix', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 0, block_on_fixable: 1 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 43, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
+    dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-3001', severity: 'CRITICAL', fixed_version: null })]);
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(true);
+    expect(result.violations).toEqual([]);
+  });
+
+  it('does not gate on severity when the severity input is off (KEV/fixable only)', async () => {
+    // A CRITICAL image with no KEV and no fix must pass a risk-first policy that
+    // leaves severity off: severity alone is no longer a blocking basis.
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1, block_on_fixable: 1, max_severity: 'LOW' }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 44, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
+    dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-4000', severity: 'CRITICAL', fixed_version: null })]);
+    dbStub.getCveIntel.mockReturnValue(new Map());
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(true);
+    expect(result.violations).toEqual([]);
+  });
+
+  it('fails closed on a KEV input when detail rows are truncated (assume it is automatable)', async () => {
+    // Aggregate reports 1500 findings but only one detail row is present; KEV
+    // membership cannot be proven absent, so the gate must block.
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1, block_on_fixable: 0 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 45, highest_severity: 'LOW', total_vulnerabilities: 1500 }));
+    dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-5000', severity: 'LOW' })]);
+    dbStub.getCveIntel.mockReturnValue(new Map());
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations[0].reasons).toContain('kev');
+  });
+
+  it('fails closed on a KEV input when the detail read throws (transient DB error)', async () => {
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1, block_on_fixable: 0 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 47, highest_severity: 'LOW', total_vulnerabilities: 3 }));
+    dbStub.getAllVulnerabilityDetails.mockImplementation(() => { throw new Error('database is locked'); });
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations[0].reasons).toContain('kev');
+  });
+
+  it('still allows when only the severity input is set and the detail read throws', async () => {
+    // Severity stays verifiable from the aggregate; a below-threshold image passes
+    // even though the (honor-suppressions) detail read failed.
+    dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1' });
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, max_severity: 'HIGH' }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 48, highest_severity: 'LOW', total_vulnerabilities: 2 }));
+    dbStub.getAllVulnerabilityDetails.mockImplementation(() => { throw new Error('database is locked'); });
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(true);
+    expect(result.violations).toEqual([]);
+  });
+
+  it('does not audit a suppression pass when the suppressed finding is not KEV (KEV policy)', async () => {
+    // A non-KEV finding is suppressed under a KEV-only policy. The raw set carries
+    // no KEV finding, so there is nothing the suppression "saved": no audit.
+    dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1' });
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1, block_on_fixable: 0 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 49, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
+    dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-7000', severity: 'CRITICAL' })]);
+    dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ cve_id: 'CVE-2026-7000' })]);
+    dbStub.getCveIntel.mockReturnValue(new Map()); // CVE-2026-7000 is not KEV
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(true);
+    expect(dbStub.insertAuditLog).not.toHaveBeenCalled();
+  });
+
+  it('allows and audits when an honored suppression covers the sole KEV finding', async () => {
+    dbStub.getGlobalSettings.mockReturnValue({ deploy_block_honor_suppressions: '1' });
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1, block_on_fixable: 0 }));
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 46, highest_severity: 'CRITICAL', critical_count: 1, total_vulnerabilities: 1 }));
+    dbStub.getAllVulnerabilityDetails.mockReturnValue([mkFinding({ vulnerability_id: 'CVE-2026-6000', severity: 'CRITICAL' })]);
+    dbStub.getCveSuppressions.mockReturnValue([mkSuppression({ cve_id: 'CVE-2026-6000' })]);
+    dbStub.getCveIntel.mockReturnValue(kevIntel('CVE-2026-6000'));
+
+    const result = await enforcePolicyForImageRefs('web', 1, ['nginx:1.14'], { bypass: false, actor: 'admin' });
+
+    expect(result.ok).toBe(true);
+    expect(result.violations).toEqual([]);
+    expect(dbStub.insertAuditLog).toHaveBeenCalledTimes(1);
+    expect(dbStub.insertAuditLog.mock.calls[0][0].summary).toContain('policy.suppression_pass');
   });
 });

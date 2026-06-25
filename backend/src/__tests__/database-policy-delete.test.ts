@@ -68,7 +68,7 @@ describe('deleteScanPolicy', () => {
             node_identity: '',
             stack_pattern: '*',
             max_severity: 'HIGH',
-            block_on_deploy: 1,
+            block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0,
             enabled: 1,
             replicated_from_control: 0,
         });
@@ -78,7 +78,7 @@ describe('deleteScanPolicy', () => {
             node_identity: '',
             stack_pattern: '*',
             max_severity: 'CRITICAL',
-            block_on_deploy: 1,
+            block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0,
             enabled: 1,
             replicated_from_control: 0,
         });
@@ -107,7 +107,7 @@ describe('deleteScanPolicy', () => {
             node_identity: '',
             stack_pattern: '*',
             max_severity: 'MEDIUM',
-            block_on_deploy: 1,
+            block_on_deploy: 1, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0,
             enabled: 1,
             replicated_from_control: 0,
         });

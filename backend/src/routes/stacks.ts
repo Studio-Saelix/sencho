@@ -1,12 +1,19 @@
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
 import path from 'path';
+import os from 'os';
+import crypto from 'crypto';
+import zlib from 'zlib';
+import { promises as fsp } from 'fs';
+import * as tar from 'tar-stream';
 import { inspect } from 'node:util';
 import YAML from 'yaml';
 import multer from 'multer';
 import { FileSystemService } from '../services/FileSystemService';
+import { StackFileRootsService, STACK_SOURCE_ROOT_ID, stackSourceFileRoot, type StackFileRoot } from '../services/StackFileRootsService';
+import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
-import DockerController from '../services/DockerController';
+import DockerController, { type BulkStackInfo } from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { MeshService } from '../services/MeshService';
 import { CacheService } from '../services/CacheService';
@@ -30,11 +37,12 @@ import { StackOpLockService, type StackOpAction } from '../services/StackOpLockS
 import { StackOpMetricsService, type StackOpAction as StackMetricAction } from '../services/StackOpMetricsService';
 import { FileExplorerMetricsService, type FileExplorerOp } from '../services/FileExplorerMetricsService';
 import { isValidGitSourcePath, isValidStackName, isValidServiceName, isValidRelativeStackPath } from '../utils/validation';
+import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
-import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan } from '../helpers/policyGate';
+import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
@@ -155,11 +163,47 @@ export async function resolveAllEnvFilePaths(nodeId: number, stackName: string):
   return dotenv ? [dotenv.resolvedPath as string] : [];
 }
 
+// Uploads spool to disk (not memory) so a 25 MB upload is never held in RAM.
+// The temp dir lives under the OS temp root, deliberately outside COMPOSE_DIR and
+// any browsable volume, so a running container never observes a half-written
+// spool. SENCHO_UPLOAD_DIR relocates it (e.g. onto a larger volume).
+const UPLOAD_TMP_DIR = process.env.SENCHO_UPLOAD_DIR
+  ? path.resolve(process.env.SENCHO_UPLOAD_DIR)
+  : path.join(os.tmpdir(), 'sencho-uploads');
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      fsp.mkdir(UPLOAD_TMP_DIR, { recursive: true })
+        .then(() => cb(null, UPLOAD_TMP_DIR))
+        .catch((err: Error) => cb(err, UPLOAD_TMP_DIR));
+    },
+    filename: (_req, _file, cb) => {
+      cb(null, `up-${process.pid}-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`);
+    },
+  }),
   limits: { fileSize: 25 * 1024 * 1024, files: 1 },
   preservePath: true,
 });
+
+/**
+ * Best-effort cleanup of a spooled upload temp file; never throws (a failed
+ * cleanup must not turn a successful upload into an error). A persistent failure
+ * would silently grow the spool dir, so log it at diagnostic level rather than
+ * swallowing it blind.
+ */
+async function cleanupUploadTemp(req: Request): Promise<void> {
+  const tmp = req.file?.path;
+  if (!tmp) return;
+  // Canonical js/path-injection barrier inline with the unlink sink: the spool
+  // path is multer-generated within UPLOAD_TMP_DIR (a random filename), but
+  // static analysis taints req.file.*, so confirm containment before unlinking.
+  const baseResolved = path.resolve(UPLOAD_TMP_DIR);
+  const resolved = path.resolve(tmp);
+  if (!resolved.startsWith(baseResolved + path.sep)) return;
+  await fsp.unlink(resolved).catch((err: unknown) => {
+    logFileDiag('upload temp cleanup failed', { path: resolved, errorCode: fsErrorCode(err) });
+  });
+}
 
 function getRelPath(req: Request): string {
   return typeof req.query.path === 'string' ? req.query.path : '';
@@ -196,7 +240,7 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
         const stackNames = stacks.map((s: string) => s.replace(/\.(yml|yaml)$/, ''));
         const dockerController = DockerController.getInstance(req.nodeId);
         const bulkInfo = await dockerController.getBulkStackStatuses(stackNames);
-        const data: Record<string, { status: 'running' | 'exited' | 'unknown'; mainPort?: number; runningSince?: number }> = {};
+        const data: Record<string, BulkStackInfo> = {};
         for (const stack of stacks) {
           const name = stack.replace(/\.(yml|yaml)$/, '');
           data[stack] = bulkInfo[name] ?? { status: 'unknown' };
@@ -347,7 +391,7 @@ async function runStackBulkOp(
         return {
           stackName,
           ok: false,
-          error: `Policy "${gate.policy?.name}" blocked update`,
+          error: describePolicyBlock(gate.policy, gate.violations, 'update'),
           code: 'policy_blocked',
         };
       }
@@ -480,6 +524,7 @@ stacksRouter.put('/:stackName', async (req: Request, res: Response) => {
       });
     }
     invalidateNodeCaches(req.nodeId);
+    StackFileRootsService.invalidate(req.nodeId, stackName);
     dlog(`[Stacks] Compose file saved: ${sanitizeForLog(stackName)}`);
     res.setHeader('ETag', stackFileEtag(result.mtimeMs));
     res.json({ message: 'Stack saved successfully', mtimeMs: result.mtimeMs });
@@ -609,6 +654,7 @@ stacksRouter.put('/:stackName/env', async (req: Request, res: Response) => {
       });
     }
     invalidateNodeCaches(req.nodeId);
+    StackFileRootsService.invalidate(req.nodeId, stackName);
     const envFileName = path.basename(envPath);
     dlog(`[Stacks] Env file saved: ${sanitizeForLog(stackName)}/${sanitizeForLog(envFileName)}`);
     res.setHeader('ETag', stackFileEtag(result.mtimeMs));
@@ -803,7 +849,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
         buildPolicyGateOptions(req),
       );
       if (!gate.ok) {
-        deployError = `Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`;
+        deployError = describePolicyBlock(gate.policy, gate.violations);
       } else {
         try {
           await ComposeService.getInstance(req.nodeId).deployStack(stack_name);
@@ -900,6 +946,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     DatabaseService.getInstance().deleteStackDossier(req.nodeId, stackName);
     DatabaseService.getInstance().deleteStackDriftFindings(req.nodeId, stackName);
     DatabaseService.getInstance().deleteStackExposureIntents(req.nodeId, stackName);
+    DatabaseService.getInstance().deleteStackExposure(req.nodeId, stackName);
     if (debug) console.debug(`[Stacks:debug] Delete: db OK`, { stackName: sanitizedName });
   } catch (dbErr) {
     console.error('[Stacks] Database cleanup failed for %s; files already removed:', sanitizeForLog(stackName), dbErr);
@@ -990,7 +1037,7 @@ async function buildDriftPayload(
   nodeId: number,
   stackName: string,
   reconcile: boolean,
-): Promise<StackDriftReport & { temporal: DriftTemporal; ledger: DriftLedgerEntry[] }> {
+): Promise<StackDriftReport & { temporal: DriftTemporal; ledger: DriftLedgerEntry[]; lastCheckedAt: number | null }> {
   const report = await buildStackDriftReport(nodeId, stackName);
   // Only the on-disk read is best-effort: an unreadable compose is already surfaced
   // by the report as a parse error, so temporal degrades to neutral. computeTemporal
@@ -1012,7 +1059,11 @@ async function buildDriftPayload(
   const ledger: DriftLedgerEntry[] = DatabaseService.getInstance()
     .getRecentDriftFindings(nodeId, stackName, 20)
     .map(r => ({ service: r.service, kind: r.finding_type as DriftFindingKind, message: r.message, detectedAt: r.detected_at, resolvedAt: r.resolved_at }));
-  return { ...report, temporal, ledger };
+  // The ledger reflects the last reconcile (re-check, deploy, or background scan),
+  // not this passive read, so surface when that was: the Drift tab labels the history
+  // "checked {time ago}" and a stale finding reads as history, not current truth.
+  const lastCheckedAt = DatabaseService.getInstance().getStackDossier(nodeId, stackName)?.last_drift_check_at ?? null;
+  return { ...report, temporal, ledger, lastCheckedAt };
 }
 
 stacksRouter.get('/:stackName/drift', async (req: Request, res: Response) => {
@@ -1116,9 +1167,11 @@ stacksRouter.get('/:stackName/storage', async (req: Request, res: Response) => {
 // Effective Stack Anatomy: structural facts (services, ports, volumes, networks,
 // restart) from the fully-merged effective model, so a multi-file Git source's
 // dossier and doc-drift reflect every override file, not just the root compose.
-// Read-only and advisory; auto-proxies to the active node. Secret-safe: the
-// response carries only structural fields; resolved env, label, and command
-// values in the rendered model are never extracted into the payload.
+// Read-only and advisory; auto-proxies to the active node. The response carries
+// only structural fields; resolved env, label, and command values are never
+// extracted. A secret interpolated INTO a structural field still resolves into
+// the payload, but is already readable at the same stack:read scope via the
+// stack's files (see docs/features/environment-guardrails).
 stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
@@ -1697,6 +1750,10 @@ stacksRouter.get('/:stackName/scan-status', (req: Request, res: Response): void 
 type FsErrorCode =
   | 'INVALID_PATH'
   | 'SYMLINK_ESCAPE'
+  | 'INVALID_ROOT'
+  | 'READONLY_ROOT'
+  | 'ROOT_UNAVAILABLE'
+  | 'UNSUPPORTED_ON_ROOT'
   | 'IS_DIRECTORY'
   | 'NOT_EMPTY'
   | 'NOT_FOUND'
@@ -1742,8 +1799,86 @@ function sendFsError(
   if (e.code === 'ENOENT') {
     return res.status(404).json({ error: opts.notFoundMessage ?? 'File not found', code: 'NOT_FOUND' });
   }
+  if (e.code === 'UNSUPPORTED_ON_ROOT') {
+    return res.status(400).json({ error: e.message, code: 'UNSUPPORTED_ON_ROOT' satisfies FsErrorCode });
+  }
+  if (e.code === 'FILE_EXISTS') {
+    return res.status(409).json({ error: e.message, code: 'FILE_EXISTS' satisfies FsErrorCode });
+  }
+  // Helper-backed (named-volume) ops throw an ExecError carrying an HTTP status;
+  // honour it (403 permission-denied, 409 conflict, 413 too-large, 504 timeout).
+  // A 4xx message is a self-explanatory client error and is forwarded as-is; a
+  // 5xx is a server-side failure, so log the detail and return a clean message.
+  const status = (err as { status?: unknown }).status;
+  if (typeof status === 'number' && status >= 400 && status < 600) {
+    if (status >= 500) {
+      // Constant format string + sanitized args (the status is already carried by
+      // the HTTP response, so it is not repeated in the log).
+      console.error('[files] %s (helper failure): %s', sanitizeForLog(fallback), sanitizeForLog(e.message));
+      return res.status(status).json({ error: fallback });
+    }
+    return res.status(status).json({ error: e.message });
+  }
   console.error(`[files] ${fallback}:`, sanitizeForLog(e.message));
   return res.status(500).json({ error: fallback });
+}
+
+const ROOT_ID_RE = /^[A-Za-z0-9:_-]{1,80}$/;
+
+function readRootId(req: Request): string {
+  const raw = req.query.rootId;
+  return typeof raw === 'string' && raw ? raw : STACK_SOURCE_ROOT_ID;
+}
+
+/**
+ * Resolve the client's rootId to a server-derived root, enforcing browsability
+ * for reads and writability for writes. Sends the error response and returns
+ * null when the root is unknown, read-only, or not browsable, so the caller
+ * just does `if (!root) return;`. Writes resolve fresh (cache bypass) so a
+ * removed mount cannot be written through a stale allowlist.
+ */
+async function resolveRootForOp(
+  req: Request,
+  res: Response,
+  stackName: string,
+  mode: 'read' | 'write',
+): Promise<StackFileRoot | null> {
+  const rootId = readRootId(req);
+  // Back-compat fast path: no rootId (or the stack-source root) is exactly the
+  // legacy behaviour. Return a synthetic stack-source root without touching the
+  // roots service, so plain stack-source ops never trigger a compose render.
+  if (rootId === STACK_SOURCE_ROOT_ID) {
+    return stackSourceFileRoot();
+  }
+  if (!ROOT_ID_RE.test(rootId)) {
+    res.status(400).json({ error: 'Invalid root', code: 'INVALID_ROOT' satisfies FsErrorCode });
+    return null;
+  }
+  let root: StackFileRoot;
+  try {
+    root = await StackFileRootsService.getInstance(req.nodeId).resolveRoot(stackName, rootId, { fresh: mode === 'write' });
+  } catch (err) {
+    if ((err as { code?: string }).code === 'INVALID_ROOT') {
+      res.status(400).json({ error: 'Unknown file root', code: 'INVALID_ROOT' satisfies FsErrorCode });
+      return null;
+    }
+    sendFsError(res, err, 'Failed to resolve file root');
+    return null;
+  }
+  if (mode === 'write' && !root.writable) {
+    res.status(403).json({ error: root.warning ?? 'This location is read-only.', code: 'READONLY_ROOT' satisfies FsErrorCode });
+    return null;
+  }
+  if (mode === 'read' && !root.browsable) {
+    res.status(400).json({ error: root.warning ?? 'This location cannot be browsed.', code: 'ROOT_UNAVAILABLE' satisfies FsErrorCode });
+    return null;
+  }
+  return root;
+}
+
+/** Drop the cached root allowlist after a stack-source mutation that can change declared mounts. */
+function afterStackMutation(req: Request, stackName: string): void {
+  StackFileRootsService.invalidate(req.nodeId, stackName);
 }
 
 function logFileOperation(level: 'info' | 'warn', message: string, details: Record<string, unknown>): void {
@@ -1816,6 +1951,17 @@ function isSafeUploadFilename(rawName: string): boolean {
 
 const DIR_LIST_LIMIT = 1000;
 
+stacksRouter.get('/:stackName/file-roots', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  try {
+    const roots = await StackFileRootsService.getInstance(req.nodeId).listRoots(stackName);
+    return res.json(roots);
+  } catch (err: unknown) {
+    return sendFsError(res, err, 'Failed to list file roots');
+  }
+});
+
 stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
@@ -1823,10 +1969,12 @@ stacksRouter.get('/:stackName/files', async (req: Request, res: Response) => {
   if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'read');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('list start', { stackName, relPath, nodeId: req.nodeId });
+  logFileDiag('list start', { stackName, relPath, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).listStackDirectoryPage(stackName, relPath, { limit: DIR_LIST_LIMIT });
+    const result = await FileRootGateway.getInstance(req.nodeId).listDir(root, stackName, relPath, DIR_LIST_LIMIT);
     // Expose pagination context via headers; the JSON body stays
     // FileEntry[] for backward compatibility with any direct API caller.
     res.setHeader('X-Total-Count', String(result.total));
@@ -1859,14 +2007,17 @@ stacksRouter.get('/:stackName/files/content', async (req: Request, res: Response
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
   const forceText = req.query.force === 'text';
+  const root = await resolveRootForOp(req, res, stackName, 'read');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('read start', { stackName, relPath, nodeId: req.nodeId, forceText });
+  logFileDiag('read start', { stackName, relPath, nodeId: req.nodeId, forceText, rootKind: root.kind });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).readStackFile(stackName, relPath, undefined, { forceText });
-    // ETag is the integer mtimeMs the file was stat'd with, so the matching
-    // PUT can compare millisecond-equal even though some filesystems return
-    // float mtimeMs.
-    res.setHeader('ETag', stackFileEtag(result.mtimeMs));
+    const result = await FileRootGateway.getInstance(req.nodeId).read(root, stackName, relPath, forceText);
+    // ETag carries the opaque version token the matching PUT compares. For fs
+    // roots it is the weak ETag over the integer mtimeMs (unchanged); for helper
+    // roots it is a composite token. The body also carries `version` so the
+    // client round-trips it verbatim as If-Match.
+    res.setHeader('ETag', result.version);
     logFileDiag('read complete', {
       stackName,
       relPath,
@@ -1893,15 +2044,27 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'read');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('download start', { stackName, relPath, nodeId: req.nodeId });
+  logFileDiag('download start', { stackName, relPath, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).streamStackFile(stackName, relPath);
-    res.setHeader('Content-Type', result.mime);
-    res.setHeader('Content-Length', result.size);
-    const encodedFilename = encodeURIComponent(result.filename);
-    const safeFilename = result.filename.replace(/[\\"]/g, '');
-    res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
+    const result = await FileRootGateway.getInstance(req.nodeId).download(root, stackName, relPath);
+    const setDownloadHeaders = (filename: string, size: number, mime: string): void => {
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Content-Length', size);
+      const encodedFilename = encodeURIComponent(filename);
+      const safeFilename = filename.replace(/[\\"]/g, '');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"; filename*=UTF-8''${encodedFilename}`);
+    };
+    // Helper-backed (named-volume) downloads come back as a bounded buffer; send
+    // it directly rather than through the file-stream lifecycle below.
+    if (result.kind === 'buffer') {
+      setDownloadHeaders(result.filename, result.size, 'application/octet-stream');
+      recordFileOp(req.nodeId, 'download', startedAt, true);
+      return res.end(result.buffer);
+    }
+    setDownloadHeaders(result.filename, result.size, result.mime);
     // Track download completion off both the file stream's lifecycle and the
     // response close. Under the in-process supertest transport, request close
     // events can race ahead of normal stream completion. End/error are the
@@ -1968,10 +2131,21 @@ stacksRouter.get('/:stackName/files/download', async (req: Request, res: Respons
   }
 });
 
-type UploadStartedReq = Request & { _fileUploadStartedAt?: number };
+type UploadStartedReq = Request & { _fileUploadStartedAt?: number; _fileUploadRoot?: StackFileRoot };
 
 stacksRouter.post(
   '/:stackName/files/upload',
+  // Authorize BEFORE multer touches the body, so an unauthorized caller or a
+  // read-only/non-existent root is rejected without ever spooling a temp file.
+  // The resolved root is stashed for the handler so it is not resolved twice.
+  async (req: Request, res: Response, next: NextFunction) => {
+    const stackName = req.params.stackName as string;
+    if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+    const root = await resolveRootForOp(req, res, stackName, 'write');
+    if (!root) return;
+    (req as UploadStartedReq)._fileUploadRoot = root;
+    next();
+  },
   (req: Request, res: Response, next: NextFunction) => {
     // Capture the time the upload entered the route so every downstream
     // metric reports the same latency window: the body-transfer +
@@ -1989,7 +2163,11 @@ stacksRouter.post(
           errorCode: 'TOO_LARGE',
         });
         recordFileOp(req.nodeId, 'upload', startedAt, false);
-        return res.status(413).json({ error: 'File exceeds 25 MB limit', code: 'TOO_LARGE' });
+        // diskStorage may have spooled a partial file before the limit fired.
+        void cleanupUploadTemp(req).finally(() =>
+          res.status(413).json({ error: 'File exceeds 25 MB limit', code: 'TOO_LARGE' }),
+        );
+        return;
       }
       if (err) {
         logFileOperation('warn', 'upload failed', {
@@ -1999,23 +2177,31 @@ stacksRouter.post(
           errorCode: 'MULTER_ERROR',
         });
         recordFileOp(req.nodeId, 'upload', startedAt, false);
-        return res.status(500).json({ error: 'Upload failed' });
+        void cleanupUploadTemp(req).finally(() => res.status(500).json({ error: 'Upload failed' }));
+        return;
       }
       next();
     });
   },
   async (req: Request, res: Response) => {
     const stackName = req.params.stackName as string;
-    if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+    // The pre-multer middleware already authorized and resolved the root.
+    const root = (req as UploadStartedReq)._fileUploadRoot;
+    if (!root) {
+      await cleanupUploadTemp(req);
+      return res.status(500).json({ error: 'Upload failed' });
+    }
     if (!req.file) {
       return res.status(400).json({ error: 'No file provided' });
     }
     const relPath = getRelPath(req);
     if (relPath !== '' && !isValidRelativeStackPath(relPath)) {
+      await cleanupUploadTemp(req);
       return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
     }
     const originalName = req.file.originalname;
     if (!isSafeUploadFilename(originalName)) {
+      await cleanupUploadTemp(req);
       return res.status(400).json({ error: 'Invalid filename' });
     }
     const targetRelPath = relPath ? `${relPath}/${originalName}` : originalName;
@@ -2026,7 +2212,8 @@ stacksRouter.post(
     const startedAt = (req as UploadStartedReq)._fileUploadStartedAt ?? Date.now();
     logFileDiag('upload start', { stackName, relPath: targetRelPath, nodeId: req.nodeId, size: req.file.size, overwrite });
     try {
-      const existing = await FileSystemService.getInstance(req.nodeId).pathKind(stackName, targetRelPath);
+      const gateway = FileRootGateway.getInstance(req.nodeId);
+      const existing = await gateway.pathKind(root, stackName, targetRelPath);
       if (existing === 'directory') {
         // A directory can never be replaced by an upload; surface a distinct code
         // so the UI does not offer a useless "Replace" button.
@@ -2058,7 +2245,22 @@ stacksRouter.post(
           },
         });
       }
-      await FileSystemService.getInstance(req.nodeId).writeStackFileBuffer(stackName, targetRelPath, req.file.buffer);
+      // Canonical js/path-injection barrier: the spool path is multer-generated
+      // within UPLOAD_TMP_DIR (a random filename), but static analysis taints
+      // req.file.*; confirm containment so the value handed to the gateway and
+      // FileSystemService streaming sinks is credited as safe.
+      const spoolBase = path.resolve(UPLOAD_TMP_DIR);
+      const tempPath = path.resolve(req.file.path);
+      if (!tempPath.startsWith(spoolBase + path.sep)) {
+        return res.status(400).json({ error: 'Upload failed' });
+      }
+      // Copy the spooled temp file into place (the spool survives; the finally
+      // removes it). The atomic exclusive create for the non-overwrite case means
+      // a file created by another writer after the pathKind check above is not
+      // silently clobbered (a race surfaces as FILE_EXISTS -> 409, same as the
+      // pre-emptive check). overwrite=true intentionally allows the clobber.
+      await gateway.writeFromTemp(root, stackName, targetRelPath, tempPath, !overwrite);
+      afterStackMutation(req, stackName);
       logFileOperation('info', 'mutate', {
         nodeId: req.nodeId,
         op: 'upload',
@@ -2066,6 +2268,8 @@ stacksRouter.post(
         path: targetRelPath,
         bytes: req.file.size,
         overwrite,
+        rootKind: root.kind,
+        backend: root.backend,
       });
       logFileDiag('upload timing', { stackName, relPath: targetRelPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
       recordFileOp(req.nodeId, 'upload', startedAt, true);
@@ -2081,6 +2285,10 @@ stacksRouter.post(
       });
       recordFileOp(req.nodeId, 'upload', startedAt, false);
       return sendFsError(res, err, 'Failed to upload file', { notFoundMessage: 'Target directory not found' });
+    } finally {
+      // writeFromTemp streams (copies) the spool into place, so the temp file
+      // always remains and must be removed on every exit (success, conflict, error).
+      await cleanupUploadTemp(req);
     }
   },
 );
@@ -2097,23 +2305,19 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
   if (typeof content !== 'string') {
     return res.status(400).json({ error: '"content" must be a string' });
   }
-  const expectedMtimeMs = parseIfMatchMtime(req.header('if-match'));
+  const expectedVersion = req.header('if-match') || undefined;
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('write start', { stackName, relPath, nodeId: req.nodeId, bytes: Buffer.byteLength(content, 'utf-8'), hasIfMatch: expectedMtimeMs !== null });
+  logFileDiag('write start', { stackName, relPath, nodeId: req.nodeId, bytes: Buffer.byteLength(content, 'utf-8'), hasIfMatch: expectedVersion !== undefined, rootKind: root.kind });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).writeStackFileIfUnchanged(
-      stackName,
-      relPath,
-      content,
-      expectedMtimeMs,
-    );
+    const result = await FileRootGateway.getInstance(req.nodeId).writeIfUnchanged(root, stackName, relPath, content, expectedVersion);
     if (!result.ok) {
-      // Stale ETag: surface the current content + mtime so the client can
-      // show a "file changed elsewhere" diff and let the user reconcile.
-      // Real FS work ran (the if-unchanged stat compare); record the
-      // attempted-and-rejected write so operators chasing concurrent-edit
-      // patterns can see them in the snapshot.
-      res.setHeader('ETag', stackFileEtag(result.currentMtimeMs));
+      // Stale version: surface the current content + token so the client can
+      // show a "file changed elsewhere" diff and retry with the fresh version.
+      // Real work ran (the if-unchanged compare); record the attempted-and-
+      // rejected write so concurrent-edit patterns show in the snapshot.
+      res.setHeader('ETag', result.currentVersion);
       return rejectFileMutation(req, res, {
         op: 'write',
         stack: stackName,
@@ -2125,16 +2329,20 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
           error: 'File has been modified since you last read it. Reload to see the current version.',
           currentMtimeMs: result.currentMtimeMs,
           currentContent: result.currentContent,
+          currentVersion: result.currentVersion,
         },
       });
     }
-    res.setHeader('ETag', stackFileEtag(result.mtimeMs));
+    res.setHeader('ETag', result.version);
+    afterStackMutation(req, stackName);
     logFileOperation('info', 'mutate', {
       nodeId: req.nodeId,
       op: 'write',
       stack: stackName,
       path: relPath,
       bytes: Buffer.byteLength(content, 'utf-8'),
+      rootKind: root.kind,
+      backend: root.backend,
     });
     logFileDiag('write timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'write', startedAt, true);
@@ -2161,16 +2369,21 @@ stacksRouter.delete('/:stackName/files', async (req: Request, res: Response) => 
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
   const recursive = req.query.recursive === '1';
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('delete start', { stackName, relPath, recursive, nodeId: req.nodeId });
+  logFileDiag('delete start', { stackName, relPath, recursive, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    await FileSystemService.getInstance(req.nodeId).deleteStackPath(stackName, relPath, recursive);
+    await FileRootGateway.getInstance(req.nodeId).deletePath(root, stackName, relPath, recursive);
+    afterStackMutation(req, stackName);
     logFileOperation('info', 'mutate', {
       nodeId: req.nodeId,
       op: 'delete',
       stack: stackName,
       path: relPath,
       recursive,
+      rootKind: root.kind,
+      backend: root.backend,
     });
     logFileDiag('delete timing', { stackName, relPath, recursive, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'delete', startedAt, true);
@@ -2197,15 +2410,20 @@ stacksRouter.post('/:stackName/files/folder', async (req: Request, res: Response
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('mkdir start', { stackName, relPath, nodeId: req.nodeId });
+  logFileDiag('mkdir start', { stackName, relPath, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    await FileSystemService.getInstance(req.nodeId).mkdirStackPath(stackName, relPath);
+    await FileRootGateway.getInstance(req.nodeId).mkdir(root, stackName, relPath);
+    afterStackMutation(req, stackName);
     logFileOperation('info', 'mutate', {
       nodeId: req.nodeId,
       op: 'mkdir',
       stack: stackName,
       path: relPath,
+      rootKind: root.kind,
+      backend: root.backend,
     });
     logFileDiag('mkdir timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'mkdir', startedAt, true);
@@ -2239,16 +2457,21 @@ stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Respons
   if (!isValidRelativeStackPath(to)) {
     return res.status(400).json({ error: 'Invalid destination path', code: 'INVALID_PATH' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('rename start', { stackName, from, to, nodeId: req.nodeId });
+  logFileDiag('rename start', { stackName, from, to, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    await FileSystemService.getInstance(req.nodeId).renameStackPath(stackName, from, to);
+    await FileRootGateway.getInstance(req.nodeId).rename(root, stackName, from, to);
+    afterStackMutation(req, stackName);
     logFileOperation('info', 'mutate', {
       nodeId: req.nodeId,
       op: 'rename',
       stack: stackName,
       path: from,
       toPath: to,
+      rootKind: root.kind,
+      backend: root.backend,
     });
     logFileDiag('rename timing', { stackName, from, to, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'rename', startedAt, true);
@@ -2267,6 +2490,310 @@ stacksRouter.patch('/:stackName/files/rename', async (req: Request, res: Respons
   }
 });
 
+stacksRouter.post('/:stackName/files/copy', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const { from, to } = req.body as { from?: unknown; to?: unknown };
+  if (typeof from !== 'string' || !from) {
+    return res.status(400).json({ error: '"from" must be a non-empty string' });
+  }
+  if (typeof to !== 'string' || !to) {
+    return res.status(400).json({ error: '"to" must be a non-empty string' });
+  }
+  if (!isValidRelativeStackPath(from)) {
+    return res.status(400).json({ error: 'Invalid source path', code: 'INVALID_PATH' });
+  }
+  if (!isValidRelativeStackPath(to)) {
+    return res.status(400).json({ error: 'Invalid destination path', code: 'INVALID_PATH' });
+  }
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
+  const startedAt = Date.now();
+  logFileDiag('copy start', { stackName, from, to, nodeId: req.nodeId, rootKind: root.kind });
+  try {
+    await FileRootGateway.getInstance(req.nodeId).copy(root, stackName, from, to);
+    afterStackMutation(req, stackName);
+    logFileOperation('info', 'mutate', {
+      nodeId: req.nodeId,
+      op: 'copy',
+      stack: stackName,
+      path: from,
+      toPath: to,
+      rootKind: root.kind,
+      backend: root.backend,
+    });
+    logFileDiag('copy timing', { stackName, from, to, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
+    recordFileOp(req.nodeId, 'copy', startedAt, true);
+    return res.status(204).send();
+  } catch (err: unknown) {
+    logFileOperation('warn', 'copy failed', {
+      nodeId: req.nodeId,
+      op: 'copy',
+      stack: stackName,
+      path: from,
+      toPath: to,
+      errorCode: fsErrorCode(err),
+    });
+    recordFileOp(req.nodeId, 'copy', startedAt, false);
+    return sendFsError(res, err, 'Failed to copy');
+  }
+});
+
+// ── Bulk file operations (delete / move / download) ─────────────────────────
+
+const MAX_BULK = 100; // selected paths accepted per bulk request
+const MAX_ARCHIVE_ENTRIES = 5000; // files packed into one bulk-download archive
+const MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024; // 1 GiB uncompressed cap
+
+/**
+ * Helper-backed named volumes are Linux containers (case-sensitive). Filesystem
+ * roots follow the host: Windows/macOS fold case, Linux does not.
+ */
+function rootCaseSensitive(root: StackFileRoot): boolean {
+  if (root.backend === 'helper') return true;
+  return process.platform !== 'win32' && process.platform !== 'darwin';
+}
+
+/** Validate a bulk path array; sends the 400 and returns null on any problem. */
+function parseBulkPaths(value: unknown, res: Response): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) {
+    res.status(400).json({ error: 'A non-empty list of paths is required' });
+    return null;
+  }
+  if (value.length > MAX_BULK) {
+    res.status(400).json({ error: `Select at most ${MAX_BULK} items at once`, code: 'TOO_MANY' });
+    return null;
+  }
+  const out: string[] = [];
+  for (const p of value) {
+    if (typeof p !== 'string' || p === '' || !isValidRelativeStackPath(p)) {
+      res.status(400).json({ error: 'Invalid path in selection', code: 'INVALID_PATH' satisfies FsErrorCode });
+      return null;
+    }
+    out.push(p);
+  }
+  return out;
+}
+
+/** A clean per-item failure message for a bulk result, mapping the opaque
+ *  filesystem codes that carry no friendly message of their own. */
+function bulkItemError(err: unknown): string {
+  const e = err as Error & { code?: string };
+  switch (e.code) {
+    case 'EXDEV': return 'Cannot move across a storage boundary';
+    case 'EEXIST': return 'A file or folder with that name already exists';
+    case 'ENOENT': return 'No longer exists';
+    case 'EISDIR': case 'ENOTDIR': return 'Path type changed';
+    default: return e.message || e.code || 'Operation failed';
+  }
+}
+
+function archiveTooLargeError(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: 'ARCHIVE_TOO_LARGE' });
+}
+
+/**
+ * Walk the normalized selection and return every file to pack, enforcing the
+ * entry and byte caps. Throws ARCHIVE_TOO_LARGE if either cap is exceeded (or an
+ * fs directory listing is truncated), so the caller can 413 before any archive
+ * byte is streamed. File sizes come from listDir; every directory is stat-ed once
+ * (the walk recurses into each), but individual files in a listing are not re-stat-ed.
+ */
+async function enumerateArchiveFiles(
+  gateway: FileRootGateway,
+  root: StackFileRoot,
+  stackName: string,
+  selection: string[],
+): Promise<string[]> {
+  const files: string[] = [];
+  let totalBytes = 0;
+  const addFile = (relPath: string, size: number): void => {
+    files.push(relPath);
+    totalBytes += size;
+    if (files.length > MAX_ARCHIVE_ENTRIES) throw archiveTooLargeError('The selection has too many files to download');
+    if (totalBytes > MAX_ARCHIVE_BYTES) throw archiveTooLargeError('The selection is too large to download');
+  };
+  const visit = async (relPath: string): Promise<void> => {
+    const st = await gateway.stat(root, stackName, relPath);
+    if (st.type !== 'directory') {
+      gateway.assertArchivable(root, relPath, st);
+      addFile(relPath, st.size);
+      return;
+    }
+    // Request one over the remaining budget so a directory that would push us one
+    // entry past the cap is detected: the overflow entry reaches addFile (which
+    // throws on >), or for larger directories the fs listing reports truncated.
+    const remaining = MAX_ARCHIVE_ENTRIES - files.length + 1;
+    const { entries, truncated } = await gateway.listDir(root, stackName, relPath, remaining);
+    if (truncated) throw archiveTooLargeError('A selected folder has too many files to download');
+    for (const entry of entries) {
+      const childRel = `${relPath}/${entry.name}`;
+      if (entry.type === 'directory') await visit(childRel);
+      else {
+        gateway.assertArchivable(root, childRel, entry);
+        addFile(childRel, entry.size);
+      }
+    }
+  };
+  for (const p of selection) await visit(p);
+  return files;
+}
+
+stacksRouter.post('/:stackName/files/bulk-delete', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const parsed = parseBulkPaths((req.body as { paths?: unknown }).paths, res);
+  if (!parsed) return;
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
+  const normalized = normalizeBulkPaths(parsed, rootCaseSensitive(root));
+  const gateway = FileRootGateway.getInstance(req.nodeId);
+  const deleted: string[] = [];
+  const failed: { path: string; error: string }[] = [];
+  for (const relPath of normalized) {
+    const startedAt = Date.now();
+    try {
+      await gateway.deletePath(root, stackName, relPath, true);
+      deleted.push(relPath);
+      recordFileOp(req.nodeId, 'delete', startedAt, true);
+    } catch (err: unknown) {
+      failed.push({ path: relPath, error: bulkItemError(err) });
+      recordFileOp(req.nodeId, 'delete', startedAt, false);
+    }
+  }
+  // Partial-success: invalidate the roots cache if anything actually changed.
+  if (deleted.length > 0) afterStackMutation(req, stackName);
+  logFileOperation('info', 'mutate', { nodeId: req.nodeId, op: 'bulkDelete', stack: stackName, deleted: deleted.length, failed: failed.length, rootKind: root.kind, backend: root.backend });
+  return res.json({ deleted, failed });
+});
+
+stacksRouter.post('/:stackName/files/bulk-move', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  const body = req.body as { from?: unknown; toDir?: unknown };
+  const parsed = parseBulkPaths(body.from, res);
+  if (!parsed) return;
+  if (typeof body.toDir !== 'string') {
+    return res.status(400).json({ error: '"toDir" must be a string (use "" for the root)' });
+  }
+  const toDir = body.toDir;
+  if (toDir !== '' && !isValidRelativeStackPath(toDir)) {
+    return res.status(400).json({ error: 'Invalid destination', code: 'INVALID_PATH' satisfies FsErrorCode });
+  }
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
+  const caseSensitive = rootCaseSensitive(root);
+  const normalized = normalizeBulkPaths(parsed, caseSensitive);
+  // Reject the whole request if the destination is one of the moved folders or
+  // sits inside one (which would move a folder into its own subtree).
+  if (destWithinAnySource(toDir, normalized, caseSensitive)) {
+    return res.status(400).json({ error: 'Cannot move the selection into itself', code: 'INVALID_PATH' satisfies FsErrorCode });
+  }
+  const gateway = FileRootGateway.getInstance(req.nodeId);
+  const moved: string[] = [];
+  const failed: { path: string; error: string }[] = [];
+  for (const fromRel of normalized) {
+    const startedAt = Date.now();
+    const name = fromRel.split('/').pop() as string;
+    const toRel = toDir ? `${toDir}/${name}` : name;
+    try {
+      await gateway.rename(root, stackName, fromRel, toRel);
+      moved.push(fromRel);
+      recordFileOp(req.nodeId, 'rename', startedAt, true);
+    } catch (err: unknown) {
+      failed.push({ path: fromRel, error: bulkItemError(err) });
+      recordFileOp(req.nodeId, 'rename', startedAt, false);
+    }
+  }
+  if (moved.length > 0) afterStackMutation(req, stackName);
+  logFileOperation('info', 'mutate', { nodeId: req.nodeId, op: 'bulkMove', stack: stackName, moved: moved.length, failed: failed.length, rootKind: root.kind, backend: root.backend });
+  return res.json({ moved, failed });
+});
+
+stacksRouter.get('/:stackName/files/bulk-download', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  const raw = req.query.path;
+  const list = Array.isArray(raw) ? raw : raw !== undefined ? [raw] : [];
+  const parsed = parseBulkPaths(list, res);
+  if (!parsed) return;
+  const root = await resolveRootForOp(req, res, stackName, 'read');
+  if (!root) return;
+  const gateway = FileRootGateway.getInstance(req.nodeId);
+  const normalized = normalizeBulkPaths(parsed, rootCaseSensitive(root));
+  const startedAt = Date.now();
+
+  // Prewalk + cap enforcement BEFORE any response header is sent, so a too-large
+  // selection fails as a clean 413 rather than a truncated archive.
+  let files: string[];
+  try {
+    files = await enumerateArchiveFiles(gateway, root, stackName, normalized);
+  } catch (err: unknown) {
+    recordFileOp(req.nodeId, 'download', startedAt, false);
+    const code = (err as { code?: string }).code;
+    if (code === 'ARCHIVE_TOO_LARGE') {
+      return res.status(413).json({ error: (err as Error).message, code: 'TOO_LARGE' });
+    }
+    if (code === 'ARCHIVE_UNSUPPORTED') {
+      return res.status(400).json({ error: (err as Error).message, code: 'UNSUPPORTED' });
+    }
+    return sendFsError(res, err, 'Failed to prepare download');
+  }
+  if (files.length === 0) {
+    recordFileOp(req.nodeId, 'download', startedAt, false);
+    return res.status(404).json({ error: 'Nothing to download', code: 'NOT_FOUND' satisfies FsErrorCode });
+  }
+
+  res.setHeader('Content-Type', 'application/gzip');
+  res.setHeader('Content-Disposition', `attachment; filename="${stackName}-files.tar.gz"`);
+  const pack = tar.pack();
+  const gzip = zlib.createGzip();
+  const onStreamError = (err: Error): void => {
+    logFileOperation('warn', 'bulk download stream error', { nodeId: req.nodeId, stack: stackName, errorCode: fsErrorCode(err) });
+    if (!res.writableEnded) res.destroy();
+  };
+  pack.on('error', onStreamError);
+  gzip.on('error', onStreamError);
+  // If the client aborts mid-download, stop fetching the remaining files (each
+  // helper-volume read is a container exec) instead of streaming into a dead pipe.
+  let aborted = false;
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      aborted = true;
+      pack.destroy();
+    }
+  });
+  pack.pipe(gzip).pipe(res);
+
+  try {
+    for (const relPath of files) {
+      if (aborted) break;
+      const dl = await gateway.download(root, stackName, relPath);
+      if (dl.kind === 'buffer') {
+        await new Promise<void>((resolve, reject) => {
+          pack.entry({ name: relPath }, dl.buffer, (err) => (err ? reject(err) : resolve()));
+        });
+      } else {
+        await new Promise<void>((resolve, reject) => {
+          const entry = pack.entry({ name: relPath, size: dl.size }, (err) => (err ? reject(err) : resolve()));
+          dl.stream.on('error', reject);
+          entry.on('error', reject);
+          dl.stream.pipe(entry);
+        });
+      }
+    }
+    pack.finalize();
+    recordFileOp(req.nodeId, 'download', startedAt, true);
+  } catch (err: unknown) {
+    // Headers are already sent, so surface the failure by tearing the stream
+    // down rather than trying to change the status.
+    logFileOperation('warn', 'bulk download failed mid-stream', { nodeId: req.nodeId, stack: stackName, errorCode: fsErrorCode(err) });
+    recordFileOp(req.nodeId, 'download', startedAt, false);
+    pack.destroy();
+    if (!res.writableEnded) res.destroy();
+  }
+});
+
 stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
@@ -2275,10 +2802,12 @@ stacksRouter.get('/:stackName/files/permissions', async (req: Request, res: Resp
   if (!isValidRelativeStackPath(relPath)) {
     return res.status(400).json({ error: 'Invalid path', code: 'INVALID_PATH' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'read');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('permissions read start', { stackName, relPath, nodeId: req.nodeId });
+  logFileDiag('permissions read start', { stackName, relPath, nodeId: req.nodeId, rootKind: root.kind });
   try {
-    const result = await FileSystemService.getInstance(req.nodeId).getStackEntryMode(stackName, relPath);
+    const result = await FileRootGateway.getInstance(req.nodeId).getMode(root, stackName, relPath);
     logFileDiag('permissions read complete', { stackName, relPath, nodeId: req.nodeId, mode: result.octal, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'permissionsRead', startedAt, true);
     return res.json(result);
@@ -2301,16 +2830,21 @@ stacksRouter.put('/:stackName/files/permissions', async (req: Request, res: Resp
   if (typeof mode !== 'number') {
     return res.status(400).json({ error: '"mode" must be a number' });
   }
+  const root = await resolveRootForOp(req, res, stackName, 'write');
+  if (!root) return;
   const startedAt = Date.now();
-  logFileDiag('chmod start', { stackName, relPath, nodeId: req.nodeId, mode });
+  logFileDiag('chmod start', { stackName, relPath, nodeId: req.nodeId, mode, rootKind: root.kind });
   try {
-    await FileSystemService.getInstance(req.nodeId).chmodStackPath(stackName, relPath, mode);
+    await FileRootGateway.getInstance(req.nodeId).chmod(root, stackName, relPath, mode);
+    afterStackMutation(req, stackName);
     logFileOperation('info', 'mutate', {
       nodeId: req.nodeId,
       op: 'chmod',
       stack: stackName,
       path: relPath,
       mode: mode.toString(8).padStart(3, '0'),
+      rootKind: root.kind,
+      backend: root.backend,
     });
     logFileDiag('chmod timing', { stackName, relPath, nodeId: req.nodeId, elapsedMs: Date.now() - startedAt });
     recordFileOp(req.nodeId, 'chmod', startedAt, true);

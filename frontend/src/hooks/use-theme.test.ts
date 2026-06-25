@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useTheme, initializeTheme, THEME_MODES, ACCENTS, UI_FONTS, MONO_FONTS, TYPE_SIZES } from './use-theme';
+import { useTheme, useChartStyle, initializeTheme, THEME_MODES, ACCENTS, UI_FONTS, MONO_FONTS, TYPE_SIZES } from './use-theme';
 
 const STORAGE_KEY = 'sencho.appearance.theme';
 
@@ -16,7 +16,9 @@ describe('useTheme', () => {
     });
 
     afterEach(() => {
-        // Reset the shared module store so tests stay order-independent.
+        // Reset the shared module store so tests stay order-independent. The
+        // appearance axes reset to Signature (readability off, effects full) so
+        // the raw-knob assertions are not dampened by the Calm default.
         const { result } = renderHook(() => useTheme());
         act(() => {
             result.current.setTheme('dim');
@@ -27,6 +29,8 @@ describe('useTheme', () => {
             result.current.setUiFont('Geist');
             result.current.setMonoFont('Geist Mono');
             result.current.setTypeScale(1);
+            result.current.setReadability(false);
+            result.current.setVisualStyle('signature');
         });
     });
 
@@ -117,5 +121,85 @@ describe('useTheme', () => {
         act(() => a.result.current.setAccent('lime'));
         expect(a.result.current.accent).toBe('lime');
         expect(b.result.current.accent).toBe('lime');
+    });
+
+    it('setVisualStyle("calm") writes the three calm sub-axes, applies them, and persists', () => {
+        const { result } = renderHook(() => useTheme());
+        act(() => result.current.setVisualStyle('calm'));
+        expect(result.current.visualStyle).toBe('calm');
+        expect(result.current.headingStyle).toBe('clean');
+        expect(result.current.chartStyle).toBe('muted');
+        expect(result.current.reducedEffects).toBe(true);
+        const root = document.documentElement;
+        expect(root.dataset.headings).toBe('clean');
+        expect(root.dataset.chartStyle).toBe('muted');
+        expect(root.dataset.effects).toBe('reduced');
+        expect(readBlob().chartStyle).toBe('muted');
+    });
+
+    it('useChartStyle resolves the effective palette and memoizes a stable result', () => {
+        const theme = renderHook(() => useTheme());
+        act(() => {
+            theme.result.current.setReadability(false);
+            theme.result.current.setChartStyle('heat');
+            theme.result.current.setReducedEffects(false);
+        });
+        const chart = renderHook(() => useChartStyle());
+        expect(chart.result.current).toEqual({ chartStyle: 'heat', reduced: false });
+        const first = chart.result.current;
+        chart.rerender();
+        expect(chart.result.current).toBe(first); // stable identity, no per-render churn
+        act(() => theme.result.current.setReadability(true));
+        expect(chart.result.current).toEqual({ chartStyle: 'muted', reduced: true }); // readability forces
+    });
+
+    it('the visual-style macro never clears readability (sticky master)', () => {
+        const { result } = renderHook(() => useTheme());
+        act(() => result.current.setReadability(true));
+        act(() => result.current.setVisualStyle('signature'));
+        expect(result.current.visualStyle).toBe('signature');
+        expect(result.current.headingStyle).toBe('signature');
+        // readability stays on, so the effective resolution is still Calm.
+        expect(result.current.readability).toBe(true);
+        expect(document.documentElement.dataset.headings).toBe('clean');
+    });
+
+    it('readability forces the calm resolution on <html> without mutating stored sub-axes', () => {
+        const { result } = renderHook(() => useTheme());
+        act(() => {
+            result.current.setVisualStyle('signature');
+            result.current.setContrast(0.2);
+            result.current.setGlow(0.3);
+            result.current.setReadability(true);
+        });
+        const root = document.documentElement;
+        expect(root.dataset.headings).toBe('clean');
+        expect(root.dataset.chartStyle).toBe('muted');
+        expect(root.dataset.effects).toBe('reduced');
+        expect(Number(root.style.getPropertyValue('--contrast'))).toBeCloseTo(0.38, 5);
+        expect(Number(root.style.getPropertyValue('--glow'))).toBeCloseTo(0.12, 5);
+        expect(root.style.getPropertyValue('--border-boost')).toBe('0.03');
+        // Stored sub-axes are untouched: readability is resolved at apply time only.
+        expect(result.current.headingStyle).toBe('signature');
+        expect(result.current.chartStyle).toBe('signature');
+        expect(result.current.contrast).toBe(0.2);
+        expect(readBlob().headingStyle).toBe('signature');
+        expect(readBlob().readability).toBe(true);
+    });
+
+    it('signature (readability off) applies the stored sub-axes and raw knobs', () => {
+        const { result } = renderHook(() => useTheme());
+        act(() => {
+            result.current.setReadability(false);
+            result.current.setVisualStyle('signature');
+            result.current.setGlow(0.25);
+            result.current.setContrast(0.1);
+        });
+        const root = document.documentElement;
+        expect(root.dataset.headings).toBe('signature');
+        expect(root.dataset.chartStyle).toBe('signature');
+        expect(root.dataset.effects).toBeUndefined();
+        expect(root.style.getPropertyValue('--glow')).toBe('0.25');
+        expect(root.style.getPropertyValue('--contrast')).toBe('0.1');
     });
 });

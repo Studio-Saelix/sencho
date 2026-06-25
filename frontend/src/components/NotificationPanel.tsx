@@ -224,7 +224,7 @@ export function NotificationPanel({
                     <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-brand/[0.05] via-transparent to-transparent" />
                     <div className="absolute inset-y-0 left-0 w-[2px] bg-brand/60" />
                     <div className="relative flex items-center justify-between px-[var(--density-row-x)] py-[var(--density-tile-y)]">
-                        <span className="font-display text-xl italic leading-none text-stat-value">
+                        <span className="font-heading text-xl leading-none text-stat-value">
                             Notifications
                         </span>
                         {unreadCount > 0 ? (

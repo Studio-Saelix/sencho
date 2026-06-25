@@ -5,7 +5,7 @@ description: See every mount a stack depends on, learn whether it is portable or
 
 The **Storage** tab in the right-hand **Anatomy** panel answers a Compose-first question: *what storage does this stack depend on, and what happens to it if I move or restore the stack?* It renders the effective Compose model, the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied, lists every mount, and gives the stack a single portability verdict.
 
-The view is read-only with respect to the stack and the host: it never changes a mount, and it never reads, moves, or changes the ownership of any file. It inspects structure only, mount type, source and target paths, the read-only flag, and a host path's existence, type, and owner, so nothing inside a volume or bind mount is ever opened.
+The view is read-only with respect to the stack and the host: it never changes a mount, and it never reads, moves, or changes the ownership of any file. It inspects structure only, mount type, source and target paths, the read-only flag, and a host path's existence, type, and owner, so nothing inside a volume or bind mount is ever opened. One caveat: a bind source or target assembled from a secret `${VAR}` is resolved before the model is read, so its value does show. Keep secrets in `environment:` or `env_file:` rather than interpolating them into mount paths. See [Environment and Secrets Guardrails](/features/environment-guardrails).
 
 ## Storage inventory
 
