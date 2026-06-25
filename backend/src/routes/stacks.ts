@@ -946,6 +946,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
     DatabaseService.getInstance().deleteStackDossier(req.nodeId, stackName);
     DatabaseService.getInstance().deleteStackDriftFindings(req.nodeId, stackName);
     DatabaseService.getInstance().deleteStackExposureIntents(req.nodeId, stackName);
+    DatabaseService.getInstance().deleteStackExposure(req.nodeId, stackName);
     if (debug) console.debug(`[Stacks:debug] Delete: db OK`, { stackName: sanitizedName });
   } catch (dbErr) {
     console.error('[Stacks] Database cleanup failed for %s; files already removed:', sanitizeForLog(stackName), dbErr);

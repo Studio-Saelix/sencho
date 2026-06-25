@@ -11,6 +11,8 @@ import { LogFormatter } from './LogFormatter';
 import { NodeRegistry } from './NodeRegistry';
 import { RegistryService } from './RegistryService';
 import { DriftLedgerService } from './DriftLedgerService';
+import { parseEffectiveModel } from './preflight/effectiveModel';
+import { deriveStackExposure } from './preflight/exposure';
 
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -481,6 +483,14 @@ export class ComposeService {
     // instead restores the previous files and throws above, so that recovery path
     // reconciles on its next deploy or scan, not here. Best-effort internally.
     await DriftLedgerService.getInstance().reconcileStack(this.nodeId, stackName);
+    // Refresh the exposure cache so posture reflects the just-deployed model.
+    // Best-effort: a refresh failure logs a warning but never fails the deploy.
+    try {
+      await this.refreshExposureCache(stackName);
+    } catch (err) {
+      console.warn('[ComposeService] Exposure refresh failed after deploy for %s:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
+    }
   }
 
   streamLogs(stackName: string, ws: WebSocket) {
@@ -682,6 +692,12 @@ export class ComposeService {
     // reconcile the ledger against the updated runtime.
     await DriftLedgerService.getInstance().recordBaseline(this.nodeId, stackName);
     await DriftLedgerService.getInstance().reconcileStack(this.nodeId, stackName);
+    try {
+      await this.refreshExposureCache(stackName);
+    } catch (err) {
+      console.warn('[ComposeService] Exposure refresh failed after update for %s:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
+    }
   }
 
   public async downStack(stackName: string): Promise<void> {
@@ -726,6 +742,36 @@ export class ComposeService {
       images.push(line);
     }
     return images;
+  }
+
+  /** Render the effective Compose model and cache the per-stack exposure
+   *  descriptor so the Security posture can join exposed images against
+   *  vulnerability findings without re-rendering config on every poll.
+   *  Best-effort: render or parse failure logs a warning and keeps the
+   *  prior cached descriptor, never failing the deploy. */
+  private async refreshExposureCache(stackName: string): Promise<void> {
+    const result = await this.renderConfig(stackName);
+    if (result.rendered === null) {
+      console.warn('[ComposeService] Exposure cache skipped for %s: model not renderable',
+        sanitizeForLog(stackName));
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.rendered);
+    } catch {
+      console.warn('[ComposeService] Exposure cache skipped for %s: unparseable model JSON',
+        sanitizeForLog(stackName));
+      return;
+    }
+    const model = parseEffectiveModel(parsed, stackName);
+    const descriptor = deriveStackExposure(model, stackName, Date.now());
+    DatabaseService.getInstance().upsertStackExposure(
+      this.nodeId,
+      stackName,
+      JSON.stringify(descriptor),
+      descriptor.computedAt,
+    );
   }
 
   private captureCompose(args: string[], cwd: string): Promise<string> {

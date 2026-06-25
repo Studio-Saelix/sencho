@@ -958,7 +958,18 @@ describe('ComposeService - idle-output stall backstop', () => {
     process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '1000';
     mockListContainers.mockResolvedValue([]);
     const proc = createMockProcess();
-    mockSpawn.mockReturnValue(proc);
+    // deployStack now spawns a second child (exposure refresh via renderConfig)
+    // after the up command closes. Return the controlled proc for the up spawn,
+    // and a fresh auto-closing proc for the config spawn so the test does not
+    // hang on the already-closed proc.
+    let spawnCount = 0;
+    mockSpawn.mockImplementation(() => {
+      spawnCount += 1;
+      if (spawnCount === 1) return proc;
+      const configProc = createMockProcess();
+      Promise.resolve().then(() => configProc.emit('close', 0));
+      return configProc;
+    });
 
     const svc = ComposeService.getInstance(1);
     // deployStack spawns a single `up`; emit output every 600ms (< 1s window)
@@ -997,7 +1008,16 @@ describe('ComposeService - idle-output stall backstop', () => {
     process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '0'; // invalid → default (10min)
     mockListContainers.mockResolvedValue([]);
     const proc = createMockProcess();
-    mockSpawn.mockReturnValue(proc);
+    // Same pattern as the stall test above: the second spawn (exposure refresh)
+    // needs its own auto-closing proc so deployStack can resolve after close.
+    let spawnCount = 0;
+    mockSpawn.mockImplementation(() => {
+      spawnCount += 1;
+      if (spawnCount === 1) return proc;
+      const configProc = createMockProcess();
+      Promise.resolve().then(() => configProc.emit('close', 0));
+      return configProc;
+    });
 
     const svc = ComposeService.getInstance(1);
     const promise = svc.deployStack('my-stack');

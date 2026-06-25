@@ -70,6 +70,9 @@ export interface VulnerabilityScan {
   error: string | null;
   stack_context: string | null;
   policy_evaluation?: ScanPolicyEvaluation | null;
+  /** Tri-state Compose exposure for the scan-sheet badge: true = publicly
+   *  exposed, false = internal only, null/absent = no descriptor cached. */
+  publicly_exposed?: boolean | null;
 }
 
 export interface SecretFinding {
