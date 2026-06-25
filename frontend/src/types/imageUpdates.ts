@@ -18,4 +18,8 @@ export interface ImageUpdateStatus {
     nextCheckAt: number | null;
     manualCooldownMinutes: number;
     manualCooldownRemainingMs: number;
+    /** Active scheduling mode. */
+    mode: 'interval' | 'cron';
+    /** 5-field cron expression when mode is 'cron', null otherwise. */
+    cronExpression: string | null;
 }

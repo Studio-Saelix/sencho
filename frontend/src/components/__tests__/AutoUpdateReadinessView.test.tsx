@@ -143,6 +143,8 @@ describe('CadenceStrip', () => {
       nextCheckAt: Date.now() + 110 * 60 * 1000,
       manualCooldownMinutes: 2,
       manualCooldownRemainingMs: 0,
+      mode: 'interval' as const,
+      cronExpression: null,
     };
     render(<CadenceStrip cadence={cadence} />);
     expect(screen.getByText(/Last checked 10m ago/)).toBeInTheDocument();
@@ -158,6 +160,8 @@ describe('CadenceStrip', () => {
       nextCheckAt: null,
       manualCooldownMinutes: 2,
       manualCooldownRemainingMs: 0,
+      mode: 'interval' as const,
+      cronExpression: null,
     };
     render(<CadenceStrip cadence={cadence} />);
     expect(screen.getByText(/Last checked never/)).toBeInTheDocument();
@@ -173,6 +177,8 @@ describe('CadenceStrip', () => {
       nextCheckAt: Date.now() + 7_200_000,
       manualCooldownMinutes: 2,
       manualCooldownRemainingMs: 3000,
+      mode: 'interval' as const,
+      cronExpression: null,
     };
     render(<CadenceStrip cadence={cadence} />);
     expect(screen.getByText(/Recheck available in 3s/)).toBeInTheDocument();

@@ -1,5 +1,6 @@
 import path from 'path';
 import YAML from 'yaml';
+import { CronExpressionParser } from 'cron-parser';
 import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
@@ -27,6 +28,8 @@ export interface ImageCheckResult {
  * remaining time (0 when a manual refresh is allowed). `lastCheckedAt` /
  * `nextCheckAt` are epoch-ms or null ("never checked" / "not scheduled");
  * `nextCheckAt` is meaningless while `checking` is true.
+ * `mode` is the active scheduling mode; `cronExpression` is the 5-field
+ * expression when mode is 'cron', null otherwise or when unconfigured.
  */
 export interface ImageUpdateStatus {
     checking: boolean;
@@ -35,6 +38,8 @@ export interface ImageUpdateStatus {
     nextCheckAt: number | null;
     manualCooldownMinutes: number;
     manualCooldownRemainingMs: number;
+    mode: 'interval' | 'cron';
+    cronExpression: string | null;
 }
 
 // ─── Compose file helpers ────────────────────────────────────────────────────
@@ -162,6 +167,8 @@ export class ImageUpdateService {
     private static readonly MAX_INTERVAL_MINUTES = 1440;          // 24 hours
     private static readonly DEFAULT_INTERVAL_MINUTES = 120;       // 2 hours
     private static readonly INTERVAL_SETTING_KEY = 'image_update_check_interval_minutes';
+    private static readonly MODE_SETTING_KEY = 'image_update_check_mode';
+    private static readonly CRON_SETTING_KEY = 'image_update_check_cron';
     private static readonly JITTER_FRACTION = 0.1;                // ±10% so a fleet does not poll in lockstep
     private static readonly STARTUP_DELAY_MS = 2 * 60 * 1000;    // 2 min after boot
 
@@ -182,6 +189,8 @@ export class ImageUpdateService {
     // Initialized at declaration so getStatus() never reports NaN before start()
     // or configureFromSettings() has run (e.g. route tests that skip startServer).
     private intervalMs = ImageUpdateService.DEFAULT_INTERVAL_MINUTES * 60 * 1000;
+    private mode: 'interval' | 'cron' = 'interval';
+    private cronExpression: string | null = null;
     private static readonly MANUAL_COOLDOWN_MS = 2 * 60 * 1000;  // 2 min between manual triggers
     private static readonly INTER_IMAGE_DELAY_MS = 300;           // be polite to registries
     private static readonly CHECK_TIMEOUT_MS = 5 * 60 * 1000;     // threshold for the "running long" skip warning
@@ -242,10 +251,37 @@ export class ImageUpdateService {
     /**
      * Reads image_update_check_interval_minutes into intervalMs, clamped to
      * [15, 1440], falling back to the 2-hour default on a missing, blank,
-     * malformed, or unreadable value.
+     * malformed, or unreadable value. Also reads mode and cron expression
+     * from global_settings; falls back to interval mode when cron is
+     * unconfigured or unparseable.
      */
     public configureFromSettings(): void {
         this.intervalMs = ImageUpdateService.resolveIntervalMinutes() * 60 * 1000;
+
+        const settings = DatabaseService.getInstance().getGlobalSettings();
+        const rawMode = settings[ImageUpdateService.MODE_SETTING_KEY];
+        this.mode = (rawMode === 'cron') ? 'cron' : 'interval';
+
+        if (this.mode === 'cron') {
+            const rawCron = settings[ImageUpdateService.CRON_SETTING_KEY];
+            if (typeof rawCron === 'string' && rawCron.trim()) {
+                try {
+                    const expr = CronExpressionParser.parse(rawCron);
+                    expr.next(); // prove the expression can produce a next fire time
+                    this.cronExpression = rawCron.trim();
+                } catch {
+                    console.warn(`[ImageUpdateService] Cron expression is invalid; falling back to interval mode. Expression: "${rawCron}"`);
+                    this.mode = 'interval';
+                    this.cronExpression = null;
+                }
+            } else {
+                console.warn('[ImageUpdateService] Cron mode is active but no expression is set; falling back to interval mode.');
+                this.mode = 'interval';
+                this.cronExpression = null;
+            }
+        } else {
+            this.cronExpression = null;
+        }
     }
 
     private static resolveIntervalMinutes(): number {
@@ -290,8 +326,31 @@ export class ImageUpdateService {
         }
     }
 
-    /** intervalMs with ±10% jitter so multiple nodes do not hit registries together. */
+    /**
+     * Compute the next check delay. In interval mode this is intervalMs with
+     * ±10% jitter. In cron mode the delay is the gap between now and the next
+     * cron fire time, with no jitter (the user chose a specific time). Falls
+     * back to interval mode if the cron expression cannot be parsed at runtime.
+     */
     private nextDelayMs(): number {
+        if (this.mode === 'cron' && this.cronExpression) {
+            try {
+                const expr = CronExpressionParser.parse(this.cronExpression);
+                const nextFire = expr.next().toDate().getTime();
+                const delay = nextFire - Date.now();
+                if (delay <= 0) {
+                    // We just passed the fire time; retry in 30 s so the next
+                    // .next() call moves to the following occurrence.
+                    return 30_000;
+                }
+                return delay;
+            } catch (e) {
+                console.warn('[ImageUpdateService] Cron expression became invalid at runtime; falling back to interval mode:', getErrorMessage(e, String(e)));
+                this.mode = 'interval';
+                this.cronExpression = null;
+                // Fall through to interval-based delay below.
+            }
+        }
         const jitter = this.intervalMs * ImageUpdateService.JITTER_FRACTION;
         return Math.round(this.intervalMs - jitter + Math.random() * 2 * jitter);
     }
@@ -328,6 +387,8 @@ export class ImageUpdateService {
             nextCheckAt: this.nextCheckAt,
             manualCooldownMinutes: ImageUpdateService.manualCooldownMinutes,
             manualCooldownRemainingMs: this.getManualCooldownRemainingMs(),
+            mode: this.mode,
+            cronExpression: this.cronExpression,
         };
     }
 
