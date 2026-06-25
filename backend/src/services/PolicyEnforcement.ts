@@ -360,8 +360,26 @@ export async function enforcePolicyForImageRefs(
             }
             continue;
         }
+        let scan: VulnerabilityScan;
         try {
-            const scan = await svc.scanImagePreflight(imageRef, nodeId, stackName);
+            scan = await svc.scanImagePreflight(imageRef, nodeId, stackName);
+        } catch (err) {
+            const message = getErrorMessage(err, 'pre-flight scan failed');
+            console.error(`[Policy] scanImagePreflight failed for ${imageRef}:`, message);
+            violations.push({
+                imageRef,
+                severity: 'UNKNOWN',
+                criticalCount: 0,
+                highCount: 0,
+                kevCount: 0,
+                fixableCount: 0,
+                reasons: [],
+                scanId: 0,
+            });
+            continue;
+        }
+
+        try {
             const evaluated = evaluateImageRisk(scan, imageRef, policy, honorSuppressions);
             if (debug) {
                 console.log(
@@ -388,8 +406,8 @@ export async function enforcePolicyForImageRefs(
                 suppressionPasses.push({ imageRef, cves: evaluated.suppressedCves });
             }
         } catch (err) {
-            const message = getErrorMessage(err, 'pre-flight scan failed');
-            console.error(`[Policy] scanImagePreflight failed for ${imageRef}:`, message);
+            const message = getErrorMessage(err, 'policy evaluation failed');
+            console.error(`[Policy] policy evaluation failed for ${imageRef}:`, message);
             violations.push({
                 imageRef,
                 severity: 'UNKNOWN',
@@ -398,7 +416,7 @@ export async function enforcePolicyForImageRefs(
                 kevCount: 0,
                 fixableCount: 0,
                 reasons: [],
-                scanId: 0,
+                scanId: scan.id,
             });
         }
     }
@@ -427,8 +445,8 @@ export async function enforcePolicyForImageRefs(
         }
         if (debug) {
             console.log(
-                '[Policy:debug] Bypass by "%s" for "%s" (%d violation(s))',
-                sanitizeForLog(opts.actor), sanitizeForLog(stackName), violations.length,
+                '[Policy:debug] Bypass for "%s" (%d violation(s))',
+                sanitizeForLog(stackName), violations.length,
             );
         }
         return { ok: true, bypassed: true, policy, violations };

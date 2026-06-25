@@ -13,10 +13,12 @@
 export const VALID_TARGET_TYPES = ['stack', 'fleet', 'system'] as const;
 export type TargetType = typeof VALID_TARGET_TYPES[number];
 
-interface BackendScheduledActionDefinition {
+export interface BackendScheduledActionDefinition {
   readonly id: string;
   /** Target types this action accepts. `update` is the only multi-target action. */
   readonly targetTypes: readonly TargetType[];
+  readonly requiresNode: boolean;
+  readonly nodeScope?: 'local';
 }
 
 /**
@@ -24,15 +26,15 @@ interface BackendScheduledActionDefinition {
  * in `routes/scheduledTasks.ts` ("Must be restart, snapshot, prune, ...").
  */
 export const BACKEND_SCHEDULED_ACTIONS = [
-  { id: 'restart', targetTypes: ['stack'] },
-  { id: 'snapshot', targetTypes: ['fleet'] },
-  { id: 'prune', targetTypes: ['system'] },
-  { id: 'update', targetTypes: ['stack', 'fleet'] },
-  { id: 'scan', targetTypes: ['system'] },
-  { id: 'auto_backup', targetTypes: ['stack'] },
-  { id: 'auto_stop', targetTypes: ['stack'] },
-  { id: 'auto_down', targetTypes: ['stack'] },
-  { id: 'auto_start', targetTypes: ['stack'] },
+  { id: 'restart', targetTypes: ['stack'], requiresNode: true },
+  { id: 'snapshot', targetTypes: ['fleet'], requiresNode: false },
+  { id: 'prune', targetTypes: ['system'], requiresNode: true, nodeScope: 'local' },
+  { id: 'update', targetTypes: ['stack', 'fleet'], requiresNode: true },
+  { id: 'scan', targetTypes: ['system'], requiresNode: true, nodeScope: 'local' },
+  { id: 'auto_backup', targetTypes: ['stack'], requiresNode: true },
+  { id: 'auto_stop', targetTypes: ['stack'], requiresNode: true },
+  { id: 'auto_down', targetTypes: ['stack'], requiresNode: true },
+  { id: 'auto_start', targetTypes: ['stack'], requiresNode: true },
 ] as const satisfies readonly BackendScheduledActionDefinition[];
 
 export type BackendScheduledAction = typeof BACKEND_SCHEDULED_ACTIONS[number]['id'];
@@ -76,4 +78,8 @@ export function validateActionTarget(action: BackendScheduledAction, targetType:
   const def = ACTION_BY_ID.get(action);
   if (!def) return null;
   return def.targetTypes.includes(targetType) ? null : TARGET_MISMATCH_MESSAGE[action];
+}
+
+export function getScheduledActionDefinition(action: BackendScheduledAction): BackendScheduledActionDefinition | undefined {
+  return ACTION_BY_ID.get(action);
 }

@@ -24,6 +24,10 @@ vi.mock('../services/NodeRegistry', () => ({
   },
 }));
 
+vi.mock('../utils/debug', () => ({
+  isDebugEnabled: () => false,
+}));
+
 import { FileSystemService } from '../services/FileSystemService';
 
 describe('FileSystemService backup location', () => {
@@ -83,6 +87,28 @@ describe('FileSystemService backup location', () => {
     const after = await service.getBackupInfo(stackName);
     expect(after.exists).toBe(true);
     expect(typeof after.timestamp).toBe('number');
+  });
+
+  it('aborts backup creation when a destination write fails', async () => {
+    const stackName = 'writefail';
+    const stackDir = path.join(composeDir, stackName);
+    const backupCompose = path.join(dataDir, 'backups', '1', stackName, 'compose.yaml');
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n', 'utf-8');
+
+    const realWriteFile = fsPromises.writeFile.bind(fsPromises);
+    const writeSpy = vi.spyOn(fsPromises, 'writeFile').mockImplementation(async (file, data, options) => {
+      if (path.normalize(String(file)) === path.normalize(backupCompose)) {
+        throw new Error('disk full');
+      }
+      return realWriteFile(file, data, options);
+    });
+    try {
+      await expect(FileSystemService.getInstance().backupStackFiles(stackName)).rejects.toThrow(/Could not write backup compose.yaml/);
+      await expect(fsPromises.access(backupCompose)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      writeSpy.mockRestore();
+    }
   });
 
   it('scopes backups by node id when stack names overlap', async () => {
