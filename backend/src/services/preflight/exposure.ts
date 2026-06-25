@@ -3,9 +3,16 @@
  * effective-model parser and the normalize helpers; does not reimplement
  * port/bind detection.
  *
- * Exposure is a tri-state signal per image: true (publicly exposed), false
- * (internal only), or absent (no cached descriptor). It is an escalation
- * input for the Security posture, never an auto-suppression.
+ * Exposure represents CONFIGURED reachability as declared in the Compose
+ * model, refreshed on deploy/update. It is NOT live topology: down/stop
+ * do not clear the cache, just as vulnerability scan data persists after
+ * containers stop. The descriptor reflects what the compose file declares,
+ * not what is currently running.
+ *
+ * The signal is tri-state per image: true (publicly exposed), false
+ * (internal only in every cached stack containing the image), or absent
+ * (no cached descriptor). It is an escalation input for the Security
+ * posture, never an auto-suppression.
  */
 import type { EffectiveModel } from './effectiveModel';
 import { isLoopback, isHostNetwork } from '../network/normalize';

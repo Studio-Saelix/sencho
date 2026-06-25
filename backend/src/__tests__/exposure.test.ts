@@ -116,6 +116,18 @@ describe('deriveStackExposure', () => {
     expect(r.services[0].publiclyExposed).toBe(false);
   });
 
+  it('marks any 127.0.0.0/8 address as loopback (not exposed)', () => {
+    const m = model({
+      services: [
+        svc({
+          ports: [{ startPort: 8080, endPort: 8080, hostIp: '127.0.0.2', protocol: 'tcp' }],
+        }),
+      ],
+    });
+    const r = deriveStackExposure(m, 'test', NOW);
+    expect(r.services[0].publiclyExposed).toBe(false);
+  });
+
   it('marks a host-network service as exposed even with no published ports', () => {
     const m = model({
       services: [

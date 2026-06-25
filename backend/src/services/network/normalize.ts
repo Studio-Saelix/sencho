@@ -20,7 +20,7 @@ export function isAllInterfaces(ip: string): boolean {
 }
 
 export function isLoopback(ip: string): boolean {
-  return ip === '127.0.0.1' || ip === '::1' || ip === '[::1]';
+  return ip.startsWith('127.') || ip === '::1' || ip === '[::1]';
 }
 
 /** True for `network_mode: host`, which publishes every container port directly
