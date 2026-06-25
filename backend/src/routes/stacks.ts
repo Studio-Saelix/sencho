@@ -716,13 +716,18 @@ stacksRouter.put('/:stackName/project-env-files', async (req: Request, res: Resp
       if (!isValidRelativeStackPath(file)) {
         return res.status(400).json({ error: `Invalid env file path: "${file}"` });
       }
-      const resolved = path.resolve(stackDir, file);
-      if (!isPathWithinBase(resolved, stackDir)) {
-        return res.status(400).json({ error: `Env file path escapes the stack directory: "${file}"` });
+      // Canonical js/path-injection barrier inline with the fs sink: resolve
+      // against the compose root and assert containment right here. CodeQL does
+      // not credit a containment check separated from the sink. Mirrors the
+      // inline barriers in authoredComposeArgs.ts, FileSystemService.ts, etc.
+      const baseResolved = path.resolve(baseDir);
+      const safePath = path.resolve(baseResolved, stackDir, file);
+      if (!safePath.startsWith(baseResolved + path.sep)) {
+        return res.status(400).json({ error: `Env file path escapes the compose directory: "${file}"` });
       }
       try {
-        await fsService.access(resolved);
-        const stat = await fsp.stat(resolved);
+        await fsService.access(safePath);
+        const stat = await fsp.stat(safePath);
         if (!stat.isFile()) {
           return res.status(400).json({ error: `Not a regular file: "${file}"` });
         }
