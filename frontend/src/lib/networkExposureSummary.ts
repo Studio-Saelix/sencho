@@ -9,13 +9,13 @@
 export interface NetworkExposureSummary {
   stackIntent: string | null;
   networks: { name: string; external: boolean; internal: boolean }[];
-  services: { name: string; intent: string | null; ports: string[] }[];
+  services: { name: string; intent: string | null; ports: string[]; hostNetwork: boolean }[];
 }
 
 // Loose input shapes: the builder reads the raw parsed /networking and
 // /exposure JSON, so it stays decoupled from the panel's local interfaces.
 interface FactsPort { startPort: number; endPort: number; protocol: string; allInterfaces: boolean; loopbackOnly: boolean }
-interface FactsService { name: string; publishedPorts?: FactsPort[] }
+interface FactsService { name: string; publishedPorts?: FactsPort[]; networkMode?: string }
 interface FactsNetwork { name: string; external: boolean; internal: boolean }
 export interface NetworkFactsInput { renderable?: boolean; networks?: FactsNetwork[]; services?: FactsService[] }
 export interface ExposureIntentInput { service: string; intent: string }
@@ -36,9 +36,12 @@ export function buildNetworkExposureSummary(facts: NetworkFactsInput | null, int
     name: s.name,
     intent: byService.get(s.name) ?? null,
     ports: (s.publishedPorts ?? []).map(portLabel),
+    // network_mode: host publishes every container port on the host, so it is
+    // exposure-relevant even with no declared ports.
+    hostNetwork: s.networkMode === 'host',
   }));
   const empty = networks.length === 0 && stackIntent === null
-    && services.every(s => s.ports.length === 0 && s.intent === null);
+    && services.every(s => s.ports.length === 0 && s.intent === null && !s.hostNetwork);
   return empty ? null : { stackIntent, networks, services };
 }
 
@@ -53,11 +56,12 @@ export function networkExposureSection(summary: NetworkExposureSummary | null): 
       return `- ${n.name}${flags ? ` (${flags})` : ''}`;
     }).join('\n'));
   }
-  const services = summary.services.filter(s => s.ports.length > 0 || s.intent);
+  const services = summary.services.filter(s => s.ports.length > 0 || s.intent || s.hostNetwork);
   if (services.length > 0) {
     parts.push('### Services', services.map(s => {
       const bits: string[] = [];
       if (s.intent) bits.push(`intent ${s.intent}`);
+      if (s.hostNetwork) bits.push('host network (all ports exposed on host)');
       if (s.ports.length > 0) bits.push(`ports ${s.ports.join(', ')}`);
       return `- **${s.name}:** ${bits.join('; ')}`;
     }).join('\n'));

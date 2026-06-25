@@ -280,3 +280,23 @@ export interface SecurityRiskTrendPoint {
   critical: number;
   high: number;
 }
+
+/** One actionable Critical/High finding for the overview exploit-intel charts
+ *  (Top exploit-risk list + CVSS-by-EPSS quadrant). Intel fields are null until
+ *  CveIntelService has fetched; cvss_score is null on pre-enrichment scans. */
+export interface ExploitIntelFinding {
+  vulnerability_id: string;
+  image_ref: string;
+  scan_id: number;
+  severity: VulnSeverity;
+  cvss_score: number | null;
+  epss_score: number | null;
+  epss_percentile: number | null;
+  kev: boolean;
+  fixed_version: string | null;
+}
+
+export interface ExploitIntelOverview {
+  items: ExploitIntelFinding[];
+  truncated: boolean;
+}

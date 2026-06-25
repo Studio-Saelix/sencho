@@ -24,6 +24,8 @@ export interface DeclaredService {
   ports: DeclaredPort[];
   /** Service `image:` reference as declared, or undefined for build-only services. */
   image?: string;
+  /** Service `network_mode:` as declared (e.g. `host`), or undefined. */
+  networkMode?: string;
 }
 
 /** A top-level networks:/volumes: entry. */
@@ -194,6 +196,7 @@ export function parseComposeDependencies(content: string): DeclaredCompose {
       volumes,
       ports,
       image: asString(svc.image),
+      networkMode: asString(svc.network_mode),
     });
   }
 

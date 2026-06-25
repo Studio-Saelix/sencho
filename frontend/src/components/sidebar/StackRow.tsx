@@ -13,6 +13,9 @@ interface StackRowProps {
   file: string;
   displayName: string;
   status: StackRowStatus;
+  // Running/total container counts (set for any stack with containers); consumed only for the partial-stack pill tooltip.
+  running?: number;
+  total?: number;
   isBusy: boolean;
   isActive: boolean;
   labels: Label[];
@@ -43,7 +46,7 @@ const MAX_VISIBLE_LABELS = 3;
 
 export function StackRow(props: StackRowProps) {
   const {
-    file, displayName, status, isBusy, isActive, labels,
+    file, displayName, status, running, total, isBusy, isActive, labels,
     hasUpdate, hasGitPending, onSelect, kebabSlot,
     bulkMode = false, isSelected = false, onToggleSelect,
   } = props;
@@ -88,9 +91,15 @@ export function StackRow(props: StackRowProps) {
         )}
       </span>
 
-      {/* Status pill */}
+      {/* Status pill. Partial stacks add a hover tooltip with the running/total count. */}
       <span className={cn('font-mono text-[10px] shrink-0 w-[22px] flex items-center', statusColor(status, isBusy))}>
-        {isBusy ? <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} /> : statusText(status)}
+        {isBusy ? (
+          <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} />
+        ) : status === 'partial' && running !== undefined && total !== undefined ? (
+          <RowTooltip trigger={<span>{statusText(status)}</span>} label={`${running}/${total} running`} />
+        ) : (
+          statusText(status)
+        )}
       </span>
 
       {/* Stack name */}

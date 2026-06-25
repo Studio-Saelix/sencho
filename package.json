@@ -25,9 +25,9 @@
   },
   "homepage": "https://github.com/studio-saelix/sencho#readme",
   "devDependencies": {
-    "@commitlint/cli": "^21.0.2",
+    "@commitlint/cli": "^21.1.0",
     "@commitlint/config-conventional": "^21.0.2",
-    "@playwright/test": "^1.61.0",
+    "@playwright/test": "^1.61.1",
     "husky": "^9.1.7",
     "otplib": "^13.4.1"
   }
