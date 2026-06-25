@@ -177,6 +177,32 @@ describe('ScheduledOperationsView', () => {
     });
   });
 
+  it('disables Create when the cron expression has a seconds field', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'cleanup');
+
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'System Prune' }));
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
+
+    const createButton = screen.getByRole('button', { name: 'Create' });
+    expect(createButton).toBeEnabled();
+
+    const cronInput = screen.getByPlaceholderText('0 3 * * *');
+    await userEvent.clear(cronInput);
+    await userEvent.type(cronInput, '30 0 3 * * *');
+
+    expect(screen.getByText(/seconds field is not supported/i)).toBeInTheDocument();
+    expect(createButton).toBeDisabled();
+
+    await userEvent.clear(cronInput);
+    await userEvent.type(cronInput, '0 4 * * *');
+    expect(createButton).toBeEnabled();
+  });
+
   it('keeps Create disabled for a prune until a node is selected', async () => {
     render(<ScheduledOperationsView />);
 

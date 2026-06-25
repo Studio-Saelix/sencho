@@ -595,6 +595,36 @@ describe('SchedulerService - executePrune', () => {
     expect(mockPruneSystem).toHaveBeenCalledWith('containers', 'env=staging');
   });
 
+  it('marks scheduled prune runs as failed when a target prune fails', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 74,
+      name: 'prune-fails',
+      action: 'prune',
+      cron_expression: '0 3 * * *',
+      enabled: true,
+      node_id: 1,
+      prune_targets: JSON.stringify(['images']),
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockPruneSystem.mockRejectedValueOnce(new Error('docker prune failed'));
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(74);
+
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({
+        status: 'failure',
+        error: expect.stringContaining('images: failed (docker prune failed)'),
+      }),
+    );
+    expect(mockUpdateScheduledTask).toHaveBeenCalledWith(
+      74,
+      expect.objectContaining({ last_status: 'failure' }),
+    );
+  });
+
   it('fails scheduled prune tasks that target remote nodes before pruning', async () => {
     mockGetScheduledTask.mockReturnValue({
       id: 73,

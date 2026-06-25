@@ -14,7 +14,7 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { Combobox } from '@/components/ui/combobox';
 import type { ScheduledTask, TaskRun, NodeOption } from '@/types/scheduling';
-import { getCronDescription, formatTimestamp } from '@/lib/scheduling';
+import { getCronDescription, getCronFieldError, formatTimestamp } from '@/lib/scheduling';
 import {
   SCHEDULED_ACTIONS,
   SCHEDULED_ACTION_CATEGORIES,
@@ -22,6 +22,7 @@ import {
   resolveTaskAction,
 } from '@/lib/scheduledActions';
 
+const DEFAULT_PRUNE_TARGETS = ['containers', 'images', 'networks', 'volumes'];
 const TIMELINE_WINDOW_HOURS = 24;
 const TIMELINE_WINDOW_MS = TIMELINE_WINDOW_HOURS * 60 * 60 * 1000;
 
@@ -72,7 +73,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const [formCron, setFormCron] = useState('0 3 * * *');
   const [formEnabled, setFormEnabled] = useState(true);
   const [formDeleteAfterRun, setFormDeleteAfterRun] = useState(false);
-  const [formPruneTargets, setFormPruneTargets] = useState<string[]>(['containers', 'images', 'networks', 'volumes']);
+  const [formPruneTargets, setFormPruneTargets] = useState<string[]>(DEFAULT_PRUNE_TARGETS);
   const [formTargetServices, setFormTargetServices] = useState<string[]>([]);
   const [formPruneLabelFilter, setFormPruneLabelFilter] = useState('');
   const [availableServices, setAvailableServices] = useState<string[]>([]);
@@ -153,7 +154,8 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   }, []);
 
   useEffect(() => {
-    if (formAction !== 'restart' || !formTargetId) {
+    const actionDef = getActionById(formAction);
+    if (!actionDef?.supportsServiceSelection || !formTargetId) {
       setAvailableServices([]);
       return;
     }
@@ -198,7 +200,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     setFormCron('0 3 * * *');
     setFormEnabled(true);
     setFormDeleteAfterRun(false);
-    setFormPruneTargets(['containers', 'images', 'networks', 'volumes']);
+    setFormPruneTargets(DEFAULT_PRUNE_TARGETS);
     setFormTargetServices([]);
     setFormPruneLabelFilter('');
     setDialogOpen(true);
@@ -215,7 +217,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     setFormEnabled(task.enabled === 1);
     setFormDeleteAfterRun((task.delete_after_run ?? 0) === 1);
     setFormPruneTargets(
-      task.prune_targets ? JSON.parse(task.prune_targets) : ['containers', 'images', 'networks', 'volumes']
+      task.prune_targets ? JSON.parse(task.prune_targets) : DEFAULT_PRUNE_TARGETS
     );
     setFormTargetServices(
       task.target_services ? JSON.parse(task.target_services) : []
@@ -338,6 +340,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
 
   const currentAction = getActionById(formAction);
   const cronDescription = getCronDescription(formCron);
+  const cronFieldError = getCronFieldError(formCron);
   const nodeOptions = useMemo(() => nodes.map(n => ({ value: String(n.id), label: n.name })), [nodes]);
   // Scan and prune run on the hub-local Docker daemon only; remote nodes are excluded from their pickers.
   const localNodeOptions = useMemo(
@@ -346,7 +349,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   );
   const currentNodeOptions = currentAction?.nodeScope === 'local' ? localNodeOptions : nodeOptions;
   const isSaveDisabled =
-    saving || !currentAction || !formName || !formCron
+    saving || !currentAction || !formName || !formCron || !!cronFieldError
     || (!!currentAction?.requiresStack && (!formTargetId || !formNodeId))
     || (!!currentAction?.requiresNode && !currentAction.requiresStack && !formNodeId)
     || (formAction === 'prune' && formPruneTargets.length === 0);
@@ -748,7 +751,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 <div className="space-y-2">
                   <Label>Prune Targets</Label>
                   <div className="grid grid-cols-2 gap-2">
-                    {['containers', 'images', 'networks', 'volumes'].map(target => (
+                    {DEFAULT_PRUNE_TARGETS.map(target => (
                       <label key={target} className="flex items-center gap-2 text-sm cursor-pointer">
                         <Checkbox
                           checked={formPruneTargets.includes(target)}
@@ -784,7 +787,9 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 onChange={e => setFormCron(e.target.value)}
                 className="font-mono"
               />
-              <p className="text-xs text-muted-foreground">{cronDescription}</p>
+              {cronFieldError
+                ? <p className="text-xs text-destructive">{cronFieldError}</p>
+                : <p className="text-xs text-muted-foreground">{cronDescription}</p>}
             </div>
 
             <div className="flex items-center gap-2">

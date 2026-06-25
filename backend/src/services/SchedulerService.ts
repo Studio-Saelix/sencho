@@ -332,6 +332,10 @@ export class SchedulerService {
                 case 'auto_start':
                     output = await this.executeAutoStart(task);
                     break;
+                default: {
+                    const unhandledAction: never = task.action;
+                    throw new Error(`Unsupported scheduled action: ${unhandledAction}`);
+                }
             }
 
             if (isDebugEnabled()) console.log(`[SchedulerService:debug] Task ${task.id} action completed in ${Date.now() - actionStart}ms`);
@@ -673,6 +677,7 @@ export class SchedulerService {
             : [...allTargets];
         const labelFilter = task.prune_label_filter || undefined;
         const results: string[] = [];
+        const failures: string[] = [];
 
         for (const target of targets) {
             try {
@@ -680,11 +685,16 @@ export class SchedulerService {
                 results.push(`${target}: ${result.reclaimedBytes ?? 0} bytes reclaimed`);
             } catch (error: unknown) {
                 const msg = error instanceof Error ? error.message : String(error);
-                results.push(`${target}: failed (${msg})`);
+                const failure = `${target}: failed (${msg})`;
+                results.push(failure);
+                failures.push(failure);
             }
         }
 
         const filterSuffix = labelFilter ? ` (label: ${labelFilter})` : '';
+        if (failures.length > 0) {
+            throw new Error(`System prune failed${filterSuffix}: ${results.join('; ')}`);
+        }
         return `System prune completed${filterSuffix}: ${results.join('; ')}`;
     }
 

@@ -192,6 +192,38 @@ describe('POST /api/scheduled-tasks', () => {
     expect(res.body.error).toMatch(/Invalid cron expression/);
   });
 
+  it('rejects a 6-field cron expression with the seconds field', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, cron_expression: '30 0 3 * * *',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/5 fields/);
+  });
+
+  it('rejects a missing cron expression with a clear message', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, cron_expression: undefined,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/required/);
+  });
+
+  it('rejects an empty cron expression with a clear message', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, cron_expression: '',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/required/);
+  });
+
+  it('accepts a cron nickname such as @daily', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, cron_expression: '@daily',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.cron_expression).toBe('@daily');
+  });
+
   it('rejects unsupported actions', async () => {
     const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
       ...basePayload, action: 'nuke',
@@ -694,6 +726,60 @@ describe('PUT /api/scheduled-tasks/:id - stack target validation', () => {
     expect(res.body.target_services).toBeNull();
     expect(res.body.prune_targets).toBeNull();
     expect(res.body.prune_label_filter).toBeNull();
+  });
+});
+
+describe('PUT /api/scheduled-tasks/:id - cron validation', () => {
+  let taskId: number;
+
+  beforeEach(() => {
+    const now = Date.now();
+    taskId = DatabaseService.getInstance().createScheduledTask({
+      name: 't', target_type: 'stack', target_id: 's', node_id: 1, action: 'update',
+      cron_expression: '0 3 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
+      last_run_at: null, next_run_at: null, last_status: null, last_error: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 0,
+    });
+  });
+
+  it('rejects a 6-field cron expression', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ cron_expression: '30 0 3 * * *' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/5 fields/);
+  });
+
+  it('accepts a valid 5-field cron expression', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ cron_expression: '0 4 * * *' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.cron_expression).toBe('0 4 * * *');
+  });
+
+  it('rejects a whitespace-only cron expression', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ cron_expression: '   ' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/required/);
+  });
+
+  it('rejects an empty cron expression', async () => {
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${taskId}`)
+      .set('Cookie', adminCookie)
+      .send({ cron_expression: '' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/required/);
   });
 });
 

@@ -43,8 +43,7 @@ function parsePositiveNodeId(nodeId: unknown): number | null {
   return Number.isInteger(parsedNodeId) && parsedNodeId > 0 ? parsedNodeId : null;
 }
 
-function actionRequiresNode(action: BackendScheduledAction, targetType: TargetType): boolean {
-  if (targetType === 'stack') return true;
+function actionRequiresNode(action: BackendScheduledAction): boolean {
   return getScheduledActionDefinition(action)?.requiresNode === true;
 }
 
@@ -141,6 +140,29 @@ function validateOptionalFields(
   return null;
 }
 
+/**
+ * Validate a cron expression for Scheduled Operations. The scheduler ticks once
+ * per minute, so an expression with a leading seconds field (6 or more fields)
+ * is rejected: its sub-minute precision could never be honored. Cron nicknames
+ * such as `@daily` (a single token) are left untouched. Returns an error message
+ * or null.
+ */
+function validateCronExpression(cron: unknown): string | null {
+  if (typeof cron !== 'string' || !cron.trim()) {
+    return 'Cron expression is required.';
+  }
+  if (cron.trim().split(/\s+/).length >= 6) {
+    return 'Cron expression must use 5 fields (minute hour day month weekday). The seconds field is not supported.';
+  }
+  try {
+    CronExpressionParser.parse(cron);
+  } catch (e) {
+    console.warn('[Scheduler] Invalid cron expression rejected:', sanitizeForLog(cron), sanitizeForLog(getErrorMessage(e, 'unknown')));
+    return 'Invalid cron expression.';
+  }
+  return null;
+}
+
 export const scheduledTasksRouter = Router();
 
 scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
@@ -202,16 +224,14 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
     const optionalErr = validateOptionalFields(action, target_type, prune_targets, target_services, prune_label_filter);
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }
 
-    try { CronExpressionParser.parse(cron_expression); } catch (e) {
-      console.warn('[Scheduler] Invalid cron expression rejected:', sanitizeForLog(cron_expression), sanitizeForLog(getErrorMessage(e, 'unknown')));
-      res.status(400).json({ error: 'Invalid cron expression.' }); return;
-    }
+    const cronErr = validateCronExpression(cron_expression);
+    if (cronErr) { res.status(400).json({ error: cronErr }); return; }
 
     const scheduler = SchedulerService.getInstance();
     const now = Date.now();
     const nextRun = (enabled !== false) ? scheduler.calculateNextRun(cron_expression) : null;
     const normalizedTargetId = target_type === 'stack' ? target_id : null;
-    const normalizedNodeId = actionRequiresNode(action, target_type) ? parsePositiveNodeId(node_id) : null;
+    const normalizedNodeId = actionRequiresNode(action) ? parsePositiveNodeId(node_id) : null;
 
     const id = DatabaseService.getInstance().createScheduledTask({
       name: name.trim(),
@@ -282,7 +302,7 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     const finalTargetId = finalTargetType === 'stack'
       ? (target_id !== undefined ? target_id : existing.target_id)
       : null;
-    const finalNodeId = actionRequiresNode(finalAction, finalTargetType)
+    const finalNodeId = actionRequiresNode(finalAction)
       ? (node_id !== undefined ? node_id : existing.node_id)
       : null;
     const targetErr = validateActionTarget(finalAction, finalTargetType);
@@ -297,22 +317,25 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     const optionalErr = validateOptionalFields(finalAction, finalTargetType, prune_targets, target_services, prune_label_filter);
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }
 
-    if (cron_expression) {
-      try { CronExpressionParser.parse(cron_expression); } catch (e) {
-        console.warn('[Scheduler] Invalid cron expression rejected:', sanitizeForLog(cron_expression), sanitizeForLog(getErrorMessage(e, 'unknown')));
-        res.status(400).json({ error: 'Invalid cron expression.' }); return;
-      }
+    if (cron_expression !== undefined) {
+      const cronErr = validateCronExpression(cron_expression);
+      if (cronErr) { res.status(400).json({ error: cronErr }); return; }
     }
 
-    const updates: Record<string, unknown> = { updated_at: Date.now() };
-    if (name !== undefined) updates.name = typeof name === 'string' ? name.trim() : name;
+    const updates: Partial<Omit<ScheduledTask, 'id'>> = { updated_at: Date.now() };
+    if (name !== undefined) {
+      if (typeof name !== 'string' || !name.trim()) {
+        res.status(400).json({ error: 'Name is required' }); return;
+      }
+      updates.name = name.trim();
+    }
     if (target_type !== undefined) updates.target_type = finalTargetType;
     if (target_id !== undefined || finalTargetType !== 'stack') updates.target_id = finalTargetId || null;
-    if (node_id !== undefined || !actionRequiresNode(finalAction, finalTargetType)) {
+    if (node_id !== undefined || !actionRequiresNode(finalAction)) {
       updates.node_id = finalNodeId != null ? parsePositiveNodeId(finalNodeId) : null;
     }
     if (action !== undefined) updates.action = finalAction;
-    if (cron_expression !== undefined) updates.cron_expression = cron_expression;
+    if (cron_expression !== undefined && typeof cron_expression === 'string') updates.cron_expression = cron_expression;
     if (enabled !== undefined) updates.enabled = enabled ? 1 : 0;
     if (prune_targets !== undefined) {
       updates.prune_targets = finalAction === 'prune' && prune_targets ? JSON.stringify(prune_targets) : null;
@@ -341,7 +364,7 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
       updates.next_run_at = null;
     }
 
-    db.updateScheduledTask(id, updates as Partial<Omit<ScheduledTask, 'id'>>);
+    db.updateScheduledTask(id, updates);
     console.log(`[ScheduledTasks] Updated task id=${id}`);
     const task = db.getScheduledTask(id);
     broadcastScheduledTasksChanged();
