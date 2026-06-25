@@ -21,6 +21,12 @@ export function NumberChip({ value, onChange, suffix, min, max, step = 1, warnOv
         if (editing) inputRef.current?.select();
     }, [editing]);
 
+    // When the chip is externally disabled (e.g. master toggle OFF), force
+    // exit from edit mode so the greyed-out button state is shown consistently.
+    useEffect(() => {
+        if (disabled) setEditing(false);
+    }, [disabled]);
+
     const startEdit = () => {
         if (disabled) return;
         setDraft(value);
