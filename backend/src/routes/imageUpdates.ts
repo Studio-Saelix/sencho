@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
+import { CronExpressionParser } from 'cron-parser';
 import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
@@ -55,10 +56,33 @@ imageUpdatesRouter.get('/status', authMiddleware, (_req: Request, res: Response)
   res.json(ImageUpdateService.getInstance().getStatus());
 });
 
+/**
+ * Validate a cron expression using the same contract as Scheduled Operations:
+ * non-empty, reject 6+ fields, parse with CronExpressionParser, and prove
+ * .next() can produce a future fire time. Nicknames like @daily are accepted.
+ */
+function validateImageCheckCron(cron: unknown): string | null {
+  if (typeof cron !== 'string' || !cron.trim()) {
+    return 'Cron expression is required.';
+  }
+  if (cron.trim().split(/\s+/).length >= 6) {
+    return 'Cron expression must use 5 fields (minute hour day month weekday). The seconds field is not supported.';
+  }
+  try {
+    const expr = CronExpressionParser.parse(cron);
+    expr.next(); // prove the expression can produce a next fire time
+  } catch {
+    return 'Invalid cron expression.';
+  }
+  return null;
+}
+
 // Min/max mirror ImageUpdateService's clamp; the service is the authority and
 // re-clamps on read, so this is the user-facing validation boundary.
 const IntervalPatchSchema = z.object({
   minutes: z.coerce.number().int().min(15).max(1440),
+  mode: z.enum(['interval', 'cron']).optional(),
+  cron: z.string().optional(),
 });
 
 imageUpdatesRouter.put('/interval', authMiddleware, (req: Request, res: Response): void => {
@@ -68,8 +92,33 @@ imageUpdatesRouter.put('/interval', authMiddleware, (req: Request, res: Response
     res.status(400).json({ error: 'minutes must be an integer between 15 and 1440' });
     return;
   }
+
+  // Validate cron expression when mode is 'cron'.
+  if (parsed.data.mode === 'cron') {
+    const cronError = validateImageCheckCron(parsed.data.cron);
+    if (cronError) {
+      res.status(400).json({ error: cronError });
+      return;
+    }
+  }
+
   try {
-    DatabaseService.getInstance().updateGlobalSetting('image_update_check_interval_minutes', String(parsed.data.minutes));
+    const db = DatabaseService.getInstance();
+    const writeSettings = db.getDb().transaction((entries: [string, string][]) => {
+      for (const [k, v] of entries) db.updateGlobalSetting(k, v);
+    });
+    const entries: [string, string][] = [
+      ['image_update_check_interval_minutes', String(parsed.data.minutes)],
+    ];
+    if (parsed.data.mode !== undefined) {
+      entries.push(['image_update_check_mode', parsed.data.mode]);
+    }
+    if (parsed.data.mode === 'cron' && parsed.data.cron !== undefined) {
+      entries.push(['image_update_check_cron', parsed.data.cron]);
+    } else if (parsed.data.mode === 'interval') {
+      entries.push(['image_update_check_cron', '']); // clear stale cron
+    }
+    writeSettings(entries);
     // Reschedule the live timer so the new cadence takes effect without a restart.
     ImageUpdateService.getInstance().restartPolling();
     res.json(ImageUpdateService.getInstance().getStatus());

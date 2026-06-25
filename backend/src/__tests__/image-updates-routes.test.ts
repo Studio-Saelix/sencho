@@ -122,6 +122,94 @@ describe('PUT /api/image-updates/interval', () => {
     const statusRes = await request(app).get('/api/image-updates/status').set('Cookie', adminCookie);
     expect(statusRes.body.intervalMinutes).toBe(30);
   });
+
+  // ── Cron mode ──────────────────────────────────────────────────────────
+
+  it('persists a valid cron expression and returns the enriched status', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '0 3 * * 1' });
+    expect(res.status).toBe(200);
+    expect(res.body.mode).toBe('cron');
+    expect(res.body.cronExpression).toBe('0 3 * * 1');
+    const settings = DatabaseService.getInstance().getGlobalSettings();
+    expect(settings.image_update_check_mode).toBe('cron');
+    expect(settings.image_update_check_cron).toBe('0 3 * * 1');
+  });
+
+  it('accepts a cron nickname like @daily', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '@daily' });
+    expect(res.status).toBe(200);
+    expect(res.body.mode).toBe('cron');
+    expect(res.body.cronExpression).toBe('@daily');
+  });
+
+  it('rejects a 6-field cron expression', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '0 0 3 * * 1' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/5 fields/);
+  });
+
+  it('rejects a blank cron expression when mode is cron', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '   ' });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects an invalid cron expression (backend-authoritative)', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '0 0 31 2 *' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid cron/);
+  });
+
+  it('rejects cron mode without a cron field', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Cron expression/);
+  });
+
+  it('clears cron when switching back to interval mode', async () => {
+    // First set cron mode.
+    await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '0 3 * * 1' });
+    // Then switch to interval.
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 60, mode: 'interval' });
+    expect(res.status).toBe(200);
+    expect(res.body.mode).toBe('interval');
+    expect(res.body.cronExpression).toBeNull();
+    const settings = DatabaseService.getInstance().getGlobalSettings();
+    expect(settings.image_update_check_mode).toBe('interval');
+    expect(settings.image_update_check_cron).toBe('');
+  });
+
+  it('old-client { minutes } only does not change mode (backward compat)', async () => {
+    // First set cron mode.
+    await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '0 3 * * 1' });
+    // Then send old-client payload.
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 30 });
+    expect(res.status).toBe(200);
+    // Mode and cron are unchanged.
+    expect(res.body.mode).toBe('cron');
+    expect(res.body.cronExpression).toBe('0 3 * * 1');
+    // Interval was updated (the fallback value).
+    expect(res.body.intervalMinutes).toBe(30);
+  });
 });
 
 describe('GET /api/image-updates/fleet', () => {

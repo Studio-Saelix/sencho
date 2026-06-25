@@ -382,7 +382,7 @@ The **Host Alerts** panel also carries the **Host thresholds** rows (CPU limit, 
 | Crash, OOM, and healthcheck events | Real-time over the Docker event stream |
 | Host CPU / RAM / disk threshold checks | 30 seconds |
 | Per-stack alert rule evaluation | 30 seconds |
-| Image update poll | 6 hours, with a 2-minute startup delay and a 2-minute cooldown on manual refresh |
+| Image update poll | Configurable (default every 2 hours), with a 2-minute startup delay and a 2-minute cooldown on manual refresh |
 | Sencho version check | 6 hours |
 | Notification fanout to channels | Single shot per dispatch, 10-second timeout, no retries |
 | Bell live updates | Pushed live over the notifications WebSocket per node |
