@@ -6,6 +6,7 @@ import type { Dirent } from 'fs';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { NodeRegistry } from './NodeRegistry';
+import { DatabaseService } from './DatabaseService';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { isBinaryBuffer } from '../utils/binaryDetect';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -1028,6 +1029,23 @@ export class FileSystemService {
     }
     await writeManagedBackupFile('.env', envSrc);
 
+    // Backup configured project env files (e.g. stack.env, .env.production).
+    // Dedup against .env (already in PROTECTED_STACK_FILES) so it is not
+    // duplicated. Stale dynamic files from a prior backup are cleared below so a
+    // previously-backed-up old.env does not linger.
+    let projectEnvFiles: string[] = [];
+    try {
+      projectEnvFiles = DatabaseService.getInstance().getStackProjectEnvFiles(this.nodeId, stackName);
+    } catch {
+      // DB read failure is not fatal to the deploy; skip project env file backup.
+    }
+    for (const file of projectEnvFiles) {
+      if (file === '.env') continue; // already handled above
+      const src = path.resolve(baseResolved, path.join(stackDir, file));
+      if (!src.startsWith(baseResolved + path.sep)) continue;
+      await writeManagedBackupFile(file, src);
+    }
+
     // Write the integrity manifest before the timestamp marker, so a crash
     // between the two leaves the checksums present (a backup that restore can
     // verify) rather than a timestamp with no integrity data. Only files that
@@ -1142,9 +1160,10 @@ export class FileSystemService {
   }
 
   /**
-   * Capture the current managed stack files (PROTECTED_STACK_FILES) in memory and
-   * return a function that puts them back, faithfully (writing the captured
-   * contents and removing any managed file that did not exist when captured).
+   * Capture the current managed stack files (PROTECTED_STACK_FILES plus configured
+   * project env files) in memory and return a function that puts them back,
+   * faithfully (writing the captured contents and removing any managed file that
+   * did not exist when captured).
    *
    * Used by the rollback route to undo a restored backup when the policy gate
    * blocks before the deploy commits: restoreStackFiles has already overwritten
@@ -1154,12 +1173,21 @@ export class FileSystemService {
   async snapshotStackFiles(stackName: string): Promise<() => Promise<void>> {
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);
-    // Canonical js/path-injection barrier inline with the read/write sinks, the
-    // same pattern restoreStackFiles uses: resolve against the base and confirm
-    // containment so static analysis credits the barrier.
     const baseResolved = path.resolve(this.baseDir);
     const snapshot = new Map<string, Buffer>();
-    for (const file of PROTECTED_STACK_FILES) {
+
+    // Collect the unified set: PROTECTED_STACK_FILES + configured project env files.
+    const files = new Set(PROTECTED_STACK_FILES);
+    try {
+      const projectEnvFiles = DatabaseService.getInstance().getStackProjectEnvFiles(this.nodeId, stackName);
+      for (const f of projectEnvFiles) {
+        if (f !== '.env') files.add(f); // .env already in PROTECTED_STACK_FILES
+      }
+    } catch {
+      // DB read failure: snapshot without project env files (safe fallback).
+    }
+
+    for (const file of files) {
       const target = path.resolve(baseResolved, path.join(stackDir, file));
       if (!target.startsWith(baseResolved + path.sep)) {
         throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
@@ -1171,7 +1199,7 @@ export class FileSystemService {
       }
     }
     return async () => {
-      for (const file of PROTECTED_STACK_FILES) {
+      for (const file of files) {
         const target = path.resolve(baseResolved, path.join(stackDir, file));
         if (!target.startsWith(baseResolved + path.sep)) continue;
         const saved = snapshot.get(file);

@@ -6,7 +6,8 @@ vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }));
 vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn().mockResolvedValue(undefined) }));
-vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 'local' } }) }));
+vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 'local' }, hasCapability: () => false }) }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => false }) }));
 
 import { apiFetch } from '@/lib/api';
 import { copyToClipboard } from '@/lib/clipboard';

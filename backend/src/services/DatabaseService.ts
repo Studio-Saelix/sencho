@@ -1874,6 +1874,22 @@ export class DatabaseService {
         } catch (e) {
             console.warn('[DatabaseService] mesh_stacks migration:', (e as Error).message);
         }
+        try {
+            this.db.prepare(`
+                CREATE TABLE IF NOT EXISTS stack_project_env_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_id INTEGER NOT NULL,
+                    stack_name TEXT NOT NULL,
+                    env_file TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    UNIQUE(node_id, stack_name, env_file),
+                    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+                )
+            `).run();
+            this.db.prepare('CREATE INDEX IF NOT EXISTS idx_stack_project_env_files_lookup ON stack_project_env_files(node_id, stack_name)').run();
+        } catch (e) {
+            console.warn('[DatabaseService] stack_project_env_files migration:', (e as Error).message);
+        }
         // mesh_centrals was the peer-side cache of the reverse-callback JWT
         // (central → peer bootstrap material). Peer→central traffic now
         // multiplexes over the existing forward WS via `tcp_open_reverse`,
@@ -2022,6 +2038,33 @@ export class DatabaseService {
     public deleteMeshStack(nodeId: number, stackName: string): void {
         if (isPilotMode()) return;
         this.db.prepare('DELETE FROM mesh_stacks WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+    }
+
+    // --- Project env files ---
+
+    public getStackProjectEnvFiles(nodeId: number, stackName: string): string[] {
+        const rows = this.db.prepare(
+            'SELECT env_file FROM stack_project_env_files WHERE node_id = ? AND stack_name = ? ORDER BY position ASC'
+        ).all(nodeId, stackName) as Array<{ env_file: string }>;
+        return rows.map(r => r.env_file);
+    }
+
+    public setStackProjectEnvFiles(nodeId: number, stackName: string, files: string[]): void {
+        const deleteStmt = this.db.prepare('DELETE FROM stack_project_env_files WHERE node_id = ? AND stack_name = ?');
+        const insertStmt = this.db.prepare(
+            'INSERT INTO stack_project_env_files (node_id, stack_name, env_file, position) VALUES (?, ?, ?, ?)'
+        );
+        const tx = this.db.transaction((ordered: string[]) => {
+            deleteStmt.run(nodeId, stackName);
+            ordered.forEach((file, idx) => {
+                insertStmt.run(nodeId, stackName, file, idx);
+            });
+        });
+        tx(files);
+    }
+
+    public deleteStackProjectEnvFiles(nodeId: number, stackName: string): void {
+        this.db.prepare('DELETE FROM stack_project_env_files WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
     public setNodeMeshEnabled(nodeId: number, enabled: boolean): void {

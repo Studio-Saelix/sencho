@@ -58,32 +58,69 @@ export function authoredComposeFileArgs(stackName: string, nodeId?: number): str
 }
 
 /**
- * Build the `--env-file <stackDir>/.env` flag a multi-file Git deploy needs when
- * the applied spec sets a context dir, or `[]` otherwise.
+ * Build `--env-file` arguments for the stack's configured project env files.
  *
- * When `authoredComposeFileArgs` emits `--project-directory <contextDir>`, Docker
- * Compose treats the context dir as the project directory and looks for `.env`
- * there, not at the stack root where Sencho writes it. `validateCompose` passes
- * the root `.env` explicitly with `--env-file` whenever the stack has env content,
- * so without the same flag at deploy/render/scan time a Git source could validate
- * with one effective config and deploy or render another. This flag makes every
- * compose invocation resolve env from the same root `.env` the validator used.
+ * When the stack has one or more project env files configured (via the
+ * project-env-files API), each file is resolved against the stack directory,
+ * validated for containment and file type, and emitted as a repeated
+ * `--env-file <absPath>` flag. Configured files apply to ALL stack types
+ * (single-file, multi-file Git, non-Git).
  *
- * Scoped to the context-dir case on purpose: with no `--project-directory`, the
- * project directory stays the stack dir (the compose command's cwd) and Compose
- * auto-discovers the root `.env`, so single-file / no-context stacks need no flag
- * and keep their existing behavior. An explicit `--env-file` to a missing file
- * errors, so the flag is only added when a root `.env` actually exists.
+ * When no project env files are configured, fall back to the legacy behavior:
+ * pass `--env-file <stackDir>/.env` only for multi-file Git stacks whose
+ * deploy spec sets a contextDir and whose root `.env` actually exists. This
+ * preserves byte-identical behavior for existing stacks.
  */
 export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: number): Promise<string[]> {
   const resolvedNodeId = nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
+  const db = DatabaseService.getInstance();
+  const configuredFiles = db.getStackProjectEnvFiles(resolvedNodeId, stackName);
+
+  if (configuredFiles.length > 0) {
+    const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(resolvedNodeId));
+    const stackDir = path.resolve(baseResolved, stackName);
+    if (!stackDir.startsWith(baseResolved + path.sep)) return [];
+
+    const args: string[] = [];
+    for (const file of configuredFiles) {
+      if (!file || !isValidRelativeStackPath(file)) {
+        throw new Error(`Invalid project env file path for stack "${stackName}": "${file}"`);
+      }
+      const envPath = path.resolve(stackDir, file);
+      if (!isPathWithinBase(envPath, stackDir)) {
+        throw new Error(`Project env file path escapes stack directory for stack "${stackName}": "${file}"`);
+      }
+      try {
+        await fsPromises.access(envPath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          throw new Error(
+            `Project env file "${file}" configured for stack "${stackName}" is missing. ` +
+            `Restore the file or update the project env file selection in the Environment tab.`
+          );
+        }
+        throw err;
+      }
+      const stat = await fsPromises.stat(envPath);
+      if (!stat.isFile()) {
+        throw new Error(
+          `Project env file "${file}" configured for stack "${stackName}" is not a regular file. ` +
+          `Update the project env file selection in the Environment tab.`
+        );
+      }
+      args.push('--env-file', envPath);
+    }
+    return args;
+  }
+
+  // Legacy fallback: --env-file .env only for multi-file Git stacks with contextDir.
   const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
   if (!spec || spec.files.length === 0 || !spec.contextDir) return [];
 
   // Inline js/path-injection barrier at the fs sink: resolve against a known-safe
   // base and assert containment with startsWith right here. CodeQL does not credit
   // the wrapped isPathWithinBase helper or a check separated from the sink, matching
-  // the inline guards in renderConfig and validateCompose. `.env` is a fixed name.
+  // the inline guards in renderConfig and validateCompose.
   const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(resolvedNodeId));
   const stackDir = path.resolve(baseResolved, stackName);
   if (!stackDir.startsWith(baseResolved + path.sep)) return [];
@@ -91,10 +128,6 @@ export async function authoredComposeEnvFileArgs(stackName: string, nodeId?: num
   try {
     await fsPromises.access(envPath);
   } catch (err) {
-    // A missing `.env` is the normal "nothing to pass" case. Any other error
-    // (e.g. EACCES on an existing but unreadable `.env`) is a real fault: surface
-    // it rather than silently dropping the flag and deploying a different effective
-    // config than the one validated.
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw err;
   }
