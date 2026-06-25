@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from './ui/button';
 import { Download, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useLogChipColorMode } from '@/hooks/use-log-chip-color-mode';
+import { hashLabel } from '@/lib/label-colors';
 
 interface StructuredLogViewerProps {
   stackName: string;
@@ -68,6 +70,7 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
   const [filter, setFilter] = useState<Filter>('all');
   const [following, setFollowing] = useState(true);
   const [connectionState, setConnectionState] = useState<'connecting' | 'open' | 'reconnecting'>('connecting');
+  const [chipColorMode] = useLogChipColorMode();
   const scrollRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
   const rowIdRef = useRef(0);
@@ -306,8 +309,20 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
               <span className="whitespace-pre-wrap break-all text-foreground/90">
                 {row.containerName && (
                   <span
-                    className="font-mono text-[10px] tracking-wide text-brand/80 bg-brand/10 rounded px-1.5 py-px mr-1.5 select-none"
+                    className={cn(
+                      'font-mono text-[10px] tracking-wide rounded px-1.5 py-px mr-1.5 select-none',
+                      chipColorMode === 'per-service' ? 'border' : 'text-brand/80 bg-brand/10',
+                    )}
                     title={row.containerName}
+                    style={
+                      chipColorMode === 'per-service'
+                        ? {
+                            backgroundColor: `var(--label-${hashLabel(row.containerName)}-bg)`,
+                            color: `var(--label-${hashLabel(row.containerName)})`,
+                            borderColor: `color-mix(in oklch, var(--label-${hashLabel(row.containerName)}) 30%, transparent)`,
+                          }
+                        : undefined
+                    }
                   >
                     {row.containerName}
                   </span>

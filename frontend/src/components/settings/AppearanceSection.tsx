@@ -6,6 +6,7 @@ import { SegmentedControl } from '@/components/ui/segmented-control';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { useDensity } from '@/hooks/use-density';
 import type { Density } from '@/hooks/use-density';
+import { useLogChipColorMode, type LogChipColorMode } from '@/hooks/use-log-chip-color-mode';
 import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { useTopNavAlign, type TopNavAlign } from '@/hooks/use-top-nav-align';
 import {
@@ -44,6 +45,11 @@ const CHART_STYLE_OPTIONS: { value: ChartStyle; label: string }[] = [
 const HEADING_STYLE_OPTIONS: { value: HeadingStyle; label: string }[] = [
     { value: 'clean', label: 'Clean' },
     { value: 'signature', label: 'Signature' },
+];
+
+const CHIP_COLOR_OPTIONS: { value: LogChipColorMode; label: string }[] = [
+    { value: 'unified', label: 'Unified' },
+    { value: 'per-service', label: 'Per service' },
 ];
 
 const fmtSigned = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(2)}`;
@@ -129,6 +135,7 @@ function VisualCard({
 
 export function AppearanceSection() {
     const [density, setDensity] = useDensity();
+    const [chipColorMode, setChipColorMode] = useLogChipColorMode();
     const [topNavLabels, setTopNavLabels] = useTopNavLabels();
     const [topNavAlign, setTopNavAlign] = useTopNavAlign();
     const {
@@ -405,6 +412,18 @@ export function AppearanceSection() {
                         />
                     </SettingsField>
                 )}
+
+                <SettingsField
+                    label="Log chip color"
+                    helper="Unified uses the accent color for all service chips. Per-service assigns each service a stable label color for faster visual scanning."
+                >
+                    <SegmentedControl
+                        value={chipColorMode}
+                        options={CHIP_COLOR_OPTIONS}
+                        onChange={setChipColorMode}
+                        ariaLabel="Log chip color mode"
+                    />
+                </SettingsField>
             </SettingsSection>
 
             <p className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle/70">

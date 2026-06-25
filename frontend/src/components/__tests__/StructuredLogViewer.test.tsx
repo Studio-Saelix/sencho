@@ -5,6 +5,8 @@ import { render, screen, cleanup, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import StructuredLogViewer from '../StructuredLogViewer';
+import { LOG_CHIP_COLOR_KEY } from '@/hooks/use-log-chip-color-mode';
+import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 
 class MockWS {
   static instances: MockWS[] = [];
@@ -28,6 +30,7 @@ beforeEach(() => {
     return 0;
   });
   localStorage.setItem('sencho-active-node', '');
+  localStorage.removeItem(LOG_CHIP_COLOR_KEY);
 });
 
 afterEach(() => {
@@ -167,5 +170,58 @@ describe('StructuredLogViewer', () => {
     expect(text).not.toContain('[null]');
     expect(text).not.toContain('[');
     expect(text).toContain('legacy line');
+  });
+
+  // ── Chip color mode ──────────────────────────────────────────────────
+
+  it('in unified mode (default), chip has brand classes and no inline style', async () => {
+    const { container } = render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: 'redis | 2025-01-01T12:00:00Z connected\n' });
+    });
+
+    const chip = container.querySelector('.select-none') as HTMLElement;
+    expect(chip).not.toBeNull();
+    expect(chip.className).toContain('text-brand/80');
+    expect(chip.className).toContain('bg-brand/10');
+    expect(chip.getAttribute('style')).toBeNull();
+  });
+
+  it('in per-service mode, chip has inline label-token style', async () => {
+    localStorage.setItem(LOG_CHIP_COLOR_KEY, 'per-service');
+    const { container } = render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: 'redis | 2025-01-01T12:00:00Z connected\n' });
+    });
+
+    const chip = container.querySelector('.select-none') as HTMLElement;
+    expect(chip).not.toBeNull();
+    const style = chip.getAttribute('style') ?? '';
+    expect(style).toContain('--label-');
+    expect(style).toContain('-bg');
+  });
+
+  it('updates chip style when setting changes from unified to per-service', async () => {
+    const { container } = render(<StructuredLogViewer stackName="test-stack" />);
+    await act(async () => {
+      MockWS.instances[0].onopen?.();
+      MockWS.instances[0].onmessage?.({ data: 'redis | 2025-01-01T12:00:00Z connected\n' });
+    });
+
+    // Start in unified mode.
+    const chip = container.querySelector('.select-none') as HTMLElement;
+    expect(chip.getAttribute('style')).toBeNull();
+
+    // Switch to per-service.
+    localStorage.setItem(LOG_CHIP_COLOR_KEY, 'per-service');
+    act(() => {
+      window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED));
+    });
+
+    const styleAfter = chip.getAttribute('style') ?? '';
+    expect(styleAfter).toContain('--label-');
+    expect(styleAfter).toContain('-bg');
   });
 });
