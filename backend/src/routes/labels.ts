@@ -8,7 +8,7 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
 import { requireAdmin, requireBody } from '../middleware/tierGates';
-import { buildPolicyGateOptions } from '../helpers/policyGate';
+import { buildPolicyGateOptions, describePolicyBlock } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { VALID_LABEL_COLORS, MAX_LABELS_PER_NODE } from '../helpers/constants';
 import { isValidStackName } from '../utils/validation';
@@ -227,7 +227,7 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
               buildPolicyGateOptions(req),
             );
             if (!gate.ok) {
-              const blockedMsg = `Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`;
+              const blockedMsg = describePolicyBlock(gate.policy, gate.violations);
               results.push({ stackName, success: false, error: blockedMsg, ...(isDryRun ? { dryRun: true } : {}) });
               continue;
             }

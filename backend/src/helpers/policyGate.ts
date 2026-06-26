@@ -9,7 +9,7 @@ import { LicenseService } from '../services/LicenseService';
 import { effectiveTier } from '../middleware/tierGates';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { describeReason } from '../utils/policy-risk';
+import { summarizeBlockReasons } from '../utils/policy-risk';
 
 type BlockableAction = 'deploy' | 'update' | 'rollback';
 
@@ -24,12 +24,7 @@ export function describePolicyBlock(
   violations: PolicyViolation[],
   action: BlockableAction = 'deploy',
 ): string {
-  const reasons = new Set<string>();
-  for (const v of violations) {
-    for (const r of v.reasons) reasons.add(describeReason(r));
-  }
-  const reasonText = reasons.size > 0 ? [...reasons].join(' + ') : 'scan policy conditions';
-  return `Policy "${policy?.name ?? 'policy'}" blocked ${action}: ${violations.length} image(s) matched ${reasonText}`;
+  return `Policy "${policy?.name ?? 'policy'}" blocked ${action}: ${violations.length} image(s) matched ${summarizeBlockReasons(violations)}`;
 }
 
 // Bypass requires `?ignorePolicy=true` AND `req.user.role === 'admin'`. The

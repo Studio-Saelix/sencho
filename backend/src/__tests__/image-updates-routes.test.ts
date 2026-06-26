@@ -361,6 +361,51 @@ describe('POST /api/auto-update/execute', () => {
     expect(typeof res.body.result).toBe('string');
   });
 
+  it('reports a reason-aware block message when the policy gate blocks auto-update', async () => {
+    // The Codex QA flagged this surface: a KEV- or fixable-driven block must
+    // name the matched input, never "exceed <max_severity>" (a ceiling the
+    // policy did not enforce). Force the gate to block on KEV and assert the
+    // per-stack result string names the reason and skips the update.
+    const DockerController = (await import('../services/DockerController')).default;
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    const { ComposeService } = await import('../services/ComposeService');
+    const PolicyEnforcement = await import('../services/PolicyEnforcement');
+
+    const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
+      .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
+    const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
+      .mockResolvedValue({ hasUpdate: true } as never);
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue();
+    const gateSpy = vi.spyOn(PolicyEnforcement, 'enforcePolicyPreDeploy').mockResolvedValue({
+      ok: false,
+      bypassed: false,
+      policy: { id: 1, name: 'kev-gate', max_severity: 'HIGH' },
+      violations: [{
+        imageRef: 'nginx:latest', severity: 'MEDIUM',
+        criticalCount: 0, highCount: 0, kevCount: 1, fixableCount: 0,
+        scanId: 9, reasons: ['kev'],
+      }],
+    } as never);
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Cookie', adminCookie)
+        .send({ target: 'auto-upd-blocked' });
+      expect(res.status).toBe(200);
+      expect(res.body.result).toContain('blocked auto-update');
+      expect(res.body.result).toContain('matched known-exploited CVE (KEV)');
+      expect(res.body.result).not.toContain('exceed');
+      expect(res.body.result).not.toContain('HIGH');
+      // Blocked stacks are skipped, not updated.
+      expect(updateSpy).not.toHaveBeenCalled();
+    } finally {
+      containersSpy.mockRestore();
+      checkSpy.mockRestore();
+      updateSpy.mockRestore();
+      gateSpy.mockRestore();
+    }
+  });
+
   it('begins an update health gate after an auto-update applies', async () => {
     // Target a single stack; the route works off the running containers, so
     // stub the container probe, the update check, and the compose update, then

@@ -14,7 +14,7 @@ import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
 import { PROXY_TIER_HEADER } from './license-headers';
 import { LicenseService } from './LicenseService';
-import { assertPolicyGateAllows, buildSystemPolicyGateOptions, triggerPostDeployScan } from '../helpers/policyGate';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions, describePolicyBlock, triggerPostDeployScan } from '../helpers/policyGate';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -401,7 +401,7 @@ export class BlueprintService {
             auditPath: `/api/blueprints/${blueprint.id}/apply`,
         }, undefined, true);
         if (!gate.ok) {
-            throw new Error(`Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`);
+            throw new Error(describePolicyBlock(gate.policy, gate.violations));
         }
 
         const outcome = await this.applyLocalUnderLock(
