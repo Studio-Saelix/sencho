@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiFetch } from '@/lib/api';
+import type { StackUpdateInfo } from '@/types/imageUpdates';
 
 const IMAGE_UPDATE_POLL_MS = 5 * 60 * 1000;
 
@@ -15,14 +16,27 @@ const IMAGE_UPDATE_POLL_MS = 5 * 60 * 1000;
  * through the active-node header just like before.
  */
 export function useImageUpdates(activeNodeId: number | undefined) {
-  const [stackUpdates, setStackUpdates] = useState<Record<string, boolean>>({});
+  const [stackUpdates, setStackUpdates] = useState<Record<string, StackUpdateInfo>>({});
 
   const refresh = useCallback(async () => {
     try {
-      const res = await apiFetch('/image-updates');
+      const res = await apiFetch('/image-updates/detail');
       if (res.ok) {
-        const data = await res.json() as Record<string, boolean>;
-        setStackUpdates(data);
+        setStackUpdates(await res.json() as Record<string, StackUpdateInfo>);
+        return;
+      }
+      // A remote node on an older Sencho lacks /detail; fall back to the boolean
+      // map so update badges keep working until that node is upgraded.
+      if (res.status === 404) {
+        const boolRes = await apiFetch('/image-updates');
+        if (boolRes.ok) {
+          const bool = await boolRes.json() as Record<string, boolean>;
+          const synthesized: Record<string, StackUpdateInfo> = {};
+          for (const [stack, hasUpdate] of Object.entries(bool)) {
+            synthesized[stack] = { hasUpdate, checkStatus: 'ok', lastError: null, checkedAt: 0 };
+          }
+          setStackUpdates(synthesized);
+        }
       }
     } catch (e: unknown) {
       console.error('[ImageUpdates] fetch failed:', e);

@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
-import { GitBranch, Loader2 } from 'lucide-react';
+import { GitBranch, Loader2, AlertCircle } from 'lucide-react';
+import type { CheckStatus } from '@/types/imageUpdates';
 import { Cursor, CursorContainer, CursorFollow, CursorProvider } from '@/components/animate-ui/primitives/animate/cursor';
 import { Checkbox } from '@/components/ui/checkbox';
 import { LabelDot } from '@/components/LabelPill';
@@ -20,6 +21,10 @@ interface StackRowProps {
   isActive: boolean;
   labels: Label[];
   hasUpdate: boolean;
+  // Last image-update check outcome. 'failed' surfaces a muted "couldn't check"
+  // indicator so an undeterminable check is not mistaken for "up to date".
+  checkStatus?: CheckStatus;
+  lastError?: string;
   hasGitPending: boolean;
   onSelect: (file: string) => void;
   kebabSlot: ReactNode;
@@ -47,7 +52,7 @@ const MAX_VISIBLE_LABELS = 3;
 export function StackRow(props: StackRowProps) {
   const {
     file, displayName, status, running, total, isBusy, isActive, labels,
-    hasUpdate, hasGitPending, onSelect, kebabSlot,
+    hasUpdate, checkStatus, lastError, hasGitPending, onSelect, kebabSlot,
     bulkMode = false, isSelected = false, onToggleSelect,
   } = props;
 
@@ -115,7 +120,7 @@ export function StackRow(props: StackRowProps) {
         </span>
       )}
 
-      {/* Fixed trailing icon slot: update dot takes priority over git pending */}
+      {/* Fixed trailing icon slot: update dot > check-failed > git pending */}
       <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
         {hasUpdate ? (
           <RowTooltip
@@ -126,6 +131,11 @@ export function StackRow(props: StackRowProps) {
               </span>
             )}
             label="Update available"
+          />
+        ) : checkStatus === 'failed' ? (
+          <RowTooltip
+            trigger={<AlertCircle className="w-3 h-3 text-muted-foreground/70" strokeWidth={1.5} />}
+            label={lastError ? `Update check failed: ${lastError}` : 'Update check failed'}
           />
         ) : hasGitPending ? (
           <RowTooltip

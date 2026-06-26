@@ -24,6 +24,21 @@ export interface GlobalSetting {
     value: string;
 }
 
+/**
+ * Per-stack image-update check outcome. 'ok' = every checkable image was
+ * reached; 'partial' = some checkable images errored; 'failed' = no checkable
+ * image could be reached (status undeterminable). Distinguishes a failed check
+ * from a confirmed "up to date".
+ */
+export type StackCheckStatus = 'ok' | 'partial' | 'failed';
+
+export interface StackUpdateDetail {
+    hasUpdate: boolean;
+    checkStatus: StackCheckStatus;
+    lastError: string | null;
+    checkedAt: number;
+}
+
 export interface StackAlert {
     id?: number;
     stack_name: string;
@@ -920,6 +935,8 @@ export class DatabaseService {
         node_id INTEGER NOT NULL DEFAULT 0,
         stack_name TEXT NOT NULL,
         has_update INTEGER DEFAULT 0,
+        check_status TEXT NOT NULL DEFAULT 'ok',
+        last_error TEXT,
         checked_at INTEGER NOT NULL,
         PRIMARY KEY (node_id, stack_name)
       );
@@ -1547,6 +1564,15 @@ export class DatabaseService {
             ALTER TABLE stack_update_status_new RENAME TO stack_update_status;
           `);
         }
+
+        // Tri-state image-update check outcome. Must run AFTER the composite-PK
+        // recreate above (that block recreates the table from the original four
+        // columns, so columns added earlier would be dropped). 'ok' = every
+        // checkable image was reached; the detector records 'failed'/'partial'
+        // plus a reason when registry checks could not determine status, so a
+        // failed check is no longer indistinguishable from "up to date".
+        maybeAddCol('stack_update_status', 'check_status', "TEXT NOT NULL DEFAULT 'ok'");
+        maybeAddCol('stack_update_status', 'last_error', 'TEXT');
 
         // Drop legacy SSH/TLS columns from pre-0.7 databases (no longer read or written)
         const legacyCols = ['host', 'port', 'ssh_port', 'ssh_user', 'ssh_password', 'ssh_key', 'tls_ca', 'tls_cert', 'tls_key'];
@@ -3161,12 +3187,41 @@ export class DatabaseService {
 
     // --- Stack Update Status ---
 
-    public upsertStackUpdateStatus(nodeId: number, stackName: string, hasUpdate: boolean, checkedAt: number): void {
+    public upsertStackUpdateStatus(
+        nodeId: number,
+        stackName: string,
+        hasUpdate: boolean,
+        checkedAt: number,
+        checkStatus: StackCheckStatus = 'ok',
+        lastError: string | null = null,
+    ): void {
         this.db.prepare(
-            `INSERT INTO stack_update_status (node_id, stack_name, has_update, checked_at)
-             VALUES (?, ?, ?, ?)
-             ON CONFLICT(node_id, stack_name) DO UPDATE SET has_update = excluded.has_update, checked_at = excluded.checked_at`
-        ).run(nodeId, stackName, hasUpdate ? 1 : 0, checkedAt);
+            `INSERT INTO stack_update_status (node_id, stack_name, has_update, check_status, last_error, checked_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(node_id, stack_name) DO UPDATE SET
+               has_update = excluded.has_update,
+               check_status = excluded.check_status,
+               last_error = excluded.last_error,
+               checked_at = excluded.checked_at`
+        ).run(nodeId, stackName, hasUpdate ? 1 : 0, checkStatus, lastError, checkedAt);
+    }
+
+    /**
+     * Record a fully-failed check (no checkable image could be reached) without
+     * touching has_update, so a transient registry outage cannot erase a real
+     * update or flap the notification state. Leaves the row absent untouched
+     * only when one already exists; a first-ever failed check inserts a row with
+     * has_update = 0 so the stack still appears with its failure reason.
+     */
+    public recordStackCheckFailure(nodeId: number, stackName: string, lastError: string, checkedAt: number): void {
+        this.db.prepare(
+            `INSERT INTO stack_update_status (node_id, stack_name, has_update, check_status, last_error, checked_at)
+             VALUES (?, ?, 0, 'failed', ?, ?)
+             ON CONFLICT(node_id, stack_name) DO UPDATE SET
+               check_status = 'failed',
+               last_error = excluded.last_error,
+               checked_at = excluded.checked_at`
+        ).run(nodeId, stackName, lastError, checkedAt);
     }
 
     public getStackUpdateStatus(nodeId?: number): Record<string, boolean> {
@@ -3176,6 +3231,27 @@ export class DatabaseService {
         const result: Record<string, boolean> = {};
         for (const row of rows) {
             result[row.stack_name] = row.has_update === 1;
+        }
+        return result;
+    }
+
+    /**
+     * Rich per-stack update status (hasUpdate + check outcome + reason) for the
+     * sidebar/readiness UI. GET /api/image-updates stays the boolean map so the
+     * cross-version fleet aggregation contract is unaffected.
+     */
+    public getStackUpdateDetail(nodeId: number): Record<string, StackUpdateDetail> {
+        const rows = this.db.prepare(
+            'SELECT stack_name, has_update, check_status, last_error, checked_at FROM stack_update_status WHERE node_id = ?'
+        ).all(nodeId) as Array<{ stack_name: string; has_update: number; check_status: string | null; last_error: string | null; checked_at: number }>;
+        const result: Record<string, StackUpdateDetail> = {};
+        for (const row of rows) {
+            result[row.stack_name] = {
+                hasUpdate: row.has_update === 1,
+                checkStatus: (row.check_status === 'failed' || row.check_status === 'partial') ? row.check_status : 'ok',
+                lastError: row.last_error,
+                checkedAt: row.checked_at,
+            };
         }
         return result;
     }

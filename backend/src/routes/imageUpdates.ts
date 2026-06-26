@@ -36,6 +36,19 @@ imageUpdatesRouter.get('/', authMiddleware, (req: Request, res: Response): void 
   }
 });
 
+// Rich per-stack status (hasUpdate + check outcome + reason) for the sidebar and
+// readiness view. Auth-only, matching GET /; the boolean GET / is left intact so
+// the cross-version fleet aggregation contract is unaffected.
+imageUpdatesRouter.get('/detail', authMiddleware, (req: Request, res: Response): void => {
+  try {
+    const nodeId = req.nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
+    res.json(DatabaseService.getInstance().getStackUpdateDetail(nodeId));
+  } catch (error) {
+    console.error('Failed to fetch image update detail:', error);
+    res.status(500).json({ error: 'Failed to fetch image update detail' });
+  }
+});
+
 imageUpdatesRouter.post('/refresh', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
   try {

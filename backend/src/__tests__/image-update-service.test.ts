@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const {
   mockGetAuthForRegistry,
   mockGetStackUpdateStatus, mockUpsertStackUpdateStatus, mockClearStackUpdateStatus,
+  mockRecordStackCheckFailure,
   mockGetSystemState, mockSetSystemState, mockAddNotificationHistory,
   mockDispatchAlert,
   mockGetStacks, mockGetStackContent, mockGetEnvContent, mockEnvExists,
@@ -18,6 +19,7 @@ const {
   mockGetStackUpdateStatus: vi.fn().mockReturnValue({}),
   mockUpsertStackUpdateStatus: vi.fn(),
   mockClearStackUpdateStatus: vi.fn(),
+  mockRecordStackCheckFailure: vi.fn(),
   mockGetSystemState: vi.fn().mockReturnValue('1'), // default: backfilled
   mockSetSystemState: vi.fn(),
   mockAddNotificationHistory: vi.fn(),
@@ -48,6 +50,7 @@ vi.mock('../services/DatabaseService', () => ({
       upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
       getStackUpdateStatus: mockGetStackUpdateStatus,
       clearStackUpdateStatus: mockClearStackUpdateStatus,
+      recordStackCheckFailure: mockRecordStackCheckFailure,
       getSystemState: mockGetSystemState,
       setSystemState: mockSetSystemState,
       addNotificationHistory: mockAddNotificationHistory,
@@ -129,10 +132,10 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     } as any;
   }
 
-  it('returns { hasUpdate: false } for sha256-only refs', async () => {
+  it('marks sha256-only refs not-checkable (no tag to track)', async () => {
     const docker = makeMockDocker();
     const result = await service.checkImage(docker, 'sha256:abc123');
-    expect(result).toEqual({ hasUpdate: false });
+    expect(result).toEqual({ hasUpdate: false, notCheckable: true });
   });
 
   it('returns error when local image inspect fails', async () => {
@@ -165,17 +168,21 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     }
   });
 
-  it('returns { hasUpdate: false } when no RepoDigests match', async () => {
-    // Empty RepoDigests means locally built image
+  it('marks an image with no RepoDigests not-checkable (locally built)', async () => {
+    // Empty RepoDigests means locally built / not registry-backed.
     const docker = makeMockDocker([]);
     const result = await service.checkImage(docker, 'nginx:latest');
-    expect(result).toEqual({ hasUpdate: false });
+    expect(result).toEqual({ hasUpdate: false, notCheckable: true });
   });
 
-  it('returns { hasUpdate: false } when RepoDigests have no sha256', async () => {
+  it('errors when RepoDigests are present but none resolves a digest', async () => {
+    // A non-empty set with no usable sha256 digest is ambiguous: surface it as an
+    // error rather than a silent "up to date".
     const docker = makeMockDocker(['library/nginx:latest']);
     const result = await service.checkImage(docker, 'nginx:latest');
-    expect(result).toEqual({ hasUpdate: false });
+    expect(result.hasUpdate).toBe(false);
+    expect(result.notCheckable).toBeUndefined();
+    expect(result.error).toContain('Could not resolve a local registry digest');
   });
 });
 
@@ -376,6 +383,7 @@ services:
     getStackUpdateStatus: mockGetStackUpdateStatus,
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -413,7 +421,7 @@ services:
       expect.stringContaining('stackA'),
       { stackName: 'stackA', actor: 'system:image-update' },
     );
-    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number));
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'ok', null);
   });
 
   it('does not re-fire notification for a stack already known to have updates', async () => {
@@ -469,6 +477,95 @@ services:
   });
 });
 
+// ── Tri-state check status (ok / partial / failed) ────────────────────────
+
+describe('ImageUpdateService - check status derivation', () => {
+  const COMPOSE_ONE = `
+services:
+  app:
+    image: nginx:latest
+`;
+  const COMPOSE_TWO = `
+services:
+  app:
+    image: nginx:latest
+  db:
+    image: postgres:15
+`;
+
+  const fakeDb = () => ({
+    getStackUpdateStatus: mockGetStackUpdateStatus,
+    upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
+    clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
+    getSystemState: mockGetSystemState,
+    setSystemState: mockSetSystemState,
+    addNotificationHistory: mockAddNotificationHistory,
+  });
+
+  // Per-image stub so a stack can mix ok / errored / not-checkable results.
+  function stubCheckImageByRef(service: ImageUpdateService, byRef: Record<string, { hasUpdate?: boolean; error?: string; notCheckable?: boolean }>) {
+    (service as any).checkImage = vi.fn().mockImplementation((_docker: unknown, imageRef: string) =>
+      Promise.resolve(byRef[imageRef] ?? { hasUpdate: false }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (ImageUpdateService as any).instance = undefined;
+    mockGetSystemState.mockReturnValue('1');
+    mockGetAllContainers.mockResolvedValue([]);
+    mockEnvExists.mockResolvedValue(false);
+  });
+
+  it('records a failure (preserving has_update) and does not notify when every image errors', async () => {
+    // Even with no prior update (previousState false), a failed check must not
+    // fire a notification, and must not write has_update via the normal upsert.
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(COMPOSE_ONE);
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: true });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImageByRef(service, { 'nginx:latest': { hasUpdate: false, error: 'Registry unreachable for registry-1.docker.io/library/nginx:latest' } });
+
+    await (service as any).checkNode(1, 'local', fakeDb());
+
+    expect(mockRecordStackCheckFailure).toHaveBeenCalledWith(1, 'stackA', expect.stringContaining('Registry unreachable'), expect.any(Number));
+    expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
+  it('marks a stack partial (with a reason) when some images error but others resolve', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(COMPOSE_TWO);
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: false });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImageByRef(service, {
+      'nginx:latest': { hasUpdate: true },
+      'postgres:15': { hasUpdate: false, error: 'Registry unreachable for registry-1.docker.io/library/postgres:15' },
+    });
+
+    await (service as any).checkNode(1, 'local', fakeDb());
+
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'partial', expect.stringContaining('Registry unreachable'));
+    expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+    // A confirmed update on an ok image still notifies on the false->true transition.
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a stack whose only image is not-checkable as ok, not failed', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(COMPOSE_ONE);
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: false });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImageByRef(service, { 'nginx:latest': { hasUpdate: false, notCheckable: true } });
+
+    await (service as any).checkNode(1, 'local', fakeDb());
+
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', false, expect.any(Number), 'ok', null);
+    expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+  });
+});
+
 // ── .env file handling ──────────────────────────────────────────────────
 
 describe('ImageUpdateService - .env file handling in checkNode', () => {
@@ -482,6 +579,7 @@ services:
     getStackUpdateStatus: mockGetStackUpdateStatus,
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -558,6 +656,7 @@ describe('ImageUpdateService - check() concurrency guard', () => {
       upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
       getStackUpdateStatus: mockGetStackUpdateStatus,
       clearStackUpdateStatus: mockClearStackUpdateStatus,
+      recordStackCheckFailure: mockRecordStackCheckFailure,
       getSystemState: mockGetSystemState,
       setSystemState: mockSetSystemState,
       addNotificationHistory: mockAddNotificationHistory,
@@ -885,6 +984,7 @@ services:
     getStackUpdateStatus: mockGetStackUpdateStatus,
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -939,6 +1039,7 @@ services:
     getStackUpdateStatus: mockGetStackUpdateStatus,
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,

@@ -289,14 +289,21 @@ export function useStackListState() {
     all: filteredFiles.length,
     up: filteredFiles.filter(f => stackStatuses[f] === 'running').length,
     down: filteredFiles.filter(f => isDownStatus(stackStatuses[f])).length,
-    updates: filteredFiles.filter(f => !!stackUpdates[f]).length,
+    updates: filteredFiles.filter(f => stackUpdates[f]?.hasUpdate).length,
   }), [filteredFiles, stackStatuses, stackUpdates]);
+
+  // Stacks whose last check could not determine status (registry unreachable,
+  // auth, rate limit). Surfaced as a row indicator, not a filter chip.
+  const checkFailedCount = useMemo(
+    () => filteredFiles.filter(f => stackUpdates[f]?.checkStatus === 'failed').length,
+    [filteredFiles, stackUpdates],
+  );
 
   const chipFilteredFiles = useMemo(() => {
     if (filterChip === 'all') return filteredFiles;
     if (filterChip === 'up') return filteredFiles.filter(f => stackStatuses[f] === 'running');
     if (filterChip === 'down') return filteredFiles.filter(f => isDownStatus(stackStatuses[f]));
-    if (filterChip === 'updates') return filteredFiles.filter(f => !!stackUpdates[f]);
+    if (filterChip === 'updates') return filteredFiles.filter(f => stackUpdates[f]?.hasUpdate);
     return filteredFiles;
   }, [filteredFiles, filterChip, stackStatuses, stackUpdates]);
 
@@ -392,6 +399,7 @@ export function useStackListState() {
     selectedFiles, setSelectedFiles,
     filteredFiles,
     filterCounts,
+    checkFailedCount,
     chipFilteredFiles,
     remoteResults,
     setStackAction, clearStackAction, isStackBusy,
