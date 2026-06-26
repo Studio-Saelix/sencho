@@ -1079,9 +1079,9 @@ describe('MonitorService - Sencho version check', () => {
     (svc as any).lastVersionCheckAt = 0;
     await (svc as any).evaluate();
 
-    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'system', expect.stringContaining('0.46.0'));
+    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.46.0'));
     // Message must include the real running version, not "0.0.0".
-    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'system', expect.stringContaining('currently running 0.45.0'));
+    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('currently running 0.45.0'));
     expect(mockSetSystemState).toHaveBeenCalledWith('last_sencho_update_notified_version', '0.46.0');
   });
 
@@ -1095,7 +1095,7 @@ describe('MonitorService - Sencho version check', () => {
     (svc as any).lastVersionCheckAt = 0;
     await (svc as any).evaluate();
 
-    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'system', expect.stringContaining('0.46.0'));
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.46.0'));
   });
 
   it('handles version check failure gracefully', async () => {
@@ -1107,7 +1107,7 @@ describe('MonitorService - Sencho version check', () => {
 
     // Should not throw
     await expect((svc as any).evaluate()).resolves.toBeUndefined();
-    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'system', expect.stringContaining('available'));
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('available'));
   });
 
   it('respects the 6-hour cooldown interval', async () => {
@@ -1134,7 +1134,7 @@ describe('MonitorService - Sencho version check', () => {
     (svc as any).lastVersionCheckAt = 0;
     await (svc as any).evaluate();
 
-    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'system', expect.stringContaining('0.46.0'));
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.46.0'));
     expect(mockSetSystemState).not.toHaveBeenCalledWith('last_sencho_update_notified_version', expect.anything());
     // Should not have even attempted the lookup.
     expect(mockGetLatestVersion).not.toHaveBeenCalled();
@@ -1193,7 +1193,7 @@ describe('MonitorService - Sencho version check', () => {
     (svc as any).lastVersionCheckAt = 0;
     await (svc as any).evaluate();
 
-    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'system', expect.stringContaining('0.47.0'));
+    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.47.0'));
     expect(store.last_sencho_update_notified_version).toBe('0.47.0');
   });
 });
