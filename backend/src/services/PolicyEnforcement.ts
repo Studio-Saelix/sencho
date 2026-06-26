@@ -40,6 +40,14 @@ export interface PolicyViolation {
     /** Which policy inputs matched (empty when the image could not be scanned). */
     reasons: PolicyBlockReason[];
     scanId: number;
+    /**
+     * Why the block is unactionable by policy: set when the gate blocked because
+     * the image could not be scanned or evaluated (compose parse error, scan
+     * failure, evaluation error), not because a policy input matched. Absent for
+     * a normal policy match. Lets the UI explain the failure instead of showing a
+     * zero-count block with no reason.
+     */
+    error?: string;
 }
 
 export interface PolicyEnforcementOptions {
@@ -304,6 +312,7 @@ export async function enforcePolicyPreDeploy(
                 fixableCount: 0,
                 reasons: [],
                 scanId: 0,
+                error: `Compose file could not be parsed: ${message}`,
             }],
         };
     }
@@ -356,6 +365,7 @@ export async function enforcePolicyForImageRefs(
                     fixableCount: 0,
                     reasons: [],
                     scanId: 0,
+                    error: 'Invalid image reference; the image could not be scanned',
                 });
             }
             continue;
@@ -375,6 +385,7 @@ export async function enforcePolicyForImageRefs(
                 fixableCount: 0,
                 reasons: [],
                 scanId: 0,
+                error: `Pre-flight scan failed: ${message}`,
             });
             continue;
         }
@@ -416,7 +427,10 @@ export async function enforcePolicyForImageRefs(
                 kevCount: 0,
                 fixableCount: 0,
                 reasons: [],
+                // The scan completed; only evaluation failed, so the real scan
+                // id is kept (the other failure sites have no scan and use 0).
                 scanId: scan.id,
+                error: `Policy evaluation failed: ${message}`,
             });
         }
     }
