@@ -4,6 +4,7 @@ import { useStackKeyboardShortcuts } from '@/hooks/useStackKeyboardShortcuts';
 import { CommandItem, CommandList } from '@/components/ui/command';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { Label } from '@/components/label-types';
+import type { StackUpdateInfo } from '@/types/imageUpdates';
 import { StackRow } from './StackRow';
 import { statusText, statusColor } from './stack-status-utils';
 import type { StackRowStatus } from './stack-status-utils';
@@ -33,7 +34,7 @@ export interface StackListProps {
   stackLabelMap: Record<string, Label[]>;
   stackStatuses: Record<string, StackRowStatus | undefined>;
   stackCounts: Record<string, { running: number; total: number } | undefined>;
-  stackUpdates: Record<string, boolean>;
+  stackUpdates: Record<string, StackUpdateInfo>;
   gitSourcePendingMap: Record<string, boolean>;
   pinnedFiles: string[];
   isCollapsed: (groupKey: string) => boolean;
@@ -182,7 +183,9 @@ export function StackList(props: StackListProps & StackListBulkProps) {
                     isBusy={isBusy(file)}
                     isActive={selectedFile === file}
                     labels={stackLabelMap[file] ?? []}
-                    hasUpdate={!!stackUpdates[file]}
+                    hasUpdate={stackUpdates[file]?.hasUpdate ?? false}
+                    checkStatus={stackUpdates[file]?.checkStatus}
+                    lastError={stackUpdates[file]?.lastError ?? undefined}
                     hasGitPending={!!gitSourcePendingMap[file]}
                     onSelect={onSelectFile}
                     kebabSlot={<StackKebabMenu file={file} ctx={ctx} />}

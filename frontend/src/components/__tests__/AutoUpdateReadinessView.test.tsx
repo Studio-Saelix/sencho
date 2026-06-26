@@ -125,6 +125,48 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
 });
 
 /**
+ * Local-node stacks whose latest check could not determine status never appear
+ * in the card grid (which lists confirmed updates only), so the readiness view
+ * surfaces them in a "could not be checked" advisory fed by a parallel local
+ * /image-updates/detail fetch.
+ */
+describe('AutoUpdateReadinessView check-failed advisory', () => {
+  const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
+  const mockedFetchForNode = fetchForNode as unknown as ReturnType<typeof vi.fn>;
+
+  afterEach(() => {
+    mockedFetch.mockReset();
+    mockedFetchForNode.mockReset();
+  });
+
+  it('lists local stacks whose check failed, with the reason', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') return Promise.resolve({ ok: true, json: async () => ({}) });
+      if (url.startsWith('/scheduled-tasks')) return Promise.resolve({ ok: true, json: async () => [] });
+      if (url === '/image-updates/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            grafana: { hasUpdate: false, checkStatus: 'failed', lastError: 'Registry unreachable for ghcr.io/acme/grafana:latest', checkedAt: 1 },
+            web: { hasUpdate: false, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockResolvedValue({ ok: true, json: async () => null });
+
+    render(<AutoUpdateReadinessView />);
+
+    expect(await screen.findByText(/could not be checked/i)).toBeInTheDocument();
+    expect(screen.getByText('grafana')).toBeInTheDocument();
+    expect(screen.getByText(/Registry unreachable for ghcr.io\/acme\/grafana:latest/)).toBeInTheDocument();
+    // An ok stack with no update must not appear in the advisory.
+    expect(screen.queryByText('web')).toBeNull();
+  });
+});
+
+/**
  * CadenceStrip surfaces the control instance's detection cadence by the
  * readiness card: a past last-check must read as an "ago" value (not the
  * future-oriented "due now"), null timestamps read as never/not-scheduled, and

@@ -45,6 +45,25 @@ The interval is node-scoped: each node runs its own scanner on its own cadence, 
 
 The readiness hero shows this instance's cadence at a glance: when it last checked, when the next check is due, and, right after a manual **Recheck**, how long the 2-minute cooldown has left.
 
+## When a check cannot complete
+
+A registry check can fail for reasons that have nothing to do with whether an update exists: the registry is unreachable, an authenticated registry has no stored credentials, or Docker Hub's anonymous pull-rate limit has been hit. Sencho treats these as a distinct **check failed** state instead of reporting "up to date", so a failed check is never mistaken for a current image.
+
+Where it shows:
+
+- **Sidebar.** A stack whose latest check could not be determined shows a muted indicator on its row. Hover it to read the reason (for example, "Registry unreachable for ghcr.io/acme/api:v1").
+- **Update board.** Stacks whose check failed appear in a "could not be checked" advisory above the card grid, each with its reason, so a stack with no confirmed update is never silently absent.
+
+A confirmed update from an earlier successful check is kept through a later failed check, so a momentary registry blip does not make a pending update vanish.
+
+Common causes and how to clear them:
+
+- **Private or custom registry with no credentials.** Add the registry under **Settings > Registries** so detection can authenticate the same way deploys do.
+- **Docker Hub rate limit.** Anonymous pulls are capped per IP address. Signing in to Docker Hub under **Settings > Registries** raises the limit.
+- **Blocked network egress.** The node must reach the registry host over HTTPS to read image manifests.
+
+Once the cause is resolved, the next check (on the interval, or via **Recheck**) clears the failed state.
+
 ## Workflow
 
 1. Open **Update** from the top nav strip.

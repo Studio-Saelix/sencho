@@ -46,6 +46,26 @@ describe('GET /api/image-updates', () => {
   });
 });
 
+describe('GET /api/image-updates/detail', () => {
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).get('/api/image-updates/detail');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns the rich per-stack detail shape for authenticated users', async () => {
+    const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+    DatabaseService.getInstance().upsertStackUpdateStatus(nodeId, 'detail-web', true, 1000, 'partial', 'Registry unreachable for ghcr.io/acme/api:v1');
+    const res = await request(app).get('/api/image-updates/detail').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body['detail-web']).toEqual({
+      hasUpdate: true,
+      checkStatus: 'partial',
+      lastError: 'Registry unreachable for ghcr.io/acme/api:v1',
+      checkedAt: 1000,
+    });
+  });
+});
+
 describe('POST /api/image-updates/refresh', () => {
   it('rejects unauthenticated requests with 401', async () => {
     const res = await request(app).post('/api/image-updates/refresh');

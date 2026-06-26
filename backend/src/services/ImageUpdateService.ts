@@ -8,7 +8,7 @@ import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
-import { parseImageRef, getRemoteDigest } from './registry-api';
+import { parseImageRef, getRemoteDigest, repoDigestMatchesRef } from './registry-api';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -18,6 +18,13 @@ const BACKFILL_KEY = 'image_update_notifications_backfilled';
 export interface ImageCheckResult {
     hasUpdate: boolean;
     error?: string;
+    /**
+     * The image is not registry-backed (locally built, or a bare digest ref
+     * with no resolvable tag), so update status is not applicable. Distinct
+     * from `error`: such an image must be excluded from a stack's pass/fail
+     * tally rather than counted as a failed or up-to-date check.
+     */
+    notCheckable?: boolean;
 }
 
 /**
@@ -549,7 +556,9 @@ export class ImageUpdateService {
                 imageUpdateMap.set(imageRef, await this.checkImage(docker, imageRef));
             } catch (e) {
                 console.error(`[ImageUpdateService] Error checking ${sanitizeForLog(imageRef)}:`, sanitizeForLog((e as Error)?.message ?? String(e)));
-                imageUpdateMap.set(imageRef, { hasUpdate: false, error: String(e) });
+                // getErrorMessage (not raw String(e)) because this value can surface
+                // verbatim in the sidebar tooltip / readiness advisory as lastError.
+                imageUpdateMap.set(imageRef, { hasUpdate: false, error: getErrorMessage(e, 'Update check failed') });
             }
             await sleep(ImageUpdateService.INTER_IMAGE_DELAY_MS);
         }
@@ -566,7 +575,32 @@ export class ImageUpdateService {
         let updatesFound = 0;
         const newlyUpdated: string[] = [];
         for (const [stackName, images] of stackImages) {
-            const hasUpdate = Array.from(images).some(img => imageUpdateMap.get(img)?.hasUpdate === true);
+            // Tally only checkable images: a not-checkable image (locally built,
+            // or a bare digest ref) is neither a pass nor a failure.
+            const checkable = Array.from(images)
+                .map(img => imageUpdateMap.get(img))
+                .filter((r): r is ImageCheckResult => !!r && !r.notCheckable);
+            const errored = checkable.filter(r => r.error !== undefined);
+            const confirmedHasUpdate = checkable.some(r => r.error === undefined && r.hasUpdate === true);
+
+            // Every checkable image failed: status is undeterminable. Preserve the
+            // last-known has_update so a transient registry outage neither erases a
+            // real update nor flaps the notification state.
+            if (checkable.length > 0 && errored.length === checkable.length) {
+                db.recordStackCheckFailure(nodeId, stackName, errored[0].error ?? 'Update check failed', now);
+                continue;
+            }
+
+            const checkStatus = errored.length > 0 ? 'partial' : 'ok';
+            const lastError = errored.length > 0 ? (errored[0].error ?? null) : null;
+            // Only a fully-ok check is authoritative enough to lower has_update to
+            // false. On a partial check some image could not be reached, so a
+            // previously confirmed update is preserved rather than erased (which
+            // would also re-fire the notification when that image recovers).
+            const hasUpdate = checkStatus === 'partial'
+                ? (confirmedHasUpdate || previousState[stackName] === true)
+                : confirmedHasUpdate;
+
             if (hasUpdate) {
                 updatesFound++;
                 // Notify only on state transition: was false/absent, now true
@@ -574,7 +608,7 @@ export class ImageUpdateService {
                     newlyUpdated.push(stackName);
                 }
             }
-            db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now);
+            db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError);
         }
 
         // Dispatch notifications for stacks that newly have updates
@@ -629,7 +663,8 @@ export class ImageUpdateService {
 
     public async checkImage(docker: DockerController, imageRef: string): Promise<ImageCheckResult> {
         const parsed = parseImageRef(imageRef);
-        if (!parsed) return { hasUpdate: false };
+        // A bare digest ref (sha256:...) has no tag to track upstream; not applicable.
+        if (!parsed) return { hasUpdate: false, notCheckable: true };
 
         if (isDebugEnabled()) {
             console.log(`[ImageUpdateService] Checking ${imageRef}: registry=${parsed.registry} repo=${parsed.repo} tag=${parsed.tag}`);
@@ -647,11 +682,15 @@ export class ImageUpdateService {
             const inspect = await withTimeout(docker.getDocker().getImage(imageRef).inspect(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'inspect');
             const repoDigests: string[] = inspect.RepoDigests ?? [];
 
+            // No RepoDigests at all: locally built / not registry-backed, so update
+            // status does not apply.
+            if (repoDigests.length === 0) return { hasUpdate: false, notCheckable: true };
+
             for (const rd of repoDigests) {
                 if (!rd.includes('@sha256:')) continue;
                 const [, digest] = rd.split('@');
 
-                if (rd.includes(parsed.repo) || rd.includes(parsed.registry) || repoDigests.length === 1) {
+                if (repoDigestMatchesRef(rd, parsed) || repoDigests.length === 1) {
                     localDigest = digest;
                     break;
                 }
@@ -660,7 +699,11 @@ export class ImageUpdateService {
             return { hasUpdate: false, error: `Failed to inspect local image "${imageRef}"` };
         }
 
-        if (!localDigest) return { hasUpdate: false };
+        // RepoDigests were present but none resolved a usable digest: genuinely
+        // ambiguous, so surface it rather than silently call the image up to date.
+        if (!localDigest) {
+            return { hasUpdate: false, error: `Could not resolve a local registry digest for "${imageRef}"` };
+        }
 
         const remoteDigest = await getRemoteDigest(parsed.registry, parsed.repo, parsed.tag, credentials);
         if (!remoteDigest) {

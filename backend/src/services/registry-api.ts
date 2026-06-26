@@ -50,8 +50,9 @@ export function parseImageRef(imageRef: string): ParsedRef | null {
     return { registry, repo: rest, tag };
 }
 
-export function httpGet(
+export function httpRequest(
     url: string,
+    method: 'GET' | 'HEAD',
     headers: Record<string, string> = {},
     timeoutMs = 10000,
 ): Promise<HttpResult> {
@@ -63,7 +64,7 @@ export function httpGet(
             settled = true;
             fn();
         };
-        const req = lib.get(url, { headers }, (res) => {
+        const req = lib.request(url, { method, headers }, (res) => {
             let body = '';
             res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
             res.on('end', () => finish(() => resolve({
@@ -79,7 +80,16 @@ export function httpGet(
             req.destroy(err);
             finish(() => reject(err));
         });
+        req.end();
     });
+}
+
+export function httpGet(
+    url: string,
+    headers: Record<string, string> = {},
+    timeoutMs = 10000,
+): Promise<HttpResult> {
+    return httpRequest(url, 'GET', headers, timeoutMs);
 }
 
 export async function getAuthToken(
@@ -129,6 +139,31 @@ const MANIFEST_ACCEPT = [
     'application/vnd.oci.image.manifest.v1+json',
 ].join(', ');
 
+/** docker.io has three hostnames that all address the same registry. */
+function canonicalRegistry(host: string): string {
+    if (host === 'docker.io' || host === 'index.docker.io' || host === 'registry-1.docker.io') {
+        return 'docker.io';
+    }
+    return host;
+}
+
+/**
+ * True when a local RepoDigest entry ("name@sha256:...") refers to the same
+ * registry + repository as the parsed image ref. Parses the name side through
+ * the same normalization as the image ref (Docker Hub's implicit `library/`
+ * namespace and default registry), replacing a fragile substring check that
+ * missed `library/*` official images: their RepoDigests read `nginx@sha256:...`,
+ * never `library/nginx@...`, so `name.includes('library/nginx')` was false.
+ */
+export function repoDigestMatchesRef(repoDigest: string, parsed: ParsedRef): boolean {
+    const at = repoDigest.indexOf('@');
+    if (at === -1) return false;
+    const parsedName = parseImageRef(repoDigest.slice(0, at));
+    if (!parsedName) return false;
+    return canonicalRegistry(parsedName.registry) === canonicalRegistry(parsed.registry)
+        && parsedName.repo === parsed.repo;
+}
+
 export async function getRemoteDigest(
     registry: string,
     repo: string,
@@ -139,10 +174,28 @@ export async function getRemoteDigest(
         const token = await getAuthToken(registry, repo, credentials);
         const headers: Record<string, string> = { Accept: MANIFEST_ACCEPT };
         if (token) headers['Authorization'] = `Bearer ${token}`;
+        const url = `https://${registry}/v2/${repo}/manifests/${tag}`;
 
-        const res = await httpGet(`https://${registry}/v2/${repo}/manifests/${tag}`, headers);
+        // HEAD first: the registry returns docker-content-digest without
+        // transferring the manifest body, so it does not draw down Docker Hub's
+        // anonymous pull-rate budget the way a GET does (a GET can self-inflict a
+        // 429). Fall back to GET only when the registry rejects HEAD (405/501) or
+        // omits the digest header on a 200. A 401/403/404/429/5xx HEAD returns
+        // null without a GET retry: the bearer token is fetched up-front, so a
+        // 401 here is a real auth failure, not a token-scope challenge to retry.
+        const head = await httpRequest(url, 'HEAD', headers);
+        if (head.statusCode === 200) {
+            const digest = head.headers['docker-content-digest'];
+            if (typeof digest === 'string') return digest;
+        } else if (head.statusCode !== 405 && head.statusCode !== 501) {
+            // 401/403/404/429/5xx: a GET would fail the same way. Report as unreachable.
+            return null;
+        }
+
+        const res = await httpRequest(url, 'GET', headers);
         if (res.statusCode !== 200) return null;
-        return (res.headers['docker-content-digest'] as string) ?? null;
+        const digest = res.headers['docker-content-digest'];
+        return typeof digest === 'string' ? digest : null;
     } catch {
         return null;
     }

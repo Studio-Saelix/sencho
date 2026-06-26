@@ -289,14 +289,14 @@ export function useStackListState() {
     all: filteredFiles.length,
     up: filteredFiles.filter(f => stackStatuses[f] === 'running').length,
     down: filteredFiles.filter(f => isDownStatus(stackStatuses[f])).length,
-    updates: filteredFiles.filter(f => !!stackUpdates[f]).length,
+    updates: filteredFiles.filter(f => stackUpdates[f]?.hasUpdate).length,
   }), [filteredFiles, stackStatuses, stackUpdates]);
 
   const chipFilteredFiles = useMemo(() => {
     if (filterChip === 'all') return filteredFiles;
     if (filterChip === 'up') return filteredFiles.filter(f => stackStatuses[f] === 'running');
     if (filterChip === 'down') return filteredFiles.filter(f => isDownStatus(stackStatuses[f]));
-    if (filterChip === 'updates') return filteredFiles.filter(f => !!stackUpdates[f]);
+    if (filterChip === 'updates') return filteredFiles.filter(f => stackUpdates[f]?.hasUpdate);
     return filteredFiles;
   }, [filteredFiles, filterChip, stackStatuses, stackUpdates]);
 

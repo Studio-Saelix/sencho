@@ -101,4 +101,26 @@ describe('StackRow', () => {
     const { container } = render(<StackRow {...base({ labels })} />);
     expect(container.querySelectorAll('[style*="--label-"]')).toHaveLength(2);
   });
+
+  // ── Image-update check status indicator ────────────────────────────────
+  // status='running' renders the pill as plain text (no tooltip), so the only
+  // cursor-container in these rows is the trailing update/check indicator.
+
+  it('shows a muted check-failed indicator when the last check failed and there is no update', () => {
+    const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: false, checkStatus: 'failed', lastError: 'Registry unreachable' })} />);
+    expect(container.querySelector('[data-slot="cursor-container"]')).not.toBeNull();
+    // It is not the update dot.
+    expect(container.querySelector('.bg-update')).toBeNull();
+  });
+
+  it('prefers the update dot over the check-failed indicator', () => {
+    const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: true, checkStatus: 'failed' })} />);
+    expect(container.querySelector('.bg-update')).not.toBeNull();
+  });
+
+  it('shows no trailing indicator for a clean ok check with no update', () => {
+    const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: false, checkStatus: 'ok' })} />);
+    expect(container.querySelector('[data-slot="cursor-container"]')).toBeNull();
+    expect(container.querySelector('.bg-update')).toBeNull();
+  });
 });
