@@ -736,7 +736,6 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
     let accepted = 0;
     let notAffected = 0;
     let needsReview = 0;
-    let knownExploited = 0;
     for (const [imageRef, group] of critHighByImage) {
       for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
         if (e.triage_status === 'needs_review') needsReview += 1;
@@ -748,7 +747,24 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
         }
         // Not dismissed (no decision, needs_review, or affected): still actionable.
         if (e.fixed_version) fixableCriticalHigh += 1;
-        if (intel.get(e.vulnerability_id)?.kev) knownExploited += 1;
+      }
+    }
+
+    // A known-exploited (KEV) finding gates a deploy at ANY severity, so the
+    // posture fact counts non-suppressed KEV findings across all severities, not
+    // just Critical/High. Sourced from its own latest-scan query so a Low/Medium
+    // KEV that the gate would block on is never invisible on the overview.
+    const kevFindings = db.getLatestKevFindingsForNode(req.nodeId);
+    const kevByImage = new Map<string, typeof kevFindings.items>();
+    for (const f of kevFindings.items) {
+      const group = kevByImage.get(f.image_ref);
+      if (group) group.push(f);
+      else kevByImage.set(f.image_ref, [f]);
+    }
+    let knownExploited = 0;
+    for (const [imageRef, group] of kevByImage) {
+      for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
+        if (!e.suppressed) knownExploited += 1;
       }
     }
 
@@ -858,7 +874,7 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       notAffected,
       actionable,
       posture,
-      posturePartial: critHigh.truncated || highMisconfigs.truncated,
+      posturePartial: critHigh.truncated || kevFindings.truncated || highMisconfigs.truncated,
       postureReasons,
       primaryAction,
     };
@@ -899,10 +915,10 @@ interface ExploitIntelFinding {
 }
 
 // Node-scoped, auth-only (Community). Returns the latest-scan Critical/High
-// findings that are still actionable (dismissed triage decisions filtered out),
-// enriched at read time with KEV/EPSS intel. Powers the Top exploit-risk list
-// and the CVSS-by-EPSS quadrant on the Security overview. Bounded; `truncated`
-// flags a capped node.
+// findings (plus known-exploited findings at any severity) that are still
+// actionable (dismissed triage decisions filtered out), enriched at read time
+// with KEV/EPSS intel. Powers the Top exploit-risk list and the CVSS-by-EPSS
+// quadrant on the Security overview. Bounded; `truncated` flags a capped node.
 securityRouter.get('/overview/exploit-intel', authMiddleware, (req: Request, res: Response): void => {
   try {
     const db = DatabaseService.getInstance();

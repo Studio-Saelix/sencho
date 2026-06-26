@@ -4963,21 +4963,47 @@ export class DatabaseService {
     }
 
     public getImageScanSummaries(nodeId: number): Record<string, ScanSummary> {
+        // The per-image row is the latest scan overall (so a secret-only or
+        // compose/config scan still contributes its secret/misconfig counts and
+        // staleness), but the vulnerability counts are sourced from the latest
+        // VULN-bearing scan via a LEFT JOIN. Without this, a newer secret-only
+        // node scan would clobber an image's Critical/High posture to zero.
+        const placeholders = VULN_BEARING_SCANNER_SETS.map(() => '?').join(', ');
         const rows = this.db
             .prepare(
-                `SELECT vs.image_ref, vs.id as scan_id, vs.highest_severity, vs.total_vulnerabilities,
-                    vs.critical_count, vs.high_count, vs.medium_count, vs.low_count,
-                    vs.unknown_count, vs.fixable_count, vs.secret_count, vs.misconfig_count, vs.scanned_at
-                 FROM vulnerability_scans vs
+                `SELECT base.image_ref, base.scanned_at,
+                    base.secret_count, base.misconfig_count,
+                    COALESCE(vuln.scan_id, base.id) AS scan_id,
+                    COALESCE(vuln.highest_severity, base.highest_severity) AS highest_severity,
+                    COALESCE(vuln.total_vulnerabilities, 0) AS total_vulnerabilities,
+                    COALESCE(vuln.critical_count, 0) AS critical_count,
+                    COALESCE(vuln.high_count, 0) AS high_count,
+                    COALESCE(vuln.medium_count, 0) AS medium_count,
+                    COALESCE(vuln.low_count, 0) AS low_count,
+                    COALESCE(vuln.unknown_count, 0) AS unknown_count,
+                    COALESCE(vuln.fixable_count, 0) AS fixable_count
+                 FROM vulnerability_scans base
                  INNER JOIN (
                    SELECT image_ref, MAX(scanned_at) AS max_scanned
                    FROM vulnerability_scans
                    WHERE node_id = ? AND status = 'completed'
                    GROUP BY image_ref
-                 ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
-                 WHERE vs.node_id = ? AND vs.status = 'completed'`,
+                 ) latest ON latest.image_ref = base.image_ref AND latest.max_scanned = base.scanned_at
+                 LEFT JOIN (
+                   SELECT v.image_ref, v.id AS scan_id, v.highest_severity, v.total_vulnerabilities, v.critical_count,
+                          v.high_count, v.medium_count, v.low_count, v.unknown_count, v.fixable_count
+                   FROM vulnerability_scans v
+                   INNER JOIN (
+                     SELECT image_ref, MAX(scanned_at) AS max_scanned
+                     FROM vulnerability_scans
+                     WHERE node_id = ? AND status = 'completed' AND scanners_used IN (${placeholders})
+                     GROUP BY image_ref
+                   ) lv ON lv.image_ref = v.image_ref AND lv.max_scanned = v.scanned_at
+                   WHERE v.node_id = ? AND v.status = 'completed' AND v.scanners_used IN (${placeholders})
+                 ) vuln ON vuln.image_ref = base.image_ref
+                 WHERE base.node_id = ? AND base.status = 'completed'`,
             )
-            .all(nodeId, nodeId) as Array<{
+            .all(nodeId, nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId) as Array<{
                 image_ref: string;
                 scan_id: number;
                 highest_severity: VulnSeverity | null;
@@ -5029,6 +5055,7 @@ export class DatabaseService {
         items: Array<{ image_ref: string; vulnerability_id: string; pkg_name: string; fixed_version: string | null }>;
         truncated: boolean;
     } {
+        const placeholders = VULN_BEARING_SCANNER_SETS.map(() => '?').join(', ');
         const rows = this.db
             .prepare(
                 `SELECT vs.image_ref, vd.vulnerability_id, vd.pkg_name, vd.fixed_version
@@ -5037,14 +5064,55 @@ export class DatabaseService {
                  INNER JOIN (
                    SELECT image_ref, MAX(scanned_at) AS max_scanned
                    FROM vulnerability_scans
-                   WHERE node_id = ? AND status = 'completed'
+                   WHERE node_id = ? AND status = 'completed' AND scanners_used IN (${placeholders})
                    GROUP BY image_ref
                  ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
-                 WHERE vs.node_id = ? AND vs.status = 'completed'
+                 WHERE vs.node_id = ? AND vs.status = 'completed' AND vs.scanners_used IN (${placeholders})
                    AND vd.severity IN ('CRITICAL', 'HIGH')
                  LIMIT ?`,
             )
-            .all(nodeId, nodeId, limit + 1) as Array<{
+            .all(nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId, ...VULN_BEARING_SCANNER_SETS, limit + 1) as Array<{
+                image_ref: string;
+                vulnerability_id: string;
+                pkg_name: string;
+                fixed_version: string | null;
+            }>;
+        const truncated = rows.length > limit;
+        return { items: truncated ? rows.slice(0, limit) : rows, truncated };
+    }
+
+    /**
+     * Known-exploited (CISA KEV) findings at ANY severity from the latest
+     * completed vuln-bearing scan per image, for the `knownExploited` posture
+     * fact. The deploy gate blocks a KEV regardless of severity, so this is not
+     * restricted to Critical/High the way the fixable/triage helpers are.
+     * Suppression filtering is applied by the caller at read time. Same bounded
+     * shape as `getLatestCritHighVulnFindingsForNode`.
+     */
+    public getLatestKevFindingsForNode(
+        nodeId: number,
+        limit = 5000,
+    ): {
+        items: Array<{ image_ref: string; vulnerability_id: string; pkg_name: string; fixed_version: string | null }>;
+        truncated: boolean;
+    } {
+        const placeholders = VULN_BEARING_SCANNER_SETS.map(() => '?').join(', ');
+        const rows = this.db
+            .prepare(
+                `SELECT vs.image_ref, vd.vulnerability_id, vd.pkg_name, vd.fixed_version
+                 FROM vulnerability_details vd
+                 INNER JOIN vulnerability_scans vs ON vs.id = vd.scan_id
+                 INNER JOIN cve_intel ci ON ci.cve_id = vd.vulnerability_id AND ci.kev = 1
+                 INNER JOIN (
+                   SELECT image_ref, MAX(scanned_at) AS max_scanned
+                   FROM vulnerability_scans
+                   WHERE node_id = ? AND status = 'completed' AND scanners_used IN (${placeholders})
+                   GROUP BY image_ref
+                 ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
+                 WHERE vs.node_id = ? AND vs.status = 'completed' AND vs.scanners_used IN (${placeholders})
+                 LIMIT ?`,
+            )
+            .all(nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId, ...VULN_BEARING_SCANNER_SETS, limit + 1) as Array<{
                 image_ref: string;
                 vulnerability_id: string;
                 pkg_name: string;
@@ -5084,11 +5152,14 @@ export class DatabaseService {
     }
 
     /**
-     * Critical/High findings from the latest completed scan per image, with the
-     * severity + CVSS the overview's exploit-intel charts need. Same bounded
-     * shape as getLatestCritHighVulnFindingsForNode (single latest-per-image
-     * JOIN, capped, `truncated` flagged). Intel (KEV/EPSS) and suppression
-     * filtering are applied by the caller at read time.
+     * Critical/High findings (plus known-exploited findings at any severity)
+     * from the latest completed scan per image, with the severity + CVSS the
+     * overview's exploit-intel charts need. Same bounded shape as
+     * getLatestCritHighVulnFindingsForNode (single latest-per-image JOIN, capped,
+     * `truncated` flagged). A KEV finding gates a deploy regardless of its
+     * severity, so a Medium/Low KEV is selected here (via the cve_intel join) to
+     * match the gate. Intel (KEV/EPSS) and suppression filtering are applied by
+     * the caller at read time.
      */
     public getLatestCritHighFindingsWithCvssForNode(
         nodeId: number,
@@ -5105,23 +5176,25 @@ export class DatabaseService {
         }>;
         truncated: boolean;
     } {
+        const placeholders = VULN_BEARING_SCANNER_SETS.map(() => '?').join(', ');
         const rows = this.db
             .prepare(
                 `SELECT vs.image_ref, vs.id AS scan_id, vd.vulnerability_id, vd.pkg_name,
                         vd.severity, vd.cvss_score, vd.fixed_version
                  FROM vulnerability_details vd
                  INNER JOIN vulnerability_scans vs ON vs.id = vd.scan_id
+                 LEFT JOIN cve_intel ci ON ci.cve_id = vd.vulnerability_id
                  INNER JOIN (
                    SELECT image_ref, MAX(scanned_at) AS max_scanned
                    FROM vulnerability_scans
-                   WHERE node_id = ? AND status = 'completed'
+                   WHERE node_id = ? AND status = 'completed' AND scanners_used IN (${placeholders})
                    GROUP BY image_ref
                  ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
-                 WHERE vs.node_id = ? AND vs.status = 'completed'
-                   AND vd.severity IN ('CRITICAL', 'HIGH')
+                 WHERE vs.node_id = ? AND vs.status = 'completed' AND vs.scanners_used IN (${placeholders})
+                   AND (vd.severity IN ('CRITICAL', 'HIGH') OR ci.kev = 1)
                  LIMIT ?`,
             )
-            .all(nodeId, nodeId, limit + 1) as Array<{
+            .all(nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId, ...VULN_BEARING_SCANNER_SETS, limit + 1) as Array<{
                 image_ref: string;
                 scan_id: number;
                 vulnerability_id: string;
