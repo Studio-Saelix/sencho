@@ -954,7 +954,7 @@ export class SchedulerService {
             NotificationService.getInstance().dispatchAlert(
                 'warning',
                 'scan_finding',
-                `Policy "${v.policyName}" violated by ${v.imageRef}: ${v.severity} exceeds ${v.maxSeverity}`,
+                `Policy "${v.policyName}" violated by ${v.imageRef}: matched ${summarizeBlockReasons([v])}`,
                 { actor: 'system:scheduler' },
             );
         }

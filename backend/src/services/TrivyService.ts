@@ -9,6 +9,7 @@ import {
     VulnSeverity,
     VulnScanTrigger,
     VulnerabilityScan,
+    parsePolicyEvaluation,
 } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { RegistryService } from './RegistryService';
@@ -19,6 +20,7 @@ import { FleetSyncService } from './FleetSyncService';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { SEVERITY_ORDER } from '../utils/severity';
+import type { PolicyBlockReason } from '../utils/policy-risk';
 
 const execFileAsync = promisify(execFile);
 
@@ -138,6 +140,9 @@ export interface ScanAllNodeImagesViolation {
     severity: VulnSeverity;
     policyName: string;
     maxSeverity: VulnSeverity;
+    // Inputs that matched (severity / kev / fixable), so the scheduled-scan
+    // alert names the reason rather than always citing a severity threshold.
+    reasons: PolicyBlockReason[];
 }
 
 export interface ScanAllNodeImagesResult {
@@ -1189,24 +1194,20 @@ class TrivyService {
         };
 
         const collectViolation = (row: VulnerabilityScan | null): void => {
-            if (!row || !row.policy_evaluation) return;
-            try {
-                const parsed = JSON.parse(row.policy_evaluation) as {
-                    violated: boolean;
-                    policyName: string;
-                    maxSeverity: VulnSeverity;
-                };
-                if (parsed.violated) {
-                    violations.push({
-                        imageRef: row.image_ref,
-                        scanId: row.id,
-                        severity: row.highest_severity ?? 'UNKNOWN',
-                        policyName: parsed.policyName,
-                        maxSeverity: parsed.maxSeverity,
-                    });
-                }
-            } catch {
-                // Ignore malformed evaluation JSON; presence is informational.
+            if (!row) return;
+            // Shared parser tolerates malformed JSON (returns null) and normalizes
+            // reasons, so the scheduled-scan alert names the same validated inputs
+            // as the banner.
+            const parsed = parsePolicyEvaluation(row.policy_evaluation);
+            if (parsed?.violated) {
+                violations.push({
+                    imageRef: row.image_ref,
+                    scanId: row.id,
+                    severity: row.highest_severity ?? 'UNKNOWN',
+                    policyName: parsed.policyName,
+                    maxSeverity: parsed.maxSeverity,
+                    reasons: parsed.reasons,
+                });
             }
         };
 

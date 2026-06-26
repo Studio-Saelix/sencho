@@ -4,10 +4,16 @@ export type VulnSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
 export type VulnScanStatus = 'in_progress' | 'completed' | 'failed';
 export type VulnScanTrigger = 'manual' | 'scheduled' | 'deploy' | 'deploy-preflight';
 
+export type PolicyBlockReason = 'severity' | 'kev' | 'fixable';
+
 export interface ScanPolicyEvaluation {
   policyId: number;
   policyName: string;
   maxSeverity: VulnSeverity;
+  // Inputs that matched (severity / kev / fixable). Empty for evaluations
+  // persisted before reason tracking; the banner falls back to a plain
+  // violation notice in that case.
+  reasons: PolicyBlockReason[];
   violated: boolean;
 }
 

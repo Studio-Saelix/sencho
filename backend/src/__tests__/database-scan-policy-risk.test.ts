@@ -10,10 +10,11 @@ import type { VulnerabilityScan, VulnerabilityDetail } from '../services/Databas
 
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
+let parsePolicyEvaluation: typeof import('../services/DatabaseService').parsePolicyEvaluation;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
-  ({ DatabaseService } = await import('../services/DatabaseService'));
+  ({ DatabaseService, parsePolicyEvaluation } = await import('../services/DatabaseService'));
 });
 
 afterAll(() => {
@@ -125,5 +126,40 @@ describe('evaluateScanAgainstPolicies risk inputs', () => {
 
     const cleanScan = seedScan('web', 'CRITICAL', [detail({ vulnerability_id: 'CVE-2026-9200', severity: 'CRITICAL' })]);
     expect(db.evaluateScanAgainstPolicies(1, cleanScan, '')!.violated).toBe(false);
+  });
+
+  it('records the matched inputs as reasons so the banner can name them', () => {
+    const db = DatabaseService.getInstance();
+    db.createScanPolicy({ ...basePolicy, stack_pattern: 'web', block_on_severity: 0, block_on_kev: 1, block_on_fixable: 1 });
+    db.replaceKev([{ cve_id: 'CVE-2026-9100', date_added: '2026-01-01' }], Date.now());
+    const scan = seedScan('web', 'CRITICAL', [
+      detail({ vulnerability_id: 'CVE-2026-9100', severity: 'CRITICAL', fixed_version: '2.0' }),
+    ]);
+    expect(db.evaluateScanAgainstPolicies(1, scan, '')!.reasons).toEqual(['kev', 'fixable']);
+  });
+
+  it('records ["severity"] for a severity-only violation and [] when within limits', () => {
+    const db = DatabaseService.getInstance();
+    db.createScanPolicy({ ...basePolicy, stack_pattern: 'web', max_severity: 'HIGH' });
+    expect(db.evaluateScanAgainstPolicies(1, seedScan('web', 'CRITICAL', []), '')!.reasons).toEqual(['severity']);
+    expect(db.evaluateScanAgainstPolicies(1, seedScan('web', 'LOW', []), '')!.reasons).toEqual([]);
+  });
+});
+
+describe('parsePolicyEvaluation', () => {
+  const base = { policyId: 1, policyName: 'p', maxSeverity: 'HIGH', violated: true };
+
+  it('defaults reasons to [] for rows persisted before reason tracking', () => {
+    expect(parsePolicyEvaluation(JSON.stringify(base))).toMatchObject({ violated: true, reasons: [] });
+  });
+
+  it('drops reason values outside the known set', () => {
+    const tampered = JSON.stringify({ ...base, reasons: ['kev', 'banana', 'fixable'] });
+    expect(parsePolicyEvaluation(tampered)!.reasons).toEqual(['kev', 'fixable']);
+  });
+
+  it('returns null for null or malformed input', () => {
+    expect(parsePolicyEvaluation(null)).toBeNull();
+    expect(parsePolicyEvaluation('not json')).toBeNull();
   });
 });
