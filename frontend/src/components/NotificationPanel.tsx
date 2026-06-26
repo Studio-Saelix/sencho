@@ -421,37 +421,27 @@ function NotificationRow({ notif, showNodeName, onDelete, onNavigate, onNavigate
                 >
                     {notif.message}
                 </p>
-                <div className="mt-1 flex items-center justify-between gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
-                    <div className="flex items-center gap-1.5">
-                        {showNodeName && notif.nodeName ? (
-                            <>
-                                <span className="rounded-sm border border-card-border bg-muted/40 px-1.5 py-0.5 normal-case tracking-normal text-stat-subtitle">
-                                    {notif.nodeName}
-                                </span>
-                                <span className="text-stat-icon">·</span>
-                            </>
-                        ) : null}
-                        <span className="tabular-nums">{formatRelative(notif.timestamp)}</span>
-                    </div>
-                    {notif.category === 'node_update_available' && onNavigateChangelog && (
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-5 px-1.5 text-[10px] font-sans normal-case tracking-normal text-brand hover:text-brand/80"
-                            onClick={(e) => { e.stopPropagation(); onNavigateChangelog(notif); }}
-                        >
-                            View changelog
-                        </Button>
-                    )}
+                <div className="mt-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
+                    {showNodeName && notif.nodeName ? (
+                        <>
+                            <span className="rounded-sm border border-card-border bg-muted/40 px-1.5 py-0.5 normal-case tracking-normal text-stat-subtitle">
+                                {notif.nodeName}
+                            </span>
+                            <span className="text-stat-icon">·</span>
+                        </>
+                    ) : null}
+                    <span className="tabular-nums">{formatRelative(notif.timestamp)}</span>
                 </div>
             </div>
         </>
     );
 
     const ariaLabel = isRoutable
-        ? (notif.container_name
-            ? `Open ${notif.stack_name} and view logs for ${notif.container_name}`
-            : `Open ${notif.stack_name}`)
+        ? (notif.category === 'node_update_available'
+            ? 'Open Fleet node updates'
+            : notif.container_name
+                ? `Open ${notif.stack_name} and view logs for ${notif.container_name}`
+                : `Open ${notif.stack_name}`)
         : undefined;
 
     return (
@@ -474,6 +464,21 @@ function NotificationRow({ notif, showNodeName, onDelete, onNavigate, onNavigate
                 </button>
             ) : (
                 <div className={surfaceClasses}>{content}</div>
+            )}
+            {notif.category === 'node_update_available' && onNavigateChangelog && (
+                <div className="flex items-center border-t border-card-border/40 px-[var(--density-row-x)] py-1">
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-5 px-1.5 text-[10px] font-sans normal-case tracking-normal text-brand hover:text-brand/80"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onNavigateChangelog(notif);
+                        }}
+                    >
+                        View changelog
+                    </Button>
+                </div>
             )}
             <Button
                 variant="ghost"

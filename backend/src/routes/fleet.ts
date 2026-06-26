@@ -1065,9 +1065,10 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
   }
 });
 // Release notes for the Changelog tab in the Node Updates sheet.
-fleetRouter.get('/update-status/release-notes', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
+fleetRouter.get('/update-status/release-notes', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
-    const release = await getLatestRelease();
+    const forceRefresh = req.query.recheck === 'true';
+    const release = await getLatestRelease(forceRefresh);
     res.json({
       releaseNotes: release?.body ?? null,
       htmlUrl: release?.html_url ?? null,
@@ -1108,12 +1109,13 @@ fleetRouter.post('/nodes/:nodeId/skip-version', authMiddleware, async (req: Requ
         return;
       }
       const { version } = req.body ?? {};
-      if (typeof version !== 'string' || version.length === 0 || version.length > 64 || !semver.valid(version)) {
+      const normalized = typeof version === 'string' ? semver.valid(version) : null;
+      if (!normalized || version.length > 64) {
         res.status(400).json({ error: 'Invalid version' });
         return;
       }
       const username = req.user?.username ?? 'unknown';
-      db.setNodeUpdateSkip(nodeId, version, username);
+      db.setNodeUpdateSkip(nodeId, normalized, username);
       res.status(204).end();
     } catch (error) {
       console.error('[Fleet] Skip-version error:', error);

@@ -50,11 +50,13 @@ export function NodeUpdatesSheet({
     }, [open, initialTab]);
 
     // Always fetch release notes when the sheet opens (changelog shows current
-    // release regardless of update availability).
+    // release regardless of update availability). Pass recheck when the user
+    // forced a version recheck so the changelog stays in sync.
     useEffect(() => {
         if (open && releaseNotes === null && !loadingRelease) {
             setLoadingRelease(true);
-            apiFetch('/fleet/update-status/release-notes', { localOnly: true })
+            const recheck = recheckingUpdates ? '?recheck=true' : '';
+            apiFetch(`/fleet/update-status/release-notes${recheck}`, { localOnly: true })
                 .then(res => res.ok ? res.json() as Promise<{ releaseNotes: string | null; htmlUrl: string | null }> : null)
                 .then(data => {
                     if (data) {
@@ -65,7 +67,7 @@ export function NodeUpdatesSheet({
                 .catch(() => { /* silent */ })
                 .finally(() => setLoadingRelease(false));
         }
-    }, [open, releaseNotes, loadingRelease]);
+    }, [open, releaseNotes, loadingRelease, recheckingUpdates]);
 
     // Clear the changelog dot when user opens that tab.
     useEffect(() => {
@@ -85,6 +87,7 @@ export function NodeUpdatesSheet({
 
     const handleRecheck = async () => {
         setRecheckingUpdates(true);
+        setReleaseNotes(null); // force re-fetch with fresh release notes
         try {
             const res = await apiFetch('/fleet/update-status?recheck=true', { method: 'DELETE', localOnly: true });
             if (res.ok) {

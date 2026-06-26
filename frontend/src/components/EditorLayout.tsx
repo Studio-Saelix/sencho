@@ -414,18 +414,24 @@ export default function EditorLayout() {
   // returns early when already on Fleet, but the state change triggers render).
   const handleNotificationNavigate = useCallback((notif: NotificationItem) => {
     if (notif.category === 'node_update_available') {
-      setFleetUpdatesIntent({ tab: 'nodes' });
-      if (isMobile) navigateMobileAware('fleet');
-      else handleNavigate('fleet');
+      if (isMobile) {
+        navigateMobileAware('fleet');
+      } else {
+        setFleetUpdatesIntent({ tab: 'nodes' });
+        handleNavigate('fleet');
+      }
       return;
     }
     stackActions.navigateToNotification(notif);
   }, [isMobile, navigateMobileAware, handleNavigate, stackActions]);
 
   const handleNotificationNavigateChangelog = useCallback((_notif: NotificationItem) => {
-    setFleetUpdatesIntent({ tab: 'changelog' });
-    if (isMobile) navigateMobileAware('fleet');
-    else handleNavigate('fleet');
+    if (isMobile) {
+      navigateMobileAware('fleet');
+    } else {
+      setFleetUpdatesIntent({ tab: 'changelog' });
+      handleNavigate('fleet');
+    }
   }, [isMobile, navigateMobileAware, handleNavigate]);
 
   const renderEditor = (headerActions?: ReactNode) => (

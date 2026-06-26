@@ -106,6 +106,18 @@ describe('POST /api/fleet/nodes/:nodeId/skip-version', () => {
     expect(skip!.skippedBy).toBe(TEST_USERNAME);
   });
 
+  it('normalizes v-prefixed version on persist', async () => {
+    const res = await request(app)
+      .post(`/api/fleet/nodes/${localNodeId}/skip-version`)
+      .set('Authorization', adminAuth)
+      .send({ version: 'v0.99.0' });
+    expect(res.status).toBe(204);
+
+    const skip = db.getNodeUpdateSkip(localNodeId);
+    expect(skip).not.toBeNull();
+    expect(skip!.skippedVersion).toBe('0.99.0'); // stored without v prefix
+  });
+
   it('replaces existing skip on second POST', async () => {
     // First skip
     await request(app)
