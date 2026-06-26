@@ -239,6 +239,85 @@ describe('GET /api/security/overview', () => {
     expect(res.body).toMatchObject({ knownExploited: 1, fixableCriticalHigh: 0, posture: 'Action needed' });
   });
 
+  it('preserves vulnerability posture when a newer secret-only scan exists for the same image', async () => {
+    const now = Date.now();
+    // Vulnerability scan: one unfixable Critical that is known-exploited.
+    const vulnScan = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'app:1', image_digest: 'sha256:app-vuln', scanned_at: now - 1000,
+      total_vulnerabilities: 1, critical_count: 1, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'CRITICAL', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(vulnScan, [{
+      vulnerability_id: 'CVE-2024-5001', pkg_name: 'libkev', installed_version: '1', fixed_version: null,
+      severity: 'CRITICAL', title: null, description: null, primary_url: null,
+    }]);
+    db().replaceKev([{ cve_id: 'CVE-2024-5001', date_added: '2024-01-01' }], now);
+    // Newer secret-only node scan for the SAME image: no vuln details, carries a secret.
+    db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'app:1', image_digest: 'sha256:app-secret', scanned_at: now,
+      total_vulnerabilities: 0, critical_count: 0, high_count: 0, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 1, misconfig_count: 0, scanners_used: 'secret',
+      highest_severity: null, os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    // The secret-only scan must not erase the vulnerability posture, and its
+    // secret finding is still counted.
+    expect(res.body).toMatchObject({
+      critical: 1,
+      knownExploited: 1,
+      secrets: 1,
+      posture: 'Action needed',
+    });
+  });
+
+  it('counts a Low/Medium known-exploited finding in knownExploited and posture (matches the deploy gate)', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'lowkev:1', image_digest: 'sha256:lowkev', scanned_at: now,
+      total_vulnerabilities: 1, critical_count: 0, high_count: 0, medium_count: 0, low_count: 1,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'LOW', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [{
+      vulnerability_id: 'CVE-2024-5002', pkg_name: 'liblow', installed_version: '1', fixed_version: null,
+      severity: 'LOW', title: null, description: null, primary_url: null,
+    }]);
+    // The deploy gate blocks a KEV at any severity; the overview must agree.
+    db().replaceKev([{ cve_id: 'CVE-2024-5002', date_added: '2024-01-01' }], now);
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ knownExploited: 1, posture: 'Action needed' });
+  });
+
+  it('excludes a suppressed (accepted) KEV from knownExploited', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'suppkev:1', image_digest: 'sha256:suppkev', scanned_at: now,
+      total_vulnerabilities: 2, critical_count: 0, high_count: 0, medium_count: 2, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'MEDIUM', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      { vulnerability_id: 'CVE-2024-KEVA', pkg_name: 'a', installed_version: '1', fixed_version: null, severity: 'MEDIUM', title: null, description: null, primary_url: null },
+      { vulnerability_id: 'CVE-2024-KEVB', pkg_name: 'b', installed_version: '1', fixed_version: null, severity: 'MEDIUM', title: null, description: null, primary_url: null },
+    ]);
+    db().replaceKev([{ cve_id: 'CVE-2024-KEVA', date_added: '2024-01-01' }, { cve_id: 'CVE-2024-KEVB', date_added: '2024-01-01' }], now);
+    // KEVA is accepted (dismissed); only the live KEVB remains actionable.
+    db().createCveSuppression({ cve_id: 'CVE-2024-KEVA', pkg_name: null, image_pattern: null, reason: 'accepted', created_by: 'admin', created_at: now, expires_at: null, replicated_from_control: 0, status: 'accepted' });
+
+    const res = await request(app).get('/api/security/overview').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.knownExploited).toBe(1);
+  });
+
   it('reads Secure when a scan completed with nothing actionable or severe', async () => {
     db().createVulnerabilityScan({
       node_id: 1, image_ref: 'clean:1', image_digest: 'sha256:clean', scanned_at: Date.now(),
@@ -434,6 +513,29 @@ describe('GET /api/security/overview/exploit-intel', () => {
     expect(items.find((i) => i.vulnerability_id === 'CVE-2024-AAAA')).toMatchObject({ cvss_score: 9.8, epss_score: 0.6, kev: true, severity: 'CRITICAL', scan_id: scanId });
     expect(items.find((i) => i.vulnerability_id === 'CVE-2024-BBBB')).toMatchObject({ cvss_score: 7.2, epss_score: null, kev: false });
     expect(res.body.truncated).toBe(false);
+  });
+
+  it('includes a Medium/Low known-exploited finding alongside Critical/High', async () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'mix:1', image_digest: 'sha256:mix', scanned_at: now,
+      total_vulnerabilities: 2, critical_count: 0, high_count: 0, medium_count: 1, low_count: 1,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'MEDIUM', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    db().insertVulnerabilityDetails(scanId, [
+      { vulnerability_id: 'CVE-2024-MEDK', pkg_name: 'm', installed_version: '1', fixed_version: null, severity: 'MEDIUM', title: null, description: null, primary_url: null, cvss_score: 5.5 },
+      { vulnerability_id: 'CVE-2024-LOWN', pkg_name: 'l', installed_version: '1', fixed_version: null, severity: 'LOW', title: null, description: null, primary_url: null, cvss_score: 3.1 },
+    ]);
+    // Only the Medium finding is known-exploited; the Low non-KEV stays out.
+    db().replaceKev([{ cve_id: 'CVE-2024-MEDK', date_added: '2024-01-01' }], now);
+
+    const res = await request(app).get('/api/security/overview/exploit-intel').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    const ids = (res.body.items as Array<{ vulnerability_id: string }>).map((i) => i.vulnerability_id);
+    expect(ids).toContain('CVE-2024-MEDK');
+    expect(ids).not.toContain('CVE-2024-LOWN');
   });
 
   it('requires authentication', async () => {
