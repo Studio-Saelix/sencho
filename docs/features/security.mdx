@@ -27,7 +27,15 @@ posture itself: a vulnerable component being present is not the same as a reacha
 The masthead carries a standing note to that effect, and posture weighs fix availability, exploit
 intelligence, and triage decisions rather than raw severity alone.
 
-Below it, the charts lead with prioritization rather than raw severity: a **risk trend** for context,
+Below the masthead, a **Review queue** card leads the overview when actions or review items exist.
+When the posture is Action needed the card is titled **Why Action needed** and lists each concrete
+action with a count and a tab-shortcut button: fixable findings, known-exploited CVEs, detected
+secrets, unacknowledged Compose risks, and publicly exposed affected images. When only monitoring
+items remain (exposed images with no fix or known exploit, findings awaiting triage, stale or failed
+scans) the card is titled **Review queue** and lists them without the red masthead, so the operator
+can see what to keep an eye on without a permanent alarm.
+
+The charts then lead with prioritization rather than raw severity: a **risk trend** for context,
 an **action posture** breakdown (fixable, known-exploited, needs-review, accepted, not-affected), a
 **top exploit-risk** list ranking actionable findings by known-exploited status then EPSS, and a
 **severity-by-exploitability** quadrant that separates high-severity-but-unlikely findings from the

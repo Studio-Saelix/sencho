@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { SecuritySevStrip, SecurityTotalsGrid, SecurityFooterBand } from './SecurityMobile';
-import type { SecurityOverview, SecurityRiskTrendPoint, ExploitIntelFinding } from '@/types/security';
+import type { SecurityOverview, SecurityRiskTrendPoint, ExploitIntelFinding, PostureReason } from '@/types/security';
 import type { SecurityTab } from '@/lib/events';
 import {
   RiskTrendChart,
@@ -53,6 +53,73 @@ function ChartCard({ title, className, children }: { title: string; className?: 
     <div className={cn('rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4', className)}>
       <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle mb-3">{title}</h3>
       {children}
+    </div>
+  );
+}
+
+const SEVERITY_DOT: Record<PostureReason['severity'], string> = {
+  blocker: 'bg-destructive',
+  review: 'bg-warning',
+  info: 'bg-stat-subtitle',
+};
+
+const SEVERITY_LABEL: Record<PostureReason['severity'], string> = {
+  blocker: 'text-destructive',
+  review: 'text-warning',
+  info: 'text-stat-subtitle',
+};
+
+function ReviewQueueCard({
+  reasons,
+  onNavigate,
+}: {
+  reasons: PostureReason[];
+  onNavigate: (tab: SecurityTab) => void;
+}) {
+  const blockers = reasons.filter((r) => r.severity === 'blocker');
+  const nonBlockers = reasons.filter((r) => r.severity !== 'blocker');
+  const hasBlockers = blockers.length > 0;
+  const title = hasBlockers ? 'Why Action needed' : 'Review queue';
+
+  return (
+    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4">
+      <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle mb-3">{title}</h3>
+      <div className="space-y-3">
+        {blockers.map((r, i) => (
+          <div key={`${r.kind}-${i}`} className="flex items-start gap-3">
+            <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', SEVERITY_DOT[r.severity])} aria-hidden />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={cn('font-mono text-sm', SEVERITY_LABEL[r.severity])}>{r.label}</span>
+                <span className="font-mono tabular-nums text-xs text-stat-subtitle">{r.count}</span>
+                <button
+                  type="button"
+                  onClick={() => onNavigate(r.targetTab)}
+                  className="text-xs font-medium text-brand hover:underline whitespace-nowrap ml-auto"
+                >
+                  Open {r.targetTab === 'compose' ? 'Compose risks' : r.targetTab === 'suppressions' ? 'Suppressions' : r.targetTab === 'secrets' ? 'Secrets' : r.targetTab === 'history' ? 'History' : r.targetTab === 'scanner' ? 'Scanner setup' : 'Images'} →
+                </button>
+              </div>
+              <p className="text-xs text-stat-subtitle mt-0.5">{r.description}</p>
+            </div>
+          </div>
+        ))}
+        {nonBlockers.length > 0 && hasBlockers && (
+          <div className="border-t border-hairline pt-3 mt-1" />
+        )}
+        {nonBlockers.map((r, i) => (
+          <div key={`${r.kind}-${i}`} className="flex items-start gap-3">
+            <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', SEVERITY_DOT[r.severity])} aria-hidden />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className={cn('font-mono text-sm', SEVERITY_LABEL[r.severity])}>{r.label}</span>
+                <span className="font-mono tabular-nums text-xs text-stat-subtitle">{r.count}</span>
+              </div>
+              <p className="text-xs text-stat-subtitle mt-0.5">{r.description}</p>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -126,6 +193,15 @@ export function OverviewTab({ overview, loadError, trend, exploitIntel, onNaviga
       {/* The masthead hides its stat cluster on a phone; restate it here. The
           scanner-detections note lives in the masthead's info affordance. */}
       {isMobile && <SecuritySevStrip overview={overview} />}
+
+      {/* Review queue: surfaces the "why" behind the posture -- blocker reasons
+          with CTAs, plus review/info items even when the masthead is not red. */}
+      {overview.posture && overview.posture !== 'Unknown' && overview.postureReasons && overview.postureReasons.length > 0 && (
+        <ReviewQueueCard
+          reasons={overview.postureReasons}
+          onNavigate={onNavigate}
+        />
+      )}
 
       {/* Charts lead the dashboard: the trend gives severity context, the rest
           answer "what should I act on first?" from posture + exploit intel. */}

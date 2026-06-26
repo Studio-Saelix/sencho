@@ -1,3 +1,5 @@
+import type { SecurityTab } from '@/lib/events';
+
 export type VulnSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
 export type VulnScanStatus = 'in_progress' | 'completed' | 'failed';
 export type VulnScanTrigger = 'manual' | 'scheduled' | 'deploy' | 'deploy-preflight';
@@ -230,6 +232,33 @@ export interface ScanCompareResult {
  *  backend `SecurityPostureState`. */
 export type SecurityPostureState = 'Action needed' | 'Monitoring' | 'Secure' | 'Unknown';
 
+/** Kinds of posture reason the backend can report. */
+export type PostureReasonKind =
+  | 'fixable_cve'
+  | 'known_exploited'
+  | 'secret'
+  | 'dangerous_compose'
+  | 'public_exposure'
+  | 'stale_scan'
+  | 'failed_scan'
+  | 'needs_review';
+
+/** One structured reason explaining why the security posture is what it is. */
+export interface PostureReason {
+  kind: PostureReasonKind;
+  count: number;
+  severity: 'blocker' | 'review' | 'info';
+  label: string;
+  description: string;
+  targetTab: SecurityTab;
+}
+
+/** Highest-priority action for the masthead CTA. */
+export interface PostureAction {
+  label: string;
+  targetTab: SecurityTab;
+}
+
 /** Node-scoped security posture rollup for the Security page Overview. */
 export interface SecurityOverview {
   scannedImages: number;
@@ -269,6 +298,11 @@ export interface SecurityOverview {
   posture?: SecurityPostureState;
   /** True when the bounded posture pass hit its row cap on this node. */
   posturePartial?: boolean;
+  /** Structured reasons for the posture (blockers, review, info). Optional for
+   *  older remote nodes that do not report them. */
+  postureReasons?: PostureReason[];
+  /** Highest-priority action for the masthead CTA, or null when no blockers. */
+  primaryAction?: PostureAction | null;
 }
 
 /** Which detail tab the scan sheet opens on. Matches VulnerabilityScanSheet's tabs. */
