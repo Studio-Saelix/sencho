@@ -510,7 +510,7 @@ export class MonitorService {
 
         try {
             const notifier = NotificationService.getInstance();
-            await notifier.dispatchAlert('info', 'system',
+            await notifier.dispatchAlert('info', 'node_update_available',
                 `Sencho ${latest} is available (currently running ${currentVersion}). Visit the Fleet dashboard to update.`);
             db.setSystemState(stateKey, latest);
             if (isDebugEnabled()) console.debug(`[Monitor:diag] Dispatched version notification: ${currentVersion} -> ${latest}`);

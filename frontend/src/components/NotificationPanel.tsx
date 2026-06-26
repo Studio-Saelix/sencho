@@ -127,6 +127,7 @@ interface NotificationPanelProps {
     onClearAll: () => void;
     onDelete: (notif: NotificationItem) => void;
     onNavigate?: (notif: NotificationItem) => void;
+    onNavigateChangelog?: (notif: NotificationItem) => void;
 }
 
 export function NotificationPanel({
@@ -136,6 +137,7 @@ export function NotificationPanel({
     onClearAll,
     onDelete,
     onNavigate,
+    onNavigateChangelog,
 }: NotificationPanelProps) {
     const [filter, setFilter] = useState<NotifFilter>('all');
     const [nodeFilter, setNodeFilter] = useState<NodeFilter>(NODE_FILTER_ALL);
@@ -148,6 +150,11 @@ export function NotificationPanel({
 
     const unreadCount = useMemo(
         () => notifications.filter((n) => !n.is_read).length,
+        [notifications],
+    );
+
+    const hasNodeUpdateNotifs = useMemo(
+        () => notifications.some((n) => !n.is_read && n.category === 'node_update_available'),
         [notifications],
     );
 
@@ -189,13 +196,25 @@ export function NotificationPanel({
     const bellBadge =
         unreadCount > 0 ? (
             <span aria-hidden="true" className="absolute -right-1 -top-1 flex h-2.5 w-2.5">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-destructive opacity-75" />
-                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-destructive" />
+                <span className={cn(
+                    "absolute inline-flex h-full w-full animate-ping rounded-full opacity-75",
+                    hasNodeUpdateNotifs ? 'bg-brand' : 'bg-destructive',
+                )} />
+                <span className={cn(
+                    "relative inline-flex h-2.5 w-2.5 rounded-full",
+                    hasNodeUpdateNotifs ? 'bg-brand' : 'bg-destructive',
+                )} />
             </span>
         ) : null;
 
     const handleNavigate = (notif: NotificationItem) => {
-        if (!onNavigate || !notif.stack_name) return;
+        if (!onNavigate) return;
+        if (notif.category === 'node_update_available') {
+            onNavigate(notif);
+            setOpen(false);
+            return;
+        }
+        if (!notif.stack_name) return;
         onNavigate(notif);
         setOpen(false);
     };
@@ -356,6 +375,7 @@ export function NotificationPanel({
                                         }
                                         onDelete={onDelete}
                                         onNavigate={onNavigate ? handleNavigate : undefined}
+                                        onNavigateChangelog={onNavigateChangelog}
                                     />
                                 ))}
                             </div>
@@ -372,13 +392,14 @@ interface NotificationRowProps {
     showNodeName: boolean;
     onDelete: (notif: NotificationItem) => void;
     onNavigate?: (notif: NotificationItem) => void;
+    onNavigateChangelog?: (notif: NotificationItem) => void;
 }
 
-function NotificationRow({ notif, showNodeName, onDelete, onNavigate }: NotificationRowProps) {
+function NotificationRow({ notif, showNodeName, onDelete, onNavigate, onNavigateChangelog }: NotificationRowProps) {
     const config = LEVEL_CONFIG[notif.level];
     const Icon = config.icon;
     const isUnread = !notif.is_read;
-    const isRoutable = Boolean(onNavigate && notif.stack_name);
+    const isRoutable = Boolean(onNavigate && (notif.stack_name || notif.category === 'node_update_available'));
 
     const surfaceClasses = cn(
         'flex w-full items-start gap-3 px-[var(--density-row-x)] py-[var(--density-row-y)] text-left transition-colors',
@@ -400,16 +421,28 @@ function NotificationRow({ notif, showNodeName, onDelete, onNavigate }: Notifica
                 >
                     {notif.message}
                 </p>
-                <div className="mt-1 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
-                    {showNodeName && notif.nodeName ? (
-                        <>
-                            <span className="rounded-sm border border-card-border bg-muted/40 px-1.5 py-0.5 normal-case tracking-normal text-stat-subtitle">
-                                {notif.nodeName}
-                            </span>
-                            <span className="text-stat-icon">·</span>
-                        </>
-                    ) : null}
-                    <span className="tabular-nums">{formatRelative(notif.timestamp)}</span>
+                <div className="mt-1 flex items-center justify-between gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
+                    <div className="flex items-center gap-1.5">
+                        {showNodeName && notif.nodeName ? (
+                            <>
+                                <span className="rounded-sm border border-card-border bg-muted/40 px-1.5 py-0.5 normal-case tracking-normal text-stat-subtitle">
+                                    {notif.nodeName}
+                                </span>
+                                <span className="text-stat-icon">·</span>
+                            </>
+                        ) : null}
+                        <span className="tabular-nums">{formatRelative(notif.timestamp)}</span>
+                    </div>
+                    {notif.category === 'node_update_available' && onNavigateChangelog && (
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-5 px-1.5 text-[10px] font-sans normal-case tracking-normal text-brand hover:text-brand/80"
+                            onClick={(e) => { e.stopPropagation(); onNavigateChangelog(notif); }}
+                        >
+                            View changelog
+                        </Button>
+                    )}
                 </div>
             </div>
         </>

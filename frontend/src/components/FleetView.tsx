@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import {
     RefreshCw, Camera, FileDown,
     Network, SlidersHorizontal,
@@ -32,9 +33,11 @@ import { useNodeActions } from './nodes/useNodeActions';
 
 interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
+    fleetUpdatesIntent?: { tab: 'nodes' | 'changelog' } | null;
+    onFleetUpdatesIntentConsumed?: () => void;
 }
 
-export function FleetView({ onNavigateToNode }: FleetViewProps) {
+export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdatesIntentConsumed }: FleetViewProps) {
     const { isPaid } = useLicense();
     const { isAdmin } = useAuth();
 
@@ -49,6 +52,17 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
         fetchUpdateStatus: updateStatus.fetchUpdateStatus,
         updateStatuses: updateStatus.updateStatuses,
     });
+
+    const [initialUpdatesTab, setInitialUpdatesTab] = useState<'nodes' | 'changelog'>('nodes');
+
+    useEffect(() => {
+        if (fleetUpdatesIntent) {
+            setInitialUpdatesTab(fleetUpdatesIntent.tab);
+            updateStatus.setShowUpdateModal(true);
+            updateStatus.fetchUpdateStatus();
+            onFleetUpdatesIntentConsumed?.();
+        }
+    }, [fleetUpdatesIntent, updateStatus, onFleetUpdatesIntentConsumed]);
 
     const { mastheadStats, lastSyncAt, loading, refreshing } = overview;
 
@@ -248,6 +262,7 @@ export function FleetView({ onNavigateToNode }: FleetViewProps) {
                 updateStatuses={updateStatus.updateStatuses}
                 updatingNodeId={updateStatus.updatingNodeId}
                 isAdmin={isAdmin}
+                initialTab={initialUpdatesTab}
                 fetchUpdateStatus={updateStatus.fetchUpdateStatus}
                 triggerNodeUpdate={updateStatus.triggerNodeUpdate}
                 retryNodeUpdate={updateStatus.retryNodeUpdate}

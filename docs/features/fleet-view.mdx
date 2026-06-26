@@ -239,18 +239,16 @@ The map is fleet-wide: the control instance gathers each node's view and merges 
 
 ## Node Updates
 
-Click **Check Updates** in the page header to open the **Node Updates** sheet. From here you can read every node's current Sencho version, see which nodes have an update available, and trigger updates one node at a time or across the whole fleet.
+Click **Check Updates** in the page header to open the **Node Updates** sheet. From here you can read every node's current Sencho version, see which nodes have an update available, and trigger updates one node at a time or across the whole fleet. The sheet has two tabs: **Nodes** (the node table and summary) and **Changelog** (release notes for the available Sencho version, fetched from the GitHub Releases page).
 
 <Frame>
   <img src="/images/fleet-view/fleet-node-updates.png" alt="Node updates sheet titled 'Node updates · 8 nodes · 1 update available'. A Recheck button and an 'Update all (1)' button sit in the header. Below them, four summary cards read '7 Up to date', '1 Available', '0 Updating', '0 Failed'. A 'Filter nodes…' search box sits above the node table, which has columns Node / Type / Current / Latest / Status. Seven rows show a green 'Up to date' badge; the sencho-pilot-test row reports Current 'unknown' and surfaces an Update button on the right. The footer reads 'LATEST VERSION v0.76.3'." />
 </Frame>
 
-The sheet has four sections from top to bottom.
-
 ### Header actions
 
 - **Recheck** re-queries every node's `/api/meta` endpoint and re-resolves the latest available Sencho version from GitHub Releases (with a Docker Hub fallback if the GitHub API is unreachable). The button disables and shows a spinner while the check is in flight.
-- **Update all (n)** carries the count of remote nodes with a pending update. Clicking it dispatches the update to every remote with a known current and latest version.
+- **Update all (n)** carries the count of remote nodes with a pending update. Clicking it dispatches the update to every remote with a known current and latest version. Nodes with a skipped version are excluded.
 
 ### Summary cards
 
@@ -273,9 +271,19 @@ The table lists every registered node, filtered by the search box at the top. Co
 | **Type** | `local` or `remote` outline pill |
 | **Current** | The node's reported Sencho version, in mono. Reads `unknown` if the node has not reported (offline, unreachable, or never connected). |
 | **Latest** | The newest published Sencho release. Highlighted when newer than Current. |
-| **Status** | Either an `Up to date` success badge, an `Update` button (per-row), or an in-progress / failed badge with retry and dismiss controls. |
+| **Status** | Either an `Up to date` success badge, an `Update` button (per-row), an in-progress / failed badge with retry and dismiss controls, or a `Skipped` badge when the version has been deferred. |
 
 The latest-version label is resolved from the GitHub Releases API (with a Docker Hub fallback) and cached for 30 minutes. **Recheck** flushes the cache and re-resolves immediately.
+
+### Skipping a version
+
+When a node has an update available and both its current version and the target version are known, a **Skip** button appears next to the Update button. Skipping a version hides the update notification for that node until a newer version is released. The node is also excluded from **Update all** while the skip is active.
+
+Skipped nodes show a **Skipped vX.Y.Z** badge and an **Unskip** button. Unskipping re-enables the update prompt and returns the node to the **Update all** pool. Skipped state persists across restarts and reloads.
+
+### Changelog tab
+
+The **Changelog** tab shows the release notes for the latest published Sencho version, fetched from the GitHub Releases page. It displays the raw release notes alongside a link to view the full release on GitHub. If the release notes cannot be loaded, a message is shown in place.
 
 ### What happens when you click Update
 
@@ -284,7 +292,7 @@ When you click **Update** on a remote row, Sencho dispatches the update command 
 When you click **Update** on the local row, a confirmation dialog appears first ("Update local node"). Confirming kicks off the same pull-and-recreate flow on the local Sencho instance. Because the gateway is restarting itself, a full-screen reconnecting overlay takes over the browser tab. The overlay polls `/api/health` every 3 seconds and dismisses itself once the new gateway answers. If the gateway has not returned within 5 minutes the overlay switches to a *Taking longer than expected* state with a **Reload to check** button rather than waiting indefinitely. A large image pull can legitimately run past that window, so this state is not a failure on its own.
 
 <Note>
-  Triggering updates (per-row and **Update all**) requires the resolved user to have the admin role. Operator and viewer roles can read update status but cannot initiate updates.
+  Triggering updates (per-row and **Update all**), skipping versions, and unskipping versions all require the **admin** role. Viewer and operator roles can read update status, the changelog, and the skipping state but cannot change them.
 </Note>
 
 ## How fleet data is fetched

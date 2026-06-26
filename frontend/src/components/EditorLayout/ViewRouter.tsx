@@ -87,6 +87,8 @@ export interface ViewRouterProps {
     onClearNotifications: () => void;
     securityTab: SecurityTab;
     onSecurityTabChange: (tab: SecurityTab) => void;
+    fleetUpdatesIntent?: { tab: 'nodes' | 'changelog' } | null;
+    onFleetUpdatesIntentConsumed?: () => void;
     // Render slot for the inline editor view. Kept as a callback so the
     // (large) editor JSX is only allocated when activeView === 'editor',
     // not on every parent render that lands on a different view.
@@ -112,6 +114,8 @@ export function ViewRouter({
     onClearNotifications,
     securityTab,
     onSecurityTabChange,
+    fleetUpdatesIntent,
+    onFleetUpdatesIntentConsumed,
     renderEditor,
 }: ViewRouterProps): ReactNode {
     const { can } = useAuth();
@@ -175,7 +179,11 @@ export function ViewRouter({
             <HubOnlyGate>
                 <CapabilityGate capability="fleet" featureName="Fleet Management">
                     <LazyView>
-                        <FleetView onNavigateToNode={onFleetNavigateToNode} />
+                        <FleetView
+                      onNavigateToNode={onFleetNavigateToNode}
+                      fleetUpdatesIntent={fleetUpdatesIntent}
+                      onFleetUpdatesIntentConsumed={onFleetUpdatesIntentConsumed}
+                    />
                     </LazyView>
                 </CapabilityGate>
             </HubOnlyGate>

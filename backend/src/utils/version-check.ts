@@ -74,3 +74,43 @@ export async function getLatestVersion(forceRefresh = false): Promise<string | n
     return null;
   }
 }
+
+// --- Release details (includes body/notes for the changelog tab) ---
+
+export interface SenchoRelease {
+  tag_name: string;
+  body: string;
+  html_url: string;
+}
+
+async function fetchReleaseDetails(): Promise<SenchoRelease> {
+  const res = await fetch('https://api.github.com/repos/studio-saelix/sencho/releases/latest', {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Sencho' },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) throw new Error(`GitHub releases API returned ${res.status}`);
+  const data = await res.json() as { tag_name?: string; body?: string; html_url?: string };
+  if (!data.tag_name) throw new Error('Release response missing tag_name');
+  return {
+    tag_name: data.tag_name,
+    body: data.body ?? '',
+    html_url: data.html_url ?? `https://github.com/studio-saelix/sencho/releases/tag/${data.tag_name}`,
+  };
+}
+
+const LATEST_RELEASE_CACHE_KEY = 'latest-release';
+
+export async function getLatestRelease(forceRefresh = false): Promise<SenchoRelease | null> {
+  if (forceRefresh) {
+    CacheService.getInstance().invalidate(LATEST_RELEASE_CACHE_KEY);
+  }
+  try {
+    return await CacheService.getInstance().getOrFetch<SenchoRelease>(
+      LATEST_RELEASE_CACHE_KEY,
+      LATEST_VERSION_CACHE_TTL,
+      fetchReleaseDetails,
+    );
+  } catch {
+    return null;
+  }
+}

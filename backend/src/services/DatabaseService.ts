@@ -848,6 +848,7 @@ export class DatabaseService {
         this.migrateFleetSyncStickyError();
         this.migrateStackDossierHashes();
         this.migrateGitSourceMultiFile();
+        this.migrateNodeUpdateSkips();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -1781,6 +1782,22 @@ export class DatabaseService {
         }
     }
 
+    private migrateNodeUpdateSkips(): void {
+        try {
+            this.db.prepare(`
+                CREATE TABLE IF NOT EXISTS node_update_skips (
+                    node_id INTEGER PRIMARY KEY,
+                    skipped_version TEXT NOT NULL,
+                    skipped_at INTEGER NOT NULL,
+                    skipped_by TEXT NOT NULL,
+                    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+                )
+            `).run();
+        } catch (e) {
+            console.warn('[DatabaseService] node_update_skips migration:', (e as Error).message);
+        }
+    }
+
     private migrateScanPolicyFleetColumns(): void {
         this.tryAddColumn('scan_policies', 'node_identity', "TEXT NOT NULL DEFAULT ''");
         this.tryAddColumn('scan_policies', 'replicated_from_control', 'INTEGER NOT NULL DEFAULT 0');
@@ -2077,6 +2094,30 @@ export class DatabaseService {
     public getNodeMeshEnabled(nodeId: number): boolean {
         const row = this.db.prepare('SELECT mesh_enabled FROM nodes WHERE id = ?').get(nodeId) as { mesh_enabled?: number } | undefined;
         return !!row?.mesh_enabled;
+    }
+
+    // --- Node update skips ---
+
+    public getNodeUpdateSkip(nodeId: number): { skippedVersion: string; skippedAt: number; skippedBy: string } | null {
+        const row = this.db.prepare(
+            'SELECT skipped_version, skipped_at, skipped_by FROM node_update_skips WHERE node_id = ?'
+        ).get(nodeId) as { skipped_version: string; skipped_at: number; skipped_by: string } | undefined;
+        if (!row) return null;
+        return {
+            skippedVersion: row.skipped_version,
+            skippedAt: row.skipped_at,
+            skippedBy: row.skipped_by,
+        };
+    }
+
+    public setNodeUpdateSkip(nodeId: number, version: string, username: string): void {
+        this.db.prepare(
+            'INSERT OR REPLACE INTO node_update_skips (node_id, skipped_version, skipped_at, skipped_by) VALUES (?, ?, ?, ?)'
+        ).run(nodeId, version, Date.now(), username);
+    }
+
+    public deleteNodeUpdateSkip(nodeId: number): void {
+        this.db.prepare('DELETE FROM node_update_skips WHERE node_id = ?').run(nodeId);
     }
 
     // --- Agents ---
@@ -3043,6 +3084,7 @@ export class DatabaseService {
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM node_update_skips WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
         })();
     }

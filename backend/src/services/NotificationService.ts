@@ -32,6 +32,7 @@ export type NotificationCategory =
     | 'update_started'
     | 'health_gate_passed'
     | 'health_gate_failed'
+    | 'node_update_available'
     | 'system';
 
 export const ALL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [
@@ -40,7 +41,7 @@ export const ALL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [
     'autoheal_triggered', 'monitor_alert', 'scan_finding',
     'blueprint_deployed', 'blueprint_deployment_failed',
     'blueprint_drift_detected', 'blueprint_drift_correction_failed',
-    'system',
+    'node_update_available', 'system',
 ];
 
 /** Webhook timeout: 10 seconds per external dispatch call. */

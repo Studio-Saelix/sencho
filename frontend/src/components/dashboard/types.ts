@@ -54,6 +54,7 @@ export type NotificationCategory =
     | 'autoheal_triggered'
     | 'monitor_alert'
     | 'scan_finding'
+    | 'node_update_available'
     | 'system';
 
 export interface NotificationItem {
