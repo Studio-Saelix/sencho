@@ -66,7 +66,9 @@ function collectKeys(value: unknown): string[] {
 /** True when a volume source is a named volume (not a bind mount or anonymous). */
 function isNamedVolumeSource(source: string): boolean {
   if (!source) return false;
-  if (source.includes('$')) return false; // env-var-interpolated bind path, unresolvable at parse time
+  // A named-volume key is [a-zA-Z0-9._-]+, so any '$' marks an env-var bind path
+  // (or the '$$' literal-dollar escape) whose value is unresolvable at parse time.
+  if (source.includes('$')) return false;
   if (source.includes('/')) return false; // bind mount path
   if (source.startsWith('.') || source.startsWith('~')) return false;
   if (/^[a-zA-Z]:[\\/]/.test(source)) return false; // Windows drive path
