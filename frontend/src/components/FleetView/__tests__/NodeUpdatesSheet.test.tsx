@@ -50,6 +50,64 @@ describe('NodeUpdatesSheet', () => {
     expect(screen.getByText('Db')).toBeInTheDocument();
   });
 
+  it('renders the changelog release notes as formatted markdown, not raw text', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        releaseNotes: '## [0.92.0](https://example.com/compare) (2026-06-19)\n\n### Added\n\n* add a toggle ([#1363](https://example.com/issues/1363))\n',
+        htmlUrl: 'https://example.com/releases/v0.92.0',
+      }),
+    });
+    render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
+    // The "### Added" section becomes a real heading element, not literal text.
+    const heading = await screen.findByRole('heading', { name: 'Added' });
+    expect(heading.tagName).toBe('H3');
+    // The issue reference becomes a link to GitHub, not raw "[#1363](...)".
+    const link = screen.getByRole('link', { name: '#1363' });
+    expect(link).toHaveAttribute('href', 'https://example.com/issues/1363');
+    expect(link).toHaveAttribute('target', '_blank');
+    // No markdown markers leak through as visible text.
+    expect(screen.queryByText(/### Added/)).not.toBeInTheDocument();
+    // Both external changelog links render.
+    expect(screen.getByRole('link', { name: /View on GitHub/ })).toHaveAttribute('href', 'https://example.com/releases/v0.92.0');
+    expect(screen.getByRole('link', { name: /View on Sencho/ })).toHaveAttribute('href', 'https://sencho.io/changelog');
+  });
+
+  it('settles on a graceful empty state with a Sencho link when no notes are returned', async () => {
+    apiFetchMock.mockResolvedValue({ ok: true, json: async () => ({ releaseNotes: null, htmlUrl: null }) });
+    render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
+    // The fetch settles (no perpetual spinner) and shows the empty message.
+    expect(await screen.findByText('No release notes to show')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /View on Sencho/ })).toHaveAttribute('href', 'https://sencho.io/changelog');
+  });
+
+  it('fetches release notes once and does not refetch on re-render when notes are null', async () => {
+    apiFetchMock.mockResolvedValue({ ok: true, json: async () => ({ releaseNotes: null, htmlUrl: null }) });
+    const releaseCalls = () => apiFetchMock.mock.calls.filter(c => String(c[0]).includes('release-notes')).length;
+    const { rerender } = render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
+    await screen.findByText('No release notes to show');
+    expect(releaseCalls()).toBe(1);
+    rerender(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
+    // The releaseLoaded latch keeps a null result from re-triggering the fetch.
+    await waitFor(() => expect(releaseCalls()).toBe(1));
+  });
+
+  it('Recheck resets and refetches release notes with the recheck flag', async () => {
+    apiFetchMock.mockImplementation((url: string) =>
+      String(url).includes('release-notes')
+        ? Promise.resolve({ ok: true, json: async () => ({ releaseNotes: '## v1', htmlUrl: null }) })
+        : Promise.resolve({ ok: true, json: async () => ({ rechecked: true }) }),
+    );
+    render(<NodeUpdatesSheet {...baseProps({ isAdmin: true, initialTab: 'changelog' })} />);
+    await screen.findByRole('heading', { name: 'v1' });
+    apiFetchMock.mockClear();
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck' }));
+    await waitFor(() => {
+      const call = apiFetchMock.mock.calls.find(c => String(c[0]).includes('release-notes'));
+      expect(call?.[0]).toBe('/fleet/update-status/release-notes?recheck=true');
+    });
+  });
+
   it('shows a checking spinner state', () => {
     render(<NodeUpdatesSheet {...baseProps({ checkingUpdates: true })} />);
     expect(screen.getByText('Checking for updates...')).toBeInTheDocument();

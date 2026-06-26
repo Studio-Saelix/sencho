@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react';
 import {
     Search, Loader2, Check, CircleCheck, CircleAlert, AlertTriangle,
-    Download, RefreshCw, Monitor, Globe, ExternalLink, Ban,
+    Download, RefreshCw, Monitor, Globe, ExternalLink, Ban, ScrollText,
 } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { MarkdownContent } from '@/components/ui/MarkdownContent';
+import { Skeleton } from '@/components/ui/skeleton';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatVersion, isValidVersion } from '@/lib/version';
@@ -43,6 +45,9 @@ export function NodeUpdatesSheet({
     const [releaseNotes, setReleaseNotes] = useState<string | null>(null);
     const [releaseHtmlUrl, setReleaseHtmlUrl] = useState<string | null>(null);
     const [loadingRelease, setLoadingRelease] = useState(false);
+    // Tracks whether a release-notes fetch has settled (success or failure), so a
+    // null result lands on the empty state instead of re-triggering the effect.
+    const [releaseLoaded, setReleaseLoaded] = useState(false);
     const [hasSeenChangelog, setHasSeenChangelog] = useState(false);
 
     useEffect(() => {
@@ -53,7 +58,7 @@ export function NodeUpdatesSheet({
     // release regardless of update availability). Pass recheck when the user
     // forced a version recheck so the changelog stays in sync.
     useEffect(() => {
-        if (open && releaseNotes === null && !loadingRelease) {
+        if (open && !releaseLoaded && !loadingRelease) {
             setLoadingRelease(true);
             const recheck = recheckingUpdates ? '?recheck=true' : '';
             apiFetch(`/fleet/update-status/release-notes${recheck}`, { localOnly: true })
@@ -64,10 +69,18 @@ export function NodeUpdatesSheet({
                         setReleaseHtmlUrl(data.htmlUrl);
                     }
                 })
-                .catch(() => { /* silent */ })
-                .finally(() => setLoadingRelease(false));
+                .catch((err) => {
+                    // Informational panel: a failure falls through to the empty
+                    // state (with an online changelog link) rather than a toast,
+                    // but leave a breadcrumb so the failure is diagnosable.
+                    console.warn('[Fleet] Release-notes fetch failed:', err);
+                })
+                .finally(() => {
+                    setLoadingRelease(false);
+                    setReleaseLoaded(true);
+                });
         }
-    }, [open, releaseNotes, loadingRelease, recheckingUpdates]);
+    }, [open, releaseLoaded, loadingRelease, recheckingUpdates]);
 
     // Clear the changelog dot when user opens that tab.
     useEffect(() => {
@@ -87,7 +100,10 @@ export function NodeUpdatesSheet({
 
     const handleRecheck = async () => {
         setRecheckingUpdates(true);
-        setReleaseNotes(null); // force re-fetch with fresh release notes
+        // Force a fresh release-notes fetch with the rechecked version.
+        setReleaseNotes(null);
+        setReleaseHtmlUrl(null);
+        setReleaseLoaded(false);
         try {
             const res = await apiFetch('/fleet/update-status?recheck=true', { method: 'DELETE', localOnly: true });
             if (res.ok) {
@@ -195,6 +211,17 @@ export function NodeUpdatesSheet({
         { id: 'changelog', label: 'Changelog', dot: showChangelogDot },
     ];
 
+    const senchoChangelogLink = (
+        <a
+            href="https://sencho.io/changelog"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-brand hover:underline"
+        >
+            View on Sencho <ExternalLink className="w-3 h-3" strokeWidth={1.5} />
+        </a>
+    );
+
     return (
         <SystemSheet
             open={open}
@@ -227,28 +254,45 @@ export function NodeUpdatesSheet({
             ) : activeTab === 'changelog' ? (
                 <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-5">
                     {loadingRelease ? (
-                        <div className="flex items-center justify-center py-12">
-                            <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" strokeWidth={1.5} />
+                        <div className="space-y-3">
+                            <Skeleton className="h-5 w-2/5" />
+                            <Skeleton className="h-3 w-1/4" />
+                            <div className="space-y-2 pt-2">
+                                <Skeleton className="h-3 w-full" />
+                                <Skeleton className="h-3 w-11/12" />
+                                <Skeleton className="h-3 w-4/5" />
+                            </div>
+                            <div className="space-y-2 pt-3">
+                                <Skeleton className="h-3 w-1/4" />
+                                <Skeleton className="h-3 w-full" />
+                                <Skeleton className="h-3 w-3/4" />
+                            </div>
                         </div>
                     ) : releaseNotes ? (
                         <div className="space-y-4">
-                            <pre className="whitespace-pre-wrap text-sm font-sans text-stat-value leading-relaxed">
-                                {releaseNotes}
-                            </pre>
-                            {releaseHtmlUrl && (
-                                <a
-                                    href={releaseHtmlUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex items-center gap-1 text-xs text-brand hover:underline"
-                                >
-                                    View on GitHub <ExternalLink className="w-3 h-3" strokeWidth={1.5} />
-                                </a>
-                            )}
+                            <MarkdownContent>{releaseNotes}</MarkdownContent>
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-card-border/40 pt-3">
+                                {releaseHtmlUrl && (
+                                    <a
+                                        href={releaseHtmlUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-1 text-xs text-brand hover:underline"
+                                    >
+                                        View on GitHub <ExternalLink className="w-3 h-3" strokeWidth={1.5} />
+                                    </a>
+                                )}
+                                {senchoChangelogLink}
+                            </div>
                         </div>
                     ) : (
-                        <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
-                            Release notes could not be loaded.
+                        <div className="flex flex-1 flex-col items-center justify-center gap-3 py-12 text-center">
+                            <ScrollText className="w-8 h-8 text-muted-foreground/40" strokeWidth={1.25} />
+                            <div className="space-y-1">
+                                <p className="text-sm text-stat-value">No release notes to show</p>
+                                <p className="text-xs text-muted-foreground">Read the full changelog online.</p>
+                            </div>
+                            {senchoChangelogLink}
                         </div>
                     )}
                 </div>

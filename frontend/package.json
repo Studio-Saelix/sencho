@@ -54,8 +54,10 @@
     "react-day-picker": "^10.0.1",
     "react-dom": "^19.2.7",
     "react-is": "^19.2.7",
+    "react-markdown": "^10.1.0",
     "react-use-measure": "^2.1.7",
     "recharts": "^3.9.0",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^3.6.0",
     "tailwindcss-animate": "^1.0.7",
     "yaml": "^2.9.0"
