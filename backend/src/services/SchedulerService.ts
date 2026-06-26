@@ -22,6 +22,7 @@ import TrivyInstaller from './TrivyInstaller';
 import { CloudBackupService } from './CloudBackupService';
 import { buildSystemPolicyGateOptions } from '../helpers/policyGate';
 import { enforcePolicyPreDeploy } from './PolicyEnforcement';
+import { summarizeBlockReasons } from '../utils/policy-risk';
 
 const TRIVY_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const TRIVY_UPDATE_CHECK_STARTUP_DELAY_MS = 5 * 60 * 1000;
@@ -197,14 +198,15 @@ export class SchedulerService {
         );
         if (gate.ok) return;
         const images = gate.violations.map((v) => v.imageRef).join(', ');
+        const reasons = summarizeBlockReasons(gate.violations);
         this.safeDispatch(
             'warning',
             'scan_finding',
-            `${action} blocked for "${stackName}" by policy "${gate.policy?.name}": ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}${images ? ` (${images})` : ''}`,
+            `${action} blocked for "${stackName}" by policy "${gate.policy?.name}": ${gate.violations.length} image(s) matched ${reasons}${images ? ` (${images})` : ''}`,
             stackName,
         );
         throw new Error(
-            `${action} blocked by policy "${gate.policy?.name}": ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`,
+            `${action} blocked by policy "${gate.policy?.name}": ${gate.violations.length} image(s) matched ${reasons}`,
         );
     }
 
