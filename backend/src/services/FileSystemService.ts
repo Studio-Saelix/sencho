@@ -1001,10 +1001,15 @@ export class FileSystemService {
         buf = await fsPromises.readFile(src);
       } catch (e: unknown) {
         const code = (e as NodeJS.ErrnoException)?.code;
-        if (code !== 'ENOENT') {
-          console.warn(`[FileSystemService] Could not read ${file} for backup:`, (e as Error).message);
-        }
-        return;
+        // ENOENT means the file genuinely is not present: most stacks use one
+        // compose variant and have no .env, so an absent managed file is expected
+        // and simply skipped. Any other code (EACCES on a chowned bind mount,
+        // EBUSY on a held file) means the file exists but could not be read.
+        // Skipping it would produce a backup that silently omits a live managed
+        // file, so a later rollback would delete that file as an orphan and
+        // restore nothing. Fail the backup so the caller aborts before mutating.
+        if (code === 'ENOENT') return;
+        throw new Error(`Could not read ${file} for backup: ${(e as Error).message}`, { cause: e });
       }
 
       const dest = path.join(backupDir, file);
@@ -1110,16 +1115,37 @@ export class FileSystemService {
       }
     }
     if (checksums) {
-      for (const item of items) {
-        if (BACKUP_MARKER_FILES.has(item)) continue;
-        const expected = checksums[item];
-        // A missing or non-string entry (a tampered or malformed-but-parseable
-        // manifest) is treated as no recorded checksum: skip rather than fail, so a
-        // manifest problem never blocks a rollback whose data files are intact.
+      // Iterate the recorded manifest, not the directory listing. A file the
+      // manifest records but the slot no longer holds (lost or deleted after the
+      // manifest was written) passes an items-only scan unchecked; the orphan
+      // removal below would then delete the live file and the copy would restore
+      // nothing, leaving the stack unrecoverable. Walking the manifest catches
+      // both a corrupt copy and a missing one before anything is mutated.
+      for (const [file, expected] of Object.entries(checksums)) {
+        // Every key the manifest records names a file the backup captured. If the
+        // slot no longer holds it, the backup is incomplete: the orphan removal
+        // below would delete the live file (for a managed name) and the copy would
+        // restore nothing, so abort before anything is mutated. This precedes the
+        // value-type skip so a missing file is caught even when its recorded
+        // checksum is malformed.
+        if (!backedUp.has(file)) {
+          throw new Error(`Rollback aborted: the backup is missing ${file} recorded in its integrity manifest; the stack files were not changed.`);
+        }
+        // A non-string entry (a tampered or malformed-but-parseable manifest) is
+        // treated as no recorded checksum: the file is present, so copy it back
+        // unverified rather than fail, so a manifest problem never blocks a
+        // rollback whose data files are intact.
         if (typeof expected !== 'string') continue;
-        const actual = sha256HexBuffer(await fsPromises.readFile(path.join(backupDir, item)));
+        // Canonical js/path-injection barrier inline with the read sink: the file
+        // name comes from the manifest, so resolve it against the backup dir and
+        // confirm containment before re-hashing.
+        const member = path.resolve(backupDir, file);
+        if (!member.startsWith(backupDir + path.sep)) {
+          throw Object.assign(new Error('Path escapes backup directory'), { code: 'INVALID_PATH' });
+        }
+        const actual = sha256HexBuffer(await fsPromises.readFile(member));
         if (actual !== expected) {
-          throw new Error(`Rollback aborted: the backup of ${item} is corrupt (integrity check failed); the stack files were not changed.`);
+          throw new Error(`Rollback aborted: the backup of ${file} is corrupt (integrity check failed); the stack files were not changed.`);
         }
       }
     }
