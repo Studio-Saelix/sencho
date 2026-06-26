@@ -38,6 +38,8 @@ There are two surfaces that initiate an update on a remote node:
 - The **Update** button on a row inside the Node updates sheet.
 - The **Update to vX.Y.Z** outline button along the bottom of any online node card on the Fleet grid.
 
+The **Skip** button next to Update hides the update prompt for that node and excludes it from **Update all** until a newer version is released. The skip is per-node and per-version: when the next Sencho release comes out, the skip clears automatically and the update surfaces again. Skipping requires the admin role.
+
 <Frame>
   <img src="/images/fleet-view/node-card-update-available.png" alt="Node card for the Opsix remote showing an Online badge, the version chip 'v0.76.6', a warning 'Update available' pill, the Running / Stopped / Stacks counters (4 / 0 / 3), CPU / RAM / Disk usage bars, and an outline 'Update to v0.76.7' button across the bottom of the card." />
 </Frame>

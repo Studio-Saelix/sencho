@@ -34,7 +34,12 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof NodeUpdatesShe
   };
 }
 
-beforeEach(() => apiFetchMock.mockReset());
+beforeEach(() => {
+  apiFetchMock.mockReset();
+  // Default: release-notes fetch returns empty notes (called by useEffect on mount).
+  // Tests that need specific apiFetch responses override this.
+  apiFetchMock.mockResolvedValue({ ok: true, json: () => Promise.resolve({ releaseNotes: null, htmlUrl: null }) });
+});
 afterEach(() => vi.clearAllMocks());
 
 describe('NodeUpdatesSheet', () => {

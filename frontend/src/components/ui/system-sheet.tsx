@@ -28,6 +28,7 @@ export interface SystemSheetTab {
   id: string;
   label: string;
   count?: number;
+  dot?: boolean;
 }
 
 export interface SystemSheetProps {
@@ -283,6 +284,12 @@ function TabsBand({ tabs, activeTab, onTabChange }: TabsBandProps) {
             )}
           >
             {tab.label}
+            {tab.dot && (
+              <span aria-hidden className="relative inline-flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand opacity-60" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-brand" />
+              </span>
+            )}
             {tab.count !== undefined && (
               <span className="font-mono text-[10px] tabular-nums text-stat-subtitle">{tab.count}</span>
             )}

@@ -20,7 +20,7 @@ import { requirePaid, requireAdmin, requireNodeProxy } from '../middleware/tierG
 import { scheduleLocalUpdate } from './license';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
-import { getLatestVersion } from '../utils/version-check';
+import { getLatestVersion, getLatestRelease } from '../utils/version-check';
 import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -1009,6 +1009,19 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         ) {
           invalidateRemoteMetaCache(node.id);
         }
+
+        // Apply skip-version: suppress updateAvailable when the node has skipped
+        // the effective compare target (which may be the gateway fallback, not
+        // just the raw GitHub latest).
+        const skipRow = db.getNodeUpdateSkip(node.id);
+        let skipActive = false;
+        let skippedVersion: string | null = null;
+        if (skipRow && compareValid && skipRow.skippedVersion === compareVersion) {
+          updateAvailable = false;
+          skipActive = true;
+          skippedVersion = skipRow.skippedVersion;
+        }
+
         return {
           nodeId: node.id,
           name: node.name,
@@ -1018,6 +1031,8 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           updateAvailable,
           updateStatus: currentTracker?.status ?? null,
           error: currentTracker?.error ?? null,
+          skipActive,
+          skippedVersion,
         };
       }),
     );
@@ -1034,6 +1049,8 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         updateAvailable: false,
         updateStatus: null,
         error: null,
+        skipActive: false,
+        skippedVersion: null,
       };
     });
 
@@ -1047,6 +1064,21 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
     res.status(500).json({ error: 'Failed to fetch update status' });
   }
 });
+// Release notes for the Changelog tab in the Node Updates sheet.
+fleetRouter.get('/update-status/release-notes', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  try {
+    const forceRefresh = req.query.recheck === 'true';
+    const release = await getLatestRelease(forceRefresh);
+    res.json({
+      releaseNotes: release?.body ?? null,
+      htmlUrl: release?.html_url ?? null,
+    });
+  } catch (error) {
+    console.error('[Fleet] Release notes error:', error);
+    res.status(500).json({ error: 'Failed to fetch release notes' });
+  }
+});
+
 
 // Pilot loopback targets carry an empty apiToken because the tunnel bridge
 // re-injects admin auth; sending a malformed `Bearer ` header would 401 on
@@ -1060,6 +1092,57 @@ function postSystemUpdate(target: { apiUrl: string; apiToken: string }) {
     signal: AbortSignal.timeout(10000),
   });
 }
+
+// --- Skip-version endpoints ---
+
+fleetRouter.post('/nodes/:nodeId/skip-version', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const nodeId = parseIntParam(req, res, 'nodeId');
+      if (nodeId === null) {
+        return;
+      }
+      const db = DatabaseService.getInstance();
+      const node = db.getNode(nodeId);
+      if (!node) {
+        res.status(404).json({ error: 'Node not found' });
+        return;
+      }
+      const { version } = req.body ?? {};
+      const normalized = typeof version === 'string' ? semver.valid(version) : null;
+      if (!normalized || version.length > 64) {
+        res.status(400).json({ error: 'Invalid version' });
+        return;
+      }
+      const username = req.user?.username ?? 'unknown';
+      db.setNodeUpdateSkip(nodeId, normalized, username);
+      res.status(204).end();
+    } catch (error) {
+      console.error('[Fleet] Skip-version error:', error);
+      res.status(500).json({ error: 'Failed to skip version' });
+    }
+  });
+
+fleetRouter.delete('/nodes/:nodeId/skip-version', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const nodeId = parseIntParam(req, res, 'nodeId');
+      if (nodeId === null) {
+        return;
+      }
+      const db = DatabaseService.getInstance();
+      const node = db.getNode(nodeId);
+      if (!node) {
+        res.status(404).json({ error: 'Node not found' });
+        return;
+      }
+      db.deleteNodeUpdateSkip(nodeId);
+      res.status(204).end();
+    } catch (error) {
+      console.error('[Fleet] Unskip-version error:', error);
+      res.status(500).json({ error: 'Failed to unskip version' });
+    }
+  });
 
 fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
@@ -1165,6 +1248,12 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
       // Clear terminal states so they can be re-triggered.
       if (tracker && (tracker.status === 'timeout' || tracker.status === 'failed' || tracker.status === 'completed')) {
         updateTracker.delete(node.id);
+      }
+      // Skip nodes that have skipped the current compare target version.
+      const skipRow = db.getNodeUpdateSkip(node.id);
+      if (skipRow && compareValid && skipRow.skippedVersion === compareVersion) {
+        if (debug) console.debug('[Fleet:debug] Update-all skipping', node.name, '(version', compareVersion, 'skipped)');
+        return false;
       }
       return true;
     });
