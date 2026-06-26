@@ -214,8 +214,15 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
   // The scanner-detections disclaimer rides as an info affordance next to the
   // scanned-images count rather than a standing caption below the masthead.
+  // When posture is Action needed, the subtitle leads with the action count and
+  // top blocker labels so the operator sees "why red" without opening the page.
+  const blockers = overview?.postureReasons?.filter((r) => r.severity === 'blocker') ?? [];
+  const actionSummary = overview?.posture === 'Action needed' && blockers.length > 0
+    ? `${blockers.length} action${blockers.length === 1 ? '' : 's'}: ${blockers.slice(0, 2).map((r) => r.label.toLowerCase()).join(', ')} · `
+    : null;
   const subtitle = overview ? (
     <span className="inline-flex items-center gap-1.5">
+      {actionSummary ? <span>{actionSummary}</span> : null}
       <span>
         {overview.scannedImages} {overview.scannedImages === 1 ? 'image' : 'images'} scanned · scanner {overview.scanner.available ? 'ready' : 'not installed'}
       </span>
@@ -363,7 +370,17 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           { label: 'HIGH', value: String(overview.high), tone: overview.high > 0 ? 'warn' : 'value' },
           { label: 'LAST SCAN', value: overview.lastSuccessfulScanAt ? formatTimeAgo(overview.lastSuccessfulScanAt) : 'never', tone: 'subtitle' },
         ] : undefined}
-      />
+      >
+        {overview?.posture === 'Action needed' && overview.primaryAction ? (
+          <button
+            type="button"
+            onClick={() => onTabChange(overview.primaryAction!.targetTab)}
+            className="text-xs font-medium text-brand hover:underline whitespace-nowrap"
+          >
+            {overview.primaryAction.label} →
+          </button>
+        ) : null}
+      </PageMasthead>
 
       <Tabs value={activeTab} onValueChange={(v) => onTabChange(v as SecurityTab)}>
         <TabsList className="mb-4">

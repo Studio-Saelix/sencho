@@ -14,7 +14,7 @@ import { applySuppressions, isTriageStatus, isTriageJustification } from '../uti
 import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { generateSarif } from '../services/SarifExporter';
 import { generateOpenVex } from '../services/OpenVexExporter';
-import { deriveSecurityPosture, type SecurityPostureFacts, type SecurityPostureState } from '../services/securityPosture';
+import { deriveSecurityPosture, derivePostureReasons, HIGH_EPSS_THRESHOLD, type SecurityPostureFacts, type SecurityPostureState, type PostureReason, type PostureAction } from '../services/securityPosture';
 import { buildExposedImageMap } from '../services/preflight/exposure';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
@@ -160,6 +160,10 @@ interface SecurityOverviewResponse {
   posture: SecurityPostureState;
   /** True when the bounded posture pass hit its row cap on this node. */
   posturePartial: boolean;
+  /** Structured reasons explaining the posture (blockers, review, info). */
+  postureReasons: PostureReason[];
+  /** Highest-priority action for the masthead CTA, or null when no blockers. */
+  primaryAction: PostureAction | null;
 }
 
 export const securityRouter = Router();
@@ -773,9 +777,31 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       }).filter(Boolean),
     );
     let publiclyExposed = 0;
-    for (const [imageRef] of critHighByImage) {
-      if (exposedMap.get(imageRef) === true) publiclyExposed += 1;
+    let exposedBlocker = 0;
+    let exposedReview = 0;
+    for (const [imageRef, group] of critHighByImage) {
+      if (exposedMap.get(imageRef) !== true) continue;
+      publiclyExposed += 1;
+      let hasUnsuppressedFinding = false;
+      let hasKevOrFixOrHighEpss = false;
+      for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
+        if (e.suppressed) continue;
+        hasUnsuppressedFinding = true;
+        if (
+          e.fixed_version
+          || intel.get(e.vulnerability_id)?.kev
+          || (intel.get(e.vulnerability_id)?.epssScore ?? 0) >= HIGH_EPSS_THRESHOLD
+        ) {
+          hasKevOrFixOrHighEpss = true;
+          break;
+        }
+      }
+      if (!hasUnsuppressedFinding) continue; // fully dismissed
+      if (hasKevOrFixOrHighEpss) exposedBlocker += 1;
+      else exposedReview += 1;
     }
+
+    const failedScans = db.countScansByStatus(req.nodeId, 'failed');
 
     const postureFacts: SecurityPostureFacts = {
       scannerAvailable: svc.isTrivyAvailable(),
@@ -785,10 +811,16 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       dangerousCompose,
       knownExploited,
       publiclyExposed,
+      exposedBlocker,
+      exposedReview,
       rawCritical: critical,
       rawHigh: high,
+      staleScans,
+      failedScans,
+      needsReview,
     };
     const posture = deriveSecurityPosture(postureFacts);
+    const { reasons: postureReasons, primaryAction } = derivePostureReasons(postureFacts);
     const actionable = fixableCriticalHigh + secrets + dangerousCompose + knownExploited + publiclyExposed;
 
     const overview: SecurityOverviewResponse = {
@@ -799,7 +831,7 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       secrets,
       misconfigs,
       staleScans,
-      failedScans: db.countScansByStatus(req.nodeId, 'failed'),
+      failedScans,
       lastSuccessfulScanAt,
       scanner: {
         available: svc.isTrivyAvailable(),
@@ -827,6 +859,8 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       actionable,
       posture,
       posturePartial: critHigh.truncated || highMisconfigs.truncated,
+      postureReasons,
+      primaryAction,
     };
     res.json(overview);
   } catch (error) {
