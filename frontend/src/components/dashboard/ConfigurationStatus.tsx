@@ -216,7 +216,7 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
           <Row
             label="Crash detection"
             value={thresholds.globalCrash ? 'On' : 'Off'}
-            onClick={open('host-alerts')}
+            onClick={open('container-alerts')}
           />
         </div>
       </CardContent>

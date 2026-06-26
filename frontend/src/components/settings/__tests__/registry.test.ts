@@ -45,6 +45,14 @@ describe('settings registry', () => {
         expect(hostAlerts?.scope).toBe('node');
         expect(dockerStorage?.scope).toBe('node');
         expect(fleetMesh?.scope).toBe('node');
+
+        const containerAlerts = SETTINGS_ITEMS.find(i => i.id === 'container-alerts');
+        expect(containerAlerts?.group).toBe('monitoring');
+        expect(containerAlerts?.scope).toBe('node');
+        expect(containerAlerts?.tier).toBeNull();
+        for (const term of ['crash', 'oom', 'healthcheck', 'container']) {
+            expect(containerAlerts?.keywords, `keyword ${term}`).toContain(term);
+        }
     });
 
     it('gates the Fleet Mesh section to admins so the sidebar entry and panel both hide', () => {
@@ -90,14 +98,17 @@ describe('settings registry', () => {
         const stacks = SETTINGS_ITEMS.find(i => i.id === 'stacks');
         expect(stacks?.group).toBe('infrastructure');
         expect(stacks?.tier).toBeNull();
-        for (const term of ['stack', 'deploy', 'progress', 'diff', 'save']) {
+        for (const term of ['stack', 'deploy', 'guardrail', 'health gate', 'observation', 'env', 'required variable', 'progress', 'diff', 'save']) {
             expect(stacks?.keywords, `keyword ${term}`).toContain(term);
         }
     });
 
-    it('scopes the browser-local sections (Appearance, Stacks) to the browser', () => {
+    it('scopes the browser-local sections to the browser', () => {
+        // Appearance is the only remaining browser-local section. Stacks moved to
+        // node scope when Deploy Guardrails (backend settings) were added to it
+        // alongside the existing browser-local Workflow controls.
         expect(SETTINGS_ITEMS.find(i => i.id === 'appearance')?.scope).toBe('browser');
-        expect(SETTINGS_ITEMS.find(i => i.id === 'stacks')?.scope).toBe('browser');
+        expect(SETTINGS_ITEMS.find(i => i.id === 'stacks')?.scope).toBe('node');
     });
 
     it('exposes the Calm/Signature appearance keywords for search', () => {

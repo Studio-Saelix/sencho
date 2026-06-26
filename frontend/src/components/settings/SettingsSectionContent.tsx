@@ -7,6 +7,7 @@ import {
     AppearanceSection,
     LicenseSection,
     HostAlertsSection,
+    ContainerAlertsSection,
     DockerStorageSection,
     UpdatesSection,
     FleetMeshSection,
@@ -82,6 +83,7 @@ function renderSection(
         case 'registries': return <RegistriesSection />;
         case 'labels': return <LabelsSection />;
         case 'host-alerts': return <HostAlertsSection onDirtyChange={(d) => onDirtyChange('host-alerts', d)} />;
+        case 'container-alerts': return <ContainerAlertsSection onDirtyChange={(d) => onDirtyChange('container-alerts', d)} />;
         case 'docker-storage': return <DockerStorageSection onDirtyChange={(d) => onDirtyChange('docker-storage', d)} />;
         case 'image-updates': return <UpdatesSection />;
         case 'fleet-mesh': return <FleetMeshSection onDirtyChange={(d) => onDirtyChange('fleet-mesh', d)} />;
@@ -93,7 +95,7 @@ function renderSection(
         case 'data-retention': return <DataRetentionSection onDirtyChange={(d) => onDirtyChange('data-retention', d)} />;
         case 'nodes': return <NodeManager />;
         case 'app-store': return <AppStoreSection />;
-        case 'stacks': return <StacksSection />;
+        case 'stacks': return <StacksSection onDirtyChange={(d) => onDirtyChange('stacks', d)} />;
         case 'recovery': return <RecoverySection />;
         case 'support': return <SupportSection />;
         case 'about': return <AboutSection />;

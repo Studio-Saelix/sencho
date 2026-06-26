@@ -16,7 +16,7 @@ Open the Settings Hub by clicking the **Profile** icon in the top bar and select
 | **Personal** | Account, Appearance |
 | **Access** | License, Users, SSO, API Tokens |
 | **Infrastructure** | Nodes, Fleet Mesh, Registries, Cloud Backup, App Store, Stacks |
-| **Monitoring** | Host Alerts, Docker & Storage |
+| **Monitoring** | Host Alerts, Container Alerts, Docker & Storage |
 | **Notifications** | Channels, Notification Routing |
 | **Automation** | Webhooks |
 | **Organization** | Labels |
@@ -33,7 +33,7 @@ Every section renders inside the same masthead-and-sidebar layout. The masthead 
 
 | Pill | Meaning |
 |------|---------|
-| **SCOPE** `operator` / `browser` / `global` | Setting applies to your account (`operator`), to this browser only (`browser`, for browser-local sections such as Appearance and Stacks), or to the whole instance (`global`, every other non-node group) |
+| **SCOPE** `operator` / `browser` / `global` | Setting applies to your account (`operator`), to this browser only (`browser`, for browser-local sections such as Appearance), or to the whole instance (`global`, every other non-node group) |
 | **NODE** `<node name>` | Setting is per-node and is currently being edited against this node |
 | **EDITED** `<count>` pending / `saved` | The current section has unsaved changes |
 | Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (License); `OPERATORS` (Users); `CHANNELS` (Channels); `ROUTES` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `PROVIDER`, `USED`, `SNAPSHOTS` (Cloud Backup); `DEV MODE` (Developer Diagnostics) |
@@ -225,13 +225,11 @@ See [API Tokens](/features/api-tokens) for the full walkthrough.
 
 **Scope:** Per-node (applies to the currently selected node)
 
-Configure the host resource thresholds that trigger warnings, the suppression cadence for repeated alerts, and whether unexpected container exits raise a crash alert. These are alerting thresholds, not enforcement: Sencho warns when a metric crosses a line, it never throttles or kills containers. The masthead **NODE** pill names which node you are configuring; the **EDITED** pill counts unsaved changes.
+Configure the host resource thresholds that trigger warnings and the suppression cadence for repeated alerts. These are alerting thresholds, not enforcement: Sencho warns when a metric crosses a line, it never throttles or kills containers. The masthead **NODE** pill names which node you are configuring; the **EDITED** pill counts unsaved changes.
 
 <Frame>
-  <img src="/images/settings/settings-host-alerts.png" alt="Host Alerts section showing the Host thresholds and Crash capture subsections" />
+  <img src="/images/settings/settings-host-alerts.png" alt="Host Alerts section showing the Host thresholds subsection with the master toggle and CPU, RAM, Disk, and Alert suppression controls" />
 </Frame>
-
-### Host thresholds
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -241,13 +239,21 @@ Configure the host resource thresholds that trigger warnings, the suppression ca
 | **Disk limit** | 90% | Low free space slows image pulls and backups. |
 | **Alert suppression** | 60 min | How long to wait before resending a host alert while the metric stays over threshold. The follow-up message includes a count of suppressed cycles. Range 1 to 1,440 minutes. |
 
-### Crash capture
+Click **Save alerts** to apply.
+
+---
+
+## Container Alerts
+
+**Scope:** Per-node (applies to the currently selected node)
+
+Controls whether Sencho watches every managed container on this node for unexpected exits, OOM kills, and Docker healthcheck failures, and dispatches alerts for each. Auto-Heal observes crash signals independently regardless of this toggle, so turning it off stops alerts but does not stop Auto-Heal.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| **Global crash capture** | On | Watch every managed container for unexpected exits. When on, Sencho sends a notification whenever a container exits with a non-zero status outside a planned stop. |
+| **Container crash & health alerts** | On | Send alerts for unexpected container exits, OOM kills, and Docker healthcheck failures. Auto-Heal can still observe crash signals independently. |
 
-Click **Save alerts** to apply.
+Click **Save settings** to apply.
 
 ---
 
@@ -487,11 +493,13 @@ See [App Store](/features/app-store#custom-template-registry) for more on custom
 
 ## Stacks
 
+Stack editor, lifecycle workflow preferences, and deploy guardrails. The Workflow controls are browser-local (each browser remembers its own choices). The Deploy Guardrails are node-scoped backend settings. The masthead shows the **NODE** pill for this section.
+
+### Workflow
+
 **Scope:** This browser (preferences are saved to local storage)
 
-Stack editor and lifecycle workflow preferences. Each browser remembers its own choices, so they follow you across tabs but never change what other operators see. The masthead reads `SCOPE browser`.
-
-### Deploy progress
+#### Deploy progress
 
 Sencho streams live output whenever you deploy, restart, update, install, or run a Git operation. It is on by default; turn it off to run operations without it. When it is on, **Progress style** chooses how it appears: **Modal** (a centered overlay that closes automatically on success or stays open on failure) or **Inline** (a quiet status band on the stack detail). See [Deploy Progress](/features/deploy-progress) for the full reference.
 
@@ -500,7 +508,7 @@ Sencho streams live output whenever you deploy, restart, update, install, or run
 | **Enabled** (default) | A progress surface (the Modal overlay or the Inline band, per Progress style) shows for every long-running operation |
 | **Disabled** | Operations run without it; results surface via toast notifications, and a failed operation still shows recovery actions on the stack page |
 
-### Diff preview before save
+#### Diff preview before save
 
 When enabled, clicking **Save & Deploy** or **Save Only** in the compose or env editor opens a side-by-side diff modal before writing anything to disk. The left pane shows the current on-disk content; the right pane shows your unsaved edits, with additions highlighted green and removals highlighted red.
 
@@ -510,6 +518,20 @@ When enabled, clicking **Save & Deploy** or **Save Only** in the compose or env 
 | **Disabled** (default) | File is saved directly without a review step |
 
 If there are no unsaved changes the modal is skipped and the save proceeds immediately. See [Diff preview before save](/features/editor#diff-preview-before-save) in the Editor guide for the full workflow.
+
+### Deploy Guardrails
+
+**Scope:** Per-node (saved on the active node, admin-only)
+
+Node-level safety checks and post-deploy observation used during stack deploys and updates.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Observe health after updates** | On | After a stack deploy or update succeeds, watch its containers for the observation window and record a passed or failed verdict on the stack timeline. Observational only: nothing is restarted or rolled back automatically. |
+| **Observation window** | 90 s | How long to watch containers before declaring the update healthy. Raise it for stacks that take a while to settle. Range 15 to 600 seconds. |
+| **Block deploy on missing required env vars** | Off | When on, a deploy or update is refused before it starts if a required `${VAR:?message}` variable is unset or empty, so the stack fails fast with a clear message instead of mid-deploy. |
+
+Click **Save settings** to apply.
 
 ---
 

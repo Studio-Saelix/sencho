@@ -67,13 +67,13 @@ The gate also runs for updates you did not click: scheduled image updates, webho
 
 ### Tuning or disabling the gate
 
-Open **Settings > Host Alerts > Update health gate** on the node you want to configure:
+Open **Settings > Infrastructure > Stacks > Deploy Guardrails** on the node you want to configure:
 
 - **Observe health after updates** turns the gate on or off for that node. On by default; turning it off only stops the observation and its timeline events, never the update itself.
 - **Observation window** sets how long containers are watched, from 15 to 600 seconds. The default is 90 seconds; raise it for stacks that take a while to settle, since a healthcheck still starting at the end of the window records an unknown verdict instead of a pass.
 
 <Frame>
-  <img src="/images/health-gated-updates/settings.png" alt="Host Alerts settings page with the Update health gate group, showing the Observe health after updates toggle and the Observation window field" />
+  <img src="/images/health-gated-updates/settings.png" alt="Stacks settings page with the Deploy Guardrails subsection, showing the Observe health after updates toggle and the Observation window field" />
 </Frame>
 
 ## Rollback readiness
@@ -102,7 +102,7 @@ When a deploy or update fails, Sencho classifies the failure from the compose ou
     Unknown means one of the verdict-affecting signals could not be verified, most often because Docker or the node did not answer in time. The update path is never blocked by an unknown verdict; check the node's connection if it persists, and proceed when you are confident in the stack's state.
   </Accordion>
   <Accordion title="The health gate failed but my app seems fine">
-    The gate fails on the first clear problem it observes: a container exit, an unhealthy healthcheck, a restart loop, or a container disappearing mid-window. Check the named container's logs from the stack page. If the container legitimately restarts during startup (a migration step, for example), raise the observation window under **Settings > Host Alerts > Update health gate** so the gate watches past the settle period.
+    The gate fails on the first clear problem it observes: a container exit, an unhealthy healthcheck, a restart loop, or a container disappearing mid-window. Check the named container's logs from the stack page. If the container legitimately restarts during startup (a migration step, for example), raise the observation window under **Settings > Infrastructure > Stacks > Deploy Guardrails** so the gate watches past the settle period.
   </Accordion>
   <Accordion title="The health gate result is unknown">
     Unknown means the observation could not finish: Sencho restarted mid-window, a newer update superseded the observation, Docker became unreachable, a healthcheck was still starting when the window ended, or no containers appeared to observe. The stack timeline records the reason. Check the containers directly; an unknown verdict makes no claim either way.

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 
 const useConfigurationStatusMock = vi.fn();
 vi.mock('../useConfigurationStatus', () => ({
@@ -145,5 +145,20 @@ describe('ConfigurationStatus threshold display', () => {
     // The OFF badge is the span inside the row that has font-mono + uppercase.
     const badge = thresholdRow!.querySelector('.font-mono');
     expect(badge?.textContent?.trim()).toBe('OFF');
+  });
+});
+
+describe('ConfigurationStatus click targets', () => {
+  it('routes Crash detection to container-alerts', () => {
+    const onOpenSection = vi.fn();
+    useConfigurationStatusMock.mockReturnValue({
+      status: makePayload(),
+      loading: false,
+    });
+    render(<ConfigurationStatus onOpenSection={onOpenSection} />);
+    const crashRow = screen.getByText('Crash detection').closest('button');
+    expect(crashRow).toBeDefined();
+    fireEvent.click(crashRow!);
+    expect(onOpenSection).toHaveBeenCalledWith('container-alerts');
   });
 });
