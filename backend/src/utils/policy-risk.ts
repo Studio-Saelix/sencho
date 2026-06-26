@@ -107,6 +107,24 @@ export function describeReason(reason: PolicyBlockReason): string {
     }
 }
 
+/**
+ * De-duplicated, human-readable summary of the inputs that actually matched
+ * across a set of policy violations, joined with " + ". Used wherever a policy
+ * block is reported to a user (the gate's 409 response, thrown gate errors, and
+ * the deploy/auto-update block messages), so a KEV- or fixable-driven block
+ * never reads as a severity-threshold block. Falls back to a generic phrase
+ * when no reason was recorded (e.g. an image that could not be scanned).
+ */
+export function summarizeBlockReasons(
+    violations: ReadonlyArray<{ reasons: readonly PolicyBlockReason[] }>,
+): string {
+    const labels = new Set<string>();
+    for (const v of violations) {
+        for (const r of v.reasons) labels.add(describeReason(r));
+    }
+    return labels.size > 0 ? [...labels].join(' + ') : 'scan policy conditions';
+}
+
 /** Compact descriptor of a policy's active inputs, for log and audit lines. */
 export function describePolicyInputs(inputs: PolicyRiskInputs): string {
     const parts: string[] = [];
