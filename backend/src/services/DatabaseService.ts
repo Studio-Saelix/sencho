@@ -3,7 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
-import { evaluatePolicyRisk, policyInputs } from '../utils/policy-risk';
+import { evaluatePolicyRisk, policyInputs, type PolicyBlockReason } from '../utils/policy-risk';
 import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
 import type { BackendScheduledAction } from './scheduledActionRegistry';
@@ -601,6 +601,10 @@ export interface PolicyEvaluation {
     policyId: number;
     policyName: string;
     maxSeverity: VulnSeverity;
+    // Inputs that actually matched (severity / kev / fixable). Empty when not
+    // violated. Lets the scan banner name the reason instead of always citing a
+    // severity threshold the policy may not have gated on.
+    reasons: PolicyBlockReason[];
     violated: boolean;
     evaluatedAt: number;
 }
@@ -640,6 +644,8 @@ export interface VulnerabilityScan {
 // a clean vuln read can never be a secret-only or config scan in disguise.
 export const VULN_BEARING_SCANNER_SETS = ['vuln', 'vuln,secret'] as const;
 
+const VALID_BLOCK_REASONS: ReadonlySet<PolicyBlockReason> = new Set(['severity', 'kev', 'fixable']);
+
 export function parsePolicyEvaluation(raw: string | null | undefined): PolicyEvaluation | null {
     if (!raw) return null;
     try {
@@ -647,6 +653,12 @@ export function parsePolicyEvaluation(raw: string | null | undefined): PolicyEva
         if (typeof parsed.policyId !== 'number' || typeof parsed.policyName !== 'string') {
             return null;
         }
+        // Rows persisted before reason tracking lack `reasons`; default to empty
+        // and keep only the known inputs so a stray stored value cannot reach the
+        // banner or alert text.
+        parsed.reasons = Array.isArray(parsed.reasons)
+            ? parsed.reasons.filter((r) => VALID_BLOCK_REASONS.has(r))
+            : [];
         return parsed;
     } catch {
         return null;
@@ -5527,24 +5539,25 @@ export class DatabaseService {
         const policy = this.getMatchingPolicy(nodeId, scan.stack_context, selfIdentity);
         if (!policy) return null;
         const inputs = policyInputs(policy);
-        let violated: boolean;
+        let reasons: PolicyBlockReason[];
         if (!inputs.blockOnKev && !inputs.blockOnFixable) {
             // Severity-only banner from the stored aggregate: no per-finding read.
-            violated = inputs.blockOnSeverity && isSeverityAtLeast(scan.highest_severity, policy.max_severity);
+            const severityHit = inputs.blockOnSeverity && isSeverityAtLeast(scan.highest_severity, policy.max_severity);
+            reasons = severityHit ? ['severity'] : [];
         } else {
             // Best-effort banner: scores the raw findings without honoring
             // suppressions or the truncation fail-closed rule. The pre-deploy gate
             // is authoritative; this only drives the informational scan banner.
             const findings = this.getAllVulnerabilityDetails(scan.id);
             const intel = inputs.blockOnKev ? this.getCveIntel(findings.map((f) => f.vulnerability_id)) : null;
-            const outcome = evaluatePolicyRisk(findings, (cveId) => intel?.get(cveId)?.kev === true, inputs);
-            violated = outcome.reasons.length > 0;
+            reasons = evaluatePolicyRisk(findings, (cveId) => intel?.get(cveId)?.kev === true, inputs).reasons;
         }
         return {
             policyId: policy.id,
             policyName: policy.name,
             maxSeverity: policy.max_severity,
-            violated,
+            reasons,
+            violated: reasons.length > 0,
             evaluatedAt: Date.now(),
         };
     }
