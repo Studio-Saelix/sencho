@@ -47,6 +47,7 @@ const FULL_SETTINGS: Record<string, string> = {
     log_retention_days: '30',
     audit_retention_days: '90',
     scan_history_per_image_limit: '50',
+    prune_orphaned_scans: '1',
     developer_mode: '0',
     health_gate_enabled: '1',
     health_gate_window_seconds: '90',
@@ -137,6 +138,7 @@ describe('split section save payloads', () => {
             'audit_retention_days',
             'log_retention_days',
             'metrics_retention_hours',
+            'prune_orphaned_scans',
             'scan_history_per_image_limit',
         ]);
     });
@@ -152,8 +154,20 @@ describe('split section save payloads', () => {
         expect(patchedKeys()).toEqual([
             'log_retention_days',
             'metrics_retention_hours',
+            'prune_orphaned_scans',
             'scan_history_per_image_limit',
         ]);
+    });
+
+    it('DataRetentionSection sends prune_orphaned_scans="0" when the toggle is turned off', async () => {
+        render(<DataRetentionSection />);
+        const save = await screen.findByRole('button', { name: /save settings/i });
+        fireEvent.click(screen.getByRole('switch')); // the only toggle: prune_orphaned_scans
+        fireEvent.click(save);
+        await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
+        const patch = [...mockedFetch.mock.calls].reverse().find(c => c[1]?.method === 'PATCH');
+        const body = JSON.parse(patch![1].body as string);
+        expect(body.prune_orphaned_scans).toBe('0');
     });
 
     it('DeveloperSection patches only developer_mode', async () => {

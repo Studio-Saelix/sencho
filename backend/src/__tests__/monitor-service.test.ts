@@ -10,7 +10,7 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockCleanupOldMetrics, mockCleanupOldNotifications, mockCleanupOldAuditLogs,
   mockUpdateStackAlertLastFired, mockGetSystemState, mockSetSystemState,
   mockGetRunningContainers, mockGetAllContainers, mockGetContainerStatsStream,
-  mockGetContainerRestartCount, mockGetDiskUsage,
+  mockGetContainerRestartCount, mockGetDiskUsage, mockGetImages, mockGetStacks,
   mockDispatchAlert,
   mockCurrentLoad, mockMem, mockFsSize,
   mockExecAsync,
@@ -36,6 +36,8 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
     reclaimableImages: 0, reclaimableContainers: 0, reclaimableVolumes: 0, reclaimableBuildCache: 0,
     reclaimableImageCount: 0, reclaimableContainerCount: 0, reclaimableVolumeCount: 0, reclaimableBuildCacheCount: 0,
   }),
+  mockGetImages: vi.fn().mockResolvedValue([]),
+  mockGetStacks: vi.fn().mockResolvedValue([]),
   mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
   mockCurrentLoad: vi.fn().mockResolvedValue({ currentLoad: 10 }),
   mockMem: vi.fn().mockResolvedValue({ total: 16e9, used: 4e9, active: 4e9, available: 12e9, free: 12e9, buffcache: 0 }),
@@ -71,6 +73,15 @@ vi.mock('../services/DockerController', () => ({
       getContainerStatsStream: mockGetContainerStatsStream,
       getContainerRestartCount: mockGetContainerRestartCount,
       getDiskUsage: mockGetDiskUsage,
+      getImages: mockGetImages,
+    }),
+  },
+}));
+
+vi.mock('../services/FileSystemService', () => ({
+  FileSystemService: {
+    getInstance: () => ({
+      getStacks: mockGetStacks,
     }),
   },
 }));
@@ -1560,5 +1571,79 @@ describe('MonitorService - janitor cycle and circuit breaker', () => {
     expect((svc as any).firstTickTimeoutId).toBeNull();
     expect((svc as any).janitorIntervalId).toBeNull();
     expect((svc as any).janitorFirstTickTimeoutId).toBeNull();
+  });
+});
+
+describe('MonitorService - reconcileOrphanedScans', () => {
+  function makeDb(refs: string[]) {
+    return {
+      getDistinctScanImageRefs: vi.fn().mockReturnValue(refs),
+      deleteScansByImageRef: vi.fn().mockReturnValue(1),
+    };
+  }
+
+  async function run(db: ReturnType<typeof makeDb>, settings: Record<string, string>) {
+    const svc = MonitorService.getInstance();
+    await (svc as any).reconcileOrphanedScans(db, settings);
+    return db.deleteScansByImageRef.mock.calls.map((c) => c[1] as string).sort();
+  }
+
+  it('does nothing when prune_orphaned_scans is not "1"', async () => {
+    const db = makeDb(['nginx:1']);
+    await run(db, { prune_orphaned_scans: '0' });
+    expect(db.getDistinctScanImageRefs).not.toHaveBeenCalled();
+    expect(db.deleteScansByImageRef).not.toHaveBeenCalled();
+  });
+
+  it('purges only the image and stack scans whose artifact is gone, scoped to the local node', async () => {
+    mockGetImages.mockResolvedValue([
+      { RepoTags: ['nginx:1', 'redis:7'] },
+      { RepoTags: ['<none>:<none>'] },
+      { RepoTags: undefined }, // dangling image with no tags
+    ]);
+    mockGetStacks.mockResolvedValue(['web']);
+    const db = makeDb(['nginx:1', 'ghost:9', 'stack:web', 'stack:old']);
+    expect(await run(db, { prune_orphaned_scans: '1' })).toEqual(['ghost:9', 'stack:old']);
+    // Per-instance: reconciliation reads and deletes against the local node id only.
+    expect(db.getDistinctScanImageRefs).toHaveBeenCalledWith(1);
+    for (const call of db.deleteScansByImageRef.mock.calls) {
+      expect(call[0]).toBe(1);
+    }
+  });
+
+  it('keeps scans whose ref matches a live image after normalization (untagged, registry-qualified, digest-pinned)', async () => {
+    mockGetImages.mockResolvedValue([
+      { RepoTags: ['alpine:latest', 'nginx:1.14'], RepoDigests: ['redis@sha256:abc'] },
+    ]);
+    mockGetStacks.mockResolvedValue(['web']);
+    // Stored refs in non-canonical forms that all resolve to a present image:
+    //   alpine -> alpine:latest, docker.io/library/nginx:1.14 -> nginx:1.14,
+    //   docker.io/library/redis@sha256:abc -> redis@sha256:abc (digest).
+    const db = makeDb(['alpine', 'docker.io/library/nginx:1.14', 'docker.io/library/redis@sha256:abc', 'ghost:9']);
+    expect(await run(db, { prune_orphaned_scans: '1' })).toEqual(['ghost:9']);
+  });
+
+  it('skips stack reconciliation when getStacks returns empty (ambiguous), still purges image orphans', async () => {
+    mockGetImages.mockResolvedValue([{ RepoTags: ['nginx:1'] }]);
+    mockGetStacks.mockResolvedValue([]);
+    const db = makeDb(['stack:web', 'ghost:9']);
+    const deleted = await run(db, { prune_orphaned_scans: '1' });
+    expect(deleted).toContain('ghost:9');
+    expect(deleted).not.toContain('stack:web');
+  });
+
+  it('purges nothing when the Docker image list cannot be read (fail-safe)', async () => {
+    mockGetImages.mockRejectedValue(new Error('docker down'));
+    mockGetStacks.mockResolvedValue(['web']);
+    const db = makeDb(['ghost:9', 'stack:old']);
+    await run(db, { prune_orphaned_scans: '1' });
+    expect(db.deleteScansByImageRef).not.toHaveBeenCalled();
+  });
+
+  it('purges every image scan when there are zero live images (empty but successful read)', async () => {
+    mockGetImages.mockResolvedValue([]);
+    mockGetStacks.mockResolvedValue(['web']);
+    const db = makeDb(['nginx:1', 'redis:7', 'stack:web']);
+    expect(await run(db, { prune_orphaned_scans: '1' })).toEqual(['nginx:1', 'redis:7']);
   });
 });
