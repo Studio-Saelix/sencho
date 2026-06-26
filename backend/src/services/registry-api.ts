@@ -113,12 +113,15 @@ export async function getAuthToken(
 
             const realmMatch = wwwAuth.match(/realm="([^"]+)"/);
             const serviceMatch = wwwAuth.match(/service="([^"]+)"/);
-            const scopeMatch = wwwAuth.match(/scope="([^"]+)"/);
             if (!realmMatch) return null;
 
             const params = new URLSearchParams();
             if (serviceMatch) params.set('service', serviceMatch[1]);
-            params.set('scope', scopeMatch ? scopeMatch[1] : `repository:${repo}:pull`);
+            // The /v2/ ping carries no repository context, so any scope it echoes is a
+            // placeholder (ghcr.io returns repository:user/image:pull). Always request
+            // the scope for the repository we actually want; reusing the echoed scope
+            // makes ghcr.io mint a token for the wrong repo and then reject the pull.
+            params.set('scope', `repository:${repo}:pull`);
             tokenUrl = `${realmMatch[1]}?${params.toString()}`;
         }
 
@@ -164,41 +167,94 @@ export function repoDigestMatchesRef(repoDigest: string, parsed: ParsedRef): boo
         && parsedName.repo === parsed.repo;
 }
 
-export async function getRemoteDigest(
+/** Outcome of a remote-digest lookup: the digest, or a human-readable reason it failed. */
+export type RemoteDigestResult =
+    | { ok: true; digest: string }
+    | { ok: false; reason: string };
+
+/**
+ * Map a non-success manifest status to a specific reason so a caller can tell an auth
+ * failure from a rate limit, a missing image, or a server error, rather than collapsing
+ * them all into "unreachable". `ref` is the resolved "<registry>/<repo>:<tag>" for the
+ * image after Docker Hub normalization, not necessarily the literal string the user wrote.
+ */
+function manifestFailureReason(statusCode: number, ref: string, headers: HttpResult['headers']): string {
+    if (statusCode === 401 || statusCode === 403) return `Authentication failed for ${ref}`;
+    if (statusCode === 429) {
+        const retry = headers['retry-after'];
+        const retryStr = Array.isArray(retry) ? retry[0] : retry;
+        return retryStr
+            ? `Rate limited by registry for ${ref} (retry after ${retryStr})`
+            : `Rate limited by registry for ${ref}`;
+    }
+    if (statusCode === 404) return `Image not found: ${ref}`;
+    if (statusCode >= 500) return `Registry error (${statusCode}) for ${ref}`;
+    return `Registry returned status ${statusCode} for ${ref}`;
+}
+
+/**
+ * Resolve the remote manifest digest for an image, returning either the digest or the
+ * reason the lookup failed. Same HEAD-first/GET-fallback transport as before (HEAD
+ * returns docker-content-digest without transferring the body, so it does not draw down
+ * Docker Hub's anonymous pull-rate budget the way a GET can); only the failure handling
+ * is richer. A 401/403/404/429/5xx HEAD reports its specific reason without a GET retry,
+ * since the bearer token is fetched up-front, so a 401 here is a real auth failure rather
+ * than a token-scope challenge to retry.
+ */
+export async function getRemoteDigestResult(
     registry: string,
     repo: string,
     tag: string,
     credentials?: RegistryCredentials | null,
-): Promise<string | null> {
+): Promise<RemoteDigestResult> {
+    const ref = `${registry}/${repo}:${tag}`;
     try {
         const token = await getAuthToken(registry, repo, credentials);
         const headers: Record<string, string> = { Accept: MANIFEST_ACCEPT };
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const url = `https://${registry}/v2/${repo}/manifests/${tag}`;
 
-        // HEAD first: the registry returns docker-content-digest without
-        // transferring the manifest body, so it does not draw down Docker Hub's
-        // anonymous pull-rate budget the way a GET does (a GET can self-inflict a
-        // 429). Fall back to GET only when the registry rejects HEAD (405/501) or
-        // omits the digest header on a 200. A 401/403/404/429/5xx HEAD returns
-        // null without a GET retry: the bearer token is fetched up-front, so a
-        // 401 here is a real auth failure, not a token-scope challenge to retry.
         const head = await httpRequest(url, 'HEAD', headers);
         if (head.statusCode === 200) {
             const digest = head.headers['docker-content-digest'];
-            if (typeof digest === 'string') return digest;
+            if (typeof digest === 'string') return { ok: true, digest };
+            // 200 without the digest header: fall through to GET to read it from there.
         } else if (head.statusCode !== 405 && head.statusCode !== 501) {
-            // 401/403/404/429/5xx: a GET would fail the same way. Report as unreachable.
-            return null;
+            return { ok: false, reason: manifestFailureReason(head.statusCode, ref, head.headers) };
         }
 
         const res = await httpRequest(url, 'GET', headers);
-        if (res.statusCode !== 200) return null;
-        const digest = res.headers['docker-content-digest'];
-        return typeof digest === 'string' ? digest : null;
-    } catch {
-        return null;
+        if (res.statusCode === 200) {
+            const digest = res.headers['docker-content-digest'];
+            if (typeof digest === 'string') return { ok: true, digest };
+            // 200 on both HEAD and GET but no digest header: a spec-violating registry.
+            return { ok: false, reason: `Registry returned no digest for ${ref}` };
+        }
+        return { ok: false, reason: manifestFailureReason(res.statusCode, ref, res.headers) };
+    } catch (e) {
+        // Bind and log the cause: a bare catch here would flatten DNS, TLS, connection-
+        // refused, and timeout failures into one opaque string with nothing in the logs,
+        // the silent-failure mode this function exists to remove. Prefer the errno code
+        // (ENOTFOUND/ECONNREFUSED/ETIMEDOUT/...) over a verbose message so the reason
+        // stays short in the sidebar tooltip; fall back to the message otherwise.
+        const cause = e instanceof Error ? ((e as NodeJS.ErrnoException).code ?? e.message) : String(e);
+        console.error(`[registry-api] Remote digest lookup for ${ref} failed:`, cause);
+        return { ok: false, reason: `Registry unreachable for ${ref} (${cause})` };
     }
+}
+
+/**
+ * Digest-or-null view of {@link getRemoteDigestResult} for callers that only need the
+ * digest and treat any failure as "unknown" (e.g. the update-preview tag/digest diff).
+ */
+export async function getRemoteDigest(
+    registry: string,
+    repo: string,
+    tag: string,
+    credentials?: RegistryCredentials | null,
+): Promise<string | null> {
+    const result = await getRemoteDigestResult(registry, repo, tag, credentials);
+    return result.ok ? result.digest : null;
 }
 
 export async function listRegistryTags(
