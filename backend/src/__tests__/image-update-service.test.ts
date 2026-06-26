@@ -552,6 +552,26 @@ services:
     expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
   });
 
+  it('preserves a previously confirmed update through a partial check and does not re-notify', async () => {
+    // Stack had a confirmed update (previousState true). This scan: the updated
+    // image errors, the other resolves clean. A partial check must not erase the
+    // known update (which would re-fire the notification when the image recovers).
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(COMPOSE_TWO);
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: true });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImageByRef(service, {
+      'nginx:latest': { hasUpdate: false, error: 'Registry unreachable for registry-1.docker.io/library/nginx:latest' },
+      'postgres:15': { hasUpdate: false },
+    });
+
+    await (service as any).checkNode(1, 'local', fakeDb());
+
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'partial', expect.stringContaining('Registry unreachable'));
+    expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
   it('treats a stack whose only image is not-checkable as ok, not failed', async () => {
     mockGetStacks.mockResolvedValue(['stackA']);
     mockGetStackContent.mockResolvedValue(COMPOSE_ONE);

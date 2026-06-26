@@ -3209,9 +3209,10 @@ export class DatabaseService {
     /**
      * Record a fully-failed check (no checkable image could be reached) without
      * touching has_update, so a transient registry outage cannot erase a real
-     * update or flap the notification state. Leaves the row absent untouched
-     * only when one already exists; a first-ever failed check inserts a row with
-     * has_update = 0 so the stack still appears with its failure reason.
+     * update or flap the notification state. On an existing row it updates only
+     * check_status / last_error / checked_at, leaving has_update intact; a
+     * first-ever failed check inserts a row with has_update = 0 so the stack
+     * still appears with its failure reason.
      */
     public recordStackCheckFailure(nodeId: number, stackName: string, lastError: string, checkedAt: number): void {
         this.db.prepare(

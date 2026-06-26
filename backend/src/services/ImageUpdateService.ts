@@ -556,7 +556,9 @@ export class ImageUpdateService {
                 imageUpdateMap.set(imageRef, await this.checkImage(docker, imageRef));
             } catch (e) {
                 console.error(`[ImageUpdateService] Error checking ${sanitizeForLog(imageRef)}:`, sanitizeForLog((e as Error)?.message ?? String(e)));
-                imageUpdateMap.set(imageRef, { hasUpdate: false, error: String(e) });
+                // getErrorMessage (not raw String(e)) because this value can surface
+                // verbatim in the sidebar tooltip / readiness advisory as lastError.
+                imageUpdateMap.set(imageRef, { hasUpdate: false, error: getErrorMessage(e, 'Update check failed') });
             }
             await sleep(ImageUpdateService.INTER_IMAGE_DELAY_MS);
         }
@@ -579,7 +581,7 @@ export class ImageUpdateService {
                 .map(img => imageUpdateMap.get(img))
                 .filter((r): r is ImageCheckResult => !!r && !r.notCheckable);
             const errored = checkable.filter(r => r.error !== undefined);
-            const hasUpdate = checkable.some(r => r.error === undefined && r.hasUpdate === true);
+            const confirmedHasUpdate = checkable.some(r => r.error === undefined && r.hasUpdate === true);
 
             // Every checkable image failed: status is undeterminable. Preserve the
             // last-known has_update so a transient registry outage neither erases a
@@ -591,6 +593,13 @@ export class ImageUpdateService {
 
             const checkStatus = errored.length > 0 ? 'partial' : 'ok';
             const lastError = errored.length > 0 ? (errored[0].error ?? null) : null;
+            // Only a fully-ok check is authoritative enough to lower has_update to
+            // false. On a partial check some image could not be reached, so a
+            // previously confirmed update is preserved rather than erased (which
+            // would also re-fire the notification when that image recovers).
+            const hasUpdate = checkStatus === 'partial'
+                ? (confirmedHasUpdate || previousState[stackName] === true)
+                : confirmedHasUpdate;
 
             if (hasUpdate) {
                 updatesFound++;

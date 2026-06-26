@@ -587,6 +587,9 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             .sort((a, b) => a.stack.localeCompare(b.stack)),
         );
       } else {
+        // Clear stale failures rather than persist them across a load, but log:
+        // an empty advisory must not silently stand in for "detail unavailable".
+        console.error('[AutoUpdateReadiness] /image-updates/detail failed:', detailRes.status);
         setCheckFailures([]);
       }
 

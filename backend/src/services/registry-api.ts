@@ -178,9 +178,11 @@ export async function getRemoteDigest(
 
         // HEAD first: the registry returns docker-content-digest without
         // transferring the manifest body, so it does not draw down Docker Hub's
-        // anonymous pull-rate budget the way a GET does (a self-inflicted 429
-        // would otherwise read as "up to date"). Fall back to GET only when the
-        // registry rejects HEAD (405/501) or omits the digest header on a 200.
+        // anonymous pull-rate budget the way a GET does (a GET can self-inflict a
+        // 429). Fall back to GET only when the registry rejects HEAD (405/501) or
+        // omits the digest header on a 200. A 401/403/404/429/5xx HEAD returns
+        // null without a GET retry: the bearer token is fetched up-front, so a
+        // 401 here is a real auth failure, not a token-scope challenge to retry.
         const head = await httpRequest(url, 'HEAD', headers);
         if (head.statusCode === 200) {
             const digest = head.headers['docker-content-digest'];

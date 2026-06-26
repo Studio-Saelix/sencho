@@ -36,8 +36,14 @@ export function useImageUpdates(activeNodeId: number | undefined) {
             synthesized[stack] = { hasUpdate, checkStatus: 'ok', lastError: null, checkedAt: 0 };
           }
           setStackUpdates(synthesized);
+        } else {
+          console.error('[ImageUpdates] /detail 404 fallback to /image-updates failed:', boolRes.status);
         }
+        return;
       }
+      // Any other non-ok (500, or a proxy 5xx from an unreachable remote): keep
+      // the last-known state on screen, but do not let the failure go silent.
+      console.error('[ImageUpdates] /image-updates/detail returned', res.status);
     } catch (e: unknown) {
       console.error('[ImageUpdates] fetch failed:', e);
     }
