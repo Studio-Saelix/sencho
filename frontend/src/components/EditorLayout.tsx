@@ -425,7 +425,7 @@ export default function EditorLayout() {
     stackActions.navigateToNotification(notif);
   }, [isMobile, navigateMobileAware, handleNavigate, stackActions]);
 
-  const handleNotificationNavigateChangelog = useCallback((_notif: NotificationItem) => {
+  const handleNotificationNavigateChangelog = useCallback(() => {
     if (isMobile) {
       navigateMobileAware('fleet');
     } else {
