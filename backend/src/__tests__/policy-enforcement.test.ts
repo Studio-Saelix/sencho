@@ -328,6 +328,8 @@ describe('enforcePolicyPreDeploy', () => {
     expect(result.violations).toHaveLength(1);
     expect(result.violations[0].imageRef).toBe('(compose parse error)');
     expect(result.violations[0].severity).toBe('UNKNOWN');
+    // The block is unactionable without naming why the gate ran a synthetic block.
+    expect(result.violations[0].error).toMatch(/compose file missing/i);
     expect(trivyStub.scanImagePreflight).not.toHaveBeenCalled();
   });
 
@@ -344,6 +346,30 @@ describe('enforcePolicyPreDeploy', () => {
     expect(result.violations[0].imageRef).toBe('nginx:1.14');
     expect(result.violations[0].severity).toBe('UNKNOWN');
     expect(result.violations[0].scanId).toBe(0);
+    // The synthetic violation must carry the scan failure reason so the block is
+    // actionable rather than an unexplained zero-count block.
+    expect(result.violations[0].error).toMatch(/trivy crashed/i);
+  });
+
+  it('records an evaluation-failure violation that keeps the scan id and names the reason', async () => {
+    // A KEV policy forces the per-finding detail path, and an intel lookup that
+    // throws after a successful scan exercises the evaluation-failure catch,
+    // which (unlike a scan failure) keeps the real scan id.
+    dbStub.getMatchingPolicy.mockReturnValue(mkPolicy({ block_on_severity: 0, block_on_kev: 1 }));
+    trivyStub.isTrivyAvailable.mockReturnValue(true);
+    composeStub.listStackImages.mockResolvedValue(['nginx:1.14']);
+    trivyStub.scanImagePreflight.mockResolvedValue(mkScan({ id: 42, total_vulnerabilities: 1, highest_severity: 'CRITICAL', critical_count: 1 }));
+    dbStub.getAllVulnerabilityDetails.mockReturnValue([
+      { id: 1, scan_id: 42, vulnerability_id: 'CVE-2024-1', pkg_name: 'p', installed_version: '1', fixed_version: null, severity: 'CRITICAL', title: null, description: null, primary_url: null },
+    ]);
+    dbStub.getCveIntel.mockImplementation(() => { throw new Error('intel db read failed'); });
+
+    const result = await enforcePolicyPreDeploy('web', 1, { bypass: false, actor: 'u' });
+
+    expect(result.ok).toBe(false);
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0].scanId).toBe(42);
+    expect(result.violations[0].error).toMatch(/policy evaluation failed/i);
   });
 
   it('skips image refs that fail validation without calling the scanner', async () => {
@@ -408,6 +434,7 @@ describe('enforcePolicyPreDeploy', () => {
       severity: 'UNKNOWN',
       scanId: 0,
     });
+    expect(result.violations[0].error).toMatch(/invalid image reference/i);
     expect(trivyStub.scanImagePreflight).not.toHaveBeenCalled();
     expect(composeStub.listStackImages).not.toHaveBeenCalled();
   });

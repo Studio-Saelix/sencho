@@ -22,6 +22,9 @@ export interface PolicyBlockViolation {
   /** Which inputs matched (empty when the image could not be scanned). */
   reasons: PolicyBlockReason[];
   scanId: number;
+  /** Set when the gate blocked because the image could not be scanned or
+   *  evaluated (a scan/parse failure), rather than a policy input matching. */
+  error?: string;
 }
 
 export interface PolicyBlockPayload {
@@ -114,19 +117,30 @@ export function PolicyBlockDialog({
               <div key={`${v.imageRef}-${v.scanId}`} className="px-4 py-3 flex items-center justify-between gap-4">
                 <div className="min-w-0">
                   <div className="font-mono text-sm truncate">{v.imageRef}</div>
-                  <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle tabular-nums">
-                    {v.criticalCount} critical &middot; {v.highCount} high
-                    {v.kevCount > 0 && <> &middot; {v.kevCount} KEV</>}
-                    {v.fixableCount > 0 && <> &middot; {v.fixableCount} fixable</>}
-                  </div>
-                  {(v.reasons ?? []).length > 0 && (
-                    <div className="flex flex-wrap gap-1 mt-1.5">
-                      {(v.reasons ?? []).map((r) => (
-                        <Badge key={r} variant="destructive" className="text-[10px]">
-                          {REASON_LABEL[r]}
-                        </Badge>
-                      ))}
-                    </div>
+                  {v.error ? (
+                    <>
+                      <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
+                        Could not be scanned
+                      </div>
+                      <div className="text-xs text-muted-foreground mt-1 break-words">{v.error}</div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle tabular-nums">
+                        {v.criticalCount} critical &middot; {v.highCount} high
+                        {v.kevCount > 0 && <> &middot; {v.kevCount} KEV</>}
+                        {v.fixableCount > 0 && <> &middot; {v.fixableCount} fixable</>}
+                      </div>
+                      {(v.reasons ?? []).length > 0 && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {(v.reasons ?? []).map((r) => (
+                            <Badge key={r} variant="destructive" className="text-[10px]">
+                              {REASON_LABEL[r]}
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
                 <SeverityChip severity={normalizeSeverity(String(v.severity))} />
@@ -134,6 +148,12 @@ export function PolicyBlockDialog({
             ))
           )}
         </div>
+        {violations.some((v) => v.error) && (
+          <p className="text-sm text-muted-foreground mt-3">
+            The deploy was blocked because the scan did not complete. Resolve the issue above and
+            deploy again, or bypass if you accept the risk.
+          </p>
+        )}
       </ModalBody>
       <ModalFooter
         secondary={
