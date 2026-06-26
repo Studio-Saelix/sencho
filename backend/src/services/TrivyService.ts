@@ -651,7 +651,11 @@ class TrivyService {
                         `scanImage: cache hit for digest=${digest} scanId=${cached.id} ageMs=${startedAt - cached.scanned_at}`,
                     );
                     const db = DatabaseService.getInstance();
-                    const details = db.getVulnerabilityDetails(cached.id, { limit: 1000 }).items;
+                    // Copy the cached scan's full finding set, not a truncated page:
+                    // the persisted copy must keep stored details == total_vulnerabilities,
+                    // or the deploy gate's integrity check fails closed on a cached scan
+                    // that has more findings than a single detail page would hold.
+                    const details = db.getAllVulnerabilityDetails(cached.id);
                     const cachedSecrets = scanners.includes('secret')
                         ? db.getSecretFindings(cached.id, { limit: 1000 }).items
                         : [];
