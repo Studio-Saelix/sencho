@@ -454,7 +454,10 @@ How long Sencho keeps historical data on this node before pruning it.
 | **Container metrics** | 24 hrs | 8,760 (1 year) | How long to keep per-container CPU, RAM, and network history for dashboard charts. |
 | **Notification log** | 30 days | 365 | How long to keep alert and notification history. |
 | **Scan history per image** | 50 scans | 1,000 | How many vulnerability scans to keep per image. Older scans beyond the cap are pruned. |
+| **Remove scans for deleted images and stacks** | On | - | When on, scan results are deleted once their image is gone from this node or their stack is deleted, so the Security Overview stays tied to what still exists. Turn it off to keep scan history for removed images and stacks. |
 | **Audit log** | 90 days | 365 | How long to keep audit trail entries. Requires Admiral. |
+
+Removing scans for deleted artifacts runs in the background a few minutes after an image or stack disappears, and immediately when you delete a stack. An image that is still present on the node keeps its scan results, even when no stack uses it.
 
 Click **Save settings** to apply.
 

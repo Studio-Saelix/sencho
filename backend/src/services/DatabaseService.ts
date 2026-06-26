@@ -1572,6 +1572,11 @@ export class DatabaseService {
         stmt.run('metrics_retention_hours', '24');
         stmt.run('log_retention_days', '30');
         stmt.run('scan_history_per_image_limit', '50');
+        // Remove scan results when their image is gone from Docker or their
+        // stack folder is deleted, so the Security Overview reflects what still
+        // exists. On by default; operators who keep scan history for deleted
+        // artifacts can turn it off.
+        stmt.run('prune_orphaned_scans', '1');
         stmt.run('trivy_auto_update', '0');
         stmt.run('trivy_last_notified_version', '');
         stmt.run('deploy_block_honor_suppressions', '0');
@@ -4493,6 +4498,55 @@ export class DatabaseService {
             return deleteParent.run(limit).changes;
         });
         return txn();
+    }
+
+    /**
+     * Distinct image_refs that have at least one scan row for a node. Used by
+     * the orphan-scan reconciler to compare stored scans against the artifacts
+     * (images, stacks) that still exist on the host.
+     */
+    public getDistinctScanImageRefs(nodeId: number): string[] {
+        return (
+            this.db
+                .prepare(
+                    'SELECT DISTINCT image_ref FROM vulnerability_scans WHERE node_id = ?',
+                )
+                .all(nodeId) as Array<{ image_ref: string }>
+        ).map((r) => r.image_ref);
+    }
+
+    /**
+     * Delete every scan (and its findings) for one (node_id, image_ref). Used
+     * to purge scans whose artifact is gone. Children are deleted explicitly
+     * because SQLite foreign-key cascade is not enabled at the connection
+     * level (see pruneScanHistoryPerImage). Returns the parent rows removed;
+     * idempotent (0 when nothing matches).
+     */
+    public deleteScansByImageRef(nodeId: number, imageRef: string): number {
+        const idSubquery =
+            'SELECT id FROM vulnerability_scans WHERE node_id = ? AND image_ref = ?';
+        const deleteChild = (table: string) =>
+            this.db
+                .prepare(`DELETE FROM ${table} WHERE scan_id IN (${idSubquery})`)
+                .run(nodeId, imageRef);
+        const deleteParent = this.db.prepare(
+            'DELETE FROM vulnerability_scans WHERE node_id = ? AND image_ref = ?',
+        );
+        const txn = this.db.transaction(() => {
+            deleteChild('vulnerability_details');
+            deleteChild('secret_findings');
+            deleteChild('misconfig_findings');
+            return deleteParent.run(nodeId, imageRef).changes;
+        });
+        return txn();
+    }
+
+    /**
+     * Purge the compose-config (misconfig) scans for a deleted stack, keyed by
+     * the `stack:<name>` image_ref convention used by scanComposeStack.
+     */
+    public deleteStackScans(nodeId: number, stackName: string): number {
+        return this.deleteScansByImageRef(nodeId, `stack:${stackName}`);
     }
 
     public getLatestScanForImage(

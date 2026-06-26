@@ -16,6 +16,7 @@ import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
 import { useSettingsDirty } from './useSettingsDirty';
+import { TogglePill } from '@/components/ui/toggle-pill';
 
 interface DataRetentionSectionProps {
     onDirtyChange?: (dirty: boolean) => void;
@@ -31,13 +32,14 @@ function SectionSkeleton() {
     );
 }
 
-type DataRetentionFields = Pick<PatchableSettings, 'metrics_retention_hours' | 'log_retention_days' | 'audit_retention_days' | 'scan_history_per_image_limit'>;
+type DataRetentionFields = Pick<PatchableSettings, 'metrics_retention_hours' | 'log_retention_days' | 'audit_retention_days' | 'scan_history_per_image_limit' | 'prune_orphaned_scans'>;
 
 const DEFAULT_DATA_RETENTION: DataRetentionFields = {
     metrics_retention_hours: DEFAULT_SETTINGS.metrics_retention_hours,
     log_retention_days: DEFAULT_SETTINGS.log_retention_days,
     audit_retention_days: DEFAULT_SETTINGS.audit_retention_days,
     scan_history_per_image_limit: DEFAULT_SETTINGS.scan_history_per_image_limit,
+    prune_orphaned_scans: DEFAULT_SETTINGS.prune_orphaned_scans,
 };
 
 export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProps) {
@@ -76,6 +78,7 @@ export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProp
                     log_retention_days: nodeData.log_retention_days ?? DEFAULT_SETTINGS.log_retention_days,
                     audit_retention_days: nodeData.audit_retention_days ?? DEFAULT_SETTINGS.audit_retention_days,
                     scan_history_per_image_limit: nodeData.scan_history_per_image_limit ?? DEFAULT_SETTINGS.scan_history_per_image_limit,
+                    prune_orphaned_scans: (nodeData.prune_orphaned_scans as '0' | '1') ?? DEFAULT_SETTINGS.prune_orphaned_scans,
                 };
                 reset(safe);
             } catch (e) {
@@ -98,6 +101,7 @@ export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProp
             metrics_retention_hours: submitted.metrics_retention_hours,
             log_retention_days: submitted.log_retention_days,
             scan_history_per_image_limit: submitted.scan_history_per_image_limit,
+            prune_orphaned_scans: submitted.prune_orphaned_scans,
         };
         // audit_retention_days is a paid-only key the backend rejects from a
         // Community operator. The field renders only when isPaid, so include it
@@ -183,6 +187,16 @@ export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProp
                         />
                         <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">scans</span>
                     </div>
+                </SettingsField>
+
+                <SettingsField
+                    label="Remove scans for deleted images and stacks"
+                    helper="Keep the Security Overview tied to what still exists by deleting scan results once their image is gone from this node or their stack is deleted. On by default; turn it off to retain scan history for removed images and stacks."
+                >
+                    <TogglePill
+                        checked={settings.prune_orphaned_scans === '1'}
+                        onChange={(next) => onSettingChange('prune_orphaned_scans', next ? '1' : '0')}
+                    />
                 </SettingsField>
 
                 {isPaid && (

@@ -3,6 +3,8 @@ import semver from 'semver';
 import DockerController from './DockerController';
 import { DatabaseService, Node, StackAlert } from './DatabaseService';
 import { NodeRegistry } from './NodeRegistry';
+import { FileSystemService } from './FileSystemService';
+import { normalizeImageRef } from './DriftDetectionService';
 import { NotificationService } from './NotificationService';
 import { FleetUpdateTrackerService } from './FleetUpdateTrackerService';
 import { isValidVersion, getSenchoVersion } from './CapabilityRegistry';
@@ -374,6 +376,17 @@ export class MonitorService {
         try {
             const db = DatabaseService.getInstance();
             const settings = db.getGlobalSettings();
+
+            // Prune scans for artifacts that no longer exist (own try/catch so a
+            // reconcile failure never aborts the disk-usage check below). Lives
+            // here because it is Docker-heavy and the 15-min janitor cadence is
+            // the right throttle; it runs even when the disk alert is disabled.
+            try {
+                await this.reconcileOrphanedScans(db, settings);
+            } catch (e) {
+                console.error('[Monitor] Orphaned-scan reconcile failed', e);
+            }
+
             const janitorLimitGb = parseFloat(settings['docker_janitor_gb']);
             if (isNaN(janitorLimitGb) || janitorLimitGb <= 0) return;
 
@@ -442,6 +455,83 @@ export class MonitorService {
             }
         } finally {
             this.isJanitorProcessing = false;
+        }
+    }
+
+    /**
+     * Remove scans whose artifact no longer exists, so the Security Overview
+     * reflects what is still on the host. Per-instance: only the local node's
+     * scans are reconciled against the local Docker image list and stack dirs.
+     *
+     * Fail-safe by construction: a scan is only purged when we positively know
+     * its artifact is gone. If the image list cannot be read, the whole pass is
+     * skipped (we never delete on an unread list). Stack scans are reconciled
+     * only when getStacks() returns a non-empty list, because it returns [] on
+     * both an empty dir and an FS error and we cannot tell them apart.
+     *
+     * Image refs are compared after normalizeImageRef so equivalent forms match
+     * (untagged `alpine` vs Docker's `alpine:latest`, `docker.io/library/`
+     * prefixes), and both RepoTags and RepoDigests feed the live set so a
+     * digest-pinned scan ref still matches a present image. Erring toward
+     * "matches, keep" is the safe direction: the cost of a miss is a stale scan,
+     * not a wrongly deleted one.
+     */
+    private async reconcileOrphanedScans(
+        db: DatabaseService,
+        settings: Readonly<Record<string, string>>,
+    ): Promise<void> {
+        // Destructive cleanup: enabled only on an explicit '1'. A missing key or
+        // a read failure leaves it off, the safe default.
+        if (settings['prune_orphaned_scans'] !== '1') return;
+
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+
+        let liveImageRefs: Set<string>;
+        try {
+            const images = (await withTimeout(
+                DockerController.getInstance(nodeId).getImages(),
+                JANITOR_TIMEOUT_MS,
+                'docker images (scan reconcile)',
+            )) as Array<{ RepoTags?: string[]; RepoDigests?: string[] }>;
+            liveImageRefs = new Set<string>();
+            for (const img of images) {
+                for (const ref of [...(img.RepoTags ?? []), ...(img.RepoDigests ?? [])]) {
+                    if (ref && !ref.startsWith('<none>')) liveImageRefs.add(normalizeImageRef(ref));
+                }
+            }
+        } catch (e) {
+            if (isDebugEnabled()) {
+                console.debug('[Monitor:diag] Scan reconcile skipped: image list unavailable', e);
+            }
+            return;
+        }
+
+        // getStacks() never throws (it swallows FS errors and returns []), so an
+        // empty list is ambiguous (empty dir vs failed read); reconcileStacks
+        // gates stack purging on a non-empty list to avoid deleting on a failure.
+        const liveStacks = await FileSystemService.getInstance(nodeId).getStacks();
+        const reconcileStacks = liveStacks.length > 0;
+        const liveStackSet = new Set(liveStacks);
+
+        let purgedImageScans = 0;
+        let purgedStackScans = 0;
+        for (const ref of db.getDistinctScanImageRefs(nodeId)) {
+            if (ref.startsWith('stack:')) {
+                if (!reconcileStacks) continue;
+                if (!liveStackSet.has(ref.slice('stack:'.length))) {
+                    purgedStackScans += db.deleteScansByImageRef(nodeId, ref);
+                }
+            } else if (!liveImageRefs.has(normalizeImageRef(ref))) {
+                purgedImageScans += db.deleteScansByImageRef(nodeId, ref);
+            }
+        }
+
+        if (isDebugEnabled() && (purgedImageScans > 0 || purgedStackScans > 0)) {
+            console.debug(
+                `[Monitor:diag] Scan reconcile: purged ${purgedImageScans} image scan(s) `
+                + `(${liveImageRefs.size} live image refs), ${purgedStackScans} stack scan(s)`
+                + (reconcileStacks ? '' : ' (stack reconcile skipped: empty stack list)'),
+            );
         }
     }
 

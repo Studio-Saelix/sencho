@@ -241,6 +241,46 @@ describe('prune_on_update (auto-prune after updates)', () => {
   });
 });
 
+describe('prune_orphaned_scans (purge scans for deleted images/stacks)', () => {
+  it('defaults to ON in a freshly seeded database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().prune_orphaned_scans).toBe('1');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.prune_orphaned_scans).toBeDefined();
+  });
+
+  it('rejects a non-admin write with 403', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', viewerCookie)
+      .send({ key: 'prune_orphaned_scans', value: '0' });
+    expect(res.status).toBe(403);
+  });
+
+  it('accepts a well-formed write and rejects a non-enum value', async () => {
+    const ok = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'prune_orphaned_scans', value: '0' });
+    expect(ok.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().prune_orphaned_scans).toBe('0');
+
+    const bad = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'prune_orphaned_scans', value: 'banana' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('Validation failed');
+    expect(DatabaseService.getInstance().getGlobalSettings().prune_orphaned_scans).toBe('0');
+
+    // Restore the seeded default so later suites observe the shipped behavior.
+    DatabaseService.getInstance().updateGlobalSetting('prune_orphaned_scans', '1');
+  });
+});
+
 describe('health gate settings', () => {
   it('seeds enabled with a 90 second window in a fresh database', () => {
     const settings = DatabaseService.getInstance().getGlobalSettings();
