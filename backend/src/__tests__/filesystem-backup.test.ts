@@ -508,5 +508,79 @@ describe('FileSystemService backup location', () => {
 
       expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: original\n');
     });
+
+    it('aborts the restore when a manifest-recorded file is missing from the backup, leaving the live file unchanged', async () => {
+      const stackName = 'missingmember';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: backed-up\n', 'utf-8');
+
+      const service = FileSystemService.getInstance();
+      await service.backupStackFiles(stackName); // manifest records compose.yaml
+
+      // The backed-up compose.yaml is lost after the manifest was written, but the
+      // manifest still names it. An items-only scan would not notice; the orphan
+      // removal would then delete the live compose.yaml and the copy would restore
+      // nothing, leaving the stack unrecoverable. The integrity check must catch
+      // the missing member first.
+      const backupDir = path.join(dataDir, 'backups', '1', stackName);
+      await fsPromises.rm(path.join(backupDir, 'compose.yaml'));
+
+      // The live file is the post-deploy state a rollback would revert.
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: current\n', 'utf-8');
+
+      await expect(service.restoreStackFiles(stackName)).rejects.toThrow(/missing/i);
+
+      // The live compose.yaml must survive: not deleted as an orphan, not truncated.
+      expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: current\n');
+    });
+
+    it('aborts on a missing recorded file even when its checksum entry is malformed', async () => {
+      const stackName = 'missingnonstring';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: backed-up\n', 'utf-8');
+
+      const service = FileSystemService.getInstance();
+      await service.backupStackFiles(stackName);
+
+      // The manifest still names compose.yaml but with a non-string value, and the
+      // backed-up copy is gone. The missing-file check must fire before the
+      // value-type skip, otherwise the orphan removal would delete the live
+      // compose.yaml and restore nothing.
+      const backupDir = path.join(dataDir, 'backups', '1', stackName);
+      await fsPromises.writeFile(path.join(backupDir, '.checksums'), JSON.stringify({ 'compose.yaml': 123 }), 'utf-8');
+      await fsPromises.rm(path.join(backupDir, 'compose.yaml'));
+
+      await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'name: current\n', 'utf-8');
+
+      await expect(service.restoreStackFiles(stackName)).rejects.toThrow(/missing/i);
+      expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe('name: current\n');
+    });
+
+    it('fails the backup when a managed file exists but cannot be read', async () => {
+      const stackName = 'readfail';
+      const stackDir = path.join(composeDir, stackName);
+      await fsPromises.mkdir(stackDir, { recursive: true });
+      const composeSrc = path.join(stackDir, 'compose.yaml');
+      await fsPromises.writeFile(composeSrc, 'name: present\n', 'utf-8');
+
+      // The compose file exists but the read fails (e.g. EACCES on a chowned bind
+      // mount). Silently skipping it would yield a "successful" backup that omits a
+      // live managed file, so a later rollback would delete it as an orphan.
+      const realReadFile = fsPromises.readFile.bind(fsPromises);
+      const readSpy = vi.spyOn(fsPromises, 'readFile').mockImplementation((file, options) => {
+        if (path.normalize(String(file)) === path.normalize(composeSrc)) {
+          return Promise.reject(Object.assign(new Error('permission denied'), { code: 'EACCES' }));
+        }
+        return realReadFile(file as Parameters<typeof realReadFile>[0], options);
+      });
+      try {
+        await expect(FileSystemService.getInstance().backupStackFiles(stackName))
+          .rejects.toThrow(/Could not read compose.yaml for backup/);
+      } finally {
+        readSpy.mockRestore();
+      }
+    });
   });
 });
