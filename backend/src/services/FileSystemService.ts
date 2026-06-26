@@ -1376,6 +1376,22 @@ export class FileSystemService {
       throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
     }
 
+    // A dangling symlink leaf realpath()s to ENOENT (its target is missing), so
+    // the reattach branch above rebuilds the path with the link name intact and
+    // it passes the lexical containment check. lstat does not follow the final
+    // component, so it tells a not-yet-created file (ENOENT, allowed) apart from
+    // a dangling link (a symlink, rejected) that a follow-on writeFile/readFile
+    // would traverse out of the root. Mirrors assertRealWithinBase's guard.
+    let leafIsSymlink = false;
+    try {
+      leafIsSymlink = (await fsPromises.lstat(realTarget)).isSymbolicLink();
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    if (leafIsSymlink) {
+      throw Object.assign(new Error('Symlink escapes root directory'), { code: 'SYMLINK_ESCAPE' });
+    }
+
     return realTarget;
   }
 
@@ -1696,7 +1712,11 @@ export class FileSystemService {
       }
     }
 
-    await fsPromises.writeFile(safePath, content, 'utf-8');
+    // Promote through the atomic stage-and-rename helper so a crash or write
+    // failure leaves the previous target intact rather than a truncated file.
+    // rename also replaces a (rejected upstream) symlink leaf in place instead
+    // of following it, so the write can never land outside the root.
+    await this.writeStackFileAtomic(safePath, content);
     const newStat = await fsPromises.stat(safePath);
     return { ok: true, mtimeMs: newStat.mtimeMs };
   }

@@ -117,7 +117,50 @@ describe('StackFileRootsService.listRoots', () => {
     expect(bind?.browsable).toBe(false);
   });
 
+  it('classifies a reachable absolute bind outside the compose base as browsable and writable', async () => {
+    // A config directory mounted into both the app and the Sencho container can
+    // legitimately live outside the compose base. When Sencho can stat it, the
+    // root must be fully browsable/editable, not silently dropped as unreachable.
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'sfr-ext-')));
+    try {
+      stub({ rendered: renderModel({ web: [{ type: 'bind', source: outside, target: '/config', read_only: false }] }) });
+      const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+      const bind = roots.find((r) => r.kind === 'bind');
+      expect(bind?.accessible).toBe(true);
+      expect(bind?.browsable).toBe(true);
+      expect(bind?.writable).toBe(true);
+      expect(bind?.managedSourceOverlap).toBe(false);
+      expect(bind?.hostPathOrName).toBe(outside);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it('marks an unreachable absolute bind outside the compose base as non-browsable', async () => {
+    const outsideMissing = path.join(os.tmpdir(), 'sfr-ext-absent-xyz-12345');
+    stub({ rendered: renderModel({ web: [{ type: 'bind', source: outsideMissing, target: '/config' }] }) });
+    const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+    const bind = roots.find((r) => r.kind === 'bind');
+    expect(bind?.accessible).toBe(false);
+    expect(bind?.browsable).toBe(false);
+    expect(bind?.warning).toBeTruthy();
+  });
+
   it('blocks a dangerous host bind (/etc) and never exposes it as browsable', async () => {
+    stub({ rendered: renderModel({ web: [{ type: 'bind', source: '/etc', target: '/host-etc' }] }) });
+    const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+    const bind = roots.find((r) => r.kind === 'bind');
+    expect(bind?.dangerous).toBe(true);
+    expect(bind?.browsable).toBe(false);
+  });
+
+  it('blocks a dangerous declared source even when realpath rewrites it to a benign canonical', async () => {
+    // Guards the dangerousSource term: realpath can rewrite a dangerous POSIX
+    // source to a benign-looking canonical (a non-existent POSIX path resolves
+    // drive-prefixed on a non-Linux host), so isDangerousHostPath(canonical)
+    // alone would miss it. The classification must also read the literal source.
+    vi.spyOn(fs, 'realpath').mockResolvedValue('/srv/benign-canonical' as never);
+    vi.spyOn(fs, 'stat').mockResolvedValue({ isDirectory: () => true } as never);
     stub({ rendered: renderModel({ web: [{ type: 'bind', source: '/etc', target: '/host-etc' }] }) });
     const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
     const bind = roots.find((r) => r.kind === 'bind');

@@ -218,6 +218,64 @@ describe.skipIf(isWindows)('FileSystemService symlink-escape: dangling (broken) 
   });
 });
 
+// ── Scoped file-explorer writes (bind roots) must reject a dangling symlink ──
+//    leaf the same way the legacy managed-stack path does: the editor save sink
+//    (writeStackFileIfUnchanged) resolves through resolveSafePathWithin, which
+//    must not hand back a link path a follow-on write would traverse out of the
+//    root. The escape only triggers on first save (no expected mtime).
+describe.skipIf(isWindows)('FileSystemService scoped-root: dangling symlink leaf write', () => {
+  let tmpBase: string;
+  let composeDir: string;
+  let rootDir: string;
+  let externalTarget: string;
+
+  beforeEach(async () => {
+    tmpBase = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-scopedangle-'));
+    composeDir = path.join(tmpBase, 'compose');
+    rootDir = path.join(tmpBase, 'bindroot');
+    externalTarget = path.join(tmpBase, 'outside');
+    await fs.mkdir(composeDir, { recursive: true });
+    await fs.mkdir(rootDir, { recursive: true });
+    // The escape target dir exists; only the leaf file is missing, so the leaf
+    // symlink is dangling (realpath ENOENT) but a writeFile would create it.
+    await fs.mkdir(externalTarget, { recursive: true });
+    mockState.composeDir = composeDir;
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpBase, { recursive: true, force: true });
+  });
+
+  it('rejects a first-save through a dangling symlink leaf and writes nothing outside the root', async () => {
+    await fs.symlink(path.join(externalTarget, 'pwned.conf'), path.join(rootDir, 'leak.conf'));
+    const svc = FileSystemService.getInstance();
+    await expect(
+      svc.writeStackFileIfUnchanged(STACK, 'leak.conf', 'PWNED=1\n', null, { rootAbsDir: rootDir }),
+    ).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    await expect(fs.access(path.join(externalTarget, 'pwned.conf'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects a scoped read through a dangling symlink leaf (shared resolver guard)', async () => {
+    await fs.symlink(path.join(externalTarget, 'secret.conf'), path.join(rootDir, 'peek.conf'));
+    const svc = FileSystemService.getInstance();
+    await expect(
+      svc.readStackFile(STACK, 'peek.conf', undefined, { scope: { rootAbsDir: rootDir } }),
+    ).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+  });
+
+  it('writes a normal scoped file atomically (no leftover staging file)', async () => {
+    const svc = FileSystemService.getInstance();
+    const res = await svc.writeStackFileIfUnchanged(STACK, 'app.conf', 'key=value\n', null, { rootAbsDir: rootDir });
+    expect(res.ok).toBe(true);
+    expect(await fs.readFile(path.join(rootDir, 'app.conf'), 'utf-8')).toBe('key=value\n');
+    // The atomic helper stages into a sibling .sencho-tmp-* file and renames it
+    // away; nothing transient should remain in the root after a clean write.
+    const entries = await fs.readdir(rootDir);
+    expect(entries.filter((e) => e.includes('sencho-tmp'))).toHaveLength(0);
+    expect(entries).toEqual(['app.conf']);
+  });
+});
+
 // ── The compose root itself is a symlink: must NOT be a false positive ───────
 describe.skipIf(isWindows)('FileSystemService symlink-escape: symlinked compose root is allowed', () => {
   let tmpBase: string;

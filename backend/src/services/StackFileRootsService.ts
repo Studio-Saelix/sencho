@@ -34,6 +34,24 @@ export interface RootMount {
   readOnly: boolean;
 }
 
+/** All declarations resolving to one canonical bind source, with its probe result. */
+interface BindGroup {
+  canonical: string;
+  accessible: boolean;
+  isDir: boolean;
+  dockerSock: boolean;
+  /**
+   * Set when any raw declared source mapping to this canonical is a dangerous
+   * host root. Tracked from the declared source (a POSIX container path that
+   * stays literal across platforms), not the canonical, so that buildBindRoot's
+   * combined dangerous check (canonical OR this) still blocks a bind like /etc
+   * even where realpath rewrites the source (a non-existent POSIX path resolves
+   * drive-prefixed on a Windows dev box).
+   */
+  dangerousSource: boolean;
+  mounts: RootMount[];
+}
+
 export interface StackFileRoot {
   /** Opaque, server-minted id. The resolved path/name lives in metadata, never in the id. */
   id: string;
@@ -117,27 +135,22 @@ export function isDangerousHostPath(p: string): boolean {
 }
 
 /**
- * Browse-accessibility probe for a bind root, scoped to the compose base dir.
- * The realpath/stat run ONLY for a source that lexically resolves inside
- * `baseDir`: in the containerized deployment that is the only host area the
- * Sencho process can reach, so a source outside it is unreachable anyway and is
- * reported non-accessible without touching the filesystem. The containment is
- * an INLINE path.resolve + startsWith guard at each filesystem sink (the
- * realpath of a within-base symlink can still escape, so the resolved canonical
- * is re-checked before stat). Returns the canonical realpath so the route can
- * pass it to FileSystemService as the containment root.
+ * Browse-accessibility probe for a declared bind source. realpath + stat the
+ * source as Sencho actually sees it: a path Sencho cannot reach (not mounted
+ * into the container, or absent on the host) surfaces ENOENT and degrades to
+ * non-accessible. Bind sources are declared by the stack's own compose file and
+ * may legitimately live outside the compose base (a config directory mounted
+ * into both the app and the Sencho container), so accessibility is decided by
+ * whether the resolved path is stat-able, not by where it sits. Safety against
+ * privileged or managed paths is the caller's job: buildBindRoot still blocks
+ * dangerous host roots, docker-socket mounts, and overlaps with Sencho's managed
+ * areas. Returns the canonical realpath the route uses as the containment root
+ * for file operations on this bind.
  */
 export async function probeBindRootAccess(
   absPath: string,
-  baseDir: string,
 ): Promise<{ canonical: string; accessible: boolean; isDir: boolean }> {
-  const base = path.resolve(baseDir);
   const resolved = path.resolve(absPath);
-  // Out-of-base sources keep their original path for the dangerous/overlap
-  // classification the caller does, but are never statted.
-  if (resolved !== base && !resolved.startsWith(base + path.sep)) {
-    return { canonical: absPath, accessible: false, isDir: false };
-  }
   // A missing path (ENOENT) is the common, expected "not reachable" outcome and
   // is left silent; any other code (e.g. EACCES on a path that exists but Sencho
   // cannot read) is logged so an operator chasing "why can't I browse this bind"
@@ -154,11 +167,6 @@ export async function probeBindRootAccess(
   } catch (err) {
     logNonEnoent('realpath', err);
     return { canonical: resolved, accessible: false, isDir: false };
-  }
-  // A within-base source can be a symlink whose target escapes the base; re-check
-  // the resolved canonical inline before the stat sink.
-  if (canonical !== base && !canonical.startsWith(base + path.sep)) {
-    return { canonical, accessible: false, isDir: false };
   }
   try {
     const st = await fsPromises.stat(canonical);
@@ -299,13 +307,6 @@ export class StackFileRootsService {
     baseDir: string,
     stackDir: string,
   ): Promise<StackFileRoot[]> {
-    interface BindGroup {
-      canonical: string;
-      accessible: boolean;
-      isDir: boolean;
-      dockerSock: boolean;
-      mounts: RootMount[];
-    }
     const probeByRaw = new Map<string, { canonical: string; accessible: boolean; isDir: boolean }>();
     const bindByCanonical = new Map<string, BindGroup>();
     const volByName = new Map<string, { name: string; mounts: RootMount[] }>();
@@ -317,7 +318,7 @@ export class StackFileRootsService {
           const rawAbs = path.isAbsolute(m.source) ? m.source : path.resolve(stackDir, m.source);
           let probe = probeByRaw.get(rawAbs);
           if (!probe) {
-            probe = await probeBindRootAccess(rawAbs, baseDir);
+            probe = await probeBindRootAccess(rawAbs);
             probeByRaw.set(rawAbs, probe);
           }
           let group = bindByCanonical.get(probe.canonical);
@@ -327,11 +328,13 @@ export class StackFileRootsService {
               accessible: probe.accessible,
               isDir: probe.isDir,
               dockerSock: false,
+              dangerousSource: false,
               mounts: [],
             };
             bindByCanonical.set(probe.canonical, group);
           }
           group.mounts.push(mount);
+          if (isDangerousHostPath(rawAbs)) group.dangerousSource = true;
           if (isDockerSocketMount({ source: m.source, target: m.target })) group.dockerSock = true;
         } else if (m.type === 'named' && m.source) {
           const resolvedName = model.volumes[m.source]?.name ?? m.source;
@@ -358,7 +361,7 @@ export class StackFileRootsService {
   }
 
   private buildBindRoot(
-    group: { canonical: string; accessible: boolean; isDir: boolean; dockerSock: boolean; mounts: RootMount[] },
+    group: BindGroup,
     baseDir: string,
     stackDir: string,
   ): StackFileRoot | null {
@@ -377,7 +380,7 @@ export class StackFileRootsService {
     const dataDir = resolveDataDir();
     const overlapsManaged = (dir: string): boolean => isPathWithinBase(canonical, dir) || isPathWithinBase(dir, canonical);
     const overlap = !inStack && (overlapsManaged(baseDir) || overlapsManaged(dataDir));
-    const dangerous = isDangerousHostPath(canonical) || group.dockerSock;
+    const dangerous = isDangerousHostPath(canonical) || group.dangerousSource || group.dockerSock;
     const readonly = group.mounts.every((m) => m.readOnly);
     const isFile = group.accessible && !group.isDir;
 
