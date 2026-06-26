@@ -15,6 +15,7 @@ import { HealthGateService } from '../services/HealthGateService';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
+import { summarizeBlockReasons } from '../utils/policy-risk';
 import { isValidStackName } from '../utils/validation';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
@@ -365,7 +366,7 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
         );
         if (!autoUpdateGate.ok) {
           const blockedImages = autoUpdateGate.violations.map((v) => v.imageRef).join(', ');
-          const blockedMsg = `Policy "${autoUpdateGate.policy?.name}" blocked auto-update: ${autoUpdateGate.violations.length} image(s) exceed ${autoUpdateGate.policy?.max_severity}${blockedImages ? ` (${blockedImages})` : ''}`;
+          const blockedMsg = `Policy "${autoUpdateGate.policy?.name}" blocked auto-update: ${autoUpdateGate.violations.length} image(s) matched ${summarizeBlockReasons(autoUpdateGate.violations)}${blockedImages ? ` (${blockedImages})` : ''}`;
           NotificationService.getInstance().dispatchAlert('warning', 'scan_finding', blockedMsg, { stackName, actor: 'system:image-update' });
           results.push(`Stack "${stackName}": ${blockedMsg}`);
           continue;

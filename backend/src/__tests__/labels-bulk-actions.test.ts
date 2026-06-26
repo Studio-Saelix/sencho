@@ -179,7 +179,7 @@ describe('Stack Labels bulk actions', () => {
     enforcePolicyPreDeploy.mockResolvedValue({
       ok: false,
       policy: { name: 'block-criticals', max_severity: 'high' },
-      violations: [{ image: 'nginx:latest', severity: 'critical' }],
+      violations: [{ imageRef: 'nginx:latest', severity: 'CRITICAL', reasons: ['severity'] }],
     });
 
     const res = await request(app)
@@ -192,6 +192,7 @@ describe('Stack Labels bulk actions', () => {
       expect.objectContaining({ stackName: 'alpha', success: false, dryRun: true }),
     ]);
     expect(res.body.results[0].error).toContain('Policy "block-criticals" blocked deploy');
+    expect(res.body.results[0].error).toContain('matched severity threshold');
     expect(deployStack).not.toHaveBeenCalled();
     expect(invalidateNodeCaches).not.toHaveBeenCalled();
   });

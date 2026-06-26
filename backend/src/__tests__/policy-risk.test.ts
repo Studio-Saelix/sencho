@@ -8,6 +8,7 @@ import {
   evaluatePolicyRisk,
   describeReason,
   describePolicyInputs,
+  summarizeBlockReasons,
   type PolicyRiskInputs,
   type RiskFinding,
 } from '../utils/policy-risk';
@@ -87,5 +88,24 @@ describe('describeReason / describePolicyInputs', () => {
     expect(describePolicyInputs(inputs({ blockOnSeverity: true, maxSeverity: 'HIGH' }))).toContain('severity>=HIGH');
     expect(describePolicyInputs(inputs({ blockOnKev: true, blockOnFixable: true }))).toBe('KEV, fixable Critical/High');
     expect(describePolicyInputs(inputs())).toBe('no active inputs');
+  });
+});
+
+describe('summarizeBlockReasons', () => {
+  it('names a KEV-driven block as known-exploited, not a severity threshold', () => {
+    expect(summarizeBlockReasons([{ reasons: ['kev'] }])).toBe('known-exploited CVE (KEV)');
+  });
+
+  it('joins and de-duplicates reasons across violations', () => {
+    const summary = summarizeBlockReasons([
+      { reasons: ['kev'] },
+      { reasons: ['fixable', 'kev'] },
+    ]);
+    expect(summary).toBe('known-exploited CVE (KEV) + fixable Critical/High');
+  });
+
+  it('falls back to a generic phrase when no reason was recorded', () => {
+    expect(summarizeBlockReasons([{ reasons: [] }])).toBe('scan policy conditions');
+    expect(summarizeBlockReasons([])).toBe('scan policy conditions');
   });
 });
