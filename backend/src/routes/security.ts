@@ -114,11 +114,49 @@ function parseScannersInput(raw: unknown): readonly ('vuln' | 'secret')[] | unde
   return Array.from(out) as readonly ('vuln' | 'secret')[];
 }
 
-function shapeScanForResponse(scan: VulnerabilityScan): Omit<VulnerabilityScan, 'policy_evaluation'> & {
+function shapeScanForResponse(
+  scan: VulnerabilityScan,
+  // The scan-detail endpoint passes a verdict recomputed against current
+  // suppressions (resolveBannerEvaluation) so the banner matches the deploy
+  // gate; other callers omit it and the snapshot stored at scan time is used.
+  evaluationOverride?: ReturnType<typeof parsePolicyEvaluation>,
+): Omit<VulnerabilityScan, 'policy_evaluation'> & {
   policy_evaluation: ReturnType<typeof parsePolicyEvaluation>;
 } {
   const { policy_evaluation, ...rest } = scan;
-  return { ...rest, policy_evaluation: parsePolicyEvaluation(policy_evaluation) };
+  return {
+    ...rest,
+    policy_evaluation: evaluationOverride !== undefined ? evaluationOverride : parsePolicyEvaluation(policy_evaluation),
+  };
+}
+
+/**
+ * The policy verdict the scan-detail banner shows. The verdict stored at scan
+ * time drifts from the deploy gate once the gate is set to honor suppressions,
+ * because the gate always re-reads current suppressions while the stored value
+ * is a one-time snapshot: creating, editing, deleting, or expiring a suppression
+ * leaves the banner claiming a violation the gate would now pass, or the reverse.
+ * Recompute against current suppressions so the banner agrees with the gate.
+ * With honor-suppressions off, suppressions affect neither the gate nor the
+ * verdict, so the stored snapshot is authoritative and returned without a reread.
+ */
+function resolveBannerEvaluation(
+  db: DatabaseService,
+  scan: VulnerabilityScan,
+): ReturnType<typeof parsePolicyEvaluation> {
+  if (db.getGlobalSettings()['deploy_block_honor_suppressions'] !== '1') {
+    return parsePolicyEvaluation(scan.policy_evaluation);
+  }
+  try {
+    return db.evaluateScanAgainstPolicies(scan.node_id, scan, FleetSyncService.getSelfIdentity());
+  } catch (err) {
+    // The banner is informational and the deploy gate is authoritative, so a
+    // recompute failure must degrade to the stored snapshot rather than 500 the
+    // scan detail. The recompute is synchronous DB reads that should not throw,
+    // so surface it at error level if it ever does.
+    console.error('[Security] banner re-evaluation failed for scanId=%s node=%s:', scan.id, scan.node_id, getErrorMessage(err, 'unknown'));
+    return parsePolicyEvaluation(scan.policy_evaluation);
+  }
 }
 
 // A completed scan whose latest run is older than this is considered "stale" in
@@ -548,7 +586,7 @@ securityRouter.get('/scans', authMiddleware, (req: Request, res: Response) => {
       limit,
       offset,
     });
-    res.json({ ...result, items: result.items.map(shapeScanForResponse) });
+    res.json({ ...result, items: result.items.map((scan) => shapeScanForResponse(scan)) });
   } catch (error) {
     console.error('[Security] Failed to list scans:', error);
     res.status(500).json({ error: 'Failed to list scans' });
@@ -574,7 +612,7 @@ securityRouter.get('/scans/:scanId', authMiddleware, (req: Request, res: Respons
     }).filter(Boolean),
   );
   const publiclyExposed = exposedMap.get(scan.image_ref) ?? null;
-  res.json({ ...shapeScanForResponse(scan), publicly_exposed: publiclyExposed });
+  res.json({ ...shapeScanForResponse(scan, resolveBannerEvaluation(db, scan)), publicly_exposed: publiclyExposed });
 });
 
 securityRouter.get(
