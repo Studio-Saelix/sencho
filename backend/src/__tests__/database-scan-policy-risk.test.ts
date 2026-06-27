@@ -4,7 +4,7 @@
  * insert migrates to severity-only defaults, and evaluateScanAgainstPolicies
  * keys the banner on the same KEV/fixable/severity inputs as enforcement.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type { VulnerabilityScan, VulnerabilityDetail } from '../services/DatabaseService';
 
@@ -143,6 +143,78 @@ describe('evaluateScanAgainstPolicies risk inputs', () => {
     db.createScanPolicy({ ...basePolicy, stack_pattern: 'web', max_severity: 'HIGH' });
     expect(db.evaluateScanAgainstPolicies(1, seedScan('web', 'CRITICAL', []), '')!.reasons).toEqual(['severity']);
     expect(db.evaluateScanAgainstPolicies(1, seedScan('web', 'LOW', []), '')!.reasons).toEqual([]);
+  });
+});
+
+describe('evaluateScanAgainstPolicies honors suppressions in lockstep with the gate', () => {
+  function suppress(cveId: string): void {
+    DatabaseService.getInstance().createCveSuppression({
+      cve_id: cveId, pkg_name: null, image_pattern: null, reason: 'accepted',
+      created_by: 'admin', created_at: Date.now(), expires_at: null, replicated_from_control: 0, status: 'accepted',
+    });
+  }
+
+  afterEach(() => {
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('deploy_block_honor_suppressions', '0');
+    (db as unknown as { db: import('better-sqlite3').Database }).db
+      .prepare('DELETE FROM cve_suppressions').run();
+  });
+
+  it('does not flag a fully suppressed KEV finding when honor-suppressions is enabled (the gate would pass)', () => {
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('deploy_block_honor_suppressions', '1');
+    db.createScanPolicy({ ...basePolicy, stack_pattern: 'web', block_on_severity: 0, block_on_kev: 1 });
+    db.replaceKev([{ cve_id: 'CVE-2026-7000', date_added: '2026-01-01' }], Date.now());
+    const scan = seedScan('web', 'CRITICAL', [detail({ vulnerability_id: 'CVE-2026-7000', severity: 'CRITICAL' })]);
+    suppress('CVE-2026-7000');
+    expect(db.evaluateScanAgainstPolicies(1, scan, '')!.violated).toBe(false);
+  });
+
+  it('still flags the suppressed finding when honor-suppressions is disabled (raw banner)', () => {
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('deploy_block_honor_suppressions', '0');
+    db.createScanPolicy({ ...basePolicy, stack_pattern: 'web', block_on_severity: 0, block_on_kev: 1 });
+    db.replaceKev([{ cve_id: 'CVE-2026-7001', date_added: '2026-01-01' }], Date.now());
+    const scan = seedScan('web', 'CRITICAL', [detail({ vulnerability_id: 'CVE-2026-7001', severity: 'CRITICAL' })]);
+    suppress('CVE-2026-7001');
+    expect(db.evaluateScanAgainstPolicies(1, scan, '')!.violated).toBe(true);
+  });
+
+  it('clears a severity-only violation when honor-suppressions removes the only finding (gate parity)', () => {
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('deploy_block_honor_suppressions', '1');
+    db.createScanPolicy({ ...basePolicy, stack_pattern: 'web', max_severity: 'HIGH' });
+    const scan = seedScan('web', 'CRITICAL', [detail({ vulnerability_id: 'CVE-2026-7002', severity: 'CRITICAL' })]);
+    suppress('CVE-2026-7002');
+    expect(db.evaluateScanAgainstPolicies(1, scan, '')!.violated).toBe(false);
+  });
+
+  it('still flags when only some findings are suppressed, naming the surviving reason', () => {
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('deploy_block_honor_suppressions', '1');
+    db.createScanPolicy({ ...basePolicy, stack_pattern: 'web', block_on_severity: 0, block_on_kev: 1 });
+    db.replaceKev([
+      { cve_id: 'CVE-2026-7010', date_added: '2026-01-01' },
+      { cve_id: 'CVE-2026-7011', date_added: '2026-01-01' },
+    ], Date.now());
+    const scan = seedScan('web', 'CRITICAL', [
+      detail({ vulnerability_id: 'CVE-2026-7010', severity: 'CRITICAL' }),
+      detail({ vulnerability_id: 'CVE-2026-7011', severity: 'CRITICAL', pkg_name: 'libfoo' }),
+    ]);
+    suppress('CVE-2026-7010'); // one KEV dismissed, the other still live
+    const result = db.evaluateScanAgainstPolicies(1, scan, '')!;
+    expect(result.violated).toBe(true);
+    expect(result.reasons).toEqual(['kev']);
+  });
+
+  it('clears a fixable-only violation when honor-suppressions drops the fixable finding', () => {
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('deploy_block_honor_suppressions', '1');
+    db.createScanPolicy({ ...basePolicy, stack_pattern: 'web', block_on_severity: 0, block_on_fixable: 1 });
+    const scan = seedScan('web', 'CRITICAL', [detail({ vulnerability_id: 'CVE-2026-7020', severity: 'CRITICAL', fixed_version: '2.0' })]);
+    suppress('CVE-2026-7020');
+    expect(db.evaluateScanAgainstPolicies(1, scan, '')!.violated).toBe(false);
   });
 });
 
