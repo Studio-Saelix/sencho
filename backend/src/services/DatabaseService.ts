@@ -4,6 +4,7 @@ import fs from 'fs';
 import { CryptoService } from './CryptoService';
 import { isSeverityAtLeast } from '../utils/severity';
 import { evaluatePolicyRisk, policyInputs, type PolicyBlockReason } from '../utils/policy-risk';
+import { applySuppressions } from '../utils/suppression-filter';
 import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
 import type { BackendScheduledAction } from './scheduledActionRegistry';
@@ -5612,18 +5613,26 @@ export class DatabaseService {
         const policy = this.getMatchingPolicy(nodeId, scan.stack_context, selfIdentity);
         if (!policy) return null;
         const inputs = policyInputs(policy);
+        // The pre-deploy gate filters suppressed findings when this setting is on,
+        // so the informational banner honors them too; otherwise the banner could
+        // claim a violation the gate would not enforce. With it off, both score the
+        // raw findings. (The gate's truncation fail-closed rule stays gate-only;
+        // the banner reflects the findings it can read and the gate is
+        // authoritative for blocking.)
+        const honorSuppressions = this.getGlobalSettings()['deploy_block_honor_suppressions'] === '1';
         let reasons: PolicyBlockReason[];
-        if (!inputs.blockOnKev && !inputs.blockOnFixable) {
+        const needsDetails = inputs.blockOnKev || inputs.blockOnFixable || honorSuppressions;
+        if (!needsDetails) {
             // Severity-only banner from the stored aggregate: no per-finding read.
             const severityHit = inputs.blockOnSeverity && isSeverityAtLeast(scan.highest_severity, policy.max_severity);
             reasons = severityHit ? ['severity'] : [];
         } else {
-            // Best-effort banner: scores the raw findings without honoring
-            // suppressions or the truncation fail-closed rule. The pre-deploy gate
-            // is authoritative; this only drives the informational scan banner.
             const findings = this.getAllVulnerabilityDetails(scan.id);
-            const intel = inputs.blockOnKev ? this.getCveIntel(findings.map((f) => f.vulnerability_id)) : null;
-            reasons = evaluatePolicyRisk(findings, (cveId) => intel?.get(cveId)?.kev === true, inputs).reasons;
+            const evalSet = honorSuppressions
+                ? applySuppressions(findings, scan.image_ref, this.getCveSuppressions()).filter((f) => !f.suppressed)
+                : findings;
+            const intel = inputs.blockOnKev ? this.getCveIntel(evalSet.map((f) => f.vulnerability_id)) : null;
+            reasons = evaluatePolicyRisk(evalSet, (cveId) => intel?.get(cveId)?.kev === true, inputs).reasons;
         }
         return {
             policyId: policy.id,
