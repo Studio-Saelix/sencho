@@ -18,7 +18,7 @@ Schedules is a unified surface for every recurring maintenance operation Sencho 
 Open the **Schedules** tab from the top navigation bar. The page opens on the Timeline view with the masthead, the five lane track, and a bottom time axis.
 
 <Frame>
-  <img src="/images/scheduled-operations/timeline.png" alt="Schedules page in Timeline view. Header reads 'Scheduled Operations' on the left with a clock icon; on the right are a Timeline / All tasks toggle, a Refresh button, and a 'New Schedule' primary button. Below, a kicker 'NEXT 24 HOURS' sits above an italic display heading 'Next 24 hours' and a monospace date range 'Thu, May 14 11:21 → Fri, May 15 11:21'. A right-aligned 'Next' pill shows '03:00' with the subtitle 'Vul Scan · in 15h 38m'. Five lanes (Lifecycle, Updates, Security, Maintenance, Backups) run horizontally; a purple '03:00 Vul Scan' pill sits on the Security lane and a cyan '04:00 Nightly Snapshot' pill sits on the Backups lane. A cyan vertical 'now' rail glows at the left edge. Six time ticks (11:21, 16:09, 20:57, 01:45, 06:33, 11:21) run along the bottom axis." />
+  <img src="/images/scheduled-operations/timeline.png" alt="Schedules page in Timeline view. Header reads 'Scheduled Operations' on the left with a clock icon; on the right are a Timeline / All tasks toggle, a Refresh button, and a 'New Schedule' primary button. Below, a kicker 'NEXT 24 HOURS' sits above an italic display heading 'Next 24 hours' and a monospace date range 'Thu, May 14 11:21 → Fri, May 15 11:21'. A right-aligned 'Next' pill shows '03:00' with the subtitle 'Vul Scan · in 15h 38m'. Five lanes (Stack lifecycle, Updates, Security, Maintenance, Backups) run horizontally; a purple '03:00 hub' pill sits on the Security lane and a cyan '04:00 Entire fleet' pill sits on the Backups lane. A cyan vertical 'now' rail glows at the left edge. Six time ticks (11:21, 16:09, 20:57, 01:45, 06:33, 11:21) run along the bottom axis." />
 </Frame>
 
 ## Timeline view
@@ -26,8 +26,8 @@ Open the **Schedules** tab from the top navigation bar. The page opens on the Ti
 The Timeline plots every firing of every enabled task across a rolling 24-hour window starting from the current minute.
 
 - **Masthead.** A `NEXT 24 HOURS` kicker, an italic display heading, the window's start and end timestamps in a monospace range, and a right-anchored **Next** pill that reads out the time and task name of the next firing and a relative countdown.
-- **Five lanes.** Lifecycle (label blue), Updates (success green), Security (label purple), Maintenance (warning amber), and Backups (brand cyan). The Lifecycle lane holds the five stack-lifecycle actions (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down); Updates holds per-node and fleet image updates; Security holds vulnerability scans; Maintenance holds node resource prunes; Backups holds fleet snapshots.
-- **Pills.** One pill per firing within the window, positioned proportionally to the firing's time. Each pill shows the firing time and the task name. Pills are color-matched to their lane. Click a pill to open the run history sheet for that task.
+- **Five lanes.** Stack lifecycle (label blue), Updates (success green), Security (label purple), Maintenance (warning amber), and Backups (brand cyan). The Stack lifecycle lane holds the five stack-lifecycle actions (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down); Updates holds per-node and fleet image updates; Security holds vulnerability scans; Maintenance holds node resource prunes; Backups holds fleet snapshots.
+- **Pills.** One pill per firing within the window, positioned proportionally to the firing's time. Each pill shows the firing time and a target: the stack for stack actions, the selected node for prune and scan, and "Entire fleet" for a fleet snapshot. Hover a pill for the full detail (action, task name, and node). Pills are color-matched to their lane. Click a pill to open the run history sheet for that task.
 - **Now rail.** A glowing vertical rail at the current minute, anchored to the left of the track at page open and drifting right as time passes (the page recomputes positions periodically).
 - **Axis.** Six monospace time ticks run along the bottom, evenly spaced through the window.
 
@@ -71,10 +71,10 @@ The All tasks toggle swaps the lane track for a sortable table.
 
 ## Creating a scheduled task
 
-Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation, grouped by category: Lifecycle, Updates, Security, Maintenance, and Backups.
+Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation, grouped by category: Stack lifecycle, Updates, Security, Maintenance, and Backups.
 
 <Frame>
-  <img src="/images/scheduled-operations/action-picker.png" alt="The New scheduled task modal with the Action combobox expanded. The dropdown groups actions under category headers: Lifecycle (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down), Updates (Auto-update Stack, Auto-update All Stacks on Node), Security (Scan Node Images), Maintenance (Prune Node Resources), and Backups (Create Fleet Snapshot). Below the picker, partly visible, sit a Services row with 'echo' and 'prober' checkboxes, the Cron Expression input, the Enabled toggle, and the Delete after successful run checkbox." />
+  <img src="/images/scheduled-operations/action-picker.png" alt="The New scheduled task modal with the Action combobox expanded. The dropdown groups actions under category headers: Stack lifecycle (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down), Updates (Auto-update Stack, Auto-update All Stacks on Node), Security (Scan Node Images), Maintenance (Prune Node Resources), and Backups (Create Fleet Snapshot). Below the picker, partly visible, sit a Services row with 'echo' and 'prober' checkboxes, the Cron Expression input, the Enabled toggle, and the Delete after successful run checkbox." />
 </Frame>
 
 Common fields:
