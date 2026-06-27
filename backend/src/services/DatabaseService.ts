@@ -7,6 +7,7 @@ import { evaluatePolicyRisk, policyInputs, type PolicyBlockReason } from '../uti
 import { applySuppressions } from '../utils/suppression-filter';
 import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
+import { HIGH_EPSS_THRESHOLD } from './securityPosture';
 import type { BackendScheduledAction } from './scheduledActionRegistry';
 
 function isPilotMode(): boolean {
@@ -5193,7 +5194,21 @@ export class DatabaseService {
                  ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
                  WHERE vs.node_id = ? AND vs.status = 'completed' AND vs.scanners_used IN (${placeholders})
                    AND (vd.severity IN ('CRITICAL', 'HIGH') OR ci.kev = 1)
-                 ORDER BY COALESCE(ci.kev, 0) DESC, COALESCE(ci.epss_score, -1) DESC, COALESCE(vd.cvss_score, -1) DESC
+                 -- Rank by the same exploitation-risk tiers the overview list
+                 -- displays (SecurityCharts exploitTier, "assume it's automatable"):
+                 -- known-exploited (KEV) > elevated EPSS > unknown EPSS > known-low
+                 -- EPSS. A finding with no EPSS evidence outranks one shown unlikely,
+                 -- so when the cap truncates it keeps the rows the list ranks highest.
+                 -- EPSS desc then CVSS desc break ties within a tier.
+                 ORDER BY
+                   CASE
+                     WHEN ci.kev = 1 THEN 0
+                     WHEN ci.epss_score IS NULL THEN 2
+                     WHEN ci.epss_score >= ${HIGH_EPSS_THRESHOLD} THEN 1
+                     ELSE 3
+                   END,
+                   COALESCE(ci.epss_score, -1) DESC,
+                   COALESCE(vd.cvss_score, -1) DESC
                  LIMIT ?`,
             )
             .all(nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId, ...VULN_BEARING_SCANNER_SETS, limit + 1) as Array<{
