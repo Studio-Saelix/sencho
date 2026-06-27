@@ -1,5 +1,6 @@
 import https from 'https';
 import http from 'http';
+import { sanitizeForLog } from '../utils/safeLog';
 
 export interface ParsedRef {
     registry: string;
@@ -238,7 +239,9 @@ export async function getRemoteDigestResult(
         // (ENOTFOUND/ECONNREFUSED/ETIMEDOUT/...) over a verbose message so the reason
         // stays short in the sidebar tooltip; fall back to the message otherwise.
         const cause = e instanceof Error ? ((e as NodeJS.ErrnoException).code ?? e.message) : String(e);
-        console.error(`[registry-api] Remote digest lookup for ${ref} failed:`, cause);
+        // ref and cause derive from the compose-authored image string and upstream error
+        // text, so neutralize control characters before they reach the log line.
+        console.error(`[registry-api] Remote digest lookup for ${sanitizeForLog(ref)} failed:`, sanitizeForLog(cause));
         return { ok: false, reason: `Registry unreachable for ${ref} (${cause})` };
     }
 }
