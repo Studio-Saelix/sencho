@@ -162,14 +162,29 @@ const EXPLOIT_PAGE_SIZE = 8;
 // horizontally instead; desktop is untouched by the `max-md:` prefix.
 const EXPLOIT_GRID = 'grid-cols-[10px_minmax(0,1.4fr)_minmax(0,1fr)_56px_52px] max-md:min-w-[480px]';
 
+// Per-severity dot color. A KEV finding can now be any severity, so the dot must
+// reflect the row's real severity rather than collapsing everything non-Critical
+// to the High color. UNKNOWN gets the neutral subtitle tone (matching SeverityChip),
+// not the low color, so an UNKNOWN-severity finding is not understated as low risk.
+const SEV_DOT_VAR: Record<string, string> = {
+  CRITICAL: 'var(--sev-critical)',
+  HIGH: 'var(--sev-high)',
+  MEDIUM: 'var(--sev-medium)',
+  LOW: 'var(--sev-low)',
+  UNKNOWN: 'var(--stat-subtitle)',
+};
+
 /** Ranked, paginated table of the highest exploit-risk actionable findings; a row opens the scan.
  *  Renders its own card chrome (header + pagination + column headers) so the Overview reads as a
  *  table, mirroring the dashboard Stack-health table. */
 export function TopExploitRiskList({
   items,
+  truncated = false,
   onInspect,
 }: {
   items: ExploitIntelFinding[];
+  /** The backend capped the result; the highest-risk findings are shown, not all. */
+  truncated?: boolean;
   onInspect: (scanId: number) => void;
 }) {
   const [page, setPage] = useState(0);
@@ -231,7 +246,7 @@ export function TopExploitRiskList({
               >
                 <span
                   className="h-[7px] w-[7px] shrink-0 justify-self-center rounded-full"
-                  style={{ background: f.severity === 'CRITICAL' ? 'var(--sev-critical)' : 'var(--sev-high)' }}
+                  style={{ background: SEV_DOT_VAR[f.severity] ?? 'var(--stat-subtitle)' }}
                   aria-hidden
                 />
                 <span className="flex min-w-0 items-center gap-1.5">
@@ -254,6 +269,11 @@ export function TopExploitRiskList({
               </li>
             ))}
           </ul>
+          {truncated && (
+            <p className="border-t border-border/40 px-4 py-2 text-[10px] leading-snug text-stat-subtitle">
+              Showing the highest-risk findings; more exist than can be listed here.
+            </p>
+          )}
           {!anyIntel && (
             <p className="border-t border-border/40 px-4 py-2 text-[10px] leading-snug text-stat-subtitle">
               Ranked by severity. Enable exploit intelligence and re-scan to rank by known-exploited and EPSS.

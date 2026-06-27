@@ -5192,6 +5192,7 @@ export class DatabaseService {
                  ) latest ON latest.image_ref = vs.image_ref AND latest.max_scanned = vs.scanned_at
                  WHERE vs.node_id = ? AND vs.status = 'completed' AND vs.scanners_used IN (${placeholders})
                    AND (vd.severity IN ('CRITICAL', 'HIGH') OR ci.kev = 1)
+                 ORDER BY COALESCE(ci.kev, 0) DESC, COALESCE(ci.epss_score, -1) DESC, COALESCE(vd.cvss_score, -1) DESC
                  LIMIT ?`,
             )
             .all(nodeId, ...VULN_BEARING_SCANNER_SETS, nodeId, ...VULN_BEARING_SCANNER_SETS, limit + 1) as Array<{

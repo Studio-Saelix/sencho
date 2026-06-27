@@ -22,6 +22,8 @@ interface OverviewTabProps {
   trend: SecurityRiskTrendPoint[];
   /** Actionable Critical/High findings with KEV/EPSS for the exploit-intel charts. */
   exploitIntel: ExploitIntelFinding[];
+  /** True when the exploit-intel set hit its row cap (highest-risk shown, not all). */
+  exploitTruncated: boolean;
   onNavigate: (tab: SecurityTab) => void;
   onInspect: (scanId: number) => void;
   /** Admin on a node with a ready scanner; enables the node-scan launcher. */
@@ -124,7 +126,7 @@ function ReviewQueueCard({
   );
 }
 
-export function OverviewTab({ overview, loadError, trend, exploitIntel, onNavigate, onInspect, canScan, onScanComplete, isPaid }: OverviewTabProps) {
+export function OverviewTab({ overview, loadError, trend, exploitIntel, exploitTruncated, onNavigate, onInspect, canScan, onScanComplete, isPaid }: OverviewTabProps) {
   const isMobile = useIsMobile();
 
   if (loadError === 'unsupported') {
@@ -218,7 +220,7 @@ export function OverviewTab({ overview, loadError, trend, exploitIntel, onNaviga
           card never stretches to a taller exploit table (which left dead space
           under the chart). The exploit-risk table owns its own card chrome. */}
       <div className="grid items-start gap-4 lg:grid-cols-2">
-        <TopExploitRiskList items={exploitIntel} onInspect={onInspect} />
+        <TopExploitRiskList items={exploitIntel} truncated={exploitTruncated} onInspect={onInspect} />
         <ChartCard title="Severity × exploitability">
           <CvssEpssQuadrantChart items={exploitIntel} />
         </ChartCard>
