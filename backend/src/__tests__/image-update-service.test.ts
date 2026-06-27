@@ -1156,6 +1156,12 @@ describe('ImageUpdateService cron scheduling', () => {
     mockGetGlobalSettings.mockReturnValue({ developer_mode: '0' });
   });
 
+  afterEach(() => {
+    // Tests below switch to fake timers and a pinned clock; reset so the state
+    // does not leak into later tests in this block (or the file).
+    vi.useRealTimers();
+  });
+
   it('getStatus returns mode and cronExpression fields', () => {
     const service = ImageUpdateService.getInstance();
     // Before start/configureFromSettings, defaults apply.
@@ -1236,6 +1242,88 @@ describe('ImageUpdateService cron scheduling', () => {
     const delay = (service as any).nextDelayMs();
     expect(typeof delay).toBe('number');
     expect(delay).toBeGreaterThan(0);
+  });
+
+  it('start() in cron mode arms at the next cron fire, not the 2-minute startup delay', () => {
+    vi.useFakeTimers();
+    // Pin "now" so the next cron fire is deterministic and far beyond the
+    // startup delay (next Monday 03:00 from this Thursday is days away).
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '0 3 * * 1',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    const checkSpy = vi.spyOn(service as any, 'check').mockResolvedValue(undefined);
+
+    service.start();
+
+    // The first check is scheduled at the cron fire time, not 2 minutes out, so
+    // a restart never triggers an out-of-cadence check.
+    const startupDelay = (ImageUpdateService as any).STARTUP_DELAY_MS as number;
+    const nextAt = service.getStatus().nextCheckAt!;
+    expect(nextAt - Date.now()).toBeGreaterThan(startupDelay);
+
+    // Advancing well past the old startup delay (but before the cron fire) must
+    // not fire a check.
+    vi.advanceTimersByTime(10 * 60 * 1000);
+    expect(checkSpy).not.toHaveBeenCalled();
+
+    // The check fires exactly when the cron schedule says, not merely "later":
+    // advancing to the computed fire time triggers it once.
+    vi.advanceTimersByTime(nextAt - Date.now() + 1000);
+    expect(checkSpy).toHaveBeenCalledTimes(1);
+
+    service.stop();
+    checkSpy.mockRestore();
+  });
+
+  it('start() in cron mode fires sooner than the startup delay when the next fire is near', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '* * * * *', // every minute
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    const checkSpy = vi.spyOn(service as any, 'check').mockResolvedValue(undefined);
+
+    service.start();
+
+    // A frequent cron fires before the old 2-minute startup delay would have:
+    // cron mode honors the schedule in both directions, not just "no sooner".
+    const startupDelay = (ImageUpdateService as any).STARTUP_DELAY_MS as number;
+    const nextAt = service.getStatus().nextCheckAt!;
+    expect(nextAt - Date.now()).toBeLessThan(startupDelay);
+
+    vi.advanceTimersByTime(nextAt - Date.now() + 100);
+    expect(checkSpy).toHaveBeenCalledTimes(1);
+
+    service.stop();
+    checkSpy.mockRestore();
+  });
+
+  it('start() in interval mode keeps the 2-minute startup delay', () => {
+    vi.useFakeTimers();
+    mockGetGlobalSettings.mockReturnValue({ developer_mode: '0' });
+    const service = ImageUpdateService.getInstance();
+    const checkSpy = vi.spyOn(service as any, 'check').mockResolvedValue(undefined);
+
+    service.start();
+
+    // Just before the 2-minute delay: no check yet.
+    vi.advanceTimersByTime(2 * 60 * 1000 - 1000);
+    expect(checkSpy).not.toHaveBeenCalled();
+    // Crossing the 2-minute mark fires the first check.
+    vi.advanceTimersByTime(1000);
+    expect(checkSpy).toHaveBeenCalledTimes(1);
+
+    service.stop();
+    checkSpy.mockRestore();
   });
 
   it('nextDelayMs falls back to interval on runtime parse failure', () => {
