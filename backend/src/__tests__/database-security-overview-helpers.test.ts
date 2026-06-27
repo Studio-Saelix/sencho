@@ -319,6 +319,69 @@ describe('getLatestCritHighFindingsWithCvssForNode ranking', () => {
     expect(ids).toContain('CVE-PLAIN-HIGHCVSS');    // then highest CVSS
     expect(ids).not.toContain('CVE-PLAIN-LOWCVSS'); // lowest-risk is the one dropped
   });
+
+  it('ranks the tiers KEV > elevated EPSS > unknown EPSS > known-low EPSS so the cap keeps what the list shows', () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'app:2', image_digest: 'sha256:tiers', scanned_at: now,
+      total_vulnerabilities: 4, critical_count: 0, high_count: 4, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'HIGH', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    const d = (id: string, cvss: number) => ({
+      vulnerability_id: id, pkg_name: `p-${id}`, installed_version: '1', fixed_version: null,
+      severity: 'HIGH' as const, title: null, description: null, primary_url: null, cvss_score: cvss,
+    });
+    // Insert lowest-risk first; give the known-low-EPSS row the highest CVSS so a
+    // raw "EPSS desc, then CVSS desc" order (null EPSS treated as -1) would keep it
+    // and drop the unknown-EPSS row, which is the exact ranking the list disagrees with.
+    db().insertVulnerabilityDetails(scanId, [
+      d('CVE-LOWEPSS', 9.0),   // tier 3: known-low EPSS, highest CVSS
+      d('CVE-UNKNOWN', 1.0),   // tier 2: no EPSS evidence
+      d('CVE-HIGHEPSS', 1.0),  // tier 1: elevated EPSS
+      d('CVE-KEV', 1.0),       // tier 0: known-exploited
+    ]);
+    db().replaceKev([{ cve_id: 'CVE-KEV', date_added: '2024-01-01' }], now);
+    db().upsertEpss([
+      { cve_id: 'CVE-HIGHEPSS', epss_score: 0.5, epss_percentile: 0.9 },
+      { cve_id: 'CVE-LOWEPSS', epss_score: 0.001, epss_percentile: 0.1 },
+    ], now);
+
+    // Cap at 3: only the lowest tier (known-low EPSS) is dropped, despite its top CVSS.
+    const res = db().getLatestCritHighFindingsWithCvssForNode(1, 3);
+    expect(res.truncated).toBe(true);
+    expect(res.items.map((i) => i.vulnerability_id)).toEqual(['CVE-KEV', 'CVE-HIGHEPSS', 'CVE-UNKNOWN']);
+  });
+
+  it('orders within the elevated-EPSS tier by EPSS desc and treats the threshold as inclusive', () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'app:3', image_digest: 'sha256:tiebreak', scanned_at: now,
+      total_vulnerabilities: 5, critical_count: 0, high_count: 5, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'HIGH', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    const d = (id: string) => ({
+      vulnerability_id: id, pkg_name: `p-${id}`, installed_version: '1', fixed_version: null,
+      severity: 'HIGH' as const, title: null, description: null, primary_url: null, cvss_score: 5.0,
+    });
+    // Insert in a scrambled order so a missing within-tier EPSS sort would surface as row order.
+    db().insertVulnerabilityDetails(scanId, [d('CVE-E05'), d('CVE-E10'), d('CVE-UNK'), d('CVE-E90'), d('CVE-E50')]);
+    db().upsertEpss([
+      { cve_id: 'CVE-E90', epss_score: 0.9, epss_percentile: 0.99 },
+      { cve_id: 'CVE-E50', epss_score: 0.5, epss_percentile: 0.9 },
+      { cve_id: 'CVE-E10', epss_score: 0.1, epss_percentile: 0.5 }, // exactly the threshold: still elevated
+      { cve_id: 'CVE-E05', epss_score: 0.05, epss_percentile: 0.2 }, // below the threshold: known-low
+    ], now);
+    // CVE-UNK has no EPSS row (tier 2). Cap at 4 keeps all of tier 1 (EPSS desc) plus the
+    // unknown row, and drops only the known-low row. A 0.1 row landing in tier 3 (exclusive
+    // threshold) would sort below CVE-UNK and change this order.
+    const res = db().getLatestCritHighFindingsWithCvssForNode(1, 4);
+    expect(res.truncated).toBe(true);
+    expect(res.items.map((i) => i.vulnerability_id)).toEqual(['CVE-E90', 'CVE-E50', 'CVE-E10', 'CVE-UNK']);
+  });
 });
 
 describe('getDailyRiskTrend', () => {
