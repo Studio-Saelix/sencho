@@ -327,6 +327,56 @@ describe('StackFileRootsService.listRoots', () => {
     }
   });
 
+  it('suppresses a bind to the real target of a symlinked managed Trivy binary (canonical managed root)', async () => {
+    // TRIVY_BIN (and the other managed paths) may itself be a symlink, e.g.
+    // /opt/trivy -> /srv/tool-target/trivy. Bind sources are canonicalized before
+    // the overlap check, so the managed paths must be canonicalized too. Without
+    // it, a bind to the symlink target's real directory does not overlap the
+    // configured symlink path, and a stack editor could overwrite the real binary
+    // a later scan executes. realpath is the only canonicalization seam, so stub
+    // it to resolve the configured symlink to the real binary path inside the
+    // bound directory; identity for every other path leaves the real
+    // baseDir/app/tmp comparisons intact.
+    const targetDir = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-symtarget-')));
+    const realBinary = path.join(targetDir, 'trivy');
+    const symlinkBin = path.join(REAL_TMP, 'sfr-symlinked-trivy-bin');
+    process.env.TRIVY_BIN = symlinkBin;
+    vi.spyOn(fs, 'realpath').mockImplementation((async (p: string) =>
+      path.resolve(p) === path.resolve(symlinkBin) ? realBinary : p) as typeof fs.realpath);
+    try {
+      // Bind the real target directory, NOT the symlink's directory: only the
+      // canonicalized managed root catches this overlap.
+      stub({ rendered: renderModel({ web: [{ type: 'bind', source: targetDir, target: '/opt/trivy', read_only: false }] }) });
+      const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+      const bind = roots.find((r) => r.kind === 'bind');
+      expect(bind?.managedSourceOverlap).toBe(true);
+      expect(bind?.browsable).toBe(false);
+      expect(bind?.writable).toBe(false);
+    } finally {
+      await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it('keeps a legitimate external bind browsable when a configured managed path is absent (ENOENT realpath tolerated)', async () => {
+    // A relocated TRIVY_BIN (or upload spool) routinely points at a path that does
+    // not exist yet on a fresh install, so realpath on a configured managed path
+    // throws ENOENT every discovery. That must be tolerated: the configured path
+    // still anchors containment and an unrelated external bind stays browsable,
+    // rather than the realpath failure collapsing discovery to stack-source only.
+    process.env.TRIVY_BIN = path.join(REAL_TMP, 'sfr-absent-trivy-bin-xyz-12345');
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-legit-')));
+    try {
+      stub({ rendered: renderModel({ web: [{ type: 'bind', source: outside, target: '/config', read_only: false }] }) });
+      const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+      const bind = roots.find((r) => r.kind === 'bind');
+      expect(bind?.managedSourceOverlap).toBe(false);
+      expect(bind?.browsable).toBe(true);
+      expect(bind?.writable).toBe(true);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
   it('resolves a named volume by its Docker name (not the compose key) and inspects that name', async () => {
     const inspected: string[] = [];
     stub({
