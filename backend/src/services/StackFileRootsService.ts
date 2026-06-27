@@ -105,6 +105,10 @@ export function stackSourceFileRoot(hostPathOrName = ''): StackFileRoot {
 
 const ROOTS_CACHE_TTL_MS = 15_000;
 
+// Upper bound on symlink hops when canonicalizing a managed path, guarding against
+// a cycle of dangling symlinks that never surfaces as ELOOP from the OS.
+const MAX_SYMLINK_HOPS = 40;
+
 // Dangerous host directories: a bind equal to or under any of these grants
 // node-level access and is never browsable. Two groups:
 //   - kernel/OS state: /etc, /proc, /sys, /dev, /var/run, /run.
@@ -154,6 +158,56 @@ function resolveAppRoot(): string {
 }
 
 /**
+ * Canonicalize an absolute path, following symlinks but tolerating components
+ * (including the final leaf) that do not exist yet. fs.realpath fails with ENOENT
+ * for a dangling symlink, which would drop the symlink target from the managed
+ * overlap set and let a bind to the target's existing parent slip through; a stack
+ * editor could then create the missing leaf and have a later scan execute it. This
+ * walks the chain manually: it follows a dangling symlink via readlink, and for a
+ * missing leaf it resolves the longest existing ancestor and re-appends the absent
+ * suffix, so the real target location is always represented. Non-ENOENT errors
+ * (ELOOP, EACCES) propagate to the caller, which keeps the configured path as the
+ * containment anchor. A symlink cycle that never surfaces as ELOOP is bounded by
+ * an internal hop limit and falls back to the lexical path.
+ */
+async function realpathAllowingMissing(target: string, hops = 0): Promise<string> {
+  const resolved = path.resolve(target);
+  // Bound the recursion so a symlink cycle that does not surface as ELOOP cannot
+  // spin forever; fall back to the lexical path and log so the degraded (less
+  // resolved) result is traceable, matching the rest of this file's convention.
+  if (hops > MAX_SYMLINK_HOPS) {
+    console.warn('[StackFileRoots] managed-root canonicalize hop limit reached, using lexical path:', sanitizeForLog(resolved));
+    return resolved;
+  }
+  try {
+    return await fsPromises.realpath(resolved);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  // A dangling symlink at this path: follow its target (resolving a relative
+  // target against the link's own directory).
+  try {
+    const st = await fsPromises.lstat(resolved);
+    if (st.isSymbolicLink()) {
+      const link = await fsPromises.readlink(resolved);
+      const next = path.isAbsolute(link) ? link : path.resolve(path.dirname(resolved), link);
+      return await realpathAllowingMissing(next, hops + 1);
+    }
+  } catch (err) {
+    // realpath ENOENT was ambiguous (dangling symlink vs. absent leaf); an lstat
+    // ENOENT narrows it to "no entry here at all", so fall through to the parent
+    // walk. Any other error (EACCES, ELOOP) is a real failure the caller handles.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  // The leaf does not exist (and is not a symlink). Canonicalize the parent and
+  // re-append the leaf so a missing file under a real, possibly symlinked, dir
+  // still resolves to its true location.
+  const parent = path.dirname(resolved);
+  if (parent === resolved) return resolved; // reached the filesystem root
+  return path.join(await realpathAllowingMissing(parent, hops + 1), path.basename(resolved));
+}
+
+/**
  * Every directory Sencho manages at runtime. A bind overlapping any of these (in
  * either direction) must never become a browsable root. Besides the compose base,
  * the data dir, and the application root, this covers:
@@ -181,22 +235,25 @@ async function resolveManagedRoots(baseDir: string): Promise<string[]> {
   // check, letting a stack editor overwrite the real Trivy binary a later scan
   // executes (the same gap re-exposes a symlinked upload spool, Trivy cache, or
   // OS temp root holding transient registry credentials). Keep both the configured
-  // path (catches a bind to its literal parent) and the realpath target (catches
-  // a bind to the symlink target's parent).
+  // path (catches a bind to its literal parent) and the canonical target (catches
+  // a bind to the symlink target's parent). realpathAllowingMissing follows the
+  // link even when its leaf does not exist yet, so a dangling managed symlink
+  // cannot be created-then-executed through an allowed bind.
   const roots = new Set<string>(configured);
   for (const p of configured) {
     try {
-      roots.add(await fsPromises.realpath(p));
+      roots.add(await realpathAllowingMissing(p));
     } catch (err) {
-      // ENOENT is expected: a configured-but-absent path (e.g. SENCHO_UPLOAD_DIR,
-      // or a relocated TRIVY_BIN/TRIVY_CACHE_DIR that env points at but that does
-      // not exist yet) has no canonical target, and the configured path already
-      // anchors containment. Anything else (e.g. EACCES) is logged so an operator
-      // chasing a containment surprise has a trail.
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        console.warn('[StackFileRoots] managed-root realpath failed (%s):', code ?? 'unknown', sanitizeForLog(p));
-      }
+      // The helper tolerates missing components, so a failure here is an
+      // unexpected resolution error (e.g. EACCES on an intermediate dir, ELOOP).
+      // The configured path stays in the set as the containment anchor, but the
+      // symlink's resolved-target subtree is not anchored on this branch:
+      // containment then falls back to the literal configured path plus the bind
+      // accessibility probe, which realpaths the declared source under the same
+      // user and degrades an unreachable bind to non-browsable. Log a trail for an
+      // operator chasing a containment surprise.
+      console.warn('[StackFileRoots] managed-root canonicalize failed (%s):',
+        (err as NodeJS.ErrnoException).code ?? 'unknown', sanitizeForLog(p));
     }
   }
   return [...roots];
