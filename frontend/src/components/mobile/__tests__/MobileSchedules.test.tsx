@@ -43,18 +43,29 @@ function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
   };
 }
 
+let tasksFixture: ScheduledTask[];
+let nodesFixture: { id: number; name: string; type: 'local' | 'remote' }[];
+
 beforeEach(() => {
+  tasksFixture = [];
+  nodesFixture = [{ id: 1, name: 'hub', type: 'local' }, { id: 2, name: 'edge', type: 'remote' }];
   mockedFetch.mockReset();
+  // The view fetches nodes and tasks separately, so dispatch by URL.
+  mockedFetch.mockImplementation(async (url: string) => {
+    if (url === '/nodes') return jsonResponse(nodesFixture);
+    if (url === '/scheduled-tasks') return jsonResponse(tasksFixture);
+    return jsonResponse({});
+  });
 });
 
 afterEach(() => vi.clearAllMocks());
 
 describe('MobileSchedules', () => {
   it('renders registry short labels for upcoming runs', async () => {
-    mockedFetch.mockResolvedValue(jsonResponse([
+    tasksFixture = [
       makeTask({ id: 1, action: 'auto_backup' }),
       makeTask({ id: 2, action: 'auto_down', next_runs: [Date.now() + 7_200_000] }),
-    ]));
+    ];
 
     const { container } = render(<MobileSchedules headerActions={null} />);
 
@@ -67,9 +78,9 @@ describe('MobileSchedules', () => {
 
   describe('update + fleet target', () => {
     it('renders node-scoped copy, not fleet-ambiguous text', async () => {
-      mockedFetch.mockResolvedValue(jsonResponse([
+      tasksFixture = [
         makeTask({ id: 1, action: 'update', target_type: 'fleet', target_id: null, node_id: 2 }),
-      ]));
+      ];
 
       render(<MobileSchedules headerActions={null} />);
 
@@ -80,19 +91,43 @@ describe('MobileSchedules', () => {
       expect(screen.queryByText('update fleet')).not.toBeInTheDocument();
       expect(screen.queryByText('update all')).not.toBeInTheDocument();
 
-      // The target label for update+fleet renders 'stacks', not 'fleet'.
-      expect(screen.getByText('stacks')).toBeInTheDocument();
+      // The target names the node the fleet update runs against.
+      expect(await screen.findByText('All stacks · edge')).toBeInTheDocument();
     });
   });
 
-  it('renders fleet target label for a snapshot task', async () => {
-    mockedFetch.mockResolvedValue(jsonResponse([
+  it('renders "Entire fleet" target label for a snapshot task', async () => {
+    tasksFixture = [
       makeTask({ id: 1, action: 'snapshot', target_type: 'fleet', target_id: null, node_id: null }),
-    ]));
+    ];
 
     render(<MobileSchedules headerActions={null} />);
 
-    // Snapshot IS fleet-wide; 'fleet' in the target label is correct.
-    expect(await screen.findByText('fleet')).toBeInTheDocument();
+    expect(await screen.findByText('Entire fleet')).toBeInTheDocument();
+  });
+
+  it('names the selected node for a node-scoped scan instead of "system"', async () => {
+    tasksFixture = [
+      makeTask({ id: 1, name: 'Vul Scan', action: 'scan', target_type: 'system', target_id: null, node_id: 1 }),
+    ];
+
+    render(<MobileSchedules headerActions={null} />);
+
+    expect(await screen.findByText('scan')).toBeInTheDocument();
+    expect(await screen.findByText('hub')).toBeInTheDocument();
+    expect(screen.queryByText('system')).not.toBeInTheDocument();
+  });
+
+  it('falls back to a generic label, not a raw id, when the node is unresolved', async () => {
+    // node_id 99 is absent from nodesFixture (deleted node, or names not yet loaded).
+    tasksFixture = [
+      makeTask({ id: 1, name: 'Orphan Scan', action: 'scan', target_type: 'system', target_id: null, node_id: 99 }),
+    ];
+
+    render(<MobileSchedules headerActions={null} />);
+
+    expect(await screen.findByText('Selected node')).toBeInTheDocument();
+    expect(screen.queryByText('99')).not.toBeInTheDocument();
+    expect(screen.queryByText('system')).not.toBeInTheDocument();
   });
 });

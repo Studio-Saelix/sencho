@@ -306,9 +306,46 @@ describe('ScheduledOperationsView', () => {
   it('renders the five registry category lanes in the timeline view', async () => {
     render(<ScheduledOperationsView />);
     // Timeline is the default view; the lane track always renders.
-    for (const lane of ['Lifecycle', 'Updates', 'Security', 'Maintenance', 'Backups']) {
+    for (const lane of ['Stack lifecycle', 'Updates', 'Security', 'Maintenance', 'Backups']) {
       expect(await screen.findByText(lane)).toBeInTheDocument();
     }
+  });
+
+  it('labels timeline pills with a category-aware target and a detailed tooltip', async () => {
+    const soon = Date.now() + 2 * 60 * 60 * 1000;
+    tasksFixture = [
+      makeTask({ id: 1, name: 'Nightly Snapshot', target_type: 'fleet', action: 'snapshot', node_id: null, next_runs: [soon] }),
+      makeTask({ id: 2, name: 'Nightly Prune', target_type: 'system', action: 'prune', node_id: 1, next_runs: [soon] }),
+    ];
+    render(<ScheduledOperationsView />);
+
+    // Snapshot pill reads "Entire fleet"; prune pill reads its node name.
+    expect(await screen.findByText('Entire fleet')).toBeInTheDocument();
+    expect(await screen.findByText('hub')).toBeInTheDocument();
+
+    // Tooltips carry the full action label, with the node when the task has one.
+    const prunePill = screen.getByText('hub').closest('button');
+    expect(prunePill).toHaveAttribute('title', expect.stringContaining('Prune Node Resources'));
+    expect(prunePill).toHaveAttribute('title', expect.stringContaining('hub'));
+    const snapshotPill = screen.getByText('Entire fleet').closest('button');
+    expect(snapshotPill).toHaveAttribute('title', expect.stringContaining('Create Fleet Snapshot'));
+  });
+
+  it('names the node on a fleet auto-update pill and composes the full tooltip', async () => {
+    const soon = Date.now() + 2 * 60 * 60 * 1000;
+    const hhmm = (ts: number) => {
+      const d = new Date(ts);
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    };
+    tasksFixture = [
+      makeTask({ id: 1, name: 'Fleet Update', target_type: 'fleet', action: 'update', node_id: 1, next_runs: [soon] }),
+    ];
+    render(<ScheduledOperationsView />);
+
+    expect(await screen.findByText('All stacks · hub')).toBeInTheDocument();
+    // Tooltip locks the ordered shape: action · name · time · node.
+    const pill = screen.getByText('All stacks · hub').closest('button');
+    expect(pill).toHaveAttribute('title', `Auto-update All Stacks on Node · Fleet Update · ${hhmm(soon)} · hub`);
   });
 
   it('offers every registry action in the create picker', async () => {

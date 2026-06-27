@@ -10,6 +10,8 @@ import {
   DEFAULT_SCHEDULED_ACTION_ID,
   getActionById,
   resolveTaskAction,
+  scheduleTargetDescriptor,
+  stripComposeExt,
   RISK_LABEL,
   RISK_TONE,
   RISK_BADGE_CLASSES,
@@ -18,6 +20,9 @@ import {
   type ScheduledActionCategory,
   type ScheduledActionRiskLevel,
 } from '../scheduledActions';
+import type { ScheduledTask } from '@/types/scheduling';
+
+type TargetTask = Pick<ScheduledTask, 'action' | 'target_type' | 'target_id' | 'name'>;
 
 const BACKEND_ACTIONS: BackendAction[] = [
   'restart', 'snapshot', 'prune', 'update', 'scan',
@@ -172,5 +177,47 @@ describe('scheduledActions registry', () => {
     expect(def?.id).toBe('update-fleet');
     expect(def?.riskLevel).toBe('runtime-change');
     expect(def?.helperText).toBe('Checks every stack on the selected node and updates stacks with newer images.');
+  });
+
+  describe('stripComposeExt', () => {
+    it('drops a trailing .yml or .yaml and leaves other names alone', () => {
+      expect(stripComposeExt('web')).toBe('web');
+      expect(stripComposeExt('web.yml')).toBe('web');
+      expect(stripComposeExt('web.yaml')).toBe('web');
+      expect(stripComposeExt('')).toBe('');
+      expect(stripComposeExt('my.app')).toBe('my.app');
+    });
+  });
+
+  describe('scheduleTargetDescriptor', () => {
+    it('shows the stack name (without compose extension) for stack actions', () => {
+      const task: TargetTask = { action: 'restart', target_type: 'stack', target_id: 'web.yml', name: 'Nightly restart' };
+      expect(scheduleTargetDescriptor(task, 'hub')).toBe('web');
+    });
+
+    it('falls back to the task name when a stack target_id is missing', () => {
+      const task: TargetTask = { action: 'restart', target_type: 'stack', target_id: null, name: 'api.yaml' };
+      expect(scheduleTargetDescriptor(task)).toBe('api');
+    });
+
+    it('shows the node for a fleet auto-update, or a generic label without one', () => {
+      const task: TargetTask = { action: 'update', target_type: 'fleet', target_id: null, name: 'Fleet update' };
+      expect(scheduleTargetDescriptor(task, 'edge-1')).toBe('All stacks · edge-1');
+      expect(scheduleTargetDescriptor(task)).toBe('All stacks');
+    });
+
+    it('shows Entire fleet for a fleet snapshot regardless of node', () => {
+      const task: TargetTask = { action: 'snapshot', target_type: 'fleet', target_id: null, name: 'Nightly Snapshot' };
+      expect(scheduleTargetDescriptor(task, 'edge-1')).toBe('Entire fleet');
+      expect(scheduleTargetDescriptor(task)).toBe('Entire fleet');
+    });
+
+    it('shows the node for system actions (prune / scan), with a fallback', () => {
+      const scan: TargetTask = { action: 'scan', target_type: 'system', target_id: null, name: 'Vul Scan' };
+      const prune: TargetTask = { action: 'prune', target_type: 'system', target_id: null, name: 'Nightly Prune' };
+      expect(scheduleTargetDescriptor(scan, 'hub')).toBe('hub');
+      expect(scheduleTargetDescriptor(prune, 'edge-1')).toBe('edge-1');
+      expect(scheduleTargetDescriptor(scan)).toBe('Selected node');
+    });
   });
 });

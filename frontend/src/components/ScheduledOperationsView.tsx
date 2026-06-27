@@ -21,6 +21,7 @@ import {
   SCHEDULED_ACTION_CATEGORIES,
   getActionById,
   resolveTaskAction,
+  scheduleTargetDescriptor,
   DEFAULT_SCHEDULED_ACTION_ID,
   RISK_BADGE_CLASSES,
   RISK_DOT_CLASSES,
@@ -347,6 +348,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const cronDescription = getCronDescription(formCron);
   const cronFieldError = getCronFieldError(formCron);
   const nodeOptions = useMemo(() => nodes.map(n => ({ value: String(n.id), label: n.name })), [nodes]);
+  const nodeNameById = useMemo(() => new Map(nodes.map(n => [n.id, n.name])), [nodes]);
   const actionOptions = useMemo(
     () =>
       SCHEDULED_ACTIONS.map(o => ({
@@ -498,9 +500,11 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                             {lanePills.map((pill, idx) => {
                               const leftPct = ((pill.runAt - now) / TIMELINE_WINDOW_MS) * 100;
                               const clamped = Math.max(0, Math.min(100, leftPct));
-                              const targetLabel = pill.task.target_type === 'stack'
-                                ? pill.task.target_id ?? pill.task.name
-                                : pill.task.name;
+                              const nodeName = pill.task.node_id != null ? nodeNameById.get(pill.task.node_id) : undefined;
+                              const targetLabel = scheduleTargetDescriptor(pill.task, nodeName);
+                              const actionLabel = resolveTaskAction(pill.task)?.label ?? pill.task.action;
+                              const tooltip = `${actionLabel} · ${pill.task.name} · ${formatHourTick(pill.runAt)}`
+                                + (nodeName ? ` · ${nodeName}` : '');
                               return (
                                 <button
                                   key={`${pill.task.id}-${idx}-${pill.runAt}`}
@@ -516,7 +520,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                                       ? 'translate(-100%, -50%)'
                                       : 'translate(0, -50%)',
                                   }}
-                                  title={`${pill.task.name} · ${formatHourTick(pill.runAt)} · ${targetLabel}`}
+                                  title={tooltip}
                                 >
                                   <span>{formatHourTick(pill.runAt)}</span>
                                   <span className="opacity-70 max-w-[100px] truncate">{targetLabel}</span>

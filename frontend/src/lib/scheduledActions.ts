@@ -129,6 +129,37 @@ export function resolveTaskAction(
   return getActionById(task.action);
 }
 
+/** Drop a trailing `.yml` / `.yaml` from a stack file name for display. */
+export function stripComposeExt(name: string): string {
+  return name.replace(/\.(ya?ml)$/, '');
+}
+
+/**
+ * Category-aware label for what a scheduled run acts on, used by the Timeline
+ * pills and the mobile schedule list. Stack actions show the stack, fleet
+ * snapshots show the whole fleet, fleet updates and node-scoped actions
+ * (prune / scan) show the selected node when its name is known.
+ */
+export function scheduleTargetDescriptor(
+  task: Pick<ScheduledTask, 'action' | 'target_type' | 'target_id' | 'name'>,
+  nodeName?: string,
+): string {
+  switch (task.target_type) {
+    case 'stack':
+      return stripComposeExt(task.target_id ?? task.name);
+    case 'fleet':
+      return task.action === 'update'
+        ? (nodeName ? `All stacks · ${nodeName}` : 'All stacks')
+        : 'Entire fleet';
+    case 'system':
+      return nodeName ?? 'Selected node';
+    default: {
+      const exhaustive: never = task.target_type;
+      return exhaustive;
+    }
+  }
+}
+
 export interface ScheduledActionCategoryLane {
   key: ScheduledActionCategory;
   label: string;
@@ -138,7 +169,7 @@ export interface ScheduledActionCategoryLane {
 
 /** Ordered Timeline lanes; each scheduled action maps to one lane by category. */
 export const SCHEDULED_ACTION_CATEGORIES: ScheduledActionCategoryLane[] = [
-  { key: 'lifecycle', label: 'Lifecycle', color: 'var(--label-blue)', bg: 'var(--label-blue-bg)' },
+  { key: 'lifecycle', label: 'Stack lifecycle', color: 'var(--label-blue)', bg: 'var(--label-blue-bg)' },
   { key: 'updates', label: 'Updates', color: 'var(--success)', bg: 'oklch(from var(--success) l c h / 0.18)' },
   { key: 'security', label: 'Security', color: 'var(--label-purple)', bg: 'var(--label-purple-bg)' },
   { key: 'maintenance', label: 'Maintenance', color: 'var(--warning)', bg: 'oklch(from var(--warning) l c h / 0.18)' },
