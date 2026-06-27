@@ -167,13 +167,39 @@ function resolveAppRoot(): string {
  * The managed Trivy install and cache default under the data dir, so they are
  * already covered unless an env override moves them elsewhere.
  */
-function resolveManagedRoots(baseDir: string): string[] {
-  const roots = [path.resolve(baseDir), resolveDataDir(), resolveAppRoot(), path.resolve(os.tmpdir())];
-  const add = (value: string | undefined): void => { if (value) roots.push(path.resolve(value)); };
+async function resolveManagedRoots(baseDir: string): Promise<string[]> {
+  const configured = [path.resolve(baseDir), resolveDataDir(), resolveAppRoot(), path.resolve(os.tmpdir())];
+  const add = (value: string | undefined): void => { if (value) configured.push(path.resolve(value)); };
   add(process.env.SENCHO_UPLOAD_DIR);
   add(process.env.TRIVY_BIN);
   add(process.env.TRIVY_CACHE_DIR);
-  return roots;
+
+  // Bind sources are canonicalized before the overlap check (probeBindRootAccess
+  // realpaths the declared source), so a managed path that is itself a symlink
+  // must be canonicalized too. Otherwise TRIVY_BIN=/opt/trivy -> /srv/tool/trivy
+  // is only compared as /opt/trivy: a bind to /srv/tool slips past the overlap
+  // check, letting a stack editor overwrite the real Trivy binary a later scan
+  // executes (the same gap re-exposes a symlinked upload spool, Trivy cache, or
+  // OS temp root holding transient registry credentials). Keep both the configured
+  // path (catches a bind to its literal parent) and the realpath target (catches
+  // a bind to the symlink target's parent).
+  const roots = new Set<string>(configured);
+  for (const p of configured) {
+    try {
+      roots.add(await fsPromises.realpath(p));
+    } catch (err) {
+      // ENOENT is expected: a configured-but-absent path (e.g. SENCHO_UPLOAD_DIR,
+      // or a relocated TRIVY_BIN/TRIVY_CACHE_DIR that env points at but that does
+      // not exist yet) has no canonical target, and the configured path already
+      // anchors containment. Anything else (e.g. EACCES) is logged so an operator
+      // chasing a containment surprise has a trail.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        console.warn('[StackFileRoots] managed-root realpath failed (%s):', code ?? 'unknown', sanitizeForLog(p));
+      }
+    }
+  }
+  return [...roots];
 }
 
 /** A bind source equal to or under one of the dangerous roots (POSIX semantics). */
@@ -398,9 +424,10 @@ export class StackFileRootsService {
       }
     }
 
+    const managedRoots = await resolveManagedRoots(baseDir);
     const roots: StackFileRoot[] = [];
     for (const group of bindByCanonical.values()) {
-      const root = this.buildBindRoot(group, baseDir, stackDir);
+      const root = this.buildBindRoot(group, managedRoots, stackDir);
       if (root) roots.push(root);
     }
     for (const group of volByName.values()) {
@@ -411,7 +438,7 @@ export class StackFileRootsService {
 
   private buildBindRoot(
     group: BindGroup,
-    baseDir: string,
+    managedRoots: string[],
     stackDir: string,
   ): StackFileRoot | null {
     const { canonical } = group;
@@ -429,7 +456,7 @@ export class StackFileRootsService {
     // must never become a browsable/editable root. Compare in both directions so
     // a mount equal to, inside, or an ancestor of a managed dir is caught.
     const overlapsManaged = (dir: string): boolean => isPathWithinBase(canonical, dir) || isPathWithinBase(dir, canonical);
-    const overlap = !inStack && resolveManagedRoots(baseDir).some(overlapsManaged);
+    const overlap = !inStack && managedRoots.some(overlapsManaged);
     const dangerous = isDangerousHostPath(canonical) || group.dangerousSource || group.dockerSock;
     const readonly = group.mounts.every((m) => m.readOnly);
     const isFile = group.accessible && !group.isDir;
