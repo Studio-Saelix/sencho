@@ -127,6 +127,20 @@ function resolveDataDir(): string {
   return path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'));
 }
 
+/**
+ * Sencho's own application/install root: the working directory the image runs
+ * from (`/app`, holding the compiled `dist/`, the served `public/`, and
+ * `node_modules`). A bind that overlaps it would let the file explorer read or
+ * overwrite Sencho's program files, so it is treated as a managed area and never
+ * browsable. Under the Docker defaults the compose base and data dir sit under
+ * it: the compose base stays reachable through the per-stack stack-source root,
+ * and the data dir has its own overlap suppression, so this check interferes
+ * with neither.
+ */
+function resolveAppRoot(): string {
+  return path.resolve(process.cwd());
+}
+
 /** A bind source equal to or under one of the dangerous roots (POSIX semantics). */
 export function isDangerousHostPath(p: string): boolean {
   const norm = p.replace(/\\/g, '/');
@@ -374,19 +388,21 @@ export class StackFileRootsService {
 
     const inStack = isPathWithinBase(canonical, stackDir); // strictly within (equal handled above)
     // A bind that overlaps Sencho's own managed areas (the compose base dir, a
-    // sibling stack, or the data dir that holds sencho.db / encryption.key) must
-    // never become a browsable/editable root. Compare in both directions so a
-    // mount equal to, inside, or an ancestor of a managed dir is caught.
+    // sibling stack, the data dir that holds sencho.db / encryption.key, or the
+    // application root that holds Sencho's program files) must never become a
+    // browsable/editable root. Compare in both directions so a mount equal to,
+    // inside, or an ancestor of a managed dir is caught.
     const dataDir = resolveDataDir();
+    const appRoot = resolveAppRoot();
     const overlapsManaged = (dir: string): boolean => isPathWithinBase(canonical, dir) || isPathWithinBase(dir, canonical);
-    const overlap = !inStack && (overlapsManaged(baseDir) || overlapsManaged(dataDir));
+    const overlap = !inStack && (overlapsManaged(baseDir) || overlapsManaged(dataDir) || overlapsManaged(appRoot));
     const dangerous = isDangerousHostPath(canonical) || group.dangerousSource || group.dockerSock;
     const readonly = group.mounts.every((m) => m.readOnly);
     const isFile = group.accessible && !group.isDir;
 
     let warning: string | null = null;
     if (overlap) {
-      warning = "This mount overlaps Sencho's managed stack area. Browse the owning stack's source instead.";
+      warning = "This mount overlaps a Sencho-managed area (stack storage, data, or application files) and cannot be browsed.";
     } else if (dangerous) {
       warning = 'This mount targets a protected host path and cannot be browsed.';
     } else if (!group.accessible) {
