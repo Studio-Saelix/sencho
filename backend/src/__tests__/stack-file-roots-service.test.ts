@@ -21,6 +21,11 @@ import { ComposeService } from '../services/ComposeService';
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
 
+// Real symlink creation needs admin or Developer Mode on Windows, so the
+// real-filesystem dangling-symlink case runs on Linux/macOS (CI) and skips on the
+// Windows dev box, mirroring filesystem-symlink-escape.test.ts.
+const isWindows = process.platform === 'win32';
+
 const STACK = 'app';
 let baseDir: string;
 let stackDir: string;
@@ -357,6 +362,96 @@ describe('StackFileRootsService.listRoots', () => {
     }
   });
 
+  it('suppresses a bind to the target parent of a dangling symlinked managed Trivy binary (missing leaf)', async () => {
+    // The exploitable edge: TRIVY_BIN=/opt/trivy -> /srv/tool/trivy where /srv/tool
+    // exists but the leaf /srv/tool/trivy does not exist yet. fs.realpath on the
+    // dangling symlink throws ENOENT, so canonicalization must follow the link
+    // chain manually and preserve the resolved target parent plus the missing leaf.
+    // Otherwise a bind to /srv/tool is allowed, the stack editor creates trivy
+    // there, and a later scan executes the attacker-supplied binary.
+    const targetDir = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-dangling-target-')));
+    const danglingLeaf = path.join(targetDir, 'trivy'); // intentionally never created
+    const symlinkBin = path.join(REAL_TMP, 'sfr-dangling-trivy-bin'); // dangling symlink -> danglingLeaf
+    process.env.TRIVY_BIN = symlinkBin;
+    const enoent = (): never => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); };
+    const isAt = (p: string, q: string): boolean => path.resolve(p) === path.resolve(q);
+    // Simulate the OS view of a dangling symlink: realpath of the link (and of its
+    // missing target) is ENOENT, lstat reports the link as a symlink, readlink
+    // yields the absolute target. Every existing path resolves to itself.
+    vi.spyOn(fs, 'realpath').mockImplementation((async (p: string) =>
+      (isAt(p, symlinkBin) || isAt(p, danglingLeaf)) ? enoent() : p) as typeof fs.realpath);
+    vi.spyOn(fs, 'lstat').mockImplementation((async (p: string) =>
+      (isAt(p, symlinkBin) ? { isSymbolicLink: () => true } : enoent())) as unknown as typeof fs.lstat);
+    vi.spyOn(fs, 'readlink').mockImplementation((async (p: string) =>
+      (isAt(p, symlinkBin) ? danglingLeaf : enoent())) as typeof fs.readlink);
+    try {
+      // Bind the existing target directory, whose missing leaf the symlink points at.
+      stub({ rendered: renderModel({ web: [{ type: 'bind', source: targetDir, target: '/opt/trivy', read_only: false }] }) });
+      const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+      const bind = roots.find((r) => r.kind === 'bind');
+      expect(bind?.managedSourceOverlap).toBe(true);
+      expect(bind?.browsable).toBe(false);
+      expect(bind?.writable).toBe(false);
+    } finally {
+      await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it('follows a relative dangling managed symlink target when canonicalizing (relative readlink)', async () => {
+    // Guards the relative-target branch of realpathAllowingMissing: a managed
+    // symlink whose readlink returns a relative path must be resolved against the
+    // link's own directory, not the cwd. Package managers commonly create such links.
+    const targetDir = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-reltarget-')));
+    const danglingLeaf = path.join(targetDir, 'trivy'); // never created
+    const linkDir = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-rellink-')));
+    const symlinkBin = path.join(linkDir, 'trivy');
+    const relativeLink = path.relative(linkDir, danglingLeaf); // resolves to danglingLeaf against linkDir
+    process.env.TRIVY_BIN = symlinkBin;
+    const enoent = (): never => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); };
+    const isAt = (p: string, q: string): boolean => path.resolve(p) === path.resolve(q);
+    vi.spyOn(fs, 'realpath').mockImplementation((async (p: string) =>
+      (isAt(p, symlinkBin) || isAt(p, danglingLeaf)) ? enoent() : p) as typeof fs.realpath);
+    vi.spyOn(fs, 'lstat').mockImplementation((async (p: string) =>
+      (isAt(p, symlinkBin) ? { isSymbolicLink: () => true } : enoent())) as unknown as typeof fs.lstat);
+    vi.spyOn(fs, 'readlink').mockImplementation((async (p: string) =>
+      (isAt(p, symlinkBin) ? relativeLink : enoent())) as typeof fs.readlink);
+    try {
+      stub({ rendered: renderModel({ web: [{ type: 'bind', source: targetDir, target: '/opt/trivy', read_only: false }] }) });
+      const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+      const bind = roots.find((r) => r.kind === 'bind');
+      expect(bind?.managedSourceOverlap).toBe(true);
+      expect(bind?.browsable).toBe(false);
+    } finally {
+      await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(linkDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it.skipIf(isWindows)('suppresses a bind to the real target parent of a dangling managed symlink (real fs)', async () => {
+    // Authoritative real-symlink form of the dangling-leaf case: create an actual
+    // dangling symlink whose leaf is never created, and confirm a bind to the
+    // existing target directory is suppressed. This exercises real fs.realpath /
+    // lstat / readlink rather than a mock, so it catches any divergence between
+    // the canonicalization helper and real OS symlink semantics.
+    const targetDir = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-rdangling-target-')));
+    const danglingLeaf = path.join(targetDir, 'trivy'); // never created
+    const linkDir = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-rdangling-link-')));
+    const symlinkBin = path.join(linkDir, 'trivy');
+    await fs.symlink(danglingLeaf, symlinkBin); // dangling: the target leaf is absent
+    process.env.TRIVY_BIN = symlinkBin;
+    try {
+      stub({ rendered: renderModel({ web: [{ type: 'bind', source: targetDir, target: '/opt/trivy', read_only: false }] }) });
+      const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+      const bind = roots.find((r) => r.kind === 'bind');
+      expect(bind?.managedSourceOverlap).toBe(true);
+      expect(bind?.browsable).toBe(false);
+      expect(bind?.writable).toBe(false);
+    } finally {
+      await fs.rm(targetDir, { recursive: true, force: true }).catch(() => {});
+      await fs.rm(linkDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
   it('keeps a legitimate external bind browsable when a configured managed path is absent (ENOENT realpath tolerated)', async () => {
     // A relocated TRIVY_BIN (or upload spool) routinely points at a path that does
     // not exist yet on a fresh install, so realpath on a configured managed path
@@ -373,6 +468,41 @@ describe('StackFileRootsService.listRoots', () => {
       expect(bind?.browsable).toBe(true);
       expect(bind?.writable).toBe(true);
     } finally {
+      await fs.rm(outside, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it('degrades safely when a managed path cannot be canonicalized (non-ENOENT error keeps containment)', async () => {
+    // A non-ENOENT realpath failure on one managed path (e.g. EACCES on an
+    // intermediate dir) must not collapse discovery or silently drop containment:
+    // the loop continues for other paths, the configured path stays anchored, and
+    // the failure is logged.
+    const binDir = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-eacces-bin-')));
+    const trivyBin = path.join(binDir, 'trivy');
+    process.env.TRIVY_BIN = trivyBin;
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-eacces-legit-')));
+    const isAt = (p: string, q: string): boolean => path.resolve(p) === path.resolve(q);
+    vi.spyOn(fs, 'realpath').mockImplementation((async (p: string) => {
+      if (isAt(p, trivyBin)) throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      return p;
+    }) as typeof fs.realpath);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      stub({ rendered: renderModel({
+        legit: [{ type: 'bind', source: outside, target: '/config', read_only: false }],
+        tool: [{ type: 'bind', source: binDir, target: '/opt/trivy', read_only: false }],
+      }) });
+      const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+      const legit = roots.find((r) => r.hostPathOrName === outside);
+      const tool = roots.find((r) => r.hostPathOrName === binDir);
+      // Discovery did not collapse: the unrelated bind is still browsable.
+      expect(legit?.browsable).toBe(true);
+      // The configured TRIVY_BIN literal still anchors containment for its own dir.
+      expect(tool?.managedSourceOverlap).toBe(true);
+      expect(tool?.browsable).toBe(false);
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      await fs.rm(binDir, { recursive: true, force: true }).catch(() => {});
       await fs.rm(outside, { recursive: true, force: true }).catch(() => {});
     }
   });
