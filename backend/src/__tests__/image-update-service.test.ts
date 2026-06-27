@@ -94,6 +94,14 @@ vi.mock('../services/NodeRegistry', () => ({
   },
 }));
 
+// getRemoteDigestResult is module-scoped inside checkImage; mock it to drive the remote
+// outcome while keeping the real parseImageRef / repoDigestMatchesRef.
+const { mockGetRemoteDigestResult } = vi.hoisted(() => ({ mockGetRemoteDigestResult: vi.fn() }));
+vi.mock('../services/registry-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/registry-api')>();
+  return { ...actual, getRemoteDigestResult: mockGetRemoteDigestResult };
+});
+
 // ── Re-export internal helpers via the module ─────────────────────────
 
 // We need the internal functions. Import the module after mocks are set up.
@@ -183,6 +191,38 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     expect(result.hasUpdate).toBe(false);
     expect(result.notCheckable).toBeUndefined();
     expect(result.error).toContain('Could not resolve a local registry digest');
+  });
+});
+
+// ── checkImage surfaces the remote-digest reason ───────────────────────
+
+describe('ImageUpdateService - checkImage surfaces the remote-digest reason', () => {
+  let service: ImageUpdateService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (ImageUpdateService as any).instance = undefined;
+    service = ImageUpdateService.getInstance();
+  });
+
+  // One RepoDigest matching the ref so the local digest resolves and the flow reaches
+  // getRemoteDigestResult.
+  const dockerWithLocalDigest = (digest: string) => ({
+    getDocker: () => ({
+      getImage: () => ({ inspect: vi.fn().mockResolvedValue({ RepoDigests: [`ghcr.io/linuxserver/radarr@${digest}`] }) }),
+    }),
+  } as any);
+
+  it('surfaces the specific failure reason (not a generic "unreachable") as the check error', async () => {
+    mockGetRemoteDigestResult.mockResolvedValue({ ok: false, reason: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
+    const result = await service.checkImage(dockerWithLocalDigest('sha256:local'), 'ghcr.io/linuxserver/radarr:latest');
+    expect(result).toEqual({ hasUpdate: false, error: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
+  });
+
+  it('reports an update when the resolved remote digest differs from the local one', async () => {
+    mockGetRemoteDigestResult.mockResolvedValue({ ok: true, digest: 'sha256:remote' });
+    const result = await service.checkImage(dockerWithLocalDigest('sha256:local'), 'ghcr.io/linuxserver/radarr:latest');
+    expect(result).toEqual({ hasUpdate: true });
   });
 });
 

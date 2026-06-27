@@ -47,11 +47,11 @@ The readiness hero shows this instance's cadence at a glance: when it last check
 
 ## When a check cannot complete
 
-A registry check can fail for reasons that have nothing to do with whether an update exists: the registry is unreachable, an authenticated registry has no stored credentials, or Docker Hub's anonymous pull-rate limit has been hit. Sencho treats these as a distinct **check failed** state instead of reporting "up to date", so a failed check is never mistaken for a current image.
+A registry check can fail for reasons that have nothing to do with whether an update exists: the registry is unreachable, an authenticated registry has no stored credentials, or Docker Hub's anonymous pull-rate limit has been hit. Sencho treats these as a distinct **check failed** state instead of reporting "up to date", so a failed check is never mistaken for a current image. The recorded reason names the specific cause, such as an authentication failure, a rate limit, a missing image, or an unreachable registry, so you can tell them apart at a glance.
 
 Where it shows:
 
-- **Sidebar.** A stack whose latest check could not be determined shows a muted indicator on its row. Hover it to read the reason (for example, "Registry unreachable for ghcr.io/acme/api:v1").
+- **Sidebar.** A stack whose latest check could not be determined shows a muted indicator on its row. Hover it to read the reason (for example, "Authentication failed for ghcr.io/acme/api:v1" or "Registry unreachable for ghcr.io/acme/api:v1").
 - **Update board.** Stacks whose check failed appear in a "could not be checked" advisory above the card grid, each with its reason, so a stack with no confirmed update is never silently absent.
 
 A confirmed update from an earlier successful check is kept through a later failed check, so a momentary registry blip does not make a pending update vanish.

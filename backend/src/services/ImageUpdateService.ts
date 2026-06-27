@@ -8,7 +8,7 @@ import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
-import { parseImageRef, getRemoteDigest, repoDigestMatchesRef } from './registry-api';
+import { parseImageRef, getRemoteDigestResult, repoDigestMatchesRef } from './registry-api';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -705,10 +705,11 @@ export class ImageUpdateService {
             return { hasUpdate: false, error: `Could not resolve a local registry digest for "${imageRef}"` };
         }
 
-        const remoteDigest = await getRemoteDigest(parsed.registry, parsed.repo, parsed.tag, credentials);
-        if (!remoteDigest) {
-            return { hasUpdate: false, error: `Registry unreachable for ${parsed.registry}/${parsed.repo}:${parsed.tag}` };
+        const remote = await getRemoteDigestResult(parsed.registry, parsed.repo, parsed.tag, credentials);
+        if (!remote.ok) {
+            return { hasUpdate: false, error: remote.reason };
         }
+        const remoteDigest = remote.digest;
 
         const hasUpdate = localDigest !== remoteDigest;
         console.log(
