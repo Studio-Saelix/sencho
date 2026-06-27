@@ -105,9 +105,20 @@ export function stackSourceFileRoot(hostPathOrName = ''): StackFileRoot {
 const ROOTS_CACHE_TTL_MS = 15_000;
 
 // Dangerous host directories: a bind equal to or under any of these grants
-// node-level access and is never browsable. The docker socket is caught
-// separately via isDockerSocketMount on the declared source.
-const DANGEROUS_ROOTS = ['/etc', '/proc', '/sys', '/dev', '/var/run', '/run'];
+// node-level access and is never browsable. Two groups:
+//   - kernel/OS state: /etc, /proc, /sys, /dev, /var/run, /run.
+//   - the system locations holding the executables and libraries Sencho's own
+//     runtime depends on: /usr (which contains /usr/local/bin/{node,docker,npm}
+//     and /usr/local/lib), /bin, /sbin, /lib, /lib64 (the base-image binaries),
+//     plus /boot and /root. A stack author with stack:edit must not be able to
+//     declare one of these as a bind source, overwrite a binary, and have a
+//     later deploy execute it.
+// The docker socket is caught separately via isDockerSocketMount on the
+// declared source.
+const DANGEROUS_ROOTS = [
+  '/etc', '/proc', '/sys', '/dev', '/var/run', '/run',
+  '/usr', '/bin', '/sbin', '/lib', '/lib64', '/boot', '/root',
+];
 
 interface CacheEntry {
   roots: StackFileRoot[];
