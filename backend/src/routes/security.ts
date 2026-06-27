@@ -114,39 +114,28 @@ function parseScannersInput(raw: unknown): readonly ('vuln' | 'secret')[] | unde
   return Array.from(out) as readonly ('vuln' | 'secret')[];
 }
 
-function shapeScanForResponse(
-  scan: VulnerabilityScan,
-  // The scan-detail endpoint passes a verdict recomputed against current
-  // suppressions (resolveBannerEvaluation) so the banner matches the deploy
-  // gate; other callers omit it and the snapshot stored at scan time is used.
-  evaluationOverride?: ReturnType<typeof parsePolicyEvaluation>,
-): Omit<VulnerabilityScan, 'policy_evaluation'> & {
+function shapeScanForResponse(scan: VulnerabilityScan): Omit<VulnerabilityScan, 'policy_evaluation'> & {
   policy_evaluation: ReturnType<typeof parsePolicyEvaluation>;
 } {
   const { policy_evaluation, ...rest } = scan;
-  return {
-    ...rest,
-    policy_evaluation: evaluationOverride !== undefined ? evaluationOverride : parsePolicyEvaluation(policy_evaluation),
-  };
+  return { ...rest, policy_evaluation: parsePolicyEvaluation(policy_evaluation) };
 }
 
 /**
  * The policy verdict the scan-detail banner shows. The verdict stored at scan
- * time drifts from the deploy gate once the gate is set to honor suppressions,
- * because the gate always re-reads current suppressions while the stored value
- * is a one-time snapshot: creating, editing, deleting, or expiring a suppression
- * leaves the banner claiming a violation the gate would now pass, or the reverse.
- * Recompute against current suppressions so the banner agrees with the gate.
- * With honor-suppressions off, suppressions affect neither the gate nor the
- * verdict, so the stored snapshot is authoritative and returned without a reread.
+ * time is a one-time snapshot, while the deploy gate always re-evaluates current
+ * policies and suppressions: enabling, disabling, or editing a policy (and
+ * creating, editing, deleting, or expiring a suppression) leaves the stored
+ * snapshot claiming a violation the gate would now pass, or the reverse. Always
+ * recompute so the banner agrees with the gate across the full policy and
+ * suppression lifecycle. evaluateScanAgainstPolicies reads the honor-suppressions
+ * setting itself, so this is correct whether or not suppressions are honored, and
+ * returns null when no policy matches (the banner clears, matching a passing gate).
  */
 function resolveBannerEvaluation(
   db: DatabaseService,
   scan: VulnerabilityScan,
 ): ReturnType<typeof parsePolicyEvaluation> {
-  if (db.getGlobalSettings()['deploy_block_honor_suppressions'] !== '1') {
-    return parsePolicyEvaluation(scan.policy_evaluation);
-  }
   try {
     return db.evaluateScanAgainstPolicies(scan.node_id, scan, FleetSyncService.getSelfIdentity());
   } catch (err) {
@@ -612,7 +601,13 @@ securityRouter.get('/scans/:scanId', authMiddleware, (req: Request, res: Respons
     }).filter(Boolean),
   );
   const publiclyExposed = exposedMap.get(scan.image_ref) ?? null;
-  res.json({ ...shapeScanForResponse(scan, resolveBannerEvaluation(db, scan)), publicly_exposed: publiclyExposed });
+  // The banner verdict is recomputed against current policies/suppressions so it
+  // matches the deploy gate; the list endpoint keeps the stored snapshot.
+  res.json({
+    ...shapeScanForResponse(scan),
+    policy_evaluation: resolveBannerEvaluation(db, scan),
+    publicly_exposed: publiclyExposed,
+  });
 });
 
 securityRouter.get(

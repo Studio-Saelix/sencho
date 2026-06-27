@@ -1,14 +1,13 @@
 /**
  * GET /api/security/scans/:scanId banner consistency with the deploy gate.
  *
- * The verdict stored on a scan at scan time is a one-time snapshot. Once the
- * deploy gate is set to honor suppressions, the gate re-reads current
- * suppressions on every deploy while the stored verdict does not, so creating,
- * deleting, or expiring a suppression used to leave the scan-detail banner
- * disagreeing with what the gate would actually do. The detail route now
- * recomputes the banner verdict against current suppressions; these tests pin
- * that the banner tracks the gate across the suppression lifecycle, and that the
- * stored snapshot is still used verbatim when honor-suppressions is off.
+ * The verdict stored on a scan at scan time is a one-time snapshot, while the
+ * deploy gate always re-evaluates current policies and suppressions. The detail
+ * route therefore recomputes the banner verdict on every read so it tracks the
+ * gate across the full lifecycle: creating, deleting, editing, or expiring a
+ * suppression, and enabling, disabling, or tightening a policy, with
+ * honor-suppressions both on and off. These tests pin that agreement; the stored
+ * snapshot is used only as a fallback if the recompute throws.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
@@ -150,11 +149,51 @@ describe('GET /api/security/scans/:scanId banner vs deploy gate', () => {
     }
   });
 
-  it('uses the stored snapshot verbatim when honor-suppressions is off', async () => {
+  it('recomputes the raw verdict when honor-suppressions is off, ignoring suppressions like the gate', async () => {
     const scanId = seedViolatingScan();
     suppress(null);
     DatabaseService.getInstance().updateGlobalSetting('deploy_block_honor_suppressions', '0');
-    // Setting off: the gate ignores suppressions too, so the raw stored verdict stands.
+    // Honor off: the gate ignores suppressions, so the recomputed banner still
+    // flags the KEV (matching the raw gate), rather than honoring the suppression.
+    expect(await bannerViolated(scanId)).toBe(true);
+  });
+
+  it('clears the banner when the policy is disabled, even with honor-suppressions off', async () => {
+    const scanId = seedViolatingScan();
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('deploy_block_honor_suppressions', '0');
+    // The stored snapshot says violated, but a disabled policy makes the gate pass.
+    // The banner must recompute (to no verdict), not echo the stale snapshot.
+    db.getScanPolicies().forEach((p) => db.updateScanPolicy(p.id, { enabled: 0 }));
+    expect(await bannerViolated(scanId)).toBeFalsy();
+    // The stored snapshot is unchanged, proving the banner was recomputed at read time.
+    expect(parsePolicyEvaluation(db.getVulnerabilityScan(scanId)?.policy_evaluation)?.violated).toBe(true);
+    // Re-enabling the policy brings the violation back, matching the gate again.
+    db.getScanPolicies().forEach((p) => db.updateScanPolicy(p.id, { enabled: 1 }));
+    expect(await bannerViolated(scanId)).toBe(true);
+  });
+
+  it('shows a violation after a passing policy is tightened to block, with honor-suppressions off', async () => {
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('deploy_block_honor_suppressions', '0');
+    const policy = db.createScanPolicy({
+      name: 'sev', node_id: null, node_identity: '', stack_pattern: 'web',
+      max_severity: 'CRITICAL', block_on_deploy: 1, enabled: 1,
+      block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0, replicated_from_control: 0,
+    });
+    const scanId = db.createVulnerabilityScan({
+      node_id: 1, image_ref: 'web:1', image_digest: null, scanned_at: Date.now(),
+      total_vulnerabilities: 1, critical_count: 0, high_count: 1, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'HIGH', os_info: null, trivy_version: '0.50.0', scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: 'web',
+    });
+    const scan = db.getVulnerabilityScan(scanId) as VulnerabilityScan;
+    db.setScanPolicyEvaluation(scanId, db.evaluateScanAgainstPolicies(1, scan, FleetSyncService.getSelfIdentity()));
+    // HIGH is within a CRITICAL threshold, so the stored verdict passes.
+    expect(await bannerViolated(scanId)).toBeFalsy();
+    // Tightening the threshold to HIGH makes the gate block; the banner must follow.
+    db.updateScanPolicy(policy.id, { max_severity: 'HIGH' });
     expect(await bannerViolated(scanId)).toBe(true);
   });
 });
