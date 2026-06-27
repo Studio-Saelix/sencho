@@ -92,6 +92,61 @@ describe('NodeUpdatesSheet', () => {
     await waitFor(() => expect(releaseCalls()).toBe(1));
   });
 
+  it('binds the changelog to the release version and shows it', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: '1.1.0', releaseNotes: '## What changed', htmlUrl: null }),
+    });
+    render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
+    await screen.findByRole('heading', { name: 'What changed' });
+    // The notes are labelled with the version they belong to.
+    expect(screen.getByText('Release v1.1.0')).toBeInTheDocument();
+  });
+
+  it('refetches release notes when the advertised latest version changes', async () => {
+    apiFetchMock.mockImplementation((url: string) =>
+      String(url).includes('release-notes')
+        ? Promise.resolve({ ok: true, json: async () => ({ version: '1.1.0', releaseNotes: '## v1.1.0 notes', htmlUrl: null }) })
+        : Promise.resolve({ ok: true, json: async () => ({}) }),
+    );
+    const releaseCalls = () => apiFetchMock.mock.calls.filter(c => String(c[0]).includes('release-notes')).length;
+    const { rerender } = render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
+    await screen.findByRole('heading', { name: 'v1.1.0 notes' });
+    expect(releaseCalls()).toBe(1);
+
+    // A newer release surfaces while the sheet is open: the advertised latest
+    // moves to 1.2.0 and the endpoint now returns its notes. The changelog must
+    // refetch and show the new version, not the stale 1.1.0 notes.
+    apiFetchMock.mockImplementation((url: string) =>
+      String(url).includes('release-notes')
+        ? Promise.resolve({ ok: true, json: async () => ({ version: '1.2.0', releaseNotes: '## v1.2.0 notes', htmlUrl: null }) })
+        : Promise.resolve({ ok: true, json: async () => ({}) }),
+    );
+    const bumped = STATUSES.map(s => ({ ...s, latestVersion: '1.2.0' }));
+    rerender(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog', updateStatuses: bumped })} />);
+
+    await screen.findByRole('heading', { name: 'v1.2.0 notes' });
+    expect(screen.getByText('Release v1.2.0')).toBeInTheDocument();
+    // The stale notes are replaced, not appended alongside the new ones.
+    expect(screen.queryByRole('heading', { name: 'v1.1.0 notes' })).not.toBeInTheDocument();
+    await waitFor(() => expect(releaseCalls()).toBe(2));
+  });
+
+  it('does not refetch loaded notes on re-render when the version is unchanged', async () => {
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: '1.1.0', releaseNotes: '## v1.1.0 notes', htmlUrl: null }),
+    });
+    const releaseCalls = () => apiFetchMock.mock.calls.filter(c => String(c[0]).includes('release-notes')).length;
+    const { rerender } = render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
+    await screen.findByRole('heading', { name: 'v1.1.0 notes' });
+    expect(releaseCalls()).toBe(1);
+    // Re-rendering with the same advertised latest version must not refetch: the
+    // version-keyed guard short-circuits for an already-loaded changelog.
+    rerender(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
+    await waitFor(() => expect(releaseCalls()).toBe(1));
+  });
+
   it('Recheck resets and refetches release notes with the recheck flag', async () => {
     apiFetchMock.mockImplementation((url: string) =>
       String(url).includes('release-notes')
