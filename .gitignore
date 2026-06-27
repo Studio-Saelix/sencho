@@ -67,3 +67,6 @@ website/
 
 # Internal engineering docs (not published)
 docs/internal/
+
+# Transient temp dir a file-roots test creates under the backend working dir
+backend/sfr-app-*/

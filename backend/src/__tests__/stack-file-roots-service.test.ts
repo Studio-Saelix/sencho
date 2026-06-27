@@ -193,6 +193,23 @@ describe('StackFileRootsService.listRoots', () => {
     expect(bind?.browsable).toBe(false);
   });
 
+  it("suppresses a bind that overlaps Sencho's own application directory", async () => {
+    // process.cwd() is Sencho's install root in the container (/app, holding
+    // dist/, public/, node_modules). A non-admin must not be able to declare a
+    // bind into it and reach Sencho's program files via the file explorer.
+    const appDir = await fs.realpath(await fs.mkdtemp(path.join(process.cwd(), 'sfr-app-')));
+    try {
+      stub({ rendered: renderModel({ web: [{ type: 'bind', source: appDir, target: '/config', read_only: false }] }) });
+      const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+      const bind = roots.find((r) => r.kind === 'bind');
+      expect(bind?.managedSourceOverlap).toBe(true);
+      expect(bind?.browsable).toBe(false);
+      expect(bind?.writable).toBe(false);
+    } finally {
+      await fs.rm(appDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
   it('resolves a named volume by its Docker name (not the compose key) and inspects that name', async () => {
     const inspected: string[] = [];
     stub({
