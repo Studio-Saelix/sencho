@@ -284,6 +284,43 @@ describe('getLatestKevFindingsForNode', () => {
   });
 });
 
+describe('getLatestCritHighFindingsWithCvssForNode ranking', () => {
+  function rawDb2() {
+    return (db() as unknown as { db: { prepare: (s: string) => { run: () => void } } }).db;
+  }
+  beforeEach(() => {
+    rawDb2().prepare('DELETE FROM vulnerability_details').run();
+    rawDb2().prepare('DELETE FROM cve_intel').run();
+    rawDb2().prepare('DELETE FROM vulnerability_scans').run();
+  });
+
+  it('keeps the highest-risk findings (KEV, then EPSS, then CVSS) when the cap truncates', () => {
+    const now = Date.now();
+    const scanId = db().createVulnerabilityScan({
+      node_id: 1, image_ref: 'app:1', image_digest: 'sha256:rank', scanned_at: now,
+      total_vulnerabilities: 3, critical_count: 0, high_count: 3, medium_count: 0, low_count: 0,
+      unknown_count: 0, fixable_count: 0, secret_count: 0, misconfig_count: 0, scanners_used: 'vuln',
+      highest_severity: 'HIGH', os_info: null, trivy_version: null, scan_duration_ms: null,
+      triggered_by: 'manual', status: 'completed', error: null, stack_context: null,
+    });
+    const d = (id: string, cvss: number) => ({
+      vulnerability_id: id, pkg_name: `p-${id}`, installed_version: '1', fixed_version: null,
+      severity: 'HIGH' as const, title: null, description: null, primary_url: null, cvss_score: cvss,
+    });
+    // Insert the lowest-risk finding FIRST so an unordered LIMIT would wrongly keep it.
+    db().insertVulnerabilityDetails(scanId, [d('CVE-PLAIN-LOWCVSS', 1.0), d('CVE-KEV-LOWCVSS', 4.0), d('CVE-PLAIN-HIGHCVSS', 9.0)]);
+    db().replaceKev([{ cve_id: 'CVE-KEV-LOWCVSS', date_added: '2024-01-01' }], now);
+
+    // Cap below the finding count: the dropped row must be the lowest-risk one.
+    const res = db().getLatestCritHighFindingsWithCvssForNode(1, 2);
+    const ids = res.items.map((i) => i.vulnerability_id);
+    expect(res.truncated).toBe(true);
+    expect(ids).toContain('CVE-KEV-LOWCVSS');       // KEV ranks first despite low CVSS
+    expect(ids).toContain('CVE-PLAIN-HIGHCVSS');    // then highest CVSS
+    expect(ids).not.toContain('CVE-PLAIN-LOWCVSS'); // lowest-risk is the one dropped
+  });
+});
+
 describe('getDailyRiskTrend', () => {
   it('sums latest-per-image critical/high per day and orders days ascending', () => {
     const day1 = dayStartMs(3);

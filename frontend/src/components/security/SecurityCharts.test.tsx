@@ -132,6 +132,22 @@ describe('TopExploitRiskList', () => {
         expect(onInspect).toHaveBeenCalledWith(11);
     });
 
+    it('colors the severity dot by the finding severity (a Medium KEV is not shown as High)', () => {
+        const { container } = render(
+            <TopExploitRiskList items={[finding({ vulnerability_id: 'CVE-MED', severity: 'MEDIUM', kev: true, cvss_score: 5 })]} onInspect={vi.fn()} />,
+        );
+        const dot = container.querySelector('li[role="button"] span[aria-hidden]') as HTMLElement;
+        expect(dot.style.background).toContain('sev-medium');
+    });
+
+    it('discloses truncation only when the result was capped', () => {
+        const item = finding({ vulnerability_id: 'CVE-A', cvss_score: 8 });
+        const capped = render(<TopExploitRiskList items={[item]} truncated onInspect={vi.fn()} />);
+        expect(capped.container.textContent).toContain('more exist than can be listed');
+        const full = render(<TopExploitRiskList items={[item]} onInspect={vi.fn()} />);
+        expect(full.container.textContent).not.toContain('more exist than can be listed');
+    });
+
     it('paginates beyond the page size and advances and rewinds pages', () => {
         const items = Array.from({ length: 9 }, (_, i) =>
             finding({ vulnerability_id: `CVE-${i}`, cvss_score: 9 - i * 0.1, epss_score: 0.5, scan_id: i }),

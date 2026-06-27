@@ -76,6 +76,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const [summariesError, setSummariesError] = useState(false);
   const [trend, setTrend] = useState<SecurityRiskTrendPoint[]>([]);
   const [exploitIntel, setExploitIntel] = useState<ExploitIntelFinding[]>([]);
+  // True when the exploit-intel query hit its row cap: the list shows the
+  // highest-risk findings but not every one, so the UI discloses it.
+  const [exploitTruncated, setExploitTruncated] = useState(false);
   const [isReplica, setIsReplica] = useState(false);
   // Bumped after a node-wide scan completes to refetch the active node's posture.
   const [reloadToken, setReloadToken] = useState(0);
@@ -117,10 +120,13 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         .catch(() => []);
       // Exploit-intel powers two overview charts; isolate it like the trend so a
       // failure (or an older node without the endpoint) degrades to empty panels.
-      const exploitIntelPromise: Promise<ExploitIntelFinding[]> = apiFetch('/security/overview/exploit-intel')
-        .then((r) => (r.ok ? r.json() : { items: [] }))
-        .then((b) => (b && Array.isArray(b.items) ? b.items : []))
-        .catch(() => []);
+      const exploitIntelPromise: Promise<{ items: ExploitIntelFinding[]; truncated: boolean }> = apiFetch('/security/overview/exploit-intel')
+        .then((r) => (r.ok ? r.json() : { items: [], truncated: false }))
+        .then((b) => ({
+          items: b && Array.isArray(b.items) ? b.items : [],
+          truncated: b?.truncated === true,
+        }))
+        .catch(() => ({ items: [], truncated: false }));
       try {
         const [overviewRes, summariesRes] = await Promise.all([
           apiFetch('/security/overview'),
@@ -164,7 +170,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       const [trendData, intelData] = await Promise.all([trendPromise, exploitIntelPromise]);
       if (!cancelled) {
         setTrend(trendData);
-        setExploitIntel(intelData);
+        setExploitIntel(intelData.items);
+        setExploitTruncated(intelData.truncated);
       }
     })();
     return () => { cancelled = true; };
@@ -246,6 +253,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
             loadError={overviewLoadError}
             trend={trend}
             exploitIntel={exploitIntel}
+            exploitTruncated={exploitTruncated}
             onNavigate={onTabChange}
             onInspect={onInspect}
             canScan={canScan}
