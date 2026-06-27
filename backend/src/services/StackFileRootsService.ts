@@ -14,6 +14,7 @@
  * the stack dir).
  */
 import path from 'path';
+import os from 'os';
 import { promises as fsPromises } from 'fs';
 import { createHash } from 'crypto';
 
@@ -150,6 +151,29 @@ function resolveDataDir(): string {
  */
 function resolveAppRoot(): string {
   return path.resolve(process.cwd());
+}
+
+/**
+ * Every directory Sencho manages at runtime. A bind overlapping any of these (in
+ * either direction) must never become a browsable root. Besides the compose base,
+ * the data dir, and the application root, this covers:
+ *   - the OS temp root: Sencho writes short-lived files there that include
+ *     resolved registry credentials (the docker config.json ComposeService and
+ *     TrivyService hand to docker/trivy), upload spools, and compose/git/scan
+ *     working dirs. A bind to it would let the file explorer read those secrets.
+ *   - the configurable upload spool, Trivy binary, and Trivy cache, which env
+ *     vars can relocate outside the data dir. The Trivy binary is included so it
+ *     cannot be overwritten through a bind and then run by a pre-deploy scan.
+ * The managed Trivy install and cache default under the data dir, so they are
+ * already covered unless an env override moves them elsewhere.
+ */
+function resolveManagedRoots(baseDir: string): string[] {
+  const roots = [path.resolve(baseDir), resolveDataDir(), resolveAppRoot(), path.resolve(os.tmpdir())];
+  const add = (value: string | undefined): void => { if (value) roots.push(path.resolve(value)); };
+  add(process.env.SENCHO_UPLOAD_DIR);
+  add(process.env.TRIVY_BIN);
+  add(process.env.TRIVY_CACHE_DIR);
+  return roots;
 }
 
 /** A bind source equal to or under one of the dangerous roots (POSIX semantics). */
@@ -398,22 +422,21 @@ export class StackFileRootsService {
     if (canonical === stackDir) return null;
 
     const inStack = isPathWithinBase(canonical, stackDir); // strictly within (equal handled above)
-    // A bind that overlaps Sencho's own managed areas (the compose base dir, a
-    // sibling stack, the data dir that holds sencho.db / encryption.key, or the
-    // application root that holds Sencho's program files) must never become a
-    // browsable/editable root. Compare in both directions so a mount equal to,
-    // inside, or an ancestor of a managed dir is caught.
-    const dataDir = resolveDataDir();
-    const appRoot = resolveAppRoot();
+    // A bind that overlaps a Sencho-managed area (the compose base, a sibling
+    // stack, the data dir holding sencho.db / encryption.key, the application
+    // root holding Sencho's program files, or the OS temp root and configurable
+    // tool paths holding transient registry credentials and the Trivy binary)
+    // must never become a browsable/editable root. Compare in both directions so
+    // a mount equal to, inside, or an ancestor of a managed dir is caught.
     const overlapsManaged = (dir: string): boolean => isPathWithinBase(canonical, dir) || isPathWithinBase(dir, canonical);
-    const overlap = !inStack && (overlapsManaged(baseDir) || overlapsManaged(dataDir) || overlapsManaged(appRoot));
+    const overlap = !inStack && resolveManagedRoots(baseDir).some(overlapsManaged);
     const dangerous = isDangerousHostPath(canonical) || group.dangerousSource || group.dockerSock;
     const readonly = group.mounts.every((m) => m.readOnly);
     const isFile = group.accessible && !group.isDir;
 
     let warning: string | null = null;
     if (overlap) {
-      warning = "This mount overlaps a Sencho-managed area (stack storage, data, or application files) and cannot be browsed.";
+      warning = "This mount overlaps a Sencho-managed area (stack storage, data, application, or temporary credential files) and cannot be browsed.";
     } else if (dangerous) {
       warning = 'This mount targets a protected host path and cannot be browsed.';
     } else if (!group.accessible) {
