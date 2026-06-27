@@ -24,6 +24,17 @@ import { FileSystemService } from '../services/FileSystemService';
 const STACK = 'app';
 let baseDir: string;
 let stackDir: string;
+// The real OS temp, captured before beforeEach redirects os.tmpdir() for the
+// service. Test scratch (baseDir, legitimate external binds) lives here and stays
+// browsable, while the service's view of the OS temp root is pointed at a separate
+// dir so the managed-temp containment can be exercised without flagging the
+// test's own scratch.
+const REAL_TMP = os.tmpdir();
+let managedTmpDir: string;
+// Env keys the managed-temp tests mutate. Snapshotted and restored around every
+// case so an inherited value (CI or a developer shell) is never clobbered.
+const MANAGED_ENV_KEYS = ['TMPDIR', 'TEMP', 'TMP', 'SENCHO_UPLOAD_DIR', 'TRIVY_BIN', 'TRIVY_CACHE_DIR'] as const;
+let savedEnv: Partial<Record<(typeof MANAGED_ENV_KEYS)[number], string | undefined>>;
 
 interface RawMount { type: 'bind' | 'volume' | 'tmpfs'; source?: string; target: string; read_only?: boolean }
 
@@ -53,14 +64,28 @@ function stub(opts: { rendered: string | null; volumeInspect?: (name: string) =>
 }
 
 beforeEach(async () => {
-  baseDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'sfr-base-')));
+  baseDir = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-base-')));
   stackDir = path.join(baseDir, STACK);
   await fs.mkdir(stackDir, { recursive: true });
+  // Redirect os.tmpdir() (the service's "OS temp root") to a dedicated dir, kept
+  // separate from REAL_TMP where the test scratch lives, so a bind to the OS temp
+  // root can be asserted non-browsable while ordinary REAL_TMP binds stay browsable.
+  managedTmpDir = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-managed-tmp-')));
+  savedEnv = {};
+  for (const key of MANAGED_ENV_KEYS) savedEnv[key] = process.env[key];
+  process.env.TMPDIR = managedTmpDir;
+  process.env.TEMP = managedTmpDir;
+  process.env.TMP = managedTmpDir;
 });
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  for (const key of MANAGED_ENV_KEYS) {
+    if (savedEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = savedEnv[key];
+  }
   await fs.rm(baseDir, { recursive: true, force: true }).catch(() => {});
+  await fs.rm(managedTmpDir, { recursive: true, force: true }).catch(() => {});
   // The service cache is module-level; clear it between cases.
   StackFileRootsService.invalidate(1, STACK);
 });
@@ -127,7 +152,7 @@ describe('StackFileRootsService.listRoots', () => {
     // A config directory mounted into both the app and the Sencho container can
     // legitimately live outside the compose base. When Sencho can stat it, the
     // root must be fully browsable/editable, not silently dropped as unreachable.
-    const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'sfr-ext-')));
+    const outside = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-ext-')));
     try {
       stub({ rendered: renderModel({ web: [{ type: 'bind', source: outside, target: '/config', read_only: false }] }) });
       const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
@@ -227,6 +252,78 @@ describe('StackFileRootsService.listRoots', () => {
       expect(bind?.writable).toBe(false);
     } finally {
       await fs.rm(appDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it("suppresses a bind to the OS temp root, where Sencho writes transient registry credentials", async () => {
+    // ComposeService and TrivyService write a docker config.json (resolved
+    // registry auth) under os.tmpdir(); a bind that exposes that dir would let
+    // the file explorer read those secrets. (os.tmpdir() is managedTmpDir here.)
+    stub({ rendered: renderModel({ web: [{ type: 'bind', source: managedTmpDir, target: '/host-tmp', read_only: false }] }) });
+    const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+    const bind = roots.find((r) => r.kind === 'bind');
+    expect(bind?.managedSourceOverlap).toBe(true);
+    expect(bind?.browsable).toBe(false);
+    expect(bind?.writable).toBe(false);
+    expect(bind?.chmodable).toBe(false);
+  });
+
+  it('suppresses a bind into a subdirectory of the OS temp root (the per-scan credential dir)', async () => {
+    const sub = path.join(managedTmpDir, 'sencho-trivy-xyz');
+    await fs.mkdir(sub);
+    stub({ rendered: renderModel({ web: [{ type: 'bind', source: sub, target: '/c' }] }) });
+    const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+    const bind = roots.find((r) => r.kind === 'bind');
+    expect(bind?.managedSourceOverlap).toBe(true);
+    expect(bind?.browsable).toBe(false);
+  });
+
+  it('suppresses a bind to a relocated upload spool (SENCHO_UPLOAD_DIR outside the OS temp root)', async () => {
+    const uploadDir = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-upload-')));
+    process.env.SENCHO_UPLOAD_DIR = uploadDir;
+    try {
+      stub({ rendered: renderModel({ web: [{ type: 'bind', source: uploadDir, target: '/u', read_only: false }] }) });
+      const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+      const bind = roots.find((r) => r.kind === 'bind');
+      expect(bind?.managedSourceOverlap).toBe(true);
+      expect(bind?.browsable).toBe(false);
+      expect(bind?.writable).toBe(false);
+    } finally {
+      // env is restored by afterEach; only the scratch dir needs removing here.
+      await fs.rm(uploadDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it('suppresses a bind that exposes a relocated Trivy binary (TRIVY_BIN), so it cannot be overwritten then run', async () => {
+    const binDir = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-trivybin-')));
+    process.env.TRIVY_BIN = path.join(binDir, 'trivy');
+    try {
+      // A bind to the directory that holds the configured Trivy binary is an
+      // ancestor of that binary, so it must be suppressed.
+      stub({ rendered: renderModel({ web: [{ type: 'bind', source: binDir, target: '/opt/trivy', read_only: false }] }) });
+      const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+      const bind = roots.find((r) => r.kind === 'bind');
+      expect(bind?.managedSourceOverlap).toBe(true);
+      expect(bind?.writable).toBe(false);
+    } finally {
+      await fs.rm(binDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it('suppresses a bind that is an ancestor of a relocated Trivy cache (TRIVY_CACHE_DIR)', async () => {
+    // The cache lives in a subdirectory; binding its parent is the reverse
+    // overlap direction (the managed dir is within the bind), which must also
+    // be caught so the cache cannot be reached through the parent bind.
+    const parent = await fs.realpath(await fs.mkdtemp(path.join(REAL_TMP, 'sfr-cacheparent-')));
+    process.env.TRIVY_CACHE_DIR = path.join(parent, 'trivy-cache');
+    try {
+      stub({ rendered: renderModel({ web: [{ type: 'bind', source: parent, target: '/cache', read_only: false }] }) });
+      const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+      const bind = roots.find((r) => r.kind === 'bind');
+      expect(bind?.managedSourceOverlap).toBe(true);
+      expect(bind?.browsable).toBe(false);
+    } finally {
+      await fs.rm(parent, { recursive: true, force: true }).catch(() => {});
     }
   });
 
