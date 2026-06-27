@@ -67,12 +67,18 @@ afterEach(async () => {
 
 describe('isDangerousHostPath', () => {
   it('flags the root and protected system directories and their descendants', () => {
-    for (const p of ['/', '/etc', '/etc/nginx', '/proc', '/sys/x', '/dev/sda', '/var/run', '/var/run/docker.sock', '/run/x']) {
+    for (const p of [
+      '/', '/etc', '/etc/nginx', '/proc', '/sys/x', '/dev/sda', '/var/run', '/var/run/docker.sock', '/run/x',
+      // System locations holding the executables/libraries Sencho's runtime
+      // depends on: a bind here could overwrite a binary a deploy later runs.
+      '/usr', '/usr/local/bin', '/usr/local/bin/node', '/usr/bin', '/usr/lib', '/bin', '/bin/sh',
+      '/sbin', '/lib', '/lib64', '/boot', '/root', '/root/.ssh',
+    ]) {
       expect(isDangerousHostPath(p)).toBe(true);
     }
   });
-  it('allows ordinary host paths', () => {
-    for (const p of ['/home/user/config', '/srv/app/data', 'C:\\data', '/etcetera']) {
+  it('allows ordinary host paths, including ones whose name only prefixes a protected root', () => {
+    for (const p of ['/home/user/config', '/srv/app/data', '/opt/app', '/mnt/data', 'C:\\data', '/etcetera', '/usrdata', '/libreoffice', '/booted']) {
       expect(isDangerousHostPath(p)).toBe(false);
     }
   });
@@ -152,6 +158,20 @@ describe('StackFileRootsService.listRoots', () => {
     const bind = roots.find((r) => r.kind === 'bind');
     expect(bind?.dangerous).toBe(true);
     expect(bind?.browsable).toBe(false);
+  });
+
+  it('blocks a bind into a system binary directory (/usr/local/bin) so Sencho binaries cannot be overwritten', async () => {
+    // A stack author with stack:edit could otherwise declare /usr/local/bin as a
+    // bind source, overwrite node/docker/the entrypoint, and have a later deploy
+    // execute it. The declared source is dangerous regardless of how realpath
+    // rewrites it (covered by the dangerousSource term), so this holds on any host.
+    stub({ rendered: renderModel({ web: [{ type: 'bind', source: '/usr/local/bin', target: '/host-bin', read_only: false }] }) });
+    const roots = await StackFileRootsService.getInstance(1).listRoots(STACK, { fresh: true });
+    const bind = roots.find((r) => r.kind === 'bind');
+    expect(bind?.dangerous).toBe(true);
+    expect(bind?.browsable).toBe(false);
+    expect(bind?.writable).toBe(false);
+    expect(bind?.chmodable).toBe(false);
   });
 
   it('blocks a dangerous declared source even when realpath rewrites it to a benign canonical', async () => {
