@@ -220,8 +220,11 @@ export class ImageUpdateService {
         if (this.timer) return;
         this.polling = true;
         this.configureFromSettings();
-        // Preserve the existing 2-minute post-boot delay before the first check.
-        this.armNext(ImageUpdateService.STARTUP_DELAY_MS);
+        // Interval mode keeps the 2-minute post-boot delay before the first check.
+        // Cron mode honors its schedule: arm at the next cron fire time so a restart
+        // never triggers an out-of-cadence check (e.g. a weekly cron must not run on
+        // every boot).
+        this.armNext(this.mode === 'cron' ? this.nextDelayMs() : ImageUpdateService.STARTUP_DELAY_MS);
     }
 
     public stop() {
