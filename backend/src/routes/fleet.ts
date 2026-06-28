@@ -17,6 +17,7 @@ import SelfUpdateService from '../services/SelfUpdateService';
 import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin, requireNodeProxy } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { scheduleLocalUpdate } from './license';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
@@ -40,7 +41,7 @@ import { invalidateNodeCaches, invalidateRemoteMetaCache } from '../helpers/cach
 import { activeBulkActions } from './labels';
 import { runLocalLabelStop, isLabelLocalStopResponse, type StackStopResult } from '../helpers/fleetLabelStop';
 import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
-import { runLocalLabelAssign, validateLabelTemplate, failAllAssign, type LabelLocalAssignResponse, type AssignNodeResult } from '../helpers/fleetLabelAssign';
+import { runLocalLabelAssign, validateLabelTemplate, validateRemoteAssignResults, failAllAssign, type AssignNodeResult } from '../helpers/fleetLabelAssign';
 import { MAX_ASSIGNMENTS } from '../helpers/constants';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
@@ -791,7 +792,12 @@ fleetRouter.get('/networking-summary', authMiddleware, async (_req: Request, res
   }
 });
 
+// Read guard uses the unscoped stack:read (no resource): a fleet node view is a
+// cross-node aggregate with no single control-DB stack to scope a per-stack
+// assignment against, so it requires the global stack:read every shipped role
+// holds. The per-stack scoped form is correct only on the local stacks router.
 fleetRouter.get('/node/:nodeId/stacks', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const nodeId = parseIntParam(req, res, 'nodeId', 'node ID');
     if (nodeId === null) return;
@@ -830,7 +836,10 @@ fleetRouter.get('/node/:nodeId/stacks', authMiddleware, async (req: Request, res
   }
 });
 
+// Unscoped stack:read for the same reason as /node/:nodeId/stacks above: a
+// fleet-routed read has no local control-DB stack resource to scope against.
 fleetRouter.get('/node/:nodeId/stacks/:stackName/containers', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const nodeId = parseIntParam(req, res, 'nodeId', 'node ID');
     if (nodeId === null) return;
@@ -1370,23 +1379,37 @@ type FleetStopNodeResult = {
 // Tier: requireAdmin (admin-only fleet plumbing; available on every license).
 fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-  const body = req.body as { labelName?: unknown; dryRun?: unknown } | undefined;
+  const body = req.body as { labelName?: unknown; dryRun?: unknown; nodeIds?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
     res.status(400).json({ error: 'Request body is required' });
     return;
   }
-  const { labelName, dryRun } = body;
+  const { labelName, dryRun, nodeIds } = body;
   if (typeof labelName !== 'string' || labelName.trim().length === 0) {
     res.status(400).json({ error: 'labelName is required' });
     return;
+  }
+  // Optional allowlist binding execution to the preview the operator confirmed.
+  // The confirm flow sends exactly the nodes shown in the resolved blast radius,
+  // so a node that was unreachable during preview and reconnects before the stop
+  // cannot silently enter execution and have unlisted stacks stopped. Absent
+  // (e.g. a dry run) the fan-out scans the whole fleet as before.
+  let allowedNodeIds: Set<number> | null = null;
+  if (nodeIds !== undefined) {
+    if (!Array.isArray(nodeIds) || !nodeIds.every(n => typeof n === 'number' && Number.isInteger(n))) {
+      res.status(400).json({ error: 'nodeIds must be an array of integers' });
+      return;
+    }
+    allowedNodeIds = new Set(nodeIds as number[]);
   }
   const trimmed = labelName.trim();
   const isDryRun = dryRun === true;
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
-    if (isDebugEnabled()) console.debug('[Fleet:debug] fleet-stop:', { labelName: trimmed, dryRun: isDryRun, nodes: nodes.length });
-    const results = await Promise.all(nodes.map(async (node): Promise<FleetStopNodeResult> => {
+    const targetNodes = allowedNodeIds ? nodes.filter(n => allowedNodeIds.has(n.id)) : nodes;
+    if (isDebugEnabled()) console.debug('[Fleet:debug] fleet-stop:', { labelName: trimmed, dryRun: isDryRun, nodes: targetNodes.length, scoped: allowedNodeIds !== null });
+    const results = await Promise.all(targetNodes.map(async (node): Promise<FleetStopNodeResult> => {
       if (node.type === 'local') {
         // Match + stop runs in-process against the control's own Docker. The
         // helper shares the per-node `bulk:<id>` lock with the per-label action
@@ -1562,11 +1585,13 @@ fleetRouter.post('/labels/bulk-assign', authMiddleware, async (req: Request, res
           const message = err.error || `Remote returned ${response.status}`;
           return { nodeId: node.id, nodeName: node.name, reachable: false, created: false, error: message, stackResults: failAllAssign(target.stackNames, message) };
         }
-        // A 200 whose body is not the expected { created, results } shape is a
-        // degraded node, not a clean no-op: report it as a per-node failure so a
-        // malformed remote cannot read as a successful zero-stack assign.
-        const remote = (await response.json().catch(() => null)) as Partial<LabelLocalAssignResponse> | null;
-        if (!remote || typeof remote.created !== 'boolean' || !Array.isArray(remote.results)) {
+        // A 200 whose body is not the expected { created, results } shape, or
+        // whose results do not cover exactly the stacks this node was asked to
+        // label, is a degraded node, not a clean no-op: report it as a per-node
+        // failure so a malformed or partial remote cannot read as a successful
+        // zero-stack assign.
+        const remote = validateRemoteAssignResults(target.stackNames, await response.json().catch(() => null));
+        if (!remote.ok) {
           const message = 'Remote returned a malformed response';
           return { nodeId: node.id, nodeName: node.name, reachable: false, created: false, error: message, stackResults: failAllAssign(target.stackNames, message) };
         }
