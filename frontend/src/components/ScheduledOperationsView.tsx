@@ -13,8 +13,18 @@ import { Clock, Plus, Pencil, Trash2, History, RefreshCw, Play, ChevronLeft, Che
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { Combobox } from '@/components/ui/combobox';
+import { SegmentedControl } from '@/components/ui/segmented-control';
 import type { ScheduledTask, TaskRun, NodeOption } from '@/types/scheduling';
-import { getCronDescription, getCronFieldError, formatTimestamp } from '@/lib/scheduling';
+import {
+  getCronDescription,
+  getCronFieldError,
+  formatTimestamp,
+  buildCron,
+  parseCron,
+  getSimpleScheduleError,
+  type SimpleSchedule,
+} from '@/lib/scheduling';
+import { ScheduleSimplePanel } from './ScheduleSimplePanel';
 import { cn } from '@/lib/utils';
 import {
   SCHEDULED_ACTIONS,
@@ -29,6 +39,9 @@ import {
 } from '@/lib/scheduledActions';
 
 const DEFAULT_PRUNE_TARGETS = ['containers', 'images', 'networks', 'volumes'];
+const DEFAULT_SIMPLE_SCHEDULE: SimpleSchedule = {
+  frequency: 'daily', minute: 0, hour: 3, weekdays: [], dayOfMonth: 1, date: null,
+};
 const TIMELINE_WINDOW_HOURS = 24;
 const TIMELINE_WINDOW_MS = TIMELINE_WINDOW_HOURS * 60 * 60 * 1000;
 
@@ -77,6 +90,9 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const [formTargetId, setFormTargetId] = useState('');
   const [formNodeId, setFormNodeId] = useState('');
   const [formCron, setFormCron] = useState('0 3 * * *');
+  const [scheduleMode, setScheduleMode] = useState<'simple' | 'advanced'>('simple');
+  const [simpleSchedule, setSimpleSchedule] = useState<SimpleSchedule>(DEFAULT_SIMPLE_SCHEDULE);
+  const [simpleReplacedCron, setSimpleReplacedCron] = useState(false);
   const [formEnabled, setFormEnabled] = useState(true);
   const [formDeleteAfterRun, setFormDeleteAfterRun] = useState(false);
   const [formPruneTargets, setFormPruneTargets] = useState<string[]>(DEFAULT_PRUNE_TARGETS);
@@ -204,6 +220,9 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     setFormTargetId(prefillData?.stackName ?? '');
     setFormNodeId(nodeId);
     setFormCron('0 3 * * *');
+    setScheduleMode('simple');
+    setSimpleSchedule(DEFAULT_SIMPLE_SCHEDULE);
+    setSimpleReplacedCron(false);
     setFormEnabled(true);
     setFormDeleteAfterRun(false);
     setFormPruneTargets(DEFAULT_PRUNE_TARGETS);
@@ -220,6 +239,10 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     setFormTargetId(task.target_id || '');
     setFormNodeId(task.node_id != null ? String(task.node_id) : '');
     setFormCron(task.cron_expression);
+    const parsed = parseCron(task.cron_expression, (task.delete_after_run ?? 0) === 1);
+    setScheduleMode(parsed ? 'simple' : 'advanced');
+    setSimpleSchedule(parsed ?? DEFAULT_SIMPLE_SCHEDULE);
+    setSimpleReplacedCron(false);
     setFormEnabled(task.enabled === 1);
     setFormDeleteAfterRun((task.delete_after_run ?? 0) === 1);
     setFormPruneTargets(
@@ -239,11 +262,25 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       return;
     }
 
+    // Re-assert schedule validity at the action, not just via the disabled
+    // button, so the cron is never compiled from an invalid simple schedule.
+    if (scheduleMode === 'simple') {
+      const scheduleError = getSimpleScheduleError(simpleSchedule);
+      if (scheduleError) {
+        toast.error(scheduleError);
+        return;
+      }
+    }
+
+    // Simple mode compiles its structured fields to the same cron string the
+    // backend stores; Advanced mode sends the raw expression as-is.
+    const cronExpression = scheduleMode === 'simple' ? buildCron(simpleSchedule) : formCron;
+
     const body: Record<string, unknown> = {
       name: formName,
       target_type: actionDef.targetType,
       action: actionDef.backendAction,
-      cron_expression: formCron,
+      cron_expression: cronExpression,
       enabled: formEnabled,
       delete_after_run: formDeleteAfterRun,
       target_id: actionDef.requiresStack ? formTargetId : null,
@@ -345,8 +382,44 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   };
 
   const currentAction = getActionById(formAction);
-  const cronDescription = getCronDescription(formCron);
   const cronFieldError = getCronFieldError(formCron);
+  const simpleCronError = scheduleMode === 'simple' ? getSimpleScheduleError(simpleSchedule) : null;
+  // In Advanced mode the saved value is the raw input; in Simple mode it is the
+  // compiled cron, short-circuited to '' on a validation error so buildCron is
+  // never reached with an invalid (e.g. dateless one-time) schedule.
+  const derivedCron = scheduleMode === 'simple'
+    ? (simpleCronError ? '' : buildCron(simpleSchedule))
+    : formCron;
+
+  // Top-level Simple/Advanced toggle. Advanced -> Simple re-parses the typed
+  // cron and pre-fills when it maps to a simple shape, otherwise flags that the
+  // custom expression will be replaced. Simple -> Advanced seeds the cron input
+  // from what Simple produced so the user keeps what they configured.
+  const handleScheduleModeChange = (mode: 'simple' | 'advanced') => {
+    if (mode === scheduleMode) return;
+    if (mode === 'simple') {
+      const parsed = parseCron(formCron, formDeleteAfterRun);
+      if (parsed) {
+        setSimpleSchedule(parsed);
+        setSimpleReplacedCron(false);
+      } else {
+        setSimpleReplacedCron(true);
+      }
+    } else {
+      if (!simpleCronError) setFormCron(buildCron(simpleSchedule));
+      setSimpleReplacedCron(false);
+    }
+    setScheduleMode(mode);
+  };
+
+  // Selecting the one-time frequency defaults delete-after-run on (the only way
+  // a fully-pinned cron behaves as a single run). Leaving it does not revert.
+  const handleSimpleScheduleChange = (next: SimpleSchedule) => {
+    if (next.frequency === 'once' && simpleSchedule.frequency !== 'once') {
+      setFormDeleteAfterRun(true);
+    }
+    setSimpleSchedule(next);
+  };
   const nodeOptions = useMemo(() => nodes.map(n => ({ value: String(n.id), label: n.name })), [nodes]);
   const nodeNameById = useMemo(() => new Map(nodes.map(n => [n.id, n.name])), [nodes]);
   const actionOptions = useMemo(
@@ -364,8 +437,11 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     [nodes],
   );
   const currentNodeOptions = currentAction?.nodeScope === 'local' ? localNodeOptions : nodeOptions;
+  const scheduleInvalid = scheduleMode === 'simple'
+    ? !!simpleCronError
+    : (!formCron || !!cronFieldError);
   const isSaveDisabled =
-    saving || !currentAction || !formName || !formCron || !!cronFieldError
+    saving || !currentAction || !formName || scheduleInvalid
     || (!!currentAction?.requiresStack && (!formTargetId || !formNodeId))
     || (!!currentAction?.requiresNode && !currentAction.requiresStack && !formNodeId)
     || (formAction === 'prune' && formPruneTargets.length === 0);
@@ -807,16 +883,40 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
             )}
 
             <div className="space-y-2">
-              <Label>Cron Expression</Label>
-              <Input
-                placeholder="0 3 * * *"
-                value={formCron}
-                onChange={e => setFormCron(e.target.value)}
-                className="font-mono"
-              />
-              {cronFieldError
-                ? <p className="text-xs text-destructive">{cronFieldError}</p>
-                : <p className="text-xs text-muted-foreground">{cronDescription}</p>}
+              <div className="flex items-center justify-between gap-3">
+                <Label>Schedule</Label>
+                <SegmentedControl<'simple' | 'advanced'>
+                  value={scheduleMode}
+                  options={[{ value: 'simple', label: 'Simple' }, { value: 'advanced', label: 'Advanced' }]}
+                  onChange={handleScheduleModeChange}
+                  ariaLabel="Schedule mode"
+                />
+              </div>
+              {scheduleMode === 'simple' ? (
+                <>
+                  <ScheduleSimplePanel
+                    value={simpleSchedule}
+                    onChange={handleSimpleScheduleChange}
+                    derivedCron={derivedCron}
+                    error={simpleCronError}
+                  />
+                  {simpleReplacedCron && (
+                    <p className="text-xs text-muted-foreground">Switching to Simple mode replaces your custom cron expression.</p>
+                  )}
+                </>
+              ) : (
+                <>
+                  <Input
+                    placeholder="0 3 * * *"
+                    value={formCron}
+                    onChange={e => setFormCron(e.target.value)}
+                    className="font-mono"
+                  />
+                  {cronFieldError
+                    ? <p className="text-xs text-destructive">{cronFieldError}</p>
+                    : <p className="text-xs text-muted-foreground">{getCronDescription(formCron)}</p>}
+                </>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
@@ -829,11 +929,15 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 id="task-delete-after-run"
                 checked={formDeleteAfterRun}
                 onCheckedChange={(checked) => setFormDeleteAfterRun(checked === true)}
+                disabled={scheduleMode === 'simple' && simpleSchedule.frequency === 'once'}
                 className="mt-0.5"
               />
               <div>
                 <span className="text-sm font-medium">Delete after successful run</span>
                 <p className="text-xs text-muted-foreground">Task removes itself after its first successful execution. Failures keep the task so you can retry or debug.</p>
+                {scheduleMode === 'simple' && simpleSchedule.frequency === 'once' && (
+                  <p className="mt-1 text-xs text-muted-foreground">Required for one-time schedules: the task fires on the chosen date, then deletes itself once it succeeds. Cron has no year field, so without this it would repeat on that date every year. A failed run is kept so you can retry.</p>
+                )}
               </div>
             </label>
         </ModalBody>
