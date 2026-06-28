@@ -420,6 +420,22 @@ describe('local-stop behavior', () => {
     expect(res.status).toBe(200);
     expect(res.body.results).toEqual([{ stackName: 'ghostdisk-stack', success: false, error: 'Stack not found on this node' }]);
   });
+
+  it('reports one failure per confirmed stack when the label no longer exists', async () => {
+    // The label vanished between preview and execution. With a confirmed
+    // allowlist the receiver must return one result per confirmed stack (so the
+    // control's exact-membership check sees a complete set), not an empty body.
+    const res = await request(app)
+      .post('/api/fleet-actions/labels/local-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'no-such-label', dryRun: true, stackNames: ['gone-a', 'gone-b'] });
+    expect(res.status).toBe(200);
+    expect(res.body.matched).toBe(false);
+    expect(res.body.results).toEqual([
+      { stackName: 'gone-a', success: false, error: 'No longer carries this label' },
+      { stackName: 'gone-b', success: false, error: 'No longer carries this label' },
+    ]);
+  });
 });
 
 // Orchestrator-level binding: the control sends the exact node + stack list the
