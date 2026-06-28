@@ -6,6 +6,7 @@ import { ScrollableTabRow } from './ui/ScrollableTabRow';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
+import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
 import { parseAnatomy, parseEnvKeys, formatGitSource, primaryPublishedHostPort, type GitSourceInfo } from '@/lib/anatomy';
 import { buildServiceUrl } from '@/lib/serviceUrl';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
@@ -108,6 +109,12 @@ export default function StackAnatomyPanel({
   // active tab content lazily, so the badge cannot come from PreflightPanel; the
   // parent reads the stored run once per stack/node change.
   const [preflightSeverity, setPreflightSeverity] = useState<string | null>(null);
+  // Findings power the dismiss fingerprint so the dot clears in lockstep with the
+  // banner and re-appears when the findings change.
+  const [preflightFindings, setPreflightFindings] = useState<Array<{ ruleId: string; severity: string; service?: string }> | undefined>(undefined);
+  // The Doctor tab dot clears when the high-risk banner is dismissed, and returns
+  // when the findings change (shared fingerprint with PreflightPanel).
+  const { dismissed: doctorDismissed } = usePreflightDismiss(stackName, activeNode?.id, preflightFindings);
   const [scanStatus, setScanStatus] = useState<{
     status: 'ok' | 'partial' | 'failed' | 'skipped' | null;
     attemptedAt?: number;
@@ -126,9 +133,12 @@ export default function StackAnatomyPanel({
         const res = await apiFetch(`/stacks/${stackName}/preflight`);
         if (cancelled || !res.ok) return;
         const data = await res.json();
-        if (!cancelled) setPreflightSeverity(typeof data?.highestSeverity === 'string' ? data.highestSeverity : null);
+        if (!cancelled) {
+          setPreflightSeverity(typeof data?.highestSeverity === 'string' ? data.highestSeverity : null);
+          setPreflightFindings(Array.isArray(data?.findings) ? data.findings : undefined);
+        }
       } catch {
-        if (!cancelled) setPreflightSeverity(null);
+        if (!cancelled) { setPreflightSeverity(null); setPreflightFindings(undefined); }
       }
     })();
     return () => { cancelled = true; };
@@ -363,7 +373,7 @@ export default function StackAnatomyPanel({
               <TabsTrigger value="doctor" data-testid="doctor-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">
                 <span className="inline-flex items-center gap-1">
                   Doctor
-                  {(preflightSeverity === 'blocker' || preflightSeverity === 'high') && (
+                  {(preflightSeverity === 'blocker' || preflightSeverity === 'high') && !doctorDismissed && (
                     <span
                       data-testid="doctor-tab-dot"
                       className={cn('h-1.5 w-1.5 rounded-full', preflightSeverity === 'blocker' ? 'bg-destructive' : 'bg-warning')}

@@ -1,12 +1,14 @@
 import { useState, useEffect, useMemo, useRef, Suspense } from 'react';
 import { Editor } from '@/lib/monacoLoader';
-import { AlertCircle, FileIcon, Download, Loader2, Save } from 'lucide-react';
+import { AlertCircle, FileIcon, Download, Loader2, Save, WrapText } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toast-store';
 import { readStackFile, writeStackFile, downloadStackFile, FileConflictError } from '@/lib/stackFilesApi';
 import { extensionToLanguage } from '@/lib/monacoLanguages';
-import { formatBytes } from '@/lib/utils';
+import { cn, formatBytes } from '@/lib/utils';
+
+const WORD_WRAP_KEY = 'sencho.fileViewer.wordWrap';
 
 interface FileViewerProps {
   stackName: string;
@@ -131,6 +133,15 @@ export function FileViewer({
   const readOnly = !canEdit;
   const hasChanges = content !== originalContent;
 
+  // Word wrap, persisted across files and sessions. Defaults on so wide files
+  // do not require horizontal scrolling; only an explicit 'false' disables it.
+  const [wordWrap, setWordWrap] = useState(() => {
+    try { return localStorage.getItem(WORD_WRAP_KEY) !== 'false'; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(WORD_WRAP_KEY, String(wordWrap)); } catch { /* ignore */ }
+  }, [wordWrap]);
+
   // Stash the latest callback in a ref so the unmount-cleanup effect can be
   // truly unmount-scoped without re-running every time a parent passes a fresh
   // function identity.
@@ -164,8 +175,9 @@ export function FileViewer({
       fontSize: 13,
       padding: { top: 8 },
       scrollBeyondLastLine: false,
+      wordWrap: wordWrap ? ('on' as const) : ('off' as const),
     }),
-    [readOnly],
+    [readOnly, wordWrap],
   );
 
   useEffect(() => {
@@ -350,6 +362,17 @@ export function FileViewer({
       <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-glass-border shrink-0">
         <span className="font-mono text-xs text-stat-subtitle truncate">{filename}</span>
         <div className="flex items-center gap-2 shrink-0">
+          <Button
+            size="sm"
+            variant="ghost"
+            className={cn('h-7 w-7 p-0', wordWrap ? 'text-brand' : 'text-stat-subtitle')}
+            onClick={() => setWordWrap((v) => !v)}
+            aria-pressed={wordWrap}
+            title={wordWrap ? 'Word wrap on' : 'Word wrap off'}
+            aria-label={wordWrap ? 'Disable word wrap' : 'Enable word wrap'}
+          >
+            <WrapText className="w-3.5 h-3.5" strokeWidth={1.5} />
+          </Button>
           {readOnly && (
             <span className="text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle border border-border rounded px-1.5 py-0.5">
               Read-only

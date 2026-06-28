@@ -155,6 +155,17 @@ describe('useViewNavigationState', () => {
     expect(result.current.filterNodeId).toBe(5);
   });
 
+  it('SENCHO_NAVIGATE_EVENT to fleet sets fleetTab then activeView (deep-link, no race)', () => {
+    const { result } = renderHook(() => useViewNavigationState());
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'fleet', fleetTab: 'snapshots' } }),
+      );
+    });
+    expect(result.current.activeView).toBe('fleet');
+    expect(result.current.fleetTab).toBe('snapshots');
+  });
+
   it('SENCHO_NAVIGATE_EVENT with no nodeId sets filterNodeId to null', () => {
     const { result } = renderHook(() => useViewNavigationState());
     act(() => {

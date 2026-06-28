@@ -8,15 +8,16 @@ interface FleetTabHeadingProps {
 }
 
 /**
- * Standardized Fleet tab header: italic-serif title and muted subtitle on the
+ * Standardized Fleet tab header: heading-styled title and muted subtitle on the
  * left, an optional primary action on the right. Rendered in both empty and
- * populated states so the tab chrome stays consistent.
+ * populated states so the tab chrome stays consistent. The title follows the
+ * theme heading style (signature italic or calm) via .font-heading.
  */
 export function FleetTabHeading({ title, subtitle, action }: FleetTabHeadingProps) {
     return (
         <div className="flex items-center justify-between gap-3">
             <div>
-                <h2 className="font-display italic text-[1.5rem] leading-tight text-stat-value">{title}</h2>
+                <h2 className="font-heading text-[1.5rem] leading-tight text-stat-value">{title}</h2>
                 <p className="text-sm text-stat-subtitle">{subtitle}</p>
             </div>
             {action}
@@ -44,15 +45,15 @@ interface FleetEmptyCardProps {
 }
 
 /**
- * Minimal empty-state card: centered icon, italic headline, muted one-line
- * description, optional CTA.
+ * Minimal empty-state card: centered icon, heading-styled headline, muted
+ * one-line description, optional CTA.
  */
 export function FleetEmptyCard({ icon: Icon, title, description, action }: FleetEmptyCardProps) {
     return (
         <div className="mx-auto max-w-xl rounded-xl border border-card-border/60 bg-popover/30 p-8 text-center space-y-4">
             <Icon className="mx-auto w-8 h-8 text-stat-subtitle" />
             <div>
-                <h3 className="font-display italic text-[1.25rem] text-stat-value">{title}</h3>
+                <h3 className="font-heading text-[1.25rem] text-stat-value">{title}</h3>
                 <p className="text-sm text-stat-subtitle leading-relaxed mt-1">{description}</p>
             </div>
             {action}

@@ -174,7 +174,9 @@ export function FleetActionCard(props: FleetActionCardProps) {
         />
       </div>
 
-      <div className="px-6 flex-1">
+      {/* pt-4 so the first SheetSection (which zeroes its own top padding) clears
+          the action row's bottom border instead of overlapping it. */}
+      <div className="px-6 pt-4 flex-1">
         {children}
       </div>
 

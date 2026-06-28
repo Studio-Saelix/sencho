@@ -1,4 +1,4 @@
-import { Suspense, useRef, useEffect } from 'react';
+import { Suspense, useRef, useEffect, useState } from 'react';
 import { Editor } from '@/lib/monacoLoader';
 import {
     Save,
@@ -8,6 +8,8 @@ import {
     ChevronDown,
     GitBranch,
     FolderOpen,
+    Maximize2,
+    Minimize2,
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader } from '../ui/card';
@@ -314,6 +316,14 @@ export function EditorView(props: EditorViewProps) {
         }
     }, [activeTab, canRead, setActiveTab]);
 
+    // Fullscreen the file browser + editor by collapsing the left column. Only
+    // meaningful on the files tab; reset when leaving it or closing the editor so
+    // it can never strand the compose/env panels in a single-column layout.
+    const [filesFullscreen, setFilesFullscreen] = useState(false);
+    useEffect(() => {
+        if (!editingCompose || activeTab !== 'files') setFilesFullscreen(false);
+    }, [editingCompose, activeTab]);
+
     // Below md, render the segmented full-screen mobile detail instead of the
     // desktop two-pane grid. All hooks above run unconditionally before this
     // branch so hook order stays stable across breakpoints.
@@ -324,8 +334,10 @@ export function EditorView(props: EditorViewProps) {
 
     return (
         <ErrorBoundary>
-            <div className="grid gap-6 grid-cols-1 lg:grid-cols-2 min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]">
-                {/* Left column: identity + health strip + logs, stacked */}
+            <div className={`grid gap-6 ${filesFullscreen ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-2'} min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]`}>
+                {/* Left column: identity + health strip + logs, stacked. Hidden in
+                    files fullscreen so the editor card fills the width. */}
+                {!filesFullscreen && (
                 <div className="flex flex-col gap-6 min-h-0">
                     {/* Command Center Card (identity + health strip) */}
                     <Card className="rounded-xl border-muted bg-card shrink-0">
@@ -396,6 +408,7 @@ export function EditorView(props: EditorViewProps) {
                     {/* Logs Section (fills remaining left-column height) */}
                     <StackLogsSection stackName={stackName} logsMode={logsMode} setLogsMode={setLogsMode} />
                 </div>
+                )}
 
                 {/* Right column: anatomy panel by default, Monaco editor when editing */}
                 {editingCompose ? (
@@ -415,7 +428,7 @@ export function EditorView(props: EditorViewProps) {
                                                 <TabsHighlightItem value="files">
                                                     <TabsTrigger value="files">
                                                         <FolderOpen className="w-3.5 h-3.5 mr-1" strokeWidth={1.5} />
-                                                        Files &amp; Volumes
+                                                        Files
                                                     </TabsTrigger>
                                                 </TabsHighlightItem>
                                             )}
@@ -484,6 +497,20 @@ export function EditorView(props: EditorViewProps) {
                                             </div>
                                         )}
                                     </>
+                                )}
+                                {activeTab === 'files' && (
+                                    <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="rounded-lg h-8 w-8 p-0"
+                                        onClick={() => setFilesFullscreen((v) => !v)}
+                                        aria-label={filesFullscreen ? 'Exit full screen' : 'Full screen'}
+                                        title={filesFullscreen ? 'Exit full screen' : 'Full screen'}
+                                    >
+                                        {filesFullscreen
+                                            ? <Minimize2 className="w-4 h-4" strokeWidth={1.5} />
+                                            : <Maximize2 className="w-4 h-4" strokeWidth={1.5} />}
+                                    </Button>
                                 )}
                                 <Button
                                     size="sm"
