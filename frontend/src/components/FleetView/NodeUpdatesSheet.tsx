@@ -78,9 +78,16 @@ export function NodeUpdatesSheet({
             .then(res => res.ok ? res.json() as Promise<{ version: string | null; releaseNotes: string | null; htmlUrl: string | null }> : null)
             .then(data => {
                 if (data) {
-                    setReleaseNotes(data.releaseNotes);
-                    setReleaseHtmlUrl(data.htmlUrl);
-                    setReleaseVersion(data.version);
+                    // Bind strictly to the advertised update: only render notes the
+                    // endpoint confirms belong to the advertised version. The version
+                    // lookup and the release-notes lookup use independent caches (and
+                    // version can fall back to Docker Hub while notes are GitHub-only),
+                    // so a drifted response must fall through to the empty state with
+                    // the online changelog link rather than show another version's notes.
+                    const matches = data.version !== null && data.version === advertisedLatest;
+                    setReleaseNotes(matches ? data.releaseNotes : null);
+                    setReleaseHtmlUrl(matches ? data.htmlUrl : null);
+                    setReleaseVersion(matches ? data.version : null);
                 }
             })
             .catch((err) => {
