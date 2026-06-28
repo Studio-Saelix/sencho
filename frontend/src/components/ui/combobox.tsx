@@ -176,7 +176,7 @@ export function Combobox({
                   type="button"
                   onClick={() => handleSelect(option)}
                   className={cn(
-                    "relative flex w-full cursor-default select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground",
+                    "relative flex w-full cursor-default select-none items-center rounded-sm px-2 py-1.5 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground",
                     value === option.value && "bg-accent/50"
                   )}
                 >
@@ -187,7 +187,7 @@ export function Combobox({
                     )}
                     strokeWidth={1.5}
                   />
-                  {option.label}
+                  <span className="min-w-0 truncate">{option.label}</span>
                 </button>
               ))
             )}

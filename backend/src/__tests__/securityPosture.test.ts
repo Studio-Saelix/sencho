@@ -133,12 +133,12 @@ describe('derivePostureReasons', () => {
       knownExploited: 1,
       secrets: 2,
     }));
-    expect(primaryAction).toEqual({ label: 'Update affected images', targetTab: 'images' });
+    expect(primaryAction).toEqual({ label: 'Update affected images', targetTab: 'images', kind: 'fixable_cve' });
   });
 
   it('falls through to the next blocker when the first is absent', () => {
     const { primaryAction } = derivePostureReasons(facts({ secrets: 1 }));
-    expect(primaryAction).toEqual({ label: 'Review detected secrets', targetTab: 'secrets' });
+    expect(primaryAction).toEqual({ label: 'Review detected secrets', targetTab: 'secrets', kind: 'secret' });
   });
 
   it('returns null primaryAction when no blockers exist', () => {

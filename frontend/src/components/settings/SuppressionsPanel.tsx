@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
-import { ChevronLeft, ChevronRight, Plus, Trash2, Download } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, Pencil, Trash2, Download } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { FleetTabHeading } from '@/components/fleet/FleetEmptyState';
@@ -44,6 +44,8 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<SuppressionFormState>(EMPTY_FORM);
+  // The row being edited, or null when the dialog is creating a new suppression.
+  const [editRow, setEditRow] = useState<CveSuppression | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleteRow, setDeleteRow] = useState<CveSuppression | null>(null);
   const [page, setPage] = useState(0);
@@ -72,13 +74,30 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
   const needsPagination = rows.length > PAGE_SIZE;
 
   const openCreate = () => {
+    setEditRow(null);
     setForm(EMPTY_FORM);
     setDialogOpen(true);
   };
 
+  const openEdit = (row: CveSuppression) => {
+    setEditRow(row);
+    setForm({
+      cveId: row.cve_id,
+      pkgName: row.pkg_name ?? '',
+      imagePattern: row.image_pattern ?? '',
+      reason: row.reason,
+      // Recompute the expiry as days from now so the same control edits it; blank
+      // means "no expiry". The CVE id and package scope are identity, not editable.
+      expiresInDays: row.expires_at === null ? '' : String(Math.max(1, Math.ceil((row.expires_at - Date.now()) / 86_400_000))),
+    });
+    setDialogOpen(true);
+  };
+
   const handleSave = async () => {
+    // CVE id and package scope identify a suppression, so they are only validated
+    // and sent on create; the edit endpoint updates reason, image pattern, expiry.
     const cveId = form.cveId.trim();
-    if (!CVE_ID_RE.test(cveId)) {
+    if (!editRow && !CVE_ID_RE.test(cveId)) {
       toast.error('CVE must look like CVE-YYYY-NNNN or GHSA-xxxx-xxxx-xxxx.');
       return;
     }
@@ -99,26 +118,36 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
     }
     setSaving(true);
     try {
-      const res = await apiFetch('/security/suppressions', {
-        method: 'POST',
-        localOnly: true,
-        body: JSON.stringify({
-          cve_id: cveId,
-          pkg_name: form.pkgName.trim() || null,
-          image_pattern: form.imagePattern.trim() || null,
-          reason,
-          expires_at: expiresAt,
-        }),
-      });
+      const res = editRow
+        ? await apiFetch(`/security/suppressions/${editRow.id}`, {
+            method: 'PUT',
+            localOnly: true,
+            body: JSON.stringify({
+              image_pattern: form.imagePattern.trim() || null,
+              reason,
+              expires_at: expiresAt,
+            }),
+          })
+        : await apiFetch('/security/suppressions', {
+            method: 'POST',
+            localOnly: true,
+            body: JSON.stringify({
+              cve_id: cveId,
+              pkg_name: form.pkgName.trim() || null,
+              image_pattern: form.imagePattern.trim() || null,
+              reason,
+              expires_at: expiresAt,
+            }),
+          });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error || 'Failed to create suppression');
+        throw new Error(body?.error || `Failed to ${editRow ? 'update' : 'create'} suppression`);
       }
-      toast.success('Suppression created');
+      toast.success(editRow ? 'Suppression updated' : 'Suppression created');
       setDialogOpen(false);
       await load();
     } catch (err) {
-      toast.error((err as Error)?.message || 'Failed to create suppression');
+      toast.error((err as Error)?.message || `Failed to ${editRow ? 'update' : 'create'} suppression`);
     } finally {
       setSaving(false);
     }
@@ -264,15 +293,26 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
                   </div>
                 </div>
                 {isAdmin && !isReplica && row.replicated_from_control === 0 && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground shrink-0"
-                    onClick={() => setDeleteRow(row)}
-                    title="Remove suppression"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  </Button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-stat-subtitle hover:text-stat-value"
+                      onClick={() => openEdit(row)}
+                      title="Edit suppression"
+                    >
+                      <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+                      onClick={() => setDeleteRow(row)}
+                      title="Remove suppression"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                    </Button>
+                  </div>
                 )}
               </li>
             ))}
@@ -283,9 +323,11 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
 
       <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="md">
         <ModalHeader
-          kicker="SUPPRESSIONS · NEW"
-          title="New suppression"
-          description="Accept a CVE as known-benign so it stops triggering alerts across the fleet."
+          kicker={editRow ? 'SUPPRESSIONS · EDIT' : 'SUPPRESSIONS · NEW'}
+          title={editRow ? 'Edit suppression' : 'New suppression'}
+          description={editRow
+            ? 'Update the reason, image scope, or expiry. The CVE and package scope are fixed.'
+            : 'Accept a CVE as known-benign so it stops triggering alerts across the fleet.'}
         />
         <ModalBody>
           <div className="space-y-2">
@@ -294,6 +336,7 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
               id="s-cve"
               placeholder="CVE-2024-12345 or GHSA-xxxx-xxxx-xxxx"
               value={form.cveId}
+              disabled={!!editRow}
               onChange={(e) => setForm({ ...form, cveId: e.target.value })}
             />
           </div>
@@ -303,6 +346,7 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
               id="s-pkg"
               placeholder="e.g. openssl (leave blank to match every package)"
               value={form.pkgName}
+              disabled={!!editRow}
               onChange={(e) => setForm({ ...form, pkgName: e.target.value })}
             />
           </div>
@@ -345,7 +389,7 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
           }
           primary={
             <Button size="sm" onClick={handleSave} disabled={saving}>
-              {saving ? 'Saving...' : 'Create'}
+              {saving ? 'Saving...' : editRow ? 'Save changes' : 'Create'}
             </Button>
           }
         />
