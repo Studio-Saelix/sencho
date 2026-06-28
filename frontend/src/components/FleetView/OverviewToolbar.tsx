@@ -259,19 +259,25 @@ export function OverviewToolbar({
                 <Button
                     variant="outline"
                     size="sm"
-                    className="gap-2 shrink-0 h-9"
+                    className="h-9 w-9 p-0 shrink-0"
                     onClick={onCheckUpdates}
                     disabled={checkingUpdates}
+                    title="Check for updates"
+                    aria-label="Check for updates"
                 >
                     <RefreshCcwDot className={`w-4 h-4 ${checkingUpdates ? 'animate-spin' : ''}`} />
-                    Check Updates
                 </Button>
             )}
 
             {onAddNode && (
-                <Button size="sm" className="gap-1.5 shrink-0 h-9" onClick={onAddNode}>
+                <Button
+                    size="sm"
+                    className="h-9 w-9 p-0 shrink-0"
+                    onClick={onAddNode}
+                    title="Add node"
+                    aria-label="Add node"
+                >
                     <Plus className="w-4 h-4" strokeWidth={1.5} />
-                    Add node
                 </Button>
             )}
         </div>

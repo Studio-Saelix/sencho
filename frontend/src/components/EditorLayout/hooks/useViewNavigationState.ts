@@ -9,7 +9,7 @@ import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
 import { SENCHO_NAVIGATE_EVENT } from '@/components/NodeManager';
 import type { SenchoNavigateDetail } from '@/components/NodeManager';
-import type { SecurityTab } from '@/lib/events';
+import type { SecurityTab, FleetTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { ScheduleTaskPrefill } from '@/components/ScheduledOperationsView';
 
@@ -61,6 +61,7 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   const [activeView, setActiveView] = useState<ActiveView>('dashboard');
   const [settingsSection, setSettingsSection] = useState<SectionId>('appearance');
   const [securityTab, setSecurityTab] = useState<SecurityTab>('overview');
+  const [fleetTab, setFleetTab] = useState<FleetTab | null>(null);
   const [filterNodeId, setFilterNodeId] = useState<number | null>(null);
   const [schedulePrefill, setSchedulePrefill] = useState<ScheduleTaskPrefill | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -93,6 +94,14 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
         // SecurityView lands on it deterministically (no mount race).
         setSecurityTab(detail.tab ?? 'overview');
         setActiveView('security');
+        setFilterNodeId(detail.nodeId ?? null);
+        return;
+      }
+      if (detail.view === 'fleet') {
+        // Set the target sub-tab before switching so the controlled FleetView
+        // lands on it (e.g. Snapshots from the stack storage warning).
+        if (detail.fleetTab) setFleetTab(detail.fleetTab);
+        setActiveView('fleet');
         setFilterNodeId(detail.nodeId ?? null);
         return;
       }
@@ -146,6 +155,7 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     activeView, setActiveView,
     settingsSection, setSettingsSection,
     securityTab, setSecurityTab,
+    fleetTab, setFleetTab,
     filterNodeId, setFilterNodeId,
     schedulePrefill, setSchedulePrefill,
     mobileNavOpen, setMobileNavOpen,

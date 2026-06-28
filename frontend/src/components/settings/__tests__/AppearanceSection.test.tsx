@@ -13,6 +13,7 @@ function resetTheme() {
         result.current.setVisualStyle('signature');
         result.current.setContrast(0);
         result.current.setGlow(0.16);
+        result.current.setReducedMotion(false);
     });
 }
 
@@ -48,6 +49,17 @@ describe('AppearanceSection', () => {
         // Effective reduced (readability || reducedEffects) disables the glow slider
         // even though reducedEffects itself is still off.
         expect(container.querySelectorAll('[data-disabled]').length).toBeGreaterThan(0);
+    });
+
+    it('reduced motion is independent of readability and toggles data-motion on <html>', () => {
+        render(<AppearanceSection />);
+        const motion = () => screen.getByRole('switch', { name: 'Reduced motion' }) as HTMLButtonElement;
+        expect(document.documentElement.dataset.motion).toBeUndefined();
+        // Readability flattens effects but must not disable the motion toggle.
+        fireEvent.click(screen.getByRole('switch', { name: 'Readability mode' }));
+        expect(motion().disabled).toBe(false);
+        fireEvent.click(motion());
+        expect(document.documentElement.dataset.motion).toBe('reduced');
     });
 
     it('readability also locks the Visual style cards and the Border brightness slider', () => {

@@ -176,6 +176,7 @@ export default function EditorLayout() {
     activeView, setActiveView,
     settingsSection, setSettingsSection,
     securityTab, setSecurityTab,
+    fleetTab, setFleetTab,
     filterNodeId, setFilterNodeId,
     schedulePrefill,
     mobileNavOpen, setMobileNavOpen,
@@ -762,6 +763,8 @@ export default function EditorLayout() {
             onFleetUpdatesIntentConsumed={handleFleetUpdatesIntentConsumed}
             securityTab={securityTab}
             onSecurityTabChange={setSecurityTab}
+            fleetTab={fleetTab}
+            onFleetTabConsumed={() => setFleetTab(null)}
             renderEditor={renderEditor}
           />
         </div>

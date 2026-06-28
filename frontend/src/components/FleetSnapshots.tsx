@@ -651,16 +651,18 @@ export default function FleetSnapshots() {
                                                                     {/* Preserved dossier notes (read-only) */}
                                                                     {dossier && <DossierBlock dossier={dossier} />}
 
-                                                                    {/* Restore button (admin only) */}
+                                                                    {/* Restore (admin only), right-aligned to match the file action row */}
                                                                     {isAdmin && (
-                                                                        <RestoreButton
-                                                                            nodeId={node.nodeId}
-                                                                            nodeName={node.nodeName}
-                                                                            stackName={stack.stackName}
-                                                                            hasDossier={!!dossier}
-                                                                            restoring={restoringStack === `${node.nodeId}:${stack.stackName}`}
-                                                                            onRestore={handleRestore}
-                                                                        />
+                                                                        <div className="flex justify-end px-3">
+                                                                            <RestoreButton
+                                                                                nodeId={node.nodeId}
+                                                                                nodeName={node.nodeName}
+                                                                                stackName={stack.stackName}
+                                                                                hasDossier={!!dossier}
+                                                                                restoring={restoringStack === `${node.nodeId}:${stack.stackName}`}
+                                                                                onRestore={handleRestore}
+                                                                            />
+                                                                        </div>
                                                                     )}
                                                                 </div>
                                                             )}
@@ -919,16 +921,16 @@ function RestoreButton({ nodeId, nodeName, stackName, hasDossier, restoring, onR
     return (
         <>
             <Button
-                variant="outline"
+                variant="ghost"
                 size="sm"
-                className="h-7 px-2.5 text-xs gap-1.5 ml-3 mt-1"
+                className="h-6 px-2 text-xs"
                 disabled={restoring}
                 onClick={() => setOpen(true)}
             >
                 {restoring ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
                 ) : (
-                    <RotateCcw className="w-3 h-3" strokeWidth={1.5} />
+                    <RotateCcw className="w-3 h-3 mr-1" strokeWidth={1.5} />
                 )}
                 Restore
             </Button>
@@ -1020,16 +1022,16 @@ function RestoreAllButton({ restoring, hasDocumentation, onRestoreAll }: {
     return (
         <>
             <Button
-                variant="outline"
+                variant="ghost"
                 size="sm"
-                className="h-8 gap-1.5 shrink-0"
+                className="h-6 px-2 text-xs shrink-0"
                 disabled={restoring}
                 onClick={() => setOpen(true)}
             >
                 {restoring ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
                 ) : (
-                    <RotateCcw className="w-3.5 h-3.5" strokeWidth={1.5} />
+                    <RotateCcw className="w-3 h-3 mr-1" strokeWidth={1.5} />
                 )}
                 Restore all
             </Button>

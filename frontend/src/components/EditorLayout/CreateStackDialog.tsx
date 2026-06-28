@@ -426,55 +426,53 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
 
             {createMode === 'git' && (
                 <div role="tabpanel" id={panelId('git')} aria-labelledby={tabId('git')}>
-                    <ScrollArea block className="max-h-[60vh]">
-                        <ModalBody>
-                            <div className="space-y-2">
-                                <Label htmlFor="create-git-stack-name">Stack Name</Label>
-                                <Input
-                                    id="create-git-stack-name"
-                                    placeholder="Stack name (e.g., myapp)"
-                                    value={newStackName}
-                                    onChange={(e) => setNewStackName(e.target.value)}
-                                    disabled={creatingFromGit}
-                                />
-                            </div>
-
-                            <GitSourceFields
-                                variant="create"
+                    <ModalBody>
+                        <div className="space-y-2">
+                            <Label htmlFor="create-git-stack-name">Stack Name</Label>
+                            <Input
+                                id="create-git-stack-name"
+                                placeholder="Stack name (e.g., myapp)"
+                                value={newStackName}
+                                onChange={(e) => setNewStackName(e.target.value)}
                                 disabled={creatingFromGit}
-                                repoUrl={gitRepoUrl}
-                                branch={gitBranch}
-                                composePaths={gitComposePaths}
-                                contextDir={gitContextDir}
-                                syncEnv={gitSyncEnv}
-                                authType={gitAuthType}
-                                token={gitToken}
-                                hasStoredToken={false}
-                                applyMode={gitApplyMode}
-                                onRepoUrlChange={setGitRepoUrl}
-                                onBranchChange={setGitBranch}
-                                onComposePathsChange={setGitComposePaths}
-                                onContextDirChange={setGitContextDir}
-                                onSyncEnvChange={setGitSyncEnv}
-                                onAuthTypeChange={setGitAuthType}
-                                onTokenChange={setGitToken}
-                                onApplyModeChange={setGitApplyMode}
-                                onBrowse={browseGitRepo}
                             />
+                        </div>
 
-                            <div className="flex items-center gap-2">
-                                <Checkbox
-                                    id="create-git-deploy-now"
-                                    checked={gitDeployNow}
-                                    onCheckedChange={(c) => setGitDeployNow(c === true)}
-                                    disabled={creatingFromGit}
-                                />
-                                <Label htmlFor="create-git-deploy-now" className="text-xs cursor-pointer">
-                                    Deploy after create
-                                </Label>
-                            </div>
-                        </ModalBody>
-                    </ScrollArea>
+                        <GitSourceFields
+                            variant="create"
+                            disabled={creatingFromGit}
+                            repoUrl={gitRepoUrl}
+                            branch={gitBranch}
+                            composePaths={gitComposePaths}
+                            contextDir={gitContextDir}
+                            syncEnv={gitSyncEnv}
+                            authType={gitAuthType}
+                            token={gitToken}
+                            hasStoredToken={false}
+                            applyMode={gitApplyMode}
+                            onRepoUrlChange={setGitRepoUrl}
+                            onBranchChange={setGitBranch}
+                            onComposePathsChange={setGitComposePaths}
+                            onContextDirChange={setGitContextDir}
+                            onSyncEnvChange={setGitSyncEnv}
+                            onAuthTypeChange={setGitAuthType}
+                            onTokenChange={setGitToken}
+                            onApplyModeChange={setGitApplyMode}
+                            onBrowse={browseGitRepo}
+                        />
+
+                        <div className="flex items-center gap-2">
+                            <Checkbox
+                                id="create-git-deploy-now"
+                                checked={gitDeployNow}
+                                onCheckedChange={(c) => setGitDeployNow(c === true)}
+                                disabled={creatingFromGit}
+                            />
+                            <Label htmlFor="create-git-deploy-now" className="text-xs cursor-pointer">
+                                Deploy after create
+                            </Label>
+                        </div>
+                    </ModalBody>
                     <ModalFooter
                         hint="HTTPS REPOS ONLY"
                         secondary={

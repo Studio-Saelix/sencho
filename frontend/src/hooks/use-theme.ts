@@ -44,6 +44,9 @@ export interface ThemeState {
     headingStyle: HeadingStyle;
     chartStyle: ChartStyle;
     reducedEffects: boolean;
+    /** Independent of reducedEffects (surface flattening): minimizes UI motion
+     *  (dialogs, menus, overlays, transitions). Not part of a visual-style preset. */
+    reducedMotion: boolean;
     readability: boolean;
 }
 
@@ -136,6 +139,9 @@ const DEFAULT_STATE: ThemeState = {
     theme: 'dim', accent: 'cyan', borderBoost: 0, glow: 0.16, contrast: 0,
     uiFont: 'Geist', monoFont: 'Geist Mono', typeScale: 1,
     ...CALM_PRESET,
+    // Independent of the visual-style presets; defaults off so the OS
+    // prefers-reduced-motion still governs via MotionConfig's 'user' mode.
+    reducedMotion: false,
 };
 
 const MODE_IDS = new Set<string>(THEME_MODES.map((m) => m.id));
@@ -200,6 +206,7 @@ function readStored(): ThemeState {
                     headingStyle: isHeadingStyle(p.headingStyle) ? p.headingStyle : SIGNATURE_PRESET.headingStyle,
                     chartStyle: isChartStyle(p.chartStyle) ? p.chartStyle : SIGNATURE_PRESET.chartStyle,
                     reducedEffects: isBool(p.reducedEffects) ? p.reducedEffects : SIGNATURE_PRESET.reducedEffects,
+                    reducedMotion: isBool(p.reducedMotion) ? p.reducedMotion : false,
                     readability: isBool(p.readability) ? p.readability : SIGNATURE_PRESET.readability,
                 };
             }
@@ -252,6 +259,9 @@ function applyToDom(s: ThemeState, systemDark: boolean) {
     root.dataset.chartStyle = chart;
     if (reduced) root.dataset.effects = 'reduced';
     else delete root.dataset.effects;
+    // Motion is independent of effects/readability: only the explicit toggle.
+    if (s.reducedMotion) root.dataset.motion = 'reduced';
+    else delete root.dataset.motion;
     root.style.setProperty('--border-boost', String(rd ? 0.03 : s.borderBoost));
     root.style.setProperty('--glow', String(reduced ? s.glow * 0.4 : s.glow));
     root.style.setProperty('--contrast', String(s.contrast + (rd ? 0.18 : 0)));
@@ -284,6 +294,7 @@ function sameState(a: ThemeState, b: ThemeState): boolean {
         && a.uiFont === b.uiFont && a.monoFont === b.monoFont && a.typeScale === b.typeScale
         && a.visualStyle === b.visualStyle && a.headingStyle === b.headingStyle
         && a.chartStyle === b.chartStyle && a.reducedEffects === b.reducedEffects
+        && a.reducedMotion === b.reducedMotion
         && a.readability === b.readability;
 }
 
@@ -310,6 +321,16 @@ function subscribe(listener: () => void): () => void {
 
 function getSnapshot(): ThemeSnapshot {
     return snapshot;
+}
+
+/** Lean selector for just the reduced-motion flag, so a wrapper like MotionConfig
+ *  re-renders only when motion changes, not on every theme tweak. */
+export function useReducedMotion(): boolean {
+    return useSyncExternalStore(
+        subscribe,
+        () => persisted.reducedMotion,
+        () => DEFAULT_STATE.reducedMotion,
+    );
 }
 
 if (typeof window !== 'undefined') {
@@ -366,6 +387,7 @@ export function useTheme() {
     const setHeadingStyle = useCallback((headingStyle: HeadingStyle) => setState({ headingStyle }), []);
     const setChartStyle = useCallback((chartStyle: ChartStyle) => setState({ chartStyle }), []);
     const setReducedEffects = useCallback((reducedEffects: boolean) => setState({ reducedEffects }), []);
+    const setReducedMotion = useCallback((reducedMotion: boolean) => setState({ reducedMotion }), []);
     const setReadability = useCallback((readability: boolean) => setState({ readability }), []);
     const resolvedTheme = resolveWith(s.theme, s.systemDark);
     return {
@@ -381,6 +403,7 @@ export function useTheme() {
         headingStyle: s.headingStyle,
         chartStyle: s.chartStyle,
         reducedEffects: s.reducedEffects,
+        reducedMotion: s.reducedMotion,
         readability: s.readability,
         resolvedTheme,
         isDarkMode: resolvedTheme !== 'light',
@@ -396,6 +419,7 @@ export function useTheme() {
         setHeadingStyle,
         setChartStyle,
         setReducedEffects,
+        setReducedMotion,
         setReadability,
     } as const;
 }

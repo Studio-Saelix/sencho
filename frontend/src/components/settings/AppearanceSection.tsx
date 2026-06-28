@@ -140,9 +140,9 @@ export function AppearanceSection() {
     const [topNavAlign, setTopNavAlign] = useTopNavAlign();
     const {
         theme, accent, borderBoost, glow, contrast, uiFont, monoFont, typeScale,
-        headingStyle, chartStyle, reducedEffects, readability,
+        headingStyle, chartStyle, reducedEffects, reducedMotion, readability,
         setTheme, setAccent, setBorderBoost, setGlow, setContrast, setUiFont, setMonoFont, setTypeScale,
-        setVisualStyle, setHeadingStyle, setChartStyle, setReducedEffects, setReadability,
+        setVisualStyle, setHeadingStyle, setChartStyle, setReducedEffects, setReducedMotion, setReadability,
     } = useTheme();
     const accentLabel = ACCENTS.find((a) => a.id === accent)?.label ?? 'Cyan';
     // Readability is a sticky master: it forces the calm resolution at apply time
@@ -249,6 +249,17 @@ export function AppearanceSection() {
                         onChange={setReducedEffects}
                         disabled={readability}
                         aria-label="Reduced effects"
+                    />
+                </SettingsField>
+
+                <SettingsField
+                    label="Reduced motion"
+                    helper="Minimizes interface animations and transitions (dialogs, menus, expand and collapse). Toasts are unaffected."
+                >
+                    <TogglePill
+                        checked={reducedMotion}
+                        onChange={setReducedMotion}
+                        aria-label="Reduced motion"
                     />
                 </SettingsField>
 

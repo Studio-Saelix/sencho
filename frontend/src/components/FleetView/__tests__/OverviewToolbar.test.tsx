@@ -97,17 +97,17 @@ describe('OverviewToolbar', () => {
   it('renders the Check Updates button and fires onCheckUpdates when provided', () => {
     const onCheckUpdates = vi.fn();
     render(<OverviewToolbar {...props({ onCheckUpdates })} />);
-    fireEvent.click(screen.getByRole('button', { name: /Check Updates/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Check for updates/ }));
     expect(onCheckUpdates).toHaveBeenCalledTimes(1);
   });
 
   it('omits the Check Updates button when onCheckUpdates is not provided', () => {
     render(<OverviewToolbar {...props()} />);
-    expect(screen.queryByRole('button', { name: /Check Updates/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Check for updates/ })).not.toBeInTheDocument();
   });
 
   it('disables the Check Updates button while a check is in flight', () => {
     render(<OverviewToolbar {...props({ onCheckUpdates: vi.fn(), checkingUpdates: true })} />);
-    expect(screen.getByRole('button', { name: /Check Updates/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Check for updates/ })).toBeDisabled();
   });
 });

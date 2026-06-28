@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import {
-  Check, TriangleAlert, ShieldAlert, Info, RefreshCw, Stethoscope, type LucideIcon,
+  Check, TriangleAlert, ShieldAlert, Info, RefreshCw, Stethoscope, X, type LucideIcon,
 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
+import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
 
 // Mirrors the backend payload shape (the frontend never imports backend).
 type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
@@ -152,6 +153,10 @@ export default function PreflightPanel({ stackName }: { stackName: string }) {
   const SummaryIcon = summary?.icon;
   const busy = loading || running;
 
+  // Dismiss the result banner (and the Doctor tab dot) until the findings change.
+  const { dismissed, dismiss } = usePreflightDismiss(stackName, nodeId, report?.findings);
+  const hasFindings = (report?.findings.length ?? 0) > 0;
+
   return (
     <div data-testid="preflight-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
@@ -192,9 +197,21 @@ export default function PreflightPanel({ stackName }: { stackName: string }) {
         </div>
       ) : (
         <>
-          {summary && SummaryIcon && (
-            <div data-testid="preflight-status" data-status={report.status} className={cn(CARD_CLASS, summary.tone)}>
-              <div className="flex items-center gap-2">
+          {summary && SummaryIcon && !dismissed && (
+            <div data-testid="preflight-status" data-status={report.status} className={cn(CARD_CLASS, summary.tone, 'relative')}>
+              {hasFindings && (
+                <button
+                  type="button"
+                  onClick={dismiss}
+                  data-testid="preflight-dismiss-btn"
+                  aria-label="Dismiss until findings change"
+                  title="Dismiss until findings change"
+                  className="absolute right-2 top-2 inline-flex h-5 w-5 items-center justify-center rounded text-current/70 hover:bg-current/10 hover:text-current"
+                >
+                  <X className="h-3.5 w-3.5" strokeWidth={1.5} />
+                </button>
+              )}
+              <div className="flex items-center gap-2 pr-6">
                 <SummaryIcon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
                 <span className="font-mono text-[11px] uppercase tracking-wide">{summary.label}</span>
                 {report.ranAt && (

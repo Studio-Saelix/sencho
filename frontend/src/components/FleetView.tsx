@@ -30,14 +30,18 @@ import { FleetActionsTab } from './fleet/FleetActions/FleetActionsTab';
 import { SecretsTab } from './fleet/secrets/SecretsTab';
 import { DependencyMapTab } from './fleet/DependencyMapTab';
 import { useNodeActions } from './nodes/useNodeActions';
+import type { FleetTab } from '@/lib/events';
 
 interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
     fleetUpdatesIntent?: { tab: 'nodes' | 'changelog' } | null;
     onFleetUpdatesIntentConsumed?: () => void;
+    /** Deep-link target tab (e.g. 'snapshots' from the stack storage warning). */
+    fleetTab?: FleetTab | null;
+    onFleetTabConsumed?: () => void;
 }
 
-export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdatesIntentConsumed }: FleetViewProps) {
+export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdatesIntentConsumed, fleetTab, onFleetTabConsumed }: FleetViewProps) {
     const { isPaid } = useLicense();
     const { isAdmin } = useAuth();
 
@@ -55,6 +59,10 @@ export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdates
 
     const [initialUpdatesTab, setInitialUpdatesTab] = useState<'nodes' | 'changelog'>('nodes');
 
+    // Controlled tab value so a deep-link (e.g. Snapshots from the stack storage
+    // warning) can land on the right tab.
+    const [activeTab, setActiveTab] = useState<FleetTab>('overview');
+
     useEffect(() => {
         if (fleetUpdatesIntent) {
             setInitialUpdatesTab(fleetUpdatesIntent.tab);
@@ -63,6 +71,13 @@ export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdates
             onFleetUpdatesIntentConsumed?.();
         }
     }, [fleetUpdatesIntent, updateStatus, onFleetUpdatesIntentConsumed]);
+
+    useEffect(() => {
+        if (fleetTab) {
+            setActiveTab(fleetTab);
+            onFleetTabConsumed?.();
+        }
+    }, [fleetTab, onFleetTabConsumed]);
 
     const { mastheadStats, lastSyncAt, loading, refreshing } = overview;
 
@@ -86,8 +101,8 @@ export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdates
                 loading={loading}
             />
 
-            <Tabs defaultValue="overview">
-                <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+            <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as FleetTab)}>
+                <div className="flex items-center justify-between gap-3 mb-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
                     <TabsList className="max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
                         <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
                             <TabsHighlightItem value="overview">
@@ -146,16 +161,17 @@ export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdates
                             )}
                         </TabsHighlight>
                     </TabsList>
-                    <div className="flex items-center gap-2 max-md:w-full max-md:flex-wrap">
+                    <div className="flex items-center gap-2 shrink-0">
                         <Button
                             variant="outline"
                             size="sm"
                             onClick={() => overview.fetchOverview(true)}
                             disabled={refreshing}
-                            className="gap-2"
+                            className="h-9 w-9 p-0"
+                            title="Refresh"
+                            aria-label="Refresh"
                         >
                             <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-                            Refresh
                         </Button>
                         {isAdmin && (
                             <Button
@@ -163,10 +179,11 @@ export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdates
                                 size="sm"
                                 onClick={() => { void exportDossier(); }}
                                 disabled={exporting}
-                                className="gap-2"
+                                className="h-9 w-9 p-0"
+                                title="Export Dossier"
+                                aria-label="Export Dossier"
                             >
                                 <FileDown className={`w-4 h-4 ${exporting ? 'animate-pulse' : ''}`} />
-                                {exporting ? 'Exporting…' : 'Export Dossier'}
                             </Button>
                         )}
                     </div>

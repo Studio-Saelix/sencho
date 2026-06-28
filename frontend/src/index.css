@@ -759,6 +759,18 @@ body {
   }
 }
 
+/* The "Reduced motion" appearance setting (data-motion="reduced" on <html>)
+   clamps CSS animations/transitions, mirroring the OS preference above. Sonner
+   toasts animate via inline transform/opacity (React state), not CSS, so they
+   are unaffected. framer-motion is handled separately by MotionConfig. */
+[data-motion="reduced"] *,
+[data-motion="reduced"] *::before,
+[data-motion="reduced"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}
+
 /* ─────────────────────────────────────────────────────────────
    XTERM.JS
 ───────────────────────────────────────────────────────────── */
