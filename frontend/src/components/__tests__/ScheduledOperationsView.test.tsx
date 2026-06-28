@@ -125,6 +125,39 @@ describe('ScheduledOperationsView', () => {
     expect(onPrefillConsumed).toHaveBeenCalledTimes(1);
     // The prefilled stack drives a node-scoped stack fetch through the proxy.
     await waitFor(() => expect(mockedFetchForNode).toHaveBeenCalledWith('/stacks', 1));
+    // The prefilled stack stays selected; the node-change effect must not wipe it.
+    // Comboboxes render in order: action, node, stack.
+    await waitFor(() => expect(screen.getAllByRole('combobox')[2]).toHaveTextContent('web'));
+  });
+
+  it('keeps the stack selected when editing a stack-targeted task', async () => {
+    tasksFixture = [makeTask({
+      id: 9, name: 'restart-web', action: 'restart', target_type: 'stack', target_id: 'web', node_id: 1,
+    })];
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByTitle('Edit'));
+    await waitFor(() => expect(screen.getAllByRole('combobox')[2]).toHaveTextContent('web'));
+  });
+
+  it('clears the stale stack when the user changes the node', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    // Default action Restart Stack: choose a node, then a stack on it.
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+    expect(screen.getAllByRole('combobox')[2]).toHaveTextContent('web');
+
+    // Switching node is a user-driven change, so the now-stale stack clears
+    // and the user must re-pick one before the schedule can be saved.
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    expect(screen.getAllByRole('combobox')[2]).toHaveTextContent('Select stack...');
+    expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
   });
 
   it('filters the table to the selected node and clears the filter', async () => {

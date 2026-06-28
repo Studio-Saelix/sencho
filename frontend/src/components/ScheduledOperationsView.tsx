@@ -201,12 +201,13 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     return () => { cancelled = true; };
   }, [formAction, formTargetId, formNodeId]);
 
-  // Re-fetch stacks when node changes
+  // Re-fetch stacks when the node changes. Clearing a stale stack selection is
+  // done in the Node picker's onValueChange (a user-driven change), not here, so
+  // a prefilled or edited node keeps its stack instead of being wiped on open.
   useEffect(() => {
     if (!dialogOpen) return;
     if (formNodeId) {
       fetchStacks(formNodeId);
-      setFormTargetId('');
     } else {
       setStacks([]);
     }
@@ -790,7 +791,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                   <Combobox
                     options={nodeOptions}
                     value={formNodeId}
-                    onValueChange={setFormNodeId}
+                    onValueChange={(val) => { setFormNodeId(val); setFormTargetId(''); }}
                     placeholder="Select node..."
                   />
                 </div>
