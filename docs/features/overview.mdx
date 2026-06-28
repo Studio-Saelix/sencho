@@ -6,13 +6,13 @@ description: A high-level tour of everything Sencho can do, organized by area.
 Sencho is a self-hosted cockpit for Docker Compose. The catalog below groups Sencho's features by area, mirroring the Features navigation, so you can scan the surface at a glance and jump into the deep-dive page for the parts you care about. Tier callouts are inline with each entry; if no tier is mentioned, the feature is available on every Sencho installation.
 
 <Frame>
-  <img src="/images/overview/dashboard-hero.png" alt="Sencho Home dashboard: the status masthead with the current state word and meta line, the CPU, memory, disk, and network gauge strip, and the stack health table below." />
+  <img src="/images/overview/dashboard-hero.png" alt="Sencho Home dashboard: the Healthy masthead with running container count, fleet-wide CPU, and memory, the CPU sparkline and memory, disk, and network gauge tiles, and the Stack health table sorted by load." />
 </Frame>
 
 ## Stacks
 
 <Frame>
-  <img src="/images/overview/stack-anatomy.png" alt="A stack open in the editor: the action toolbar, the container card with live stats, streaming logs, and the right-hand Anatomy panel showing its Dossier, Drift, Doctor, and Networking tabs." />
+  <img src="/images/overview/stack-anatomy.png" alt="A stack open in the editor: the action toolbar, the container card with CPU and memory sparklines, the live log stream, and the right-hand panel on the Networking tab showing exposure intent, network memberships, published ports, and a runtime drift check. The full tab strip (Anatomy, Activity, Dossier, Drift, Environment, Networking, Doctor, Storage) is visible across the top of the panel." />
 </Frame>
 
 ### Stack management
@@ -124,7 +124,7 @@ Track every mutating action across your Sencho instance with a searchable trail:
 ## Fleet
 
 <Frame>
-  <img src="/images/overview/fleet-topology.png" alt="Fleet view in topology layout: the fleet masthead and aggregate stats above a node graph where the local node links out to the remote nodes, with a minimap in the corner." />
+  <img src="/images/overview/fleet-topology.png" alt="Fleet view in grid layout: the fleet masthead showing aggregate CPU, memory, and container counts across all nodes, the tab strip (Overview, Snapshots, Status, Map, Deployments, Routing, Federation, Actions, Secrets), and the node grid with per-node container counts and CPU, RAM, and disk usage bars." />
 </Frame>
 
 ### Multi-node support
@@ -183,7 +183,7 @@ Open an interactive terminal on the host OS directly in the browser with full xt
 
 ### Scheduled operations
 
-Automate recurring maintenance like stack restarts, fleet snapshots, system prunes, scans, and image updates on a cron schedule. Every run is logged with full history so you always know what ran and when. [Learn more →](/features/scheduled-operations)
+Automate recurring maintenance like stack restarts, fleet snapshots, system prunes, scans, and image updates. Use the simple point-and-click mode for one-time or common recurring schedules, or switch to a full cron expression for precise control. Every run is logged with full history so you always know what ran and when. [Learn more →](/features/scheduled-operations)
 
 ### Auto-Update Policies
 
@@ -200,7 +200,7 @@ Trigger stack actions from external CI/CD pipelines over HTTP. Create a webhook 
 ## Security & Identity
 
 <Frame>
-  <img src="/images/overview/security-overview.png" alt="The Security page overview tab: the severity masthead with the current state word and the critical and high counts, the tab strip, and the overview charts for risk trend, severity distribution, top exposed images, and findings by type." />
+  <img src="/images/overview/security-overview.png" alt="The Security page: the 'Action needed' masthead with critical and high CVE counts and last scan time, the tab strip (Overview, Images, Compose risks, Secrets, Policies, Suppressions, History, Scanner setup), the actionable findings summary listing fixable CVEs, detected secrets, and exposed images, and the 30-day risk trend chart." />
 </Frame>
 
 ### Two-factor authentication
@@ -221,7 +221,7 @@ Generate scoped API tokens for CI/CD pipelines, scripts, and automation workflow
 
 ### Security
 
-A primary surface in the top navigation that brings your security posture into one command center, scoped to the active node. An overview masthead reads your worst active severity (Secure, At risk, or Critical), and tabs cover image findings, Compose risks, secrets, scan history, suppressions, and scanner setup. [Learn more →](/features/security)
+A primary surface in the top navigation that brings your security posture into one command center, scoped to the active node. An overview masthead reports your current posture (Action needed, Monitoring, or Secure), and tabs cover image findings, Compose risks, secrets, scan policies, suppressions, scan history, and scanner setup. [Learn more →](/features/security)
 
 ### Vulnerability scanning
 
