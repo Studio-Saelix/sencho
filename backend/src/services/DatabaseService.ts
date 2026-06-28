@@ -304,7 +304,14 @@ export interface WebhookExecution {
 
 export type AuthProvider = 'local' | 'ldap' | 'oidc_google' | 'oidc_github' | 'oidc_okta' | 'oidc_custom';
 
-export type UserRole = 'admin' | 'viewer' | 'deployer' | 'node-admin' | 'auditor';
+// Source of truth for the role set. UserRole derives from it so the union and
+// the runtime list cannot drift (adding a role here updates both).
+export const USER_ROLES = ['admin', 'viewer', 'deployer', 'node-admin', 'auditor'] as const;
+export type UserRole = typeof USER_ROLES[number];
+/** Narrow an untrusted string (e.g. a proxied role header) to a known UserRole. */
+export function isUserRole(value: unknown): value is UserRole {
+  return typeof value === 'string' && (USER_ROLES as readonly string[]).includes(value);
+}
 export type ResourceType = 'stack' | 'node';
 
 export interface User {

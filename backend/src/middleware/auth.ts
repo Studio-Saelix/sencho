@@ -3,11 +3,12 @@ import jwt from 'jsonwebtoken';
 import {
   DatabaseService,
   API_TOKEN_SCOPE_TO_ROLE,
+  isUserRole,
   type UserRole,
   type ApiTokenScope,
 } from '../services/DatabaseService';
 import { getErrorMessage } from '../utils/errors';
-import { PROXY_TIER_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER } from '../services/license-headers';
 import { isLicenseTier, normalizeTier } from '../services/license-normalize';
 import { isDebugEnabled } from '../utils/debug';
 import {
@@ -105,7 +106,21 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
     // after the primary itself re-signed/trusted them. Same tier-header trust
     // rules apply.
     if (decoded.scope === 'node_proxy' || decoded.scope === 'pilot_tunnel') {
-      req.user = { username: 'node-proxy', role: 'admin', userId: 0 };
+      // Preserve the originating user's RBAC across the proxy. The forwarding
+      // primary asserts the signed-in user's role on PROXY_ROLE_HEADER, trusted
+      // under the same rule as the tier header (only a valid node_proxy /
+      // pilot_tunnel bearer reaches this branch). Honor that role so a non-admin
+      // proxied here is bound to their own permissions instead of inheriting
+      // blanket admin. An absent header is a direct instance-to-instance or
+      // background service call (fleet orchestration, sync, monitor) that
+      // legitimately runs as admin; a present-but-unrecognized role fails closed
+      // to read-only rather than admin.
+      const forwardedRole = req.headers[PROXY_ROLE_HEADER] as string | undefined;
+      let role: UserRole = 'admin';
+      if (forwardedRole !== undefined) {
+        role = isUserRole(forwardedRole) ? forwardedRole : 'viewer';
+      }
+      req.user = { username: 'node-proxy', role, userId: 0 };
 
       // Distributed License Enforcement: trust tier headers only from authenticated node proxy requests.
       // Browser sessions and API tokens cannot set these; only a valid node_proxy JWT (signed with
