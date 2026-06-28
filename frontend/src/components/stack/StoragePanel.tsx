@@ -8,6 +8,7 @@ import { toast } from '@/components/ui/toast-store';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
+import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
 
 // Mirrors the backend /storage payload (the frontend never imports backend).
 type PortabilityStatus = 'portable' | 'partially-portable' | 'node-bound' | 'unknown';
@@ -221,6 +222,17 @@ export default function StoragePanel({ stackName }: { stackName: string }) {
                     This stack has persistent storage but no fleet snapshot in the last 7 days.
                   </span>
                 </div>
+                {activeNode?.type !== 'remote' && (
+                  <button
+                    type="button"
+                    onClick={() => window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
+                      detail: { view: 'fleet', fleetTab: 'snapshots' },
+                    }))}
+                    className="mt-1.5 text-[12px] font-medium text-brand hover:underline"
+                  >
+                    Take a fleet snapshot →
+                  </button>
+                )}
               </div>
             )}
             {isAdmin && inventory.stateful && snapshot.recent && snapshot.at && (

@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Network, Globe, Lock, ShieldQuestion, RefreshCw, ArrowRight } from 'lucide-react';
+import { Network, Globe, Lock, ShieldQuestion, RefreshCw, ArrowRight, Plus } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
+import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog';
 
 // Mirrors the backend networking payload shapes (the frontend never imports
 // backend). IntentEntry intentionally keeps only the fields this panel reads.
@@ -110,6 +111,7 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
   const [loadError, setLoadError] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [showCreateNetwork, setShowCreateNetwork] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -197,10 +199,23 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
     <div data-testid="networking-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
       <div className="flex items-center justify-between gap-2">
         <span className={LABEL_CLASS}>networking</span>
-        <button type="button" onClick={() => setReloadKey(k => k + 1)} disabled={refreshing} className={ACTION_CLASS}>
-          <RefreshCw className={cn('h-3 w-3', refreshing && 'animate-spin')} strokeWidth={1.5} /> refresh
-        </button>
+        <div className="flex items-center gap-3">
+          {canEdit && (
+            <button type="button" onClick={() => setShowCreateNetwork(true)} className={ACTION_CLASS}>
+              <Plus className="h-3 w-3" strokeWidth={1.5} /> create network
+            </button>
+          )}
+          <button type="button" onClick={() => setReloadKey(k => k + 1)} disabled={refreshing} className={ACTION_CLASS}>
+            <RefreshCw className={cn('h-3 w-3', refreshing && 'animate-spin')} strokeWidth={1.5} /> refresh
+          </button>
+        </div>
       </div>
+
+      <CreateNetworkDialog
+        open={showCreateNetwork}
+        onOpenChange={setShowCreateNetwork}
+        onCreated={() => setReloadKey(k => k + 1)}
+      />
 
       {/* Exposure intent */}
       <section className="flex flex-col gap-2">
@@ -253,6 +268,14 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
                       {n.key}{n.aliases.length > 0 && <span className="text-stat-subtitle"> ({n.aliases.join(', ')})</span>}
                     </span>
                   ))}
+                </div>
+              )}
+              {svc.networkMode === 'host' && (
+                // Host networking publishes every container port on the host, so
+                // the service is host-exposed even with no published-port rows.
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-[11px] text-foreground/80">all container ports</span>
+                  <span className="rounded border border-warning/40 bg-warning/[0.08] px-1 py-0.5 font-mono text-[10px] text-warning">host-exposed</span>
                 </div>
               )}
               {svc.publishedPorts.length > 0 && (

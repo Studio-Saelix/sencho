@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react';
-import { Lock, Copy, Info, TriangleAlert, ShieldAlert } from 'lucide-react';
+import { useEffect, useState, useCallback } from 'react';
+import { Lock, Copy, Info, TriangleAlert, ShieldAlert, X, ChevronUp, ChevronDown } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
 import { copyToClipboard } from '@/lib/clipboard';
 import { useNodes } from '@/context/NodeContext';
+import { useAuth } from '@/context/AuthContext';
 import {
   buildEnvChecklistMarkdown,
   SOURCE_LABELS,
@@ -14,6 +15,7 @@ import {
   type EnvItemStatus,
   type EnvFileExistence,
 } from '@/lib/envChecklist';
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
 const ACTION_CLASS =
@@ -91,39 +93,114 @@ const STATUS_GROUPS: { status: EnvItemStatus; label: string }[] = [
 ];
 
 export default function EnvironmentPanel({ stackName }: { stackName: string }) {
-  const { activeNode } = useNodes();
+  const { activeNode, hasCapability } = useNodes();
+  const { can } = useAuth();
   const nodeId = activeNode?.id;
   const [inventory, setInventory] = useState<EnvInventory | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [copying, setCopying] = useState(false);
 
+  // Project env file selection
+  const projectEnvCapable = hasCapability('project-env-files');
+  const canEdit = can('stack:edit', 'stack', stackName);
+  const [projectEnvFiles, setProjectEnvFiles] = useState<string[]>([]);
+  const [candidates, setCandidates] = useState<string[]>([]);
+  const [savingProjectEnv, setSavingProjectEnv] = useState(false);
+
+  const fetchJsonEnvFiles = useCallback(async (suffix: string, setter: (v: string[]) => void) => {
+    if (!projectEnvCapable) return;
+    try {
+      const res = await apiFetch(`/stacks/${stackName}/project-env-files${suffix}`);
+      if (res.ok) {
+        const data = await res.json() as { envFiles: string[] };
+        setter(data.envFiles);
+      }
+    } catch { /* silently skip on older nodes */ }
+  }, [stackName, projectEnvCapable]);
+
+  const fetchProjectEnvFiles = useCallback(
+    () => fetchJsonEnvFiles('', setProjectEnvFiles),
+    [fetchJsonEnvFiles],
+  );
+
+  const fetchCandidates = useCallback(
+    () => fetchJsonEnvFiles('/candidates', setCandidates),
+    [fetchJsonEnvFiles],
+  );
+
+  const fetchInventory = useCallback(async () => {
+    setLoading(true);
+    setLoadError(false);
+    try {
+      const res = await apiFetch(`/stacks/${stackName}/env-inventory`);
+      if (!res.ok) {
+        setLoadError(true);
+        toast.error('Failed to load the environment inventory.');
+        return;
+      }
+      setInventory((await res.json()) as EnvInventory);
+    } catch {
+      setLoadError(true);
+      toast.error('Failed to load the environment inventory.');
+    } finally {
+      setLoading(false);
+    }
+  }, [stackName]);
+
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
-      setLoading(true);
-      setLoadError(false);
-      try {
-        const res = await apiFetch(`/stacks/${stackName}/env-inventory`);
-        if (cancelled) return;
-        if (!res.ok) {
-          setLoadError(true);
-          toast.error('Failed to load the environment inventory.');
-          return;
-        }
-        setInventory((await res.json()) as EnvInventory);
-      } catch {
-        if (!cancelled) {
-          setLoadError(true);
-          toast.error('Failed to load the environment inventory.');
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
+      await fetchInventory();
+      if (cancelled) return;
+      await fetchProjectEnvFiles();
+      if (cancelled) return;
+      await fetchCandidates();
     };
     void run();
     return () => { cancelled = true; };
-  }, [stackName, nodeId]);
+  }, [stackName, nodeId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const saveProjectEnvFiles = async (files: string[]) => {
+    setSavingProjectEnv(true);
+    try {
+      const res = await apiFetch(`/stacks/${stackName}/project-env-files`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ envFiles: files }),
+      });
+      if (!res.ok) {
+        const data = await res.json() as { error?: string };
+        toast.error(data.error ?? 'Failed to save project env file selection.');
+        return;
+      }
+      setProjectEnvFiles(files);
+      toast.success('Project env file selection saved.');
+      // Refresh inventory to reflect new interpolation source.
+      await fetchInventory();
+    } catch {
+      toast.error('Failed to save project env file selection.');
+    } finally {
+      setSavingProjectEnv(false);
+    }
+  };
+
+  const addProjectEnvFile = (file: string) => {
+    if (!file || projectEnvFiles.includes(file)) return;
+    saveProjectEnvFiles([...projectEnvFiles, file]);
+  };
+
+  const removeProjectEnvFile = (idx: number) => {
+    saveProjectEnvFiles(projectEnvFiles.filter((_, i) => i !== idx));
+  };
+
+  const moveProjectEnvFile = (idx: number, dir: -1 | 1) => {
+    const newFiles = [...projectEnvFiles];
+    const target = idx + dir;
+    if (target < 0 || target >= newFiles.length) return;
+    [newFiles[idx], newFiles[target]] = [newFiles[target], newFiles[idx]];
+    saveProjectEnvFiles(newFiles);
+  };
 
   const copyChecklist = async () => {
     if (!inventory) return;
@@ -154,10 +231,84 @@ export default function EnvironmentPanel({ stackName }: { stackName: string }) {
       </div>
 
       <p className="text-[11px] leading-relaxed text-stat-subtitle">
-        Compose reads <span className="font-mono">.env</span> and the shell for <span className="font-mono">{'${VAR}'}</span> interpolation,
+        Compose reads the project environment file and the shell for <span className="font-mono">{'${VAR}'}</span> interpolation,
         while <span className="font-mono">env_file</span> and inline <span className="font-mono">environment</span> are injected into the container.
         Values are never read or shown: likely secrets show presence only.
       </p>
+
+      {projectEnvCapable && (
+        <section data-testid="project-env-section">
+          <div className={cn(LABEL_CLASS, 'mb-1.5')}>project environment file</div>
+          <div className="rounded-lg border border-muted bg-card/40 px-3 py-2">
+            {projectEnvFiles.length === 0 ? (
+              <p className="text-[11px] text-stat-subtitle py-1">
+                Using <span className="font-mono">.env</span> (default). Compose auto-discovers <span className="font-mono">.env</span> in the project directory.
+              </p>
+            ) : (
+              <div className="flex flex-col gap-1">
+                {projectEnvFiles.map((file, idx) => (
+                  <div key={file} className="flex items-center gap-1.5 py-1 border-t border-muted first:border-t-0">
+                    <span className="font-mono text-[12px] text-foreground/90 flex-1">{file}</span>
+                    {canEdit && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => moveProjectEnvFile(idx, -1)}
+                          disabled={idx === 0 || savingProjectEnv}
+                          className="p-0.5 text-stat-subtitle hover:text-brand disabled:opacity-30"
+                          title="Move up"
+                        >
+                          <ChevronUp className="h-3 w-3" strokeWidth={1.5} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moveProjectEnvFile(idx, 1)}
+                          disabled={idx === projectEnvFiles.length - 1 || savingProjectEnv}
+                          className="p-0.5 text-stat-subtitle hover:text-brand disabled:opacity-30"
+                          title="Move down"
+                        >
+                          <ChevronDown className="h-3 w-3" strokeWidth={1.5} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeProjectEnvFile(idx)}
+                          disabled={savingProjectEnv}
+                          className="p-0.5 text-stat-subtitle hover:text-destructive disabled:opacity-30"
+                          title="Remove"
+                        >
+                          <X className="h-3 w-3" strokeWidth={1.5} />
+                        </button>
+                      </>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {canEdit && candidates.length > 0 && (
+              <div className="flex items-center gap-2 mt-2 pt-2 border-t border-muted">
+                <Select
+                  value=""
+                  onValueChange={addProjectEnvFile}
+                  disabled={savingProjectEnv}
+                >
+                  <SelectTrigger className="h-7 text-[11px] bg-muted border-none w-full">
+                    <SelectValue placeholder="Add env file…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {candidates
+                      .filter(f => !projectEnvFiles.includes(f))
+                      .map(file => (
+                        <SelectItem key={file} value={file} className="text-[11px]">
+                          {file}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {loadError ? (
         <div className="flex items-center gap-2 rounded-lg border border-destructive/40 bg-destructive/[0.06] px-3 py-3">

@@ -113,6 +113,21 @@ it('narrows the list with the severity filter', async () => {
   expect(screen.queryByText('low:1')).not.toBeInTheDocument();
 });
 
+it('applies initialFilter to show only the matching images on arrival', () => {
+  render(
+    <ImagesTab
+      {...base}
+      initialFilter="FIXABLE"
+      summaries={asMap(
+        summary({ image_ref: 'fix:1', scan_id: 1, highest_severity: 'HIGH', total: 2, high: 2, fixable: 2 }),
+        summary({ image_ref: 'nofix:1', scan_id: 2, highest_severity: 'HIGH', total: 1, high: 1, fixable: 0 }),
+      )}
+    />,
+  );
+  expect(screen.getByText('fix:1')).toBeInTheDocument();
+  expect(screen.queryByText('nofix:1')).not.toBeInTheDocument();
+});
+
 it('shows the scan action only when scanning is allowed', () => {
   const data = asMap(summary({ image_ref: 'nginx:1', scan_id: 1 }));
   const { rerender } = render(<ImagesTab {...base} canScan={false} summaries={data} />);

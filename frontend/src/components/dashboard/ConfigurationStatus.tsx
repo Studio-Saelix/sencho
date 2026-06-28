@@ -208,13 +208,15 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
           )}
           <Row
             label="Alert thresholds"
-            value={`CPU ${thresholds.cpuLimit}% · RAM ${thresholds.ramLimit}% · Disk ${thresholds.diskLimit}%`}
+            value={thresholds.hostAlertsEnabled === false
+                ? 'Off'
+                : `CPU ${thresholds.cpuLimit}% · RAM ${thresholds.ramLimit}% · Disk ${thresholds.diskLimit}%`}
             onClick={open('host-alerts')}
           />
           <Row
             label="Crash detection"
             value={thresholds.globalCrash ? 'On' : 'Off'}
-            onClick={open('host-alerts')}
+            onClick={open('container-alerts')}
           />
         </div>
       </CardContent>

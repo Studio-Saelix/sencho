@@ -7,6 +7,7 @@ import { AnimatePresence, motion, type HTMLMotionProps } from 'motion/react';
 
 import { getStrictContext } from '@/lib/get-strict-context';
 import { useControlledState } from '@/hooks/use-controlled-state';
+import { useReducedTransition } from '@/components/animate-ui/primitives/use-reduced-transition';
 
 type PopoverContextType = {
   isOpen: boolean;
@@ -91,6 +92,7 @@ function PopoverContent({
   transition = { type: 'spring', stiffness: 300, damping: 25 },
   ...props
 }: PopoverContentProps) {
+  const resolvedTransition = useReducedTransition(transition);
   return (
     <PopoverPrimitive.Content
       asChild
@@ -118,7 +120,7 @@ function PopoverContent({
         initial={{ opacity: 0, scale: 0.5 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.5 }}
-        transition={transition}
+        transition={resolvedTransition}
         {...props}
       />
     </PopoverPrimitive.Content>

@@ -36,6 +36,26 @@ describe('StackRow', () => {
     expect(screen.getByText('--')).toBeInTheDocument();
   });
 
+  it('renders PT with the amber class for partial', () => {
+    const { container } = render(<StackRow {...base({ status: 'partial', running: 3, total: 5 })} />);
+    expect(screen.getByText('PT')).toBeInTheDocument();
+    expect(container.querySelector('.text-warning')).not.toBeNull();
+  });
+
+  it('wraps the partial pill in a hover tooltip', () => {
+    // jsdom does not mount the cursor-follow label, so assert the PT trigger is
+    // wrapped in the RowTooltip cursor-container; the visible "3/5 running"
+    // tooltip text is verified in the Playwright drive.
+    const { container } = render(<StackRow {...base({ status: 'partial', running: 3, total: 5 })} />);
+    expect(screen.getByText('PT').closest('[data-slot="cursor-container"]')).not.toBeNull();
+    expect(container.querySelector('[data-slot="cursor-container"]')).not.toBeNull();
+  });
+
+  it('does not wrap a non-partial pill in a tooltip', () => {
+    render(<StackRow {...base({ status: 'running' })} />);
+    expect(screen.getByText('UP').closest('[data-slot="cursor-container"]')).toBeNull();
+  });
+
   it('renders cyan rail only when active', () => {
     const { rerender } = render(<StackRow {...base({ isActive: false })} />);
     expect(screen.getByTestId('stack-row')).not.toHaveClass('bg-accent/[0.07]');
@@ -80,5 +100,27 @@ describe('StackRow', () => {
     ];
     const { container } = render(<StackRow {...base({ labels })} />);
     expect(container.querySelectorAll('[style*="--label-"]')).toHaveLength(2);
+  });
+
+  // ── Image-update check status indicator ────────────────────────────────
+  // status='running' renders the pill as plain text (no tooltip), so the only
+  // cursor-container in these rows is the trailing update/check indicator.
+
+  it('shows a muted check-failed indicator when the last check failed and there is no update', () => {
+    const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: false, checkStatus: 'failed', lastError: 'Registry unreachable' })} />);
+    expect(container.querySelector('[data-slot="cursor-container"]')).not.toBeNull();
+    // It is not the update dot.
+    expect(container.querySelector('.bg-update')).toBeNull();
+  });
+
+  it('prefers the update dot over the check-failed indicator', () => {
+    const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: true, checkStatus: 'failed' })} />);
+    expect(container.querySelector('.bg-update')).not.toBeNull();
+  });
+
+  it('shows no trailing indicator for a clean ok check with no update', () => {
+    const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: false, checkStatus: 'ok' })} />);
+    expect(container.querySelector('[data-slot="cursor-container"]')).toBeNull();
+    expect(container.querySelector('.bg-update')).toBeNull();
   });
 });

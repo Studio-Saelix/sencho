@@ -3,6 +3,8 @@ import semver from 'semver';
 import DockerController from './DockerController';
 import { DatabaseService, Node, StackAlert } from './DatabaseService';
 import { NodeRegistry } from './NodeRegistry';
+import { FileSystemService } from './FileSystemService';
+import { normalizeImageRef } from './DriftDetectionService';
 import { NotificationService } from './NotificationService';
 import { FleetUpdateTrackerService } from './FleetUpdateTrackerService';
 import { isValidVersion, getSenchoVersion } from './CapabilityRegistry';
@@ -283,46 +285,54 @@ export class MonitorService {
         const suppressionMs = suppressionMin * 60 * 1000;
 
         // 1. Host Limits — fetch CPU, RAM, disk concurrently
-        try {
-            const [currentLoad, mem, fsSize] = await Promise.all([
-                withTimeout(si.currentLoad(), STATS_TIMEOUT_MS, 'host CPU stats'),
-                withTimeout(si.mem(), STATS_TIMEOUT_MS, 'host RAM stats'),
-                withTimeout(si.fsSize(), STATS_TIMEOUT_MS, 'host disk stats'),
-            ]);
+        if (settings['host_alerts_enabled'] !== '0') {
+            try {
+                const [currentLoad, mem, fsSize] = await Promise.all([
+                    withTimeout(si.currentLoad(), STATS_TIMEOUT_MS, 'host CPU stats'),
+                    withTimeout(si.mem(), STATS_TIMEOUT_MS, 'host RAM stats'),
+                    withTimeout(si.fsSize(), STATS_TIMEOUT_MS, 'host disk stats'),
+                ]);
 
-            const cpuUsage = currentLoad.currentLoad;
-            const cpuLimit = parseFloat(settings['host_cpu_limit']);
-            if (!isNaN(cpuLimit) && cpuLimit > 0 && cpuUsage > cpuLimit) {
-                await this.dispatchHostMetricAlert('cpu', 'warning', suppressionMs,
-                    `Host CPU utilization is critically high: ${cpuUsage.toFixed(1)}% (Threshold: ${cpuLimit}%)`);
-            } else {
-                this.clearHostMetricSuppression('cpu');
-            }
-
-            // Key off mem.active (the real working set), not mem.used: on Linux/BSD/macOS
-            // mem.used counts reclaimable page cache and reads ~99% on a busy host, which
-            // would fire spurious host-memory alerts.
-            const ramUsage = (mem.active / mem.total) * 100;
-            const ramLimit = parseFloat(settings['host_ram_limit']);
-            if (!isNaN(ramLimit) && ramLimit > 0 && ramUsage > ramLimit) {
-                await this.dispatchHostMetricAlert('ram', 'warning', suppressionMs,
-                    `Host Memory utilization is critically high: ${ramUsage.toFixed(1)}% (Threshold: ${ramLimit}%)`);
-            } else {
-                this.clearHostMetricSuppression('ram');
-            }
-
-            const mainDisk = fsSize.find(fs => fs.mount === '/' || fs.mount === 'C:') || fsSize[0];
-            if (mainDisk) {
-                const diskLimit = parseFloat(settings['host_disk_limit']);
-                if (!isNaN(diskLimit) && diskLimit > 0 && mainDisk.use > diskLimit) {
-                    await this.dispatchHostMetricAlert('disk', 'warning', suppressionMs,
-                        `Host Disk space utilization is critically high: ${mainDisk.use.toFixed(1)}% (Threshold: ${diskLimit}%)`);
+                const cpuUsage = currentLoad.currentLoad;
+                const cpuLimit = parseFloat(settings['host_cpu_limit']);
+                if (!isNaN(cpuLimit) && cpuLimit > 0 && cpuUsage > cpuLimit) {
+                    await this.dispatchHostMetricAlert('cpu', 'warning', suppressionMs,
+                        `Host CPU utilization is critically high: ${cpuUsage.toFixed(1)}% (Threshold: ${cpuLimit}%)`);
                 } else {
-                    this.clearHostMetricSuppression('disk');
+                    this.clearHostMetricSuppression('cpu');
                 }
+
+                // Key off mem.active (the real working set), not mem.used: on Linux/BSD/macOS
+                // mem.used counts reclaimable page cache and reads ~99% on a busy host, which
+                // would fire spurious host-memory alerts.
+                const ramUsage = (mem.active / mem.total) * 100;
+                const ramLimit = parseFloat(settings['host_ram_limit']);
+                if (!isNaN(ramLimit) && ramLimit > 0 && ramUsage > ramLimit) {
+                    await this.dispatchHostMetricAlert('ram', 'warning', suppressionMs,
+                        `Host Memory utilization is critically high: ${ramUsage.toFixed(1)}% (Threshold: ${ramLimit}%)`);
+                } else {
+                    this.clearHostMetricSuppression('ram');
+                }
+
+                const mainDisk = fsSize.find(fs => fs.mount === '/' || fs.mount === 'C:') || fsSize[0];
+                if (mainDisk) {
+                    const diskLimit = parseFloat(settings['host_disk_limit']);
+                    if (!isNaN(diskLimit) && diskLimit > 0 && mainDisk.use > diskLimit) {
+                        await this.dispatchHostMetricAlert('disk', 'warning', suppressionMs,
+                            `Host Disk space utilization is critically high: ${mainDisk.use.toFixed(1)}% (Threshold: ${diskLimit}%)`);
+                    } else {
+                        this.clearHostMetricSuppression('disk');
+                    }
+                }
+            } catch (e) {
+                console.error('Error checking host limits in watchdog', e);
             }
-        } catch (e) {
-            console.error('Error checking host limits in watchdog', e);
+        } else {
+            // Host threshold alerts are disabled: clear any stale suppression
+            // state so re-enabling starts fresh (no "Suppressed N" carryover).
+            this.clearHostMetricSuppression('cpu');
+            this.clearHostMetricSuppression('ram');
+            this.clearHostMetricSuppression('disk');
         }
 
         // 2. (Removed) Container crash + healthcheck detection moved to
@@ -366,6 +376,17 @@ export class MonitorService {
         try {
             const db = DatabaseService.getInstance();
             const settings = db.getGlobalSettings();
+
+            // Prune scans for artifacts that no longer exist (own try/catch so a
+            // reconcile failure never aborts the disk-usage check below). Lives
+            // here because it is Docker-heavy and the 15-min janitor cadence is
+            // the right throttle; it runs even when the disk alert is disabled.
+            try {
+                await this.reconcileOrphanedScans(db, settings);
+            } catch (e) {
+                console.error('[Monitor] Orphaned-scan reconcile failed', e);
+            }
+
             const janitorLimitGb = parseFloat(settings['docker_janitor_gb']);
             if (isNaN(janitorLimitGb) || janitorLimitGb <= 0) return;
 
@@ -438,6 +459,83 @@ export class MonitorService {
     }
 
     /**
+     * Remove scans whose artifact no longer exists, so the Security Overview
+     * reflects what is still on the host. Per-instance: only the local node's
+     * scans are reconciled against the local Docker image list and stack dirs.
+     *
+     * Fail-safe by construction: a scan is only purged when we positively know
+     * its artifact is gone. If the image list cannot be read, the whole pass is
+     * skipped (we never delete on an unread list). Stack scans are reconciled
+     * only when getStacks() returns a non-empty list, because it returns [] on
+     * both an empty dir and an FS error and we cannot tell them apart.
+     *
+     * Image refs are compared after normalizeImageRef so equivalent forms match
+     * (untagged `alpine` vs Docker's `alpine:latest`, `docker.io/library/`
+     * prefixes), and both RepoTags and RepoDigests feed the live set so a
+     * digest-pinned scan ref still matches a present image. Erring toward
+     * "matches, keep" is the safe direction: the cost of a miss is a stale scan,
+     * not a wrongly deleted one.
+     */
+    private async reconcileOrphanedScans(
+        db: DatabaseService,
+        settings: Readonly<Record<string, string>>,
+    ): Promise<void> {
+        // Destructive cleanup: enabled only on an explicit '1'. A missing key or
+        // a read failure leaves it off, the safe default.
+        if (settings['prune_orphaned_scans'] !== '1') return;
+
+        const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+
+        let liveImageRefs: Set<string>;
+        try {
+            const images = (await withTimeout(
+                DockerController.getInstance(nodeId).getImages(),
+                JANITOR_TIMEOUT_MS,
+                'docker images (scan reconcile)',
+            )) as Array<{ RepoTags?: string[]; RepoDigests?: string[] }>;
+            liveImageRefs = new Set<string>();
+            for (const img of images) {
+                for (const ref of [...(img.RepoTags ?? []), ...(img.RepoDigests ?? [])]) {
+                    if (ref && !ref.startsWith('<none>')) liveImageRefs.add(normalizeImageRef(ref));
+                }
+            }
+        } catch (e) {
+            if (isDebugEnabled()) {
+                console.debug('[Monitor:diag] Scan reconcile skipped: image list unavailable', e);
+            }
+            return;
+        }
+
+        // getStacks() never throws (it swallows FS errors and returns []), so an
+        // empty list is ambiguous (empty dir vs failed read); reconcileStacks
+        // gates stack purging on a non-empty list to avoid deleting on a failure.
+        const liveStacks = await FileSystemService.getInstance(nodeId).getStacks();
+        const reconcileStacks = liveStacks.length > 0;
+        const liveStackSet = new Set(liveStacks);
+
+        let purgedImageScans = 0;
+        let purgedStackScans = 0;
+        for (const ref of db.getDistinctScanImageRefs(nodeId)) {
+            if (ref.startsWith('stack:')) {
+                if (!reconcileStacks) continue;
+                if (!liveStackSet.has(ref.slice('stack:'.length))) {
+                    purgedStackScans += db.deleteScansByImageRef(nodeId, ref);
+                }
+            } else if (!liveImageRefs.has(normalizeImageRef(ref))) {
+                purgedImageScans += db.deleteScansByImageRef(nodeId, ref);
+            }
+        }
+
+        if (isDebugEnabled() && (purgedImageScans > 0 || purgedStackScans > 0)) {
+            console.debug(
+                `[Monitor:diag] Scan reconcile: purged ${purgedImageScans} image scan(s) `
+                + `(${liveImageRefs.size} live image refs), ${purgedStackScans} stack scan(s)`
+                + (reconcileStacks ? '' : ' (stack reconcile skipped: empty stack list)'),
+            );
+        }
+    }
+
+    /**
      * Check GitHub/Docker Hub for a newer Sencho release and dispatch a
      * one-shot notification. Uses getLatestVersion() which wraps CacheService
      * (30 min TTL + inflight dedup + stale-on-error) so transient network
@@ -502,7 +600,7 @@ export class MonitorService {
 
         try {
             const notifier = NotificationService.getInstance();
-            await notifier.dispatchAlert('info', 'system',
+            await notifier.dispatchAlert('info', 'node_update_available',
                 `Sencho ${latest} is available (currently running ${currentVersion}). Visit the Fleet dashboard to update.`);
             db.setSystemState(stateKey, latest);
             if (isDebugEnabled()) console.debug(`[Monitor:diag] Dispatched version notification: ${currentVersion} -> ${latest}`);

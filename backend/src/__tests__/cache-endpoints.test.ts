@@ -17,6 +17,8 @@
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_PASSWORD } from './helpers/setupTestDb';
+import { GitSourceService } from '../services/GitSourceService';
+import type { PublicGitSource } from '../services/GitSourceService';
 
 // ── Hoisted mocks (must come before importing the app) ─────────────────
 
@@ -218,6 +220,45 @@ describe('GET /api/stacks/statuses caching', () => {
 
     await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
     expect(mockGetStacks).toHaveBeenCalledTimes(2);
+  });
+
+  it('labels each stack with its git/local source, computed outside the cache', async () => {
+    mockGetStacks.mockResolvedValue(['web.yml', 'db.yml']);
+    mockGetBulkStackStatuses.mockResolvedValue({
+      web: { status: 'running' },
+      db: { status: 'running' },
+    });
+    // Only `web` is linked to a Git source.
+    const listSpy = vi
+      .spyOn(GitSourceService.getInstance(), 'list')
+      .mockReturnValue([{ stack_name: 'web' } as PublicGitSource]);
+
+    const first = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    expect(first.body['web.yml'].source).toBe('git');
+    expect(first.body['db.yml'].source).toBe('local');
+
+    // Source is recomputed live even when the Docker-status payload is cached:
+    // unlinking `web` flips it to local on the next request without a cache flush.
+    listSpy.mockReturnValue([]);
+    const second = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    expect(second.body['web.yml'].source).toBe('local');
+    expect(mockGetBulkStackStatuses).toHaveBeenCalledTimes(1); // status portion served from cache
+
+    listSpy.mockRestore();
+  });
+
+  it('falls back to local labels (200, not 500) when the git-source lookup throws', async () => {
+    mockGetStacks.mockResolvedValue(['web.yml']);
+    mockGetBulkStackStatuses.mockResolvedValue({ web: { status: 'running' } });
+    const listSpy = vi
+      .spyOn(GitSourceService.getInstance(), 'list')
+      .mockImplementation(() => { throw new Error('db locked'); });
+
+    const res = await request(app).get('/api/stacks/statuses').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body['web.yml'].source).toBe('local');
+
+    listSpy.mockRestore();
   });
 });
 

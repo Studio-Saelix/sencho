@@ -5,11 +5,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { PageMasthead, type MastheadTone } from '@/components/ui/PageMasthead';
 import { CapabilityGate } from '@/components/CapabilityGate';
-import { deriveMasthead } from './security/securityMasthead';
+import { deriveMasthead, SCANNER_DETECTIONS_NOTE } from './security/securityMasthead';
 import { springs } from '@/lib/motion';
 import { apiFetch } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
-import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { useImageScan } from '@/hooks/useImageScan';
@@ -17,11 +16,13 @@ import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, type Tone } from './mobile/mobile-ui';
 import { SecurityMobileTabs, type SecurityMobileTab } from './security/SecurityMobile';
 import type { SecurityTab } from '@/lib/events';
-import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, FleetRole } from '@/types/security';
+import type { ImageFilterValue } from '@/lib/severityStyles';
+import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, ExploitIntelFinding, FleetRole } from '@/types/security';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
 import { OverviewTab } from './security/OverviewTab';
+import { reasonImageFilter } from './security/postureNavigation';
 import { ImagesTab } from './security/ImagesTab';
 import { FindingsTab } from './security/FindingsTab';
 import { ScanPolicyManager } from './security/ScanPolicyManager';
@@ -61,7 +62,6 @@ const MOBILE_MASTHEAD_TONE: Record<MastheadTone, { dot: Tone; word: StateWordCla
 };
 
 export function SecurityView({ activeTab, onTabChange, headerActions }: SecurityViewProps) {
-  const { isPaid } = useLicense();
   const { isAdmin } = useAuth();
   const { activeNode } = useNodes();
   const isMobile = useIsMobile();
@@ -75,12 +75,26 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   const [summariesLoading, setSummariesLoading] = useState(true);
   const [summariesError, setSummariesError] = useState(false);
   const [trend, setTrend] = useState<SecurityRiskTrendPoint[]>([]);
+  const [exploitIntel, setExploitIntel] = useState<ExploitIntelFinding[]>([]);
+  // True when the exploit-intel query hit its row cap: the list shows the
+  // highest-risk findings but not every one, so the UI discloses it.
+  const [exploitTruncated, setExploitTruncated] = useState(false);
   const [isReplica, setIsReplica] = useState(false);
   // Bumped after a node-wide scan completes to refetch the active node's posture.
   const [reloadToken, setReloadToken] = useState(0);
 
   const [inspectScanId, setInspectScanId] = useState<number | null>(null);
   const [inspectInitialTab, setInspectInitialTab] = useState<ScanDetailTab | undefined>(undefined);
+  // Filter to preselect on the Images tab when arriving from an overview link
+  // (e.g. "fixable findings"). Null leaves the Images tab on its own default.
+  const [imagesFilter, setImagesFilter] = useState<ImageFilterValue | null>(null);
+
+  // Navigate between security tabs, optionally preselecting an Images filter so
+  // an overview action link lands on exactly the affected images.
+  const handleNavigate = useCallback((tab: SecurityTab, filter?: ImageFilterValue) => {
+    if (tab === 'images' && filter) setImagesFilter(filter);
+    onTabChange(tab);
+  }, [onTabChange]);
 
   const onInspect = useCallback((scanId: number, initialTab?: ScanDetailTab) => {
     setInspectInitialTab(initialTab);
@@ -114,6 +128,15 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         .then((r) => (r.ok ? r.json() : []))
         .then((t) => (Array.isArray(t) ? t : []))
         .catch(() => []);
+      // Exploit-intel powers two overview charts; isolate it like the trend so a
+      // failure (or an older node without the endpoint) degrades to empty panels.
+      const exploitIntelPromise: Promise<{ items: ExploitIntelFinding[]; truncated: boolean }> = apiFetch('/security/overview/exploit-intel')
+        .then((r) => (r.ok ? r.json() : { items: [], truncated: false }))
+        .then((b) => ({
+          items: b && Array.isArray(b.items) ? b.items : [],
+          truncated: b?.truncated === true,
+        }))
+        .catch(() => ({ items: [], truncated: false }));
       try {
         const [overviewRes, summariesRes] = await Promise.all([
           apiFetch('/security/overview'),
@@ -154,8 +177,12 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       } finally {
         if (!cancelled) setSummariesLoading(false);
       }
-      const trend = await trendPromise;
-      if (!cancelled) setTrend(trend);
+      const [trendData, intelData] = await Promise.all([trendPromise, exploitIntelPromise]);
+      if (!cancelled) {
+        setTrend(trendData);
+        setExploitIntel(intelData.items);
+        setExploitTruncated(intelData.truncated);
+      }
     })();
     return () => { cancelled = true; };
   }, [activeNode?.id, reloadToken]);
@@ -180,31 +207,45 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     return () => { cancelled = true; };
   }, [isRemote, activeNode?.id]);
 
-  // The Policies tab hosts only the paid enforcement manager, so it is hidden for
-  // Community; redirect off it if a deep-link lands a Community user there.
-  useEffect(() => {
-    if (!isPaid && activeTab === 'policies') onTabChange('overview');
-  }, [isPaid, activeTab, onTabChange]);
-
   const { state, tone } = deriveMasthead(overview, overviewLoadError !== null);
   const pulsing = tone === 'live' && !!overview?.scanner.available;
 
-  // The mobile tab strip mirrors the desktop tab IA, including the paid-only
-  // Policies tab when licensed, so every section stays reachable by scroll.
+  // The mobile tab strip mirrors the desktop tab IA, so every section stays
+  // reachable by scroll.
   const mobileTabs: SecurityMobileTab[] = [
     { value: 'overview', label: 'Overview' },
     { value: 'images', label: 'Images' },
     { value: 'compose', label: 'Compose risks' },
     { value: 'secrets', label: 'Secrets' },
-    ...(isPaid ? [{ value: 'policies', label: 'Policies' } as const] : []),
+    { value: 'policies', label: 'Policies' },
     { value: 'suppressions', label: 'Suppressions' },
     { value: 'history', label: 'History' },
     { value: 'scanner', label: 'Scanner setup' },
   ];
 
-  const subtitle = overview
-    ? `${overview.scannedImages} ${overview.scannedImages === 1 ? 'image' : 'images'} scanned · scanner ${overview.scanner.available ? 'ready' : 'not installed'}`
-    : undefined;
+  // The scanner-detections disclaimer rides as an info affordance next to the
+  // scanned-images count rather than a standing caption below the masthead.
+  // When posture is Action needed, the subtitle leads with the action count and
+  // top blocker labels so the operator sees "why red" without opening the page.
+  const blockers = overview?.postureReasons?.filter((r) => r.severity === 'blocker') ?? [];
+  const actionSummary = overview?.posture === 'Action needed' && blockers.length > 0
+    ? `${blockers.length} action${blockers.length === 1 ? '' : 's'}: ${blockers.slice(0, 2).map((r) => r.label.toLowerCase()).join(', ')} · `
+    : null;
+  const subtitle = overview ? (
+    <span className="inline-flex items-center gap-1.5">
+      {actionSummary ? <span>{actionSummary}</span> : null}
+      <span>
+        {overview.scannedImages} {overview.scannedImages === 1 ? 'image' : 'images'} scanned · scanner {overview.scanner.available ? 'ready' : 'not installed'}
+      </span>
+      <span
+        className="inline-flex shrink-0 cursor-help text-stat-subtitle/70 hover:text-stat-subtitle"
+        title={SCANNER_DETECTIONS_NOTE}
+        aria-label={SCANNER_DETECTIONS_NOTE}
+      >
+        <Info className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
+      </span>
+    </span>
+  ) : undefined;
 
   // The tab panels are identical on desktop and mobile; only the masthead and
   // the tab strip differ, so the panels are shared between both layouts.
@@ -214,13 +255,13 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           <OverviewTab
             overview={overview}
             loadError={overviewLoadError}
-            summaries={summaries}
             trend={trend}
-            onNavigate={onTabChange}
+            exploitIntel={exploitIntel}
+            exploitTruncated={exploitTruncated}
+            onNavigate={handleNavigate}
             onInspect={onInspect}
             canScan={canScan}
             onScanComplete={() => setReloadToken((t) => t + 1)}
-            isPaid={isPaid}
           />
         </TabsContent>
 
@@ -234,6 +275,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               canScan={canScan}
               scanningRef={scanningRef}
               onScan={scanImage}
+              initialFilter={imagesFilter ?? undefined}
             />
           </CapabilityGate>
         </TabsContent>
@@ -250,11 +292,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           </CapabilityGate>
         </TabsContent>
 
-        {isPaid && (
-          <TabsContent value="policies">
-            <ScanPolicyManager />
-          </TabsContent>
-        )}
+        <TabsContent value="policies">
+          <ScanPolicyManager />
+        </TabsContent>
 
         <TabsContent value="suppressions">
           {isRemote ? (
@@ -293,7 +333,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       initialTab={inspectInitialTab}
       onClose={() => setInspectScanId(null)}
       canGenerateSbom={isAdmin}
-      canExportSarif={isPaid && isAdmin}
+      canExportSarif={isAdmin}
       canCompare
       canManageSuppressions={isAdmin}
     />
@@ -329,7 +369,6 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
   return (
     <div className="h-full overflow-auto p-6">
       <PageMasthead
-        kicker="SECURITY"
         state={state}
         tone={tone}
         pulsing={pulsing}
@@ -341,11 +380,27 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           { label: 'HIGH', value: String(overview.high), tone: overview.high > 0 ? 'warn' : 'value' },
           { label: 'LAST SCAN', value: overview.lastSuccessfulScanAt ? formatTimeAgo(overview.lastSuccessfulScanAt) : 'never', tone: 'subtitle' },
         ] : undefined}
-      />
+      >
+        {overview?.posture === 'Action needed' && overview.primaryAction ? (
+          <button
+            type="button"
+            onClick={() => handleNavigate(
+              overview.primaryAction!.targetTab,
+              reasonImageFilter(overview.primaryAction!.kind),
+            )}
+            className="text-xs font-medium text-brand hover:underline whitespace-nowrap"
+          >
+            {overview.primaryAction.label} →
+          </button>
+        ) : null}
+      </PageMasthead>
 
       <Tabs value={activeTab} onValueChange={(v) => onTabChange(v as SecurityTab)}>
-        <TabsList className="mb-4">
-          <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+        {/* Standard full-width tab band (matches Fleet): the list's own pill band
+            is flattened so the tabs sit directly in this single band. */}
+        <div className="flex items-center gap-3 mb-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
+          <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
+            <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
             <TabsHighlightItem value="overview">
               <TabsTrigger value="overview"><LayoutDashboard className="w-4 h-4 mr-1.5" />Overview</TabsTrigger>
             </TabsHighlightItem>
@@ -359,11 +414,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               <TabsTrigger value="secrets"><KeyRound className="w-4 h-4 mr-1.5" />Secrets</TabsTrigger>
             </TabsHighlightItem>
             <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-            {isPaid && (
-              <TabsHighlightItem value="policies">
-                <TabsTrigger value="policies"><BookCheck className="w-4 h-4 mr-1.5" />Policies</TabsTrigger>
-              </TabsHighlightItem>
-            )}
+            <TabsHighlightItem value="policies">
+              <TabsTrigger value="policies"><BookCheck className="w-4 h-4 mr-1.5" />Policies</TabsTrigger>
+            </TabsHighlightItem>
             <TabsHighlightItem value="suppressions">
               <TabsTrigger value="suppressions"><EyeOff className="w-4 h-4 mr-1.5" />Suppressions</TabsTrigger>
             </TabsHighlightItem>
@@ -374,7 +427,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               <TabsTrigger value="scanner"><Wrench className="w-4 h-4 mr-1.5" />Scanner setup</TabsTrigger>
             </TabsHighlightItem>
           </TabsHighlight>
-        </TabsList>
+          </TabsList>
+        </div>
         {tabPanels}
       </Tabs>
 

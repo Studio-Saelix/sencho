@@ -30,17 +30,14 @@ function SectionSkeleton() {
     );
 }
 
-type HostAlertFields = Pick<PatchableSettings, 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins' | 'global_crash' | 'health_gate_enabled' | 'health_gate_window_seconds' | 'env_block_deploy_on_missing_required'>;
+type HostAlertFields = Pick<PatchableSettings, 'host_alerts_enabled' | 'host_cpu_limit' | 'host_ram_limit' | 'host_disk_limit' | 'host_alert_suppression_mins'>;
 
 const DEFAULT_HOST_ALERTS: HostAlertFields = {
+    host_alerts_enabled: DEFAULT_SETTINGS.host_alerts_enabled,
     host_cpu_limit: DEFAULT_SETTINGS.host_cpu_limit,
     host_ram_limit: DEFAULT_SETTINGS.host_ram_limit,
     host_disk_limit: DEFAULT_SETTINGS.host_disk_limit,
     host_alert_suppression_mins: DEFAULT_SETTINGS.host_alert_suppression_mins,
-    global_crash: DEFAULT_SETTINGS.global_crash,
-    health_gate_enabled: DEFAULT_SETTINGS.health_gate_enabled,
-    health_gate_window_seconds: DEFAULT_SETTINGS.health_gate_window_seconds,
-    env_block_deploy_on_missing_required: DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
 };
 
 export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
@@ -74,14 +71,11 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                 const nodeRes = await apiFetch('/settings');
                 const nodeData: Record<string, string> = nodeRes.ok ? await nodeRes.json() : {};
                 const safe: HostAlertFields = {
+                    host_alerts_enabled: (nodeData.host_alerts_enabled as '0' | '1') ?? DEFAULT_SETTINGS.host_alerts_enabled,
                     host_cpu_limit: nodeData.host_cpu_limit ?? DEFAULT_SETTINGS.host_cpu_limit,
                     host_ram_limit: nodeData.host_ram_limit ?? DEFAULT_SETTINGS.host_ram_limit,
                     host_disk_limit: nodeData.host_disk_limit ?? DEFAULT_SETTINGS.host_disk_limit,
                     host_alert_suppression_mins: nodeData.host_alert_suppression_mins ?? DEFAULT_SETTINGS.host_alert_suppression_mins,
-                    global_crash: (nodeData.global_crash as '0' | '1') ?? DEFAULT_SETTINGS.global_crash,
-                    health_gate_enabled: (nodeData.health_gate_enabled as '0' | '1') ?? DEFAULT_SETTINGS.health_gate_enabled,
-                    health_gate_window_seconds: nodeData.health_gate_window_seconds ?? DEFAULT_SETTINGS.health_gate_window_seconds,
-                    env_block_deploy_on_missing_required: (nodeData.env_block_deploy_on_missing_required as '0' | '1') ?? DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
                 };
                 reset(safe);
             } catch (e) {
@@ -112,7 +106,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                 return;
             }
             markSaved(submitted);
-            toast.success('Host alerts saved.');
+            toast.success('Host alert settings saved.');
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');
         } finally {
@@ -126,6 +120,15 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
         <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
             <SettingsSection title="Host thresholds">
                 <SettingsField
+                    label="Host threshold alerts"
+                    helper="Master switch for CPU, RAM, and disk threshold alerts only. When OFF, no host threshold checks run and the controls below are inactive. Stack alert rules are unaffected."
+                >
+                    <TogglePill
+                        checked={settings.host_alerts_enabled === '1'}
+                        onChange={(next) => onSettingChange('host_alerts_enabled', next ? '1' : '0')}
+                    />
+                </SettingsField>
+                <SettingsField
                     label="CPU limit"
                     helper="Alerts fire when host CPU utilization exceeds this percentage."
                 >
@@ -136,6 +139,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                         min={1}
                         max={100}
                         warnOver={95}
+                        disabled={settings.host_alerts_enabled !== '1'}
                     />
                 </SettingsField>
                 <SettingsField
@@ -149,6 +153,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                         min={1}
                         max={100}
                         warnOver={95}
+                        disabled={settings.host_alerts_enabled !== '1'}
                     />
                 </SettingsField>
                 <SettingsField
@@ -162,6 +167,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                         min={1}
                         max={100}
                         warnOver={95}
+                        disabled={settings.host_alerts_enabled !== '1'}
                     />
                 </SettingsField>
                 <SettingsField
@@ -174,54 +180,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                         suffix="min"
                         min={1}
                         max={1440}
-                    />
-                </SettingsField>
-            </SettingsSection>
-
-            <SettingsSection title="Crash capture">
-                <SettingsField
-                    label="Global crash capture"
-                    helper="Watch every managed container for unexpected exits."
-                >
-                    <TogglePill
-                        checked={settings.global_crash === '1'}
-                        onChange={(next) => onSettingChange('global_crash', next ? '1' : '0')}
-                    />
-                </SettingsField>
-            </SettingsSection>
-
-            <SettingsSection title="Update health gate">
-                <SettingsField
-                    label="Observe health after updates"
-                    helper="After a stack deploy or update succeeds, watch its containers for the observation window and record a passed or failed verdict on the stack timeline. Observational only: nothing is restarted or rolled back automatically. On by default."
-                >
-                    <TogglePill
-                        checked={settings.health_gate_enabled === '1'}
-                        onChange={(next) => onSettingChange('health_gate_enabled', next ? '1' : '0')}
-                    />
-                </SettingsField>
-                <SettingsField
-                    label="Observation window"
-                    helper="How long to watch containers before declaring the update healthy. Raise it for stacks that take a while to settle. Default 90 seconds."
-                >
-                    <NumberChip
-                        value={settings.health_gate_window_seconds || '90'}
-                        onChange={(v) => onSettingChange('health_gate_window_seconds', v)}
-                        suffix="s"
-                        min={15}
-                        max={600}
-                    />
-                </SettingsField>
-            </SettingsSection>
-
-            <SettingsSection title="Deploy guardrails">
-                <SettingsField
-                    label="Block deploy on missing required env vars"
-                    helper="When on, a deploy or update is refused before it starts if a required ${VAR:?message} variable is unset or empty, so the stack fails fast with a clear message instead of mid-deploy. Off by default."
-                >
-                    <TogglePill
-                        checked={settings.env_block_deploy_on_missing_required === '1'}
-                        onChange={(next) => onSettingChange('env_block_deploy_on_missing_required', next ? '1' : '0')}
+                        disabled={settings.host_alerts_enabled !== '1'}
                     />
                 </SettingsField>
             </SettingsSection>

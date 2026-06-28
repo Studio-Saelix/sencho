@@ -11,5 +11,6 @@ export const CATEGORY_LABELS: Record<NotificationCategory, string> = {
     autoheal_triggered: 'Auto-heal',
     monitor_alert: 'Monitor alert',
     scan_finding: 'Scan finding',
+    node_update_available: 'Node update',
     system: 'System',
 };

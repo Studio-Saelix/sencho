@@ -47,6 +47,8 @@ Image references are compared after normalizing the implicit Docker Hub registry
 
 Each time you **re-check** a stack, and after every deploy, Sencho records the findings it sees. The **Drift history** list under the findings shows recent entries with when each was first **detected** and, once it clears, when it was **resolved**. This turns a point-in-time check into a short ledger of how a stack has drifted and recovered over time.
 
+The history is labelled with when it was last checked. The status badge at the top is always live, recomputed each time you open the tab, while the history reflects the last time the ledger was reconciled. When the two differ, re-check to bring the history up to date.
+
 Drift that appears or clears is also written to the stack's **Activity** timeline, so **Drift detected** and **Drift resolved** events sit alongside deploys and restarts.
 
 ## Accessing the Drift tab

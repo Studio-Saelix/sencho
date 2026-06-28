@@ -241,6 +241,46 @@ describe('prune_on_update (auto-prune after updates)', () => {
   });
 });
 
+describe('prune_orphaned_scans (purge scans for deleted images/stacks)', () => {
+  it('defaults to ON in a freshly seeded database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().prune_orphaned_scans).toBe('1');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.prune_orphaned_scans).toBeDefined();
+  });
+
+  it('rejects a non-admin write with 403', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', viewerCookie)
+      .send({ key: 'prune_orphaned_scans', value: '0' });
+    expect(res.status).toBe(403);
+  });
+
+  it('accepts a well-formed write and rejects a non-enum value', async () => {
+    const ok = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'prune_orphaned_scans', value: '0' });
+    expect(ok.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().prune_orphaned_scans).toBe('0');
+
+    const bad = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'prune_orphaned_scans', value: 'banana' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('Validation failed');
+    expect(DatabaseService.getInstance().getGlobalSettings().prune_orphaned_scans).toBe('0');
+
+    // Restore the seeded default so later suites observe the shipped behavior.
+    DatabaseService.getInstance().updateGlobalSetting('prune_orphaned_scans', '1');
+  });
+});
+
 describe('health gate settings', () => {
   it('seeds enabled with a 90 second window in a fresh database', () => {
     const settings = DatabaseService.getInstance().getGlobalSettings();
@@ -334,6 +374,57 @@ describe('env_block_deploy_on_missing_required setting', () => {
     expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('1');
 
     DatabaseService.getInstance().updateGlobalSetting('env_block_deploy_on_missing_required', '0');
+  });
+});
+
+describe('host_alerts_enabled toggle', () => {
+  it('seeds to "1" (on) in a fresh database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().host_alerts_enabled).toBe('1');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.host_alerts_enabled).toBeDefined();
+  });
+
+  it('accepts a single-key POST write and persists it', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'host_alerts_enabled', value: '0' });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().host_alerts_enabled).toBe('0');
+    DatabaseService.getInstance().updateGlobalSetting('host_alerts_enabled', '1');
+  });
+
+  it('accepts a bulk PATCH alongside another key', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ host_alerts_enabled: '0', host_cpu_limit: 75 });
+    expect(res.status).toBe(200);
+    const settings = DatabaseService.getInstance().getGlobalSettings();
+    expect(settings.host_alerts_enabled).toBe('0');
+    expect(settings.host_cpu_limit).toBe('75');
+    DatabaseService.getInstance().updateGlobalSetting('host_alerts_enabled', '1');
+    DatabaseService.getInstance().updateGlobalSetting('host_cpu_limit', '90');
+  });
+
+  it('rejects non-enum values with 400', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'host_alerts_enabled', value: '2' });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects viewer write with 403', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', viewerCookie)
+      .send({ key: 'host_alerts_enabled', value: '0' });
+    expect(res.status).toBe(403);
   });
 });
 

@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
-import { ChevronLeft, ChevronRight, Plus, Trash2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, Pencil, Trash2 } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { FleetTabHeading } from '@/components/fleet/FleetEmptyState';
@@ -40,6 +40,8 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState<AckFormState>(EMPTY_FORM);
+  // The row being edited, or null when the dialog is creating a new ack.
+  const [editRow, setEditRow] = useState<MisconfigAcknowledgement | null>(null);
   const [saving, setSaving] = useState(false);
   const [deleteRow, setDeleteRow] = useState<MisconfigAcknowledgement | null>(null);
   const [page, setPage] = useState(0);
@@ -68,13 +70,29 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
   const needsPagination = rows.length > PAGE_SIZE;
 
   const openCreate = () => {
+    setEditRow(null);
     setForm(EMPTY_FORM);
     setDialogOpen(true);
   };
 
+  const openEdit = (row: MisconfigAcknowledgement) => {
+    setEditRow(row);
+    setForm({
+      ruleId: row.rule_id,
+      stackPattern: row.stack_pattern ?? '',
+      reason: row.reason,
+      // Recompute expiry as days from now; blank means no expiry. The rule id is
+      // identity and not editable.
+      expiresInDays: row.expires_at === null ? '' : String(Math.max(1, Math.ceil((row.expires_at - Date.now()) / 86_400_000))),
+    });
+    setDialogOpen(true);
+  };
+
   const handleSave = async () => {
+    // The rule id identifies an acknowledgement, so it is only validated and sent
+    // on create; edit updates stack pattern, reason, and expiry.
     const ruleId = form.ruleId.trim();
-    if (!RULE_RE.test(ruleId)) {
+    if (!editRow && !RULE_RE.test(ruleId)) {
       toast.error('Rule id must be alpha-numeric (e.g. "DS002" or "AVD-DS-0002").');
       return;
     }
@@ -95,25 +113,35 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
     }
     setSaving(true);
     try {
-      const res = await apiFetch('/security/misconfig-acks', {
-        method: 'POST',
-        localOnly: true,
-        body: JSON.stringify({
-          rule_id: ruleId,
-          stack_pattern: form.stackPattern.trim() || null,
-          reason,
-          expires_at: expiresAt,
-        }),
-      });
+      const res = editRow
+        ? await apiFetch(`/security/misconfig-acks/${editRow.id}`, {
+            method: 'PUT',
+            localOnly: true,
+            body: JSON.stringify({
+              stack_pattern: form.stackPattern.trim() || null,
+              reason,
+              expires_at: expiresAt,
+            }),
+          })
+        : await apiFetch('/security/misconfig-acks', {
+            method: 'POST',
+            localOnly: true,
+            body: JSON.stringify({
+              rule_id: ruleId,
+              stack_pattern: form.stackPattern.trim() || null,
+              reason,
+              expires_at: expiresAt,
+            }),
+          });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error || 'Failed to create acknowledgement');
+        throw new Error(body?.error || `Failed to ${editRow ? 'update' : 'create'} acknowledgement`);
       }
-      toast.success('Acknowledgement created');
+      toast.success(editRow ? 'Acknowledgement updated' : 'Acknowledgement created');
       setDialogOpen(false);
       await load();
     } catch (err) {
-      toast.error((err as Error)?.message || 'Failed to create acknowledgement');
+      toast.error((err as Error)?.message || `Failed to ${editRow ? 'update' : 'create'} acknowledgement`);
     } finally {
       setSaving(false);
     }
@@ -228,15 +256,26 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
                   </div>
                 </div>
                 {isAdmin && !isReplica && row.replicated_from_control === 0 && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground shrink-0"
-                    onClick={() => setDeleteRow(row)}
-                    title="Remove acknowledgement"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  </Button>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-stat-subtitle hover:text-stat-value"
+                      onClick={() => openEdit(row)}
+                      title="Edit acknowledgement"
+                    >
+                      <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+                      onClick={() => setDeleteRow(row)}
+                      title="Remove acknowledgement"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                    </Button>
+                  </div>
                 )}
               </li>
             ))}
@@ -247,9 +286,11 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
 
       <Modal open={dialogOpen} onOpenChange={setDialogOpen} size="md">
         <ModalHeader
-          kicker="ACKNOWLEDGEMENTS · NEW"
-          title="New misconfig acknowledgement"
-          description="Accept a known-benign misconfiguration so it stops triggering alerts across the fleet."
+          kicker={editRow ? 'ACKNOWLEDGEMENTS · EDIT' : 'ACKNOWLEDGEMENTS · NEW'}
+          title={editRow ? 'Edit acknowledgement' : 'New misconfig acknowledgement'}
+          description={editRow
+            ? 'Update the reason, stack scope, or expiry. The rule id is fixed.'
+            : 'Accept a known-benign misconfiguration so it stops triggering alerts across the fleet.'}
         />
         <ModalBody>
           <div className="space-y-2">
@@ -258,6 +299,7 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
               id="ack-rule"
               placeholder="DS002 or AVD-DS-0002"
               value={form.ruleId}
+              disabled={!!editRow}
               onChange={(e) => setForm({ ...form, ruleId: e.target.value })}
             />
           </div>
@@ -300,7 +342,7 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
           }
           primary={
             <Button size="sm" onClick={handleSave} disabled={saving}>
-              {saving ? 'Saving...' : 'Create'}
+              {saving ? 'Saving...' : editRow ? 'Save changes' : 'Create'}
             </Button>
           }
         />

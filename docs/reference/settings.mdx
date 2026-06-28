@@ -16,7 +16,7 @@ Open the Settings Hub by clicking the **Profile** icon in the top bar and select
 | **Personal** | Account, Appearance |
 | **Access** | License, Users, SSO, API Tokens |
 | **Infrastructure** | Nodes, Fleet Mesh, Registries, Cloud Backup, App Store, Stacks |
-| **Monitoring** | Host Alerts, Docker & Storage |
+| **Monitoring** | Host Alerts, Container Alerts, Docker & Storage |
 | **Notifications** | Channels, Notification Routing |
 | **Automation** | Webhooks |
 | **Organization** | Labels |
@@ -33,7 +33,7 @@ Every section renders inside the same masthead-and-sidebar layout. The masthead 
 
 | Pill | Meaning |
 |------|---------|
-| **SCOPE** `operator` / `browser` / `global` | Setting applies to your account (`operator`), to this browser only (`browser`, for browser-local sections such as Appearance and Stacks), or to the whole instance (`global`, every other non-node group) |
+| **SCOPE** `operator` / `browser` / `global` | Setting applies to your account (`operator`), to this browser only (`browser`, for browser-local sections such as Appearance), or to the whole instance (`global`, every other non-node group) |
 | **NODE** `<node name>` | Setting is per-node and is currently being edited against this node |
 | **EDITED** `<count>` pending / `saved` | The current section has unsaved changes |
 | Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (License); `OPERATORS` (Users); `CHANNELS` (Channels); `ROUTES` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `PROVIDER`, `USED`, `SNAPSHOTS` (Cloud Backup); `DEV MODE` (Developer Diagnostics) |
@@ -97,11 +97,32 @@ See [Two-Factor Authentication](/features/two-factor-authentication) for the enr
 
 **Scope:** This browser (preferences are saved to local storage)
 
-Control how dense and how interactive the workspace feels. Each browser remembers its own choices so a compact laptop setup does not force the same rhythm on a larger desktop.
+Control how Sencho looks and how dense the workspace feels. Each browser remembers its own choices so a compact laptop setup does not force the same rhythm on a larger desktop. See [Appearance](/features/appearance) for the full walkthrough.
 
 <Frame>
   <img src="/images/settings/appearance-density.png" alt="Appearance settings showing the Density selector" />
 </Frame>
+
+### Visual style and readability
+
+| Control | What it does |
+|---------|--------------|
+| **Visual style** | Master switch between **Calm** (upright headings, muted charts, reduced effects, the default) and **Signature** (italic Instrument Serif headings, saturated charts). |
+| **Readability mode** | One switch for the most legible result: upright headings, muted charts, reduced effects, and a contrast lift. Locks the heading and chart controls while on. |
+| **Header style** | Clean (upright interface face) or Signature (italic serif). |
+| **Contrast** | Spreads the page tone, borders, and text tiers together. |
+
+### Charts and effects
+
+| Control | What it does |
+|---------|--------------|
+| **Chart palette** | Colors the Security page charts: **Muted**, **Heat** (one warm ramp), or **Signature** (saturated). |
+| **Reduced effects** | Flattens card bevels, the accent glow, and chart gradients. |
+| **Ambient glow** | Intensity of the accent-tinted page glow. |
+
+### Theme and typography
+
+The **Mode** (Dim, OLED, Light, Auto) and **Accent** (one of eight hues) set the surface palette and data color; **Border brightness** tunes every hairline. The **Interface font**, **Data font**, and **Text size** are yours to change; the heading style follows your Visual style choice.
 
 ### Density
 
@@ -204,28 +225,35 @@ See [API Tokens](/features/api-tokens) for the full walkthrough.
 
 **Scope:** Per-node (applies to the currently selected node)
 
-Configure the host resource thresholds that trigger warnings, the suppression cadence for repeated alerts, and whether unexpected container exits raise a crash alert. These are alerting thresholds, not enforcement: Sencho warns when a metric crosses a line, it never throttles or kills containers. The masthead **NODE** pill names which node you are configuring; the **EDITED** pill counts unsaved changes.
+Configure the host resource thresholds that trigger warnings and the suppression cadence for repeated alerts. These are alerting thresholds, not enforcement: Sencho warns when a metric crosses a line, it never throttles or kills containers. The masthead **NODE** pill names which node you are configuring; the **EDITED** pill counts unsaved changes.
 
 <Frame>
-  <img src="/images/settings/settings-host-alerts.png" alt="Host Alerts section showing the Host thresholds and Crash capture subsections" />
+  <img src="/images/settings/settings-host-alerts.png" alt="Host Alerts section showing the Host thresholds subsection with the master toggle and CPU, RAM, Disk, and Alert suppression controls" />
 </Frame>
-
-### Host thresholds
 
 | Setting | Default | Description |
 |---------|---------|-------------|
+| **Host threshold alerts** | On | Master switch for CPU, RAM, and disk threshold alerts only. When OFF, no host threshold checks run and the controls below are inactive. |
 | **CPU limit** | 90% | Alerts fire when host CPU utilization exceeds this percentage. The input warns at values above 95%. |
 | **RAM limit** | 90% | Set this below the point at which the host starts paging to swap. |
 | **Disk limit** | 90% | Low free space slows image pulls and backups. |
 | **Alert suppression** | 60 min | How long to wait before resending a host alert while the metric stays over threshold. The follow-up message includes a count of suppressed cycles. Range 1 to 1,440 minutes. |
 
-### Crash capture
+Click **Save alerts** to apply.
+
+---
+
+## Container Alerts
+
+**Scope:** Per-node (applies to the currently selected node)
+
+Controls whether Sencho watches every managed container on this node for unexpected exits, OOM kills, and Docker healthcheck failures, and dispatches alerts for each. Auto-Heal observes crash signals independently regardless of this toggle, so turning it off stops alerts but does not stop Auto-Heal.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| **Global crash capture** | On | Watch every managed container for unexpected exits. When on, Sencho sends a notification whenever a container exits with a non-zero status outside a planned stop. |
+| **Container crash & health alerts** | On | Send alerts for unexpected container exits, OOM kills, and Docker healthcheck failures. Auto-Heal can still observe crash signals independently. |
 
-Click **Save alerts** to apply.
+Click **Save settings** to apply.
 
 ---
 
@@ -426,7 +454,10 @@ How long Sencho keeps historical data on this node before pruning it.
 | **Container metrics** | 24 hrs | 8,760 (1 year) | How long to keep per-container CPU, RAM, and network history for dashboard charts. |
 | **Notification log** | 30 days | 365 | How long to keep alert and notification history. |
 | **Scan history per image** | 50 scans | 1,000 | How many vulnerability scans to keep per image. Older scans beyond the cap are pruned. |
+| **Remove scans for deleted images and stacks** | On | - | When on, scan results are deleted once their image is gone from this node or their stack is deleted, so the Security Overview stays tied to what still exists. Turn it off to keep scan history for removed images and stacks. |
 | **Audit log** | 90 days | 365 | How long to keep audit trail entries. Requires Admiral. |
+
+Removing scans for deleted artifacts runs in the background a few minutes after an image or stack disappears, and immediately when you delete a stack. An image that is still present on the node keeps its scan results, even when no stack uses it.
 
 Click **Save settings** to apply.
 
@@ -465,11 +496,13 @@ See [App Store](/features/app-store#custom-template-registry) for more on custom
 
 ## Stacks
 
+Stack editor, lifecycle workflow preferences, and deploy guardrails. The Workflow controls are browser-local (each browser remembers its own choices). The Deploy Guardrails are node-scoped backend settings. The masthead shows the **NODE** pill for this section.
+
+### Workflow
+
 **Scope:** This browser (preferences are saved to local storage)
 
-Stack editor and lifecycle workflow preferences. Each browser remembers its own choices, so they follow you across tabs but never change what other operators see. The masthead reads `SCOPE browser`.
-
-### Deploy progress
+#### Deploy progress
 
 Sencho streams live output whenever you deploy, restart, update, install, or run a Git operation. It is on by default; turn it off to run operations without it. When it is on, **Progress style** chooses how it appears: **Modal** (a centered overlay that closes automatically on success or stays open on failure) or **Inline** (a quiet status band on the stack detail). See [Deploy Progress](/features/deploy-progress) for the full reference.
 
@@ -478,7 +511,7 @@ Sencho streams live output whenever you deploy, restart, update, install, or run
 | **Enabled** (default) | A progress surface (the Modal overlay or the Inline band, per Progress style) shows for every long-running operation |
 | **Disabled** | Operations run without it; results surface via toast notifications, and a failed operation still shows recovery actions on the stack page |
 
-### Diff preview before save
+#### Diff preview before save
 
 When enabled, clicking **Save & Deploy** or **Save Only** in the compose or env editor opens a side-by-side diff modal before writing anything to disk. The left pane shows the current on-disk content; the right pane shows your unsaved edits, with additions highlighted green and removals highlighted red.
 
@@ -488,6 +521,20 @@ When enabled, clicking **Save & Deploy** or **Save Only** in the compose or env 
 | **Disabled** (default) | File is saved directly without a review step |
 
 If there are no unsaved changes the modal is skipped and the save proceeds immediately. See [Diff preview before save](/features/editor#diff-preview-before-save) in the Editor guide for the full workflow.
+
+### Deploy Guardrails
+
+**Scope:** Per-node (saved on the active node, admin-only)
+
+Node-level safety checks and post-deploy observation used during stack deploys and updates.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Observe health after updates** | On | After a stack deploy or update succeeds, watch its containers for the observation window and record a passed or failed verdict on the stack timeline. Observational only: nothing is restarted or rolled back automatically. |
+| **Observation window** | 90 s | How long to watch containers before declaring the update healthy. Raise it for stacks that take a while to settle. Range 15 to 600 seconds. |
+| **Block deploy on missing required env vars** | Off | When on, a deploy or update is refused before it starts if a required `${VAR:?message}` variable is unset or empty, so the stack fails fast with a clear message instead of mid-deploy. |
+
+Click **Save settings** to apply.
 
 ---
 

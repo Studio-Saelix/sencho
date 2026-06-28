@@ -15,6 +15,7 @@ const {
   mockContainerInspect, mockContainerLogs,
   mockGetRegistries, mockResolveDockerConfig,
   mockBackupStackFiles, mockRestoreStackFiles,
+  mockGetComposeFilename, mockGetOverrideFilename, mockEnsureStackOverride,
   mockMkdtempSync, mockWriteFileSync, mockUnlinkSync, mockRmdirSync,
   mockGetGlobalSettings, mockPruneDanglingImages,
 } = vi.hoisted(() => ({
@@ -28,6 +29,9 @@ const {
   mockResolveDockerConfig: vi.fn().mockResolvedValue({ config: { auths: {} }, warnings: [] }),
   mockBackupStackFiles: vi.fn().mockResolvedValue(undefined),
   mockRestoreStackFiles: vi.fn().mockResolvedValue(undefined),
+  mockGetComposeFilename: vi.fn().mockResolvedValue('compose.yaml'),
+  mockGetOverrideFilename: vi.fn().mockResolvedValue(null),
+  mockEnsureStackOverride: vi.fn().mockResolvedValue(null),
   mockMkdtempSync: vi.fn().mockReturnValue('/tmp/sencho-docker-test'),
   mockWriteFileSync: vi.fn(),
   mockUnlinkSync: vi.fn(),
@@ -83,6 +87,7 @@ vi.mock('../services/DatabaseService', () => ({
       getRegistries: mockGetRegistries,
       getGlobalSettings: mockGetGlobalSettings,
       getGitSource: () => undefined,
+      getStackProjectEnvFiles: () => [],
     }),
   },
 }));
@@ -100,24 +105,28 @@ vi.mock('../services/FileSystemService', () => ({
     getInstance: () => ({
       backupStackFiles: mockBackupStackFiles,
       restoreStackFiles: mockRestoreStackFiles,
+      getComposeFilename: mockGetComposeFilename,
+      getOverrideFilename: mockGetOverrideFilename,
     }),
   },
 }));
 
 vi.mock('../services/LogFormatter', () => ({
-  LogFormatter: { formatLine: (line: string) => line },
+  LogFormatter: { process: (line: string) => line },
 }));
 
 // runCommand and the deploy/update paths route through authoredComposeArgs, which
-// resolves the (optional) mesh override. Stub it to "no override" so a single-file
-// stack yields plain `docker compose <action>` args deterministically.
+// resolves the (optional) mesh override. The hoisted mock defaults to "no override"
+// so a single-file stack yields plain `docker compose <action>` args deterministically;
+// individual tests set a path to exercise the mesh-injection branch.
 vi.mock('../services/MeshService', () => ({
   MeshService: {
-    getInstance: () => ({ ensureStackOverride: vi.fn().mockResolvedValue(null) }),
+    getInstance: () => ({ ensureStackOverride: mockEnsureStackOverride }),
   },
 }));
 
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
+import { DriftLedgerService } from '../services/DriftLedgerService';
 
 const originalComposeTimeout = process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
 const originalStallTimeout = process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS;
@@ -180,6 +189,13 @@ function createMockWs(): MockWebSocket {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // clearAllMocks() clears call records but not implementations, so a mockResolvedValue
+  // set by one test persists into the next. Re-assert the safe "no mesh override, no user
+  // override, base = compose.yaml" baseline here so a stray override from an earlier test
+  // cannot leak forward and add phantom -f flags.
+  mockGetComposeFilename.mockResolvedValue('compose.yaml');
+  mockGetOverrideFilename.mockResolvedValue(null);
+  mockEnsureStackOverride.mockResolvedValue(null);
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
 
@@ -372,6 +388,142 @@ describe('ComposeService - runCommand', () => {
       freememSpy.mockRestore();
       totalmemSpy.mockRestore();
     }
+  });
+});
+
+// ── authoredComposeArgs: mesh + user override ──────────────────────────
+
+describe('ComposeService - authoredComposeArgs mesh override', () => {
+  const MESH_OVERRIDE = '/app/data/mesh/overrides/1/my-stack.override.yml';
+
+  it('preserves a user compose.override.yml between the base and the mesh override', async () => {
+    // Single-file stack opted into mesh, with a hand-authored override on disk.
+    mockEnsureStackOverride.mockResolvedValue(MESH_OVERRIDE);
+    mockGetComposeFilename.mockResolvedValue('compose.yaml');
+    mockGetOverrideFilename.mockResolvedValue('compose.override.yml');
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'restart');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    // The user override sits between the base and the mesh override as a bare basename
+    // (resolved against the stack-dir cwd); only the mesh override is an absolute path.
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', '-f', 'compose.yaml', '-f', 'compose.override.yml', '-f', MESH_OVERRIDE, 'restart'],
+      expect.objectContaining({ cwd: expect.stringContaining('my-stack') })
+    );
+  });
+
+  it('emits base + mesh override only when no user override exists', async () => {
+    mockEnsureStackOverride.mockResolvedValue(MESH_OVERRIDE);
+    mockGetComposeFilename.mockResolvedValue('compose.yaml');
+    mockGetOverrideFilename.mockResolvedValue(null);
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'restart');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', '-f', 'compose.yaml', '-f', MESH_OVERRIDE, 'restart'],
+      expect.objectContaining({ cwd: expect.stringContaining('my-stack') })
+    );
+  });
+
+  it('does not look up or emit a user override when mesh is disabled', async () => {
+    // A user override on disk must not introduce -f flags for a non-mesh stack;
+    // implicit compose discovery already resolves it when no -f is passed.
+    mockEnsureStackOverride.mockResolvedValue(null);
+    mockGetOverrideFilename.mockResolvedValue('compose.override.yml');
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'restart');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', 'restart'],
+      expect.objectContaining({ cwd: expect.stringContaining('my-stack') })
+    );
+    // The override lookup is gated inside the mesh branch.
+    expect(mockGetOverrideFilename).not.toHaveBeenCalled();
+  });
+
+  it('drops the user override and still deploys when the lookup throws', async () => {
+    // A present override that cannot be resolved (e.g. EACCES) must not crash the
+    // deploy: the mesh override still applies and the deploy proceeds without the
+    // user override, with a warning logged.
+    mockEnsureStackOverride.mockResolvedValue(MESH_OVERRIDE);
+    mockGetComposeFilename.mockResolvedValue('compose.yaml');
+    mockGetOverrideFilename.mockRejectedValue(Object.assign(new Error('EACCES'), { code: 'EACCES' }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'restart');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', '-f', 'compose.yaml', '-f', MESH_OVERRIDE, 'restart'],
+      expect.objectContaining({ cwd: expect.stringContaining('my-stack') })
+    );
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('could not resolve user compose override'),
+      expect.anything()
+    );
+    warnSpy.mockRestore();
+  });
+
+  it('aborts the deploy when the override lookup hits a containment-guard rejection', async () => {
+    // A symlink-escape (or invalid-name) rejection from the override lookup is a hard
+    // error: it must propagate and abort the deploy, never degrade to "no override".
+    mockEnsureStackOverride.mockResolvedValue(MESH_OVERRIDE);
+    mockGetComposeFilename.mockResolvedValue('compose.yaml');
+    mockGetOverrideFilename.mockRejectedValue(Object.assign(new Error('symlink escape'), { code: 'SYMLINK_ESCAPE' }));
+
+    const svc = ComposeService.getInstance(1);
+    await expect(svc.runCommand('my-stack', 'restart')).rejects.toMatchObject({ code: 'SYMLINK_ESCAPE' });
+    // The error is thrown while building the args, before docker is ever spawned.
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('leak sanity: a default single-file stack still emits no -f flags', async () => {
+    // Proves the override-setting tests above do not leak through the shared mocks.
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.runCommand('my-stack', 'restart');
+    await waitForSpawn();
+    proc.emit('close', 0);
+    await promise;
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', 'restart'],
+      expect.objectContaining({ cwd: expect.stringContaining('my-stack') })
+    );
   });
 });
 
@@ -620,6 +772,48 @@ describe('ComposeService - updateStack prune-on-update', () => {
 
 // ── withRegistryAuth ───────────────────────────────────────────────────
 
+describe('ComposeService - drift reconcile hook', () => {
+  it('reconciles the drift ledger after a successful update', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+    const spy = vi.spyOn(DriftLedgerService.getInstance(), 'reconcileStack').mockResolvedValue({ detected: 0, resolved: 0 });
+
+    const promise = ComposeService.getInstance(1).updateStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(spy).toHaveBeenCalledWith(1, 'my-stack');
+    spy.mockRestore();
+  });
+
+  it('reconciles the drift ledger after a successful deploy', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+    const spy = vi.spyOn(DriftLedgerService.getInstance(), 'reconcileStack').mockResolvedValue({ detected: 0, resolved: 0 });
+
+    const promise = ComposeService.getInstance(1).deployStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(spy).toHaveBeenCalledWith(1, 'my-stack');
+    spy.mockRestore();
+  });
+
+  it('does not reconcile the ledger when a deploy fails', async () => {
+    setupAutoCloseSpawn(1); // non-zero exit => the deploy rejects before the post-success hook
+    mockListContainers.mockResolvedValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+    const spy = vi.spyOn(DriftLedgerService.getInstance(), 'reconcileStack').mockResolvedValue({ detected: 0, resolved: 0 });
+
+    const result = await ComposeService.getInstance(1).deployStack('my-stack').then(() => null, (e: Error) => e);
+    expect(result).toBeInstanceOf(Error);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+});
+
 describe('ComposeService - withRegistryAuth', () => {
   it('passes default env when no registries configured', async () => {
     mockGetRegistries.mockReturnValue([]);
@@ -765,7 +959,18 @@ describe('ComposeService - idle-output stall backstop', () => {
     process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '1000';
     mockListContainers.mockResolvedValue([]);
     const proc = createMockProcess();
-    mockSpawn.mockReturnValue(proc);
+    // deployStack now spawns a second child (exposure refresh via renderConfig)
+    // after the up command closes. Return the controlled proc for the up spawn,
+    // and a fresh auto-closing proc for the config spawn so the test does not
+    // hang on the already-closed proc.
+    let spawnCount = 0;
+    mockSpawn.mockImplementation(() => {
+      spawnCount += 1;
+      if (spawnCount === 1) return proc;
+      const configProc = createMockProcess();
+      Promise.resolve().then(() => configProc.emit('close', 0));
+      return configProc;
+    });
 
     const svc = ComposeService.getInstance(1);
     // deployStack spawns a single `up`; emit output every 600ms (< 1s window)
@@ -804,7 +1009,16 @@ describe('ComposeService - idle-output stall backstop', () => {
     process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '0'; // invalid → default (10min)
     mockListContainers.mockResolvedValue([]);
     const proc = createMockProcess();
-    mockSpawn.mockReturnValue(proc);
+    // Same pattern as the stall test above: the second spawn (exposure refresh)
+    // needs its own auto-closing proc so deployStack can resolve after close.
+    let spawnCount = 0;
+    mockSpawn.mockImplementation(() => {
+      spawnCount += 1;
+      if (spawnCount === 1) return proc;
+      const configProc = createMockProcess();
+      Promise.resolve().then(() => configProc.emit('close', 0));
+      return configProc;
+    });
 
     const svc = ComposeService.getInstance(1);
     const promise = svc.deployStack('my-stack');
@@ -841,5 +1055,131 @@ describe('ComposeService - idle-output stall backstop', () => {
     expect(error).not.toBeNull();
     expect(error!.message).toContain('STACK_STALLED_OUTPUT');
     expect(getComposeRollbackInfo(error)).toMatchObject({ attempted: true });
+  });
+});
+
+// ── streamLogs ─────────────────────────────────────────────────────────
+
+describe('ComposeService - streamLogs', () => {
+  it('emits a normalized container name prefix for each container', async () => {
+    mockGetContainersByStack.mockResolvedValue([
+      { Names: ['/mystack-redis-1'], State: 'running', Id: 'abc123' },
+      { Names: ['/mystack-api-1'], State: 'running', Id: 'def456' },
+    ]);
+
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    const proc1 = createMockProcess();
+    const proc2 = createMockProcess();
+    mockSpawn
+      .mockReturnValueOnce(proc1)
+      .mockReturnValueOnce(proc2);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(2));
+
+    // Emit stdout from each container.
+    proc1.stdout.emit('data', Buffer.from('2024-01-01T00:00:00Z redis log line\n'));
+    proc2.stdout.emit('data', Buffer.from('2024-01-01T00:00:01Z api response\n'));
+
+    const calls = (ws.send as ReturnType<typeof vi.fn>).mock.calls as string[][];
+    const sentLines = calls.flatMap(c => c[0].split('\r\n')).filter(Boolean);
+
+    expect(sentLines).toContain('redis | 2024-01-01T00:00:00Z redis log line');
+    expect(sentLines).toContain('api | 2024-01-01T00:00:01Z api response');
+  });
+
+  it('prefixes flushBuffer trailing line on child close', async () => {
+    mockGetContainersByStack.mockResolvedValue([
+      { Names: ['/mystack-web-1'], State: 'running', Id: 'ghi789' },
+    ]);
+
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+
+    // Emit a line without a trailing newline, then close.
+    proc.stdout.emit('data', Buffer.from('trailing content'));
+    proc.emit('close', 0);
+
+    const calls = (ws.send as ReturnType<typeof vi.fn>).mock.calls as string[][];
+    const sentLines = calls.flatMap(c => c[0].split('\r\n')).filter(Boolean);
+
+    expect(sentLines).toContain('web | trailing content');
+  });
+
+  it('joins chunk-split lines and prefixes once', async () => {
+    mockGetContainersByStack.mockResolvedValue([
+      { Names: ['/mystack-db-1'], State: 'running', Id: 'jkl012' },
+    ]);
+
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+
+    // Split a single line across two data events.
+    proc.stdout.emit('data', Buffer.from('2024-01-01T00:00:00Z partial '));
+    proc.stdout.emit('data', Buffer.from('end of line\n'));
+
+    const calls = (ws.send as ReturnType<typeof vi.fn>).mock.calls as string[][];
+    const sentLines = calls.flatMap(c => c[0].split('\r\n')).filter(Boolean);
+
+    expect(sentLines).toContain('db | 2024-01-01T00:00:00Z partial end of line');
+  });
+
+  it('normalizes dotted container names', async () => {
+    mockGetContainersByStack.mockResolvedValue([
+      { Names: ['/mystack-api.v1-1'], State: 'running', Id: 'mno345' },
+    ]);
+
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+
+    proc.stdout.emit('data', Buffer.from('2024-01-01T00:00:00Z started\n'));
+
+    const calls = (ws.send as ReturnType<typeof vi.fn>).mock.calls as string[][];
+    const sentLines = calls.flatMap(c => c[0].split('\r\n')).filter(Boolean);
+
+    // normalizeContainerName strips stack prefix and -1 replica suffix, leaving 'api.v1'.
+    expect(sentLines).toContain('api.v1 | 2024-01-01T00:00:00Z started');
+  });
+
+  it('passes raw container name to docker logs, not normalized name', async () => {
+    mockGetContainersByStack.mockResolvedValue([
+      { Names: ['/mystack-redis-1'], State: 'running', Id: 'pqr678' },
+    ]);
+
+    const ws = createMockWs();
+    const svc = ComposeService.getInstance(1);
+
+    const proc = createMockProcess();
+    mockSpawn.mockReturnValue(proc);
+
+    svc.streamLogs('mystack', ws);
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalled());
+
+    // Verify that docker logs uses the raw name, not the normalized one.
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['logs', '-f', '-t', '--tail', '100', 'mystack-redis-1'],
+      expect.anything(),
+    );
   });
 });

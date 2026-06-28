@@ -22,6 +22,7 @@ import TrivyInstaller from './TrivyInstaller';
 import { CloudBackupService } from './CloudBackupService';
 import { buildSystemPolicyGateOptions } from '../helpers/policyGate';
 import { enforcePolicyPreDeploy } from './PolicyEnforcement';
+import { summarizeBlockReasons } from '../utils/policy-risk';
 
 const TRIVY_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const TRIVY_UPDATE_CHECK_STARTUP_DELAY_MS = 5 * 60 * 1000;
@@ -197,14 +198,15 @@ export class SchedulerService {
         );
         if (gate.ok) return;
         const images = gate.violations.map((v) => v.imageRef).join(', ');
+        const reasons = summarizeBlockReasons(gate.violations);
         this.safeDispatch(
             'warning',
             'scan_finding',
-            `${action} blocked for "${stackName}" by policy "${gate.policy?.name}": ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}${images ? ` (${images})` : ''}`,
+            `${action} blocked for "${stackName}" by policy "${gate.policy?.name}": ${gate.violations.length} image(s) matched ${reasons}${images ? ` (${images})` : ''}`,
             stackName,
         );
         throw new Error(
-            `${action} blocked by policy "${gate.policy?.name}": ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`,
+            `${action} blocked by policy "${gate.policy?.name}": ${gate.violations.length} image(s) matched ${reasons}`,
         );
     }
 
@@ -332,6 +334,10 @@ export class SchedulerService {
                 case 'auto_start':
                     output = await this.executeAutoStart(task);
                     break;
+                default: {
+                    const unhandledAction: never = task.action;
+                    throw new Error(`Unsupported scheduled action: ${unhandledAction}`);
+                }
             }
 
             if (isDebugEnabled()) console.log(`[SchedulerService:debug] Task ${task.id} action completed in ${Date.now() - actionStart}ms`);
@@ -662,6 +668,9 @@ export class SchedulerService {
         if (task.node_id == null && isDebugEnabled()) {
             console.log(`[SchedulerService:debug] Prune task ${task.id}: no node_id specified, using default node ${nodeId}`);
         }
+        if (this.isRemoteNode(nodeId)) {
+            throw new Error('Scheduled prunes currently require a local node.');
+        }
         const docker = DockerController.getInstance(nodeId);
         const allTargets = ['containers', 'images', 'networks', 'volumes'] as const;
         type PruneTarget = typeof allTargets[number];
@@ -670,6 +679,7 @@ export class SchedulerService {
             : [...allTargets];
         const labelFilter = task.prune_label_filter || undefined;
         const results: string[] = [];
+        const failures: string[] = [];
 
         for (const target of targets) {
             try {
@@ -677,11 +687,16 @@ export class SchedulerService {
                 results.push(`${target}: ${result.reclaimedBytes ?? 0} bytes reclaimed`);
             } catch (error: unknown) {
                 const msg = error instanceof Error ? error.message : String(error);
-                results.push(`${target}: failed (${msg})`);
+                const failure = `${target}: failed (${msg})`;
+                results.push(failure);
+                failures.push(failure);
             }
         }
 
         const filterSuffix = labelFilter ? ` (label: ${labelFilter})` : '';
+        if (failures.length > 0) {
+            throw new Error(`System prune failed${filterSuffix}: ${results.join('; ')}`);
+        }
         return `System prune completed${filterSuffix}: ${results.join('; ')}`;
     }
 
@@ -939,7 +954,7 @@ export class SchedulerService {
             NotificationService.getInstance().dispatchAlert(
                 'warning',
                 'scan_finding',
-                `Policy "${v.policyName}" violated by ${v.imageRef}: ${v.severity} exceeds ${v.maxSeverity}`,
+                `Policy "${v.policyName}" violated by ${v.imageRef}: matched ${summarizeBlockReasons([v])}`,
                 { actor: 'system:scheduler' },
             );
         }

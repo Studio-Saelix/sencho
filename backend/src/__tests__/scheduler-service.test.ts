@@ -594,6 +594,62 @@ describe('SchedulerService - executePrune', () => {
 
     expect(mockPruneSystem).toHaveBeenCalledWith('containers', 'env=staging');
   });
+
+  it('marks scheduled prune runs as failed when a target prune fails', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 74,
+      name: 'prune-fails',
+      action: 'prune',
+      cron_expression: '0 3 * * *',
+      enabled: true,
+      node_id: 1,
+      prune_targets: JSON.stringify(['images']),
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockPruneSystem.mockRejectedValueOnce(new Error('docker prune failed'));
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(74);
+
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({
+        status: 'failure',
+        error: expect.stringContaining('images: failed (docker prune failed)'),
+      }),
+    );
+    expect(mockUpdateScheduledTask).toHaveBeenCalledWith(
+      74,
+      expect.objectContaining({ last_status: 'failure' }),
+    );
+  });
+
+  it('fails scheduled prune tasks that target remote nodes before pruning', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 73,
+      name: 'remote-prune',
+      action: 'prune',
+      cron_expression: '0 3 * * *',
+      enabled: true,
+      node_id: 2,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(73);
+
+    expect(mockPruneSystem).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({
+        status: 'failure',
+        error: expect.stringMatching(/local node/i),
+      }),
+    );
+  });
 });
 
 // ── executeUpdate ──────────────────────────────────────────────────────
@@ -865,7 +921,7 @@ describe('SchedulerService - executeUpdate', () => {
       ok: false,
       bypassed: false,
       policy: { id: 1, name: 'block-high', max_severity: 'HIGH' },
-      violations: [{ imageRef: 'nginx:1.14', severity: 'CRITICAL', criticalCount: 2, highCount: 5, scanId: 7 }],
+      violations: [{ imageRef: 'nginx:1.14', severity: 'CRITICAL', criticalCount: 2, highCount: 5, scanId: 7, reasons: ['severity'] }],
     });
 
     const svc = SchedulerService.getInstance();
@@ -878,6 +934,7 @@ describe('SchedulerService - executeUpdate', () => {
     expect(warn).toBeDefined();
     expect(warn![2]).toContain('block-high');
     expect(warn![2]).toContain('nginx:1.14');
+    expect(warn![2]).toContain('matched severity threshold');
     // The run completes (skip-and-continue), not a hard task failure.
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
   });
@@ -894,11 +951,13 @@ describe('SchedulerService - executeUpdate', () => {
       created_by: 'admin',
       last_status: null,
     });
+    // KEV-driven block (severity threshold not the trigger): the message must
+    // name the matched input, never a severity ceiling it did not enforce.
     mockEnforcePolicyPreDeploy.mockResolvedValue({
       ok: false,
       bypassed: false,
       policy: { id: 1, name: 'block-high', max_severity: 'HIGH' },
-      violations: [{ imageRef: 'nginx:1.14', severity: 'CRITICAL', criticalCount: 1, highCount: 0, scanId: 3 }],
+      violations: [{ imageRef: 'nginx:1.14', severity: 'MEDIUM', criticalCount: 0, highCount: 0, kevCount: 1, scanId: 3, reasons: ['kev'] }],
     });
 
     const svc = SchedulerService.getInstance();
@@ -910,6 +969,8 @@ describe('SchedulerService - executeUpdate', () => {
     expect(warn).toBeDefined();
     expect(warn![2]).toContain('Auto-start');
     expect(warn![2]).toContain('block-high');
+    expect(warn![2]).toContain('known-exploited CVE (KEV)');
+    expect(warn![2]).not.toContain('HIGH');
     // Auto-start does not skip-and-continue; the run is recorded as a failure.
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'failure' }));
   });

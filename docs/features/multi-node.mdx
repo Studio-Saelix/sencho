@@ -171,7 +171,7 @@ The Nodes table surfaces routing, status, and per-node automation at a glance fo
 | **Status** | `Online`, `Offline`, or `Unknown` badge. |
 | **Labels** | Per-node label palette. The cell shows the label picker; an empty cell reads `No labels` with an Add label control. |
 | **Schedules** | Number of active scheduled tasks targeting this node, plus a `next X` countdown to the next run. Click the count or the calendar icon in the Actions column to filter the Schedules view to that node. |
-| **Updates** | `Auto` if at least one enabled `Auto-update Stack` or `Auto-update All Stacks` schedule targets the node; `Off` otherwise. A pulsing dot and count appear when stacks have pending image updates. |
+| **Updates** | `Auto` if at least one enabled `Auto-update Stack` or `Auto-update All Stacks on Node` schedule targets the node; `Off` otherwise. A pulsing dot and count appear when stacks have pending image updates. |
 | **Actions** | **View Schedules**, **Test Connection**, **Edit Node**, and **Delete Node** icon buttons. The local row hides Delete because the local node cannot be removed. |
 
 Clicking the schedules-link icon opens the Schedules view filtered to the selected node. From there you can create, edit, or manage scheduled tasks scoped to that node. The filter bar shows which node you are viewing, with a Clear filter control to return to the full list.
@@ -185,7 +185,7 @@ When you select a remote node in the switcher, the Settings hub filters to the p
 | Panel | Scope | Notes |
 |-------|:-----:|-------|
 | Appearance | Per browser | Theme and density preferences are stored in your browser, not on the node. |
-| Host Alerts | Per node | Host CPU, RAM, disk, and crash thresholds for the selected node. |
+| Host Alerts | Per node | Host CPU, RAM, and disk thresholds for the selected node. |
 | Channels | Per node | Discord, Slack, and Webhook channels fire from the node that detects the event. |
 | Labels | Per node | Stack and container label palettes. |
 | Vulnerability Scanning | Per node | Trivy install state and scanner readiness for the selected node. |

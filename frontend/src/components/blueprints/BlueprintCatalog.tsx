@@ -130,7 +130,7 @@ function BlueprintTile({ blueprint, onClick }: { blueprint: BlueprintListItem; o
             <div className="flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
                     <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${statusDot(dom)}`} aria-hidden />
-                    <span className="font-serif italic text-base tracking-[-0.01em] text-stat-value truncate">
+                    <span className="font-heading text-base tracking-[-0.01em] text-stat-value truncate">
                         {blueprint.name}
                     </span>
                 </div>

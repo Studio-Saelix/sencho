@@ -81,16 +81,16 @@ export function SettingsSidebar({ currentSection, onSectionChange, dirtyFlags, o
                                             onClick={() => onSectionChange(item.id)}
                                             aria-current={isActive ? 'page' : undefined}
                                             className={cn(
-                                                'relative flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-xs transition-colors',
+                                                'relative flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors',
                                                 isActive
-                                                    ? 'text-stat-value'
-                                                    : 'text-stat-subtitle hover:bg-accent/40 hover:text-stat-value',
+                                                    ? 'text-brand bg-gradient-to-r from-brand/[0.12] to-transparent'
+                                                    : 'text-foreground/80 hover:bg-muted/40',
                                             )}
                                         >
                                             {isActive && (
                                                 <span
                                                     aria-hidden="true"
-                                                    className="absolute inset-y-1 left-0 w-[3px] rounded-full bg-brand shadow-[0_0_8px_color-mix(in_oklch,var(--brand)_30%,transparent)]"
+                                                    className="absolute inset-y-0 left-0 w-[2px] rounded-sm bg-brand"
                                                 />
                                             )}
                                             <span

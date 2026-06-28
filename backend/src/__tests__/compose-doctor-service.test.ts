@@ -22,8 +22,13 @@ let nodeId: number;
 function db() { return DatabaseService.getInstance(); }
 function doctor() { return ComposeDoctorService.getInstance(); }
 
-/** Mock the two Docker calls; render returns the given effective model JSON. */
-function stubDocker(rendered: object | null, stderr = '', snapshot = { containers: [], networks: [], volumes: [] }) {
+/** Mock the two Docker calls; render returns the given effective model JSON.
+ *  Pass `'reject'` as the snapshot to simulate an unreachable Docker daemon. */
+function stubDocker(
+  rendered: object | null,
+  stderr = '',
+  snapshot: { containers: unknown[]; networks: unknown[]; volumes: unknown[] } | 'reject' = { containers: [], networks: [], volumes: [] },
+) {
   vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
     renderConfig: vi.fn().mockResolvedValue({
       rendered: rendered === null ? null : JSON.stringify(rendered),
@@ -33,7 +38,9 @@ function stubDocker(rendered: object | null, stderr = '', snapshot = { container
     }),
   } as unknown as ComposeService);
   vi.spyOn(DockerController, 'getInstance').mockReturnValue({
-    getDependencySnapshot: vi.fn().mockResolvedValue(snapshot),
+    getDependencySnapshot: snapshot === 'reject'
+      ? vi.fn().mockRejectedValue(new Error('docker down'))
+      : vi.fn().mockResolvedValue(snapshot),
   } as unknown as DockerController);
 }
 
@@ -164,19 +171,55 @@ describe('runPreflight', () => {
   });
 
   it('degrades to model-only findings when the node snapshot fails', async () => {
-    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
-      renderConfig: vi.fn().mockResolvedValue({
-        rendered: JSON.stringify({ name: STACK, services: { web: { image: 'nginx:latest' } }, networks: {}, volumes: {} }),
-        stderr: '', code: 0, timedOut: false,
-      }),
-    } as unknown as ComposeService);
-    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
-      getDependencySnapshot: vi.fn().mockRejectedValue(new Error('docker down')),
-    } as unknown as DockerController);
+    stubDocker({ name: STACK, services: { web: { image: 'nginx:latest' } }, networks: {}, volumes: {} }, '', 'reject');
     const report = await doctor().runPreflight(nodeId, STACK, null);
     expect(report.renderable).toBe(true);
     expect(report.findings.map(f => f.ruleId)).toContain('image-latest'); // model rule still ran
     expect(report.findings.map(f => f.ruleId)).not.toContain('port-conflict-node'); // node-state skipped
+    expect(report.findings.map(f => f.ruleId)).toContain('node-state-unavailable'); // partial coverage is surfaced
+  });
+
+  it('does not flag external resources as missing when the snapshot is unavailable', async () => {
+    stubDocker(
+      {
+        name: STACK,
+        services: { web: { image: 'nginx:1.27', restart: 'always', healthcheck: { test: ['CMD', 'true'] } } },
+        networks: { ext: { name: 'shared', external: true } },
+        volumes: { v: { name: 'data', external: true } },
+      },
+      '',
+      'reject',
+    );
+    const report = await doctor().runPreflight(nodeId, STACK, null);
+    expect(report.renderable).toBe(true);
+    const ruleIds = report.findings.map(f => f.ruleId);
+    // An empty snapshot must not be read as "the external resource is absent".
+    expect(ruleIds).not.toContain('external-network-missing');
+    expect(ruleIds).not.toContain('external-volume-missing');
+    expect(ruleIds).toContain('node-state-unavailable');
+  });
+
+  it('marks the run partial (info) when only node state is unavailable', async () => {
+    stubDocker({ name: STACK, services: { web: { image: 'nginx:1.27', restart: 'always', healthcheck: { test: ['CMD', 'true'] } } }, networks: {}, volumes: {} }, '', 'reject');
+    const report = await doctor().runPreflight(nodeId, STACK, null);
+    // A clean model with the daemon down yields only the advisory, so the clean
+    // 'pass' becomes 'info': the operator sees the result is partial.
+    expect(report.findings.map(f => f.ruleId)).toEqual(['node-state-unavailable']);
+    expect(report.status).toBe('info');
+    expect(report.highestSeverity).toBe('info');
+  });
+
+  it('runs node-state rules against a collected snapshot', async () => {
+    stubDocker(
+      { name: STACK, services: { web: { image: 'nginx:1.27', container_name: 'dup', restart: 'always', healthcheck: { test: ['CMD', 'true'] } } }, networks: {}, volumes: {} },
+      '',
+      { containers: [{ name: 'dup', stack: 'other', ports: [] }], networks: [], volumes: [] },
+    );
+    const report = await doctor().runPreflight(nodeId, STACK, null);
+    const ruleIds = report.findings.map(f => f.ruleId);
+    // A successful snapshot sets nodeStateAvailable true, so the node-state rule runs.
+    expect(ruleIds).toContain('container-name-collision');
+    expect(ruleIds).not.toContain('node-state-unavailable');
   });
 
   it('orders findings by severity, highest first', async () => {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
     Search, ArrowUpDown, AlertTriangle, Play, Square,
-    LayoutGrid, Network, SlidersHorizontal, Plus, RefreshCcwDot,
+    LayoutGrid, Network, SlidersHorizontal, ChartNetwork, RefreshCcwDot,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -259,19 +259,27 @@ export function OverviewToolbar({
                 <Button
                     variant="outline"
                     size="sm"
-                    className="gap-2 shrink-0 h-9"
+                    className="h-9 gap-2 shrink-0"
                     onClick={onCheckUpdates}
                     disabled={checkingUpdates}
+                    title="Check for node updates"
+                    aria-label="Check for node updates"
                 >
                     <RefreshCcwDot className={`w-4 h-4 ${checkingUpdates ? 'animate-spin' : ''}`} />
-                    Check Updates
+                    Node Update
                 </Button>
             )}
 
             {onAddNode && (
-                <Button size="sm" className="gap-1.5 shrink-0 h-9" onClick={onAddNode}>
-                    <Plus className="w-4 h-4" strokeWidth={1.5} />
-                    Add node
+                <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-9 w-9 p-0 shrink-0"
+                    onClick={onAddNode}
+                    title="Manage nodes"
+                    aria-label="Manage nodes"
+                >
+                    <ChartNetwork className="w-4 h-4" strokeWidth={1.5} />
                 </Button>
             )}
         </div>

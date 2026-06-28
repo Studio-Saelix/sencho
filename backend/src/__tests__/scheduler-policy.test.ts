@@ -118,6 +118,7 @@ function summaryWith(violations: Array<{
   maxSeverity: string;
   severity: string;
   scanId: number;
+  reasons: Array<'severity' | 'kev' | 'fixable'>;
 }>) {
   return {
     scanned: violations.length,
@@ -142,8 +143,9 @@ describe('SchedulerService - scheduled scan policy alerts', () => {
         policyId: 1,
         policyName: 'prod-high-gate',
         maxSeverity: 'HIGH',
-        severity: 'CRITICAL',
+        severity: 'MEDIUM',
         scanId: 42,
+        reasons: ['kev'],
       },
       {
         imageRef: 'redis:6',
@@ -152,6 +154,7 @@ describe('SchedulerService - scheduled scan policy alerts', () => {
         maxSeverity: 'HIGH',
         severity: 'HIGH',
         scanId: 43,
+        reasons: ['severity'],
       },
     ]));
 
@@ -160,11 +163,15 @@ describe('SchedulerService - scheduled scan policy alerts', () => {
 
     const warningCalls = mockDispatchAlert.mock.calls.filter((c) => c[0] === 'warning');
     expect(warningCalls).toHaveLength(2);
+    // The first violation matched KEV, so the alert names the known-exploited
+    // input and never the severity ceiling it did not enforce.
     expect(warningCalls[0][2]).toContain('prod-high-gate');
     expect(warningCalls[0][2]).toContain('nginx:1.14');
-    expect(warningCalls[0][2]).toContain('CRITICAL');
-    expect(warningCalls[0][2]).toContain('HIGH');
+    expect(warningCalls[0][2]).toContain('known-exploited CVE (KEV)');
+    expect(warningCalls[0][2]).not.toContain('HIGH');
+    // The second matched the severity threshold.
     expect(warningCalls[1][2]).toContain('redis:6');
+    expect(warningCalls[1][2]).toContain('severity threshold');
   });
 
   it('does not dispatch any policy alert when no violations occur', async () => {
@@ -194,6 +201,7 @@ describe('SchedulerService - scheduled scan policy alerts', () => {
         maxSeverity: 'CRITICAL',
         severity: 'CRITICAL',
         scanId: 44,
+        reasons: ['severity'],
       },
     ]));
 

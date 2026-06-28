@@ -3,6 +3,7 @@ export interface PatchableSettings {
     host_ram_limit?: string;
     host_disk_limit?: string;
     host_alert_suppression_mins?: string;
+    host_alerts_enabled?: '0' | '1';
     docker_janitor_gb?: string;
     global_crash?: '0' | '1';
     developer_mode?: '0' | '1';
@@ -12,6 +13,7 @@ export interface PatchableSettings {
     audit_retention_days?: string;
     mesh_auto_recreate?: '0' | '1';
     scan_history_per_image_limit?: string;
+    prune_orphaned_scans?: '0' | '1';
     prune_on_update?: '0' | '1';
     reclaim_hero?: '0' | '1';
     snapshot_documentation?: '0' | '1';
@@ -25,6 +27,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     host_ram_limit: '90',
     host_disk_limit: '90',
     host_alert_suppression_mins: '60',
+    host_alerts_enabled: '1',
     global_crash: '1',
     docker_janitor_gb: '5',
     developer_mode: '0',
@@ -34,6 +37,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     audit_retention_days: '90',
     mesh_auto_recreate: '0',
     scan_history_per_image_limit: '50',
+    prune_orphaned_scans: '1',
     prune_on_update: '1',
     reclaim_hero: '1',
     snapshot_documentation: '0',
@@ -52,6 +56,7 @@ export type SectionId =
     | 'registries'
     | 'labels'
     | 'host-alerts'
+    | 'container-alerts'
     | 'docker-storage'
     | 'image-updates'
     | 'fleet-mesh'

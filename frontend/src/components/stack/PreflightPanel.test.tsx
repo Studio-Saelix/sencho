@@ -42,7 +42,7 @@ function jsonRes(body: unknown, ok = true) {
   return { ok, status: ok ? 200 : 500, json: async () => body, text: async () => '' } as unknown as Response;
 }
 
-beforeEach(() => { vi.clearAllMocks(); });
+beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); });
 
 describe('PreflightPanel', () => {
   it('shows the never-run empty state', async () => {
@@ -73,6 +73,19 @@ describe('PreflightPanel', () => {
     expect(status).toHaveAttribute('data-status', 'high');
     expect(screen.getByText('Privileged container')).toBeInTheDocument();
     expect(screen.getByText('Image uses a moving tag')).toBeInTheDocument();
+  });
+
+  it('dismisses only the result banner, keeping the finding rows', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'high', highestSeverity: 'high',
+      findings: [{ ruleId: 'privileged', severity: 'high', title: 'Privileged container', message: 'runs privileged', service: 'web' }],
+    })));
+    render(<PreflightPanel stackName="web" />);
+    expect(await screen.findByTestId('preflight-status')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('preflight-dismiss-btn'));
+    expect(screen.queryByTestId('preflight-status')).not.toBeInTheDocument();
+    // Only the summary banner is dismissed; the finding row remains.
+    expect(screen.getByText('Privileged container')).toBeInTheDocument();
   });
 
   it('surfaces the unrenderable state with the render error', async () => {

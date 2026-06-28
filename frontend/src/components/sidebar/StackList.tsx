@@ -4,6 +4,7 @@ import { useStackKeyboardShortcuts } from '@/hooks/useStackKeyboardShortcuts';
 import { CommandItem, CommandList } from '@/components/ui/command';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { Label } from '@/components/label-types';
+import type { StackUpdateInfo } from '@/types/imageUpdates';
 import { StackRow } from './StackRow';
 import { statusText, statusColor } from './stack-status-utils';
 import type { StackRowStatus } from './stack-status-utils';
@@ -32,7 +33,8 @@ export interface StackListProps {
   searchQuery: string;
   stackLabelMap: Record<string, Label[]>;
   stackStatuses: Record<string, StackRowStatus | undefined>;
-  stackUpdates: Record<string, boolean>;
+  stackCounts: Record<string, { running: number; total: number } | undefined>;
+  stackUpdates: Record<string, StackUpdateInfo>;
   gitSourcePendingMap: Record<string, boolean>;
   pinnedFiles: string[];
   isCollapsed: (groupKey: string) => boolean;
@@ -117,7 +119,7 @@ interface StackListBulkProps {
 
 export function StackList(props: StackListProps & StackListBulkProps) {
   const {
-    files, isLoading, selectedFile, searchQuery, stackLabelMap, stackStatuses,
+    files, isLoading, selectedFile, searchQuery, stackLabelMap, stackStatuses, stackCounts,
     stackUpdates, gitSourcePendingMap, pinnedFiles, isCollapsed, toggleCollapse,
     isBusy, getDisplayName, onSelectFile, buildMenuCtx,
     bulkMode, selectedFiles, onToggleSelect,
@@ -176,10 +178,14 @@ export function StackList(props: StackListProps & StackListBulkProps) {
                     file={file}
                     displayName={getDisplayName(file)}
                     status={stackStatuses[file] ?? 'unknown'}
+                    running={stackCounts[file]?.running}
+                    total={stackCounts[file]?.total}
                     isBusy={isBusy(file)}
                     isActive={selectedFile === file}
                     labels={stackLabelMap[file] ?? []}
-                    hasUpdate={!!stackUpdates[file]}
+                    hasUpdate={stackUpdates[file]?.hasUpdate ?? false}
+                    checkStatus={stackUpdates[file]?.checkStatus}
+                    lastError={stackUpdates[file]?.lastError ?? undefined}
                     hasGitPending={!!gitSourcePendingMap[file]}
                     onSelect={onSelectFile}
                     kebabSlot={<StackKebabMenu file={file} ctx={ctx} />}

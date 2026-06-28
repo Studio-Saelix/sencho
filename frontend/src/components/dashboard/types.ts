@@ -54,6 +54,7 @@ export type NotificationCategory =
     | 'autoheal_triggered'
     | 'monitor_alert'
     | 'scan_finding'
+    | 'node_update_available'
     | 'system';
 
 export interface NotificationItem {
@@ -71,10 +72,12 @@ export interface NotificationItem {
 }
 
 export interface StackStatusEntry {
-  status: 'running' | 'exited' | 'unknown';
+  status: 'running' | 'exited' | 'unknown' | 'partial';
   mainPort?: number;
   /** Unix seconds of the oldest running container (approximates stack uptime). */
   runningSince?: number;
+  /** Provenance of the stack: 'git' when linked to a Git source, else 'local'. */
+  source?: 'local' | 'git';
 }
 
 export type HealthLevel = 'healthy' | 'degraded' | 'critical';

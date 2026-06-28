@@ -10,7 +10,7 @@ import { FileSystemService } from '../FileSystemService';
 import { DatabaseService } from '../DatabaseService';
 import { parseComposeDependencies } from '../../helpers/composeDependencyParse';
 import { assembleStackDrift } from '../DriftDetectionService';
-import { isLoopback } from './normalize';
+import { isHostNetwork, isLoopback } from './normalize';
 import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
 
@@ -60,8 +60,13 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
     const declared = parseComposeDependencies(content);
     if (declared.parseError) continue;
 
-    const publishesPort = declared.services.some(s => s.ports.length > 0);
-    if (declared.services.some(s => s.ports.some(p => !isLoopback(p.hostIp)))) exposed.push(stack);
+    // A host-network service publishes every container port directly on the host,
+    // so it counts as exposed (beyond loopback) and as publishing even with no
+    // declared `ports:`. This keeps the summary honest about host networking,
+    // matching the Compose Doctor's host-network finding.
+    const publishes = (s: typeof declared.services[number]): boolean => s.ports.length > 0 || isHostNetwork(s.networkMode);
+    const publishesPort = declared.services.some(publishes);
+    if (declared.services.some(s => isHostNetwork(s.networkMode) || s.ports.some(p => !isLoopback(p.hostIp)))) exposed.push(stack);
 
     if (publishesPort) {
       // Unknown only when a publishing service is effectively unclassified: a
@@ -70,7 +75,7 @@ export async function computeNodeNetworkingSummary(nodeId: number): Promise<Node
       const stackIntent = intents.find(i => i.service === '')?.intent ?? null;
       const byService = new Map(intents.filter(i => i.service !== '').map(i => [i.service, i.intent]));
       const anyUnclassified = declared.services
-        .filter(s => s.ports.length > 0)
+        .filter(publishes)
         .some(s => {
           const intent = byService.get(s.name) ?? stackIntent;
           return intent === null || intent === 'unknown';

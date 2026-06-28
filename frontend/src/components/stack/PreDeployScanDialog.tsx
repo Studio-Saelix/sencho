@@ -21,7 +21,7 @@ interface PreDeployScanDialogProps {
  * Advisory pre-deploy review. Shows the latest cached scan for each image in a
  * manual deploy so the operator can review the security posture before
  * proceeding. Unlike PolicyBlockDialog this never blocks: anyone can deploy or
- * cancel, and there is no override gate (blocking is the paid deploy-block
+ * cancel, and there is no override gate (blocking is the deploy-block
  * policy). Opened opt-in via the pre-deploy scan advisory setting.
  */
 export function PreDeployScanDialog({ open, stackName, images, onCancel, onDeploy }: PreDeployScanDialogProps) {

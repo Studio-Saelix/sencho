@@ -590,22 +590,34 @@ export default function FleetSnapshots() {
                                                         .find(s => s.nodeId === node.nodeId && s.stackName === stack.stackName)?.dossier;
                                                     return (
                                                         <div key={stackKey}>
-                                                            <button
-                                                                onClick={() => toggleStack(stackKey)}
-                                                                className="flex items-center gap-2 w-full px-3 py-2 text-left rounded-md hover:bg-muted/50 transition-colors"
-                                                            >
-                                                                {stackExpanded
-                                                                    ? <ChevronDown className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
-                                                                    : <ChevronRight className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
-                                                                }
-                                                                <Layers className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                                                                <span className="text-xs font-mono font-medium flex-1 truncate">
-                                                                    {stack.stackName}
-                                                                </span>
-                                                                <Badge variant="outline" className="text-[10px] font-mono tabular-nums px-1.5 py-0 h-4 shrink-0">
-                                                                    {stack.files.length} file{stack.files.length !== 1 ? 's' : ''}
-                                                                </Badge>
-                                                            </button>
+                                                            <div className="flex items-center gap-2 pr-3 rounded-md hover:bg-muted/50 transition-colors">
+                                                                <button
+                                                                    onClick={() => toggleStack(stackKey)}
+                                                                    className="flex items-center gap-2 flex-1 min-w-0 px-3 py-2 text-left"
+                                                                >
+                                                                    {stackExpanded
+                                                                        ? <ChevronDown className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                                                                        : <ChevronRight className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                                                                    }
+                                                                    <Layers className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                                                                    <span className="text-xs font-mono font-medium flex-1 truncate">
+                                                                        {stack.stackName}
+                                                                    </span>
+                                                                    <Badge variant="outline" className="text-[10px] font-mono tabular-nums px-1.5 py-0 h-4 shrink-0">
+                                                                        {stack.files.length} file{stack.files.length !== 1 ? 's' : ''}
+                                                                    </Badge>
+                                                                </button>
+                                                                {isAdmin && (
+                                                                    <RestoreButton
+                                                                        nodeId={node.nodeId}
+                                                                        nodeName={node.nodeName}
+                                                                        stackName={stack.stackName}
+                                                                        hasDossier={!!dossier}
+                                                                        restoring={restoringStack === `${node.nodeId}:${stack.stackName}`}
+                                                                        onRestore={handleRestore}
+                                                                    />
+                                                                )}
+                                                            </div>
 
                                                             {/* Files */}
                                                             {stackExpanded && (
@@ -650,18 +662,6 @@ export default function FleetSnapshots() {
 
                                                                     {/* Preserved dossier notes (read-only) */}
                                                                     {dossier && <DossierBlock dossier={dossier} />}
-
-                                                                    {/* Restore button (admin only) */}
-                                                                    {isAdmin && (
-                                                                        <RestoreButton
-                                                                            nodeId={node.nodeId}
-                                                                            nodeName={node.nodeName}
-                                                                            stackName={stack.stackName}
-                                                                            hasDossier={!!dossier}
-                                                                            restoring={restoringStack === `${node.nodeId}:${stack.stackName}`}
-                                                                            onRestore={handleRestore}
-                                                                        />
-                                                                    )}
                                                                 </div>
                                                             )}
                                                         </div>
@@ -919,16 +919,16 @@ function RestoreButton({ nodeId, nodeName, stackName, hasDossier, restoring, onR
     return (
         <>
             <Button
-                variant="outline"
+                variant="ghost"
                 size="sm"
-                className="h-7 px-2.5 text-xs gap-1.5 ml-3 mt-1"
+                className="h-6 px-2 text-xs"
                 disabled={restoring}
                 onClick={() => setOpen(true)}
             >
                 {restoring ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
+                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
                 ) : (
-                    <RotateCcw className="w-3 h-3" strokeWidth={1.5} />
+                    <RotateCcw className="w-3 h-3 mr-1" strokeWidth={1.5} />
                 )}
                 Restore
             </Button>
@@ -1020,16 +1020,16 @@ function RestoreAllButton({ restoring, hasDocumentation, onRestoreAll }: {
     return (
         <>
             <Button
-                variant="outline"
+                variant="ghost"
                 size="sm"
-                className="h-8 gap-1.5 shrink-0"
+                className="h-6 px-2 text-xs shrink-0"
                 disabled={restoring}
                 onClick={() => setOpen(true)}
             >
                 {restoring ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
                 ) : (
-                    <RotateCcw className="w-3.5 h-3.5" strokeWidth={1.5} />
+                    <RotateCcw className="w-3 h-3 mr-1" strokeWidth={1.5} />
                 )}
                 Restore all
             </Button>

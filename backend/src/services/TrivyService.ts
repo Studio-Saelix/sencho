@@ -9,6 +9,7 @@ import {
     VulnSeverity,
     VulnScanTrigger,
     VulnerabilityScan,
+    parsePolicyEvaluation,
 } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { RegistryService } from './RegistryService';
@@ -19,6 +20,7 @@ import { FleetSyncService } from './FleetSyncService';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { SEVERITY_ORDER } from '../utils/severity';
+import type { PolicyBlockReason } from '../utils/policy-risk';
 
 const execFileAsync = promisify(execFile);
 
@@ -72,12 +74,18 @@ function diag(msg: string, ...args: unknown[]): void {
 interface TrivyRawVulnerability {
     VulnerabilityID?: string;
     PkgName?: string;
+    PkgPath?: string;
+    PkgIdentifier?: { PURL?: string };
     InstalledVersion?: string;
     FixedVersion?: string;
+    Status?: string;
     Severity?: string;
     Title?: string;
     Description?: string;
     PrimaryURL?: string;
+    Layer?: { Digest?: string; DiffID?: string };
+    VendorSeverity?: Record<string, number>;
+    CVSS?: Record<string, { V3Vector?: string; V3Score?: number }>;
 }
 
 interface TrivyRawSecret {
@@ -132,6 +140,9 @@ export interface ScanAllNodeImagesViolation {
     severity: VulnSeverity;
     policyName: string;
     maxSeverity: VulnSeverity;
+    // Inputs that matched (severity / kev / fixable), so the scheduled-scan
+    // alert names the reason rather than always citing a severity threshold.
+    reasons: PolicyBlockReason[];
 }
 
 export interface ScanAllNodeImagesResult {
@@ -178,6 +189,18 @@ export interface TrivyVulnerability {
     title: string;
     description: string;
     primaryUrl: string | null;
+    // Scan-intrinsic enrichment Trivy returns per finding. These separate scary
+    // from exploitable: `status` (fixed / will_not_fix / end_of_life / ...) drives
+    // posture, the others power evidence tags. Captured here, joined with
+    // time-varying intel (KEV/EPSS) only at read time.
+    status: string | null;
+    cvssScore: number | null;
+    cvssVector: string | null;
+    cvssSource: string | null;
+    vendorSeverity: VulnSeverity | null;
+    purl: string | null;
+    pkgPath: string | null;
+    layerDigest: string | null;
 }
 
 export interface TrivySecret {
@@ -274,6 +297,37 @@ function normalizeSeverity(raw: string | undefined): VulnSeverity {
     return 'UNKNOWN';
 }
 
+// Trivy reports CVSS keyed by source (nvd, redhat, ...). Prefer NVD, else the
+// first available source. Returns nulls when no V3 score/vector is present.
+function pickCvss(
+    cvss: Record<string, { V3Vector?: string; V3Score?: number }> | undefined,
+): { score: number | null; vector: string | null; source: string | null } {
+    if (!cvss) return { score: null, vector: null, source: null };
+    const source = cvss.nvd ? 'nvd' : Object.keys(cvss)[0];
+    const entry = source ? cvss[source] : undefined;
+    if (!entry || (typeof entry.V3Score !== 'number' && !entry.V3Vector)) {
+        return { score: null, vector: null, source: null };
+    }
+    return {
+        score: typeof entry.V3Score === 'number' ? entry.V3Score : null,
+        vector: entry.V3Vector ?? null,
+        source: source ?? null,
+    };
+}
+
+// Trivy's VendorSeverity is a vendor->numeric map (1=Low..4=Critical). Collapse
+// to the highest vendor rating as a label so the UI can flag a vendor that rates
+// a finding differently from NVD.
+const VENDOR_SEVERITY_LABEL: Record<number, VulnSeverity> = { 1: 'LOW', 2: 'MEDIUM', 3: 'HIGH', 4: 'CRITICAL' };
+function pickVendorSeverity(map: Record<string, number> | undefined): VulnSeverity | null {
+    if (!map) return null;
+    let max = 0;
+    for (const v of Object.values(map)) {
+        if (typeof v === 'number' && v > max) max = v;
+    }
+    return VENDOR_SEVERITY_LABEL[max] ?? null;
+}
+
 function computeHighestSeverity(vulns: TrivyVulnerability[]): VulnSeverity | null {
     if (vulns.length === 0) return null;
     let highestIdx = -1;
@@ -310,6 +364,7 @@ export function parseTrivyOutput(raw: string): {
             const key = `${id}::${pkg}`;
             if (vulnSeen.has(key)) continue;
             vulnSeen.add(key);
+            const cvss = pickCvss(v.CVSS);
             vulnerabilities.push({
                 vulnerabilityId: id,
                 pkgName: pkg,
@@ -319,6 +374,14 @@ export function parseTrivyOutput(raw: string): {
                 title: v.Title ?? '',
                 description: v.Description ?? '',
                 primaryUrl: v.PrimaryURL ? v.PrimaryURL : null,
+                status: v.Status ? v.Status : null,
+                cvssScore: cvss.score,
+                cvssVector: cvss.vector,
+                cvssSource: cvss.source,
+                vendorSeverity: pickVendorSeverity(v.VendorSeverity),
+                purl: v.PkgIdentifier?.PURL ?? null,
+                pkgPath: v.PkgPath ? v.PkgPath : null,
+                layerDigest: v.Layer?.Digest ?? v.Layer?.DiffID ?? null,
             });
         }
         for (const s of result.Secrets ?? []) {
@@ -588,7 +651,11 @@ class TrivyService {
                         `scanImage: cache hit for digest=${digest} scanId=${cached.id} ageMs=${startedAt - cached.scanned_at}`,
                     );
                     const db = DatabaseService.getInstance();
-                    const details = db.getVulnerabilityDetails(cached.id, { limit: 1000 }).items;
+                    // Copy the cached scan's full finding set, not a truncated page:
+                    // the persisted copy must keep stored details == total_vulnerabilities,
+                    // or the deploy gate's integrity check fails closed on a cached scan
+                    // that has more findings than a single detail page would hold.
+                    const details = db.getAllVulnerabilityDetails(cached.id);
                     const cachedSecrets = scanners.includes('secret')
                         ? db.getSecretFindings(cached.id, { limit: 1000 }).items
                         : [];
@@ -615,6 +682,14 @@ class TrivyService {
                             title: d.title ?? '',
                             description: d.description ?? '',
                             primaryUrl: d.primary_url,
+                            status: d.status ?? null,
+                            cvssScore: d.cvss_score ?? null,
+                            cvssVector: d.cvss_vector ?? null,
+                            cvssSource: d.cvss_source ?? null,
+                            vendorSeverity: d.vendor_severity ?? null,
+                            purl: d.purl ?? null,
+                            pkgPath: d.pkg_path ?? null,
+                            layerDigest: d.layer_digest ?? null,
                         })),
                         secrets: cachedSecrets.map((s) => ({
                             ruleId: s.rule_id,
@@ -809,6 +884,14 @@ class TrivyService {
                     title: v.title || null,
                     description: v.description || null,
                     primary_url: v.primaryUrl,
+                    status: v.status,
+                    cvss_score: v.cvssScore,
+                    cvss_vector: v.cvssVector,
+                    cvss_source: v.cvssSource,
+                    vendor_severity: v.vendorSeverity,
+                    purl: v.purl,
+                    pkg_path: v.pkgPath,
+                    layer_digest: v.layerDigest,
                 })),
             );
             db.insertSecretFindings(
@@ -1115,24 +1198,20 @@ class TrivyService {
         };
 
         const collectViolation = (row: VulnerabilityScan | null): void => {
-            if (!row || !row.policy_evaluation) return;
-            try {
-                const parsed = JSON.parse(row.policy_evaluation) as {
-                    violated: boolean;
-                    policyName: string;
-                    maxSeverity: VulnSeverity;
-                };
-                if (parsed.violated) {
-                    violations.push({
-                        imageRef: row.image_ref,
-                        scanId: row.id,
-                        severity: row.highest_severity ?? 'UNKNOWN',
-                        policyName: parsed.policyName,
-                        maxSeverity: parsed.maxSeverity,
-                    });
-                }
-            } catch {
-                // Ignore malformed evaluation JSON; presence is informational.
+            if (!row) return;
+            // Shared parser tolerates malformed JSON (returns null) and normalizes
+            // reasons, so the scheduled-scan alert names the same validated inputs
+            // as the banner.
+            const parsed = parsePolicyEvaluation(row.policy_evaluation);
+            if (parsed?.violated) {
+                violations.push({
+                    imageRef: row.image_ref,
+                    scanId: row.id,
+                    severity: row.highest_severity ?? 'UNKNOWN',
+                    policyName: parsed.policyName,
+                    maxSeverity: parsed.maxSeverity,
+                    reasons: parsed.reasons,
+                });
             }
         };
 

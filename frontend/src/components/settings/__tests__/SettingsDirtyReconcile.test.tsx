@@ -32,10 +32,12 @@ vi.mock('../MastheadStatsContext', () => ({
 import { apiFetch } from '@/lib/api';
 import { useLicense } from '@/context/LicenseContext';
 import { HostAlertsSection } from '../HostAlertsSection';
+import { ContainerAlertsSection } from '../ContainerAlertsSection';
 import { DockerStorageSection } from '../DockerStorageSection';
 import { FleetMeshSection } from '../FleetMeshSection';
 import { DataRetentionSection } from '../DataRetentionSection';
 import { DeveloperSection } from '../DeveloperSection';
+import { StacksSection } from '../StacksSection';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
 const mockedLicense = useLicense as unknown as ReturnType<typeof vi.fn>;
@@ -45,6 +47,7 @@ const FULL_SETTINGS: Record<string, string> = {
     host_ram_limit: '90',
     host_disk_limit: '90',
     host_alert_suppression_mins: '60',
+    host_alerts_enabled: '1',
     global_crash: '1',
     docker_janitor_gb: '5',
     prune_on_update: '1',
@@ -55,6 +58,9 @@ const FULL_SETTINGS: Record<string, string> = {
     audit_retention_days: '90',
     scan_history_per_image_limit: '50',
     developer_mode: '0',
+    health_gate_enabled: '1',
+    health_gate_window_seconds: '90',
+    env_block_deploy_on_missing_required: '0',
 };
 
 /** GET /settings resolves load data; PATCH resolves ok unless overridden per-test. */
@@ -83,8 +89,11 @@ describe('settings dirty reconcile on save', () => {
         render(<HostAlertsSection onDirtyChange={onDirty} />);
         const save = await screen.findByRole('button', { name: /save alerts/i });
 
-        // Edit: section becomes dirty.
-        fireEvent.click(screen.getAllByRole('switch')[0]); // global_crash
+        // Edit via NumberChip: click chip button to mount spinbutton, change, blur to commit.
+        fireEvent.click(screen.getAllByRole('button', { name: /90\s*%/i })[0]);
+        const spinbutton = screen.getByRole('spinbutton');
+        fireEvent.change(spinbutton, { target: { value: '95' } });
+        fireEvent.blur(spinbutton);
         await waitFor(() => expect(lastDirty(onDirty)).toBe(true));
         expect(masthead.last?.[0]).toMatchObject({ label: 'EDITED', value: '1 pending', tone: 'warn' });
         expect(save).not.toBeDisabled();
@@ -108,7 +117,10 @@ describe('settings dirty reconcile on save', () => {
         render(<HostAlertsSection onDirtyChange={onDirty} />);
         const save = await screen.findByRole('button', { name: /save alerts/i });
 
-        fireEvent.click(screen.getAllByRole('switch')[0]);
+        fireEvent.click(screen.getAllByRole('button', { name: /90\s*%/i })[0]);
+        const spinbutton = screen.getByRole('spinbutton');
+        fireEvent.change(spinbutton, { target: { value: '95' } });
+        fireEvent.blur(spinbutton);
         await waitFor(() => expect(lastDirty(onDirty)).toBe(true));
 
         fireEvent.click(save);
@@ -132,17 +144,20 @@ describe('settings dirty reconcile on save', () => {
         render(<HostAlertsSection onDirtyChange={onDirty} />);
         const save = await screen.findByRole('button', { name: /save alerts/i });
 
-        // Change field A and submit (PATCH now pending).
-        fireEvent.click(screen.getAllByRole('switch')[0]); // global_crash
+        // Change field A (CPU limit via NumberChip) and submit (PATCH now pending).
+        fireEvent.click(screen.getAllByRole('button', { name: /90\s*%/i })[0]);
+        const spinbuttonA = screen.getByRole('spinbutton');
+        fireEvent.change(spinbuttonA, { target: { value: '95' } });
+        fireEvent.blur(spinbuttonA);
         await waitFor(() => expect(lastDirty(onDirty)).toBe(true));
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
 
-        // Change field B while the save is still in flight (fieldset stays editable).
-        const healthGate = screen.getAllByRole('switch')[1]; // health_gate_enabled
-        const healthBefore = healthGate.getAttribute('aria-checked');
-        fireEvent.click(healthGate);
-        expect(healthGate.getAttribute('aria-checked')).not.toBe(healthBefore);
+        // Change field B (host_alerts_enabled master toggle) while the save is still in flight.
+        const masterToggle = screen.getAllByRole('switch')[0]; // host_alerts_enabled (only switch left)
+        const toggleBefore = masterToggle.getAttribute('aria-checked');
+        fireEvent.click(masterToggle);
+        expect(masterToggle.getAttribute('aria-checked')).not.toBe(toggleBefore);
 
         // Resolve the save: only the submitted snapshot becomes the baseline.
         await act(async () => {
@@ -150,7 +165,7 @@ describe('settings dirty reconcile on save', () => {
         });
 
         // The later edit survives and keeps the section dirty/retryable.
-        expect(healthGate.getAttribute('aria-checked')).not.toBe(healthBefore);
+        expect(masterToggle.getAttribute('aria-checked')).not.toBe(toggleBefore);
         await waitFor(() => expect(lastDirty(onDirty)).toBe(true));
         expect(save).not.toBeDisabled();
     });
@@ -169,7 +184,18 @@ describe('every migrated section clears its dirty flag on save', () => {
             name: 'HostAlertsSection',
             render: onDirty => render(<HostAlertsSection onDirtyChange={onDirty} />),
             saveName: /save alerts/i,
-            edit: () => fireEvent.click(screen.getAllByRole('switch')[0]),
+            // NumberChip: click chip button, change spinbutton, blur to commit
+            edit: () => {
+                fireEvent.click(screen.getAllByRole('button', { name: /90\s*%/i })[0]);
+                fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '95' } });
+                fireEvent.blur(screen.getByRole('spinbutton'));
+            },
+        },
+        {
+            name: 'ContainerAlertsSection',
+            render: onDirty => render(<ContainerAlertsSection onDirtyChange={onDirty} />),
+            saveName: /save settings/i,
+            edit: () => fireEvent.click(screen.getByRole('switch')),
         },
         {
             name: 'DockerStorageSection',
@@ -194,6 +220,12 @@ describe('every migrated section clears its dirty flag on save', () => {
             render: onDirty => render(<DeveloperSection onDirtyChange={onDirty} />),
             saveName: /save settings/i,
             edit: () => fireEvent.click(screen.getByRole('switch')),
+        },
+        {
+            name: 'StacksSection',
+            render: onDirty => render(<StacksSection onDirtyChange={onDirty} />),
+            saveName: /save settings/i,
+            edit: () => fireEvent.click(screen.getAllByRole('switch')[0]),
         },
     ];
 

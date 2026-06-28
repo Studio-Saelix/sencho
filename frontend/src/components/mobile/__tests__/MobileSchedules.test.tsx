@@ -1,0 +1,133 @@
+/**
+ * Confirms the mobile schedule view renders action short labels from the shared
+ * registry rather than a local map, so a registry change flows through to mobile.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import type { ScheduledTask } from '@/types/scheduling';
+
+vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
+
+import { apiFetch } from '@/lib/api';
+import { MobileSchedules } from '../MobileSchedules';
+
+const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
+
+function jsonResponse(body: unknown): Response {
+  return { ok: true, status: 200, json: async () => body } as unknown as Response;
+}
+
+function makeTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
+  const soon = Date.now() + 3_600_000;
+  return {
+    id: 1,
+    name: 'task',
+    target_type: 'stack',
+    target_id: 'web',
+    node_id: 1,
+    action: 'auto_backup',
+    cron_expression: '0 3 * * *',
+    enabled: 1,
+    created_by: 'admin',
+    created_at: 0,
+    updated_at: 0,
+    last_run_at: null,
+    next_run_at: soon,
+    last_status: null,
+    last_error: null,
+    prune_targets: null,
+    target_services: null,
+    prune_label_filter: null,
+    next_runs: [soon],
+    ...overrides,
+  };
+}
+
+let tasksFixture: ScheduledTask[];
+let nodesFixture: { id: number; name: string; type: 'local' | 'remote' }[];
+
+beforeEach(() => {
+  tasksFixture = [];
+  nodesFixture = [{ id: 1, name: 'hub', type: 'local' }, { id: 2, name: 'edge', type: 'remote' }];
+  mockedFetch.mockReset();
+  // The view fetches nodes and tasks separately, so dispatch by URL.
+  mockedFetch.mockImplementation(async (url: string) => {
+    if (url === '/nodes') return jsonResponse(nodesFixture);
+    if (url === '/scheduled-tasks') return jsonResponse(tasksFixture);
+    return jsonResponse({});
+  });
+});
+
+afterEach(() => vi.clearAllMocks());
+
+describe('MobileSchedules', () => {
+  it('renders registry short labels for upcoming runs', async () => {
+    tasksFixture = [
+      makeTask({ id: 1, action: 'auto_backup' }),
+      makeTask({ id: 2, action: 'auto_down', next_runs: [Date.now() + 7_200_000] }),
+    ];
+
+    const { container } = render(<MobileSchedules headerActions={null} />);
+
+    expect(await screen.findByText('backup')).toBeInTheDocument();
+    expect(await screen.findByText('down')).toBeInTheDocument();
+    // auto_down carries the destructive tone in the registry; its StateDot
+    // renders with the destructive class only if the tone is wired through.
+    expect(container.querySelector('.bg-destructive')).toBeTruthy();
+  });
+
+  describe('update + fleet target', () => {
+    it('renders node-scoped copy, not fleet-ambiguous text', async () => {
+      tasksFixture = [
+        makeTask({ id: 1, action: 'update', target_type: 'fleet', target_id: null, node_id: 2 }),
+      ];
+
+      render(<MobileSchedules headerActions={null} />);
+
+      const row = await screen.findByText('update node');
+      expect(row).toBeInTheDocument();
+
+      // The row must not contain the forbidden ambiguous copy.
+      expect(screen.queryByText('update fleet')).not.toBeInTheDocument();
+      expect(screen.queryByText('update all')).not.toBeInTheDocument();
+
+      // The target names the node the fleet update runs against.
+      expect(await screen.findByText('All stacks · edge')).toBeInTheDocument();
+    });
+  });
+
+  it('renders "Entire fleet" target label for a snapshot task', async () => {
+    tasksFixture = [
+      makeTask({ id: 1, action: 'snapshot', target_type: 'fleet', target_id: null, node_id: null }),
+    ];
+
+    render(<MobileSchedules headerActions={null} />);
+
+    expect(await screen.findByText('Entire fleet')).toBeInTheDocument();
+  });
+
+  it('names the selected node for a node-scoped scan instead of "system"', async () => {
+    tasksFixture = [
+      makeTask({ id: 1, name: 'Vul Scan', action: 'scan', target_type: 'system', target_id: null, node_id: 1 }),
+    ];
+
+    render(<MobileSchedules headerActions={null} />);
+
+    expect(await screen.findByText('scan')).toBeInTheDocument();
+    expect(await screen.findByText('hub')).toBeInTheDocument();
+    expect(screen.queryByText('system')).not.toBeInTheDocument();
+  });
+
+  it('falls back to a generic label, not a raw id, when the node is unresolved', async () => {
+    // node_id 99 is absent from nodesFixture (deleted node, or names not yet loaded).
+    tasksFixture = [
+      makeTask({ id: 1, name: 'Orphan Scan', action: 'scan', target_type: 'system', target_id: null, node_id: 99 }),
+    ];
+
+    render(<MobileSchedules headerActions={null} />);
+
+    expect(await screen.findByText('Selected node')).toBeInTheDocument();
+    expect(screen.queryByText('99')).not.toBeInTheDocument();
+    expect(screen.queryByText('system')).not.toBeInTheDocument();
+  });
+});

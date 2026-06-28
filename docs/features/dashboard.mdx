@@ -92,7 +92,7 @@ The card is divided into four sections.
 | Row | What it shows |
 |-----|---------------|
 | **Auto-heal policies** | `<enabled> / <total> active` for crash-recovery policies across all stacks; reads `None` when no policies exist |
-| **Auto-update schedules** | `<enabled> / <total> active` count of `Auto-update Stack` / `Auto-update All Stacks` rows configured for this node; reads `None` when none are configured |
+| **Auto-update schedules** | `<enabled> / <total> active` count of `Auto-update Stack` / `Auto-update All Stacks on Node` rows configured for this node; reads `None` when none are configured |
 | **Webhooks** | Active inbound deploy webhooks tied to Git Sources or stacks, formatted `<n> actives` |
 | **Scheduled tasks** | Active scheduled operations (backups, restarts, scripts), formatted `<n> actives` |
 
@@ -102,14 +102,14 @@ The card is divided into four sections.
 |-----|---------------|
 | **MFA** | `On` when TOTP is configured for the signed-in operator, `Off` when configured but disabled, `Not set up` when there is no MFA secret on file |
 | **SSO** | The active SSO provider name (`OIDC`, `Google`, `GitHub`, `Okta`, `LDAP`); reads `Off` when SSO is not enabled |
-| **Vulnerability scanning** (Admiral) | Count of enabled scan policies on the active node; reads `None` when no policy is enabled |
+| **Vulnerability scanning** | Count of enabled scan policies on the active node; reads `None` when no policy is enabled |
 
 ### Backups & Thresholds
 
 | Row | What it shows |
 |-----|---------------|
 | **Cloud Backup** | The active cloud backup target: `Sencho Cloud` (Admiral only), `Custom S3` (with ` (auto)` appended when auto-upload is enabled), or `Disabled` |
-| **Alert thresholds** | The current host thresholds, formatted `CPU x% · RAM y% · Disk z%` |
+| **Alert thresholds** | The current host thresholds, formatted `CPU x% · RAM y% · Disk z%`, or `Off` when host threshold alerts are disabled |
 | **Crash detection** | `On` when global container-crash notifications are enabled, `Off` otherwise |
 
 Click any row to jump directly to the settings section that manages it. Rows that require a higher tier than the active license are not rendered. The section headers (Notifications, Automation, Security, Backups & Thresholds) only render when at least one of their rows is visible.

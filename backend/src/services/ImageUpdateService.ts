@@ -1,5 +1,6 @@
 import path from 'path';
 import YAML from 'yaml';
+import { CronExpressionParser } from 'cron-parser';
 import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
@@ -7,7 +8,7 @@ import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
-import { parseImageRef, getRemoteDigest } from './registry-api';
+import { parseImageRef, getRemoteDigestResult, repoDigestMatchesRef } from './registry-api';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -17,6 +18,13 @@ const BACKFILL_KEY = 'image_update_notifications_backfilled';
 export interface ImageCheckResult {
     hasUpdate: boolean;
     error?: string;
+    /**
+     * The image is not registry-backed (locally built, or a bare digest ref
+     * with no resolvable tag), so update status is not applicable. Distinct
+     * from `error`: such an image must be excluded from a stack's pass/fail
+     * tally rather than counted as a failed or up-to-date check.
+     */
+    notCheckable?: boolean;
 }
 
 /**
@@ -27,6 +35,8 @@ export interface ImageCheckResult {
  * remaining time (0 when a manual refresh is allowed). `lastCheckedAt` /
  * `nextCheckAt` are epoch-ms or null ("never checked" / "not scheduled");
  * `nextCheckAt` is meaningless while `checking` is true.
+ * `mode` is the active scheduling mode; `cronExpression` is the 5-field
+ * expression when mode is 'cron', null otherwise or when unconfigured.
  */
 export interface ImageUpdateStatus {
     checking: boolean;
@@ -35,6 +45,8 @@ export interface ImageUpdateStatus {
     nextCheckAt: number | null;
     manualCooldownMinutes: number;
     manualCooldownRemainingMs: number;
+    mode: 'interval' | 'cron';
+    cronExpression: string | null;
 }
 
 // ─── Compose file helpers ────────────────────────────────────────────────────
@@ -162,6 +174,8 @@ export class ImageUpdateService {
     private static readonly MAX_INTERVAL_MINUTES = 1440;          // 24 hours
     private static readonly DEFAULT_INTERVAL_MINUTES = 120;       // 2 hours
     private static readonly INTERVAL_SETTING_KEY = 'image_update_check_interval_minutes';
+    private static readonly MODE_SETTING_KEY = 'image_update_check_mode';
+    private static readonly CRON_SETTING_KEY = 'image_update_check_cron';
     private static readonly JITTER_FRACTION = 0.1;                // ±10% so a fleet does not poll in lockstep
     private static readonly STARTUP_DELAY_MS = 2 * 60 * 1000;    // 2 min after boot
 
@@ -182,6 +196,8 @@ export class ImageUpdateService {
     // Initialized at declaration so getStatus() never reports NaN before start()
     // or configureFromSettings() has run (e.g. route tests that skip startServer).
     private intervalMs = ImageUpdateService.DEFAULT_INTERVAL_MINUTES * 60 * 1000;
+    private mode: 'interval' | 'cron' = 'interval';
+    private cronExpression: string | null = null;
     private static readonly MANUAL_COOLDOWN_MS = 2 * 60 * 1000;  // 2 min between manual triggers
     private static readonly INTER_IMAGE_DELAY_MS = 300;           // be polite to registries
     private static readonly CHECK_TIMEOUT_MS = 5 * 60 * 1000;     // threshold for the "running long" skip warning
@@ -204,8 +220,11 @@ export class ImageUpdateService {
         if (this.timer) return;
         this.polling = true;
         this.configureFromSettings();
-        // Preserve the existing 2-minute post-boot delay before the first check.
-        this.armNext(ImageUpdateService.STARTUP_DELAY_MS);
+        // Interval mode keeps the 2-minute post-boot delay before the first check.
+        // Cron mode honors its schedule: arm at the next cron fire time so a restart
+        // never triggers an out-of-cadence check (e.g. a weekly cron must not run on
+        // every boot).
+        this.armNext(this.mode === 'cron' ? this.nextDelayMs() : ImageUpdateService.STARTUP_DELAY_MS);
     }
 
     public stop() {
@@ -242,10 +261,37 @@ export class ImageUpdateService {
     /**
      * Reads image_update_check_interval_minutes into intervalMs, clamped to
      * [15, 1440], falling back to the 2-hour default on a missing, blank,
-     * malformed, or unreadable value.
+     * malformed, or unreadable value. Also reads mode and cron expression
+     * from global_settings; falls back to interval mode when cron is
+     * unconfigured or unparseable.
      */
     public configureFromSettings(): void {
         this.intervalMs = ImageUpdateService.resolveIntervalMinutes() * 60 * 1000;
+
+        const settings = DatabaseService.getInstance().getGlobalSettings();
+        const rawMode = settings[ImageUpdateService.MODE_SETTING_KEY];
+        this.mode = (rawMode === 'cron') ? 'cron' : 'interval';
+
+        if (this.mode === 'cron') {
+            const rawCron = settings[ImageUpdateService.CRON_SETTING_KEY];
+            if (typeof rawCron === 'string' && rawCron.trim()) {
+                try {
+                    const expr = CronExpressionParser.parse(rawCron);
+                    expr.next(); // prove the expression can produce a next fire time
+                    this.cronExpression = rawCron.trim();
+                } catch {
+                    console.warn(`[ImageUpdateService] Cron expression is invalid; falling back to interval mode. Expression: "${rawCron}"`);
+                    this.mode = 'interval';
+                    this.cronExpression = null;
+                }
+            } else {
+                console.warn('[ImageUpdateService] Cron mode is active but no expression is set; falling back to interval mode.');
+                this.mode = 'interval';
+                this.cronExpression = null;
+            }
+        } else {
+            this.cronExpression = null;
+        }
     }
 
     private static resolveIntervalMinutes(): number {
@@ -290,8 +336,31 @@ export class ImageUpdateService {
         }
     }
 
-    /** intervalMs with ±10% jitter so multiple nodes do not hit registries together. */
+    /**
+     * Compute the next check delay. In interval mode this is intervalMs with
+     * ±10% jitter. In cron mode the delay is the gap between now and the next
+     * cron fire time, with no jitter (the user chose a specific time). Falls
+     * back to interval mode if the cron expression cannot be parsed at runtime.
+     */
     private nextDelayMs(): number {
+        if (this.mode === 'cron' && this.cronExpression) {
+            try {
+                const expr = CronExpressionParser.parse(this.cronExpression);
+                const nextFire = expr.next().toDate().getTime();
+                const delay = nextFire - Date.now();
+                if (delay <= 0) {
+                    // We just passed the fire time; retry in 30 s so the next
+                    // .next() call moves to the following occurrence.
+                    return 30_000;
+                }
+                return delay;
+            } catch (e) {
+                console.warn('[ImageUpdateService] Cron expression became invalid at runtime; falling back to interval mode:', getErrorMessage(e, String(e)));
+                this.mode = 'interval';
+                this.cronExpression = null;
+                // Fall through to interval-based delay below.
+            }
+        }
         const jitter = this.intervalMs * ImageUpdateService.JITTER_FRACTION;
         return Math.round(this.intervalMs - jitter + Math.random() * 2 * jitter);
     }
@@ -328,6 +397,8 @@ export class ImageUpdateService {
             nextCheckAt: this.nextCheckAt,
             manualCooldownMinutes: ImageUpdateService.manualCooldownMinutes,
             manualCooldownRemainingMs: this.getManualCooldownRemainingMs(),
+            mode: this.mode,
+            cronExpression: this.cronExpression,
         };
     }
 
@@ -488,7 +559,9 @@ export class ImageUpdateService {
                 imageUpdateMap.set(imageRef, await this.checkImage(docker, imageRef));
             } catch (e) {
                 console.error(`[ImageUpdateService] Error checking ${sanitizeForLog(imageRef)}:`, sanitizeForLog((e as Error)?.message ?? String(e)));
-                imageUpdateMap.set(imageRef, { hasUpdate: false, error: String(e) });
+                // getErrorMessage (not raw String(e)) because this value can surface
+                // verbatim in the sidebar tooltip / readiness advisory as lastError.
+                imageUpdateMap.set(imageRef, { hasUpdate: false, error: getErrorMessage(e, 'Update check failed') });
             }
             await sleep(ImageUpdateService.INTER_IMAGE_DELAY_MS);
         }
@@ -505,7 +578,32 @@ export class ImageUpdateService {
         let updatesFound = 0;
         const newlyUpdated: string[] = [];
         for (const [stackName, images] of stackImages) {
-            const hasUpdate = Array.from(images).some(img => imageUpdateMap.get(img)?.hasUpdate === true);
+            // Tally only checkable images: a not-checkable image (locally built,
+            // or a bare digest ref) is neither a pass nor a failure.
+            const checkable = Array.from(images)
+                .map(img => imageUpdateMap.get(img))
+                .filter((r): r is ImageCheckResult => !!r && !r.notCheckable);
+            const errored = checkable.filter(r => r.error !== undefined);
+            const confirmedHasUpdate = checkable.some(r => r.error === undefined && r.hasUpdate === true);
+
+            // Every checkable image failed: status is undeterminable. Preserve the
+            // last-known has_update so a transient registry outage neither erases a
+            // real update nor flaps the notification state.
+            if (checkable.length > 0 && errored.length === checkable.length) {
+                db.recordStackCheckFailure(nodeId, stackName, errored[0].error ?? 'Update check failed', now);
+                continue;
+            }
+
+            const checkStatus = errored.length > 0 ? 'partial' : 'ok';
+            const lastError = errored.length > 0 ? (errored[0].error ?? null) : null;
+            // Only a fully-ok check is authoritative enough to lower has_update to
+            // false. On a partial check some image could not be reached, so a
+            // previously confirmed update is preserved rather than erased (which
+            // would also re-fire the notification when that image recovers).
+            const hasUpdate = checkStatus === 'partial'
+                ? (confirmedHasUpdate || previousState[stackName] === true)
+                : confirmedHasUpdate;
+
             if (hasUpdate) {
                 updatesFound++;
                 // Notify only on state transition: was false/absent, now true
@@ -513,7 +611,7 @@ export class ImageUpdateService {
                     newlyUpdated.push(stackName);
                 }
             }
-            db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now);
+            db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError);
         }
 
         // Dispatch notifications for stacks that newly have updates
@@ -568,7 +666,8 @@ export class ImageUpdateService {
 
     public async checkImage(docker: DockerController, imageRef: string): Promise<ImageCheckResult> {
         const parsed = parseImageRef(imageRef);
-        if (!parsed) return { hasUpdate: false };
+        // A bare digest ref (sha256:...) has no tag to track upstream; not applicable.
+        if (!parsed) return { hasUpdate: false, notCheckable: true };
 
         if (isDebugEnabled()) {
             console.log(`[ImageUpdateService] Checking ${imageRef}: registry=${parsed.registry} repo=${parsed.repo} tag=${parsed.tag}`);
@@ -586,11 +685,15 @@ export class ImageUpdateService {
             const inspect = await withTimeout(docker.getDocker().getImage(imageRef).inspect(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'inspect');
             const repoDigests: string[] = inspect.RepoDigests ?? [];
 
+            // No RepoDigests at all: locally built / not registry-backed, so update
+            // status does not apply.
+            if (repoDigests.length === 0) return { hasUpdate: false, notCheckable: true };
+
             for (const rd of repoDigests) {
                 if (!rd.includes('@sha256:')) continue;
                 const [, digest] = rd.split('@');
 
-                if (rd.includes(parsed.repo) || rd.includes(parsed.registry) || repoDigests.length === 1) {
+                if (repoDigestMatchesRef(rd, parsed) || repoDigests.length === 1) {
                     localDigest = digest;
                     break;
                 }
@@ -599,12 +702,17 @@ export class ImageUpdateService {
             return { hasUpdate: false, error: `Failed to inspect local image "${imageRef}"` };
         }
 
-        if (!localDigest) return { hasUpdate: false };
-
-        const remoteDigest = await getRemoteDigest(parsed.registry, parsed.repo, parsed.tag, credentials);
-        if (!remoteDigest) {
-            return { hasUpdate: false, error: `Registry unreachable for ${parsed.registry}/${parsed.repo}:${parsed.tag}` };
+        // RepoDigests were present but none resolved a usable digest: genuinely
+        // ambiguous, so surface it rather than silently call the image up to date.
+        if (!localDigest) {
+            return { hasUpdate: false, error: `Could not resolve a local registry digest for "${imageRef}"` };
         }
+
+        const remote = await getRemoteDigestResult(parsed.registry, parsed.repo, parsed.tag, credentials);
+        if (!remote.ok) {
+            return { hasUpdate: false, error: remote.reason };
+        }
+        const remoteDigest = remote.digest;
 
         const hasUpdate = localDigest !== remoteDigest;
         console.log(

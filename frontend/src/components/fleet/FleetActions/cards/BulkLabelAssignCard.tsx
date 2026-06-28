@@ -42,6 +42,11 @@ interface Props {
   nodes: FleetNode[];
 }
 
+// One node's slice of the pending assignment: the stacks selected on it and
+// whether the label will be created there. Shared by the preview builder and the
+// confirm-modal list so the two cannot drift.
+type PreviewNode = { nodeId: number; nodeName: string; willCreate: boolean; stacks: string[] };
+
 const KICKER = 'font-mono text-[10px] uppercase tracking-[0.18em]';
 
 export function BulkLabelAssignCard({ nodes }: Props) {
@@ -55,14 +60,21 @@ export function BulkLabelAssignCard({ nodes }: Props) {
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<ResultRow[]>([]);
 
-  // Re-fetch only when the set of node ids changes, not on every parent render
-  // (the nodes array is a fresh reference each render, e.g. on each fleet poll).
   // The latest nodes are read through a ref so the load effect can rebuild
-  // per-node state without taking the array as a reactive dependency.
+  // per-node state without taking the array as a reactive dependency (it is a
+  // fresh reference each parent render, e.g. on each fleet poll).
   const nodesRef = useRef(nodes);
   useEffect(() => { nodesRef.current = nodes; });
   const nodeIds = nodes.map(n => n.id).join(',');
 
+  // Bumped by the manual Refresh so the snapshot is never trusted indefinitely:
+  // a remote that recovers, or a label added/removed after the card opened, is
+  // re-read on demand rather than confirmed against stale state.
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // Reload when the node set changes or the operator refreshes (not on every
+  // parent render). Resets the selection because a refreshed fleet can no longer
+  // guarantee the previously picked stacks still exist.
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -94,7 +106,7 @@ export function BulkLabelAssignCard({ nodes }: Props) {
     }
     load();
     return () => { cancelled = true; };
-  }, [nodeIds]);
+  }, [nodeIds, refreshKey]);
 
   // Distinct label templates across the fleet (name + deterministic color).
   const templates = useMemo<LabelTemplate[]>(() => {
@@ -186,7 +198,15 @@ export function BulkLabelAssignCard({ nodes }: Props) {
         toast.error(body.error || 'Bulk label assign failed');
         return;
       }
-      const apiResults = (body.results as AssignNodeResult[]) ?? [];
+      // A 200 with a missing or non-array `results` is a server/contract bug,
+      // not an empty assign: don't let it fall through to the success path with
+      // zero counts. Log it and tell the operator it was unexpected.
+      if (!Array.isArray(body.results)) {
+        console.error('[BulkLabelAssign] bulk-assign returned a malformed body', body);
+        toast.error('Bulk label assign returned an unexpected response. Check the server logs and retry.');
+        return;
+      }
+      const apiResults = body.results as AssignNodeResult[];
       const rows: ResultRow[] = apiResults.map((node) => {
         const unreachable = node.reachable === false;
         const ok = node.stackResults.filter(s => s.success).length;
@@ -210,7 +230,13 @@ export function BulkLabelAssignCard({ nodes }: Props) {
       const ok = allStacks.filter(s => s.success).length;
       const failed = allStacks.length - ok;
       const unreachableCount = apiResults.filter(n => n.reachable === false).length;
-      if (failed === 0 && unreachableCount === 0) toast.success(`Assigned "${selectedTemplate.name}" to ${ok} stack${ok === 1 ? '' : 's'} across ${apiResults.length} node${apiResults.length === 1 ? '' : 's'}.`);
+      if (ok > 0 && failed === 0 && unreachableCount === 0) toast.success(`Assigned "${selectedTemplate.name}" to ${ok} stack${ok === 1 ? '' : 's'} across ${apiResults.length} node${apiResults.length === 1 ? '' : 's'}.`);
+      else if (ok === 0 && failed === 0 && unreachableCount === 0) {
+        // Every node reported zero stack results for a non-empty request: a
+        // contract break the success path above must not absorb.
+        console.error('[BulkLabelAssign] bulk-assign returned no stack results', apiResults);
+        toast.error('Bulk label assign returned no results. Check the server logs and retry.');
+      }
       else toast.warning(`${ok} assigned, ${failed} failed${unreachableCount > 0 ? `, ${unreachableCount} node${unreachableCount === 1 ? '' : 's'} unreachable` : ''}. See results below.`);
     } catch (err) {
       toast.dismiss(toastId);
@@ -236,7 +262,7 @@ export function BulkLabelAssignCard({ nodes }: Props) {
         const willCreate = !entry.labels.some(l => l.name === selectedTemplate.name);
         return { nodeId: entry.node.id, nodeName: entry.node.name, willCreate, stacks };
       })
-      .filter((n): n is { nodeId: number; nodeName: string; willCreate: boolean; stacks: string[] } => n !== null);
+      .filter((n): n is PreviewNode => n !== null);
   }, [nodeData, selected, selectedTemplate]);
 
   return (
@@ -264,9 +290,20 @@ export function BulkLabelAssignCard({ nodes }: Props) {
           title="Label · source"
           meta={loading ? 'loading…' : `${templates.length} label${templates.length === 1 ? '' : 's'}`}
         >
-          <p className={cn(KICKER, 'text-stat-subtitle mb-2 normal-case tracking-normal text-[11px]')}>
-            Pick a stack label from anywhere in the fleet. It is added to the selected stacks on each node, and created there with this color if the node does not have it yet.
-          </p>
+          <div className="flex items-start justify-between gap-2 mb-2">
+            <p className={cn(KICKER, 'text-stat-subtitle normal-case tracking-normal text-[11px]')}>
+              Pick a stack label from anywhere in the fleet. It is added to the selected stacks on each node, and created there with this color if the node does not have it yet.
+            </p>
+            <button
+              type="button"
+              onClick={() => setRefreshKey(k => k + 1)}
+              disabled={running || loading}
+              title="Re-read stacks and labels from every node"
+              className={cn(KICKER, 'shrink-0 text-stat-subtitle hover:text-stat-value disabled:opacity-50')}
+            >
+              {loading ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
           <div className="flex flex-wrap gap-1.5 max-h-32 overflow-auto p-2 border border-card-border/40 rounded-md">
             {templates.length === 0 && (
               <span className="text-xs text-stat-subtitle">
@@ -398,7 +435,30 @@ export function BulkLabelAssignCard({ nodes }: Props) {
         confirmLabel="Apply"
         confirming={running}
         onConfirm={run}
-      />
+      >
+        {previewNodes.length > 0 && <AffectedTargetsList nodes={previewNodes} />}
+      </ConfirmModal>
     </>
+  );
+}
+
+// The concrete node/stack list carried into the confirm modal so the operator
+// approves against the names being changed, not a bare stack/node count. Mirrors
+// the stop card's resolved-targets list; `creates label` flags nodes where the
+// label does not exist yet and will be created.
+function AffectedTargetsList({ nodes }: { nodes: PreviewNode[] }) {
+  return (
+    <div className="max-h-[180px] overflow-y-auto rounded border border-card-border/60 bg-card/40 p-2">
+      <ul className="space-y-1.5">
+        {nodes.map(n => (
+          <li key={n.nodeId} className="flex items-start gap-2">
+            <span className={cn(KICKER, 'shrink-0 pt-0.5', n.willCreate ? 'text-amber-400' : 'text-stat-subtitle')}>
+              {n.nodeName}{n.willCreate ? ' · creates label' : ''}
+            </span>
+            <span className="min-w-0 flex-1 break-words font-mono text-[11px] text-stat-value">{n.stacks.join(', ')}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }

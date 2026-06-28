@@ -41,6 +41,9 @@ describe('normalized-model adapters', () => {
         backend: { name: 'myapp_backend', external: false, internal: false },
         shared: { name: 'shared_net', external: true, internal: false },
         custom: { name: 'custom_name', external: false, internal: false },
+        // External with no name override: the rendered model resolves the runtime
+        // name to the key verbatim, so the raw adapter must agree (not myapp_extnet).
+        extnet: { name: 'extnet', external: true, internal: false },
       },
       volumes: {},
     };
@@ -50,6 +53,7 @@ describe('normalized-model adapters', () => {
         backend: { external: false },
         shared: { external: true, name: 'shared_net' },
         custom: { external: false, name: 'custom_name' },
+        extnet: { external: true },
       },
       volumes: {},
     };
@@ -125,6 +129,16 @@ describe('runtimeResourceName', () => {
     expect(runtimeResourceName('myapp', 'backend', undefined)).toBe('myapp_backend');
     expect(runtimeResourceName('myapp', 'backend', 'backend')).toBe('myapp_backend'); // name == key is not an override
     expect(runtimeResourceName('myapp', 'shared', 'shared_net')).toBe('shared_net');
+  });
+
+  it('never project-prefixes an external resource (runtime name is the key, or a name override)', () => {
+    // Compose references an external network/volume by its real name and never
+    // prefixes the project, so an external resource with no name override keeps
+    // its key verbatim. Prefixing it invents a phantom `<project>_<key>` that no
+    // runtime resource matches, which then reads as foreign-network drift.
+    expect(runtimeResourceName('myapp', 'arr-net', undefined, true)).toBe('arr-net');
+    expect(runtimeResourceName('myapp', 'arr-net', 'arr-net', true)).toBe('arr-net');
+    expect(runtimeResourceName('myapp', 'shared', 'shared-prod', true)).toBe('shared-prod');
   });
 });
 
@@ -205,6 +219,24 @@ describe('compareStackNetworks', () => {
     );
     // edge_override is declared but missing from the runtime.
     expect(compareStackNetworks(declaredFromCompose, snap, 'myapp').missingFromRuntime).toEqual(['edge_override']);
+  });
+
+  it('does not flag an external network declared without a name override through the raw adapter', () => {
+    // The plex/arr-net case: an external network declared `external: true` with no
+    // name override. Its real runtime name is the key (arr-net), unprefixed, so an
+    // attachment to it reads as in-sync, not as a foreign network owned elsewhere.
+    const declaredFromCompose = fromDeclaredCompose({
+      services: [{ name: 'plex', dependsOn: [], networks: ['arr-net'], volumes: [], ports: [] }],
+      networks: { 'arr-net': { external: true } },
+      volumes: {},
+    }, 'plex');
+    const snap = snapshot(
+      [container({ name: 'plex', service: 'plex', composeProject: 'plex', stack: 'plex', networks: [{ name: 'arr-net', id: 'a', ip: '' }] })],
+      [depNet({ name: 'arr-net', composeProject: null, stack: null })],
+    );
+    const drift = compareStackNetworks(declaredFromCompose, snap, 'plex');
+    expect(drift.foreignNetworkAttachments).toEqual([]);
+    expect(drift.runtimeOnlyAttachments).toEqual([]);
   });
 
   it('ignores system networks, the default network, and external networks', () => {

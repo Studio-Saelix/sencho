@@ -13,37 +13,36 @@ import { Clock, Plus, Pencil, Trash2, History, RefreshCw, Play, ChevronLeft, Che
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { Combobox } from '@/components/ui/combobox';
+import { SegmentedControl } from '@/components/ui/segmented-control';
 import type { ScheduledTask, TaskRun, NodeOption } from '@/types/scheduling';
-import { getCronDescription, formatTimestamp } from '@/lib/scheduling';
+import {
+  getCronDescription,
+  getCronFieldError,
+  formatTimestamp,
+  buildCron,
+  parseCron,
+  getSimpleScheduleError,
+  getOnceRunAt,
+  type SimpleSchedule,
+} from '@/lib/scheduling';
+import { ScheduleSimplePanel } from './ScheduleSimplePanel';
+import { cn } from '@/lib/utils';
+import {
+  SCHEDULED_ACTIONS,
+  SCHEDULED_ACTION_CATEGORIES,
+  getActionById,
+  resolveTaskAction,
+  scheduleTargetDescriptor,
+  DEFAULT_SCHEDULED_ACTION_ID,
+  RISK_BADGE_CLASSES,
+  RISK_DOT_CLASSES,
+  RISK_LABEL,
+} from '@/lib/scheduledActions';
 
-const UPDATE_FLEET_ACTION = 'update-fleet' as const;
-
-const ACTION_OPTIONS: Array<{
-  value: string;
-  label: string;
-  targetType: 'stack' | 'fleet' | 'system';
-  backendAction?: 'restart' | 'snapshot' | 'prune' | 'update' | 'scan';
-}> = [
-  { value: 'restart', label: 'Restart Stack', targetType: 'stack' },
-  { value: 'update', label: 'Auto-update Stack', targetType: 'stack' },
-  { value: UPDATE_FLEET_ACTION, label: 'Auto-update All Stacks', targetType: 'fleet', backendAction: 'update' },
-  { value: 'snapshot', label: 'Fleet Snapshot', targetType: 'fleet' },
-  { value: 'prune', label: 'System Prune', targetType: 'system' },
-  { value: 'scan', label: 'Vulnerability Scan', targetType: 'system' },
-  { value: 'auto_backup', label: 'Backup Stack Files', targetType: 'stack' },
-  { value: 'auto_stop', label: 'Stop Stack (keep containers)', targetType: 'stack' },
-  { value: 'auto_down', label: 'Take Stack Down (remove containers)', targetType: 'stack' },
-  { value: 'auto_start', label: 'Start Stack', targetType: 'stack' },
-];
-
-const TIMELINE_LANES: { key: ScheduledTask['action']; label: string; color: string; bg: string; actions: ScheduledTask['action'][] }[] = [
-  { key: 'restart', label: 'Restart', color: 'var(--brand)', bg: 'oklch(from var(--brand) l c h / 0.18)', actions: ['restart'] },
-  { key: 'update', label: 'Update', color: 'var(--success)', bg: 'oklch(from var(--success) l c h / 0.18)', actions: ['update'] },
-  { key: 'scan', label: 'Scan', color: 'var(--label-purple)', bg: 'var(--label-purple-bg)', actions: ['scan'] },
-  { key: 'prune', label: 'Prune', color: 'var(--warning)', bg: 'oklch(from var(--warning) l c h / 0.18)', actions: ['prune', 'snapshot'] },
-  { key: 'auto_stop', label: 'Lifecycle', color: 'var(--label-blue)', bg: 'var(--label-blue-bg)', actions: ['auto_stop', 'auto_down', 'auto_start', 'auto_backup'] },
-];
-
+const DEFAULT_PRUNE_TARGETS = ['containers', 'images', 'networks', 'volumes'];
+const DEFAULT_SIMPLE_SCHEDULE: SimpleSchedule = {
+  frequency: 'daily', minute: 0, hour: 3, weekdays: [], dayOfMonth: 1, date: null,
+};
 const TIMELINE_WINDOW_HOURS = 24;
 const TIMELINE_WINDOW_MS = TIMELINE_WINDOW_HOURS * 60 * 60 * 1000;
 
@@ -92,9 +91,12 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const [formTargetId, setFormTargetId] = useState('');
   const [formNodeId, setFormNodeId] = useState('');
   const [formCron, setFormCron] = useState('0 3 * * *');
+  const [scheduleMode, setScheduleMode] = useState<'simple' | 'advanced'>('simple');
+  const [simpleSchedule, setSimpleSchedule] = useState<SimpleSchedule>(DEFAULT_SIMPLE_SCHEDULE);
+  const [simpleReplacedCron, setSimpleReplacedCron] = useState(false);
   const [formEnabled, setFormEnabled] = useState(true);
   const [formDeleteAfterRun, setFormDeleteAfterRun] = useState(false);
-  const [formPruneTargets, setFormPruneTargets] = useState<string[]>(['containers', 'images', 'networks', 'volumes']);
+  const [formPruneTargets, setFormPruneTargets] = useState<string[]>(DEFAULT_PRUNE_TARGETS);
   const [formTargetServices, setFormTargetServices] = useState<string[]>([]);
   const [formPruneLabelFilter, setFormPruneLabelFilter] = useState('');
   const [availableServices, setAvailableServices] = useState<string[]>([]);
@@ -149,7 +151,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       const res = await apiFetch('/nodes', { localOnly: true });
       if (res.ok) {
         const data = await res.json();
-        setNodes(data.map((n: { id: number; name: string }) => ({ id: n.id, name: n.name })));
+        setNodes(data.map((n: { id: number; name: string; type: 'local' | 'remote' }) => ({ id: n.id, name: n.name, type: n.type })));
       }
     } catch {
       // Non-critical
@@ -175,14 +177,20 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   }, []);
 
   useEffect(() => {
-    if (formAction !== 'restart' || !formTargetId) {
+    const actionDef = getActionById(formAction);
+    if (!actionDef?.supportsServiceSelection || !formTargetId) {
       setAvailableServices([]);
       return;
     }
     let cancelled = false;
     const fetchServices = async () => {
       try {
-        const res = await apiFetch(`/stacks/${encodeURIComponent(formTargetId)}/services`);
+        // Load services from the selected node so remote-node restart schedules
+        // discover the right services instead of the hub's.
+        const endpoint = `/stacks/${encodeURIComponent(formTargetId)}/services`;
+        const res = formNodeId
+          ? await fetchForNode(endpoint, parseInt(formNodeId, 10))
+          : await apiFetch(endpoint);
         if (res.ok && !cancelled) {
           setAvailableServices(await res.json());
         }
@@ -192,14 +200,15 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     };
     fetchServices();
     return () => { cancelled = true; };
-  }, [formAction, formTargetId]);
+  }, [formAction, formTargetId, formNodeId]);
 
-  // Re-fetch stacks when node changes
+  // Re-fetch stacks when the node changes. Clearing a stale stack selection is
+  // done in the Node picker's onValueChange (a user-driven change), not here, so
+  // a prefilled or edited node keeps its stack instead of being wiped on open.
   useEffect(() => {
     if (!dialogOpen) return;
     if (formNodeId) {
       fetchStacks(formNodeId);
-      setFormTargetId('');
     } else {
       setStacks([]);
     }
@@ -209,13 +218,16 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     const nodeId = prefillData?.nodeId ?? (filterNodeId != null ? String(filterNodeId) : '');
     setEditingTask(null);
     setFormName('');
-    setFormAction(ACTION_OPTIONS[0]?.value ?? 'restart');
+    setFormAction(DEFAULT_SCHEDULED_ACTION_ID);
     setFormTargetId(prefillData?.stackName ?? '');
     setFormNodeId(nodeId);
     setFormCron('0 3 * * *');
+    setScheduleMode('simple');
+    setSimpleSchedule(DEFAULT_SIMPLE_SCHEDULE);
+    setSimpleReplacedCron(false);
     setFormEnabled(true);
     setFormDeleteAfterRun(false);
-    setFormPruneTargets(['containers', 'images', 'networks', 'volumes']);
+    setFormPruneTargets(DEFAULT_PRUNE_TARGETS);
     setFormTargetServices([]);
     setFormPruneLabelFilter('');
     setDialogOpen(true);
@@ -225,14 +237,26 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const openEdit = (task: ScheduledTask) => {
     setEditingTask(task);
     setFormName(task.name);
-    setFormAction(task.action === 'update' && task.target_type === 'fleet' ? UPDATE_FLEET_ACTION : task.action);
+    setFormAction(resolveTaskAction(task)?.id ?? task.action);
     setFormTargetId(task.target_id || '');
     setFormNodeId(task.node_id != null ? String(task.node_id) : '');
     setFormCron(task.cron_expression);
+    let parsed = parseCron(task.cron_expression, (task.delete_after_run ?? 0) === 1);
+    // The cron has no year field, so parseCron reconstructs a one-shot's date in
+    // the current year. Rebuild it from the persisted run_at instead, so editing
+    // (and re-saving) preserves the originally chosen instant rather than moving
+    // it to this year's occurrence.
+    if (parsed && parsed.frequency === 'once' && task.run_at != null) {
+      const pinned = new Date(task.run_at);
+      parsed = { ...parsed, date: pinned, hour: pinned.getHours(), minute: pinned.getMinutes() };
+    }
+    setScheduleMode(parsed ? 'simple' : 'advanced');
+    setSimpleSchedule(parsed ?? DEFAULT_SIMPLE_SCHEDULE);
+    setSimpleReplacedCron(false);
     setFormEnabled(task.enabled === 1);
     setFormDeleteAfterRun((task.delete_after_run ?? 0) === 1);
     setFormPruneTargets(
-      task.prune_targets ? JSON.parse(task.prune_targets) : ['containers', 'images', 'networks', 'volumes']
+      task.prune_targets ? JSON.parse(task.prune_targets) : DEFAULT_PRUNE_TARGETS
     );
     setFormTargetServices(
       task.target_services ? JSON.parse(task.target_services) : []
@@ -242,34 +266,45 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   };
 
   const handleSave = async () => {
-    const actionOption = ACTION_OPTIONS.find(a => a.value === formAction);
-    if (!actionOption) return;
+    const actionDef = getActionById(formAction);
+    if (!actionDef) {
+      toast.error('This scheduled action is no longer supported.');
+      return;
+    }
+
+    // Re-assert schedule validity at the action, not just via the disabled
+    // button, so the cron is never compiled from an invalid simple schedule.
+    if (scheduleMode === 'simple') {
+      const scheduleError = getSimpleScheduleError(simpleSchedule);
+      if (scheduleError) {
+        toast.error(scheduleError);
+        return;
+      }
+    }
+
+    // Simple mode compiles its structured fields to the same cron string the
+    // backend stores; Advanced mode sends the raw expression as-is.
+    const cronExpression = scheduleMode === 'simple' ? buildCron(simpleSchedule) : formCron;
+
+    // A one-time ('once') Simple schedule pins its exact run instant (including
+    // year) via run_at, because the 5-field cron cannot encode a year. null for
+    // every recurring shape and for Advanced mode, where the cron is authoritative.
+    const runAt = scheduleMode === 'simple' ? getOnceRunAt(simpleSchedule) : null;
 
     const body: Record<string, unknown> = {
       name: formName,
-      target_type: actionOption.targetType,
-      action: actionOption.backendAction ?? formAction,
-      cron_expression: formCron,
+      target_type: actionDef.targetType,
+      action: actionDef.backendAction,
+      cron_expression: cronExpression,
       enabled: formEnabled,
       delete_after_run: formDeleteAfterRun,
+      run_at: runAt,
+      target_id: actionDef.requiresStack ? formTargetId : null,
+      node_id: actionDef.requiresNode && formNodeId ? parseInt(formNodeId, 10) : null,
+      prune_targets: formAction === 'prune' && formPruneTargets.length > 0 ? formPruneTargets : null,
+      target_services: actionDef.supportsServiceSelection && formTargetServices.length > 0 ? formTargetServices : null,
+      prune_label_filter: formAction === 'prune' && formPruneLabelFilter.trim() ? formPruneLabelFilter.trim() : null,
     };
-
-    if (actionOption.targetType === 'stack') {
-      body.target_id = formTargetId;
-      body.node_id = formNodeId ? parseInt(formNodeId, 10) : null;
-    }
-    if (formAction === 'scan' || formAction === UPDATE_FLEET_ACTION) {
-      body.node_id = formNodeId ? parseInt(formNodeId, 10) : null;
-    }
-    if (formAction === 'prune' && formPruneTargets.length > 0) {
-      body.prune_targets = formPruneTargets;
-    }
-    if (formAction === 'restart' && formTargetServices.length > 0) {
-      body.target_services = formTargetServices;
-    }
-    if (formAction === 'prune' && formPruneLabelFilter.trim()) {
-      body.prune_label_filter = formPruneLabelFilter.trim();
-    }
 
     setSaving(true);
     try {
@@ -362,14 +397,69 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     }
   };
 
-  const targetType = ACTION_OPTIONS.find(a => a.value === formAction)?.targetType;
-  const cronDescription = getCronDescription(formCron);
+  const currentAction = getActionById(formAction);
+  const cronFieldError = getCronFieldError(formCron);
+  const simpleCronError = scheduleMode === 'simple' ? getSimpleScheduleError(simpleSchedule) : null;
+  // In Advanced mode the saved value is the raw input; in Simple mode it is the
+  // compiled cron, short-circuited to '' on a validation error so buildCron is
+  // never reached with an invalid (e.g. dateless one-time) schedule.
+  const derivedCron = scheduleMode === 'simple'
+    ? (simpleCronError ? '' : buildCron(simpleSchedule))
+    : formCron;
+
+  // Top-level Simple/Advanced toggle. Advanced -> Simple re-parses the typed
+  // cron and pre-fills when it maps to a simple shape, otherwise flags that the
+  // custom expression will be replaced. Simple -> Advanced seeds the cron input
+  // from what Simple produced so the user keeps what they configured.
+  const handleScheduleModeChange = (mode: 'simple' | 'advanced') => {
+    if (mode === scheduleMode) return;
+    if (mode === 'simple') {
+      const parsed = parseCron(formCron, formDeleteAfterRun);
+      if (parsed) {
+        setSimpleSchedule(parsed);
+        setSimpleReplacedCron(false);
+      } else {
+        setSimpleReplacedCron(true);
+      }
+    } else {
+      if (!simpleCronError) setFormCron(buildCron(simpleSchedule));
+      setSimpleReplacedCron(false);
+    }
+    setScheduleMode(mode);
+  };
+
+  // Selecting the one-time frequency defaults delete-after-run on (the only way
+  // a fully-pinned cron behaves as a single run). Leaving it does not revert.
+  const handleSimpleScheduleChange = (next: SimpleSchedule) => {
+    if (next.frequency === 'once' && simpleSchedule.frequency !== 'once') {
+      setFormDeleteAfterRun(true);
+    }
+    setSimpleSchedule(next);
+  };
   const nodeOptions = useMemo(() => nodes.map(n => ({ value: String(n.id), label: n.name })), [nodes]);
+  const nodeNameById = useMemo(() => new Map(nodes.map(n => [n.id, n.name])), [nodes]);
+  const actionOptions = useMemo(
+    () =>
+      SCHEDULED_ACTIONS.map(o => ({
+        value: o.id,
+        label: o.label,
+        group: SCHEDULED_ACTION_CATEGORIES.find(c => c.key === o.category)?.label,
+      })),
+    [],
+  );
+  // Scan and prune run on the hub-local Docker daemon only; remote nodes are excluded from their pickers.
+  const localNodeOptions = useMemo(
+    () => nodes.filter(n => n.type === 'local').map(n => ({ value: String(n.id), label: n.name })),
+    [nodes],
+  );
+  const currentNodeOptions = currentAction?.nodeScope === 'local' ? localNodeOptions : nodeOptions;
+  const scheduleInvalid = scheduleMode === 'simple'
+    ? !!simpleCronError
+    : (!formCron || !!cronFieldError);
   const isSaveDisabled =
-    saving || !formName || !formCron
-    || (targetType === 'stack' && (!formTargetId || !formNodeId))
-    || (formAction === 'scan' && !formNodeId)
-    || (formAction === UPDATE_FLEET_ACTION && !formNodeId)
+    saving || !currentAction || !formName || scheduleInvalid
+    || (!!currentAction?.requiresStack && (!formTargetId || !formNodeId))
+    || (!!currentAction?.requiresNode && !currentAction.requiresStack && !formNodeId)
     || (formAction === 'prune' && formPruneTargets.length === 0);
 
   const windowEnd = now + TIMELINE_WINDOW_MS;
@@ -443,7 +533,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                   <div className="text-[10px] font-mono uppercase tracking-[0.22em] text-stat-subtitle mb-1">
                     Next 24 hours
                   </div>
-                  <div className="font-display italic text-3xl text-foreground leading-tight">
+                  <div className="font-heading text-3xl text-foreground leading-tight">
                     Next <em className="not-italic text-brand">24 hours</em>
                   </div>
                   <div className="text-xs font-mono text-stat-subtitle mt-1 tabular-nums">
@@ -482,8 +572,8 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
               ) : (
                 <div className="relative">
                   <div className="space-y-1.5">
-                    {TIMELINE_LANES.map(lane => {
-                      const lanePills = timelinePills.filter(p => lane.actions.includes(p.task.action));
+                    {SCHEDULED_ACTION_CATEGORIES.map(lane => {
+                      const lanePills = timelinePills.filter(p => resolveTaskAction(p.task)?.category === lane.key);
                       return (
                         <div key={lane.key} className="grid grid-cols-[80px_1fr] items-center gap-3">
                           <div className="flex items-center gap-2">
@@ -502,9 +592,11 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                             {lanePills.map((pill, idx) => {
                               const leftPct = ((pill.runAt - now) / TIMELINE_WINDOW_MS) * 100;
                               const clamped = Math.max(0, Math.min(100, leftPct));
-                              const targetLabel = pill.task.target_type === 'stack'
-                                ? pill.task.target_id ?? pill.task.name
-                                : pill.task.name;
+                              const nodeName = pill.task.node_id != null ? nodeNameById.get(pill.task.node_id) : undefined;
+                              const targetLabel = scheduleTargetDescriptor(pill.task, nodeName);
+                              const actionLabel = resolveTaskAction(pill.task)?.label ?? pill.task.action;
+                              const tooltip = `${actionLabel} · ${pill.task.name} · ${formatHourTick(pill.runAt)}`
+                                + (nodeName ? ` · ${nodeName}` : '');
                               return (
                                 <button
                                   key={`${pill.task.id}-${idx}-${pill.runAt}`}
@@ -520,7 +612,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                                       ? 'translate(-100%, -50%)'
                                       : 'translate(0, -50%)',
                                   }}
-                                  title={`${pill.task.name} · ${formatHourTick(pill.runAt)} · ${targetLabel}`}
+                                  title={tooltip}
                                 >
                                   <span>{formatHourTick(pill.runAt)}</span>
                                   <span className="opacity-70 max-w-[100px] truncate">{targetLabel}</span>
@@ -599,10 +691,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                     <TableCell className="font-medium">{task.name}</TableCell>
                     <TableCell>
                       <Badge variant="outline">
-                        {(task.action === 'update' && task.target_type === 'fleet'
-                          ? ACTION_OPTIONS.find(a => a.value === UPDATE_FLEET_ACTION)
-                          : ACTION_OPTIONS.find(a => a.value === task.action)
-                        )?.label || task.action}
+                        {resolveTaskAction(task)?.label || task.action}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
@@ -619,13 +708,28 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                       <div className="text-xs text-muted-foreground font-mono">{task.cron_expression}</div>
                     </TableCell>
                     <TableCell>
-                      {task.last_status === 'success' ? (
-                        <Badge className="bg-success-muted text-success border-success/20">Success</Badge>
-                      ) : task.last_status === 'failure' ? (
-                        <Badge variant="destructive">Failed</Badge>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">Never run</span>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {task.last_status === 'success' ? (
+                          <Badge className="bg-success-muted text-success border-success/20">Success</Badge>
+                        ) : task.last_status === 'failure' ? (
+                          <Badge variant="destructive">Failed</Badge>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">Never run</span>
+                        )}
+                        {task.delete_after_run === 1 && (
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] text-muted-foreground"
+                            title={
+                              task.last_status === 'failure'
+                                ? 'One-shot task kept after a failed run so you can retry or debug. Deletes itself after a successful run.'
+                                : 'One-shot task. Deletes itself after a successful run.'
+                            }
+                          >
+                            One-shot
+                          </Badge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {formatTimestamp(task.next_run_at)}
@@ -676,21 +780,33 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
             <div className="space-y-2">
               <Label>Action</Label>
               <Combobox
-                options={ACTION_OPTIONS.map(o => ({ value: o.value, label: o.label }))}
+                options={actionOptions}
                 value={formAction}
                 onValueChange={(val) => { setFormAction(val); setFormTargetId(''); setFormNodeId(''); setFormTargetServices([]); setFormPruneLabelFilter(''); }}
                 placeholder="Select action..."
               />
+              {currentAction && (
+                <div className="flex items-start gap-2">
+                  <span className={cn(
+                    'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium shrink-0 mt-0.5',
+                    RISK_BADGE_CLASSES[currentAction.riskLevel],
+                  )}>
+                    <span className={cn('w-1.5 h-1.5 rounded-full shrink-0', RISK_DOT_CLASSES[currentAction.riskLevel])} />
+                    {RISK_LABEL[currentAction.riskLevel]}
+                  </span>
+                  <p className="text-xs text-muted-foreground">{currentAction.helperText}</p>
+                </div>
+              )}
             </div>
 
-            {targetType === 'stack' && (
+            {currentAction?.requiresStack && (
               <>
                 <div className="space-y-2">
                   <Label>Node</Label>
                   <Combobox
                     options={nodeOptions}
                     value={formNodeId}
-                    onValueChange={setFormNodeId}
+                    onValueChange={(val) => { setFormNodeId(val); setFormTargetId(''); }}
                     placeholder="Select node..."
                   />
                 </div>
@@ -704,7 +820,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                     disabled={!formNodeId}
                   />
                 </div>
-                {formAction === 'restart' && formTargetId && availableServices.length > 0 && (
+                {currentAction.supportsServiceSelection && formTargetId && availableServices.length > 0 && (
                   <div className="space-y-2">
                     <Label>Services <span className="text-xs text-muted-foreground">(leave empty for all)</span></Label>
                     <div className="grid grid-cols-2 gap-2">
@@ -727,29 +843,25 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
               </>
             )}
 
-            {formAction === UPDATE_FLEET_ACTION && (
+            {formAction === 'snapshot' && (
               <div className="space-y-2">
-                <Label>Node</Label>
-                <Combobox
-                  options={nodeOptions}
-                  value={formNodeId}
-                  onValueChange={setFormNodeId}
-                  placeholder="Select node..."
-                />
-                <p className="text-xs text-muted-foreground">Every stack on the selected node will be checked and updated when new images are available.</p>
+                <Label>Scope</Label>
+                <div className="flex h-9 w-full items-center rounded-md border border-glass-border bg-input px-3 text-sm text-muted-foreground">
+                  Entire fleet
+                </div>
+                <p className="text-xs text-muted-foreground">Captures every node's compose and .env files. No node or stack to choose.</p>
               </div>
             )}
 
-            {formAction === 'scan' && (
+            {currentAction?.requiresNode && !currentAction.requiresStack && (
               <div className="space-y-2">
                 <Label>Node</Label>
                 <Combobox
-                  options={nodeOptions}
+                  options={currentNodeOptions}
                   value={formNodeId}
                   onValueChange={setFormNodeId}
                   placeholder="Select node..."
                 />
-                <p className="text-xs text-muted-foreground">Every image on the selected node will be scanned.</p>
               </div>
             )}
 
@@ -758,7 +870,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 <div className="space-y-2">
                   <Label>Prune Targets</Label>
                   <div className="grid grid-cols-2 gap-2">
-                    {['containers', 'images', 'networks', 'volumes'].map(target => (
+                    {DEFAULT_PRUNE_TARGETS.map(target => (
                       <label key={target} className="flex items-center gap-2 text-sm cursor-pointer">
                         <Checkbox
                           checked={formPruneTargets.includes(target)}
@@ -787,14 +899,40 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
             )}
 
             <div className="space-y-2">
-              <Label>Cron Expression</Label>
-              <Input
-                placeholder="0 3 * * *"
-                value={formCron}
-                onChange={e => setFormCron(e.target.value)}
-                className="font-mono"
-              />
-              <p className="text-xs text-muted-foreground">{cronDescription}</p>
+              <div className="flex items-center justify-between gap-3">
+                <Label>Schedule</Label>
+                <SegmentedControl<'simple' | 'advanced'>
+                  value={scheduleMode}
+                  options={[{ value: 'simple', label: 'Simple' }, { value: 'advanced', label: 'Advanced' }]}
+                  onChange={handleScheduleModeChange}
+                  ariaLabel="Schedule mode"
+                />
+              </div>
+              {scheduleMode === 'simple' ? (
+                <>
+                  <ScheduleSimplePanel
+                    value={simpleSchedule}
+                    onChange={handleSimpleScheduleChange}
+                    derivedCron={derivedCron}
+                    error={simpleCronError}
+                  />
+                  {simpleReplacedCron && (
+                    <p className="text-xs text-muted-foreground">Switching to Simple mode replaces your custom cron expression.</p>
+                  )}
+                </>
+              ) : (
+                <>
+                  <Input
+                    placeholder="0 3 * * *"
+                    value={formCron}
+                    onChange={e => setFormCron(e.target.value)}
+                    className="font-mono"
+                  />
+                  {cronFieldError
+                    ? <p className="text-xs text-destructive">{cronFieldError}</p>
+                    : <p className="text-xs text-muted-foreground">{getCronDescription(formCron)}</p>}
+                </>
+              )}
             </div>
 
             <div className="flex items-center gap-2">
@@ -807,11 +945,15 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 id="task-delete-after-run"
                 checked={formDeleteAfterRun}
                 onCheckedChange={(checked) => setFormDeleteAfterRun(checked === true)}
+                disabled={scheduleMode === 'simple' && simpleSchedule.frequency === 'once'}
                 className="mt-0.5"
               />
               <div>
                 <span className="text-sm font-medium">Delete after successful run</span>
                 <p className="text-xs text-muted-foreground">Task removes itself after its first successful execution. Failures keep the task so you can retry or debug.</p>
+                {scheduleMode === 'simple' && simpleSchedule.frequency === 'once' && (
+                  <p className="mt-1 text-xs text-muted-foreground">Required for one-time schedules: the task fires on the chosen date, then deletes itself once it succeeds. Cron has no year field, so without this it would repeat on that date every year. A failed run is kept so you can retry.</p>
+                )}
               </div>
             </label>
         </ModalBody>

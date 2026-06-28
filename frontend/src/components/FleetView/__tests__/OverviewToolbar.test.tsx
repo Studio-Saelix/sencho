@@ -82,32 +82,32 @@ describe('OverviewToolbar', () => {
     expect(screen.queryByText('Tags')).not.toBeInTheDocument();
   });
 
-  it('renders the Add node button and fires onAddNode when provided', () => {
+  it('renders the manage-nodes button and fires onAddNode when provided', () => {
     const onAddNode = vi.fn();
     render(<OverviewToolbar {...props({ onAddNode })} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Add node' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Manage nodes' }));
     expect(onAddNode).toHaveBeenCalledTimes(1);
   });
 
-  it('omits the Add node button when onAddNode is not provided', () => {
+  it('omits the manage-nodes button when onAddNode is not provided', () => {
     render(<OverviewToolbar {...props()} />);
-    expect(screen.queryByRole('button', { name: 'Add node' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Manage nodes' })).not.toBeInTheDocument();
   });
 
   it('renders the Check Updates button and fires onCheckUpdates when provided', () => {
     const onCheckUpdates = vi.fn();
     render(<OverviewToolbar {...props({ onCheckUpdates })} />);
-    fireEvent.click(screen.getByRole('button', { name: /Check Updates/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Check for node updates/ }));
     expect(onCheckUpdates).toHaveBeenCalledTimes(1);
   });
 
   it('omits the Check Updates button when onCheckUpdates is not provided', () => {
     render(<OverviewToolbar {...props()} />);
-    expect(screen.queryByRole('button', { name: /Check Updates/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Check for node updates/ })).not.toBeInTheDocument();
   });
 
   it('disables the Check Updates button while a check is in flight', () => {
     render(<OverviewToolbar {...props({ onCheckUpdates: vi.fn(), checkingUpdates: true })} />);
-    expect(screen.getByRole('button', { name: /Check Updates/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /Check for node updates/ })).toBeDisabled();
   });
 });

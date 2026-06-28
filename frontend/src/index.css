@@ -84,6 +84,15 @@
   --chart-2: var(--warning);
   --chart-3: var(--destructive);
 
+  /* Severity / chart palette (Signature default = today's saturated semantics).
+     Colours only; per-palette fill/gradient/stroke live in JS (SecurityCharts).
+     [data-chart-style="muted"|"heat"] override these; signature needs no rule. */
+  --sev-critical: var(--destructive);
+  --sev-high:     var(--warning);
+  --sev-medium:   color-mix(in oklch, var(--warning) 52%, var(--stat-icon));
+  --sev-low:      color-mix(in oklch, var(--stat-icon) 72%, var(--well));
+  --sev-vuln:     var(--brand);
+
   /* Sparkline / data-line styling (centralized) */
   --data-line-width: 1.25px;
   --data-peak: var(--warning);
@@ -223,6 +232,13 @@
   --font-mono: var(--mono-font), ui-monospace, monospace;
   --font-serif: 'Instrument Serif', Georgia, serif;
   --font-display: 'Instrument Serif', Georgia, serif;
+
+  /* Operational heading family. Signature default = the display serif, italic;
+     family + style ONLY so migrated headings keep their own weight/tracking and
+     stay a true no-op in Signature. [data-headings="clean"] flips to the sans
+     face and the Calm weight/tracking lift lands via the .font-heading rule. */
+  --font-heading: var(--font-display);
+  --heading-style: italic;
 
   /* Shape */
   --radius: 0.5rem;
@@ -386,6 +402,57 @@
 
   /* Terminal stays a dark well even in the light theme */
   --terminal-bg: oklch(0.12 0 0);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   CALM / READABILITY REFRESH
+   Three appearance attributes on <html> switch the heading family, the
+   severity-chart palette, and material effects. Signature (the defaults in
+   :root) needs no rule; Calm flips them. Placed after the theme blocks so the
+   reduced-effects --card-bevel override wins in every theme.
+───────────────────────────────────────────────────────────── */
+/* Clean headings: the readability fix. Operational headings drop the display
+   serif for the upright interface face. */
+[data-headings="clean"] {
+  --font-heading: var(--font-sans);
+  --heading-style: normal;
+}
+
+/* Muted: desaturated severity semantics, no brand/destructive clash. */
+[data-chart-style="muted"] {
+  --sev-critical: oklch(0.605 0.105 28);
+  --sev-high:     oklch(0.715 0.085 70);
+  --sev-medium:   oklch(0.675 0.045 88);
+  --sev-low:      oklch(0.565 0.018 250);
+  --sev-vuln:     oklch(0.605 0.045 235);
+}
+
+/* Heat: a single warm sequential ramp with zero complementary vibration. */
+[data-chart-style="heat"] {
+  --sev-critical: oklch(0.565 0.135 30);
+  --sev-high:     oklch(0.675 0.115 48);
+  --sev-medium:   oklch(0.770 0.080 70);
+  --sev-low:      oklch(0.825 0.040 82);
+  --sev-vuln:     oklch(0.660 0.100 45);
+}
+
+/* Reduced effects: flatten the material (Calm only). Charts read the reduced
+   flag from the store; here we flatten the real card top-bevel token. */
+[data-effects="reduced"] {
+  --card-bevel: none;
+}
+
+/* Heading utility: every operational title routes through this. Base sets only
+   family + style (Signature parity); the Calm-only descendant rule lifts weight
+   and tightens tracking for the sans face, beating any single tracking or weight
+   utility on the element. */
+.font-heading {
+  font-family: var(--font-heading);
+  font-style:  var(--heading-style);
+}
+[data-headings="clean"] .font-heading {
+  font-weight: 600;
+  letter-spacing: -0.006em;
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -690,6 +757,18 @@ body {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* The "Reduced motion" appearance setting (data-motion="reduced" on <html>)
+   clamps CSS animations/transitions, mirroring the OS preference above. Sonner
+   toasts animate via inline transform/opacity (React state), not CSS, so they
+   are unaffected. framer-motion is handled separately by MotionConfig. */
+[data-motion="reduced"] *,
+[data-motion="reduced"] *::before,
+[data-motion="reduced"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
 }
 
 /* ─────────────────────────────────────────────────────────────

@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from './ui/button';
-import { Download, RefreshCw } from 'lucide-react';
+import { Download, RefreshCw, Maximize2, Minimize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useLogChipColorMode } from '@/hooks/use-log-chip-color-mode';
+import { hashLabel } from '@/lib/label-colors';
 
 interface StructuredLogViewerProps {
   stackName: string;
+  /** When set, renders an expand/collapse control next to the download button. */
+  expanded?: boolean;
+  onToggleExpand?: () => void;
 }
 
 type LogLevel = 'info' | 'warn' | 'err';
@@ -14,6 +19,8 @@ interface LogRow {
   ts: string | null;
   level: LogLevel;
   message: string;
+  /** Normalized service name extracted from the log prefix, or null for synthetic / old-format rows. */
+  containerName: string | null;
   /** True when this row was synthesized by the client (e.g. reconnect sentinel). */
   synthetic?: boolean;
 }
@@ -24,6 +31,7 @@ const BUFFER_CAP = 10_000;
 const TIMESTAMP_REGEX = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+(.*)$/;
 // eslint-disable-next-line no-control-regex
 const ANSI_REGEX = /\x1b\[[0-9;]*[A-Za-z]/g;
+const PREFIX_REGEX = /^([a-zA-Z0-9_.-]+)(?:\s+\|\s+)/;
 const ERROR_REGEX = /\b(ERROR|ERR|FATAL|Exception)\b/i;
 const WARN_REGEX = /\b(WARN|WARNING|WRN)\b/i;
 
@@ -34,14 +42,20 @@ const WARN_REGEX = /\b(WARN|WARNING|WRN)\b/i;
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 
 function parseLine(raw: string): Omit<LogRow, 'id'> {
-  const stripped = raw.replace(ANSI_REGEX, '').replace(/[\r\n]+$/, '');
+  let stripped = raw.replace(ANSI_REGEX, '').replace(/[\r\n]+$/, '');
+  let containerName: string | null = null;
+  const prefixMatch = stripped.match(PREFIX_REGEX);
+  if (prefixMatch) {
+    containerName = prefixMatch[1];
+    stripped = stripped.slice(prefixMatch[0].length);
+  }
   const match = stripped.match(TIMESTAMP_REGEX);
   const ts = match ? match[1] : null;
   const body = match ? match[2] : stripped;
   let level: LogLevel = 'info';
   if (ERROR_REGEX.test(body)) level = 'err';
   else if (WARN_REGEX.test(body)) level = 'warn';
-  return { ts, level, message: body };
+  return { ts, level, message: body, containerName };
 }
 
 function formatTs(iso: string | null): string {
@@ -54,11 +68,12 @@ function formatTs(iso: string | null): string {
   return `${hh}:${mm}:${ss}`;
 }
 
-export default function StructuredLogViewer({ stackName }: StructuredLogViewerProps) {
+export default function StructuredLogViewer({ stackName, expanded, onToggleExpand }: StructuredLogViewerProps) {
   const [rows, setRows] = useState<LogRow[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
   const [following, setFollowing] = useState(true);
   const [connectionState, setConnectionState] = useState<'connecting' | 'open' | 'reconnecting'>('connecting');
+  const [chipColorMode] = useLogChipColorMode();
   const scrollRef = useRef<HTMLDivElement>(null);
   const followingRef = useRef(true);
   const rowIdRef = useRef(0);
@@ -68,6 +83,13 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
   useEffect(() => { followingRef.current = following; }, [following]);
 
   useEffect(() => {
+    // Reset state accumulated from the previous stack before connecting.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setRows([]);
+    rowIdRef.current = 0;
+    setFollowing(true);
+    followingRef.current = true;
+
     const cleanStackName = stackName.replace(/\.(yml|yaml)$/, '');
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const activeNodeId = localStorage.getItem('sencho-active-node') || '';
@@ -100,6 +122,7 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
         ts: new Date().toISOString(),
         level,
         message,
+        containerName: null,
         synthetic: true,
       });
       scheduleFlush();
@@ -205,7 +228,11 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
   };
 
   const downloadLogs = () => {
-    const text = rows.map(r => `${r.ts ?? ''} ${r.level.toUpperCase()} ${r.message}`.trim()).join('\n');
+    const text = rows.map(r =>
+      r.containerName
+        ? `[${r.containerName}] ${r.ts ?? ''} ${r.level.toUpperCase()} ${r.message}`.trim()
+        : `${r.ts ?? ''} ${r.level.toUpperCase()} ${r.message}`.trim(),
+    ).join('\n');
     const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -257,6 +284,21 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
             </button>
           ))}
           <div className="mx-1 h-4 w-px bg-muted" />
+          {onToggleExpand && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-7 w-7 p-0"
+              onClick={onToggleExpand}
+              aria-label={expanded ? 'Collapse logs' : 'Expand logs'}
+              title={expanded ? 'Collapse logs' : 'Expand logs'}
+            >
+              {expanded
+                ? <Minimize2 className="h-3.5 w-3.5" strokeWidth={1.5} />
+                : <Maximize2 className="h-3.5 w-3.5" strokeWidth={1.5} />}
+            </Button>
+          )}
           <Button type="button" size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={downloadLogs} aria-label="Download logs">
             <Download className="h-3.5 w-3.5" strokeWidth={1.5} />
           </Button>
@@ -265,7 +307,7 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex-1 min-h-0 overflow-y-auto font-mono text-[11px] leading-[1.5]"
+        className="flex-1 min-h-0 overflow-y-auto font-mono text-xs leading-[1.5]"
       >
         {filtered.length === 0 ? (
           <div className="px-3 py-2 text-stat-subtitle">Waiting for log output…</div>
@@ -289,7 +331,29 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
               )}>
                 {row.level}
               </span>
-              <span className="whitespace-pre-wrap break-all text-foreground/90">{row.message}</span>
+              <span className="whitespace-pre-wrap break-all text-foreground/90">
+                {row.containerName && (
+                  <span
+                    className={cn(
+                      'font-mono text-[10px] tracking-wide rounded px-1.5 py-px mr-1.5 select-none',
+                      chipColorMode === 'per-service' ? 'border' : 'text-brand/80 bg-brand/10',
+                    )}
+                    title={row.containerName}
+                    style={
+                      chipColorMode === 'per-service'
+                        ? {
+                            backgroundColor: `var(--label-${hashLabel(row.containerName)}-bg)`,
+                            color: `var(--label-${hashLabel(row.containerName)})`,
+                            borderColor: `color-mix(in oklch, var(--label-${hashLabel(row.containerName)}) 30%, transparent)`,
+                          }
+                        : undefined
+                    }
+                  >
+                    {row.containerName}
+                  </span>
+                )}
+                {row.message}
+              </span>
             </div>
           ))
         )}

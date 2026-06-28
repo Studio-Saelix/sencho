@@ -1,38 +1,21 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Loader2 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
-import type { ScheduledTask } from '@/types/scheduling';
-import { Masthead, SectionHead, StateDot } from './mobile-ui';
+import type { NodeOption, ScheduledTask } from '@/types/scheduling';
+import { resolveTaskAction, scheduleTargetDescriptor } from '@/lib/scheduledActions';
+import { Masthead, SectionHead, StateDot, type Tone } from './mobile-ui';
 
 interface MobileSchedulesProps {
   headerActions: ReactNode;
 }
 
-type Tone = 'success' | 'warning' | 'destructive' | 'brand';
+function actionTone(task: ScheduledTask): Tone {
+  return resolveTaskAction(task)?.tone ?? 'brand';
+}
 
-const ACTION_TONE: Record<ScheduledTask['action'], Tone> = {
-  restart: 'brand',
-  update: 'success',
-  scan: 'success',
-  prune: 'warning',
-  snapshot: 'warning',
-  auto_backup: 'brand',
-  auto_stop: 'warning',
-  auto_down: 'destructive',
-  auto_start: 'success',
-};
-
-const ACTION_LABEL: Record<ScheduledTask['action'], string> = {
-  restart: 'restart',
-  update: 'update',
-  scan: 'scan',
-  prune: 'prune',
-  snapshot: 'snapshot',
-  auto_backup: 'backup',
-  auto_stop: 'stop',
-  auto_down: 'down',
-  auto_start: 'start',
-};
+function actionShortLabel(task: ScheduledTask): string {
+  return resolveTaskAction(task)?.shortLabel ?? task.action;
+}
 
 function hhmm(ts: number): string {
   const d = new Date(ts);
@@ -59,12 +42,6 @@ function dayLabel(ts: number, now: number): string {
   return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
-function targetLabel(task: ScheduledTask): string {
-  if (task.target_type === 'stack') return (task.target_id ?? task.name).replace(/\.(ya?ml)$/, '');
-  if (task.target_type === 'fleet') return 'fleet';
-  return task.target_type;
-}
-
 interface UpcomingRun {
   task: ScheduledTask;
   runAt: number;
@@ -72,9 +49,29 @@ interface UpcomingRun {
 
 export function MobileSchedules({ headerActions }: MobileSchedulesProps) {
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
+  const [nodes, setNodes] = useState<NodeOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(() => Date.now());
   const abortRef = useRef<AbortController | null>(null);
+
+  const fetchNodes = useCallback(async () => {
+    try {
+      const res = await apiFetch('/nodes', { localOnly: true });
+      if (!res.ok) {
+        console.error('Node poll failed:', res.status);
+        return;
+      }
+      const data = await res.json();
+      if (!Array.isArray(data)) {
+        console.error('Unexpected /nodes response shape');
+        return;
+      }
+      setNodes((data as { id: number; name: string; type: 'local' | 'remote' }[])
+        .map(n => ({ id: n.id, name: n.name, type: n.type })));
+    } catch (error) {
+      console.error('Failed to fetch nodes:', error);
+    }
+  }, []);
 
   const fetchTasks = useCallback(async () => {
     abortRef.current?.abort();
@@ -109,9 +106,22 @@ export function MobileSchedules({ headerActions }: MobileSchedulesProps) {
   }, [fetchTasks]);
 
   useEffect(() => {
+    // Node names rarely change, so fetch once on mount rather than on the poll.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void fetchNodes();
+  }, [fetchNodes]);
+
+  useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(id);
   }, []);
+
+  const nodeNameById = useMemo(() => new Map(nodes.map(n => [n.id, n.name])), [nodes]);
+  const describeTarget = useCallback(
+    (task: ScheduledTask) =>
+      scheduleTargetDescriptor(task, task.node_id != null ? nodeNameById.get(task.node_id) : undefined),
+    [nodeNameById],
+  );
 
   const enabledCount = tasks.filter(t => t.enabled === 1).length;
   const upcoming: UpcomingRun[] = tasks
@@ -130,7 +140,7 @@ export function MobileSchedules({ headerActions }: MobileSchedulesProps) {
         state={next ? hhmm(next.runAt) : '--:--'}
         stateTone="brand"
         live={false}
-        meta={next ? `${relative(next.runAt, now)} · ${ACTION_LABEL[next.task.action]} ${targetLabel(next.task)}` : 'nothing scheduled'}
+        meta={next ? `${relative(next.runAt, now)} · ${actionShortLabel(next.task)} ${describeTarget(next.task)}` : 'nothing scheduled'}
         right={headerActions}
       />
 
@@ -147,7 +157,7 @@ export function MobileSchedules({ headerActions }: MobileSchedulesProps) {
           upcoming.map((run, i) => {
             const prevDay = i > 0 ? dayLabel(upcoming[i - 1].runAt, now) : null;
             const day = dayLabel(run.runAt, now);
-            const tone = ACTION_TONE[run.task.action];
+            const tone = actionTone(run.task);
             return (
               <div key={`${run.task.id}-${run.runAt}`}>
                 {day !== prevDay ? <SectionHead>{day}</SectionHead> : null}
@@ -155,7 +165,7 @@ export function MobileSchedules({ headerActions }: MobileSchedulesProps) {
                   <span className="w-[46px] shrink-0 font-mono tabular-nums text-[13px] text-stat-value">{hhmm(run.runAt)}</span>
                   <StateDot tone={tone} size={7} glow />
                   <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-stat-subtitle">
-                    <span className="text-stat-value">{ACTION_LABEL[run.task.action]}</span>{` ${targetLabel(run.task)}`}
+                    <span className="text-stat-value">{actionShortLabel(run.task)}</span>{` ${describeTarget(run.task)}`}
                   </span>
                   <span className="shrink-0 font-mono text-[11px] text-stat-icon">{relative(run.runAt, now)}</span>
                 </div>

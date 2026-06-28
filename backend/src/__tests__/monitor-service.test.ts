@@ -2,7 +2,7 @@
  * Unit tests for MonitorService — alert state machine, metric calculations,
  * cleanup delegation, global settings evaluation, and concurrency guards.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
@@ -10,7 +10,7 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockCleanupOldMetrics, mockCleanupOldNotifications, mockCleanupOldAuditLogs,
   mockUpdateStackAlertLastFired, mockGetSystemState, mockSetSystemState,
   mockGetRunningContainers, mockGetAllContainers, mockGetContainerStatsStream,
-  mockGetContainerRestartCount, mockGetDiskUsage,
+  mockGetContainerRestartCount, mockGetDiskUsage, mockGetImages, mockGetStacks,
   mockDispatchAlert,
   mockCurrentLoad, mockMem, mockFsSize,
   mockExecAsync,
@@ -36,6 +36,8 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
     reclaimableImages: 0, reclaimableContainers: 0, reclaimableVolumes: 0, reclaimableBuildCache: 0,
     reclaimableImageCount: 0, reclaimableContainerCount: 0, reclaimableVolumeCount: 0, reclaimableBuildCacheCount: 0,
   }),
+  mockGetImages: vi.fn().mockResolvedValue([]),
+  mockGetStacks: vi.fn().mockResolvedValue([]),
   mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
   mockCurrentLoad: vi.fn().mockResolvedValue({ currentLoad: 10 }),
   mockMem: vi.fn().mockResolvedValue({ total: 16e9, used: 4e9, active: 4e9, available: 12e9, free: 12e9, buffcache: 0 }),
@@ -71,6 +73,15 @@ vi.mock('../services/DockerController', () => ({
       getContainerStatsStream: mockGetContainerStatsStream,
       getContainerRestartCount: mockGetContainerRestartCount,
       getDiskUsage: mockGetDiskUsage,
+      getImages: mockGetImages,
+    }),
+  },
+}));
+
+vi.mock('../services/FileSystemService', () => ({
+  FileSystemService: {
+    getInstance: () => ({
+      getStacks: mockGetStacks,
     }),
   },
 }));
@@ -367,6 +378,106 @@ describe('MonitorService - evaluateGlobalSettings', () => {
 
     await (svc as any).evaluateGlobalSettings({ host_cpu_limit: 'abc' });
     expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'));
+  });
+});
+
+describe('MonitorService - host_alerts_enabled toggle', () => {
+  beforeEach(() => {
+    mockGetGlobalSettings.mockReturnValue({});
+    mockDispatchAlert.mockClear();
+    mockCurrentLoad.mockClear();
+    mockMem.mockClear();
+    mockFsSize.mockClear();
+  });
+
+  afterEach(() => {
+    // Restore default mock implementations so version-check state does not
+    // leak into sibling describe blocks (F-11 suppression, version check).
+    mockGetLatestVersion.mockResolvedValue(null);
+    mockGetSenchoVersion.mockReturnValue(null);
+  });
+
+  it('skips host metrics and dispatch when disabled', async () => {
+    mockCurrentLoad.mockResolvedValue({ currentLoad: 75 });
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0', host_cpu_limit: '50' });
+
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+    expect(mockCurrentLoad).not.toHaveBeenCalled();
+    expect(mockMem).not.toHaveBeenCalled();
+    expect(mockFsSize).not.toHaveBeenCalled();
+  });
+
+  it('does not call systeminformation when disabled', async () => {
+    mockMem.mockResolvedValue(memSample(15e9)); // ~94% - would breach
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0', host_ram_limit: '80' });
+
+    expect(mockCurrentLoad).not.toHaveBeenCalled();
+    expect(mockMem).not.toHaveBeenCalled();
+    expect(mockFsSize).not.toHaveBeenCalled();
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
+  it('clears persisted suppression state when disabled', async () => {
+    const store: Record<string, string> = {};
+    mockGetSystemState.mockImplementation((key: string) => store[key] ?? null);
+    mockSetSystemState.mockImplementation((key: string, value: string) => { store[key] = value; });
+
+    // Simulate a prior breach that set the persisted suppression timestamp.
+    store['last_host_cpu_alert_ts'] = String(Date.now());
+    store['last_host_ram_alert_ts'] = String(Date.now());
+    store['last_host_disk_alert_ts'] = String(Date.now());
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0' });
+
+    expect(store['last_host_cpu_alert_ts']).toBe('0');
+    expect(store['last_host_ram_alert_ts']).toBe('0');
+    expect(store['last_host_disk_alert_ts']).toBe('0');
+  });
+
+  it('re-enable fires fresh without suppressed suffix', async () => {
+    const store: Record<string, string> = {};
+    mockGetSystemState.mockImplementation((key: string) => store[key] ?? null);
+    mockSetSystemState.mockImplementation((key: string, value: string) => { store[key] = value; });
+    mockMem.mockResolvedValue(memSample(15e9)); // ~94% - breaches 80% limit
+
+    const svc = MonitorService.getInstance();
+
+    // Step 1: breach while enabled — fires alert and seeds suppression state.
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Memory'));
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Suppressed'));
+    mockDispatchAlert.mockClear();
+
+    // Step 2: disable — clears suppression state and skips dispatch.
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0', host_ram_limit: '80' });
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+    expect(store['last_host_ram_alert_ts']).toBe('0');
+
+    // Step 3: re-enable while still breaching — fires fresh, no "Suppressed" suffix.
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '1', host_ram_limit: '80' });
+    const calls = mockDispatchAlert.mock.calls.filter(
+      (c: unknown[]) => c[0] === 'warning' && c[1] === 'monitor_alert',
+    );
+    expect(calls.length).toBe(1);
+    const msg = calls[0] as string[];
+    expect(msg[2]).toContain('Memory');
+    expect(msg[2]).not.toContain('Suppressed');
+  });
+
+  it('still runs version check when disabled', async () => {
+    mockGetSenchoVersion.mockReturnValue('0.45.0');
+    mockGetLatestVersion.mockResolvedValue('0.46.0');
+
+    const svc = MonitorService.getInstance();
+    (svc as any).lastVersionCheckAt = 0;
+    await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0' });
+
+    expect(mockGetLatestVersion).toHaveBeenCalled();
   });
 });
 
@@ -979,9 +1090,9 @@ describe('MonitorService - Sencho version check', () => {
     (svc as any).lastVersionCheckAt = 0;
     await (svc as any).evaluate();
 
-    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'system', expect.stringContaining('0.46.0'));
+    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.46.0'));
     // Message must include the real running version, not "0.0.0".
-    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'system', expect.stringContaining('currently running 0.45.0'));
+    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('currently running 0.45.0'));
     expect(mockSetSystemState).toHaveBeenCalledWith('last_sencho_update_notified_version', '0.46.0');
   });
 
@@ -995,7 +1106,7 @@ describe('MonitorService - Sencho version check', () => {
     (svc as any).lastVersionCheckAt = 0;
     await (svc as any).evaluate();
 
-    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'system', expect.stringContaining('0.46.0'));
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.46.0'));
   });
 
   it('handles version check failure gracefully', async () => {
@@ -1007,7 +1118,7 @@ describe('MonitorService - Sencho version check', () => {
 
     // Should not throw
     await expect((svc as any).evaluate()).resolves.toBeUndefined();
-    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'system', expect.stringContaining('available'));
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('available'));
   });
 
   it('respects the 6-hour cooldown interval', async () => {
@@ -1034,7 +1145,7 @@ describe('MonitorService - Sencho version check', () => {
     (svc as any).lastVersionCheckAt = 0;
     await (svc as any).evaluate();
 
-    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'system', expect.stringContaining('0.46.0'));
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.46.0'));
     expect(mockSetSystemState).not.toHaveBeenCalledWith('last_sencho_update_notified_version', expect.anything());
     // Should not have even attempted the lookup.
     expect(mockGetLatestVersion).not.toHaveBeenCalled();
@@ -1093,7 +1204,7 @@ describe('MonitorService - Sencho version check', () => {
     (svc as any).lastVersionCheckAt = 0;
     await (svc as any).evaluate();
 
-    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'system', expect.stringContaining('0.47.0'));
+    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.47.0'));
     expect(store.last_sencho_update_notified_version).toBe('0.47.0');
   });
 });
@@ -1460,5 +1571,79 @@ describe('MonitorService - janitor cycle and circuit breaker', () => {
     expect((svc as any).firstTickTimeoutId).toBeNull();
     expect((svc as any).janitorIntervalId).toBeNull();
     expect((svc as any).janitorFirstTickTimeoutId).toBeNull();
+  });
+});
+
+describe('MonitorService - reconcileOrphanedScans', () => {
+  function makeDb(refs: string[]) {
+    return {
+      getDistinctScanImageRefs: vi.fn().mockReturnValue(refs),
+      deleteScansByImageRef: vi.fn().mockReturnValue(1),
+    };
+  }
+
+  async function run(db: ReturnType<typeof makeDb>, settings: Record<string, string>) {
+    const svc = MonitorService.getInstance();
+    await (svc as any).reconcileOrphanedScans(db, settings);
+    return db.deleteScansByImageRef.mock.calls.map((c) => c[1] as string).sort();
+  }
+
+  it('does nothing when prune_orphaned_scans is not "1"', async () => {
+    const db = makeDb(['nginx:1']);
+    await run(db, { prune_orphaned_scans: '0' });
+    expect(db.getDistinctScanImageRefs).not.toHaveBeenCalled();
+    expect(db.deleteScansByImageRef).not.toHaveBeenCalled();
+  });
+
+  it('purges only the image and stack scans whose artifact is gone, scoped to the local node', async () => {
+    mockGetImages.mockResolvedValue([
+      { RepoTags: ['nginx:1', 'redis:7'] },
+      { RepoTags: ['<none>:<none>'] },
+      { RepoTags: undefined }, // dangling image with no tags
+    ]);
+    mockGetStacks.mockResolvedValue(['web']);
+    const db = makeDb(['nginx:1', 'ghost:9', 'stack:web', 'stack:old']);
+    expect(await run(db, { prune_orphaned_scans: '1' })).toEqual(['ghost:9', 'stack:old']);
+    // Per-instance: reconciliation reads and deletes against the local node id only.
+    expect(db.getDistinctScanImageRefs).toHaveBeenCalledWith(1);
+    for (const call of db.deleteScansByImageRef.mock.calls) {
+      expect(call[0]).toBe(1);
+    }
+  });
+
+  it('keeps scans whose ref matches a live image after normalization (untagged, registry-qualified, digest-pinned)', async () => {
+    mockGetImages.mockResolvedValue([
+      { RepoTags: ['alpine:latest', 'nginx:1.14'], RepoDigests: ['redis@sha256:abc'] },
+    ]);
+    mockGetStacks.mockResolvedValue(['web']);
+    // Stored refs in non-canonical forms that all resolve to a present image:
+    //   alpine -> alpine:latest, docker.io/library/nginx:1.14 -> nginx:1.14,
+    //   docker.io/library/redis@sha256:abc -> redis@sha256:abc (digest).
+    const db = makeDb(['alpine', 'docker.io/library/nginx:1.14', 'docker.io/library/redis@sha256:abc', 'ghost:9']);
+    expect(await run(db, { prune_orphaned_scans: '1' })).toEqual(['ghost:9']);
+  });
+
+  it('skips stack reconciliation when getStacks returns empty (ambiguous), still purges image orphans', async () => {
+    mockGetImages.mockResolvedValue([{ RepoTags: ['nginx:1'] }]);
+    mockGetStacks.mockResolvedValue([]);
+    const db = makeDb(['stack:web', 'ghost:9']);
+    const deleted = await run(db, { prune_orphaned_scans: '1' });
+    expect(deleted).toContain('ghost:9');
+    expect(deleted).not.toContain('stack:web');
+  });
+
+  it('purges nothing when the Docker image list cannot be read (fail-safe)', async () => {
+    mockGetImages.mockRejectedValue(new Error('docker down'));
+    mockGetStacks.mockResolvedValue(['web']);
+    const db = makeDb(['ghost:9', 'stack:old']);
+    await run(db, { prune_orphaned_scans: '1' });
+    expect(db.deleteScansByImageRef).not.toHaveBeenCalled();
+  });
+
+  it('purges every image scan when there are zero live images (empty but successful read)', async () => {
+    mockGetImages.mockResolvedValue([]);
+    mockGetStacks.mockResolvedValue(['web']);
+    const db = makeDb(['nginx:1', 'redis:7', 'stack:web']);
+    expect(await run(db, { prune_orphaned_scans: '1' })).toEqual(['nginx:1', 'redis:7']);
   });
 });

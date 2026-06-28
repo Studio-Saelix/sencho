@@ -61,8 +61,8 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         id: 'appearance',
         group: 'personal',
         label: 'Appearance',
-        description: 'Theme, accent, density, and display preferences saved to this browser.',
-        keywords: ['theme', 'dim', 'oled', 'light', 'dark', 'accent', 'color', 'glow', 'border', 'contrast', 'density', 'comfortable', 'compact', 'spacing', 'display'],
+        description: 'Visual style, readability, theme, accent, charts, and display preferences saved to this browser.',
+        keywords: ['theme', 'dim', 'oled', 'light', 'dark', 'accent', 'color', 'glow', 'border', 'contrast', 'density', 'comfortable', 'compact', 'spacing', 'display', 'calm', 'signature', 'readability', 'heading', 'chart', 'motion', 'effects'],
         tier: null,
         scope: 'browser',
     },
@@ -166,18 +166,27 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         id: 'stacks',
         group: 'infrastructure',
         label: 'Stacks',
-        description: 'Stack editor and lifecycle workflow preferences saved to this browser.',
-        keywords: ['stack', 'compose', 'deploy', 'progress', 'modal', 'inline', 'diff', 'preview', 'save', 'editor', 'workflow'],
+        description: 'Stack editor, lifecycle workflow preferences, and deploy guardrails.',
+        keywords: ['stack', 'compose', 'deploy', 'guardrail', 'health gate', 'observation', 'env', 'required variable', 'progress', 'modal', 'inline', 'diff', 'preview', 'save', 'editor', 'workflow'],
         tier: null,
-        scope: 'browser',
+        scope: 'node',
     },
     // Monitoring
     {
         id: 'host-alerts',
         group: 'monitoring',
         label: 'Host Alerts',
-        description: 'Alert thresholds for host CPU, RAM, and disk, plus suppression cadence and container crash capture.',
-        keywords: ['cpu', 'ram', 'disk', 'thresholds', 'alerts', 'suppression', 'crash', 'host', 'limits'],
+        description: 'Alert thresholds for host CPU, RAM, and disk, plus suppression cadence.',
+        keywords: ['cpu', 'ram', 'disk', 'thresholds', 'alerts', 'suppression', 'host', 'limits'],
+        tier: null,
+        scope: 'node',
+    },
+    {
+        id: 'container-alerts',
+        group: 'monitoring',
+        label: 'Container Alerts',
+        description: 'Crash, OOM, and healthcheck alert behavior for every managed container on this node.',
+        keywords: ['crash', 'oom', 'healthcheck', 'health', 'container', 'exit', 'alert', 'auto-heal'],
         tier: null,
         scope: 'node',
     },
@@ -318,7 +327,7 @@ export function isItemLocked(item: SettingsItemMeta, ctx: VisibilityContext): bo
 
 /**
  * The masthead SCOPE value for a non-node section. Browser-local sections
- * (Appearance, Stacks) persist to this browser's localStorage and read as
+ * (Appearance) persist to this browser's localStorage and read as
  * browser regardless of their group; the signed-in Account is operator-scoped;
  * Access sections (license, users, sso, api-tokens) are instance-global, so
  * they read as global like every other non-node group. Node-scoped sections

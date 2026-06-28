@@ -1,18 +1,35 @@
-import { Writable } from 'stream';
+import { Writable, Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import path from 'path';
+import { createHash } from 'crypto';
 import DockerController from './DockerController';
 
 const HELPER_IMAGE = 'alpine:3.20';
 const VOLUME_MOUNT = '/v';
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
+// Named-volume downloads are bounded (not chunk-streamed): the helper output is
+// buffered up to this size and a larger file is rejected rather than silently
+// truncated. The bound matches the upload limit so the in-memory footprint is no
+// worse than the existing multipart upload path.
+export const DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
 const EXEC_TIMEOUT_MS = 30_000;
+
+// Containment guard run inside the helper after every `cd`. Even though
+// sanitizeRelPath strips `..`, a symlinked directory component could redirect
+// `cd` outside the mounted volume; `pwd -P` resolves symlinks so we can assert
+// the working directory is still under the volume root before touching anything.
+const ROOT_GUARD =
+  `case "$(pwd -P)" in "${VOLUME_MOUNT}"|"${VOLUME_MOUNT}/"*) ;; *) echo "path escapes volume root" >&2; exit 7 ;; esac`;
 
 // Portable shell scripts that work with BusyBox sh + stat (Alpine) and GNU
 // coreutils alike. The user-supplied relative path arrives as $1; we cd into
 // it before iterating, so user input never lands as an argv element to a
 // command that might interpret it as a flag.
 const LIST_SCRIPT = `set -e
-cd -- "$1" 2>/dev/null || { echo "cd: $1: No such file or directory" >&2; exit 1; }
+cd -- "$1" || exit 1
+${ROOT_GUARD}
+lim="$2"
+n=0
 for entry in * .[!.]* ..?*; do
   [ -e "$entry" ] || [ -L "$entry" ] || continue
   if [ -L "$entry" ]; then t=l; link=$(readlink -- "$entry" 2>/dev/null || echo "")
@@ -23,10 +40,19 @@ for entry in * .[!.]* ..?*; do
   size=$(stat -c '%s' -- "$entry" 2>/dev/null || echo 0)
   mtime=$(stat -c '%Y' -- "$entry" 2>/dev/null || echo 0)
   printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$t" "$size" "$mtime" "$entry" "$link"
+  n=$((n+1))
+  if [ -n "$lim" ] && [ "$n" -ge "$lim" ]; then break; fi
 done`;
 
+// Contain the parent before statting the leaf: cd into the leaf's directory and
+// assert (via pwd -P) it is still inside the volume, so a symlinked path
+// component cannot make stat report on a file outside the mount.
 const STAT_SCRIPT = `set -e
-target="$1"
+p="$1"
+d=$(dirname -- "$p"); b=$(basename -- "$p")
+cd -- "$d" || exit 1
+${ROOT_GUARD}
+target="$b"
 [ -e "$target" ] || [ -L "$target" ] || { echo "cannot access $target" >&2; exit 1; }
 if [ -L "$target" ]; then t=l; link=$(readlink -- "$target" 2>/dev/null || echo "")
 elif [ -d "$target" ]; then t=d; link=""
@@ -37,6 +63,82 @@ size=$(stat -c '%s' -- "$target" 2>/dev/null || echo 0)
 mtime=$(stat -c '%Y' -- "$target" 2>/dev/null || echo 0)
 name=$(basename -- "$target")
 printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "$t" "$size" "$mtime" "$name" "$link"`;
+
+// --- mutation + probe scripts (all contain the parent, then act on the leaf) ---
+
+// $1 = relative path. New file → owned by the helper user (65534); existing file
+// → in-place truncate (`>` keeps the inode, so owner/mode are preserved). A
+// symlink leaf is refused so a write never follows a link out of the volume.
+const WRITE_SCRIPT = `set -e
+p="$1"
+d=$(dirname -- "$p"); f=$(basename -- "$p")
+cd -- "$d" || exit 1
+${ROOT_GUARD}
+[ -L "$f" ] && { echo "refusing to write through a symlink" >&2; exit 8; }
+[ -d "$f" ] && { echo "target is a directory" >&2; exit 9; }
+cat > "$f"`;
+
+// $1 = relative path of the new directory; its parent must already exist.
+const MKDIR_SCRIPT = `set -e
+p="$1"
+d=$(dirname -- "$p"); f=$(basename -- "$p")
+cd -- "$d" || exit 1
+${ROOT_GUARD}
+mkdir -- "$f"`;
+
+// $1 = relative path, $2 = "1" for recursive directory delete. Removing a symlink
+// leaf is allowed (rm unlinks the link itself, never its target).
+const DELETE_SCRIPT = `set -e
+p="$1"; recursive="$2"
+d=$(dirname -- "$p"); f=$(basename -- "$p")
+cd -- "$d" || exit 1
+${ROOT_GUARD}
+[ -e "$f" ] || [ -L "$f" ] || { echo "no such path" >&2; exit 1; }
+if [ -d "$f" ] && [ ! -L "$f" ]; then
+  if [ "$recursive" = "1" ]; then rm -rf -- "$f"; else rmdir -- "$f" 2>/dev/null || { echo "Directory is not empty" >&2; exit 10; }; fi
+else
+  rm -f -- "$f"
+fi`;
+
+// $1 = from, $2 = to. Both parents are contained; the destination must not exist.
+const RENAME_SCRIPT = `set -e
+from="$1"; to="$2"
+fd=$(dirname -- "$from"); td=$(dirname -- "$to")
+( cd -- "$fd" 2>/dev/null && case "$(pwd -P)" in "${VOLUME_MOUNT}"|"${VOLUME_MOUNT}/"*) ;; *) exit 7 ;; esac ) || { echo "source escapes volume root" >&2; exit 7; }
+( cd -- "$td" 2>/dev/null && case "$(pwd -P)" in "${VOLUME_MOUNT}"|"${VOLUME_MOUNT}/"*) ;; *) exit 7 ;; esac ) || { echo "destination escapes volume root" >&2; exit 7; }
+{ [ -e "$to" ] || [ -L "$to" ]; } && { echo "destination exists" >&2; exit 11; }
+mv -- "$from" "$to"`;
+
+// $1 = from, $2 = to. Both parents are contained and the destination must not
+// exist. cp -RP recurses without dereferencing symlinks (copying links as links,
+// matching the fs backend) and does NOT preserve ownership, since the helper runs
+// unprivileged and cannot chown; new entries are owned by the helper user, like
+// the helper write. A directory may not be copied into itself or a descendant
+// (cp would otherwise recurse into the copy it is creating).
+const COPY_SCRIPT = `set -e
+from="$1"; to="$2"
+fd=$(dirname -- "$from"); td=$(dirname -- "$to")
+sp=$( cd -- "$fd" 2>/dev/null && pwd -P ) || { echo "source escapes volume root" >&2; exit 7; }
+case "$sp" in "${VOLUME_MOUNT}"|"${VOLUME_MOUNT}/"*) ;; *) echo "source escapes volume root" >&2; exit 7 ;; esac
+dp=$( cd -- "$td" 2>/dev/null && pwd -P ) || { echo "destination escapes volume root" >&2; exit 7; }
+case "$dp" in "${VOLUME_MOUNT}"|"${VOLUME_MOUNT}/"*) ;; *) echo "destination escapes volume root" >&2; exit 7 ;; esac
+{ [ -e "$to" ] || [ -L "$to" ]; } && { echo "destination exists" >&2; exit 11; }
+src="$sp/$(basename -- "$from")"
+if [ -d "$src" ] && [ ! -L "$src" ]; then
+  case "$dp/" in "$src/"*) echo "cannot copy a folder into itself" >&2; exit 12 ;; esac
+fi
+cp -RP -- "$from" "$to"`;
+
+// $1 = relative path. Prints directory|file|none. Used for upload-overwrite checks.
+const PATHKIND_SCRIPT = `set -e
+p="$1"
+d=$(dirname -- "$p"); f=$(basename -- "$p")
+cd -- "$d" || exit 2
+${ROOT_GUARD}
+if [ -d "$f" ] && [ ! -L "$f" ]; then echo directory
+elif [ -e "$f" ] || [ -L "$f" ]; then echo file
+else echo none
+fi`;
 
 export interface VolumeEntry {
   name: string;
@@ -54,9 +156,29 @@ export interface VolumeFileResult {
   truncated: boolean;
   size: number;
   mime: string;
+  /** mtime in milliseconds (seconds resolution from the helper `stat`, ×1000). */
+  mtimeMs: number;
+}
+
+/** Raw bytes of a volume file for download, bounded to DOWNLOAD_MAX_BYTES. */
+export interface VolumeDownload {
+  buffer: Buffer;
+  size: number;
+  filename: string;
 }
 
 export type VolumeStat = VolumeEntry;
+
+/**
+ * Opaque optimistic-concurrency token for an editable volume file. Seconds-
+ * resolution mtime alone collides for two edits within the same second, so the
+ * size and a content hash are folded in to keep the guarantee close to the
+ * millisecond-mtime fs path.
+ */
+export function makeHelperVersion(mtimeSeconds: number, size: number, content: Buffer): string {
+  const hash = createHash('sha256').update(content).digest('hex').slice(0, 16);
+  return `"v1:${mtimeSeconds}-${size}-${hash}"`;
+}
 
 export class PathTraversalError extends Error {
   status = 400;
@@ -89,7 +211,7 @@ export class VolumeBrowserService {
     return new VolumeBrowserService(nodeId ?? 1);
   }
 
-  async listDir(volumeName: string, relPath: string): Promise<VolumeEntry[]> {
+  async listDir(volumeName: string, relPath: string, limit?: number): Promise<VolumeEntry[]> {
     const safe = sanitizeRelPath(relPath);
     await this.assertVolumeExists(volumeName);
     await this.ensureHelperImage();
@@ -97,10 +219,12 @@ export class VolumeBrowserService {
     // Portable across BusyBox (Alpine) and GNU coreutils. Lists each
     // direct child with a tab-separated row: type<TAB>size<TAB>mtime<TAB>
     // name<TAB>symlinkTarget. We chdir to /v/<safe> first so user input is
-    // never an argv element passed to find/stat.
-    const script = LIST_SCRIPT;
+    // never an argv element passed to find/stat. When a limit is given the
+    // script breaks after limit+1 rows, so a huge directory is never fully
+    // buffered; the caller detects truncation from the overflow row.
+    const limArg = limit !== undefined ? String(limit + 1) : '';
     const { stdout, stderr, exitCode } = await this.runHelper(volumeName, [
-      'sh', '-c', script, 'sh', `./${safe || ''}`,
+      'sh', '-c', LIST_SCRIPT, 'sh', `./${safe || ''}`, limArg,
     ]);
 
     if (exitCode !== 0) {
@@ -149,6 +273,7 @@ export class VolumeBrowserService {
     ]);
     if (exitCode !== 0) {
       const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg)) throw new ExecError('Permission denied', 403);
       if (/No such file or directory|cannot access/i.test(msg)) throw new ExecError('Path not found', 404);
       throw new ExecError(`Stat failed: ${msg.substring(0, 200) || 'unknown error'}`);
     }
@@ -181,12 +306,12 @@ export class VolumeBrowserService {
     if (meta.type === 'symlink') throw new ExecError('Refusing to follow symlink', 400);
     if (meta.type !== 'file') throw new ExecError('Not a regular file', 400);
 
-    // Read up to maxBytes+1 to detect truncation precisely. The path is
-    // passed as $1 (an argv element, never concatenated) and read with
-    // head -c -- "$1" so a leading-dash filename is never parsed as a flag.
+    // Read up to maxBytes+1 to detect truncation precisely. The parent is
+    // contained (cd + pwd -P) and the leaf symlink refused so the read can never
+    // follow a link out of the volume.
     const { stdout, stderr, exitCode } = await this.runHelper(volumeName, [
       'sh', '-c',
-      `head -c ${maxBytes + 1} -- "$1"`,
+      `p="$1"; d=$(dirname -- "$p"); b=$(basename -- "$p"); cd -- "$d" || exit 1; ${ROOT_GUARD}; [ -L "$b" ] && { echo "refusing to follow symlink" >&2; exit 8; }; head -c ${maxBytes + 1} -- "$b"`,
       'sh', `./${safe}`,
     ]);
     if (exitCode !== 0) {
@@ -207,7 +332,203 @@ export class VolumeBrowserService {
       truncated,
       size: meta.size,
       mime,
+      mtimeMs: meta.mtime * 1000,
     };
+  }
+
+  /**
+   * Read a file's full bytes for download, bounded to DOWNLOAD_MAX_BYTES so a
+   * large file is rejected (413) rather than silently truncated. The parent is
+   * contained and the leaf symlink refused, like readFile.
+   */
+  async downloadFile(volumeName: string, relPath: string): Promise<VolumeDownload> {
+    const safe = sanitizeRelPath(relPath);
+    if (!safe) throw new ExecError('Cannot download volume root', 400);
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+
+    const meta = await this.stat(volumeName, safe);
+    if (meta.type === 'symlink') throw new ExecError('Refusing to follow symlink', 400);
+    if (meta.type !== 'file') throw new ExecError('Not a regular file', 400);
+    if (meta.size > DOWNLOAD_MAX_BYTES) {
+      throw new ExecError('File is too large to download from this volume', 413);
+    }
+
+    const { stdout, stderr, exitCode } = await this.runHelper(volumeName, [
+      'sh', '-c',
+      `p="$1"; d=$(dirname -- "$p"); b=$(basename -- "$p"); cd -- "$d" || exit 1; ${ROOT_GUARD}; [ -L "$b" ] && { echo "refusing to follow symlink" >&2; exit 8; }; head -c ${DOWNLOAD_MAX_BYTES + 1} -- "$b"`,
+      'sh', `./${safe}`,
+    ]);
+    if (exitCode !== 0) {
+      const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg)) throw new ExecError('Permission denied', 403);
+      throw new ExecError(`Download failed: ${msg.substring(0, 200) || 'unknown error'}`);
+    }
+    if (stdout.length > DOWNLOAD_MAX_BYTES) {
+      throw new ExecError('File is too large to download from this volume', 413);
+    }
+    return { buffer: stdout, size: stdout.length, filename: path.posix.basename(safe) };
+  }
+
+  /** Probe whether a path is a directory, file, or absent (upload-overwrite check). */
+  async pathKind(volumeName: string, relPath: string): Promise<'file' | 'directory' | null> {
+    const safe = sanitizeRelPath(relPath);
+    if (!safe) return 'directory';
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+    const { stdout, stderr, exitCode } = await this.runHelper(volumeName, ['sh', '-c', PATHKIND_SCRIPT, 'sh', `./${safe}`]);
+    if (exitCode !== 0) {
+      // A permission failure on the parent must not be reported as "absent"
+      // (which would let an exclusive create proceed); surface it as 403. A
+      // genuinely missing parent (ENOENT) means nothing exists at this path.
+      if (/Permission denied/i.test(stderr.toString('utf-8'))) throw new ExecError('Permission denied', 403);
+      return null;
+    }
+    const kind = stdout.toString('utf-8').trim();
+    if (kind === 'directory') return 'directory';
+    if (kind === 'file') return 'file';
+    return null;
+  }
+
+  /**
+   * Write `content` to a volume file. New files are created owned by the helper
+   * user (65534); existing files are truncated in place so their owner/mode are
+   * preserved. The write is intentionally NON-ATOMIC (a helper death mid-write
+   * can leave a truncated file) because the helper cannot chown a renamed temp
+   * back to the original owner; ownership preservation is the better default for
+   * editing a service's config. Returns the new mtime/size for the version token.
+   */
+  async writeFile(volumeName: string, relPath: string, content: Buffer): Promise<{ mtimeMs: number; size: number }> {
+    const safe = sanitizeRelPath(relPath);
+    if (!safe) throw new ExecError('Cannot write the volume root', 400);
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+
+    const { stderr, exitCode } = await this.runHelper(
+      volumeName,
+      ['sh', '-c', WRITE_SCRIPT, 'sh', `./${safe}`],
+      { writable: true, stdin: content },
+    );
+    if (exitCode !== 0) {
+      const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg) || exitCode === 8) throw new ExecError('Permission denied', 403);
+      if (exitCode === 9) throw new ExecError('Target is a directory', 400);
+      throw new ExecError(`Write failed: ${msg.substring(0, 200) || 'unknown error'}`);
+    }
+    const meta = await this.stat(volumeName, safe);
+    return { mtimeMs: meta.mtime * 1000, size: meta.size };
+  }
+
+  /**
+   * Like writeFile but streams the content from a Readable (an upload spooled to
+   * a temp file) straight into the helper's stdin, so a large upload is never
+   * held in memory. Non-atomic in-place write (`cat > file`), matching writeFile
+   * (see writeFile for the ownership-preservation rationale); the caller owns the
+   * source stream's underlying temp file. `expectedSize` is the source byte count:
+   * `cat` cannot report a short write, so the post-write size is checked against
+   * it to catch a truncated transfer that exited cleanly.
+   */
+  async writeFileStream(volumeName: string, relPath: string, source: Readable, expectedSize: number): Promise<{ mtimeMs: number; size: number }> {
+    const safe = sanitizeRelPath(relPath);
+    if (!safe) throw new ExecError('Cannot write the volume root', 400);
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+
+    const { stderr, exitCode } = await this.runHelper(
+      volumeName,
+      ['sh', '-c', WRITE_SCRIPT, 'sh', `./${safe}`],
+      { writable: true, stdin: source },
+    );
+    if (exitCode !== 0) {
+      const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg) || exitCode === 8) throw new ExecError('Permission denied', 403);
+      if (exitCode === 9) throw new ExecError('Target is a directory', 400);
+      throw new ExecError(`Write failed: ${msg.substring(0, 200) || 'unknown error'}`);
+    }
+    const meta = await this.stat(volumeName, safe);
+    if (meta.size !== expectedSize) {
+      throw new ExecError('Upload did not fully write to the volume', 500);
+    }
+    return { mtimeMs: meta.mtime * 1000, size: meta.size };
+  }
+
+  /** Create a single directory; its parent must already exist. */
+  async mkdir(volumeName: string, relPath: string): Promise<void> {
+    const safe = sanitizeRelPath(relPath);
+    if (!safe) throw new ExecError('Invalid directory path', 400);
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+    const { stderr, exitCode } = await this.runHelper(
+      volumeName,
+      ['sh', '-c', MKDIR_SCRIPT, 'sh', `./${safe}`],
+      { writable: true },
+    );
+    if (exitCode !== 0) {
+      const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg)) throw new ExecError('Permission denied', 403);
+      if (/File exists/i.test(msg)) throw new ExecError('A file or folder with that name already exists', 409);
+      throw new ExecError(`Create folder failed: ${msg.substring(0, 200) || 'unknown error'}`);
+    }
+  }
+
+  /** Delete a file or directory. Removing a symlink unlinks the link, not its target. */
+  async deletePath(volumeName: string, relPath: string, recursive: boolean): Promise<void> {
+    const safe = sanitizeRelPath(relPath);
+    if (!safe) throw new ExecError('Cannot delete the volume root', 400);
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+    const { stderr, exitCode } = await this.runHelper(
+      volumeName,
+      ['sh', '-c', DELETE_SCRIPT, 'sh', `./${safe}`, recursive ? '1' : '0'],
+      { writable: true },
+    );
+    if (exitCode !== 0) {
+      const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg)) throw new ExecError('Permission denied', 403);
+      if (exitCode === 10 || /not empty/i.test(msg)) throw new ExecError('Directory is not empty', 409);
+      throw new ExecError(`Delete failed: ${msg.substring(0, 200) || 'unknown error'}`);
+    }
+  }
+
+  /** Rename/move a file or directory within the same volume. */
+  async rename(volumeName: string, fromRel: string, toRel: string): Promise<void> {
+    const from = sanitizeRelPath(fromRel);
+    const to = sanitizeRelPath(toRel);
+    if (!from || !to) throw new ExecError('Invalid rename path', 400);
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+    const { stderr, exitCode } = await this.runHelper(
+      volumeName,
+      ['sh', '-c', RENAME_SCRIPT, 'sh', `./${from}`, `./${to}`],
+      { writable: true },
+    );
+    if (exitCode !== 0) {
+      const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg)) throw new ExecError('Permission denied', 403);
+      if (exitCode === 11 || /exists/i.test(msg)) throw new ExecError('A file or folder with that name already exists', 409);
+      throw new ExecError(`Rename failed: ${msg.substring(0, 200) || 'unknown error'}`);
+    }
+  }
+
+  /** Copy a file or directory within the same volume (symlink-as-link, no chown). */
+  async copy(volumeName: string, fromRel: string, toRel: string): Promise<void> {
+    const from = sanitizeRelPath(fromRel);
+    const to = sanitizeRelPath(toRel);
+    if (!from || !to) throw new ExecError('Invalid copy path', 400);
+    await this.assertVolumeExists(volumeName);
+    await this.ensureHelperImage();
+    const { stderr, exitCode } = await this.runHelper(
+      volumeName,
+      ['sh', '-c', COPY_SCRIPT, 'sh', `./${from}`, `./${to}`],
+      { writable: true },
+    );
+    if (exitCode !== 0) {
+      const msg = stderr.toString('utf-8').trim();
+      if (/Permission denied/i.test(msg)) throw new ExecError('Permission denied', 403);
+      if (exitCode === 11 || /exists/i.test(msg)) throw new ExecError('A file or folder with that name already exists', 409);
+      if (exitCode === 12) throw new ExecError('Cannot copy a folder into itself', 400);
+      throw new ExecError(`Copy failed: ${msg.substring(0, 200) || 'unknown error'}`);
+    }
   }
 
   // --- internals -----------------------------------------------------------
@@ -250,17 +571,23 @@ export class VolumeBrowserService {
     }
   }
 
-  private async runHelper(volumeName: string, cmd: string[]): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number }> {
+  private async runHelper(
+    volumeName: string,
+    cmd: string[],
+    opts: { writable?: boolean; stdin?: Buffer | Readable } = {},
+  ): Promise<{ stdout: Buffer; stderr: Buffer; exitCode: number }> {
     const docker = DockerController.getInstance(this.nodeId).getDocker();
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
     const stdoutStream = new Writable({ write(chunk, _enc, cb) { stdoutChunks.push(chunk); cb(); } });
     const stderrStream = new Writable({ write(chunk, _enc, cb) { stderrChunks.push(chunk); cb(); } });
+    const wantStdin = opts.stdin !== undefined;
 
     // Manual lifecycle (create -> attach -> start -> wait -> remove). Using
     // dockerode's docker.run() with AutoRemove races: Docker can delete the
     // container before run()'s internal wait() callback fires, surfacing as
-    // a 404 "no such container" from docker-modem.
+    // a 404 "no such container" from docker-modem. Only the target volume mount
+    // becomes writable for mutations; every other hardening flag is unchanged.
     const container = await docker.createContainer({
       Image: HELPER_IMAGE,
       Cmd: cmd,
@@ -269,6 +596,9 @@ export class VolumeBrowserService {
       WorkingDir: VOLUME_MOUNT,
       AttachStdout: true,
       AttachStderr: true,
+      AttachStdin: wantStdin,
+      OpenStdin: wantStdin,
+      StdinOnce: wantStdin,
       HostConfig: {
         ReadonlyRootfs: true,
         NetworkMode: 'none',
@@ -281,7 +611,7 @@ export class VolumeBrowserService {
           Type: 'volume',
           Source: volumeName,
           Target: VOLUME_MOUNT,
-          ReadOnly: true,
+          ReadOnly: !opts.writable,
         }],
       },
     });
@@ -291,21 +621,57 @@ export class VolumeBrowserService {
       timer = setTimeout(() => reject(new ExecError('Helper exec timed out', 504)), EXEC_TIMEOUT_MS);
     });
 
+    let stdinError: unknown = null;
     const runPromise = (async () => {
-      const stream = await container.attach({ stream: true, stdout: true, stderr: true });
+      const stream = await container.attach({ stream: true, stdin: wantStdin, stdout: true, stderr: true, hijack: wantStdin });
       const streamEnded = new Promise<void>((resolve) => {
         stream.once('end', () => resolve());
         stream.once('close', () => resolve());
       });
       docker.modem.demuxStream(stream, stdoutStream, stderrStream);
       await container.start();
+      if (wantStdin && opts.stdin) {
+        // Feed the file content to the container's stdin, then close it so the
+        // helper's `cat > file` sees EOF and exits.
+        if (Buffer.isBuffer(opts.stdin)) {
+          stream.write(opts.stdin);
+          stream.end();
+        } else {
+          // A Readable (an upload spooled to a temp file) is piped so a large
+          // upload is never held in memory. pipeline tears the stdin side down
+          // (destroys it) on a source error rather than ending it cleanly, so
+          // cat sees an abnormal close instead of a normal EOF and does not
+          // commit a truncated file as a success. Remember the error so the run
+          // is reported as failed after the container exits.
+          try {
+            await pipeline(opts.stdin, stream);
+          } catch (err) {
+            stdinError = err;
+          }
+        }
+      }
       const exitInfo = await container.wait();
       // Wait for the attach stream to finish flushing demuxed output.
       await streamEnded;
+      const exitCode = typeof exitInfo?.StatusCode === 'number' ? exitInfo.StatusCode : 0;
+      // A nonzero helper exit is the authoritative failure: its exit code carries
+      // the intended 4xx mapping (target-is-a-directory, permission denied, etc.),
+      // which a stdin EPIPE from the helper closing stdin early would otherwise
+      // mask as a generic 500. Only surface the stream error when the helper
+      // itself exited cleanly (or its status was unreadable).
+      if (stdinError) {
+        if (exitCode === 0) {
+          throw new ExecError('Upload stream failed before the volume write completed', 500);
+        }
+        // The nonzero exit's mapping is the user-facing error, but the stream
+        // failure is the root cause; log it so an intermittent upload failure is
+        // debuggable rather than being silently attributed to the exit code.
+        console.error('[VolumeBrowser] helper stdin stream error masked by nonzero exit', exitCode, stdinError);
+      }
       return {
         stdout: Buffer.concat(stdoutChunks),
         stderr: Buffer.concat(stderrChunks),
-        exitCode: typeof exitInfo?.StatusCode === 'number' ? exitInfo.StatusCode : 0,
+        exitCode,
       };
     })();
 

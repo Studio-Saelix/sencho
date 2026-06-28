@@ -16,6 +16,10 @@ Compose treats environment in two distinct ways, and mixing them up is a common 
 
 The inventory labels each variable with how it is used, so you can tell at a glance whether a variable feeds Compose interpolation, is injected into a service, or both.
 
+<Note>
+  Interpolation resolves a `${VAR}` into the Compose file before the container is created, so a variable used in a **structural** field (a bind path, a network name, a published port, or an `extra_hosts` entry) is substituted before any tab reads the model. Its resolved value then shows in the Storage, Networking, and Dossier facts to anyone with read access to the stack, the same access that can open the stack's Compose and `.env` files. Container injection is different: values under `environment:` and `env_file:` are only ever reported by name. Keep secrets in injection, and avoid interpolating them into structural fields.
+</Note>
+
 ## What the inventory shows
 
 For every variable, Sencho records its source, its scope, and a status:
@@ -42,7 +46,7 @@ When a service declares an `env_file:` that does not exist in the stack director
 
 A `${VAR:?message}` reference tells Compose the variable is required: the deploy fails if it is unset or empty. By default Sencho surfaces that as an advisory finding and lets Compose report it at deploy time.
 
-If you would rather fail fast with a clear message before anything runs, turn on **Block deploy on missing required env vars** under **Settings → Host alerts → Deploy guardrails**. With it on, a deploy or update is refused up front when a required variable is unset or empty, before any backup, image pull, or container change happens. It is off by default, applies to the node you set it on, and requires an admin to change.
+If you would rather fail fast with a clear message before anything runs, turn on **Block deploy on missing required env vars** under **Settings → Infrastructure → Stacks → Deploy Guardrails**. With it on, a deploy or update is refused up front when a required variable is unset or empty, before any backup, image pull, or container change happens. It is off by default, applies to the node you set it on, and requires an admin to change.
 
 ## Opening the inventory
 

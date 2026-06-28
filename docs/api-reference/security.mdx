@@ -5,11 +5,11 @@ description: Automate scan policies, CVE suppressions, and vulnerability scans f
 
 The Security API lets you manage scan policies, CVE suppressions, and trigger vulnerability scans from CI pipelines and automation scripts. Every endpoint in this reference is intended for external automation; internal frontend-only endpoints (finding listings, SARIF downloads) are not documented here.
 
-All endpoints require [Bearer token authentication](/api-reference/overview#authentication). Manual scans, secret and misconfiguration results, scan comparison, and CVE suppressions are available on every tier. Scan policies (with `block_on_deploy` enforcement), SBOM, and SARIF require Admiral. See the per-endpoint **License** row for details.
+All endpoints require [Bearer token authentication](/api-reference/overview#authentication). Every endpoint in this reference is available on every tier, including scan policies with `block_on_deploy` enforcement. See the per-endpoint **Role** row for the admin requirement on writes.
 
 ## Scan policies
 
-Scan policies define severity thresholds that Sencho evaluates on every post-deploy and scheduled scan. When a policy has `block_on_deploy=1`, a matching deploy is rejected at the pre-flight stage with an HTTP 409 response. See [Deploy Enforcement](/features/deploy-enforcement) for the full flow.
+Scan policies define risk conditions that Sencho evaluates on every post-deploy and scheduled scan: a known-exploited CVE (CISA KEV), a fixable Critical/High finding, and an optional severity threshold. When a policy has `block_on_deploy=1`, a deploy whose images match any enabled condition is rejected at the pre-flight stage with an HTTP 409 response. See [Deploy Enforcement](/features/deploy-enforcement) for the full flow.
 
 Writes are admin-only and rejected on replica nodes (policies are managed on the control instance and replicate fleet-wide).
 
@@ -17,7 +17,7 @@ Writes are admin-only and rejected on replica nodes (policies are managed on the
 
 **`GET /api/security/policies`**
 
-**License:** Admiral
+**License:** Community
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_TOKEN" \
@@ -37,6 +37,9 @@ curl -H "Authorization: Bearer YOUR_API_TOKEN" \
     "max_severity": "HIGH",
     "block_on_deploy": 1,
     "enabled": 1,
+    "block_on_severity": 1,
+    "block_on_kev": 0,
+    "block_on_fixable": 0,
     "replicated_from_control": 0,
     "created_at": 1745107200000,
     "updated_at": 1745107200000
@@ -48,16 +51,21 @@ curl -H "Authorization: Bearer YOUR_API_TOKEN" \
 
 **`POST /api/security/policies`**
 
-**License:** Admiral · **Role:** Admin
+**License:** Community · **Role:** Admin
 
 | Field | Type | Required | Description |
 |-------|------|:--------:|-------------|
 | `name` | string | yes | Human-readable name shown in the UI. |
 | `stack_pattern` | string or `null` | no | Glob against stack names (e.g. `prod-*`). `null` matches every stack. |
-| `max_severity` | string | yes | One of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`. A scan whose highest finding meets or exceeds this severity triggers the policy. |
-| `block_on_deploy` | `0` or `1` | yes | When `1`, pre-flight violations reject deploys with HTTP 409. When `0`, post-deploy and scheduled scans dispatch warning alerts instead. |
+| `max_severity` | string | yes | One of `CRITICAL`, `HIGH`, `MEDIUM`, `LOW`. The threshold used when `block_on_severity` is on. Always stored for context. |
+| `block_on_deploy` | `0` or `1` | yes | When `1`, pre-flight matches reject deploys with HTTP 409. When `0`, post-deploy and scheduled scans dispatch warning alerts instead. |
 | `enabled` | `0` or `1` | no | Defaults to `1`. Disabled policies are never evaluated. |
+| `block_on_severity` | `0` or `1` | no | Block when an image's highest non-suppressed finding meets or exceeds `max_severity`. Defaults to `0`. |
+| `block_on_kev` | `0` or `1` | no | Block when an image carries a CVE on the CISA known-exploited (KEV) list. Defaults to `1`. |
+| `block_on_fixable` | `0` or `1` | no | Block when an image has a Critical/High finding with a fix available. Defaults to `1`. |
 | `node_id` | number or `null` | no | Scope the policy to one node. `null` applies the policy fleet-wide. |
+
+A blocking policy (`block_on_deploy=1`) must enable at least one of `block_on_severity`, `block_on_kev`, or `block_on_fixable`. When the three input fields are omitted, they default risk-first (`block_on_kev=1`, `block_on_fixable=1`, `block_on_severity=0`).
 
 ```bash
 curl -X POST https://your-sencho-instance:1852/api/security/policies \
@@ -78,13 +86,14 @@ curl -X POST https://your-sencho-instance:1852/api/security/policies \
 
 - `400` `max_severity must be CRITICAL, HIGH, MEDIUM, or LOW`
 - `400` `Policy name is required`
+- `400` `A blocking policy must enable at least one of: severity threshold, KEV, or fixable.`
 - `403` when called on a replica node
 
 ### Update policy
 
 **`PUT /api/security/policies/{id}`**
 
-**License:** Admiral · **Role:** Admin
+**License:** Community · **Role:** Admin
 
 Any of the create fields can be updated individually. Omitted fields are left unchanged.
 
@@ -103,7 +112,7 @@ curl -X PUT https://your-sencho-instance:1852/api/security/policies/1 \
 
 **`DELETE /api/security/policies/{id}`**
 
-**License:** Admiral · **Role:** Admin
+**License:** Community · **Role:** Admin
 
 ```bash
 curl -X DELETE https://your-sencho-instance:1852/api/security/policies/1 \

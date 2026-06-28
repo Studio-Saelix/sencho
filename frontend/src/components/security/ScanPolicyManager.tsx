@@ -14,7 +14,6 @@ import { SettingsCallout } from '@/components/settings/SettingsCallout';
 import { SettingsPrimaryButton } from '@/components/settings/SettingsActions';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import type { FleetRole, ScanPolicy, VulnSeverity } from '@/types/security';
 
@@ -31,27 +30,33 @@ interface PolicyFormState {
   max_severity: VulnSeverity;
   block_on_deploy: boolean;
   enabled: boolean;
+  block_on_severity: boolean;
+  block_on_kev: boolean;
+  block_on_fixable: boolean;
 }
 
+// New policies default risk-first (block on known-exploited and on fixable
+// Critical/High), with the raw severity threshold off until the operator turns
+// it on. Existing policies keep whatever they were saved with.
 const EMPTY_FORM: PolicyFormState = {
   name: '',
   stack_pattern: '',
   max_severity: 'CRITICAL',
   block_on_deploy: false,
   enabled: true,
+  block_on_severity: false,
+  block_on_kev: true,
+  block_on_fixable: true,
 };
 
 /**
  * Deploy-enforcement scan policies (block-on-deploy severity thresholds), the
  * honor-suppressions toggle, and the replica "managed by control" state. This
- * is the paid governance surface for the Security page Policies tab; it returns
- * null for Community (no enforcement management) so the catalog is all a
- * Community operator sees. Policies are control-governed: fetched localOnly and
- * shown only on the local node, mirroring how the rest of the fleet-governance
- * UI behaves.
+ * is the governance surface for the Security page Policies tab. Policies are
+ * control-governed: fetched localOnly and shown only on the local node,
+ * mirroring how the rest of the fleet-governance UI behaves.
  */
 export function ScanPolicyManager() {
-  const { isPaid } = useLicense();
   const { isAdmin } = useAuth();
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
@@ -94,17 +99,17 @@ export function ScanPolicyManager() {
   };
 
   useEffect(() => {
-    if (!isPaid || isRemote) { setLoading(false); return; }
+    if (isRemote) { setLoading(false); return; }
     fetchPolicies();
-  }, [isPaid, isRemote]);
+  }, [isRemote]);
 
   useEffect(() => {
-    if (!isPaid || isRemote) return;
+    if (isRemote) return;
     void refreshTrivy();
-  }, [isPaid, isRemote, activeNode?.id, refreshTrivy]);
+  }, [isRemote, activeNode?.id, refreshTrivy]);
 
   useEffect(() => {
-    if (!isPaid || isRemote) return;
+    if (isRemote) return;
     let cancelled = false;
     (async () => {
       try {
@@ -126,7 +131,7 @@ export function ScanPolicyManager() {
       }
     })();
     return () => { cancelled = true; };
-  }, [isPaid, isRemote]);
+  }, [isRemote]);
 
   const handleHonorSuppressionsToggle = async (enabled: boolean) => {
     setHonorBusy(true);
@@ -184,6 +189,9 @@ export function ScanPolicyManager() {
       max_severity: policy.max_severity,
       block_on_deploy: policy.block_on_deploy === 1,
       enabled: policy.enabled === 1,
+      block_on_severity: policy.block_on_severity === 1,
+      block_on_kev: policy.block_on_kev === 1,
+      block_on_fixable: policy.block_on_fixable === 1,
     });
     setDialogOpen(true);
   };
@@ -191,6 +199,12 @@ export function ScanPolicyManager() {
   const handleSave = async () => {
     if (!form.name.trim()) {
       toast.error('Policy name is required');
+      return;
+    }
+    // A blocking policy with no active input would block nothing; the backend
+    // rejects it too. Catch it here so the operator gets immediate feedback.
+    if (form.block_on_deploy && !form.block_on_severity && !form.block_on_kev && !form.block_on_fixable) {
+      toast.error('Enable at least one input (severity, KEV, or fixable) to block on deploy.');
       return;
     }
     setSaving(true);
@@ -201,6 +215,9 @@ export function ScanPolicyManager() {
         max_severity: form.max_severity,
         block_on_deploy: form.block_on_deploy ? 1 : 0,
         enabled: form.enabled ? 1 : 0,
+        block_on_severity: form.block_on_severity ? 1 : 0,
+        block_on_kev: form.block_on_kev ? 1 : 0,
+        block_on_fixable: form.block_on_fixable ? 1 : 0,
       };
       const url = editingId ? `/security/policies/${editingId}` : '/security/policies';
       const method = editingId ? 'PUT' : 'POST';
@@ -242,11 +259,6 @@ export function ScanPolicyManager() {
       setDeleteId(null);
     }
   };
-
-  // Enforcement management is a paid governance surface; the Policies tab is
-  // hidden for Community entirely (gated in SecurityView), so this is a
-  // defensive guard.
-  if (!isPaid) return null;
 
   return (
     <div className="space-y-4">
@@ -338,7 +350,7 @@ export function ScanPolicyManager() {
         <SettingsCallout
           icon={<ShieldCheck className="h-4 w-4" />}
           title="No scan policies configured"
-          subtitle="Add one to enforce severity thresholds across your fleet."
+          subtitle="Add one to gate deploys on known-exploited, fixable, or high-severity findings across your fleet."
         />
       )}
 
@@ -349,9 +361,21 @@ export function ScanPolicyManager() {
               <div className="flex items-center gap-2 min-w-0">
                 <ShieldCheck className="w-4 h-4 text-muted-foreground shrink-0" strokeWidth={1.5} />
                 <span className="font-medium text-sm truncate">{policy.name}</span>
-                <Badge variant="outline" className="text-[10px] shrink-0">
-                  max: {policy.max_severity}
-                </Badge>
+                {policy.block_on_severity === 1 && (
+                  <Badge variant="outline" className="text-[10px] shrink-0">
+                    max: {policy.max_severity}
+                  </Badge>
+                )}
+                {policy.block_on_kev === 1 && (
+                  <Badge variant="outline" className="text-[10px] shrink-0">
+                    KEV
+                  </Badge>
+                )}
+                {policy.block_on_fixable === 1 && (
+                  <Badge variant="outline" className="text-[10px] shrink-0">
+                    Fixable
+                  </Badge>
+                )}
                 {policy.block_on_deploy === 1 && (
                   <Badge variant="destructive" className="text-[10px] shrink-0">
                     block
@@ -439,21 +463,62 @@ export function ScanPolicyManager() {
             </p>
           </div>
           <div className="space-y-2">
-            <Label>Max severity</Label>
-            <Combobox
-              options={SEVERITY_OPTIONS}
-              value={form.max_severity}
-              onValueChange={(v) => setForm({ ...form, max_severity: v as VulnSeverity })}
-            />
+            <Label>Block conditions</Label>
+            <p className="text-xs text-muted-foreground">
+              What makes this policy flag an image. Enable at least one to block on deploy. CVSS is always captured for context but never the sole basis.
+            </p>
+            <div className="rounded-lg border border-glass-border px-3 py-2.5 space-y-2.5">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <Label className="text-sm">Severity threshold</Label>
+                  <p className="text-xs text-muted-foreground">Flag an image whose highest finding meets or exceeds the chosen severity.</p>
+                </div>
+                <TogglePill
+                  aria-label="Severity threshold"
+                  checked={form.block_on_severity}
+                  onChange={(c) => setForm({ ...form, block_on_severity: c })}
+                />
+              </div>
+              {form.block_on_severity && (
+                <Combobox
+                  options={SEVERITY_OPTIONS}
+                  value={form.max_severity}
+                  onValueChange={(v) => setForm({ ...form, max_severity: v as VulnSeverity })}
+                />
+              )}
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-glass-border px-3 py-2.5">
+              <div>
+                <Label className="text-sm">Known-exploited (KEV)</Label>
+                <p className="text-xs text-muted-foreground">Flag an image carrying a CVE on the CISA known-exploited list.</p>
+              </div>
+              <TogglePill
+                aria-label="Known-exploited (KEV)"
+                checked={form.block_on_kev}
+                onChange={(c) => setForm({ ...form, block_on_kev: c })}
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-glass-border px-3 py-2.5">
+              <div>
+                <Label className="text-sm">Fixable Critical/High</Label>
+                <p className="text-xs text-muted-foreground">Flag an image with a Critical or High finding that has a fix available.</p>
+              </div>
+              <TogglePill
+                aria-label="Fixable Critical/High"
+                checked={form.block_on_fixable}
+                onChange={(c) => setForm({ ...form, block_on_fixable: c })}
+              />
+            </div>
           </div>
           <div className="flex items-center justify-between rounded-lg border border-glass-border px-3 py-2.5">
             <div>
               <Label className="text-sm">Block on deploy</Label>
               <p className="text-xs text-muted-foreground">
-                Reject a deploy before containers start when any image meets or exceeds the threshold. With this off, the policy only evaluates and raises an alert.
+                Reject a deploy before containers start when any image matches the block conditions above. With this off, the policy only evaluates and raises an alert.
               </p>
             </div>
             <TogglePill
+              aria-label="Block on deploy"
               checked={form.block_on_deploy}
               onChange={(c) => setForm({ ...form, block_on_deploy: c })}
             />

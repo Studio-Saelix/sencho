@@ -34,3 +34,16 @@ export type SecurityTab =
   | 'suppressions'
   | 'history'
   | 'scanner';
+
+/** Fleet view sub-tabs, used for deep-link navigation (e.g. the stack storage
+ *  warning linking to Snapshots). Mirrors the TabsTrigger values in FleetView. */
+export type FleetTab =
+  | 'overview'
+  | 'snapshots'
+  | 'configuration'
+  | 'dependencies'
+  | 'deployments'
+  | 'routing'
+  | 'federation'
+  | 'actions'
+  | 'secrets';

@@ -757,6 +757,93 @@ describe('POST /api/fleet/labels/fleet-stop remote leg', () => {
   });
 });
 
+describe('POST /api/fleet/labels/fleet-stop nodeIds allowlist', () => {
+  // Guards the wrong-node drift fix: the real stop carries the node ids the
+  // operator confirmed in the preview, so a node that was unreachable then and
+  // reconnects before execution cannot silently enter the fan-out.
+  it('contacts a confirmed remote in the allowlist and excludes the unconfirmed local node', async () => {
+    const remoteId = db.addNode({
+      name: 'confirmed-remote', type: 'remote', api_url: 'http://confirmed.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true, status: 200, json: async () => ({ matched: true, results: [{ stackName: 'alpha', success: true }] }),
+      } as unknown as Response);
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: 'any-label', nodeIds: [remoteId] });
+      expect(res.status).toBe(200);
+      // Only the confirmed remote is in the fan-out: its local-stop receiver is
+      // contacted and the unconfirmed local node is absent from the results.
+      expect(res.body.results).toHaveLength(1);
+      expect(res.body.results[0].nodeId).toBe(remoteId);
+      const urls = fetchSpy.mock.calls.map(c => String(c[0]));
+      expect(urls.some(u => u.endsWith('/api/fleet-actions/labels/local-stop'))).toBe(true);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('excludes an otherwise-reachable remote that is not in the allowlist', async () => {
+    const label = await createAssignedLabel('confirmed-only', ['alpha']);
+    const localId = label.node_id;
+    const remoteId = db.addNode({
+      name: 'excluded-remote', type: 'remote', api_url: 'http://excluded.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: label.name, nodeIds: [localId] });
+      expect(res.status).toBe(200);
+      // The excluded remote has a proxy target and would otherwise be contacted;
+      // the allowlist keeps it out of execution entirely.
+      expect(res.body.results).toHaveLength(1);
+      expect(res.body.results[0].nodeId).toBe(localId);
+      expect(res.body.results.some((r: { nodeId: number }) => r.nodeId === remoteId)).toBe(false);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('treats an empty allowlist as zero target nodes, stopping nothing', async () => {
+    const label = await createAssignedLabel('empty-allow', ['alpha']);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: label.name, nodeIds: [] });
+    expect(res.status).toBe(200);
+    // An empty allowlist filters to no nodes: a fail-safe no-op rather than a
+    // full-fleet stop. The local node is not acted on and no remote is contacted.
+    expect(res.body.results).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-array nodeIds with 400', async () => {
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'whatever', nodeIds: 'oops' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/nodeIds/);
+  });
+
+  it('rejects a non-integer nodeIds entry with 400', async () => {
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'whatever', nodeIds: [1, 2.5] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/nodeIds/);
+  });
+});
+
 describe('POST /api/fleet/labels/fleet-stop with dryRun: true', () => {
   it('marks each stack dryRun: true and does not invoke containerActionForStack', async () => {
     const label = await createAssignedLabel('dry-stop', ['alpha', 'beta']);

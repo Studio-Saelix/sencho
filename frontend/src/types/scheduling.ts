@@ -18,6 +18,11 @@ export interface ScheduledTask {
   target_services: string | null;
   prune_label_filter: string | null;
   delete_after_run?: number;
+  // Absolute epoch-ms fire time for a one-time ('once') schedule; null/absent for
+  // recurring shapes. Persisted so the chosen instant (including year) survives
+  // disable/enable and edit, where the yearless cron would otherwise collapse to
+  // the next annual occurrence.
+  run_at?: number | null;
   next_runs?: number[];
 }
 
@@ -35,4 +40,5 @@ export interface TaskRun {
 export interface NodeOption {
   id: number;
   name: string;
+  type: 'local' | 'remote';
 }

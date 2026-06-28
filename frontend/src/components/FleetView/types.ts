@@ -40,6 +40,8 @@ export interface NodeUpdateStatus {
     updateAvailable: boolean;
     updateStatus: 'updating' | 'completed' | 'timeout' | 'failed' | null;
     error?: string | null;
+    skipActive?: boolean;
+    skippedVersion?: string | null;
 }
 
 export type ViewMode = 'grid' | 'topology';

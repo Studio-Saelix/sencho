@@ -22,10 +22,12 @@ vi.mock('../MastheadStatsContext', () => ({ useMastheadStats: () => {} }));
 import { apiFetch } from '@/lib/api';
 import { useLicense } from '@/context/LicenseContext';
 import { HostAlertsSection } from '../HostAlertsSection';
+import { ContainerAlertsSection } from '../ContainerAlertsSection';
 import { DockerStorageSection } from '../DockerStorageSection';
 import { FleetMeshSection } from '../FleetMeshSection';
 import { DataRetentionSection } from '../DataRetentionSection';
 import { DeveloperSection } from '../DeveloperSection';
+import { StacksSection } from '../StacksSection';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
 const mockedLicense = useLicense as unknown as ReturnType<typeof vi.fn>;
@@ -35,6 +37,7 @@ const FULL_SETTINGS: Record<string, string> = {
     host_ram_limit: '90',
     host_disk_limit: '90',
     host_alert_suppression_mins: '60',
+    host_alerts_enabled: '1',
     global_crash: '1',
     docker_janitor_gb: '5',
     prune_on_update: '1',
@@ -44,7 +47,11 @@ const FULL_SETTINGS: Record<string, string> = {
     log_retention_days: '30',
     audit_retention_days: '90',
     scan_history_per_image_limit: '50',
+    prune_orphaned_scans: '1',
     developer_mode: '0',
+    health_gate_enabled: '1',
+    health_gate_window_seconds: '90',
+    env_block_deploy_on_missing_required: '0',
 };
 
 function patchedKeys(): string[] {
@@ -60,21 +67,46 @@ beforeEach(() => {
 });
 
 describe('split section save payloads', () => {
-    it('HostAlertsSection patches only host alert and health gate keys', async () => {
+    it('HostAlertsSection patches only host alert keys', async () => {
         render(<HostAlertsSection />);
         const save = await screen.findByRole('button', { name: /save alerts/i });
-        fireEvent.click(screen.getAllByRole('switch')[0]); // global_crash
+        // NumberChip renders as a button until clicked; click the CPU chip to enter edit mode.
+        fireEvent.click(screen.getAllByRole('button', { name: /90\s*%/i })[0]);
+        const spinbutton = screen.getByRole('spinbutton');
+        fireEvent.change(spinbutton, { target: { value: '95' } });
+        fireEvent.blur(spinbutton);
+        fireEvent.click(save);
+        await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
+        expect(patchedKeys()).toEqual([
+            'host_alert_suppression_mins',
+            'host_alerts_enabled',
+            'host_cpu_limit',
+            'host_disk_limit',
+            'host_ram_limit',
+        ]);
+    });
+
+    it('ContainerAlertsSection patches only global_crash', async () => {
+        render(<ContainerAlertsSection />);
+        const save = await screen.findByRole('button', { name: /save settings/i });
+        fireEvent.click(screen.getByRole('switch')); // global_crash toggle
+        fireEvent.click(save);
+        await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
+        expect(patchedKeys()).toEqual(['global_crash']);
+    });
+
+    it('StacksSection guardrails patch only deploy guardrail keys', async () => {
+        render(<StacksSection />);
+        const save = await screen.findByRole('button', { name: /save settings/i });
+        // StacksSection has switches for health_gate_enabled and env_block. The first
+        // switch is the Observe health toggle.
+        fireEvent.click(screen.getAllByRole('switch')[0]);
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
         expect(patchedKeys()).toEqual([
             'env_block_deploy_on_missing_required',
-            'global_crash',
             'health_gate_enabled',
             'health_gate_window_seconds',
-            'host_alert_suppression_mins',
-            'host_cpu_limit',
-            'host_disk_limit',
-            'host_ram_limit',
         ]);
     });
 
@@ -106,6 +138,7 @@ describe('split section save payloads', () => {
             'audit_retention_days',
             'log_retention_days',
             'metrics_retention_hours',
+            'prune_orphaned_scans',
             'scan_history_per_image_limit',
         ]);
     });
@@ -121,8 +154,20 @@ describe('split section save payloads', () => {
         expect(patchedKeys()).toEqual([
             'log_retention_days',
             'metrics_retention_hours',
+            'prune_orphaned_scans',
             'scan_history_per_image_limit',
         ]);
+    });
+
+    it('DataRetentionSection sends prune_orphaned_scans="0" when the toggle is turned off', async () => {
+        render(<DataRetentionSection />);
+        const save = await screen.findByRole('button', { name: /save settings/i });
+        fireEvent.click(screen.getByRole('switch')); // the only toggle: prune_orphaned_scans
+        fireEvent.click(save);
+        await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
+        const patch = [...mockedFetch.mock.calls].reverse().find(c => c[1]?.method === 'PATCH');
+        const body = JSON.parse(patch![1].body as string);
+        expect(body.prune_orphaned_scans).toBe('0');
     });
 
     it('DeveloperSection patches only developer_mode', async () => {

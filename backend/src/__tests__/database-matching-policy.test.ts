@@ -30,7 +30,7 @@ describe('getMatchingPolicy tiebreaker', () => {
             node_identity: '',
             stack_pattern: null,
             max_severity: 'HIGH',
-            block_on_deploy: 0,
+            block_on_deploy: 0, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0,
             enabled: 1,
             replicated_from_control: 0,
         });
@@ -40,7 +40,7 @@ describe('getMatchingPolicy tiebreaker', () => {
             node_identity: '',
             stack_pattern: null,
             max_severity: 'CRITICAL',
-            block_on_deploy: 0,
+            block_on_deploy: 0, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0,
             enabled: 1,
             replicated_from_control: 0,
         });
@@ -60,7 +60,7 @@ describe('getMatchingPolicy tiebreaker', () => {
             node_identity: '',
             stack_pattern: null,
             max_severity: 'LOW',
-            block_on_deploy: 0,
+            block_on_deploy: 0, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0,
             enabled: 1,
             replicated_from_control: 0,
         });
@@ -70,7 +70,7 @@ describe('getMatchingPolicy tiebreaker', () => {
             node_identity: 'local',
             stack_pattern: null,
             max_severity: 'CRITICAL',
-            block_on_deploy: 0,
+            block_on_deploy: 0, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0,
             enabled: 1,
             replicated_from_control: 0,
         });
@@ -89,7 +89,7 @@ describe('getMatchingPolicy tiebreaker', () => {
             node_identity: 'https://other.example',
             stack_pattern: null,
             max_severity: 'CRITICAL',
-            block_on_deploy: 0,
+            block_on_deploy: 0, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0,
             enabled: 1,
             replicated_from_control: 1,
         });
@@ -99,7 +99,7 @@ describe('getMatchingPolicy tiebreaker', () => {
             node_identity: 'https://me.example',
             stack_pattern: null,
             max_severity: 'HIGH',
-            block_on_deploy: 0,
+            block_on_deploy: 0, block_on_severity: 1, block_on_kev: 0, block_on_fixable: 0,
             enabled: 1,
             replicated_from_control: 1,
         });

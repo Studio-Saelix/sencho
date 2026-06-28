@@ -18,4 +18,27 @@ export interface ImageUpdateStatus {
     nextCheckAt: number | null;
     manualCooldownMinutes: number;
     manualCooldownRemainingMs: number;
+    /** Active scheduling mode. */
+    mode: 'interval' | 'cron';
+    /** 5-field cron expression when mode is 'cron', null otherwise. */
+    cronExpression: string | null;
+}
+
+/**
+ * Per-stack image-update check outcome. 'ok' = every checkable image was
+ * reached; 'partial' = some checkable images errored; 'failed' = no checkable
+ * image could be reached, so update status is undeterminable (distinct from a
+ * confirmed "up to date").
+ */
+export type CheckStatus = 'ok' | 'partial' | 'failed';
+
+/**
+ * Rich per-stack update status from `GET /api/image-updates/detail`. `lastError`
+ * carries the failure reason when `checkStatus` is 'failed' or 'partial'.
+ */
+export interface StackUpdateInfo {
+    hasUpdate: boolean;
+    checkStatus: CheckStatus;
+    lastError: string | null;
+    checkedAt: number;
 }

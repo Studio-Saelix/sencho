@@ -198,7 +198,7 @@ function NodeDetail({
         <span aria-hidden className={`absolute left-0 top-1 bottom-[15px] w-[3px] ${tone === 'destructive' ? 'bg-destructive' : tone === 'warning' ? 'bg-warning' : 'bg-brand'}`} />
         <div className="mb-1"><Kicker>{`fleet › node › ${node.name}`}</Kicker></div>
         <div className="flex items-center gap-2.5">
-          <span className="min-w-0 truncate font-display italic text-[30px] leading-[34px] text-stat-value">{node.name}</span>
+          <span className="min-w-0 truncate font-heading text-[30px] leading-[34px] text-stat-value">{node.name}</span>
           <StatePill tone={tone} live={!online}>{node.cordoned ? 'cordoned' : online ? (isCritical(node) ? 'degraded' : 'online') : 'offline'}</StatePill>
         </div>
         <div className="mt-[7px] font-mono text-[12px] text-stat-subtitle">

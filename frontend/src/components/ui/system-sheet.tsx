@@ -28,6 +28,7 @@ export interface SystemSheetTab {
   id: string;
   label: string;
   count?: number;
+  dot?: boolean;
 }
 
 export interface SystemSheetProps {
@@ -178,7 +179,7 @@ function SheetHeaderBand({ crumb, name, meta, onDismiss }: SheetHeaderBandProps)
         })}
       </nav>
 
-      <SheetTitle className="mt-2 font-display italic text-[1.5rem] leading-tight text-stat-value text-left">
+      <SheetTitle className="mt-2 font-heading text-[1.5rem] leading-tight text-stat-value text-left">
         {name}
       </SheetTitle>
 
@@ -283,6 +284,12 @@ function TabsBand({ tabs, activeTab, onTabChange }: TabsBandProps) {
             )}
           >
             {tab.label}
+            {tab.dot && (
+              <span aria-hidden className="relative inline-flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-brand opacity-60" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-brand" />
+              </span>
+            )}
             {tab.count !== undefined && (
               <span className="font-mono text-[10px] tabular-nums text-stat-subtitle">{tab.count}</span>
             )}

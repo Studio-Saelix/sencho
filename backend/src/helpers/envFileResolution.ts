@@ -165,20 +165,52 @@ export async function resolveStackEnvSources(nodeId: number, stackName: string):
 
   const composeFiles = await discoverAuthoredComposeFiles(fsService, stackName, stackDir);
 
-  // Physical env files, deduped by resolved absolute path. Seed with the project
-  // `.env`: always the interpolation source, regardless of any env_file entry.
+  // Physical env files, deduped by resolved absolute path.
+  // Seed the project `.env` as the fallback interpolation source. When the stack
+  // has configured project env files, they REPLACE `.env` as the interpolation
+  // source (matching Docker Compose behavior: explicit --env-file suppresses
+  // default .env auto-discovery). If the user wants `.env` in addition to custom
+  // files, they must include it in the configured list.
+  const configuredProjectFiles = DatabaseService.getInstance().getStackProjectEnvFiles(nodeId, stackName);
+  const hasConfiguredProjectFiles = configuredProjectFiles.length > 0;
+
   const byPath = new Map<string, PhysicalEnvFile>();
-  const dotenvPath = path.resolve(stackDir, '.env');
-  const dotenv: PhysicalEnvFile = {
-    resolvedPath: dotenvPath,
-    rawPaths: ['.env'],
-    existence: await existenceOf(fsService, dotenvPath, baseDir),
-    required: false,
-    isInterpolationSource: true,
-    isInjectionSource: false,
-    declaringServices: [],
-  };
-  byPath.set(dotenvPath, dotenv);
+
+  if (hasConfiguredProjectFiles) {
+    for (const file of configuredProjectFiles) {
+      const resolvedPath = path.resolve(stackDir, file);
+      const exists = await existenceOf(fsService, resolvedPath, baseDir);
+      const existing = byPath.get(resolvedPath);
+      if (existing) {
+        existing.isInterpolationSource = true;
+      } else {
+        byPath.set(resolvedPath, {
+          resolvedPath,
+          rawPaths: [file],
+          existence: exists,
+          required: false,
+          isInterpolationSource: true,
+          isInjectionSource: false,
+          declaringServices: [],
+        });
+      }
+    }
+  }
+
+  // Seed the project `.env` as the fallback interpolation source when nothing is configured.
+  if (!hasConfiguredProjectFiles) {
+    const dotenvPath = path.resolve(stackDir, '.env');
+    const dotenv: PhysicalEnvFile = {
+      resolvedPath: dotenvPath,
+      rawPaths: ['.env'],
+      existence: await existenceOf(fsService, dotenvPath, baseDir),
+      required: false,
+      isInterpolationSource: true,
+      isInjectionSource: false,
+      declaringServices: [],
+    };
+    byPath.set(dotenvPath, dotenv);
+  }
 
   const unresolved: PhysicalEnvFile[] = [];
   const inlineEnvKeysByService: Record<string, string[]> = {};
@@ -250,4 +282,41 @@ export async function resolveStackEnvSources(nodeId: number, stackName: string):
     inlineEnvKeysByService,
     interpolationRefs: parseInterpolationRefs(authoredText),
   };
+}
+
+/**
+ * Scan the stack directory (non-recursive) for env-like files that could serve as
+ * project env files. Matches three patterns: `.env`, `*.env` (e.g. `stack.env`),
+ * and `.env.*` (e.g. `.env.production`, `.env.local`). Returns only regular files
+ * (directories named `*.env` are excluded). Results are stack-relative paths sorted
+ * alphabetically.
+ */
+export async function discoverStackLocalEnvFiles(nodeId: number, stackName: string): Promise<string[]> {
+  const fsService = FileSystemService.getInstance(nodeId);
+  const baseDir = fsService.getBaseDir();
+
+  let entries: { name: string; type: string }[];
+  try {
+    entries = await fsService.listStackDirectory(stackName, '');
+  } catch (err) {
+    console.warn('[EnvFileResolution] Failed to list stack directory for env file discovery:', (err as Error).message);
+    return [];
+  }
+
+  const stackDir = path.join(baseDir, stackName);
+  const candidates: string[] = [];
+  for (const entry of entries) {
+    const name = entry.name;
+    if (name === '.env' || name.endsWith('.env') || name.startsWith('.env.')) {
+      // Must be a regular file, not a directory.
+      if (entry.type !== 'file') continue;
+      // Validate containment (defense in depth).
+      const absPath = path.resolve(stackDir, name);
+      if (!isPathWithinBase(absPath, stackDir)) continue;
+      candidates.push(name);
+    }
+  }
+
+  candidates.sort();
+  return candidates;
 }

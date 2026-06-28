@@ -1,4 +1,4 @@
-import { Suspense, useRef, useEffect } from 'react';
+import { Suspense, useRef, useEffect, useState } from 'react';
 import { Editor } from '@/lib/monacoLoader';
 import {
     Save,
@@ -8,6 +8,8 @@ import {
     ChevronDown,
     GitBranch,
     FolderOpen,
+    Maximize2,
+    Minimize2,
 } from 'lucide-react';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader } from '../ui/card';
@@ -314,6 +316,23 @@ export function EditorView(props: EditorViewProps) {
         }
     }, [activeTab, canRead, setActiveTab]);
 
+    // Fullscreen the file browser + editor by collapsing the left column. Only
+    // meaningful on the files tab; reset when leaving it or closing the editor so
+    // it can never strand the compose/env panels in a single-column layout.
+    const [filesFullscreen, setFilesFullscreen] = useState(false);
+    useEffect(() => {
+        if (!editingCompose || activeTab !== 'files') setFilesFullscreen(false);
+    }, [editingCompose, activeTab]);
+
+    // Expand the logs by collapsing the Command Center card so the logs pane
+    // fills the left column. Toggled from the structured log viewer header.
+    const [logsExpanded, setLogsExpanded] = useState(false);
+    // The expand control lives only in the structured viewer; reset when the
+    // raw terminal is selected so the Command Center can't be stranded hidden.
+    useEffect(() => {
+        if (logsMode === 'raw') setLogsExpanded(false);
+    }, [logsMode]);
+
     // Below md, render the segmented full-screen mobile detail instead of the
     // desktop two-pane grid. All hooks above run unconditionally before this
     // branch so hook order stays stable across breakpoints.
@@ -324,10 +343,14 @@ export function EditorView(props: EditorViewProps) {
 
     return (
         <ErrorBoundary>
-            <div className="grid gap-6 grid-cols-1 lg:grid-cols-2 min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]">
-                {/* Left column: identity + health strip + logs, stacked */}
+            <div className={`grid gap-6 ${filesFullscreen ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-2'} min-h-[600px] h-[calc(100vh-160px)] max-h-[1040px]`}>
+                {/* Left column: identity + health strip + logs, stacked. Hidden in
+                    files fullscreen so the editor card fills the width. */}
+                {!filesFullscreen && (
                 <div className="flex flex-col gap-6 min-h-0">
-                    {/* Command Center Card (identity + health strip) */}
+                    {/* Command Center Card (identity + health strip). Hidden when
+                        the logs are expanded so the logs pane fills the column. */}
+                    {!logsExpanded && (
                     <Card className="rounded-xl border-muted bg-card shrink-0">
                         <CardHeader className="p-4 pb-2">
                             <div className="flex items-start justify-between gap-3">
@@ -392,10 +415,18 @@ export function EditorView(props: EditorViewProps) {
                             />
                         </CardContent>
                     </Card>
+                    )}
 
                     {/* Logs Section (fills remaining left-column height) */}
-                    <StackLogsSection stackName={stackName} logsMode={logsMode} setLogsMode={setLogsMode} />
+                    <StackLogsSection
+                        stackName={stackName}
+                        logsMode={logsMode}
+                        setLogsMode={setLogsMode}
+                        logsExpanded={logsExpanded}
+                        onToggleLogsExpand={() => setLogsExpanded((v) => !v)}
+                    />
                 </div>
+                )}
 
                 {/* Right column: anatomy panel by default, Monaco editor when editing */}
                 {editingCompose ? (
@@ -485,6 +516,20 @@ export function EditorView(props: EditorViewProps) {
                                         )}
                                     </>
                                 )}
+                                {activeTab === 'files' && (
+                                    <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        className="rounded-lg h-8 w-8 p-0"
+                                        onClick={() => setFilesFullscreen((v) => !v)}
+                                        aria-label={filesFullscreen ? 'Exit full screen' : 'Full screen'}
+                                        title={filesFullscreen ? 'Exit full screen' : 'Full screen'}
+                                    >
+                                        {filesFullscreen
+                                            ? <Minimize2 className="w-4 h-4" strokeWidth={1.5} />
+                                            : <Maximize2 className="w-4 h-4" strokeWidth={1.5} />}
+                                    </Button>
+                                )}
                                 <Button
                                     size="sm"
                                     variant="ghost"
@@ -515,7 +560,7 @@ export function EditorView(props: EditorViewProps) {
                                     {activeTab === 'env' && (
                                         <div className="bg-brand/8 border-b border-brand/20 px-4 py-2 flex items-center gap-2 text-xs text-brand">
                                             <span>
-                                                Variables defined here are automatically available for substitution in your compose.yaml (e.g., <code className="bg-background px-1 rounded text-[10px]">${'{}'}VAR</code>). To pass them directly into your container, you must add <code className="bg-background px-1 rounded text-[10px]">env_file: - .env</code> to your service definition.
+                                                Variables defined in the project environment file are available for substitution in your compose.yaml (e.g., <code className="bg-background px-1 rounded text-[10px]">${'{}'}VAR</code>). To pass them directly into your container, add <code className="bg-background px-1 rounded text-[10px]">env_file: - .env</code> to your service definition.
                                             </span>
                                         </div>
                                     )}
@@ -524,7 +569,7 @@ export function EditorView(props: EditorViewProps) {
                                             <Suspense fallback={<div className="w-full h-full" aria-busy="true" />}>
                                                 <Editor
                                                     height="100%"
-                                                    language={activeTab === 'compose' ? 'yaml' : 'plaintext'}
+                                                    language={activeTab === 'compose' ? 'yaml' : 'ini'}
                                                     theme={isDarkMode ? 'vs-dark' : 'vs'}
                                                     value={activeTab === 'compose' ? safeContent : safeEnvContent}
                                                     onMount={(editor) => { monacoEditorRef.current = editor; }}

@@ -5,6 +5,7 @@ import { COOKIE_NAME } from '../helpers/constants';
 import { WEBHOOK_TRIGGER_RE } from '../helpers/routePatterns';
 import { looksLikeApiToken } from '../utils/apiTokenFormat';
 import { validateApiToken } from '../utils/apiTokenAuth';
+import { DatabaseService } from '../services/DatabaseService';
 
 // ── Rate Limiting ─────────────────────────────────────────────────────────────
 //
@@ -63,13 +64,35 @@ function isNodeProxyRequest(req: Request): boolean {
 }
 
 /**
+ * Verify a session/bearer JWT against the cached signing secret and return its
+ * payload, or null when the secret is unset, the signature or expiry is invalid,
+ * or the settings read itself fails. `getGlobalSettings()` is a frozen in-memory
+ * cache (no per-call DB hit) and `jwt.verify` costs microseconds, so this is safe
+ * on the rate-limiter hot path. Verifying here is what stops one source from
+ * fragmenting the limiter by rotating a forged JWT with a varying username: a
+ * credential that does not verify yields no per-user key. Fails closed: any error
+ * returns null, so the caller degrades to per-IP keying rather than throwing out
+ * of the key generator.
+ */
+function verifiedJwtPayload(token: string): { username?: string; sub?: string } | null {
+  try {
+    const secret = DatabaseService.getInstance().getGlobalSettings().auth_jwt_secret;
+    if (!secret) return null;
+    return jwt.verify(token, secret) as { username?: string; sub?: string };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Hybrid rate limit key: per-token / per-user for authenticated requests, IP
  * otherwise. Mirrors authMiddleware's bearer-over-cookie precedence (auth.ts
  * uses `bearerToken || cookieToken`) so the limiter keys off the same credential
- * auth will use. Checking the cookie first would let a request authenticated by
- * a Bearer API token be bucketed under an unrelated (or forged) cookie username,
- * sidestepping the per-token / per-IP keying. `jwt.decode()` avoids
- * double-verification; `authMiddleware` handles signature checks downstream.
+ * auth will use, and a JWT is trusted only once its signature verifies. When a
+ * Bearer header is present the cookie is never consulted (auth ignores it too),
+ * so a forged or expired Bearer cannot be rescued into a valid cookie's bucket.
+ * Anything that does not resolve to a live token or a verified username falls
+ * back to per-IP keying.
  */
 export function rateLimitKeyGenerator(req: Request): string {
   const auth = req.headers.authorization;
@@ -82,8 +105,8 @@ export function rateLimitKeyGenerator(req: Request): string {
     // that is not a live token therefore falls through to per-IP keying. The
     // validated row is memoized on the request so authMiddleware reuses it
     // without a second lookup (and a request crossing two limiters reuses it
-    // here too). Like the jwt.decode branches, a lookup failure degrades to
-    // per-IP keying rather than throwing out of the key generator.
+    // here too). Like the verified-JWT branches below, a validation failure
+    // degrades to per-IP keying rather than throwing out of the key generator.
     if (looksLikeApiToken(bearer)) {
       if (req._apiToken) return `user:sk:${req._apiToken.token_hash.slice(0, 16)}`;
       try {
@@ -97,18 +120,19 @@ export function rateLimitKeyGenerator(req: Request): string {
       } catch { /* fall through to IP */ }
       return ipKeyGenerator(req.ip || 'unknown');
     }
-    try {
-      const decoded = jwt.decode(bearer) as { username?: string; sub?: string } | null;
-      if (decoded?.username) return `user:${decoded.username}`;
-      if (decoded?.sub) return `user:${decoded.sub}`;
-    } catch { /* fall through to cookie / IP */ }
+    // Non-API Bearer JWT: key by the VERIFIED username (sub is a legacy
+    // fallback, now signature-gated, kept only for back-compat). A Bearer header
+    // present means auth ignores the cookie, so an unverified Bearer returns
+    // per-IP here rather than falling through to the cookie branch below.
+    const payload = verifiedJwtPayload(bearer);
+    if (payload?.username) return `user:${payload.username}`;
+    if (payload?.sub) return `user:${payload.sub}`;
+    return ipKeyGenerator(req.ip || 'unknown');
   }
   const cookie = req.cookies?.[COOKIE_NAME];
   if (cookie) {
-    try {
-      const decoded = jwt.decode(cookie) as { username?: string } | null;
-      if (decoded?.username) return `user:${decoded.username}`;
-    } catch { /* fall through to IP */ }
+    const payload = verifiedJwtPayload(cookie);
+    if (payload?.username) return `user:${payload.username}`;
   }
   return ipKeyGenerator(req.ip || 'unknown');
 }

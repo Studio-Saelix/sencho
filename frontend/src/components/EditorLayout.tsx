@@ -54,6 +54,7 @@ import { BESPOKE_MOBILE_VIEWS } from './EditorLayout/mobile-treatments';
 import { CapabilityGate } from './CapabilityGate';
 import { HubOnlyGate } from './HubOnlyGate';
 import type { SectionId } from './settings/types';
+import type { NotificationItem } from './dashboard/types';
 
 // These bespoke phone screens reuse the desktop view's component (with a mobile
 // branch), code-split exactly like the desktop content path so the heavy chunks
@@ -111,6 +112,7 @@ export default function EditorLayout() {
     isScanning,
     searchQuery, setSearchQuery,
     stackStatuses,
+    stackCounts,
     stackLabelMap,
     filterChip, setFilterChip,
     bulkMode,
@@ -174,6 +176,7 @@ export default function EditorLayout() {
     activeView, setActiveView,
     settingsSection, setSettingsSection,
     securityTab, setSecurityTab,
+    fleetTab, setFleetTab,
     filterNodeId, setFilterNodeId,
     schedulePrefill,
     mobileNavOpen, setMobileNavOpen,
@@ -294,11 +297,14 @@ export default function EditorLayout() {
   // Optimistically flip to the detail surface the instant a row is tapped,
   // before loadFile's fetch resolves selectedFile; cleared once it settles.
   const [pendingDetailStack, setPendingDetailStack] = useState<string | null>(null);
+  const [fleetUpdatesIntent, setFleetUpdatesIntent] = useState<{ tab: 'nodes' | 'changelog' } | null>(null);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!isFileLoading && pendingDetailStack) setPendingDetailStack(null);
   }, [isFileLoading, pendingDetailStack]);
+
+  const handleFleetUpdatesIntentConsumed = useCallback(() => setFleetUpdatesIntent(null), []);
 
   const { surface: mobileSurface, detailReady, detailOpen } = deriveMobileSurface({
     activeView,
@@ -402,6 +408,32 @@ export default function EditorLayout() {
         return;
     }
   }, [stackActions, setActiveView, isMobile, navigateMobileAware]);
+
+  // Notification navigation: node_update_available notifications route to the
+  // Fleet view and open the Node Updates sheet (desktop only). The intent state
+  // handles both cross-view navigation and same-view re-entry (handleNavigate
+  // returns early when already on Fleet, but the state change triggers render).
+  const handleNotificationNavigate = useCallback((notif: NotificationItem) => {
+    if (notif.category === 'node_update_available') {
+      if (isMobile) {
+        navigateMobileAware('fleet');
+      } else {
+        setFleetUpdatesIntent({ tab: 'nodes' });
+        handleNavigate('fleet');
+      }
+      return;
+    }
+    stackActions.navigateToNotification(notif);
+  }, [isMobile, navigateMobileAware, handleNavigate, stackActions]);
+
+  const handleNotificationNavigateChangelog = useCallback(() => {
+    if (isMobile) {
+      navigateMobileAware('fleet');
+    } else {
+      setFleetUpdatesIntent({ tab: 'changelog' });
+      handleNavigate('fleet');
+    }
+  }, [isMobile, navigateMobileAware, handleNavigate]);
 
   const renderEditor = (headerActions?: ReactNode) => (
     <EditorView
@@ -629,6 +661,7 @@ export default function EditorLayout() {
             searchQuery,
             stackLabelMap,
             stackStatuses: stackStatuses as Record<string, StackRowStatus | undefined>,
+            stackCounts,
             stackUpdates,
             gitSourcePendingMap,
             pinnedFiles: pinned,
@@ -666,10 +699,11 @@ export default function EditorLayout() {
           onMarkAllRead={markAllRead}
           onClearAll={clearAllNotifications}
           onDelete={deleteNotification}
-          onNavigate={stackActions.navigateToNotification}
+          onNavigate={handleNotificationNavigate}
+          onNavigateChangelog={handleNotificationNavigateChangelog}
         />
       );
-      const themeSwitchEl = <ThemeQuickSwitch />;
+      const themeSwitchEl = <ThemeQuickSwitch onOpenAppearance={() => openSettings('appearance')} />;
       const userMenuEl = <UserProfileDropdown onOpenSettings={() => openSettings('account')} />;
 
       const topBarEl = (
@@ -725,8 +759,12 @@ export default function EditorLayout() {
             onNavigateToStack={(stackFile) => { void stackActions.loadFile(stackFile); }}
             onOpenSettingsSection={(section) => openSettings(section)}
             onClearNotifications={clearAllNotifications}
+            fleetUpdatesIntent={fleetUpdatesIntent}
+            onFleetUpdatesIntentConsumed={handleFleetUpdatesIntentConsumed}
             securityTab={securityTab}
             onSecurityTabChange={setSecurityTab}
+            fleetTab={fleetTab}
+            onFleetTabConsumed={() => setFleetTab(null)}
             renderEditor={renderEditor}
           />
         </div>
@@ -951,7 +989,7 @@ function MobileDetailLoading({ name, onBack, headerActions }: { name: string; on
           <ChevronLeft className="h-4 w-4" strokeWidth={1.6} />
           Stacks
         </button>
-        <span className="min-w-0 flex-1 truncate font-display text-2xl italic text-stat-value">
+        <span className="min-w-0 flex-1 truncate font-heading text-2xl text-stat-value">
           {name.replace(/\.(ya?ml)$/, '')}
         </span>
         {headerActions ? <div className="shrink-0">{headerActions}</div> : null}

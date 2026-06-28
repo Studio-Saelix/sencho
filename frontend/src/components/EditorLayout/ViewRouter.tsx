@@ -13,7 +13,7 @@ import HomeDashboard from '../HomeDashboard';
 import type { NotificationItem } from '../dashboard/types';
 import type { ScheduleTaskPrefill } from '../ScheduledOperationsView';
 import type { ActiveView } from './hooks/useViewNavigationState';
-import type { SecurityTab } from '@/lib/events';
+import type { SecurityTab, FleetTab } from '@/lib/events';
 
 // Paid-tier views are loaded on demand. Their internal PaidGate /
 // CapabilityGate wrappers render
@@ -87,6 +87,10 @@ export interface ViewRouterProps {
     onClearNotifications: () => void;
     securityTab: SecurityTab;
     onSecurityTabChange: (tab: SecurityTab) => void;
+    fleetUpdatesIntent?: { tab: 'nodes' | 'changelog' } | null;
+    onFleetUpdatesIntentConsumed?: () => void;
+    fleetTab?: FleetTab | null;
+    onFleetTabConsumed?: () => void;
     // Render slot for the inline editor view. Kept as a callback so the
     // (large) editor JSX is only allocated when activeView === 'editor',
     // not on every parent render that lands on a different view.
@@ -112,6 +116,10 @@ export function ViewRouter({
     onClearNotifications,
     securityTab,
     onSecurityTabChange,
+    fleetUpdatesIntent,
+    onFleetUpdatesIntentConsumed,
+    fleetTab,
+    onFleetTabConsumed,
     renderEditor,
 }: ViewRouterProps): ReactNode {
     const { can } = useAuth();
@@ -175,7 +183,14 @@ export function ViewRouter({
             <HubOnlyGate>
                 <CapabilityGate capability="fleet" featureName="Fleet Management">
                     <LazyView>
-                        <FleetView onNavigateToNode={onFleetNavigateToNode} />
+                        <FleetView
+                      onNavigateToNode={onFleetNavigateToNode}
+                      onOpenSettingsSection={onOpenSettingsSection}
+                      fleetUpdatesIntent={fleetUpdatesIntent}
+                      onFleetUpdatesIntentConsumed={onFleetUpdatesIntentConsumed}
+                      fleetTab={fleetTab}
+                      onFleetTabConsumed={onFleetTabConsumed}
+                    />
                     </LazyView>
                 </CapabilityGate>
             </HubOnlyGate>

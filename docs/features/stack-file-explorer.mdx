@@ -1,31 +1,59 @@
 ---
-title: Stack File Explorer
-description: Browse, view, edit, upload, rename, and chmod every file inside a stack's directory from the dashboard.
+title: Files & Volumes
+description: Browse and safely edit the config files inside a stack's mounted volumes, plus the files in the stack's own directory, from the dashboard.
 ---
 
-The file explorer gives you direct access to everything inside a stack's directory: configuration files, certificates, scripts, static assets, and any other files your containers depend on. It lives on the **Files** tab inside the stack editor, alongside the dedicated `compose.yaml` and `.env` editors.
+Files & Volumes gives you direct access to the files your containers actually read at runtime: the configuration inside a stack's **mounted volumes** (bind mounts and named Docker volumes), as well as the files in the stack's own source directory. A typical use is editing the Nginx and proxy configuration inside a reverse proxy's `/config` volume without leaving the dashboard. It lives on the **Files & Volumes** tab inside the stack editor, alongside the dedicated `compose.yaml` and `.env` editors.
 
 <Frame>
-  <img src="/images/stack-file-explorer/overview.png" alt="Files tab open with a populated tree on the left, a YAML file open in the editor on the right, and the Anatomy panel in the background" />
+  <img src="/images/stack-file-explorer/overview.png" alt="Files & Volumes tab open with the root switcher and a populated tree on the left and a config file open in the editor on the right" />
 </Frame>
 
 <Note>
-  The explorer is scoped to the stack's own directory. You cannot browse other stacks or navigate above the stack root.
+  Browsing is limited to the roots the stack itself declares: its source directory and the volumes mounted by its services. You cannot browse other stacks or arbitrary locations on the host.
 </Note>
 
-## Opening the file explorer
+## Opening Files & Volumes
 
 1. Click any stack in the left sidebar.
 2. Click **edit** in the right-hand Anatomy panel header to open the editor.
-3. Switch to the **Files** tab.
+3. Switch to the **Files & Volumes** tab.
 
-The **files** shortcut button next to **edit** in the Anatomy header opens the editor and selects the Files tab in one click.
+The **files** shortcut button next to **edit** in the Anatomy header opens the editor and selects the Files & Volumes tab in one click.
 
-The file explorer is available on every Sencho tier. Read actions (browse, preview, download, inspect permissions) require **stack read** permission, which every signed-in role has by default. Write actions (upload, edit, create, rename, move, change permissions, delete) require **stack edit** permission on your account.
+Files & Volumes is available on every Sencho tier. Read actions (browse, preview, download, inspect permissions) require **stack read** permission, which every signed-in role has by default. Write actions (upload, edit, create, rename, move, change permissions, delete) require **stack edit** permission on your account.
+
+## File roots: Volumes and stack source
+
+The left pane opens with a **Browsing** selector that lists the roots Sencho discovered for the stack, grouped into **Volumes** and **Stack source**. When the stack declares at least one browsable volume, the explorer defaults to it; otherwise it opens on the stack source.
+
+Each volume root is labelled by its container path (for example `/config`) and the type of mount behind it:
+
+- **Bind mounts** map a host directory into a service (for example `./config:/config`). When the directory is reachable by Sencho, the root is fully browsable and editable.
+- **Named volumes** are Docker-managed volumes. Sencho browses and edits them through a short-lived, locked-down helper container, so they work even though their on-disk location is not directly visible to the dashboard.
+
+The same source mounted by more than one service is shown as a single root, summarised as `N mounts`. A root that any service mounts read/write is editable; a root that every service mounts read-only is browse-only.
+
+<Note>
+  Editing a config file does not restart the service that reads it. After you save, restart the relevant service so it picks up the new content.
+</Note>
+
+### When a volume cannot be browsed
+
+A volume root is shown with a short explanation and is not browsable when:
+
+- the bind mount points at a host path Sencho cannot reach (mount that path into the Sencho container to browse it),
+- the mount targets a protected host location such as `/`, `/etc`, `/proc`, `/sys`, `/dev`, or the Docker socket,
+- the mount overlaps Sencho's own managed stack area (browse the owning stack's source instead), or
+- a named volume cannot be resolved on the node that owns the stack.
+
+### Named-volume editing details
+
+Named-volume editing is best-effort and bound by file ownership. The helper container writes as an unprivileged user, so a file owned by `root` or a specific application user may not be writable; Sencho returns a clear permission error in that case. New files created in a named volume are owned by the helper user, while edits to an existing file keep that file's owner and mode. Named-volume saves are written in place and are not atomic, so a save interrupted mid-write can leave the file partially written; the files involved are small config files, which keeps the window tiny.
 
 ## Layout
 
-The Files tab splits into two panes. The left pane holds the upload affordance, the new-folder button, and the directory tree. The right pane is the action bar plus the file viewer.
+The Files & Volumes tab splits into two panes. The left pane holds the Browsing selector, the upload affordance, the **New file** and **New folder** buttons, and the directory tree for the selected root. The right pane is the action bar plus the file viewer.
 
 <Frame>
   <img src="/images/stack-file-explorer/layout-panes.png" alt="Files tab two-pane layout showing the upload widget and tree on the left and the file viewer on the right" />
@@ -37,11 +65,17 @@ Folders sort before files, and entries within each group sort alphabetically.
 
 Click a folder to expand or collapse it. Click a file to open it in the viewer on the right. Symlinks render with a chain icon and behave like files when clicked. Deleting a symlink removes only the link entry; the file it points to is untouched.
 
+The tree is fully keyboard navigable. Tab into it and use the arrow keys to move between rows: **Up** and **Down** move row to row, **Right** expands a folder (then steps into it), **Left** collapses it (or steps out to the parent), **Home** and **End** jump to the first and last visible row, and **Enter** opens a file or toggles a folder.
+
+Each row is fully clickable across the pane, so right-clicking anywhere on a row (not just on its name) opens that entry's context menu. Long names are never truncated: the tree scrolls horizontally so you can read the full name.
+
 **Display cap.** Each directory render is capped at 1000 entries. A folder with more than 1000 children shows the first 1000 alphabetically with a footer noting how many entries the directory holds in total. The tree also has a filter input at the top of the list so you can narrow a large directory to the entries you care about without dropping to a shell.
 
 ## Protected files
 
-The amber dot in the tree marks the five canonical stack files: `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, and `.env`.
+Protection applies to the **Stack source** root. On a volume root a file named `compose.yaml` or `.env` is an ordinary config file: it opens directly in the viewer and has no delete restriction, because it is the application's own file rather than the stack's compose definition.
+
+On the stack source root, the amber dot in the tree marks the five canonical stack files: `compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, and `.env`.
 
 <Frame>
   <img src="/images/stack-file-explorer/protected-tree-marker.png" alt="File tree with amber dot markers next to compose.yaml and .env" />
@@ -50,7 +84,7 @@ The amber dot in the tree marks the five canonical stack files: `compose.yaml`, 
 Two behaviours follow from the marker:
 
 - **Dedicated tab redirect.** Clicking `compose.yaml`, `compose.yml`, or `.env` jumps you to the matching **compose.yaml** or **.env** tab so the save-and-deploy controls stay in front of you. `docker-compose.yaml` and `docker-compose.yml` are still flagged as protected, but they open in the regular file viewer because they are not the canonical Sencho file.
-- **Type-to-confirm delete.** All five protected names require typing the filename to confirm a delete. See the Deleting section below.
+- **Delete is blocked at the stack root.** The five canonical files at the stack root cannot be deleted through the explorer: the delete is rejected. Remove the whole stack via Stack Actions instead. A same-named file nested in a subdirectory is an ordinary file and can be deleted after the type-to-confirm step.
 
 ## Viewing files
 
@@ -84,7 +118,7 @@ Writes are atomic at the filesystem level. Sencho stages the new content into a 
 
 ## Creating files and folders
 
-The toolbar **New folder** button at the top of the tree creates a folder in the currently selected directory (the parent of the file you have open, or the stack root if nothing is open).
+The toolbar **New file** and **New folder** buttons at the top of the tree create an entry in the currently selected directory (the parent of the file you have open, or the stack root if nothing is open). Use the toolbar buttons to create an entry directly at the stack root, where there is no folder row to right-click.
 
 Right-click any folder for **New File** and **New Folder** entries that scope to the right-clicked folder. These write controls appear only when your account has stack edit permission.
 
@@ -93,6 +127,8 @@ Right-click any folder for **New File** and **New Folder** entries that scope to
 </Frame>
 
 Filenames cannot be empty, cannot contain `/` or `\`, and cannot be `.` or `..`. The Create button stays disabled until the input passes validation.
+
+Creating a file never overwrites an existing one. If a file of that name already exists in the target directory, the dialog reports inline that the name is taken; if a folder of that name exists, Sencho rejects the creation with a message. Either way the existing entry is left untouched.
 
 ## Uploading files
 
@@ -128,6 +164,33 @@ Move a file or folder into a different directory in one of two ways:
 - **Drag and drop.** Drag the entry onto a folder in the tree, or onto empty space to move it to the stack root.
 
 Moving requires stack edit permission. The protected stack files (compose / docker-compose / `.env`) at the stack root stay put: the compose CLI reads them from the stack directory, so they are not offered as move sources or root destinations. Moving a file changes only where it lives on disk; it does not redeploy or restart the stack.
+
+## Copying and duplicating
+
+Copy a file or folder without removing the original in one of two ways:
+
+- **Duplicate.** Right-click the entry and choose **Duplicate** to make a copy in the same folder under an auto-suffixed name (`config.yaml` becomes `config copy.yaml`, then `config copy 2.yaml`, and so on). This is the quickest way to snapshot a file before you edit it.
+- **Copy to…** Right-click the entry and choose **Copy to…** to pick a destination folder, the same way Move works. The current folder stays disabled in the picker, since a same-folder copy is what Duplicate is for.
+
+Copying requires stack edit permission and stays within the current root. A folder is copied with its full contents, and a symlink is copied as a link rather than as the file it points to. Unlike Move, a protected stack file can be copied: duplicating `compose.yaml` to `compose.yaml.bak`, or copying it into a subfolder, is allowed because the copy is an ordinary file. Only creating a reserved name (`compose.yaml`, `.env`, and the rest) directly at the stack root is blocked.
+
+## Working with multiple files
+
+Select more than one entry to act on them together.
+
+- **Select.** Hover a row to reveal its checkbox, or hold **Ctrl** (**Cmd** on macOS) and click a row to add it to the selection. Hold **Shift** and click to select a contiguous range. A plain click still opens a file in the viewer and leaves the selection untouched.
+- **Act.** Once anything is selected, a bar at the top of the tree shows the count and the bulk actions.
+
+| Bulk action | What it does |
+|---|---|
+| Download | Streams the whole selection as a single `.tar.gz` archive, preserving folder structure. Available to anyone who can read the stack. |
+| Move | Opens the destination picker (the same one as single Move) and relocates every selected item into the chosen folder. Requires stack edit. |
+| Delete | Asks for confirmation, then removes every selected item; selected folders are removed with their contents. Requires stack edit. |
+| Clear | Drops the current selection. |
+
+Bulk Move and Delete skip the protected stack files (`compose.yaml`, `.env`, and the rest) at the stack root, which are reported as kept rather than acted on; they can still be included in a Download.
+
+Each item is processed independently. If some succeed and others fail (for example, a permission error on one file), Sencho reports how many succeeded and leaves the items that failed selected so you can see which they were and retry. Very large selections are capped: a Download that would exceed the archive's file-count or total-size limit is refused before it starts.
 
 ## Permissions (chmod)
 
@@ -171,10 +234,12 @@ When the entry is one of the five protected names, the modal asks you to type th
   <img src="/images/stack-file-explorer/context-menu-file.png" alt="Right-click menu on a file showing Rename, Permissions, and Delete entries" />
 </Frame>
 
+Right-click anywhere on a row, not only on its name, to open the menu.
+
 | Right-click target | Admin entries (with stack edit) | Viewer entries |
 |---|---|---|
-| Folder | New File, New Folder, Rename, Move to…, Delete | No write entries |
-| File | Rename, Move to…, Permissions, Delete | Permissions (read-only) |
+| Folder | New File, New Folder, Rename, Duplicate, Copy to…, Move to…, Delete | No write entries |
+| File | Rename, Duplicate, Copy to…, Move to…, Permissions, Delete | Permissions (read-only) |
 
 **Move to…** is absent for the protected stack files (compose / docker-compose / `.env`) at the stack root, which cannot be moved out of the stack directory.
 
@@ -183,8 +248,20 @@ The Permissions dialog opens for everyone; only users with stack edit permission
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="Files tab is empty or returns a 403">
+  <Accordion title="Files & Volumes tab is empty or returns a 403">
     The signed-in role lacks **stack read** permission for this stack. Ask an admin to grant the permission on your account, or sign in with a role that already has it.
+  </Accordion>
+  <Accordion title="No browsable stack volumes detected">
+    The stack declares no volume Sencho can reach, so the explorer opens on the stack source. This happens when the stack uses only anonymous or `tmpfs` mounts, when its bind mounts point at host paths that are not mounted into the Sencho container, or when its named volumes have not been created yet. Deploy the stack so its named volumes exist, or mount the relevant host path into the Sencho container, then reopen the tab.
+  </Accordion>
+  <Accordion title="A volume is shown but cannot be browsed">
+    The root carries a short explanation. A bind mount to a host path Sencho cannot reach needs that path mounted into the Sencho container. A mount that targets a protected host location (`/`, `/etc`, `/proc`, `/sys`, `/dev`, the Docker socket) or that overlaps Sencho's managed stack area is intentionally not browsable. A named volume that cannot be resolved on the owning node is not browsable until it exists.
+  </Accordion>
+  <Accordion title="Saving a file in a named volume returns a permission error">
+    Sencho writes to named volumes as an unprivileged helper user. A file owned by `root` or a specific application user may not be writable by that helper. Adjust the file's ownership or permissions on the host, or edit the file from a context that owns it, then try again.
+  </Accordion>
+  <Accordion title="A volume is read-only">
+    Every service that mounts the volume declares it read-only (for example `./config:/config:ro`). The explorer browses it but disables the edit, upload, delete, and rename controls. Change the mount to read/write in the compose file and redeploy if you need to edit its contents from Sencho.
   </Accordion>
   <Accordion title="Cannot delete compose.yaml or .env">
     The five canonical stack files (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, `docker-compose.yml`, `.env`) are protected because removing them mid-life breaks the stack. To delete a stack entirely, use **Delete stack** in the stack toolbar's overflow menu rather than removing these files individually.
@@ -214,6 +291,12 @@ The Permissions dialog opens for everyone; only users with stack edit permission
     Each directory render is capped at 1000 entries to keep the tree responsive. Use the filter input above the tree to narrow the list, or drop into a host shell with `cd` into the stack directory if you need to work with entries past the cap.
   </Accordion>
   <Accordion title="Write controls are missing">
-    Upload, create, rename, move, chmod save, and delete require **stack edit** permission. Viewer accounts can browse, preview text files, and inspect permissions in read-only mode.
+    Upload, create, rename, copy, move, chmod save, and delete require **stack edit** permission. Viewer accounts can browse, preview text files, inspect permissions in read-only mode, and download (including a bulk download).
+  </Accordion>
+  <Accordion title="A bulk action reports that some items failed">
+    Bulk delete and move process each item independently and report how many succeeded. The items that failed stay selected so you can see which they were; open one to find out why (a common cause is a permission error on a named-volume file, or a name collision at the destination), fix it, and retry on the still-selected items.
+  </Accordion>
+  <Accordion title="Bulk download is refused as too large">
+    A bulk download is packed into a single archive with a fixed cap on both the number of files and the total uncompressed size. A selection that would exceed either cap is refused before the download starts. Narrow the selection, or download large folders in smaller batches.
   </Accordion>
 </AccordionGroup>

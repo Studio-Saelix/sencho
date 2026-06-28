@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requirePaid } from '../middleware/tierGates';
+import { requireAdmin } from '../middleware/tierGates';
 import { trivyInstallLimiter } from '../middleware/rateLimiters';
 import TrivyService, { SbomFormat } from '../services/TrivyService';
 import TrivyInstaller from '../services/TrivyInstaller';
@@ -10,15 +10,19 @@ import { isValidStackName } from '../utils/validation';
 import { FleetSyncService } from '../services/FleetSyncService';
 import { LicenseService } from '../services/LicenseService';
 import { validateImageRef } from '../utils/image-ref';
-import { applySuppressions } from '../utils/suppression-filter';
+import { applySuppressions, isTriageStatus, isTriageJustification } from '../utils/suppression-filter';
 import { applyMisconfigAcknowledgements } from '../utils/misconfig-ack-filter';
 import { generateSarif } from '../services/SarifExporter';
+import { generateOpenVex } from '../services/OpenVexExporter';
+import { deriveSecurityPosture, derivePostureReasons, HIGH_EPSS_THRESHOLD, type SecurityPostureFacts, type SecurityPostureState, type PostureReason, type PostureAction } from '../services/securityPosture';
+import { buildExposedImageMap } from '../services/preflight/exposure';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { blockIfReplica } from '../middleware/fleetSyncGuards';
 import { validateStackPatternForRedos } from './fleet';
 import { FINDING_SEVERITIES, POLICY_SEVERITIES } from '../utils/severity';
+import { isNoOpBlockingPolicy } from '../utils/policy-risk';
 import { DEFAULT_POLICY_PACKS } from '../services/policy-packs';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 
@@ -117,6 +121,33 @@ function shapeScanForResponse(scan: VulnerabilityScan): Omit<VulnerabilityScan, 
   return { ...rest, policy_evaluation: parsePolicyEvaluation(policy_evaluation) };
 }
 
+/**
+ * The policy verdict the scan-detail banner shows. The verdict stored at scan
+ * time is a one-time snapshot, while the deploy gate always re-evaluates current
+ * policies and suppressions: enabling, disabling, or editing a policy (and
+ * creating, editing, deleting, or expiring a suppression) leaves the stored
+ * snapshot claiming a violation the gate would now pass, or the reverse. Always
+ * recompute so the banner agrees with the gate across the full policy and
+ * suppression lifecycle. evaluateScanAgainstPolicies reads the honor-suppressions
+ * setting itself, so this is correct whether or not suppressions are honored, and
+ * returns null when no policy matches (the banner clears, matching a passing gate).
+ */
+function resolveBannerEvaluation(
+  db: DatabaseService,
+  scan: VulnerabilityScan,
+): ReturnType<typeof parsePolicyEvaluation> {
+  try {
+    return db.evaluateScanAgainstPolicies(scan.node_id, scan, FleetSyncService.getSelfIdentity());
+  } catch (err) {
+    // The banner is informational and the deploy gate is authoritative, so a
+    // recompute failure must degrade to the stored snapshot rather than 500 the
+    // scan detail. The recompute is synchronous DB reads that should not throw,
+    // so surface it at error level if it ever does.
+    console.error('[Security] banner re-evaluation failed for scanId=%s node=%s:', scan.id, scan.node_id, getErrorMessage(err, 'unknown'));
+    return parsePolicyEvaluation(scan.policy_evaluation);
+  }
+}
+
 // A completed scan whose latest run is older than this is considered "stale" in
 // the Security overview. Named so the route and its tests share one value.
 export const STALE_SCAN_THRESHOLD_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -137,6 +168,29 @@ interface SecurityOverviewResponse {
   lastSuccessfulScanAt: number | null;
   scanner: { available: boolean; version: string | null; source: 'managed' | 'host' | 'none'; autoUpdate: boolean };
   deployEnforcement: { honorSuppressionsOnDeploy: boolean; eligibleBlockPolicies: number };
+  // Posture facts. Counts are facts; the verb (`posture`) is derived in one
+  // place (`deriveSecurityPosture`). `critical`/`high` above stay for back-compat
+  // and are relabeled "scanner detections" in the UI; `rawCritical`/`rawHigh`
+  // are their posture-named aliases. `knownExploited` and `publiclyExposed` come
+  // online with the CVE-intel and Compose-exposure phases (0 until then).
+  rawCritical: number;
+  rawHigh: number;
+  fixableCriticalHigh: number;
+  knownExploited: number;
+  publiclyExposed: number;
+  dangerousCompose: number;
+  needsReview: number;
+  accepted: number;
+  notAffected: number;
+  /** Total actionable items, for the "N actions" affordance. */
+  actionable: number;
+  posture: SecurityPostureState;
+  /** True when the bounded posture pass hit its row cap on this node. */
+  posturePartial: boolean;
+  /** Structured reasons explaining the posture (blockers, review, info). */
+  postureReasons: PostureReason[];
+  /** Highest-priority action for the masthead CTA, or null when no blockers. */
+  primaryAction: PostureAction | null;
 }
 
 export const securityRouter = Router();
@@ -152,6 +206,7 @@ securityRouter.get('/trivy-status', authMiddleware, (_req: Request, res: Respons
     autoUpdate: settings.trivy_auto_update === '1',
     honorSuppressionsOnDeploy: settings.deploy_block_honor_suppressions === '1',
     preDeployScanAdvisory: settings.pre_deploy_scan_advisory === '1',
+    cveIntelEnabled: settings.cve_intel_enabled !== '0',
     busy: installer.isBusy(),
   });
 });
@@ -243,13 +298,28 @@ securityRouter.put('/trivy-auto-update', authMiddleware, (req: Request, res: Res
   }
 });
 
+// Outbound CVE exploit-intel (KEV + EPSS) fetch toggle. Per-instance: the
+// background CveIntelService on each node reads its own local setting, so this
+// configures whichever node is active. Default on; off suits air-gapped hosts.
+securityRouter.put('/cve-intel-enabled', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  const enabled = req.body?.enabled === true;
+  try {
+    DatabaseService.getInstance().updateGlobalSetting('cve_intel_enabled', enabled ? '1' : '0');
+    res.json({ cveIntelEnabled: enabled });
+  } catch (err) {
+    const msg = getErrorMessage(err, 'Failed to update setting');
+    console.error('[Security] CVE intel toggle failed:', msg);
+    res.status(500).json({ error: msg });
+  }
+});
+
 // When enabled, the pre-deploy block policy re-derives image severity from
 // suppression-filtered findings, so an accepted CVE no longer blocks a deploy.
 // Per-instance setting (not fleet-replicated): the gate runs on the node that
 // deploys, against that node's own replicated suppression copy. Default off.
 securityRouter.put('/deploy-block-honor-suppressions', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   // Require an explicit boolean so a stringy `"1"` cannot silently disable the
   // gate (this toggle weakens a deploy block, so intent must be unambiguous).
   if (typeof req.body?.enabled !== 'boolean') {
@@ -269,7 +339,7 @@ securityRouter.put('/deploy-block-honor-suppressions', authMiddleware, (req: Req
 
 // Pre-deploy scan advisory toggle. When on, a manual stack deploy first shows
 // the latest cached scan severity for each image so the operator can review it
-// before deploying. Visibility only: it never blocks (that is the paid
+// before deploying. Visibility only: it never blocks (that is the
 // deploy-block policy). Per-instance, admin-only, all tiers. Default off.
 securityRouter.put('/pre-deploy-scan-advisory', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
@@ -504,7 +574,7 @@ securityRouter.get('/scans', authMiddleware, (req: Request, res: Response) => {
       limit,
       offset,
     });
-    res.json({ ...result, items: result.items.map(shapeScanForResponse) });
+    res.json({ ...result, items: result.items.map((scan) => shapeScanForResponse(scan)) });
   } catch (error) {
     console.error('[Security] Failed to list scans:', error);
     res.status(500).json({ error: 'Failed to list scans' });
@@ -516,11 +586,27 @@ securityRouter.get('/scans/:scanId', authMiddleware, (req: Request, res: Respons
   if (!Number.isFinite(scanId)) {
     res.status(400).json({ error: 'Invalid scan id' }); return;
   }
-  const scan = DatabaseService.getInstance().getVulnerabilityScan(scanId);
+  const db = DatabaseService.getInstance();
+  const scan = db.getVulnerabilityScan(scanId);
   if (!scan || scan.node_id !== req.nodeId) {
     res.status(404).json({ error: 'Scan not found' }); return;
   }
-  res.json(shapeScanForResponse(scan));
+  // Attach the exposure status for the scan sheet badge (tri-state:
+  // true = public, false = internal, absent = no descriptor cached).
+  const exposures = db.getStackExposures(req.nodeId);
+  const exposedMap = buildExposedImageMap(
+    exposures.map((r) => {
+      try { return JSON.parse(r.descriptor); } catch { return null; }
+    }).filter(Boolean),
+  );
+  const publiclyExposed = exposedMap.get(scan.image_ref) ?? null;
+  // The banner verdict is recomputed against current policies/suppressions so it
+  // matches the deploy gate; the list endpoint keeps the stored snapshot.
+  res.json({
+    ...shapeScanForResponse(scan),
+    policy_evaluation: resolveBannerEvaluation(db, scan),
+    publicly_exposed: publiclyExposed,
+  });
 });
 
 securityRouter.get(
@@ -547,7 +633,19 @@ securityRouter.get(
     const result = db.getVulnerabilityDetails(scanId, { severity, limit, offset });
     const suppressions = db.getCveSuppressions();
     const enriched = applySuppressions(result.items, scan.image_ref, suppressions);
-    res.json({ ...result, items: enriched });
+    // Join time-varying exploit intel at read time (KEV/EPSS), keyed by CVE id;
+    // never frozen onto the row, so a CVE entering KEV later surfaces on this scan.
+    const intel = db.getCveIntel(enriched.map((v) => v.vulnerability_id));
+    const withIntel = enriched.map((v) => {
+      const i = intel.get(v.vulnerability_id);
+      return {
+        ...v,
+        kev: i?.kev ?? false,
+        epss_score: i?.epssScore ?? null,
+        epss_percentile: i?.epssPercentile ?? null,
+      };
+    });
+    res.json({ ...result, items: withIntel });
   },
 );
 
@@ -652,6 +750,127 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       }
     }
 
+    // Posture facts that depend on suppressions/acks (which change without a
+    // rescan) are computed at read time over a bounded set of Critical/High
+    // findings, grouped per image so the existing read-time filters apply
+    // unchanged. The pass is capped; `posturePartial` flags a truncated node.
+    const cveSuppressions = db.getCveSuppressions();
+    const critHigh = db.getLatestCritHighVulnFindingsForNode(req.nodeId);
+    // Exploit intel is joined at read time by CVE id (never frozen onto the row).
+    const intel = db.getCveIntel(critHigh.items.map((f) => f.vulnerability_id));
+    const critHighByImage = new Map<string, Array<{ vulnerability_id: string; pkg_name: string; fixed_version: string | null }>>();
+    for (const f of critHigh.items) {
+      const group = critHighByImage.get(f.image_ref);
+      if (group) group.push(f);
+      else critHighByImage.set(f.image_ref, [f]);
+    }
+    let fixableCriticalHigh = 0;
+    let accepted = 0;
+    let notAffected = 0;
+    let needsReview = 0;
+    for (const [imageRef, group] of critHighByImage) {
+      for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
+        if (e.triage_status === 'needs_review') needsReview += 1;
+        if (e.suppressed) {
+          // A dismissing decision: not_affected is its own fact, the rest are "accepted".
+          if (e.triage_status === 'not_affected') notAffected += 1;
+          else accepted += 1;
+          continue;
+        }
+        // Not dismissed (no decision, needs_review, or affected): still actionable.
+        if (e.fixed_version) fixableCriticalHigh += 1;
+      }
+    }
+
+    // A known-exploited (KEV) finding gates a deploy at ANY severity, so the
+    // posture fact counts non-suppressed KEV findings across all severities, not
+    // just Critical/High. Sourced from its own latest-scan query so a Low/Medium
+    // KEV that the gate would block on is never invisible on the overview.
+    const kevFindings = db.getLatestKevFindingsForNode(req.nodeId);
+    const kevByImage = new Map<string, typeof kevFindings.items>();
+    for (const f of kevFindings.items) {
+      const group = kevByImage.get(f.image_ref);
+      if (group) group.push(f);
+      else kevByImage.set(f.image_ref, [f]);
+    }
+    let knownExploited = 0;
+    for (const [imageRef, group] of kevByImage) {
+      for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
+        if (!e.suppressed) knownExploited += 1;
+      }
+    }
+
+    const acks = db.getMisconfigAcknowledgements();
+    const highMisconfigs = db.getLatestHighMisconfigFindingsForNode(req.nodeId);
+    const misconfigByStack = new Map<string | null, Array<{ rule_id: string }>>();
+    for (const f of highMisconfigs.items) {
+      const group = misconfigByStack.get(f.stack_context);
+      if (group) group.push(f);
+      else misconfigByStack.set(f.stack_context, [f]);
+    }
+    let dangerousCompose = 0;
+    for (const [stackContext, group] of misconfigByStack) {
+      for (const e of applyMisconfigAcknowledgements(group, stackContext, acks)) {
+        if (!e.acknowledged) dangerousCompose += 1;
+      }
+    }
+
+    // Count distinct images that are publicly exposed AND have at least one
+    // non-suppressed Critical/High finding. The exposure descriptor is cached
+    // at deploy/update time, so this is O(stacks) + O(images), zero subprocess.
+    const exposures = db.getStackExposures(req.nodeId);
+    const exposedMap = buildExposedImageMap(
+      exposures.map((r) => {
+        try { return JSON.parse(r.descriptor); } catch { return null; }
+      }).filter(Boolean),
+    );
+    let publiclyExposed = 0;
+    let exposedBlocker = 0;
+    let exposedReview = 0;
+    for (const [imageRef, group] of critHighByImage) {
+      if (exposedMap.get(imageRef) !== true) continue;
+      publiclyExposed += 1;
+      let hasUnsuppressedFinding = false;
+      let hasKevOrFixOrHighEpss = false;
+      for (const e of applySuppressions(group, imageRef, cveSuppressions)) {
+        if (e.suppressed) continue;
+        hasUnsuppressedFinding = true;
+        if (
+          e.fixed_version
+          || intel.get(e.vulnerability_id)?.kev
+          || (intel.get(e.vulnerability_id)?.epssScore ?? 0) >= HIGH_EPSS_THRESHOLD
+        ) {
+          hasKevOrFixOrHighEpss = true;
+          break;
+        }
+      }
+      if (!hasUnsuppressedFinding) continue; // fully dismissed
+      if (hasKevOrFixOrHighEpss) exposedBlocker += 1;
+      else exposedReview += 1;
+    }
+
+    const failedScans = db.countScansByStatus(req.nodeId, 'failed');
+
+    const postureFacts: SecurityPostureFacts = {
+      scannerAvailable: svc.isTrivyAvailable(),
+      hasCompletedScan: lastSuccessfulScanAt !== null,
+      fixableCriticalHigh,
+      secrets,
+      dangerousCompose,
+      knownExploited,
+      publiclyExposed,
+      exposedBlocker,
+      exposedReview,
+      rawCritical: critical,
+      rawHigh: high,
+      staleScans,
+      failedScans,
+      needsReview,
+    };
+    const posture = deriveSecurityPosture(postureFacts);
+    const { reasons: postureReasons, primaryAction } = derivePostureReasons(postureFacts);
+    const actionable = fixableCriticalHigh + secrets + dangerousCompose + knownExploited + publiclyExposed;
+
     const overview: SecurityOverviewResponse = {
       scannedImages,
       critical,
@@ -660,7 +879,7 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
       secrets,
       misconfigs,
       staleScans,
-      failedScans: db.countScansByStatus(req.nodeId, 'failed'),
+      failedScans,
       lastSuccessfulScanAt,
       scanner: {
         available: svc.isTrivyAvailable(),
@@ -676,6 +895,20 @@ securityRouter.get('/overview', authMiddleware, (req: Request, res: Response): v
           FleetSyncService.getSelfIdentity(),
         ),
       },
+      rawCritical: critical,
+      rawHigh: high,
+      fixableCriticalHigh,
+      knownExploited,
+      publiclyExposed,
+      dangerousCompose,
+      needsReview,
+      accepted,
+      notAffected,
+      actionable,
+      posture,
+      posturePartial: critHigh.truncated || kevFindings.truncated || highMisconfigs.truncated,
+      postureReasons,
+      primaryAction,
     };
     res.json(overview);
   } catch (error) {
@@ -697,6 +930,61 @@ securityRouter.get('/overview/trend', authMiddleware, (req: Request, res: Respon
   } catch (error) {
     console.error('[Security] Failed to build risk trend:', error);
     res.status(500).json({ error: 'Failed to build risk trend' });
+  }
+});
+
+// One actionable Critical/High finding for the overview exploit-intel charts.
+interface ExploitIntelFinding {
+  vulnerability_id: string;
+  image_ref: string;
+  scan_id: number;
+  severity: VulnSeverity;
+  cvss_score: number | null;
+  epss_score: number | null;
+  epss_percentile: number | null;
+  kev: boolean;
+  fixed_version: string | null;
+}
+
+// Node-scoped, auth-only (Community). Returns the latest-scan Critical/High
+// findings (plus known-exploited findings at any severity) that are still
+// actionable (dismissed triage decisions filtered out), enriched at read time
+// with KEV/EPSS intel. Powers the Top exploit-risk list and the CVSS-by-EPSS
+// quadrant on the Security overview. Bounded; `truncated` flags a capped node.
+securityRouter.get('/overview/exploit-intel', authMiddleware, (req: Request, res: Response): void => {
+  try {
+    const db = DatabaseService.getInstance();
+    const found = db.getLatestCritHighFindingsWithCvssForNode(req.nodeId);
+    const suppressions = db.getCveSuppressions();
+    const intel = db.getCveIntel(found.items.map((f) => f.vulnerability_id));
+    const byImage = new Map<string, typeof found.items>();
+    for (const f of found.items) {
+      const group = byImage.get(f.image_ref);
+      if (group) group.push(f);
+      else byImage.set(f.image_ref, [f]);
+    }
+    const items: ExploitIntelFinding[] = [];
+    for (const [imageRef, group] of byImage) {
+      for (const e of applySuppressions(group, imageRef, suppressions)) {
+        if (e.suppressed) continue; // decided findings are not part of the act-first view
+        const i = intel.get(e.vulnerability_id);
+        items.push({
+          vulnerability_id: e.vulnerability_id,
+          image_ref: imageRef,
+          scan_id: e.scan_id,
+          severity: e.severity,
+          cvss_score: e.cvss_score,
+          epss_score: i?.epssScore ?? null,
+          epss_percentile: i?.epssPercentile ?? null,
+          kev: i?.kev ?? false,
+          fixed_version: e.fixed_version,
+        });
+      }
+    }
+    res.json({ items, truncated: found.truncated });
+  } catch (error) {
+    console.error('[Security] Failed to build exploit-intel overview:', error);
+    res.status(500).json({ error: 'Failed to build exploit-intel overview' });
   }
 });
 
@@ -742,7 +1030,6 @@ securityRouter.get(
   authMiddleware,
   (req: Request, res: Response): void => {
     if (!requireAdmin(req, res)) return;
-    if (!requirePaid(req, res)) return;
     const scanId = Number(req.params.scanId);
     if (!Number.isFinite(scanId)) {
       res.status(400).json({ error: 'Invalid scan id' }); return;
@@ -803,8 +1090,25 @@ securityRouter.get(
   },
 );
 
+// Export the instance's CVE triage decisions as an OpenVEX document. Admin-only,
+// mirroring the SARIF export.
+securityRouter.get('/vex/export', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const suppressions = DatabaseService.getInstance().getCveSuppressions();
+    const doc = generateOpenVex(suppressions, req.user?.username || 'sencho', new Date().toISOString());
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="sencho-fleet.openvex.json"');
+    res.send(JSON.stringify(doc));
+  } catch (error) {
+    console.error('[Security] OpenVEX export failed:', error);
+    res.status(500).json({ error: (error as Error).message || 'Failed to generate OpenVEX' });
+  }
+});
+
 securityRouter.get('/policies', authMiddleware, (req: Request, res: Response): void => {
-  if (!requirePaid(req, res)) return;
+  // Reading policies is not privileged, so this stays auth-only; only the
+  // mutation routes below require admin.
   // Replicas see only policies that apply to themselves: local-only rows plus
   // fleet-wide and self-identity-matched replicated rows. Identity-scoped
   // rows targeting other replicas are filtered out at the SQL boundary.
@@ -815,9 +1119,8 @@ securityRouter.get('/policies', authMiddleware, (req: Request, res: Response): v
 
 securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   if (blockIfReplica(res, 'security policies')) return;
-  const { name, node_id, stack_pattern, max_severity, block_on_deploy, enabled } = req.body ?? {};
+  const { name, node_id, stack_pattern, max_severity, block_on_deploy, enabled, block_on_severity, block_on_kev, block_on_fixable } = req.body ?? {};
   if (!name || typeof name !== 'string' || !name.trim()) {
     res.status(400).json({ error: 'Policy name is required' }); return;
   }
@@ -831,6 +1134,16 @@ securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
       res.status(400).json({ error: patternError }); return;
     }
   }
+  // Risk-first defaults when a field is omitted (KEV + fixable on, severity off),
+  // so an API-created policy matches the UI default rather than the severity-only
+  // migration default that exists only to preserve older rows.
+  const blockOnDeploy = block_on_deploy ? 1 : 0;
+  const blockOnSeverity = block_on_severity === undefined ? 0 : (block_on_severity ? 1 : 0);
+  const blockOnKev = block_on_kev === undefined ? 1 : (block_on_kev ? 1 : 0);
+  const blockOnFixable = block_on_fixable === undefined ? 1 : (block_on_fixable ? 1 : 0);
+  if (isNoOpBlockingPolicy(blockOnDeploy, blockOnSeverity, blockOnKev, blockOnFixable)) {
+    res.status(400).json({ error: 'A blocking policy must enable at least one of: severity threshold, KEV, or fixable.' }); return;
+  }
   try {
     const resolvedNodeId = node_id != null ? Number(node_id) : null;
     const policy = DatabaseService.getInstance().createScanPolicy({
@@ -839,8 +1152,11 @@ securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
       node_identity: FleetSyncService.resolveIdentityForNodeId(resolvedNodeId),
       stack_pattern: normalizedPattern,
       max_severity,
-      block_on_deploy: block_on_deploy ? 1 : 0,
+      block_on_deploy: blockOnDeploy,
       enabled: enabled === false ? 0 : 1,
+      block_on_severity: blockOnSeverity,
+      block_on_kev: blockOnKev,
+      block_on_fixable: blockOnFixable,
       replicated_from_control: 0,
     });
     FleetSyncService.getInstance().pushResourceAsync('scan_policies');
@@ -853,7 +1169,6 @@ securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
 
 securityRouter.put('/policies/:id', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   if (blockIfReplica(res, 'security policies')) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
@@ -885,7 +1200,24 @@ securityRouter.put('/policies/:id', authMiddleware, (req: Request, res: Response
   }
   if (body.block_on_deploy !== undefined) updates.block_on_deploy = body.block_on_deploy ? 1 : 0;
   if (body.enabled !== undefined) updates.enabled = body.enabled ? 1 : 0;
-  const policy = DatabaseService.getInstance().updateScanPolicy(id, updates);
+  if (body.block_on_severity !== undefined) updates.block_on_severity = body.block_on_severity ? 1 : 0;
+  if (body.block_on_kev !== undefined) updates.block_on_kev = body.block_on_kev ? 1 : 0;
+  if (body.block_on_fixable !== undefined) updates.block_on_fixable = body.block_on_fixable ? 1 : 0;
+  const db = DatabaseService.getInstance();
+  const existing = db.getScanPolicy(id);
+  if (!existing) {
+    res.status(404).json({ error: 'Policy not found' }); return;
+  }
+  // Validate the post-update state: a policy that ends up blocking must still
+  // have at least one active input. Merge the patch over the existing row.
+  const mergedBlockOnDeploy = (updates.block_on_deploy as number | undefined) ?? existing.block_on_deploy;
+  const mergedSeverity = (updates.block_on_severity as number | undefined) ?? existing.block_on_severity;
+  const mergedKev = (updates.block_on_kev as number | undefined) ?? existing.block_on_kev;
+  const mergedFixable = (updates.block_on_fixable as number | undefined) ?? existing.block_on_fixable;
+  if (isNoOpBlockingPolicy(mergedBlockOnDeploy, mergedSeverity, mergedKev, mergedFixable)) {
+    res.status(400).json({ error: 'A blocking policy must enable at least one of: severity threshold, KEV, or fixable.' }); return;
+  }
+  const policy = db.updateScanPolicy(id, updates);
   if (!policy) {
     res.status(404).json({ error: 'Policy not found' }); return;
   }
@@ -895,7 +1227,6 @@ securityRouter.put('/policies/:id', authMiddleware, (req: Request, res: Response
 
 securityRouter.delete('/policies/:id', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   if (blockIfReplica(res, 'security policies')) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
@@ -943,6 +1274,15 @@ securityRouter.post('/suppressions', authMiddleware, (req: Request, res: Respons
   if (expiresAt !== null && !Number.isFinite(expiresAt)) {
     res.status(400).json({ error: 'expires_at must be a timestamp or null' }); return;
   }
+  // Triage decision: default 'accepted' (a plain suppress = accepted risk).
+  const status = body.status === undefined ? 'accepted' : body.status;
+  if (!isTriageStatus(status)) {
+    res.status(400).json({ error: 'invalid triage status' }); return;
+  }
+  const justification = body.justification == null || body.justification === '' ? null : body.justification;
+  if (justification !== null && !isTriageJustification(justification)) {
+    res.status(400).json({ error: 'invalid triage justification' }); return;
+  }
   try {
     const suppression = DatabaseService.getInstance().createCveSuppression({
       cve_id: cveId,
@@ -953,6 +1293,8 @@ securityRouter.post('/suppressions', authMiddleware, (req: Request, res: Respons
       created_at: Date.now(),
       expires_at: expiresAt,
       replicated_from_control: 0,
+      status,
+      justification,
     });
     FleetSyncService.getInstance().pushResourceAsync('cve_suppressions');
     res.status(201).json(suppression);
@@ -976,12 +1318,23 @@ securityRouter.put('/suppressions/:id', authMiddleware, (req: Request, res: Resp
     res.status(400).json({ error: 'Invalid suppression id' }); return;
   }
   const body = req.body ?? {};
-  const updates: Partial<{ reason: string; image_pattern: string | null; expires_at: number | null }> = {};
+  const updates: Partial<{ reason: string; image_pattern: string | null; expires_at: number | null; status: string; justification: string | null }> = {};
   if (body.reason !== undefined) {
     const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
     if (!reason) { res.status(400).json({ error: 'reason is required' }); return; }
     if (reason.length > 2000) { res.status(400).json({ error: 'reason is too long' }); return; }
     updates.reason = reason;
+  }
+  if (body.status !== undefined) {
+    if (!isTriageStatus(body.status)) { res.status(400).json({ error: 'invalid triage status' }); return; }
+    updates.status = body.status;
+  }
+  if (body.justification !== undefined) {
+    const justification = body.justification == null || body.justification === '' ? null : body.justification;
+    if (justification !== null && !isTriageJustification(justification)) {
+      res.status(400).json({ error: 'invalid triage justification' }); return;
+    }
+    updates.justification = justification;
   }
   if (body.image_pattern !== undefined) {
     const pattern = body.image_pattern == null || body.image_pattern === '' ? null : String(body.image_pattern).trim();

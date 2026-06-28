@@ -7,6 +7,7 @@ import { AnimatePresence, motion, type HTMLMotionProps } from 'motion/react';
 
 import { useControlledState } from '@/hooks/use-controlled-state';
 import { getStrictContext } from '@/lib/get-strict-context';
+import { useReducedTransition } from '@/components/animate-ui/primitives/use-reduced-transition';
 
 type DialogContextType = {
   isOpen: boolean;
@@ -73,6 +74,7 @@ function DialogOverlay({
   transition = { duration: 0.2, ease: 'easeInOut' },
   ...props
 }: DialogOverlayProps) {
+  const resolvedTransition = useReducedTransition(transition);
   return (
     <DialogPrimitive.Overlay data-slot="dialog-overlay" asChild forceMount>
       <motion.div
@@ -80,7 +82,7 @@ function DialogOverlay({
         initial={{ opacity: 0, filter: 'blur(4px)' }}
         animate={{ opacity: 1, filter: 'blur(0px)' }}
         exit={{ opacity: 0, filter: 'blur(4px)' }}
-        transition={transition}
+        transition={resolvedTransition}
         {...props}
       />
     </DialogPrimitive.Overlay>
@@ -111,6 +113,7 @@ function DialogContent({
     from === 'bottom' || from === 'left' ? '20deg' : '-20deg';
   const isVertical = from === 'top' || from === 'bottom';
   const rotateAxis = isVertical ? 'rotateX' : 'rotateY';
+  const resolvedTransition = useReducedTransition(transition);
 
   return (
     <DialogPrimitive.Content
@@ -140,7 +143,7 @@ function DialogContent({
           filter: 'blur(4px)',
           transform: `perspective(500px) ${rotateAxis}(${initialRotation}) scale(0.8)`,
         }}
-        transition={transition}
+        transition={resolvedTransition}
         {...props}
       />
     </DialogPrimitive.Content>

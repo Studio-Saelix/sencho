@@ -5,6 +5,9 @@
  *   - rateLimitKeyGenerator: per-token budget only for live tokens; forged,
  *     bad-checksum, revoked, or expired token-shaped bearers fall back to
  *     per-IP keying so they cannot fragment the limiter (H-1).
+ *   - rateLimitKeyGenerator (JWT / cookie): only a signature-verified session
+ *     username is keyed per-user; forged or expired JWTs (bearer or cookie) fall
+ *     back to per-IP, and a present Bearer never defers to the cookie.
  *
  * Token rows are seeded through the shared apiTokenTestHelper and their stored
  * hash is read back from the row, so this suite hashes nothing itself.
@@ -216,5 +219,109 @@ describe('rateLimitKeyGenerator (API token branch)', () => {
     const token = jwt.sign({ username: 'cookie-user' }, TEST_JWT_SECRET);
     const req = { cookies: { [COOKIE_NAME]: token }, headers: {}, ip: '203.0.113.7' } as unknown as Request;
     expect(rateLimitKeyGenerator(req)).toBe('user:cookie-user');
+  });
+});
+
+describe('rateLimitKeyGenerator (JWT / cookie username branch)', () => {
+  // A signature the server never issued: the baseline test DB seeds
+  // auth_jwt_secret = TEST_JWT_SECRET (vitestGlobalSetup), so a JWT signed with
+  // any other key fails verification and must never yield a per-user bucket.
+  const WRONG_SECRET = 'attacker-controlled-secret';
+  const IP = '198.51.100.9';
+  // The per-IP bucket an unauthenticated request from `ip` gets; a verified-out
+  // credential must collapse to exactly this key.
+  const anonKey = (ip: string) =>
+    rateLimitKeyGenerator({ cookies: {}, headers: {}, ip } as unknown as Request);
+
+  it('falls back to per-IP for a forged Bearer JWT (wrong signature) despite a valid username claim', () => {
+    const forged = jwt.sign({ username: 'victim' }, WRONG_SECRET);
+    const key = rateLimitKeyGenerator(bearerReq(forged));
+    expect(key).not.toMatch(/^user:/);
+    expect(key).toBe(anonKey('203.0.113.7'));
+  });
+
+  it('collapses distinct forged Bearer JWTs from one IP into the anonymous bucket (no username fragmentation)', () => {
+    const forgedFrom = (username: string) =>
+      ({ cookies: {}, headers: { authorization: `Bearer ${jwt.sign({ username }, WRONG_SECRET)}` }, ip: IP } as unknown as Request);
+    const keyA = rateLimitKeyGenerator(forgedFrom('rotated-1'));
+    const keyB = rateLimitKeyGenerator(forgedFrom('rotated-2'));
+    expect(keyA).not.toMatch(/^user:/);
+    expect(keyA).toBe(keyB);
+    expect(keyA).toBe(anonKey(IP));
+  });
+
+  it('falls back to per-IP for a forged session cookie (wrong signature)', () => {
+    const forged = jwt.sign({ username: 'victim' }, WRONG_SECRET);
+    const req = { cookies: { [COOKIE_NAME]: forged }, headers: {}, ip: IP } as unknown as Request;
+    const key = rateLimitKeyGenerator(req);
+    expect(key).not.toMatch(/^user:/);
+    expect(key).toBe(anonKey(IP));
+  });
+
+  it('falls back to per-IP for a validly-signed but expired Bearer JWT', () => {
+    const expired = jwt.sign({ username: 'ci-bot' }, TEST_JWT_SECRET, { expiresIn: -10 });
+    const key = rateLimitKeyGenerator(bearerReq(expired));
+    expect(key).not.toMatch(/^user:/);
+    expect(key).toBe(anonKey('203.0.113.7'));
+  });
+
+  it('falls back to per-IP for a validly-signed but expired session cookie', () => {
+    const expired = jwt.sign({ username: 'cookie-user' }, TEST_JWT_SECRET, { expiresIn: -10 });
+    const req = { cookies: { [COOKIE_NAME]: expired }, headers: {}, ip: IP } as unknown as Request;
+    const key = rateLimitKeyGenerator(req);
+    expect(key).not.toMatch(/^user:/);
+    expect(key).toBe(anonKey(IP));
+  });
+
+  it('does not let a valid session cookie rescue a forged Bearer JWT (bearer precedence)', () => {
+    // auth uses bearerToken || cookieToken, so a present-but-invalid Bearer is the
+    // credential auth rejects; the limiter must not key it as the cookie's user.
+    const validCookie = jwt.sign({ username: 'real-user' }, TEST_JWT_SECRET);
+    const forgedBearer = jwt.sign({ username: 'attacker' }, WRONG_SECRET);
+    const req = {
+      cookies: { [COOKIE_NAME]: validCookie },
+      headers: { authorization: `Bearer ${forgedBearer}` },
+      ip: IP,
+    } as unknown as Request;
+    const key = rateLimitKeyGenerator(req);
+    expect(key).not.toMatch(/^user:/);
+    expect(key).toBe(anonKey(IP));
+  });
+
+  it('does not let a valid session cookie rescue an expired Bearer JWT (bearer precedence)', () => {
+    const validCookie = jwt.sign({ username: 'real-user' }, TEST_JWT_SECRET);
+    const expiredBearer = jwt.sign({ username: 'real-user' }, TEST_JWT_SECRET, { expiresIn: -10 });
+    const req = {
+      cookies: { [COOKIE_NAME]: validCookie },
+      headers: { authorization: `Bearer ${expiredBearer}` },
+      ip: IP,
+    } as unknown as Request;
+    const key = rateLimitKeyGenerator(req);
+    expect(key).not.toMatch(/^user:/);
+    expect(key).toBe(anonKey(IP));
+  });
+
+  it('keys a valid Bearer JWT by its own username even when a valid cookie for another user is present (bearer precedence)', () => {
+    // The positive mirror: auth would use the Bearer, so the limiter must key the
+    // Bearer user, never the unrelated cookie user. Guards against a refactor that
+    // consults the cookie before the verified Bearer.
+    const validBearer = jwt.sign({ username: 'bearer-user' }, TEST_JWT_SECRET);
+    const validCookie = jwt.sign({ username: 'cookie-user' }, TEST_JWT_SECRET);
+    const req = {
+      cookies: { [COOKIE_NAME]: validCookie },
+      headers: { authorization: `Bearer ${validBearer}` },
+      ip: IP,
+    } as unknown as Request;
+    expect(rateLimitKeyGenerator(req)).toBe('user:bearer-user');
+  });
+
+  it('fails closed to per-IP when the JWT signing secret is unset', () => {
+    // The explicit no-secret branch in verifiedJwtPayload: a validly-signed token
+    // must still collapse to per-IP rather than throw or grant a per-user bucket.
+    vi.spyOn(DatabaseService.getInstance(), 'getGlobalSettings').mockReturnValue({});
+    const validBearer = jwt.sign({ username: 'ci-bot' }, TEST_JWT_SECRET);
+    const key = rateLimitKeyGenerator(bearerReq(validBearer));
+    expect(key).not.toMatch(/^user:/);
+    expect(key).toBe(anonKey('203.0.113.7'));
   });
 });

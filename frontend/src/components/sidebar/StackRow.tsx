@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
-import { GitBranch, Loader2 } from 'lucide-react';
+import { GitBranch, Loader2, AlertCircle } from 'lucide-react';
+import type { CheckStatus } from '@/types/imageUpdates';
 import { Cursor, CursorContainer, CursorFollow, CursorProvider } from '@/components/animate-ui/primitives/animate/cursor';
 import { Checkbox } from '@/components/ui/checkbox';
 import { LabelDot } from '@/components/LabelPill';
@@ -13,10 +14,17 @@ interface StackRowProps {
   file: string;
   displayName: string;
   status: StackRowStatus;
+  // Running/total container counts (set for any stack with containers); consumed only for the partial-stack pill tooltip.
+  running?: number;
+  total?: number;
   isBusy: boolean;
   isActive: boolean;
   labels: Label[];
   hasUpdate: boolean;
+  // Last image-update check outcome. 'failed' surfaces a muted "couldn't check"
+  // indicator so an undeterminable check is not mistaken for "up to date".
+  checkStatus?: CheckStatus;
+  lastError?: string;
   hasGitPending: boolean;
   onSelect: (file: string) => void;
   kebabSlot: ReactNode;
@@ -43,8 +51,8 @@ const MAX_VISIBLE_LABELS = 3;
 
 export function StackRow(props: StackRowProps) {
   const {
-    file, displayName, status, isBusy, isActive, labels,
-    hasUpdate, hasGitPending, onSelect, kebabSlot,
+    file, displayName, status, running, total, isBusy, isActive, labels,
+    hasUpdate, checkStatus, lastError, hasGitPending, onSelect, kebabSlot,
     bulkMode = false, isSelected = false, onToggleSelect,
   } = props;
 
@@ -88,9 +96,15 @@ export function StackRow(props: StackRowProps) {
         )}
       </span>
 
-      {/* Status pill */}
+      {/* Status pill. Partial stacks add a hover tooltip with the running/total count. */}
       <span className={cn('font-mono text-[10px] shrink-0 w-[22px] flex items-center', statusColor(status, isBusy))}>
-        {isBusy ? <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} /> : statusText(status)}
+        {isBusy ? (
+          <Loader2 className="w-3 h-3 animate-spin" strokeWidth={2} />
+        ) : status === 'partial' && running !== undefined && total !== undefined ? (
+          <RowTooltip trigger={<span>{statusText(status)}</span>} label={`${running}/${total} running`} />
+        ) : (
+          statusText(status)
+        )}
       </span>
 
       {/* Stack name */}
@@ -106,7 +120,7 @@ export function StackRow(props: StackRowProps) {
         </span>
       )}
 
-      {/* Fixed trailing icon slot: update dot takes priority over git pending */}
+      {/* Fixed trailing icon slot: update dot > check-failed > git pending */}
       <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
         {hasUpdate ? (
           <RowTooltip
@@ -117,6 +131,11 @@ export function StackRow(props: StackRowProps) {
               </span>
             )}
             label="Update available"
+          />
+        ) : checkStatus === 'failed' ? (
+          <RowTooltip
+            trigger={<AlertCircle className="w-3 h-3 text-muted-foreground/70" strokeWidth={1.5} />}
+            label={lastError ? `Update check failed: ${lastError}` : 'Update check failed'}
           />
         ) : hasGitPending ? (
           <RowTooltip

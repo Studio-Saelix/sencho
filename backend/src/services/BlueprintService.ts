@@ -14,7 +14,7 @@ import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
 import { PROXY_TIER_HEADER } from './license-headers';
 import { LicenseService } from './LicenseService';
-import { assertPolicyGateAllows, buildSystemPolicyGateOptions, triggerPostDeployScan } from '../helpers/policyGate';
+import { assertPolicyGateAllows, buildSystemPolicyGateOptions, describePolicyBlock, triggerPostDeployScan } from '../helpers/policyGate';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -401,7 +401,7 @@ export class BlueprintService {
             auditPath: `/api/blueprints/${blueprint.id}/apply`,
         }, undefined, true);
         if (!gate.ok) {
-            throw new Error(`Policy "${gate.policy?.name}" blocked deploy: ${gate.violations.length} image(s) exceed ${gate.policy?.max_severity}`);
+            throw new Error(describePolicyBlock(gate.policy, gate.violations));
         }
 
         const outcome = await this.applyLocalUnderLock(
@@ -472,6 +472,13 @@ export class BlueprintService {
                 }
                 if (await this.stackDirExists(node.id, blueprint.name)) {
                     await FileSystemService.getInstance(node.id).deleteStack(blueprint.name);
+                }
+                // Remove the exposure descriptor so a withdrawn blueprint
+                // stack does not leave a stale row that escalates posture.
+                try {
+                    DatabaseService.getInstance().deleteStackExposure(node.id, blueprint.name);
+                } catch (e) {
+                    console.warn(`[BlueprintService] deleteStackExposure failed for "${blueprint.name}" on node ${node.id}: ${BlueprintService.formatError(e)}`);
                 }
             },
         );

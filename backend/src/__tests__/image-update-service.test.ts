@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const {
   mockGetAuthForRegistry,
   mockGetStackUpdateStatus, mockUpsertStackUpdateStatus, mockClearStackUpdateStatus,
+  mockRecordStackCheckFailure,
   mockGetSystemState, mockSetSystemState, mockAddNotificationHistory,
   mockDispatchAlert,
   mockGetStacks, mockGetStackContent, mockGetEnvContent, mockEnvExists,
@@ -18,6 +19,7 @@ const {
   mockGetStackUpdateStatus: vi.fn().mockReturnValue({}),
   mockUpsertStackUpdateStatus: vi.fn(),
   mockClearStackUpdateStatus: vi.fn(),
+  mockRecordStackCheckFailure: vi.fn(),
   mockGetSystemState: vi.fn().mockReturnValue('1'), // default: backfilled
   mockSetSystemState: vi.fn(),
   mockAddNotificationHistory: vi.fn(),
@@ -44,9 +46,11 @@ vi.mock('../services/DatabaseService', () => ({
       getGlobalSettings: mockGetGlobalSettings,
       getNodes: () => [],
       getGitSource: () => undefined,
+      getStackProjectEnvFiles: () => [],
       upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
       getStackUpdateStatus: mockGetStackUpdateStatus,
       clearStackUpdateStatus: mockClearStackUpdateStatus,
+      recordStackCheckFailure: mockRecordStackCheckFailure,
       getSystemState: mockGetSystemState,
       setSystemState: mockSetSystemState,
       addNotificationHistory: mockAddNotificationHistory,
@@ -90,6 +94,14 @@ vi.mock('../services/NodeRegistry', () => ({
   },
 }));
 
+// getRemoteDigestResult is module-scoped inside checkImage; mock it to drive the remote
+// outcome while keeping the real parseImageRef / repoDigestMatchesRef.
+const { mockGetRemoteDigestResult } = vi.hoisted(() => ({ mockGetRemoteDigestResult: vi.fn() }));
+vi.mock('../services/registry-api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/registry-api')>();
+  return { ...actual, getRemoteDigestResult: mockGetRemoteDigestResult };
+});
+
 // ── Re-export internal helpers via the module ─────────────────────────
 
 // We need the internal functions. Import the module after mocks are set up.
@@ -128,10 +140,10 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     } as any;
   }
 
-  it('returns { hasUpdate: false } for sha256-only refs', async () => {
+  it('marks sha256-only refs not-checkable (no tag to track)', async () => {
     const docker = makeMockDocker();
     const result = await service.checkImage(docker, 'sha256:abc123');
-    expect(result).toEqual({ hasUpdate: false });
+    expect(result).toEqual({ hasUpdate: false, notCheckable: true });
   });
 
   it('returns error when local image inspect fails', async () => {
@@ -164,17 +176,53 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     }
   });
 
-  it('returns { hasUpdate: false } when no RepoDigests match', async () => {
-    // Empty RepoDigests means locally built image
+  it('marks an image with no RepoDigests not-checkable (locally built)', async () => {
+    // Empty RepoDigests means locally built / not registry-backed.
     const docker = makeMockDocker([]);
     const result = await service.checkImage(docker, 'nginx:latest');
-    expect(result).toEqual({ hasUpdate: false });
+    expect(result).toEqual({ hasUpdate: false, notCheckable: true });
   });
 
-  it('returns { hasUpdate: false } when RepoDigests have no sha256', async () => {
+  it('errors when RepoDigests are present but none resolves a digest', async () => {
+    // A non-empty set with no usable sha256 digest is ambiguous: surface it as an
+    // error rather than a silent "up to date".
     const docker = makeMockDocker(['library/nginx:latest']);
     const result = await service.checkImage(docker, 'nginx:latest');
-    expect(result).toEqual({ hasUpdate: false });
+    expect(result.hasUpdate).toBe(false);
+    expect(result.notCheckable).toBeUndefined();
+    expect(result.error).toContain('Could not resolve a local registry digest');
+  });
+});
+
+// ── checkImage surfaces the remote-digest reason ───────────────────────
+
+describe('ImageUpdateService - checkImage surfaces the remote-digest reason', () => {
+  let service: ImageUpdateService;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (ImageUpdateService as any).instance = undefined;
+    service = ImageUpdateService.getInstance();
+  });
+
+  // One RepoDigest matching the ref so the local digest resolves and the flow reaches
+  // getRemoteDigestResult.
+  const dockerWithLocalDigest = (digest: string) => ({
+    getDocker: () => ({
+      getImage: () => ({ inspect: vi.fn().mockResolvedValue({ RepoDigests: [`ghcr.io/linuxserver/radarr@${digest}`] }) }),
+    }),
+  } as any);
+
+  it('surfaces the specific failure reason (not a generic "unreachable") as the check error', async () => {
+    mockGetRemoteDigestResult.mockResolvedValue({ ok: false, reason: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
+    const result = await service.checkImage(dockerWithLocalDigest('sha256:local'), 'ghcr.io/linuxserver/radarr:latest');
+    expect(result).toEqual({ hasUpdate: false, error: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
+  });
+
+  it('reports an update when the resolved remote digest differs from the local one', async () => {
+    mockGetRemoteDigestResult.mockResolvedValue({ ok: true, digest: 'sha256:remote' });
+    const result = await service.checkImage(dockerWithLocalDigest('sha256:local'), 'ghcr.io/linuxserver/radarr:latest');
+    expect(result).toEqual({ hasUpdate: true });
   });
 });
 
@@ -375,6 +423,7 @@ services:
     getStackUpdateStatus: mockGetStackUpdateStatus,
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -412,7 +461,7 @@ services:
       expect.stringContaining('stackA'),
       { stackName: 'stackA', actor: 'system:image-update' },
     );
-    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number));
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'ok', null);
   });
 
   it('does not re-fire notification for a stack already known to have updates', async () => {
@@ -468,6 +517,115 @@ services:
   });
 });
 
+// ── Tri-state check status (ok / partial / failed) ────────────────────────
+
+describe('ImageUpdateService - check status derivation', () => {
+  const COMPOSE_ONE = `
+services:
+  app:
+    image: nginx:latest
+`;
+  const COMPOSE_TWO = `
+services:
+  app:
+    image: nginx:latest
+  db:
+    image: postgres:15
+`;
+
+  const fakeDb = () => ({
+    getStackUpdateStatus: mockGetStackUpdateStatus,
+    upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
+    clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
+    getSystemState: mockGetSystemState,
+    setSystemState: mockSetSystemState,
+    addNotificationHistory: mockAddNotificationHistory,
+  });
+
+  // Per-image stub so a stack can mix ok / errored / not-checkable results.
+  function stubCheckImageByRef(service: ImageUpdateService, byRef: Record<string, { hasUpdate?: boolean; error?: string; notCheckable?: boolean }>) {
+    (service as any).checkImage = vi.fn().mockImplementation((_docker: unknown, imageRef: string) =>
+      Promise.resolve(byRef[imageRef] ?? { hasUpdate: false }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (ImageUpdateService as any).instance = undefined;
+    mockGetSystemState.mockReturnValue('1');
+    mockGetAllContainers.mockResolvedValue([]);
+    mockEnvExists.mockResolvedValue(false);
+  });
+
+  it('records a failure (preserving has_update) and does not notify when every image errors', async () => {
+    // Even with no prior update (previousState false), a failed check must not
+    // fire a notification, and must not write has_update via the normal upsert.
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(COMPOSE_ONE);
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: true });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImageByRef(service, { 'nginx:latest': { hasUpdate: false, error: 'Registry unreachable for registry-1.docker.io/library/nginx:latest' } });
+
+    await (service as any).checkNode(1, 'local', fakeDb());
+
+    expect(mockRecordStackCheckFailure).toHaveBeenCalledWith(1, 'stackA', expect.stringContaining('Registry unreachable'), expect.any(Number));
+    expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
+  it('marks a stack partial (with a reason) when some images error but others resolve', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(COMPOSE_TWO);
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: false });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImageByRef(service, {
+      'nginx:latest': { hasUpdate: true },
+      'postgres:15': { hasUpdate: false, error: 'Registry unreachable for registry-1.docker.io/library/postgres:15' },
+    });
+
+    await (service as any).checkNode(1, 'local', fakeDb());
+
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'partial', expect.stringContaining('Registry unreachable'));
+    expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+    // A confirmed update on an ok image still notifies on the false->true transition.
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a previously confirmed update through a partial check and does not re-notify', async () => {
+    // Stack had a confirmed update (previousState true). This scan: the updated
+    // image errors, the other resolves clean. A partial check must not erase the
+    // known update (which would re-fire the notification when the image recovers).
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(COMPOSE_TWO);
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: true });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImageByRef(service, {
+      'nginx:latest': { hasUpdate: false, error: 'Registry unreachable for registry-1.docker.io/library/nginx:latest' },
+      'postgres:15': { hasUpdate: false },
+    });
+
+    await (service as any).checkNode(1, 'local', fakeDb());
+
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'partial', expect.stringContaining('Registry unreachable'));
+    expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
+  it('treats a stack whose only image is not-checkable as ok, not failed', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(COMPOSE_ONE);
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: false });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImageByRef(service, { 'nginx:latest': { hasUpdate: false, notCheckable: true } });
+
+    await (service as any).checkNode(1, 'local', fakeDb());
+
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', false, expect.any(Number), 'ok', null);
+    expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+  });
+});
+
 // ── .env file handling ──────────────────────────────────────────────────
 
 describe('ImageUpdateService - .env file handling in checkNode', () => {
@@ -481,6 +639,7 @@ services:
     getStackUpdateStatus: mockGetStackUpdateStatus,
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -553,9 +712,11 @@ describe('ImageUpdateService - check() concurrency guard', () => {
       getGlobalSettings: () => ({ developer_mode: developerMode }),
       getNodes: () => [{ type: 'local', id: 1, name: 'local', mode: 'proxy', compose_dir: '/tmp/compose', is_default: true, status: 'online', created_at: 1 }],
       getGitSource: () => undefined,
+      getStackProjectEnvFiles: () => [],
       upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
       getStackUpdateStatus: mockGetStackUpdateStatus,
       clearStackUpdateStatus: mockClearStackUpdateStatus,
+      recordStackCheckFailure: mockRecordStackCheckFailure,
       getSystemState: mockGetSystemState,
       setSystemState: mockSetSystemState,
       addNotificationHistory: mockAddNotificationHistory,
@@ -883,6 +1044,7 @@ services:
     getStackUpdateStatus: mockGetStackUpdateStatus,
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -937,6 +1099,7 @@ services:
     getStackUpdateStatus: mockGetStackUpdateStatus,
     upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
     clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
     getSystemState: mockGetSystemState,
     setSystemState: mockSetSystemState,
     addNotificationHistory: mockAddNotificationHistory,
@@ -984,5 +1147,201 @@ services:
 
     const checkedImages = checkImageSpy.mock.calls.map((c: any[]) => c[1]);
     expect(checkedImages).not.toContain('someapp:v2');
+  });
+});
+
+describe('ImageUpdateService cron scheduling', () => {
+  beforeEach(() => {
+    (ImageUpdateService as any).instance = undefined;
+    mockGetGlobalSettings.mockReturnValue({ developer_mode: '0' });
+  });
+
+  afterEach(() => {
+    // Tests below switch to fake timers and a pinned clock; reset so the state
+    // does not leak into later tests in this block (or the file).
+    vi.useRealTimers();
+  });
+
+  it('getStatus returns mode and cronExpression fields', () => {
+    const service = ImageUpdateService.getInstance();
+    // Before start/configureFromSettings, defaults apply.
+    mockGetGlobalSettings.mockReturnValue({ developer_mode: '0' });
+    service.configureFromSettings();
+    const status = service.getStatus();
+    expect(status.mode).toBe('interval');
+    expect(status.cronExpression).toBeNull();
+  });
+
+  it('configureFromSettings sets cron mode with valid expression', () => {
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '0 3 * * 1',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    const status = service.getStatus();
+    expect(status.mode).toBe('cron');
+    expect(status.cronExpression).toBe('0 3 * * 1');
+  });
+
+  it('configureFromSettings falls back to interval on invalid cron', () => {
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: 'not a cron expression',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    const status = service.getStatus();
+    expect(status.mode).toBe('interval');
+    expect(status.cronExpression).toBeNull();
+  });
+
+  it('configureFromSettings falls back to interval when cron mode has empty expression', () => {
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    const status = service.getStatus();
+    expect(status.mode).toBe('interval');
+    expect(status.cronExpression).toBeNull();
+  });
+
+  it('configureFromSettings accepts cron nicknames like @daily', () => {
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '@daily',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    const status = service.getStatus();
+    expect(status.mode).toBe('cron');
+    expect(status.cronExpression).toBe('@daily');
+  });
+
+  it('nextDelayMs computes a positive delay for a valid cron expression', () => {
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '0 3 * * 1',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    // nextDelayMs is private; access it to verify it does not throw and returns
+    // a positive number (next Monday at 03:00 is in the future).
+    const delay = (service as any).nextDelayMs();
+    expect(typeof delay).toBe('number');
+    expect(delay).toBeGreaterThan(0);
+  });
+
+  it('start() in cron mode arms at the next cron fire, not the 2-minute startup delay', () => {
+    vi.useFakeTimers();
+    // Pin "now" so the next cron fire is deterministic and far beyond the
+    // startup delay (next Monday 03:00 from this Thursday is days away).
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '0 3 * * 1',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    const checkSpy = vi.spyOn(service as any, 'check').mockResolvedValue(undefined);
+
+    service.start();
+
+    // The first check is scheduled at the cron fire time, not 2 minutes out, so
+    // a restart never triggers an out-of-cadence check.
+    const startupDelay = (ImageUpdateService as any).STARTUP_DELAY_MS as number;
+    const nextAt = service.getStatus().nextCheckAt!;
+    expect(nextAt - Date.now()).toBeGreaterThan(startupDelay);
+
+    // Advancing well past the old startup delay (but before the cron fire) must
+    // not fire a check.
+    vi.advanceTimersByTime(10 * 60 * 1000);
+    expect(checkSpy).not.toHaveBeenCalled();
+
+    // The check fires exactly when the cron schedule says, not merely "later":
+    // advancing to the computed fire time triggers it once.
+    vi.advanceTimersByTime(nextAt - Date.now() + 1000);
+    expect(checkSpy).toHaveBeenCalledTimes(1);
+
+    service.stop();
+    checkSpy.mockRestore();
+  });
+
+  it('start() in cron mode fires sooner than the startup delay when the next fire is near', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '* * * * *', // every minute
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    const checkSpy = vi.spyOn(service as any, 'check').mockResolvedValue(undefined);
+
+    service.start();
+
+    // A frequent cron fires before the old 2-minute startup delay would have:
+    // cron mode honors the schedule in both directions, not just "no sooner".
+    const startupDelay = (ImageUpdateService as any).STARTUP_DELAY_MS as number;
+    const nextAt = service.getStatus().nextCheckAt!;
+    expect(nextAt - Date.now()).toBeLessThan(startupDelay);
+
+    vi.advanceTimersByTime(nextAt - Date.now() + 100);
+    expect(checkSpy).toHaveBeenCalledTimes(1);
+
+    service.stop();
+    checkSpy.mockRestore();
+  });
+
+  it('start() in interval mode keeps the 2-minute startup delay', () => {
+    vi.useFakeTimers();
+    mockGetGlobalSettings.mockReturnValue({ developer_mode: '0' });
+    const service = ImageUpdateService.getInstance();
+    const checkSpy = vi.spyOn(service as any, 'check').mockResolvedValue(undefined);
+
+    service.start();
+
+    // Just before the 2-minute delay: no check yet.
+    vi.advanceTimersByTime(2 * 60 * 1000 - 1000);
+    expect(checkSpy).not.toHaveBeenCalled();
+    // Crossing the 2-minute mark fires the first check.
+    vi.advanceTimersByTime(1000);
+    expect(checkSpy).toHaveBeenCalledTimes(1);
+
+    service.stop();
+    checkSpy.mockRestore();
+  });
+
+  it('nextDelayMs falls back to interval on runtime parse failure', () => {
+    // Set up cron mode, then corrupt the expression at runtime before nextDelayMs.
+    mockGetGlobalSettings.mockReturnValue({
+      developer_mode: '0',
+      image_update_check_mode: 'cron',
+      image_update_check_cron: '0 3 * * 1',
+      image_update_check_interval_minutes: '120',
+    });
+    const service = ImageUpdateService.getInstance();
+    service.configureFromSettings();
+    // Corrupt the expression directly on the private field.
+    (service as any).cronExpression = '0 0 31 2 *'; // Feb 31 — invalid
+    const delay = (service as any).nextDelayMs();
+    // Should fall back to interval mode after the parse error.
+    expect(service.getStatus().mode).toBe('interval');
+    expect(typeof delay).toBe('number');
+    expect(delay).toBeGreaterThan(0);
   });
 });

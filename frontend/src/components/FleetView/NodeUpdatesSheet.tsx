@@ -1,15 +1,17 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
     Search, Loader2, Check, CircleCheck, CircleAlert, AlertTriangle,
-    Download, RefreshCw, Monitor, Globe,
+    Download, RefreshCw, Monitor, Globe, ExternalLink, Ban, ScrollText,
 } from 'lucide-react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { MarkdownContent } from '@/components/ui/MarkdownContent';
+import { Skeleton } from '@/components/ui/skeleton';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
-import { formatVersion } from '@/lib/version';
+import { formatVersion, isValidVersion } from '@/lib/version';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
 import type { NodeUpdateStatus } from './types';
 
@@ -23,6 +25,7 @@ interface NodeUpdatesSheetProps {
      *  only for admins, matching the requireAdmin guard on the fleet routes they
      *  call. Non-admins still see the read-only status table. */
     isAdmin: boolean;
+    initialTab?: 'nodes' | 'changelog';
     fetchUpdateStatus: () => Promise<void>;
     triggerNodeUpdate: (nodeId: number) => void;
     retryNodeUpdate: (nodeId: number) => void;
@@ -32,18 +35,107 @@ interface NodeUpdatesSheetProps {
 
 export function NodeUpdatesSheet({
     open, onOpenChange, checkingUpdates, updateStatuses, updatingNodeId, isAdmin,
+    initialTab = 'nodes',
     fetchUpdateStatus, triggerNodeUpdate, retryNodeUpdate, dismissNodeUpdate, triggerUpdateAll,
 }: NodeUpdatesSheetProps) {
     const [search, setSearch] = useState('');
     const [recheckingUpdates, setRecheckingUpdates] = useState(false);
+    const [activeTab, setActiveTab] = useState<'nodes' | 'changelog'>(initialTab);
+    const [skipLoading, setSkipLoading] = useState<number | null>(null);
+    const [releaseNotes, setReleaseNotes] = useState<string | null>(null);
+    const [releaseHtmlUrl, setReleaseHtmlUrl] = useState<string | null>(null);
+    const [releaseVersion, setReleaseVersion] = useState<string | null>(null);
+    const [loadingRelease, setLoadingRelease] = useState(false);
+    // The advertised latest version the loaded notes were fetched against, or
+    // `undefined` before the first settle (so a null/unknown advertised version
+    // still triggers the initial fetch). When it no longer matches the advertised
+    // latest, the notes are refetched so the changelog never shows a previous
+    // version's notes; settling on any result (including null) records the version
+    // so a failed fetch lands on the empty state instead of looping.
+    const [loadedForVersion, setLoadedForVersion] = useState<string | null | undefined>(undefined);
+    const [hasSeenChangelog, setHasSeenChangelog] = useState(false);
+
+    // The version the Fleet currently advertises as latest (gateway-derived, same
+    // as the footer's "Latest version" label). Notes are keyed to this so they
+    // stay in sync.
+    const advertisedLatest = (updateStatuses.find(s => s.type === 'local') ?? updateStatuses[0])?.latestVersion ?? null;
+
+    useEffect(() => {
+        if (open) setActiveTab(initialTab);
+    }, [open, initialTab]);
+
+    // Fetch release notes when the sheet opens (changelog shows the current
+    // release regardless of update availability), and refetch whenever the
+    // advertised latest version changes so reopening after a newer release
+    // surfaces its notes, never a previous version's. Pass recheck when the user
+    // forced a version recheck so the changelog stays in sync.
+    useEffect(() => {
+        if (!open || loadingRelease) return;
+        if (loadedForVersion === advertisedLatest) return;
+        // Drop any previously loaded notes before fetching for a (possibly) newer
+        // advertised version. If this fetch mismatches, returns null, errors, or
+        // rejects, the panel must fall to the empty state rather than keep showing
+        // the prior version's notes; a confirmed match repopulates below. The
+        // skeleton (loadingRelease) covers the in-flight gap, so this does not flash.
+        setReleaseNotes(null);
+        setReleaseHtmlUrl(null);
+        setReleaseVersion(null);
+        setLoadingRelease(true);
+        const recheck = recheckingUpdates ? '?recheck=true' : '';
+        apiFetch(`/fleet/update-status/release-notes${recheck}`, { localOnly: true })
+            .then(res => res.ok ? res.json() as Promise<{ version: string | null; releaseNotes: string | null; htmlUrl: string | null }> : null)
+            .then(data => {
+                // Bind strictly to the advertised update: render only notes the
+                // endpoint confirms belong to the advertised version. The version
+                // lookup and the release-notes lookup use independent caches (and
+                // version can fall back to Docker Hub while notes are GitHub-only),
+                // so a drifted, null, or failed response keeps the cleared state set
+                // above and falls through to the empty state with the online link.
+                if (data && data.version !== null && data.version === advertisedLatest) {
+                    setReleaseNotes(data.releaseNotes);
+                    setReleaseHtmlUrl(data.htmlUrl);
+                    setReleaseVersion(data.version);
+                }
+            })
+            .catch((err) => {
+                // Informational panel: a failure falls through to the empty state
+                // (notes already cleared above) rather than a toast, but leave a
+                // breadcrumb so the failure is diagnosable.
+                console.warn('[Fleet] Release-notes fetch failed:', err);
+            })
+            .finally(() => {
+                setLoadingRelease(false);
+                // Record the advertised version this fetch settled for, so a null
+                // or failed result does not loop and a later version change forces
+                // a refetch.
+                setLoadedForVersion(advertisedLatest);
+            });
+    }, [open, advertisedLatest, loadedForVersion, loadingRelease, recheckingUpdates]);
+
+    // Clear the changelog dot when user opens that tab.
+    useEffect(() => {
+        if (open && activeTab === 'changelog') {
+            setHasSeenChangelog(true);
+        }
+    }, [open, activeTab]);
 
     const handleOpenChange = (next: boolean) => {
         onOpenChange(next);
-        if (!next) setSearch('');
+        if (!next) {
+            setSearch('');
+            setActiveTab('nodes');
+            setHasSeenChangelog(false);
+        }
     };
 
     const handleRecheck = async () => {
         setRecheckingUpdates(true);
+        // Force a fresh release-notes fetch with the rechecked version: clearing
+        // loadedForVersion makes the effect's version guard miss and refetch.
+        setReleaseNotes(null);
+        setReleaseHtmlUrl(null);
+        setReleaseVersion(null);
+        setLoadedForVersion(undefined);
         try {
             const res = await apiFetch('/fleet/update-status?recheck=true', { method: 'DELETE', localOnly: true });
             if (res.ok) {
@@ -67,6 +159,49 @@ export function NodeUpdatesSheet({
             toast.error('Could not recheck for updates. Try again shortly.');
         } finally {
             setRecheckingUpdates(false);
+        }
+    };
+
+    const handleSkipVersion = async (nodeId: number, version: string | null) => {
+        if (!version) return;
+        setSkipLoading(nodeId);
+        try {
+            const res = await apiFetch(`/fleet/nodes/${nodeId}/skip-version`, {
+                method: 'POST',
+                body: JSON.stringify({ version }),
+                localOnly: true,
+            });
+            if (res.ok || res.status === 204) {
+                toast.success('Version skipped.');
+                await fetchUpdateStatus();
+            } else {
+                const err = await res.json().catch(() => ({}));
+                toast.error(err?.error || 'Failed to skip version.');
+            }
+        } catch {
+            toast.error('Failed to skip version.');
+        } finally {
+            setSkipLoading(null);
+        }
+    };
+
+    const handleUnskipVersion = async (nodeId: number) => {
+        setSkipLoading(nodeId);
+        try {
+            const res = await apiFetch(`/fleet/nodes/${nodeId}/skip-version`, {
+                method: 'DELETE',
+                localOnly: true,
+            });
+            if (res.ok || res.status === 204) {
+                toast.success('Skip cleared.');
+                await fetchUpdateStatus();
+            } else {
+                toast.error('Failed to clear skip.');
+            }
+        } catch {
+            toast.error('Failed to clear skip.');
+        } finally {
+            setSkipLoading(null);
         }
     };
 
@@ -98,6 +233,27 @@ export function NodeUpdatesSheet({
         }]
         : undefined;
 
+    const showChangelogDot = available > 0 && !hasSeenChangelog;
+
+    const showSkip = (s: NodeUpdateStatus) =>
+        s.updateAvailable && !s.updateStatus && isAdmin && isValidVersion(s.version) && isValidVersion(s.latestVersion);
+
+    const tabs: Array<{ id: string; label: string; count?: number; dot?: boolean }> = [
+        { id: 'nodes', label: 'Nodes' },
+        { id: 'changelog', label: 'Changelog', dot: showChangelogDot },
+    ];
+
+    const senchoChangelogLink = (
+        <a
+            href="https://sencho.io/changelog"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-xs text-brand hover:underline"
+        >
+            View on Sencho <ExternalLink className="w-3 h-3" strokeWidth={1.5} />
+        </a>
+    );
+
     return (
         <SystemSheet
             open={open}
@@ -113,6 +269,9 @@ export function NodeUpdatesSheet({
             } : undefined}
             secondaryActions={secondaryActions}
             footerContext={footerContext}
+            tabs={tabs}
+            activeTab={activeTab}
+            onTabChange={(id) => setActiveTab(id as 'nodes' | 'changelog')}
             size="lg"
         >
             {checkingUpdates ? (
@@ -123,6 +282,56 @@ export function NodeUpdatesSheet({
             ) : updateStatuses.length === 0 ? (
                 <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
                     No nodes found.
+                </div>
+            ) : activeTab === 'changelog' ? (
+                <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-5">
+                    {loadingRelease ? (
+                        <div className="space-y-3">
+                            <Skeleton className="h-5 w-2/5" />
+                            <Skeleton className="h-3 w-1/4" />
+                            <div className="space-y-2 pt-2">
+                                <Skeleton className="h-3 w-full" />
+                                <Skeleton className="h-3 w-11/12" />
+                                <Skeleton className="h-3 w-4/5" />
+                            </div>
+                            <div className="space-y-2 pt-3">
+                                <Skeleton className="h-3 w-1/4" />
+                                <Skeleton className="h-3 w-full" />
+                                <Skeleton className="h-3 w-3/4" />
+                            </div>
+                        </div>
+                    ) : releaseNotes ? (
+                        <div className="space-y-4">
+                            {releaseVersion && (
+                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-stat-subtitle">
+                                    Release {formatVersion(releaseVersion)}
+                                </div>
+                            )}
+                            <MarkdownContent>{releaseNotes}</MarkdownContent>
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-card-border/40 pt-3">
+                                {releaseHtmlUrl && (
+                                    <a
+                                        href={releaseHtmlUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-1 text-xs text-brand hover:underline"
+                                    >
+                                        View on GitHub <ExternalLink className="w-3 h-3" strokeWidth={1.5} />
+                                    </a>
+                                )}
+                                {senchoChangelogLink}
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="flex flex-1 flex-col items-center justify-center gap-3 py-12 text-center">
+                            <ScrollText className="w-8 h-8 text-muted-foreground/40" strokeWidth={1.25} />
+                            <div className="space-y-1">
+                                <p className="text-sm text-stat-value">No release notes to show</p>
+                                <p className="text-xs text-muted-foreground">Read the full changelog online.</p>
+                            </div>
+                            {senchoChangelogLink}
+                        </div>
+                    )}
                 </div>
             ) : (
                 <>
@@ -166,7 +375,7 @@ export function NodeUpdatesSheet({
                             />
                         </div>
 
-                        <div className="grid grid-cols-[1fr_80px_100px_100px_120px] gap-2 px-3 pb-1 text-[10px] leading-3 font-mono text-stat-subtitle uppercase tracking-[0.18em]">
+                        <div className="grid grid-cols-[1fr_80px_80px_100px_160px] gap-2 px-3 pb-1 text-[10px] leading-3 font-mono text-stat-subtitle uppercase tracking-[0.18em]">
                             <span>Node</span>
                             <span>Type</span>
                             <span>Current</span>
@@ -176,7 +385,7 @@ export function NodeUpdatesSheet({
 
                         <div className="divide-y divide-card-border/40">
                             {filtered.map(s => (
-                                <div key={s.nodeId} className="grid grid-cols-[1fr_80px_100px_100px_120px] gap-2 items-center px-3 py-2">
+                                <div key={s.nodeId} className="grid grid-cols-[1fr_80px_80px_100px_160px] gap-2 items-center px-3 py-2">
                                     <div className="flex items-center gap-2.5 min-w-0">
                                         <div className={`flex items-center justify-center w-6 h-6 rounded-md shrink-0 ${s.updateAvailable && !s.updateStatus ? 'bg-warning/10' : 'bg-muted'}`}>
                                             {s.type === 'local'
@@ -195,7 +404,7 @@ export function NodeUpdatesSheet({
                                     <span className="text-xs font-mono tabular-nums">
                                         {formatVersion(s.latestVersion) ?? <span className="text-muted-foreground/50 italic text-[10px]">unknown</span>}
                                     </span>
-                                    <div className="flex justify-end">
+                                    <div className="flex justify-end items-center gap-1">
                                         {s.updateStatus && (
                                             <UpdateStatusBadge
                                                 status={s.updateStatus}
@@ -204,12 +413,28 @@ export function NodeUpdatesSheet({
                                                 onDismiss={isAdmin ? () => dismissNodeUpdate(s.nodeId) : undefined}
                                             />
                                         )}
-                                        {!s.updateStatus && !s.updateAvailable && (
+                                        {!s.updateStatus && !s.updateAvailable && !s.skipActive && (
                                             <Badge className="text-[10px] px-1.5 py-0 h-5 bg-success-muted text-success border-success/30">
                                                 <Check className="w-2.5 h-2.5 mr-0.5" /> Up to date
                                             </Badge>
                                         )}
-                                        {s.updateAvailable && !s.updateStatus && isAdmin && (
+                                        {s.skipActive && (
+                                            <Badge className="text-[10px] px-1.5 py-0 h-5 bg-muted text-muted-foreground border-card-border/40">
+                                                <Ban className="w-2.5 h-2.5 mr-0.5" /> Skipped {formatVersion(s.skippedVersion)}
+                                            </Badge>
+                                        )}
+                                        {s.skipActive && isAdmin && (
+                                            <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                className="h-6 text-[10px] px-1.5 text-muted-foreground hover:text-stat-value"
+                                                onClick={() => { void handleUnskipVersion(s.nodeId); }}
+                                                disabled={skipLoading === s.nodeId}
+                                            >
+                                                Unskip
+                                            </Button>
+                                        )}
+                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && isAdmin && (
                                             <Button
                                                 variant="outline"
                                                 size="sm"
@@ -224,7 +449,18 @@ export function NodeUpdatesSheet({
                                                 )}
                                             </Button>
                                         )}
-                                        {s.updateAvailable && !s.updateStatus && !isAdmin && (
+                                        {showSkip(s) && (
+                                            <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                className="h-6 text-[10px] px-1.5 text-muted-foreground hover:text-warning"
+                                                onClick={() => { void handleSkipVersion(s.nodeId, s.latestVersion); }}
+                                                disabled={skipLoading === s.nodeId}
+                                            >
+                                                Skip
+                                            </Button>
+                                        )}
+                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && !isAdmin && (
                                             <Badge className="text-[10px] px-1.5 py-0 h-5 bg-warning/15 text-warning border-warning/30">
                                                 <CircleAlert className="w-2.5 h-2.5 mr-0.5" /> Available
                                             </Badge>

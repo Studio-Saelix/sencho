@@ -11,9 +11,12 @@ import { LogFormatter } from './LogFormatter';
 import { NodeRegistry } from './NodeRegistry';
 import { RegistryService } from './RegistryService';
 import { DriftLedgerService } from './DriftLedgerService';
+import { parseEffectiveModel } from './preflight/effectiveModel';
+import { deriveStackExposure } from './preflight/exposure';
 
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { normalizeContainerName } from '../utils/log-parsing';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
@@ -117,10 +120,29 @@ export class ComposeService {
     }
     if (overridePath) {
       if (filePrefix.length === 0) {
-        // Single-file stack: passing any -f disables auto-discovery, so name the
-        // base file explicitly before layering the override on top of it.
-        const baseFilename = await FileSystemService.getInstance(this.nodeId).getComposeFilename(stackName);
+        // Single-file stack: passing any -f disables compose's auto-discovery, so name
+        // the base file explicitly, then re-add the user's implicit override (if any) so
+        // it is not silently dropped, before layering the mesh override on top.
+        const fsSvc = FileSystemService.getInstance(this.nodeId);
+        const baseFilename = await fsSvc.getComposeFilename(stackName);
         args.push('-f', baseFilename);
+        let userOverride: string | null = null;
+        try {
+          userOverride = await fsSvc.getOverrideFilename(stackName);
+        } catch (err) {
+          // Containment-guard rejections (bad stack name / symlink escape) are hard errors:
+          // abort the deploy rather than degrade. The "no override" case returns null rather
+          // than throwing, so any other throw is transient I/O: drop the override and proceed
+          // (logging the consequence) instead of failing the deploy.
+          const code = (err as { code?: string }).code;
+          if (code === 'INVALID_STACK_NAME' || code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
+            throw err;
+          }
+          console.warn('[ComposeService] could not resolve user compose override; deploying without it:', sanitizeForLog((err as Error).message));
+        }
+        if (userOverride) {
+          args.push('-f', userOverride);
+        }
       }
       args.push('-f', overridePath);
     }
@@ -455,6 +477,21 @@ export class ComposeService {
     // route: bulk, Git-source, App Store, scheduler, and webhook deploys all funnel
     // through this method. Internally guarded; awaited so it cannot race later work.
     await DriftLedgerService.getInstance().recordBaseline(this.nodeId, stackName);
+    // Reconcile the ledger against the just-deployed runtime: findings this deploy
+    // fixed are resolved and any it left are recorded (and surfaced in the activity
+    // feed) now, instead of waiting for someone to open the Drift tab. The rollback
+    // route re-deploys through this method, so it is covered; a failed atomic deploy
+    // instead restores the previous files and throws above, so that recovery path
+    // reconciles on its next deploy or scan, not here. Best-effort internally.
+    await DriftLedgerService.getInstance().reconcileStack(this.nodeId, stackName);
+    // Refresh the exposure cache so posture reflects the just-deployed model.
+    // Best-effort: a refresh failure logs a warning but never fails the deploy.
+    try {
+      await this.refreshExposureCache(stackName);
+    } catch (err) {
+      console.warn('[ComposeService] Exposure refresh failed after deploy for %s:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
+    }
   }
 
   streamLogs(stackName: string, ws: WebSocket) {
@@ -517,7 +554,8 @@ export class ComposeService {
         };
 
         for (const container of containersToLog) {
-          const containerName = container.Names?.[0]?.replace(/^\//, '') || container.Id;
+          const rawName = container.Names?.[0]?.replace(/^\//, '') || container.Id;
+          const displayName = normalizeContainerName(rawName, stackName);
           activeProcesses++;
           let lineBuffer = '';
 
@@ -527,19 +565,19 @@ export class ComposeService {
               const lines = lineBuffer.split(/\r?\n/);
               lineBuffer = lines.pop() || '';
               for (const line of lines) {
-                ws.send(LogFormatter.process(line) + '\r\n');
+                ws.send(LogFormatter.process(`${displayName} | ${line}`) + '\r\n');
               }
             }
           };
 
           const flushBuffer = () => {
             if (lineBuffer && ws.readyState === WebSocket.OPEN) {
-              ws.send(LogFormatter.process(lineBuffer) + '\r\n');
+              ws.send(LogFormatter.process(`${displayName} | ${lineBuffer}`) + '\r\n');
               lineBuffer = '';
             }
           };
 
-          const child = spawn('docker', ['logs', '-f', '-t', '--tail', '100', containerName], {
+          const child = spawn('docker', ['logs', '-f', '-t', '--tail', '100', rawName], {
             env: {
               ...process.env,
               PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
@@ -652,8 +690,16 @@ export class ComposeService {
       throw updateError;
     }
     // Reached only on a successful update; re-baseline so temporal drift compares
-    // against what is now deployed (see deployStack for why this lives here).
+    // against what is now deployed (see deployStack for why this lives here), then
+    // reconcile the ledger against the updated runtime.
     await DriftLedgerService.getInstance().recordBaseline(this.nodeId, stackName);
+    await DriftLedgerService.getInstance().reconcileStack(this.nodeId, stackName);
+    try {
+      await this.refreshExposureCache(stackName);
+    } catch (err) {
+      console.warn('[ComposeService] Exposure refresh failed after update for %s:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
+    }
   }
 
   public async downStack(stackName: string): Promise<void> {
@@ -698,6 +744,36 @@ export class ComposeService {
       images.push(line);
     }
     return images;
+  }
+
+  /** Render the effective Compose model and cache the per-stack exposure
+   *  descriptor so the Security posture can join exposed images against
+   *  vulnerability findings without re-rendering config on every poll.
+   *  Best-effort: render or parse failure logs a warning and keeps the
+   *  prior cached descriptor, never failing the deploy. */
+  private async refreshExposureCache(stackName: string): Promise<void> {
+    const result = await this.renderConfig(stackName);
+    if (result.rendered === null) {
+      console.warn('[ComposeService] Exposure cache skipped for %s: model not renderable',
+        sanitizeForLog(stackName));
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.rendered);
+    } catch {
+      console.warn('[ComposeService] Exposure cache skipped for %s: unparseable model JSON',
+        sanitizeForLog(stackName));
+      return;
+    }
+    const model = parseEffectiveModel(parsed, stackName);
+    const descriptor = deriveStackExposure(model, stackName, Date.now());
+    DatabaseService.getInstance().upsertStackExposure(
+      this.nodeId,
+      stackName,
+      JSON.stringify(descriptor),
+      descriptor.computedAt,
+    );
   }
 
   private captureCompose(args: string[], cwd: string): Promise<string> {

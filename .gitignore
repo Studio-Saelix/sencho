@@ -57,7 +57,6 @@ plans/
 CLAUDE.md
 
 # Design system (local-only authoritative reference)
-frontend/DESIGN.md
 .design-bundle/
 docs/design/
 
@@ -68,3 +67,6 @@ website/
 
 # Internal engineering docs (not published)
 docs/internal/
+
+# Transient temp dir a file-roots test creates under the backend working dir
+backend/sfr-app-*/

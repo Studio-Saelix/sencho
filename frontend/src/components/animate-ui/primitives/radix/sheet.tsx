@@ -7,6 +7,7 @@ import { AnimatePresence, motion, type HTMLMotionProps } from 'motion/react';
 
 import { getStrictContext } from '@/lib/get-strict-context';
 import { useControlledState } from '@/hooks/use-controlled-state';
+import { useReducedTransition } from '@/components/animate-ui/primitives/use-reduced-transition';
 
 type SheetContextType = {
   isOpen: boolean;
@@ -72,6 +73,7 @@ function SheetOverlay({
   transition = { duration: 0.2, ease: 'easeInOut' },
   ...props
 }: SheetOverlayProps) {
+  const resolvedTransition = useReducedTransition(transition);
   return (
     <SheetPrimitive.Overlay asChild forceMount>
       <motion.div
@@ -80,7 +82,7 @@ function SheetOverlay({
         initial={{ opacity: 0, filter: 'blur(4px)' }}
         animate={{ opacity: 1, filter: 'blur(0px)' }}
         exit={{ opacity: 0, filter: 'blur(4px)' }}
-        transition={transition}
+        transition={resolvedTransition}
         {...props}
       />
     </SheetPrimitive.Overlay>
@@ -102,6 +104,7 @@ function SheetContent({
   ...props
 }: SheetContentProps) {
   const axis = side === 'left' || side === 'right' ? 'x' : 'y';
+  const resolvedTransition = useReducedTransition(transition);
 
   const offscreen: Record<Side, { x?: string; y?: string; opacity: number }> = {
     right: { x: '100%', opacity: 0 },
@@ -131,7 +134,7 @@ function SheetContent({
           ...positionStyle[side],
           ...style,
         }}
-        transition={transition}
+        transition={resolvedTransition}
       >
         {children}
       </motion.div>

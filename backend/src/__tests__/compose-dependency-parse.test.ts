@@ -37,6 +37,42 @@ describe('parseComposeDependencies - volumes', () => {
     const r = parseComposeDependencies('services:\n  web:\n    volumes:\n      - type: volume\n        source: data\n        target: /d\n      - type: bind\n        source: /host\n        target: /b\n');
     expect(r.services[0].volumes).toEqual(['data']);
   });
+
+  it('drops env-var-interpolated bind sources and keeps real named volumes', () => {
+    const r = parseComposeDependencies(svc('web', 'volumes:\n  - ${BACKUPS_PATH}:/backups\n  - $LEGACY_PATH:/legacy\n  - db_data:/var/lib'));
+    expect(r.services[0].volumes).toEqual(['db_data']);
+  });
+
+  it('drops a bind source with an embedded (non-leading) env var', () => {
+    const r = parseComposeDependencies(svc('web', 'volumes:\n  - prefix-${SUB}:/data'));
+    expect(r.services[0].volumes).toEqual([]);
+  });
+
+  it('passes a long-form type: volume env-var source through unchanged', () => {
+    // The long-form path never calls isNamedVolumeSource, so its contract is
+    // unaffected by the short-form env-var fix; this guards that.
+    const r = parseComposeDependencies('services:\n  web:\n    volumes:\n      - type: volume\n        source: ${MY_VOLUME}\n        target: /d\n');
+    expect(r.services[0].volumes).toEqual(['${MY_VOLUME}']);
+  });
+
+  it('does not flag env-var bind mounts as named volumes (issue #1464 repro)', () => {
+    const r = parseComposeDependencies(
+      'services:\n' +
+      '  core:\n' +
+      '    volumes:\n' +
+      '      - ${COMPOSE_KOMODO_BACKUPS_PATH}:/backups\n' +
+      '      - keys:/config/keys\n' +
+      '  periphery:\n' +
+      '    volumes:\n' +
+      '      - /var/run/docker.sock:/var/run/docker.sock\n' +
+      '      - ${PERIPHERY_ROOT_DIRECTORY}:/root\n' +
+      '      - ${PERIPHERY_STACK_DIR}:/stack\n',
+    );
+    const core = r.services.find((s) => s.name === 'core');
+    const periphery = r.services.find((s) => s.name === 'periphery');
+    expect(core?.volumes).toEqual(['keys']);
+    expect(periphery?.volumes).toEqual([]);
+  });
 });
 
 describe('parseComposeDependencies - ports', () => {
@@ -63,6 +99,15 @@ describe('parseComposeDependencies - ports', () => {
   it('parses long-form ports with host_ip and protocol', () => {
     const r = parseComposeDependencies('services:\n  web:\n    ports:\n      - target: 80\n        published: 8080\n        host_ip: 10.0.0.5\n        protocol: udp\n');
     expect(r.services[0].ports).toEqual([{ hostIp: '10.0.0.5', publishedPort: 8080, protocol: 'udp' }]);
+  });
+});
+
+describe('parseComposeDependencies - network_mode', () => {
+  it('captures network_mode and leaves it undefined when absent', () => {
+    const host = parseComposeDependencies(svc('web', 'image: nginx\nnetwork_mode: host'));
+    expect(host.services[0].networkMode).toBe('host');
+    const none = parseComposeDependencies(svc('web', 'image: nginx'));
+    expect(none.services[0].networkMode).toBeUndefined();
   });
 });
 

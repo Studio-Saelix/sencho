@@ -70,17 +70,16 @@ describe('GET /api/dashboard/configuration', () => {
     });
   });
 
-  it('keeps freed rows unlocked and only scanPolicies locked for Community', async () => {
+  it('keeps every freed row unlocked for Community', async () => {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
 
     const res = await request(app).get('/api/dashboard/configuration').set('Cookie', adminCookie);
     expect(res.status).toBe(200);
-    // routing rules, webhooks, and scheduled tasks are free.
+    // routing rules, webhooks, scheduled tasks, and scan policies are all free.
     expect(res.body.notifications.routingRules.locked).toBe(false);
     expect(res.body.automation.webhooks.locked).toBe(false);
     expect(res.body.automation.scheduledTasks.locked).toBe(false);
-    // Scan policies stay paid-gated.
-    expect(res.body.security.scanPolicies.locked).toBe(true);
+    expect(res.body.security.scanPolicies.locked).toBe(false);
   });
 
   it('unlocks every gated row for the paid tier', async () => {

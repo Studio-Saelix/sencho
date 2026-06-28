@@ -311,7 +311,7 @@ export function BlueprintEditor({ initial, distinctLabels, onCancel, onSubmit, s
                                     <span className={`inline-block w-2 h-2 rounded-full ${selected ? 'bg-brand' : 'border border-stat-icon'}`} />
                                     {opt.kicker}
                                 </div>
-                                <p className="font-serif italic text-sm mt-1.5 text-stat-value">{opt.title}</p>
+                                <p className="font-heading text-sm mt-1.5 text-stat-value">{opt.title}</p>
                                 <p className="text-[10px] text-stat-subtitle mt-0.5">{opt.tagline}</p>
                             </button>
                         );

@@ -8,12 +8,8 @@ import { springs } from '@/lib/motion';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from "@/components/ui/modal";
+import { ConfirmModal } from "@/components/ui/modal";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Combobox } from "@/components/ui/combobox";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { TogglePill } from "@/components/ui/toggle-pill";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
@@ -25,7 +21,6 @@ import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from './NodeManager'
 import type { ScanSummary } from '@/types/security';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { CapabilityGate } from './CapabilityGate';
 import LazyBoundary from './LazyBoundary';
 import { formatBytes } from '@/lib/utils';
@@ -38,6 +33,10 @@ import { ReclaimHero } from './resources/ReclaimHero';
 import { FootprintTreemap } from './resources/FootprintTreemap';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
+import { VolumeNameLabel } from './resources/VolumeNameLabel';
+import { CreateNetworkDialog } from './resources/CreateNetworkDialog';
+import { useTableSort } from '@/hooks/useTableSort';
+import { SortableTableHead } from '@/components/ui/sortable-table';
 import { NetworkDetailSheet, type NetworkInspectData } from './resources/NetworkDetailSheet';
 
 const NetworkTopologyView = lazy(() => import('./NetworkTopologyView'));
@@ -77,9 +76,6 @@ interface DockerVolume {
     managedStatus: 'managed' | 'unmanaged';
     isSencho: boolean;
 }
-
-const NETWORK_DRIVERS = ['bridge', 'overlay', 'macvlan', 'host', 'none'] as const;
-type NetworkDriver = (typeof NETWORK_DRIVERS)[number];
 
 export interface DockerNetwork {
     Id: string;
@@ -300,6 +296,23 @@ function TableSkeleton({ cols, rows = 5 }: { cols: number; rows?: number }) {
     );
 }
 
+// Stable comparator maps for the resource tables (module scope so useTableSort
+// does not re-sort on every render). Mirrors the Security Images sort standard.
+const IMAGE_COMPARATORS: Record<'repo' | 'size' | 'status', (a: DockerImage, b: DockerImage) => number> = {
+    repo: (a, b) => (a.RepoTags?.[0] || '').localeCompare(b.RepoTags?.[0] || ''),
+    size: (a, b) => a.Size - b.Size,
+    status: (a, b) => Number(a.Containers > 0) - Number(b.Containers > 0),
+};
+const VOLUME_COMPARATORS: Record<'name' | 'driver', (a: DockerVolume, b: DockerVolume) => number> = {
+    name: (a, b) => a.Name.localeCompare(b.Name),
+    driver: (a, b) => a.Driver.localeCompare(b.Driver),
+};
+const NETWORK_COMPARATORS: Record<'name' | 'driver' | 'scope', (a: DockerNetwork, b: DockerNetwork) => number> = {
+    name: (a, b) => a.Name.localeCompare(b.Name),
+    driver: (a, b) => a.Driver.localeCompare(b.Driver),
+    scope: (a, b) => a.Scope.localeCompare(b.Scope),
+};
+
 // ── Main Component ─────────────────────────────────────────────────────────────
 
 interface ResourcesViewProps {
@@ -312,7 +325,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [resourceTab, setResourceTab] = useState<'images' | 'volumes' | 'networks' | 'unmanaged'>('images');
     const { isAdmin } = useAuth();
     const { activeNode } = useNodes();
-    const { isPaid } = useLicense();
     const [networkViewMode, setNetworkViewMode] = useState<'list' | 'topology'>('list');
     const [usage, setUsage] = useState<UsageData | null>(null);
     const [images, setImages] = useState<DockerImage[]>([]);
@@ -340,8 +352,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     // Network create/inspect state
     const [showCreateNetwork, setShowCreateNetwork] = useState(false);
-    const [createNetworkForm, setCreateNetworkForm] = useState<{ name: string; driver: NetworkDriver; subnet: string; gateway: string; internal: boolean; attachable: boolean }>({ name: '', driver: 'bridge', subnet: '', gateway: '', internal: false, attachable: false });
-    const [isCreatingNetwork, setIsCreatingNetwork] = useState(false);
     const [inspectNetwork, setInspectNetwork] = useState<NetworkInspectData | null>(null);
     const [inspectLoadingId, setInspectLoadingId] = useState<string | null>(null);
     const [inspectImageId, setInspectImageId] = useState<string | null>(null);
@@ -590,36 +600,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         }
     };
 
-    const handleCreateNetwork = async () => {
-        setIsCreatingNetwork(true);
-        try {
-            const res = await apiFetch('/system/networks', {
-                method: 'POST',
-                body: JSON.stringify({
-                    name: createNetworkForm.name,
-                    driver: createNetworkForm.driver,
-                    subnet: createNetworkForm.subnet || undefined,
-                    gateway: createNetworkForm.gateway || undefined,
-                    internal: createNetworkForm.internal,
-                    attachable: createNetworkForm.attachable,
-                }),
-            });
-            if (!res.ok) {
-                const data = await res.json();
-                throw new Error(data?.error || 'Failed to create network');
-            }
-            toast.success(`Network "${createNetworkForm.name}" created`);
-            setShowCreateNetwork(false);
-            setCreateNetworkForm({ name: '', driver: 'bridge', subnet: '', gateway: '', internal: false, attachable: false });
-            await fetchAllData();
-        } catch (error) {
-            const err = error as Record<string, unknown>;
-            toast.error(String(err?.message || err?.error || 'Something went wrong.'));
-        } finally {
-            setIsCreatingNetwork(false);
-        }
-    };
-
     const handleInspectNetwork = async (id: string) => {
         setInspectLoadingId(id);
         try {
@@ -648,6 +628,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         networkFilter === 'managed' ? net.managedStatus === 'managed' :
             networkFilter === 'unmanaged' ? net.managedStatus !== 'managed' : true
     );
+
+    // Sortable tables (standard sort behavior across the resource tables).
+    const imageSort = useTableSort(filteredImages, IMAGE_COMPARATORS, 'repo');
+    const volumeSort = useTableSort(filteredVolumes, VOLUME_COMPARATORS, 'name');
+    const networkSort = useTableSort(filteredNetworks, NETWORK_COMPARATORS, 'name');
 
     const handleFootprintFilter = (filter: ResourceFilter) => {
         setImageFilter(filter);
@@ -857,23 +842,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             </TabsHighlightItem>
                         </TabsHighlight>
                     </TabsList>
-                    {trivy.available && (
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            className="border-border"
-                            onClick={() => {
-                                window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
-                                    detail: { view: 'security', tab: 'history' },
-                                }));
-                            }}
-                            title="View completed vulnerability scans and compare them"
-                            aria-label="Open scan history"
-                        >
-                            <History className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                            Scan history
-                        </Button>
-                    )}
                 </div>
                 )}
 
@@ -881,30 +849,49 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
                     {/* Images */}
                     <TabsContent value="images" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
-                        <FilterToggle
-                            value={imageFilter}
-                            onChange={setImageFilter}
-                            counts={{
-                                all: images.length,
-                                managed: images.filter(i => i.managedStatus === 'managed').length,
-                                unmanaged: images.filter(i => i.managedStatus !== 'managed').length,
-                            }}
-                        />
+                        <div className="flex items-center justify-between gap-3">
+                            <FilterToggle
+                                value={imageFilter}
+                                onChange={setImageFilter}
+                                counts={{
+                                    all: images.length,
+                                    managed: images.filter(i => i.managedStatus === 'managed').length,
+                                    unmanaged: images.filter(i => i.managedStatus !== 'managed').length,
+                                }}
+                            />
+                            {trivy.available && (
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-7 text-xs gap-1.5 mr-3 shrink-0"
+                                    onClick={() => {
+                                        window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
+                                            detail: { view: 'security', tab: 'history' },
+                                        }));
+                                    }}
+                                    title="View completed vulnerability scans and compare them"
+                                    aria-label="Open scan history"
+                                >
+                                    <History className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                    Scan history
+                                </Button>
+                            )}
+                        </div>
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
                                     <TableHead className="w-[120px] text-[11px]">ID</TableHead>
-                                    <TableHead className="text-[11px]">Repository:Tag</TableHead>
-                                    <TableHead className="text-[11px]">Size</TableHead>
-                                    <TableHead className="text-[11px]">Status</TableHead>
+                                    <SortableTableHead label="Repository:Tag" columnKey="repo" activeKey={imageSort.sortKey} dir={imageSort.sortDir} onSort={imageSort.toggleSort} />
+                                    <SortableTableHead label="Size" columnKey="size" activeKey={imageSort.sortKey} dir={imageSort.sortDir} onSort={imageSort.toggleSort} />
+                                    <SortableTableHead label="Status" columnKey="status" activeKey={imageSort.sortKey} dir={imageSort.sortDir} onSort={imageSort.toggleSort} />
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
                                 </TableRow>
                             </TableHeader>
                             {isLoading ? <TableSkeleton cols={5} /> : (
                                 <TableBody>
-                                    {filteredImages.length === 0 ? (
+                                    {imageSort.sorted.length === 0 ? (
                                         <TableRow><TableCell colSpan={5} className="text-center py-8 text-muted-foreground text-sm">No images found.</TableCell></TableRow>
-                                    ) : filteredImages.map((img, i) => (
+                                    ) : imageSort.sorted.map((img, i) => (
                                         <TableRow
                                             key={img.Id}
                                             className="animate-in fade-in-0 duration-200 hover:bg-muted/30 transition-colors"
@@ -1004,8 +991,8 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
-                                    <TableHead className="text-[11px]">Name</TableHead>
-                                    <TableHead className="text-[11px]">Driver</TableHead>
+                                    <SortableTableHead label="Name" columnKey="name" activeKey={volumeSort.sortKey} dir={volumeSort.sortDir} onSort={volumeSort.toggleSort} />
+                                    <SortableTableHead label="Driver" columnKey="driver" activeKey={volumeSort.sortKey} dir={volumeSort.sortDir} onSort={volumeSort.toggleSort} />
                                     <TableHead className="hidden md:table-cell text-[11px]">Mountpoint</TableHead>
                                     <TableHead className="text-[11px]">Status</TableHead>
                                     <TableHead className="text-right text-[11px]">Action</TableHead>
@@ -1013,15 +1000,15 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             </TableHeader>
                             {isLoading ? <TableSkeleton cols={5} /> : (
                                 <TableBody>
-                                    {filteredVolumes.length === 0 ? (
+                                    {volumeSort.sorted.length === 0 ? (
                                         <TableRow><TableCell colSpan={5} className="text-center py-8 text-muted-foreground text-sm">No volumes found.</TableCell></TableRow>
-                                    ) : filteredVolumes.map((vol, i) => (
+                                    ) : volumeSort.sorted.map((vol, i) => (
                                         <TableRow
                                             key={vol.Name}
                                             className="animate-in fade-in-0 duration-200 hover:bg-muted/30 transition-colors"
                                             style={{ animationDelay: `${Math.min(i * 20, 200)}ms` }}
                                         >
-                                            <TableCell className="font-mono text-xs max-w-[200px] truncate">{vol.Name}</TableCell>
+                                            <TableCell className="font-mono text-xs max-w-[200px]"><VolumeNameLabel name={vol.Name} showChip /></TableCell>
                                             <TableCell><Badge variant="outline" className="text-[10px] h-5">{vol.Driver}</Badge></TableCell>
                                             <TableCell className="hidden md:table-cell text-xs text-muted-foreground truncate max-w-[300px]">{vol.Mountpoint}</TableCell>
                                             <TableCell>
@@ -1066,7 +1053,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                     {/* Networks */}
                     <TabsContent value="networks" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
                         <div className="flex items-center justify-between">
-                            {networkViewMode === 'list' && (
+                            {networkViewMode === 'list' ? (
                                 <FilterToggle
                                     value={networkFilter}
                                     onChange={setNetworkFilter}
@@ -1076,6 +1063,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                         unmanaged: networks.filter(n => n.managedStatus !== 'managed').length,
                                     }}
                                 />
+                            ) : (
+                                // Keep a left spacer so justify-between holds the toggle +
+                                // Create Network group anchored on the right in topology mode.
+                                <span aria-hidden="true" />
                             )}
                             <div className="flex items-center gap-2 pr-3">
                                 <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
@@ -1098,7 +1089,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                         Topology
                                     </button>
                                 </div>
-                                {isAdmin && networkViewMode === 'list' && (
+                                {isAdmin && (
                                     <Button
                                         variant="outline"
                                         size="sm"
@@ -1138,18 +1129,18 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
                                     <TableHead className="w-[120px] text-[11px]">ID</TableHead>
-                                    <TableHead className="text-[11px]">Name</TableHead>
-                                    <TableHead className="text-[11px]">Driver</TableHead>
-                                    <TableHead className="text-[11px]">Scope</TableHead>
+                                    <SortableTableHead label="Name" columnKey="name" activeKey={networkSort.sortKey} dir={networkSort.sortDir} onSort={networkSort.toggleSort} />
+                                    <SortableTableHead label="Driver" columnKey="driver" activeKey={networkSort.sortKey} dir={networkSort.sortDir} onSort={networkSort.toggleSort} />
+                                    <SortableTableHead label="Scope" columnKey="scope" activeKey={networkSort.sortKey} dir={networkSort.sortDir} onSort={networkSort.toggleSort} />
                                     <TableHead className="text-[11px]">Status</TableHead>
                                     <TableHead className="text-right text-[11px]">Actions</TableHead>
                                 </TableRow>
                             </TableHeader>
                             {isLoading ? <TableSkeleton cols={6} /> : (
                                 <TableBody>
-                                    {filteredNetworks.length === 0 ? (
+                                    {networkSort.sorted.length === 0 ? (
                                         <TableRow><TableCell colSpan={6} className="text-center py-8 text-muted-foreground text-sm">No networks found.</TableCell></TableRow>
-                                    ) : filteredNetworks.map((net, i) => (
+                                    ) : networkSort.sorted.map((net, i) => (
                                         <TableRow
                                             key={net.Id}
                                             className="animate-in fade-in-0 duration-200 hover:bg-muted/30 transition-colors"
@@ -1395,89 +1386,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             </ConfirmModal>
 
             {/* Create Network Modal */}
-            <Modal open={showCreateNetwork} onOpenChange={setShowCreateNetwork} size="md">
-                <ModalHeader
-                    kicker="NETWORKS · NEW"
-                    title="Create network"
-                    description="Create a new Docker network for inter-container communication."
-                />
-                <ModalBody>
-                    <div className="space-y-2">
-                        <Label htmlFor="net-name" className="text-xs font-medium">Name</Label>
-                        <Input
-                            id="net-name"
-                            placeholder="my-network"
-                            className="font-mono text-sm"
-                            value={createNetworkForm.name}
-                            onChange={e => setCreateNetworkForm(f => ({ ...f, name: e.target.value }))}
-                        />
-                    </div>
-                    <div className="space-y-2">
-                        <Label htmlFor="net-driver" className="text-xs font-medium">Driver</Label>
-                        <Combobox
-                            options={NETWORK_DRIVERS.map(d => ({ value: d, label: d }))}
-                            value={createNetworkForm.driver}
-                            onValueChange={v => setCreateNetworkForm(f => ({ ...f, driver: (v || 'bridge') as NetworkDriver }))}
-                            placeholder="Select driver..."
-                            searchPlaceholder="Search drivers..."
-                            emptyText="No matching driver."
-                        />
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                        <div className="space-y-2">
-                            <Label htmlFor="net-subnet" className="text-xs font-medium">Subnet <span className="text-muted-foreground">(optional)</span></Label>
-                            <Input
-                                id="net-subnet"
-                                placeholder="172.20.0.0/16"
-                                className="font-mono text-sm"
-                                value={createNetworkForm.subnet}
-                                onChange={e => setCreateNetworkForm(f => ({ ...f, subnet: e.target.value }))}
-                            />
-                        </div>
-                        <div className="space-y-2">
-                            <Label htmlFor="net-gateway" className="text-xs font-medium">Gateway <span className="text-muted-foreground">(optional)</span></Label>
-                            <Input
-                                id="net-gateway"
-                                placeholder="172.20.0.1"
-                                className="font-mono text-sm"
-                                value={createNetworkForm.gateway}
-                                onChange={e => setCreateNetworkForm(f => ({ ...f, gateway: e.target.value }))}
-                            />
-                        </div>
-                    </div>
-                    <div className="flex items-center gap-6 pt-1">
-                        <div className="flex items-center gap-2">
-                            <TogglePill
-                                id="net-internal"
-                                checked={createNetworkForm.internal}
-                                onChange={v => setCreateNetworkForm(f => ({ ...f, internal: v }))}
-                            />
-                            <Label htmlFor="net-internal" className="text-xs cursor-pointer">Internal <span className="text-muted-foreground">(no external access)</span></Label>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            <TogglePill
-                                id="net-attachable"
-                                checked={createNetworkForm.attachable}
-                                onChange={v => setCreateNetworkForm(f => ({ ...f, attachable: v }))}
-                            />
-                            <Label htmlFor="net-attachable" className="text-xs cursor-pointer">Attachable</Label>
-                        </div>
-                    </div>
-                </ModalBody>
-                <ModalFooter
-                    hint={`DRIVER ${createNetworkForm.driver}`}
-                    secondary={
-                        <Button variant="outline" size="sm" onClick={() => setShowCreateNetwork(false)} disabled={isCreatingNetwork}>
-                            Cancel
-                        </Button>
-                    }
-                    primary={
-                        <Button size="sm" onClick={handleCreateNetwork} disabled={!createNetworkForm.name.trim() || isCreatingNetwork}>
-                            {isCreatingNetwork ? 'Creating...' : 'Create network'}
-                        </Button>
-                    }
-                />
-            </Modal>
+            <CreateNetworkDialog
+                open={showCreateNetwork}
+                onOpenChange={setShowCreateNetwork}
+                onCreated={fetchAllData}
+            />
 
             {/* Image Details Sheet */}
             <ImageDetailsSheet imageId={inspectImageId} onClose={() => setInspectImageId(null)} />
@@ -1497,7 +1410,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 onClose={() => setInspectScanId(null)}
                 onRescan={isAdmin ? (imageRef) => { setInspectScanId(null); handleScanImage(imageRef, { force: true }); } : undefined}
                 canGenerateSbom={isAdmin}
-                canExportSarif={isPaid && isAdmin}
+                canExportSarif={isAdmin}
                 canCompare
                 canManageSuppressions={isAdmin}
             />

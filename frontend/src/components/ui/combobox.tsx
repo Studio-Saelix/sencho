@@ -6,6 +6,9 @@ import { cn } from "@/lib/utils"
 export interface ComboboxOption {
   value: string
   label: string
+  /** Optional category group. When any option has a group, options render in
+   *  grouped sections with non-interactive headers between groups. */
+  group?: string
 }
 
 interface ComboboxProps {
@@ -75,6 +78,23 @@ export function Combobox({
     setSearch("")
   }
 
+  const hasGroups = filtered.some((o) => o.group)
+
+  const groupedOptions = React.useMemo(() => {
+    if (!hasGroups) return null
+    const groupMap = new Map<string, ComboboxOption[]>()
+    const groupOrder: string[] = []
+    for (const o of filtered) {
+      const g = o.group!
+      if (!groupMap.has(g)) {
+        groupMap.set(g, [])
+        groupOrder.push(g)
+      }
+      groupMap.get(g)!.push(o)
+    }
+    return groupOrder.map(label => ({ label, options: groupMap.get(label)! }))
+  }, [filtered, hasGroups])
+
   return (
     <div ref={wrapperRef} className={cn("relative w-full", className)}>
       {/* Trigger: static button when closed, inline search input when open */}
@@ -121,6 +141,34 @@ export function Combobox({
               <div className="py-4 text-center text-sm text-muted-foreground">
                 {emptyText}
               </div>
+            ) : hasGroups && groupedOptions ? (
+              groupedOptions.map((group) => (
+                <div key={group.label}>
+                  <div className="px-2 pt-2 pb-1 text-xs font-medium text-muted-foreground select-none">
+                    {group.label}
+                  </div>
+                  {group.options.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => handleSelect(option)}
+                      className={cn(
+                        "relative flex w-full cursor-default select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground",
+                        value === option.value && "bg-accent/50"
+                      )}
+                    >
+                      <Check
+                        className={cn(
+                          "mr-2 h-4 w-4 shrink-0",
+                          value === option.value ? "opacity-100" : "opacity-0"
+                        )}
+                        strokeWidth={1.5}
+                      />
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              ))
             ) : (
               filtered.map((option) => (
                 <button
@@ -128,7 +176,7 @@ export function Combobox({
                   type="button"
                   onClick={() => handleSelect(option)}
                   className={cn(
-                    "relative flex w-full cursor-default select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground",
+                    "relative flex w-full cursor-default select-none items-center rounded-sm px-2 py-1.5 text-left text-sm outline-none hover:bg-accent hover:text-accent-foreground",
                     value === option.value && "bg-accent/50"
                   )}
                 >
@@ -139,7 +187,7 @@ export function Combobox({
                     )}
                     strokeWidth={1.5}
                   />
-                  {option.label}
+                  <span className="min-w-0 truncate">{option.label}</span>
                 </button>
               ))
             )}

@@ -163,7 +163,7 @@ export function StackIdentityHeader({
                     {(activeNode?.name || 'local')} <span className="text-muted-foreground/60">›</span> stacks <span className="text-muted-foreground/60">›</span> {stackName}
                 </div>
                 <div className="flex items-center gap-3 flex-wrap">
-                    <CardTitle className="font-display italic text-3xl leading-none tracking-tight">{stackName}</CardTitle>
+                    <CardTitle className="font-heading text-3xl leading-none tracking-tight">{stackName}</CardTitle>
                     {(() => {
                         const pill = getStackStatePill(safeContainers);
                         if (!pill) return null;
@@ -555,10 +555,14 @@ export interface StackLogsSectionProps {
     stackName: string;
     logsMode: 'structured' | 'raw';
     setLogsMode: (mode: 'structured' | 'raw') => void;
+    /** When set, the structured viewer shows an expand control that collapses
+     *  the Command Center to give the logs more vertical room. */
+    logsExpanded?: boolean;
+    onToggleLogsExpand?: () => void;
 }
 
 // Logs pane: structured / raw-terminal toggle + the live viewer.
-export function StackLogsSection({ stackName, logsMode, setLogsMode }: StackLogsSectionProps) {
+export function StackLogsSection({ stackName, logsMode, setLogsMode, logsExpanded, onToggleLogsExpand }: StackLogsSectionProps) {
     return (
         <div className="flex-1 min-h-0 flex flex-col gap-2 overflow-hidden">
             <div className="flex items-center justify-between">
@@ -568,7 +572,7 @@ export function StackLogsSection({ stackName, logsMode, setLogsMode }: StackLogs
                         type="button"
                         onClick={() => setLogsMode('structured')}
                         className={cn(
-                            'rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors',
+                            'rounded px-2 py-0.5 font-mono text-xs uppercase tracking-wide transition-colors',
                             logsMode === 'structured' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground',
                         )}
                     >
@@ -578,7 +582,7 @@ export function StackLogsSection({ stackName, logsMode, setLogsMode }: StackLogs
                         type="button"
                         onClick={() => setLogsMode('raw')}
                         className={cn(
-                            'rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors',
+                            'rounded px-2 py-0.5 font-mono text-xs uppercase tracking-wide transition-colors',
                             logsMode === 'raw' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground',
                         )}
                     >
@@ -588,7 +592,7 @@ export function StackLogsSection({ stackName, logsMode, setLogsMode }: StackLogs
             </div>
             {logsMode === 'structured' ? (
                 <ErrorBoundary>
-                    <StructuredLogViewer stackName={stackName} />
+                    <StructuredLogViewer stackName={stackName} expanded={logsExpanded} onToggleExpand={onToggleLogsExpand} />
                 </ErrorBoundary>
             ) : (
                 <div className="flex-1 rounded-xl overflow-hidden border border-muted bg-black p-3 shadow-[inset_0_2px_4px_0_oklch(0_0_0/0.4)]">

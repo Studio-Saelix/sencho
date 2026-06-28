@@ -12,15 +12,22 @@ import { isInputFocused, isPaletteOpen } from '@/lib/keyboard-guards';
 import type { StackAction, StackActionResult, ContainerInfo } from '../EditorView';
 import type { Label as StackLabel } from '../../label-types';
 import type { FilterChip } from '../../sidebar/sidebar-types';
+import { isDownStatus } from '../../sidebar/stack-status-utils';
 import type { StackRowStatus } from '../../sidebar/stack-status-utils';
 
 interface StackStatus {
-  [key: string]: 'running' | 'exited' | 'unknown';
+  [key: string]: StackRowStatus;
+}
+
+interface StackCounts {
+  [key: string]: { running: number; total: number } | undefined;
 }
 
 interface StackStatusInfo {
-  status: 'running' | 'exited' | 'unknown';
+  status: StackRowStatus;
   mainPort?: number;
+  running?: number;
+  total?: number;
 }
 
 export interface RemoteResult {
@@ -58,6 +65,7 @@ export function useStackListState() {
   const [searchQuery, setSearchQuery] = useState('');
   const [stackStatuses, setStackStatuses] = useState<StackStatus>({});
   const [stackPorts, setStackPorts] = useState<Record<string, number | undefined>>({});
+  const [stackCounts, setStackCounts] = useState<StackCounts>({});
   const [labels, setLabels] = useState<StackLabel[]>([]);
   const [stackLabelMap, setStackLabelMap] = useState<Record<string, StackLabel[]>>({});
   const [filterChip, setFilterChip] = useState<FilterChip>('all');
@@ -165,19 +173,23 @@ export function useStackListState() {
       // Fetch all stack statuses in a single bulk call (falls back to per-stack queries for older remote nodes)
       const statusRes = await apiFetch('/stacks/statuses');
       if (stale()) return fileList;
-      let bulkStatuses: Record<string, 'running' | 'exited' | 'unknown'> | null = null;
+      let bulkStatuses: Record<string, StackRowStatus> | null = null;
       const bulkPorts: Record<string, number | undefined> = {};
+      const bulkCounts: StackCounts = {};
       if (statusRes.ok) {
         const raw = await statusRes.json();
         bulkStatuses = {};
-        // Handle both old format (plain string) and new format ({ status, mainPort })
+        // Handle both old format (plain string) and new format ({ status, mainPort, running, total })
         for (const [key, val] of Object.entries(raw)) {
           if (typeof val === 'string') {
-            bulkStatuses[key] = val as 'running' | 'exited' | 'unknown';
+            bulkStatuses[key] = val as StackRowStatus;
           } else if (val && typeof val === 'object' && 'status' in val) {
             const info = val as StackStatusInfo;
             bulkStatuses[key] = info.status;
             if (info.mainPort) bulkPorts[key] = info.mainPort;
+            if (info.running !== undefined && info.total !== undefined) {
+              bulkCounts[key] = { running: info.running, total: info.total };
+            }
           }
         }
       } else {
@@ -211,6 +223,7 @@ export function useStackListState() {
         if (keys.length === Object.keys(prev).length && keys.every(k => prev[k] === bulkPorts[k])) return prev;
         return bulkPorts;
       });
+      setStackCounts(bulkCounts);
       refreshLabels();
       return fileList;
     } catch (error) {
@@ -275,15 +288,15 @@ export function useStackListState() {
   const filterCounts = useMemo(() => ({
     all: filteredFiles.length,
     up: filteredFiles.filter(f => stackStatuses[f] === 'running').length,
-    down: filteredFiles.filter(f => stackStatuses[f] === 'exited').length,
-    updates: filteredFiles.filter(f => !!stackUpdates[f]).length,
+    down: filteredFiles.filter(f => isDownStatus(stackStatuses[f])).length,
+    updates: filteredFiles.filter(f => stackUpdates[f]?.hasUpdate).length,
   }), [filteredFiles, stackStatuses, stackUpdates]);
 
   const chipFilteredFiles = useMemo(() => {
     if (filterChip === 'all') return filteredFiles;
     if (filterChip === 'up') return filteredFiles.filter(f => stackStatuses[f] === 'running');
-    if (filterChip === 'down') return filteredFiles.filter(f => stackStatuses[f] === 'exited');
-    if (filterChip === 'updates') return filteredFiles.filter(f => !!stackUpdates[f]);
+    if (filterChip === 'down') return filteredFiles.filter(f => isDownStatus(stackStatuses[f]));
+    if (filterChip === 'updates') return filteredFiles.filter(f => stackUpdates[f]?.hasUpdate);
     return filteredFiles;
   }, [filteredFiles, filterChip, stackStatuses, stackUpdates]);
 
@@ -343,7 +356,7 @@ export function useStackListState() {
   }, [bulkMode, toggleBulkMode]);
 
   const remoteStackResults = useMemo(() => {
-    const out: Record<number, Array<{ file: string; status: 'running' | 'exited' | 'unknown' }>> = {};
+    const out: Record<number, Array<{ file: string; status: StackRowStatus }>> = {};
     for (const hit of remoteSearchHits) {
       (out[hit.nodeId] ??= []).push({ file: hit.file, status: hit.status });
     }
@@ -371,6 +384,7 @@ export function useStackListState() {
     searchQuery, setSearchQuery,
     stackStatuses, setStackStatuses,
     stackPorts, setStackPorts,
+    stackCounts,
     labels,
     stackLabelMap,
     filterChip, setFilterChip,

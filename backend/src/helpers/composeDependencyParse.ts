@@ -24,6 +24,8 @@ export interface DeclaredService {
   ports: DeclaredPort[];
   /** Service `image:` reference as declared, or undefined for build-only services. */
   image?: string;
+  /** Service `network_mode:` as declared (e.g. `host`), or undefined. */
+  networkMode?: string;
 }
 
 /** A top-level networks:/volumes: entry. */
@@ -64,6 +66,9 @@ function collectKeys(value: unknown): string[] {
 /** True when a volume source is a named volume (not a bind mount or anonymous). */
 function isNamedVolumeSource(source: string): boolean {
   if (!source) return false;
+  // A named-volume key is [a-zA-Z0-9._-]+, so any '$' marks an env-var bind path
+  // (or the '$$' literal-dollar escape) whose value is unresolvable at parse time.
+  if (source.includes('$')) return false;
   if (source.includes('/')) return false; // bind mount path
   if (source.startsWith('.') || source.startsWith('~')) return false;
   if (/^[a-zA-Z]:[\\/]/.test(source)) return false; // Windows drive path
@@ -194,6 +199,7 @@ export function parseComposeDependencies(content: string): DeclaredCompose {
       volumes,
       ports,
       image: asString(svc.image),
+      networkMode: asString(svc.network_mode),
     });
   }
 

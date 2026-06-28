@@ -46,6 +46,26 @@ describe('GET /api/image-updates', () => {
   });
 });
 
+describe('GET /api/image-updates/detail', () => {
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).get('/api/image-updates/detail');
+    expect(res.status).toBe(401);
+  });
+
+  it('returns the rich per-stack detail shape for authenticated users', async () => {
+    const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+    DatabaseService.getInstance().upsertStackUpdateStatus(nodeId, 'detail-web', true, 1000, 'partial', 'Registry unreachable for ghcr.io/acme/api:v1');
+    const res = await request(app).get('/api/image-updates/detail').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body['detail-web']).toEqual({
+      hasUpdate: true,
+      checkStatus: 'partial',
+      lastError: 'Registry unreachable for ghcr.io/acme/api:v1',
+      checkedAt: 1000,
+    });
+  });
+});
+
 describe('POST /api/image-updates/refresh', () => {
   it('rejects unauthenticated requests with 401', async () => {
     const res = await request(app).post('/api/image-updates/refresh');
@@ -121,6 +141,94 @@ describe('PUT /api/image-updates/interval', () => {
     // ...and a follow-up status read reflects the rescheduled cadence.
     const statusRes = await request(app).get('/api/image-updates/status').set('Cookie', adminCookie);
     expect(statusRes.body.intervalMinutes).toBe(30);
+  });
+
+  // ── Cron mode ──────────────────────────────────────────────────────────
+
+  it('persists a valid cron expression and returns the enriched status', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '0 3 * * 1' });
+    expect(res.status).toBe(200);
+    expect(res.body.mode).toBe('cron');
+    expect(res.body.cronExpression).toBe('0 3 * * 1');
+    const settings = DatabaseService.getInstance().getGlobalSettings();
+    expect(settings.image_update_check_mode).toBe('cron');
+    expect(settings.image_update_check_cron).toBe('0 3 * * 1');
+  });
+
+  it('accepts a cron nickname like @daily', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '@daily' });
+    expect(res.status).toBe(200);
+    expect(res.body.mode).toBe('cron');
+    expect(res.body.cronExpression).toBe('@daily');
+  });
+
+  it('rejects a 6-field cron expression', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '0 0 3 * * 1' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/5 fields/);
+  });
+
+  it('rejects a blank cron expression when mode is cron', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '   ' });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects an invalid cron expression (backend-authoritative)', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '0 0 31 2 *' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid cron/);
+  });
+
+  it('rejects cron mode without a cron field', async () => {
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Cron expression/);
+  });
+
+  it('clears cron when switching back to interval mode', async () => {
+    // First set cron mode.
+    await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '0 3 * * 1' });
+    // Then switch to interval.
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 60, mode: 'interval' });
+    expect(res.status).toBe(200);
+    expect(res.body.mode).toBe('interval');
+    expect(res.body.cronExpression).toBeNull();
+    const settings = DatabaseService.getInstance().getGlobalSettings();
+    expect(settings.image_update_check_mode).toBe('interval');
+    expect(settings.image_update_check_cron).toBe('');
+  });
+
+  it('old-client { minutes } only does not change mode (backward compat)', async () => {
+    // First set cron mode.
+    await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 120, mode: 'cron', cron: '0 3 * * 1' });
+    // Then send old-client payload.
+    const res = await request(app).put('/api/image-updates/interval')
+      .set('Cookie', adminCookie)
+      .send({ minutes: 30 });
+    expect(res.status).toBe(200);
+    // Mode and cron are unchanged.
+    expect(res.body.mode).toBe('cron');
+    expect(res.body.cronExpression).toBe('0 3 * * 1');
+    // Interval was updated (the fallback value).
+    expect(res.body.intervalMinutes).toBe(30);
   });
 });
 
@@ -251,6 +359,51 @@ describe('POST /api/auto-update/execute', () => {
       .send({ target: '*' });
     expect(res.status).toBe(200);
     expect(typeof res.body.result).toBe('string');
+  });
+
+  it('reports a reason-aware block message when the policy gate blocks auto-update', async () => {
+    // The Codex QA flagged this surface: a KEV- or fixable-driven block must
+    // name the matched input, never "exceed <max_severity>" (a ceiling the
+    // policy did not enforce). Force the gate to block on KEV and assert the
+    // per-stack result string names the reason and skips the update.
+    const DockerController = (await import('../services/DockerController')).default;
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    const { ComposeService } = await import('../services/ComposeService');
+    const PolicyEnforcement = await import('../services/PolicyEnforcement');
+
+    const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
+      .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
+    const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
+      .mockResolvedValue({ hasUpdate: true } as never);
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue();
+    const gateSpy = vi.spyOn(PolicyEnforcement, 'enforcePolicyPreDeploy').mockResolvedValue({
+      ok: false,
+      bypassed: false,
+      policy: { id: 1, name: 'kev-gate', max_severity: 'HIGH' },
+      violations: [{
+        imageRef: 'nginx:latest', severity: 'MEDIUM',
+        criticalCount: 0, highCount: 0, kevCount: 1, fixableCount: 0,
+        scanId: 9, reasons: ['kev'],
+      }],
+    } as never);
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Cookie', adminCookie)
+        .send({ target: 'auto-upd-blocked' });
+      expect(res.status).toBe(200);
+      expect(res.body.result).toContain('blocked auto-update');
+      expect(res.body.result).toContain('matched known-exploited CVE (KEV)');
+      expect(res.body.result).not.toContain('exceed');
+      expect(res.body.result).not.toContain('HIGH');
+      // Blocked stacks are skipped, not updated.
+      expect(updateSpy).not.toHaveBeenCalled();
+    } finally {
+      containersSpy.mockRestore();
+      checkSpy.mockRestore();
+      updateSpy.mockRestore();
+      gateSpy.mockRestore();
+    }
   });
 
   it('begins an update health gate after an auto-update applies', async () => {

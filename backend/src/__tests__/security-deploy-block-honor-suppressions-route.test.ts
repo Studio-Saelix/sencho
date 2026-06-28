@@ -1,10 +1,10 @@
 /**
- * Tests for the role + tier gate on PUT /api/security/deploy-block-honor-suppressions.
+ * Tests for the role gate on PUT /api/security/deploy-block-honor-suppressions.
  *
  * The route flips the global `deploy_block_honor_suppressions` setting that the
  * pre-deploy policy gate reads to decide whether a suppressed CVE still counts
- * toward a block-on-deploy policy. It must be reachable only by an admin on a
- * paid (Admiral) tier, matching the trivy-auto-update toggle.
+ * toward a block-on-deploy policy. It must be reachable by any admin on every
+ * tier; only the admin role is required.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
@@ -52,7 +52,7 @@ describe('PUT /api/security/deploy-block-honor-suppressions', () => {
     expect(res.status).toBe(403);
   });
 
-  it('rejects Community tier with 403', async () => {
+  it('accepts a Community tier admin (no tier gate)', async () => {
     const { LicenseService } = await import('../services/LicenseService');
     const spy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
     try {
@@ -60,7 +60,8 @@ describe('PUT /api/security/deploy-block-honor-suppressions', () => {
         .put('/api/security/deploy-block-honor-suppressions')
         .set('Cookie', adminCookie)
         .send({ enabled: true });
-      expect(res.status).toBe(403);
+      expect(res.status).toBe(200);
+      expect(res.body.honorSuppressionsOnDeploy).toBe(true);
     } finally {
       spy.mockReturnValue('paid');
     }

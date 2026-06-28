@@ -6,7 +6,7 @@ import { RefreshCw, Shield, AlertTriangle, ShieldAlert, CircleSlash, Clock, Play
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
-import type { ImageUpdateStatus } from '@/types/imageUpdates';
+import type { ImageUpdateStatus, StackUpdateInfo } from '@/types/imageUpdates';
 import { useNodes } from '@/context/NodeContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, Kicker } from '@/components/mobile/mobile-ui';
@@ -206,7 +206,7 @@ function StackReadinessCard({
           <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle/80">
             Stack
           </span>
-          <span className="font-display italic text-2xl leading-tight tracking-tight text-stat-value truncate">
+          <span className="font-heading text-2xl leading-tight tracking-tight text-stat-value truncate">
             {stack}
           </span>
         </div>
@@ -334,7 +334,7 @@ function ReadinessHero({
           <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-brand">
             Fleet readiness
           </span>
-          <span className="font-display italic text-3xl leading-tight tracking-tight text-stat-value">
+          <span className="font-heading text-3xl leading-tight tracking-tight text-stat-value">
             {headline}
           </span>
           {total > 0 && (
@@ -389,7 +389,7 @@ function NodeGroupSection({
     <section className="flex flex-col gap-4">
       <div className="flex items-baseline gap-3 border-b border-card-border/60 pb-2">
         <TypeIcon className="h-4 w-4 text-stat-subtitle self-center" strokeWidth={1.5} aria-hidden="true" />
-        <span className="font-display italic text-xl leading-tight tracking-tight text-stat-value truncate">
+        <span className="font-heading text-xl leading-tight tracking-tight text-stat-value truncate">
           {group.nodeName}
         </span>
         <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 shrink-0 self-center">
@@ -428,7 +428,7 @@ export function MobileReadinessCard({ card, onApply }: { card: StackCard; onAppl
       <div className="flex items-start justify-between gap-[10px]">
         <div className="min-w-0 flex-1">
           <Kicker>stack</Kicker>
-          <div className="mt-px truncate font-display italic text-[23px] leading-[26px] text-stat-value">{stack}</div>
+          <div className="mt-px truncate font-heading text-[23px] leading-[26px] text-stat-value">{stack}</div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {!autoUpdateEnabled && (
@@ -483,7 +483,7 @@ function MobileNodeSection({ group, onApply }: { group: NodeGroup; onApply: (sta
   return (
     <section>
       <div className="mb-[13px] flex items-baseline gap-2 border-b border-hairline pb-2">
-        <span className="truncate font-display italic text-[19px] leading-tight text-stat-value">{group.nodeName}</span>
+        <span className="truncate font-heading text-[19px] leading-tight text-stat-value">{group.nodeName}</span>
         <span className="shrink-0 rounded-[5px] border border-card-border px-1.5 py-px font-mono text-[10px] uppercase tracking-[0.1em] text-stat-subtitle">{group.nodeType}</span>
         <span className="shrink-0 font-mono text-[11px] text-stat-icon">{group.cards.length} {group.cards.length === 1 ? 'stack' : 'stacks'}</span>
       </div>
@@ -493,6 +493,30 @@ function MobileNodeSection({ group, onApply }: { group: NodeGroup; onApply: (sta
         ))}
       </div>
     </section>
+  );
+}
+
+/**
+ * Advisory for local-node stacks whose latest image-update check could not
+ * determine status. These never appear in the card grid (which lists only
+ * confirmed updates), so without this they would be invisible here.
+ */
+function CheckFailuresNotice({ failures }: { failures: { stack: string; reason: string | null }[] }) {
+  if (failures.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-warning/30 bg-warning/5 p-3">
+      <div className="flex items-center gap-2 font-mono text-[11px] text-warning">
+        <AlertTriangle className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+        {failures.length} stack{failures.length !== 1 ? 's' : ''} could not be checked
+      </div>
+      <ul className="mt-1.5 space-y-0.5 pl-5">
+        {failures.map(f => (
+          <li key={f.stack} className="font-mono text-[11px] text-stat-subtitle">
+            <span className="text-stat-value">{f.stack}</span>{f.reason ? `: ${f.reason}` : ''}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -509,6 +533,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [cadence, setCadence] = useState<ImageUpdateStatus | null>(null);
+  // Local-node stacks whose latest check could not determine status. The fleet
+  // list only shows stacks with a confirmed update, so without this a stack
+  // whose checks all fail would silently vanish from this view.
+  const [checkFailures, setCheckFailures] = useState<{ stack: string; reason: string | null }[]>([]);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Monotonic token guards against stale setGroups from older fetches.
   const loadTokenRef = useRef(0);
@@ -535,9 +563,10 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
     const token = ++loadTokenRef.current;
     setLoading(true);
     try {
-      const [statusRes, tasksRes] = await Promise.all([
+      const [statusRes, tasksRes, detailRes] = await Promise.all([
         apiFetch('/image-updates/fleet', { localOnly: true }),
         apiFetch('/scheduled-tasks?action=update', { localOnly: true }),
+        apiFetch('/image-updates/detail', { localOnly: true }),
       ]);
       if (token !== loadTokenRef.current) return;
 
@@ -546,6 +575,23 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       }
       const fleetStatus = await statusRes.json() as FleetUpdateResponse;
       setReachableNodeCount(Object.keys(fleetStatus).length);
+
+      // Local-node check failures: surfaced separately because the fleet map is
+      // boolean and the card grid only lists stacks with a confirmed update.
+      if (detailRes.ok) {
+        const detail = await detailRes.json() as Record<string, StackUpdateInfo>;
+        setCheckFailures(
+          Object.entries(detail)
+            .filter(([, info]) => info.checkStatus === 'failed')
+            .map(([stack, info]) => ({ stack, reason: info.lastError }))
+            .sort((a, b) => a.stack.localeCompare(b.stack)),
+        );
+      } else {
+        // Clear stale failures rather than persist them across a load, but log:
+        // an empty advisory must not silently stand in for "detail unavailable".
+        console.error('[AutoUpdateReadiness] /image-updates/detail failed:', detailRes.status);
+        setCheckFailures([]);
+      }
 
       const tasks: ScheduledTask[] = tasksRes.ok ? await tasksRes.json() : [];
       // A stack is "covered" by an enabled action='update' row when either
@@ -805,6 +851,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
               {reachableNodeCount} of {onlineNodeCount} nodes reachable. Unreachable nodes are not shown.
             </div>
           )}
+          <CheckFailuresNotice failures={checkFailures} />
           {loading && groups.length === 0 ? (
             <div className="flex items-center justify-center py-16 font-mono text-xs text-stat-subtitle">Loading readiness...</div>
           ) : groups.length === 0 ? (
@@ -838,6 +885,8 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
           {reachableNodeCount} of {onlineNodeCount} nodes reachable. Unreachable nodes are not shown.
         </div>
       )}
+
+      <CheckFailuresNotice failures={checkFailures} />
 
       {loading && groups.length === 0 ? (
         <div className="flex items-center justify-center py-16 font-mono text-xs text-stat-subtitle">

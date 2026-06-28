@@ -48,7 +48,6 @@ export default function HomeDashboard({ onNavigateToStack, onOpenSettingsSection
         stackStatuses={data.stackStatuses}
         metrics={data.metrics}
         stackCpuSeries={data.stackCpuSeries}
-        activeNodeName={activeNodeName}
         onNavigateToStack={onNavigateToStack ?? NOOP}
       />
 

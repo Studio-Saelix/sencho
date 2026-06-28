@@ -5,30 +5,36 @@ import { cn } from '@/lib/utils';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { SecuritySevStrip, SecurityTotalsGrid, SecurityFooterBand } from './SecurityMobile';
-import type { SecurityOverview, ScanSummary, SecurityRiskTrendPoint } from '@/types/security';
+import type { SecurityOverview, SecurityRiskTrendPoint, ExploitIntelFinding, PostureReason } from '@/types/security';
 import type { SecurityTab } from '@/lib/events';
+import type { ImageFilterValue } from '@/lib/severityStyles';
+import { reasonImageFilter } from './postureNavigation';
 import {
-  SeverityDonutChart,
   RiskTrendChart,
-  TopExposedImagesChart,
-  FindingsByTypeChart,
+  ActionPostureChart,
+  TopExploitRiskList,
+  CvssEpssQuadrantChart,
 } from './SecurityCharts';
 import { ScanNodeLauncher } from './ScanNodeLauncher';
+
+/** Navigate to a security tab, optionally preselecting an Images filter. */
+type NavigateFn = (tab: SecurityTab, filter?: ImageFilterValue) => void;
 
 interface OverviewTabProps {
   overview: SecurityOverview | null;
   /** 'unsupported' = node has no overview endpoint (benign); 'failed' = a real error. */
   loadError: 'unsupported' | 'failed' | null;
-  summaries: Record<string, ScanSummary>;
   trend: SecurityRiskTrendPoint[];
-  onNavigate: (tab: SecurityTab) => void;
+  /** Actionable Critical/High findings with KEV/EPSS for the exploit-intel charts. */
+  exploitIntel: ExploitIntelFinding[];
+  /** True when the exploit-intel set hit its row cap (highest-risk shown, not all). */
+  exploitTruncated: boolean;
+  onNavigate: NavigateFn;
   onInspect: (scanId: number) => void;
   /** Admin on a node with a ready scanner; enables the node-scan launcher. */
   canScan: boolean;
   /** Refresh the overview after a node-wide scan completes. */
   onScanComplete: () => void;
-  /** Paid licensees can manage enforcement policies (the Policies tab is hidden otherwise). */
-  isPaid: boolean;
 }
 
 const STATUS_ROW_TONE: Record<'value' | 'warn' | 'subtitle', string> = {
@@ -56,7 +62,74 @@ function ChartCard({ title, className, children }: { title: string; className?: 
   );
 }
 
-export function OverviewTab({ overview, loadError, summaries, trend, onNavigate, onInspect, canScan, onScanComplete, isPaid }: OverviewTabProps) {
+const SEVERITY_DOT: Record<PostureReason['severity'], string> = {
+  blocker: 'bg-destructive',
+  review: 'bg-warning',
+  info: 'bg-stat-subtitle',
+};
+
+const SEVERITY_LABEL: Record<PostureReason['severity'], string> = {
+  blocker: 'text-destructive',
+  review: 'text-warning',
+  info: 'text-stat-subtitle',
+};
+
+function ReviewQueueCard({
+  reasons,
+  onNavigate,
+}: {
+  reasons: PostureReason[];
+  onNavigate: NavigateFn;
+}) {
+  const blockers = reasons.filter((r) => r.severity === 'blocker');
+  const nonBlockers = reasons.filter((r) => r.severity !== 'blocker');
+  const hasBlockers = blockers.length > 0;
+  const title = hasBlockers ? 'Why Action needed' : 'Review queue';
+
+  return (
+    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4">
+      <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle mb-3">{title}</h3>
+      <div className="space-y-3">
+        {blockers.map((r, i) => (
+          <div key={`${r.kind}-${i}`} className="flex items-start gap-3">
+            <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', SEVERITY_DOT[r.severity])} aria-hidden />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={cn('font-mono text-sm', SEVERITY_LABEL[r.severity])}>{r.label}</span>
+                <span className="font-mono tabular-nums text-xs text-stat-subtitle">{r.count}</span>
+                <button
+                  type="button"
+                  onClick={() => onNavigate(r.targetTab, reasonImageFilter(r.kind))}
+                  className="text-xs font-medium text-brand hover:underline whitespace-nowrap ml-auto"
+                >
+                  Open {r.targetTab === 'compose' ? 'Compose risks' : r.targetTab === 'suppressions' ? 'Suppressions' : r.targetTab === 'secrets' ? 'Secrets' : r.targetTab === 'history' ? 'History' : r.targetTab === 'scanner' ? 'Scanner setup' : 'Images'} →
+                </button>
+              </div>
+              <p className="text-xs text-stat-subtitle mt-0.5">{r.description}</p>
+            </div>
+          </div>
+        ))}
+        {nonBlockers.length > 0 && hasBlockers && (
+          <div className="border-t border-hairline pt-3 mt-1" />
+        )}
+        {nonBlockers.map((r, i) => (
+          <div key={`${r.kind}-${i}`} className="flex items-start gap-3">
+            <span className={cn('mt-1.5 h-2 w-2 shrink-0 rounded-full', SEVERITY_DOT[r.severity])} aria-hidden />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className={cn('font-mono text-sm', SEVERITY_LABEL[r.severity])}>{r.label}</span>
+                <span className="font-mono tabular-nums text-xs text-stat-subtitle">{r.count}</span>
+              </div>
+              <p className="text-xs text-stat-subtitle mt-0.5">{r.description}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function OverviewTab({ overview, loadError, trend, exploitIntel, exploitTruncated, onNavigate, onInspect, canScan, onScanComplete }: OverviewTabProps) {
   const isMobile = useIsMobile();
 
   if (loadError === 'unsupported') {
@@ -92,15 +165,28 @@ export function OverviewTab({ overview, loadError, summaries, trend, onNavigate,
     );
   }
 
-  const summaryList = Object.values(summaries);
-
   const tiles: SignalTile[] = [
     { kicker: 'Scanned images', value: String(overview.scannedImages) },
-    { kicker: 'Fixable', value: String(overview.fixable), tone: overview.fixable > 0 ? 'warn' : 'value' },
-    { kicker: 'Secrets', value: String(overview.secrets), tone: overview.secrets > 0 ? 'error' : 'value' },
-    { kicker: 'Misconfigs', value: String(overview.misconfigs), tone: overview.misconfigs > 0 ? 'warn' : 'value' },
-    { kicker: 'Stale', value: String(overview.staleScans), tone: overview.staleScans > 0 ? 'warn' : 'value' },
-    { kicker: 'Failed', value: String(overview.failedScans), tone: overview.failedScans > 0 ? 'error' : 'value' },
+    {
+      kicker: 'Fixable', value: String(overview.fixable), tone: overview.fixable > 0 ? 'warn' : 'value',
+      onClick: overview.fixable > 0 ? () => onNavigate('images', 'FIXABLE') : undefined,
+    },
+    {
+      kicker: 'Secrets', value: String(overview.secrets), tone: overview.secrets > 0 ? 'error' : 'value',
+      onClick: overview.secrets > 0 ? () => onNavigate('secrets') : undefined,
+    },
+    {
+      kicker: 'Misconfigs', value: String(overview.misconfigs), tone: overview.misconfigs > 0 ? 'warn' : 'value',
+      onClick: overview.misconfigs > 0 ? () => onNavigate('compose') : undefined,
+    },
+    {
+      kicker: 'Stale', value: String(overview.staleScans), tone: overview.staleScans > 0 ? 'warn' : 'value',
+      onClick: overview.staleScans > 0 ? () => onNavigate('history') : undefined,
+    },
+    {
+      kicker: 'Failed', value: String(overview.failedScans), tone: overview.failedScans > 0 ? 'error' : 'value',
+      onClick: overview.failedScans > 0 ? () => onNavigate('history') : undefined,
+    },
   ];
 
   const scannerValue = overview.scanner.available
@@ -124,25 +210,37 @@ export function OverviewTab({ overview, loadError, summaries, trend, onNavigate,
         )
       )}
 
-      {/* The masthead hides its stat cluster on a phone; restate it here. */}
+      {/* The masthead hides its stat cluster on a phone; restate it here. The
+          scanner-detections note lives in the masthead's info affordance. */}
       {isMobile && <SecuritySevStrip overview={overview} />}
 
-      {/* Charts lead the dashboard. */}
+      {/* Review queue: surfaces the "why" behind the posture -- blocker reasons
+          with CTAs, plus review/info items even when the masthead is not red. */}
+      {overview.posture && overview.posture !== 'Unknown' && overview.postureReasons && overview.postureReasons.length > 0 && (
+        <ReviewQueueCard
+          reasons={overview.postureReasons}
+          onNavigate={onNavigate}
+        />
+      )}
+
+      {/* Charts lead the dashboard: the trend gives severity context, the rest
+          answer "what should I act on first?" from posture + exploit intel. */}
       <div className="grid gap-4 lg:grid-cols-3">
         <ChartCard title="Risk trend · 30 days · critical + high" className="lg:col-span-2">
           <RiskTrendChart trend={trend} />
         </ChartCard>
-        <ChartCard title="Severity distribution">
-          <SeverityDonutChart summaries={summaryList} />
+        <ChartCard title="Action posture">
+          <ActionPostureChart overview={overview} />
         </ChartCard>
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <ChartCard title="Top exposed images">
-          <TopExposedImagesChart summaries={summaryList} onInspect={onInspect} />
-        </ChartCard>
-        <ChartCard title="Findings by type">
-          <FindingsByTypeChart summaries={summaryList} />
+      {/* items-start: each card keeps its natural height so the fixed-height chart
+          card never stretches to a taller exploit table (which left dead space
+          under the chart). The exploit-risk table owns its own card chrome. */}
+      <div className="grid items-start gap-4 lg:grid-cols-2">
+        <TopExploitRiskList items={exploitIntel} truncated={exploitTruncated} onInspect={onInspect} />
+        <ChartCard title="Severity × exploitability">
+          <CvssEpssQuadrantChart items={exploitIntel} />
         </ChartCard>
       </div>
 
@@ -193,7 +291,7 @@ export function OverviewTab({ overview, loadError, summaries, trend, onNavigate,
             tone="subtitle"
           />
           <p className="mt-2 text-xs text-muted-foreground">
-            {isPaid ? 'Manage enforcement policies on the Policies tab. ' : ''}This is a read-only posture for the active node.
+            Manage enforcement policies on the Policies tab. This is a read-only posture for the active node.
           </p>
         </div>
       </div>
