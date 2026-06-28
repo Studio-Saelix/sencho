@@ -454,10 +454,11 @@ Click the **Scan stacks folder** icon button to the right of **Create Stack**. S
 
 ## Troubleshooting
 
-### Service action returns a "service not found" error
-
-The service name used in the action must match the `services:` key in the stack's `compose.yaml`. This error occurs when no running containers match that service name, either because the service was never deployed or because the compose file defines a different name. Verify the service key in your compose file and ensure the stack has been deployed at least once so containers exist for that service.
-
-### A published port link opens but the service does not load
-
-The link targets the active node's host and the published host port. It cannot reach a service bound only to `127.0.0.1` on the node, or one published on a port your browser cannot route to. For a remote node, the link uses that node's host; if the service lives at a different address, open it there directly. A port that is not published to a host port has no link.
+<AccordionGroup>
+  <Accordion title="Service action returns a 'service not found' error">
+    The service name used in the action must match the `services:` key in the stack's `compose.yaml`. This error occurs when no running containers match that service name, either because the service was never deployed or because the compose file defines a different name. Verify the service key in your compose file and ensure the stack has been deployed at least once so containers exist for that service.
+  </Accordion>
+  <Accordion title="A published port link opens but the service does not load">
+    The link targets the active node's host and the published host port. It cannot reach a service bound only to `127.0.0.1` on the node, or one published on a port your browser cannot route to. For a remote node, the link uses that node's host; if the service lives at a different address, open it there directly. A port that is not published to a host port has no link.
+  </Accordion>
+</AccordionGroup>
