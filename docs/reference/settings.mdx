@@ -15,17 +15,17 @@ Open the Settings Hub by clicking the **Profile** icon in the top bar and select
 |-------|----------------|
 | **Personal** | Account, Appearance |
 | **Access** | License, Users, SSO, API Tokens |
-| **Infrastructure** | Nodes, Fleet Mesh, Registries, Cloud Backup, App Store, Stacks |
+| **Infrastructure** | Nodes, Fleet, Registries, Cloud Backup, App Store, Stacks |
 | **Monitoring** | Host Alerts, Container Alerts, Docker & Storage |
 | **Notifications** | Channels, Notification Routing |
-| **Automation** | Webhooks |
+| **Automation** | Image update checks, Webhooks |
 | **Organization** | Labels |
 | **Operations** | Data Retention, Developer Diagnostics, Recovery |
 | **Help** | Support, About |
 
 Vulnerability scanning is no longer a Settings section: scanner setup, scan policies, suppressions, and acknowledgements now live on the dedicated [Security page](/features/security).
 
-Sections that require a higher license tier stay hidden until the operator has the matching license. Admin-only sections (Users, SSO, API Tokens, Fleet Mesh, Registries, Cloud Backup, Notification Routing) stay hidden for non-admin operators.
+Sections that require a higher license tier stay hidden until the operator has the matching license. Admin-only sections (Users, SSO, API Tokens, Fleet, Registries, Cloud Backup, Notification Routing) stay hidden for non-admin operators.
 
 ### Page chrome
 
@@ -247,6 +247,10 @@ Click **Save alerts** to apply.
 
 **Scope:** Per-node (applies to the currently selected node)
 
+<Frame>
+  <img src="/images/settings/settings-container-alerts.png" alt="Container Alerts section showing the crash and health alerts toggle" />
+</Frame>
+
 Controls whether Sencho watches every managed container on this node for unexpected exits, OOM kills, and Docker healthcheck failures, and dispatches alerts for each. Auto-Heal observes crash signals independently regardless of this toggle, so turning it off stops alerts but does not stop Auto-Heal.
 
 | Setting | Default | Description |
@@ -280,19 +284,29 @@ Click **Save settings** to apply.
 
 ---
 
-## Fleet Mesh
+## Fleet
 
 <Note>
-  Fleet Mesh is admin-only.
+  Fleet is admin-only.
 </Note>
 
 **Scope:** Per-node (applies to the currently selected node)
 
-Control the cross-node service mesh data plane for the selected node.
+<Frame>
+  <img src="/images/settings/settings-fleet.png" alt="Fleet section showing the Mesh data plane and Documentation snapshots subsections" />
+</Frame>
+
+### Mesh data plane
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | **Auto-recreate mesh network** | Off | If `sencho_mesh` is removed at runtime, rebuild it at the same subnet on the next 10-second tick. Off by default; leave it off and restart Sencho manually for the safest path. See [Sencho Mesh](/features/sencho-mesh) for the reconciler behavior. |
+
+### Documentation snapshots
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Capture stack documentation in snapshots** | Off | Preserve each stack's Dossier notes alongside its captured files when a fleet snapshot is taken. Restoring a stack never overwrites current notes unless you explicitly choose to. |
 
 Click **Save settings** to apply.
 
@@ -405,6 +419,28 @@ See [Notification Routing](/features/alerts-notifications#notification-routing) 
 
 ---
 
+## Image update checks
+
+**Scope:** Per-node (applies to the currently selected node)
+
+<Frame>
+  <img src="/images/settings/settings-image-updates.png" alt="Image update checks section showing the scheduling mode selector and interval dropdown" />
+</Frame>
+
+Configure how often this node polls container registries to detect available image updates. The masthead publishes an **INTERVAL** pill showing the current check cadence. Each node checks on its own independent schedule.
+
+### Registry checks
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Scheduling mode** | Interval | **Interval**: check every fixed period. **Cron**: check on a precise cron schedule (runs in the node's local timezone). |
+| **Check interval** | 2 hours | How often to poll registries when in Interval mode. Presets: 15 min, 30 min, 1 h, 2 h, 6 h, 12 h, 24 h. Selecting a new preset saves immediately. |
+| **Cron expression** | - | A standard five-field cron expression (for example, `0 3 * * 1` for every Monday at 03:00). A human-readable description appears below the field as you type. Click **Save schedule** to apply. |
+
+The section footer shows the last-checked timestamp and when the next check is scheduled.
+
+---
+
 ## Webhooks
 
 <Note>
@@ -477,6 +513,64 @@ Click **Save settings** to apply.
 
 ---
 
+## Recovery
+
+<Note>
+  Recovery is admin-only and is not visible on remote nodes.
+</Note>
+
+**Scope:** Global, admin-only
+
+A read-only diagnostic panel and safe recovery tools for the control plane. It is the first place to look when the dashboard behaves unexpectedly.
+
+<Frame>
+  <img src="/images/settings/settings-recovery.png" alt="Recovery section showing the System health snapshot with database, encryption key, Docker, and administrator status" />
+</Frame>
+
+### System health
+
+A read-only snapshot of the control plane. It loads without Docker or live metrics, so it stays available when the dashboard does not. **Refresh** reloads the snapshot. **Export diagnostics** downloads the full report as a JSON file.
+
+| Field | Status indicators |
+|-------|------------------|
+| **Version** | Current Sencho version string |
+| **Database** | `Healthy` (green check) or `Problem detected` (red X) |
+| **Encryption key** | `Present` (green check), `Missing`, or `Invalid` (red X) |
+| **Docker** | `Reachable` (green check) or `Unreachable` (amber warning) |
+| **Administrators** | Count of admin accounts out of total users |
+| **Two-factor enrolled** | Count of users with an active second factor |
+| **SSO providers** | Each configured provider and whether it is enabled |
+
+### Environment (preflight)
+
+Checks what deployments depend on: the Docker engine, the Compose plugin, the compose directory and its host path mapping, TLS, and disk headroom. Each failed check includes a fix.
+
+### Safe actions
+
+| Action | Description |
+|--------|-------------|
+| **Reset interface preferences** | Clears density and editor display options from this browser's local storage and reloads the page. Use this if a display setting wedges the layout. |
+| **Recovery guide** | Opens the step-by-step recovery guide at docs.sencho.io. |
+
+### Command-line recovery
+
+When the UI is fully unreachable, run these from a shell on the host. Prefix each with `docker compose exec sencho`:
+
+| Command | What it does |
+|---------|-------------|
+| `node dist/cli/resetMfa.js <username>` | Clear a user's two-factor enrolment |
+| `node dist/cli/resetPassword.js <username> <new-password>` | Reset a local user's password |
+| `node dist/cli/createEmergencyAdmin.js <username> <password>` | Create a new admin account |
+| `node dist/cli/clearSessions.js` | Sign every user out |
+| `node dist/cli/disableSso.js [provider]` | Disable a broken SSO provider |
+| `node dist/cli/diagnostics.js` | Print the diagnostics report as JSON |
+| `node dist/cli/validateDb.js` | Check database and encryption-key integrity |
+| `node dist/cli/backupData.js [dir]` | Back up the data directory |
+
+**Download commands** saves a plain-text copy of the reference so it is on hand when the dashboard is unavailable.
+
+---
+
 ## App Store
 
 **Scope:** Per-node
@@ -525,6 +619,10 @@ If there are no unsaved changes the modal is skipped and the save proceeds immed
 ### Deploy Guardrails
 
 **Scope:** Per-node (saved on the active node, admin-only)
+
+<Frame>
+  <img src="/images/settings/settings-stacks-guardrails.png" alt="Stacks section showing the Deploy Guardrails subsection with health gate and env-var block controls" />
+</Frame>
 
 Node-level safety checks and post-deploy observation used during stack deploys and updates.
 
