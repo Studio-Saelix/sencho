@@ -396,8 +396,11 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       </PageMasthead>
 
       <Tabs value={activeTab} onValueChange={(v) => onTabChange(v as SecurityTab)}>
-        <TabsList className="mb-4">
-          <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+        {/* Standard full-width tab band (matches Fleet): the list's own pill band
+            is flattened so the tabs sit directly in this single band. */}
+        <div className="flex items-center gap-3 mb-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
+          <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
+            <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
             <TabsHighlightItem value="overview">
               <TabsTrigger value="overview"><LayoutDashboard className="w-4 h-4 mr-1.5" />Overview</TabsTrigger>
             </TabsHighlightItem>
@@ -424,7 +427,8 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               <TabsTrigger value="scanner"><Wrench className="w-4 h-4 mr-1.5" />Scanner setup</TabsTrigger>
             </TabsHighlightItem>
           </TabsHighlight>
-        </TabsList>
+          </TabsList>
+        </div>
         {tabPanels}
       </Tabs>
 

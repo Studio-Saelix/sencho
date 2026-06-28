@@ -13,6 +13,7 @@ import {
 } from '@/components/animate-ui/primitives/effects/highlight';
 import { getStrictContext } from '@/lib/get-strict-context';
 import { useControlledState } from '@/hooks/use-controlled-state';
+import { useReducedTransition } from '@/components/animate-ui/primitives/use-reduced-transition';
 import { useDataState } from '@/hooks/use-data-state';
 
 type DropdownMenuContextType = {
@@ -198,6 +199,7 @@ function DropdownMenuSubContent({
   ...props
 }: DropdownMenuSubContentProps) {
   const { isOpen } = useDropdownMenuSub();
+  const resolvedTransition = useReducedTransition(transition);
 
   return (
     <AnimatePresence>
@@ -226,7 +228,7 @@ function DropdownMenuSubContent({
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              transition={transition}
+              transition={resolvedTransition}
               style={{ willChange: 'opacity, transform', ...style }}
               {...props}
             />
@@ -295,6 +297,7 @@ function DropdownMenuContent({
   ...props
 }: DropdownMenuContentProps) {
   const { isOpen } = useDropdownMenu();
+  const resolvedTransition = useReducedTransition(transition);
 
   return (
     <AnimatePresence>
@@ -325,7 +328,7 @@ function DropdownMenuContent({
               initial={{ opacity: 0, scale: 0.95 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              transition={transition}
+              transition={resolvedTransition}
               style={{ willChange: 'opacity, transform', ...style }}
               {...props}
             />

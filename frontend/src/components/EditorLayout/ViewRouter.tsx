@@ -185,6 +185,7 @@ export function ViewRouter({
                     <LazyView>
                         <FleetView
                       onNavigateToNode={onFleetNavigateToNode}
+                      onOpenSettingsSection={onOpenSettingsSection}
                       fleetUpdatesIntent={fleetUpdatesIntent}
                       onFleetUpdatesIntentConsumed={onFleetUpdatesIntentConsumed}
                       fleetTab={fleetTab}

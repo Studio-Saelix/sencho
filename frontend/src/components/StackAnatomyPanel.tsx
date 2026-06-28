@@ -64,7 +64,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   return (
     <div className="grid grid-cols-[72px_1fr] gap-3 border-t border-muted py-2 first:border-t-0">
       <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle pt-0.5">{label}</span>
-      <div className="min-w-0 text-[12px] text-foreground/90">{children}</div>
+      <div className="min-w-0 text-xs text-foreground/90">{children}</div>
     </div>
   );
 }
@@ -359,18 +359,18 @@ export default function StackAnatomyPanel({
       <div className="flex items-center justify-between border-b border-muted px-3 py-1.5 gap-2">
         <ScrollableTabRow surface="card" wrapperClassName="min-w-0 flex-1">
           <TabsList className="h-7 w-max gap-0.5 bg-transparent border-none p-0">
-            <TabsTrigger value="anatomy" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
-            <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
-            <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
-            <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
+            <TabsTrigger value="anatomy" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
+            <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Activity</TabsTrigger>
+            <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Dossier</TabsTrigger>
+            <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Drift</TabsTrigger>
             {envInventoryEnabled && (
-              <TabsTrigger value="environment" data-testid="environment-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Environment</TabsTrigger>
+              <TabsTrigger value="environment" data-testid="environment-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Environment</TabsTrigger>
             )}
             {networkingEnabled && (
-              <TabsTrigger value="networking" data-testid="networking-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Networking</TabsTrigger>
+              <TabsTrigger value="networking" data-testid="networking-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Networking</TabsTrigger>
             )}
             {doctorEnabled && (
-              <TabsTrigger value="doctor" data-testid="doctor-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">
+              <TabsTrigger value="doctor" data-testid="doctor-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">
                 <span className="inline-flex items-center gap-1">
                   Doctor
                   {(preflightSeverity === 'blocker' || preflightSeverity === 'high') && !doctorDismissed && (
@@ -383,7 +383,7 @@ export default function StackAnatomyPanel({
               </TabsTrigger>
             )}
             {storageEnabled && (
-              <TabsTrigger value="storage" data-testid="storage-tab" className="h-6 px-2.5 font-mono text-[10px] uppercase tracking-[0.18em]">Storage</TabsTrigger>
+              <TabsTrigger value="storage" data-testid="storage-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Storage</TabsTrigger>
             )}
           </TabsList>
         </ScrollableTabRow>
@@ -417,7 +417,7 @@ export default function StackAnatomyPanel({
       <TabsContent value="anatomy" className="flex flex-col flex-1 min-h-0 mt-0">
       <div className="flex-1 min-h-0 overflow-y-auto px-3">
         {!anatomy ? (
-          <div className="py-3 font-mono text-[11px] text-stat-subtitle">Unable to parse compose.yaml.</div>
+          <div className="py-3 font-mono text-xs text-stat-subtitle">Unable to parse compose.yaml.</div>
         ) : (
           <>
             <Row label="services">
@@ -426,7 +426,7 @@ export default function StackAnatomyPanel({
               ) : (
                 <div className="flex flex-wrap gap-1">
                   {anatomy.services.map(s => (
-                    <span key={s} className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">
+                    <span key={s} className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-xs text-brand">
                       {s}
                     </span>
                   ))}
@@ -437,7 +437,7 @@ export default function StackAnatomyPanel({
               {Object.keys(anatomy.ports).length === 0 ? (
                 <span className="text-stat-subtitle">none</span>
               ) : (
-                <div className="flex flex-col gap-0.5 font-mono text-[11px]">
+                <div className="flex flex-col gap-0.5 font-mono text-xs">
                   {Object.entries(anatomy.ports).flatMap(([svc, rows]) =>
                     rows.map((r, i) => (
                       <div key={`${svc}-${i}`} className="flex items-center gap-1.5">
@@ -457,7 +457,7 @@ export default function StackAnatomyPanel({
               {Object.keys(anatomy.volumes).length === 0 ? (
                 <span className="text-stat-subtitle">none</span>
               ) : (
-                <div className="flex flex-col gap-0.5 font-mono text-[11px]">
+                <div className="flex flex-col gap-0.5 font-mono text-xs">
                   {Object.entries(anatomy.volumes).flatMap(([svc, rows]) =>
                     rows.map((r, i) => (
                       <div key={`${svc}-${i}`} className="flex items-center gap-1.5 min-w-0">
@@ -474,19 +474,19 @@ export default function StackAnatomyPanel({
               )}
             </Row>
             <Row label="restart">
-              <span className="font-mono text-[11px]">{anatomy.restart ?? <span className="text-stat-subtitle">default</span>}</span>
+              <span className="font-mono text-xs">{anatomy.restart ?? <span className="text-stat-subtitle">default</span>}</span>
             </Row>
             <Row label="env_file">
               {!firstEnvFile ? (
                 <span className="text-stat-subtitle">none</span>
               ) : (
                 <div className="flex flex-col gap-0.5">
-                  <div className="font-mono text-[11px]">
+                  <div className="font-mono text-xs">
                     <span className="text-foreground/90">{firstEnvFile}</span>
                     <span className="text-stat-subtitle"> · {envVarCount} var{envVarCount === 1 ? '' : 's'}</span>
                   </div>
                   {missingVars.length > 0 && (
-                    <div className="flex flex-wrap gap-1 font-mono text-[11px] text-destructive">
+                    <div className="flex flex-wrap gap-1 font-mono text-xs text-destructive">
                       {missingVars.map(v => (
                         <span key={v}>{'${'}{v}{'}'} missing</span>
                       ))}
@@ -496,14 +496,14 @@ export default function StackAnatomyPanel({
               )}
             </Row>
             <Row label="network">
-              <span className="font-mono text-[11px]">{networkName} <span className="text-stat-subtitle">· bridge</span></span>
+              <span className="font-mono text-xs">{networkName} <span className="text-stat-subtitle">· bridge</span></span>
             </Row>
             <Row label="source">
               <button
                 type="button"
                 onClick={onOpenGitSource}
                 aria-label="Git Source"
-                className="inline-flex items-center gap-1.5 font-mono text-[11px] text-left hover:text-brand transition-colors"
+                className="inline-flex items-center gap-1.5 font-mono text-xs text-left hover:text-brand transition-colors"
               >
                 <GitBranch className="h-3 w-3 shrink-0" strokeWidth={1.5} />
                 {activeGitSource ? (
@@ -522,7 +522,7 @@ export default function StackAnatomyPanel({
           <div data-testid="update-available-banner" className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
-                <div className="font-mono text-[11px] uppercase tracking-wide">
+                <div className="font-mono text-xs uppercase tracking-wide">
                   Update available
                   {updatePreview.summary.current_tag && updatePreview.summary.next_tag && (
                     <span className="text-foreground">
@@ -533,7 +533,7 @@ export default function StackAnatomyPanel({
                     </span>
                   )}
                 </div>
-                <div className="mt-1 font-mono text-[11px] text-foreground/80 leading-relaxed">
+                <div className="mt-1 font-mono text-xs text-foreground/80 leading-relaxed">
                   {[
                     bumpLabel,
                     bannerLeadIn,
@@ -562,7 +562,7 @@ export default function StackAnatomyPanel({
         )}
         {scanStatus && scanStatus.status && scanStatus.status !== 'ok' && (
           <div
-            className="mx-3 my-2 flex items-start gap-2 rounded-md border border-warning/40 bg-warning/[0.06] px-2 py-1.5 text-[11px] text-warning"
+            className="mx-3 my-2 flex items-start gap-2 rounded-md border border-warning/40 bg-warning/[0.06] px-2 py-1.5 text-xs text-warning"
             role="status"
             title={scanStatus.errorMessage ?? undefined}
           >

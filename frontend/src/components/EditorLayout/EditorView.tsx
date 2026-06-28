@@ -324,6 +324,15 @@ export function EditorView(props: EditorViewProps) {
         if (!editingCompose || activeTab !== 'files') setFilesFullscreen(false);
     }, [editingCompose, activeTab]);
 
+    // Expand the logs by collapsing the Command Center card so the logs pane
+    // fills the left column. Toggled from the structured log viewer header.
+    const [logsExpanded, setLogsExpanded] = useState(false);
+    // The expand control lives only in the structured viewer; reset when the
+    // raw terminal is selected so the Command Center can't be stranded hidden.
+    useEffect(() => {
+        if (logsMode === 'raw') setLogsExpanded(false);
+    }, [logsMode]);
+
     // Below md, render the segmented full-screen mobile detail instead of the
     // desktop two-pane grid. All hooks above run unconditionally before this
     // branch so hook order stays stable across breakpoints.
@@ -339,7 +348,9 @@ export function EditorView(props: EditorViewProps) {
                     files fullscreen so the editor card fills the width. */}
                 {!filesFullscreen && (
                 <div className="flex flex-col gap-6 min-h-0">
-                    {/* Command Center Card (identity + health strip) */}
+                    {/* Command Center Card (identity + health strip). Hidden when
+                        the logs are expanded so the logs pane fills the column. */}
+                    {!logsExpanded && (
                     <Card className="rounded-xl border-muted bg-card shrink-0">
                         <CardHeader className="p-4 pb-2">
                             <div className="flex items-start justify-between gap-3">
@@ -404,9 +415,16 @@ export function EditorView(props: EditorViewProps) {
                             />
                         </CardContent>
                     </Card>
+                    )}
 
                     {/* Logs Section (fills remaining left-column height) */}
-                    <StackLogsSection stackName={stackName} logsMode={logsMode} setLogsMode={setLogsMode} />
+                    <StackLogsSection
+                        stackName={stackName}
+                        logsMode={logsMode}
+                        setLogsMode={setLogsMode}
+                        logsExpanded={logsExpanded}
+                        onToggleLogsExpand={() => setLogsExpanded((v) => !v)}
+                    />
                 </div>
                 )}
 

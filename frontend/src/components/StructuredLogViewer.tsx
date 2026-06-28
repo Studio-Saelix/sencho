@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from './ui/button';
-import { Download, RefreshCw } from 'lucide-react';
+import { Download, RefreshCw, Maximize2, Minimize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useLogChipColorMode } from '@/hooks/use-log-chip-color-mode';
 import { hashLabel } from '@/lib/label-colors';
 
 interface StructuredLogViewerProps {
   stackName: string;
+  /** When set, renders an expand/collapse control next to the download button. */
+  expanded?: boolean;
+  onToggleExpand?: () => void;
 }
 
 type LogLevel = 'info' | 'warn' | 'err';
@@ -65,7 +68,7 @@ function formatTs(iso: string | null): string {
   return `${hh}:${mm}:${ss}`;
 }
 
-export default function StructuredLogViewer({ stackName }: StructuredLogViewerProps) {
+export default function StructuredLogViewer({ stackName, expanded, onToggleExpand }: StructuredLogViewerProps) {
   const [rows, setRows] = useState<LogRow[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
   const [following, setFollowing] = useState(true);
@@ -281,6 +284,21 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
             </button>
           ))}
           <div className="mx-1 h-4 w-px bg-muted" />
+          {onToggleExpand && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-7 w-7 p-0"
+              onClick={onToggleExpand}
+              aria-label={expanded ? 'Collapse logs' : 'Expand logs'}
+              title={expanded ? 'Collapse logs' : 'Expand logs'}
+            >
+              {expanded
+                ? <Minimize2 className="h-3.5 w-3.5" strokeWidth={1.5} />
+                : <Maximize2 className="h-3.5 w-3.5" strokeWidth={1.5} />}
+            </Button>
+          )}
           <Button type="button" size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={downloadLogs} aria-label="Download logs">
             <Download className="h-3.5 w-3.5" strokeWidth={1.5} />
           </Button>
@@ -289,7 +307,7 @@ export default function StructuredLogViewer({ stackName }: StructuredLogViewerPr
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="flex-1 min-h-0 overflow-y-auto font-mono text-[11px] leading-[1.5]"
+        className="flex-1 min-h-0 overflow-y-auto font-mono text-xs leading-[1.5]"
       >
         {filtered.length === 0 ? (
           <div className="px-3 py-2 text-stat-subtitle">Waiting for log output…</div>
