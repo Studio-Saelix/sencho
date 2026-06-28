@@ -52,7 +52,7 @@ Opening a stack gives you the day-to-day workspace:
 - Running stacks expose **Restart**, **Stop**, and **Update**; stopped stacks expose **Start** and **Update**. The overflow menu holds less frequent actions such as rollback, config scan, and delete.
 - Container rows show health, uptime, published ports, live CPU and memory, network activity, logs, and service actions.
 - The logs panel can run in **Structured** mode or **Raw terminal** mode.
-- The right panel switches between **Anatomy** and **Activity**, with **Files** and **Edit** controls for browsing stack files and editing compose or env content.
+- The right panel provides tabs for **Anatomy**, **Activity**, **Dossier**, **Drift**, **Environment**, **Networking**, **Doctor**, and **Storage**, with **Files** and **Edit** controls for browsing stack files and editing compose or env content.
 
 ## Fleet operations
 
@@ -83,10 +83,10 @@ The **Logs** view aggregates logs across stacks on the active node. It includes 
 The **Security** view is a node-scoped review surface for the container images on the active node. The masthead reports the overall posture, how many images have been scanned, and whether the scanner is installed.
 
 <Frame>
-  <img src="/images/introduction/security-overview.png" alt="Sencho Security view with the posture masthead, severity trend and distribution charts, top-image and findings breakdowns, and the tab strip" />
+  <img src="/images/introduction/security-overview.png" alt="Sencho Security view with the posture masthead, action summary, review queue, risk trend chart, and the tab strip" />
 </Frame>
 
-Tabs cover the **Overview** charts, per-image findings under **Images**, **Compose risks** read from your Compose files, embedded **Secrets** detection, deploy-blocking **Policies**, **Suppressions** for findings you have accepted, scan **History**, and **Scanner setup**. Scanning is powered by Trivy and installs from **Scanner setup** in one step. Policies require Admiral. See [Vulnerability Scanning](/features/vulnerability-scanning) for the full workflow.
+Tabs cover the **Overview** charts, per-image findings under **Images**, **Compose risks** read from your Compose files, embedded **Secrets** detection, deploy-blocking **Policies**, **Suppressions** for findings you have accepted, scan **History**, and **Scanner setup**. Scanning is powered by Trivy and installs from **Scanner setup** in one step. See [Vulnerability Scanning](/features/vulnerability-scanning) for the full workflow.
 
 ## Settings
 
