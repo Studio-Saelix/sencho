@@ -1070,6 +1070,9 @@ fleetRouter.get('/update-status/release-notes', authMiddleware, async (req: Requ
     const forceRefresh = req.query.recheck === 'true';
     const release = await getLatestRelease(forceRefresh);
     res.json({
+      // Bind the notes to the release they belong to so the frontend can tell
+      // when the advertised latest version has moved past the loaded notes.
+      version: release ? release.tag_name.replace(/^v/, '') : null,
       releaseNotes: release?.body ?? null,
       htmlUrl: release?.html_url ?? null,
     });

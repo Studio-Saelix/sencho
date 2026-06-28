@@ -276,3 +276,35 @@ describe('forced-recheck throttle', () => {
     expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)).toBeUndefined();
   });
 });
+
+describe('GET /api/fleet/update-status/release-notes', () => {
+  // Each case uses ?recheck=true so getLatestRelease force-invalidates the cache
+  // and fetches fresh, keeping the assertion independent of prior cache state.
+  it('binds the returned notes to the release version (normalized tag_name)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({
+        tag_name: 'v0.93.0',
+        body: '## Notes for 0.93.0',
+        html_url: 'https://github.com/studio-saelix/sencho/releases/tag/v0.93.0',
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+    const res = await request(app)
+      .get('/api/fleet/update-status/release-notes?recheck=true')
+      .set('Authorization', adminAuth);
+    expect(res.status).toBe(200);
+    expect(res.body.version).toBe('0.93.0');
+    expect(res.body.releaseNotes).toBe('## Notes for 0.93.0');
+    expect(res.body.htmlUrl).toContain('v0.93.0');
+  });
+
+  it('returns null fields when the upstream release lookup fails', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 500 }));
+    const res = await request(app)
+      .get('/api/fleet/update-status/release-notes?recheck=true')
+      .set('Authorization', adminAuth);
+    expect(res.status).toBe(200);
+    expect(res.body.version).toBeNull();
+    expect(res.body.releaseNotes).toBeNull();
+    expect(res.body.htmlUrl).toBeNull();
+  });
+});

@@ -44,43 +44,58 @@ export function NodeUpdatesSheet({
     const [skipLoading, setSkipLoading] = useState<number | null>(null);
     const [releaseNotes, setReleaseNotes] = useState<string | null>(null);
     const [releaseHtmlUrl, setReleaseHtmlUrl] = useState<string | null>(null);
+    const [releaseVersion, setReleaseVersion] = useState<string | null>(null);
     const [loadingRelease, setLoadingRelease] = useState(false);
-    // Tracks whether a release-notes fetch has settled (success or failure), so a
-    // null result lands on the empty state instead of re-triggering the effect.
-    const [releaseLoaded, setReleaseLoaded] = useState(false);
+    // The advertised latest version the loaded notes were fetched against, or
+    // `undefined` before the first settle (so a null/unknown advertised version
+    // still triggers the initial fetch). When it no longer matches the advertised
+    // latest, the notes are refetched so the changelog never shows a previous
+    // version's notes; settling on any result (including null) records the version
+    // so a failed fetch lands on the empty state instead of looping.
+    const [loadedForVersion, setLoadedForVersion] = useState<string | null | undefined>(undefined);
     const [hasSeenChangelog, setHasSeenChangelog] = useState(false);
+
+    // The version the Fleet currently advertises as latest (gateway-derived, same
+    // as the footer's "Latest version" label). Notes are keyed to this so they
+    // stay in sync.
+    const advertisedLatest = (updateStatuses.find(s => s.type === 'local') ?? updateStatuses[0])?.latestVersion ?? null;
 
     useEffect(() => {
         if (open) setActiveTab(initialTab);
     }, [open, initialTab]);
 
-    // Always fetch release notes when the sheet opens (changelog shows current
-    // release regardless of update availability). Pass recheck when the user
+    // Fetch release notes when the sheet opens (changelog shows the current
+    // release regardless of update availability), and refetch whenever the
+    // advertised latest version changes so reopening after a newer release
+    // surfaces its notes, never a previous version's. Pass recheck when the user
     // forced a version recheck so the changelog stays in sync.
     useEffect(() => {
-        if (open && !releaseLoaded && !loadingRelease) {
-            setLoadingRelease(true);
-            const recheck = recheckingUpdates ? '?recheck=true' : '';
-            apiFetch(`/fleet/update-status/release-notes${recheck}`, { localOnly: true })
-                .then(res => res.ok ? res.json() as Promise<{ releaseNotes: string | null; htmlUrl: string | null }> : null)
-                .then(data => {
-                    if (data) {
-                        setReleaseNotes(data.releaseNotes);
-                        setReleaseHtmlUrl(data.htmlUrl);
-                    }
-                })
-                .catch((err) => {
-                    // Informational panel: a failure falls through to the empty
-                    // state (with an online changelog link) rather than a toast,
-                    // but leave a breadcrumb so the failure is diagnosable.
-                    console.warn('[Fleet] Release-notes fetch failed:', err);
-                })
-                .finally(() => {
-                    setLoadingRelease(false);
-                    setReleaseLoaded(true);
-                });
-        }
-    }, [open, releaseLoaded, loadingRelease, recheckingUpdates]);
+        if (!open || loadingRelease) return;
+        if (loadedForVersion === advertisedLatest) return;
+        setLoadingRelease(true);
+        const recheck = recheckingUpdates ? '?recheck=true' : '';
+        apiFetch(`/fleet/update-status/release-notes${recheck}`, { localOnly: true })
+            .then(res => res.ok ? res.json() as Promise<{ version: string | null; releaseNotes: string | null; htmlUrl: string | null }> : null)
+            .then(data => {
+                if (data) {
+                    setReleaseNotes(data.releaseNotes);
+                    setReleaseHtmlUrl(data.htmlUrl);
+                    setReleaseVersion(data.version);
+                }
+            })
+            .catch((err) => {
+                // Informational panel: a failure falls through to the empty
+                // state (with an online changelog link) rather than a toast,
+                // but leave a breadcrumb so the failure is diagnosable.
+                console.warn('[Fleet] Release-notes fetch failed:', err);
+            })
+            .finally(() => {
+                setLoadingRelease(false);
+                // Record the advertised version this fetch settled for, so a null
+                // result does not loop and a later version change forces a refetch.
+                setLoadedForVersion(advertisedLatest);
+            });
+    }, [open, advertisedLatest, loadedForVersion, loadingRelease, recheckingUpdates]);
 
     // Clear the changelog dot when user opens that tab.
     useEffect(() => {
@@ -100,10 +115,12 @@ export function NodeUpdatesSheet({
 
     const handleRecheck = async () => {
         setRecheckingUpdates(true);
-        // Force a fresh release-notes fetch with the rechecked version.
+        // Force a fresh release-notes fetch with the rechecked version: clearing
+        // loadedForVersion makes the effect's version guard miss and refetch.
         setReleaseNotes(null);
         setReleaseHtmlUrl(null);
-        setReleaseLoaded(false);
+        setReleaseVersion(null);
+        setLoadedForVersion(undefined);
         try {
             const res = await apiFetch('/fleet/update-status?recheck=true', { method: 'DELETE', localOnly: true });
             if (res.ok) {
@@ -270,6 +287,11 @@ export function NodeUpdatesSheet({
                         </div>
                     ) : releaseNotes ? (
                         <div className="space-y-4">
+                            {releaseVersion && (
+                                <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-stat-subtitle">
+                                    Release {formatVersion(releaseVersion)}
+                                </div>
+                            )}
                             <MarkdownContent>{releaseNotes}</MarkdownContent>
                             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-card-border/40 pt-3">
                                 {releaseHtmlUrl && (
