@@ -7,6 +7,8 @@ import { useIsMobile } from '@/hooks/use-is-mobile';
 import { SecuritySevStrip, SecurityTotalsGrid, SecurityFooterBand } from './SecurityMobile';
 import type { SecurityOverview, SecurityRiskTrendPoint, ExploitIntelFinding, PostureReason } from '@/types/security';
 import type { SecurityTab } from '@/lib/events';
+import type { ImageFilterValue } from '@/lib/severityStyles';
+import { reasonImageFilter } from './postureNavigation';
 import {
   RiskTrendChart,
   ActionPostureChart,
@@ -14,6 +16,9 @@ import {
   CvssEpssQuadrantChart,
 } from './SecurityCharts';
 import { ScanNodeLauncher } from './ScanNodeLauncher';
+
+/** Navigate to a security tab, optionally preselecting an Images filter. */
+type NavigateFn = (tab: SecurityTab, filter?: ImageFilterValue) => void;
 
 interface OverviewTabProps {
   overview: SecurityOverview | null;
@@ -24,7 +29,7 @@ interface OverviewTabProps {
   exploitIntel: ExploitIntelFinding[];
   /** True when the exploit-intel set hit its row cap (highest-risk shown, not all). */
   exploitTruncated: boolean;
-  onNavigate: (tab: SecurityTab) => void;
+  onNavigate: NavigateFn;
   onInspect: (scanId: number) => void;
   /** Admin on a node with a ready scanner; enables the node-scan launcher. */
   canScan: boolean;
@@ -76,7 +81,7 @@ function ReviewQueueCard({
   onNavigate,
 }: {
   reasons: PostureReason[];
-  onNavigate: (tab: SecurityTab) => void;
+  onNavigate: NavigateFn;
 }) {
   const blockers = reasons.filter((r) => r.severity === 'blocker');
   const nonBlockers = reasons.filter((r) => r.severity !== 'blocker');
@@ -96,7 +101,7 @@ function ReviewQueueCard({
                 <span className="font-mono tabular-nums text-xs text-stat-subtitle">{r.count}</span>
                 <button
                   type="button"
-                  onClick={() => onNavigate(r.targetTab)}
+                  onClick={() => onNavigate(r.targetTab, reasonImageFilter(r.kind))}
                   className="text-xs font-medium text-brand hover:underline whitespace-nowrap ml-auto"
                 >
                   Open {r.targetTab === 'compose' ? 'Compose risks' : r.targetTab === 'suppressions' ? 'Suppressions' : r.targetTab === 'secrets' ? 'Secrets' : r.targetTab === 'history' ? 'History' : r.targetTab === 'scanner' ? 'Scanner setup' : 'Images'} →
@@ -164,11 +169,26 @@ export function OverviewTab({ overview, loadError, trend, exploitIntel, exploitT
 
   const tiles: SignalTile[] = [
     { kicker: 'Scanned images', value: String(overview.scannedImages) },
-    { kicker: 'Fixable', value: String(overview.fixable), tone: overview.fixable > 0 ? 'warn' : 'value' },
-    { kicker: 'Secrets', value: String(overview.secrets), tone: overview.secrets > 0 ? 'error' : 'value' },
-    { kicker: 'Misconfigs', value: String(overview.misconfigs), tone: overview.misconfigs > 0 ? 'warn' : 'value' },
-    { kicker: 'Stale', value: String(overview.staleScans), tone: overview.staleScans > 0 ? 'warn' : 'value' },
-    { kicker: 'Failed', value: String(overview.failedScans), tone: overview.failedScans > 0 ? 'error' : 'value' },
+    {
+      kicker: 'Fixable', value: String(overview.fixable), tone: overview.fixable > 0 ? 'warn' : 'value',
+      onClick: overview.fixable > 0 ? () => onNavigate('images', 'FIXABLE') : undefined,
+    },
+    {
+      kicker: 'Secrets', value: String(overview.secrets), tone: overview.secrets > 0 ? 'error' : 'value',
+      onClick: overview.secrets > 0 ? () => onNavigate('secrets') : undefined,
+    },
+    {
+      kicker: 'Misconfigs', value: String(overview.misconfigs), tone: overview.misconfigs > 0 ? 'warn' : 'value',
+      onClick: overview.misconfigs > 0 ? () => onNavigate('compose') : undefined,
+    },
+    {
+      kicker: 'Stale', value: String(overview.staleScans), tone: overview.staleScans > 0 ? 'warn' : 'value',
+      onClick: overview.staleScans > 0 ? () => onNavigate('history') : undefined,
+    },
+    {
+      kicker: 'Failed', value: String(overview.failedScans), tone: overview.failedScans > 0 ? 'error' : 'value',
+      onClick: overview.failedScans > 0 ? () => onNavigate('history') : undefined,
+    },
   ];
 
   const scannerValue = overview.scanner.available

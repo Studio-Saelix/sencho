@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Boxes, AlertTriangle, Search, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, ShieldCheck, Loader2 } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
@@ -52,8 +52,9 @@ function SortHead({ label, k, sortKey, sortDir, onSort, className }: {
   );
 }
 
-const FILTER_OPTIONS: Array<{ value: 'all' | SeverityKey; label: string }> = [
+const FILTER_OPTIONS: Array<{ value: ImageFilterValue; label: string }> = [
   { value: 'all', label: 'All severities' },
+  { value: 'FIXABLE', label: 'Fixable' },
   { value: 'CRITICAL', label: 'Critical' },
   { value: 'HIGH', label: 'High' },
   { value: 'MEDIUM', label: 'Medium' },
@@ -75,16 +76,25 @@ interface ImagesTabProps {
   /** image_ref of the scan currently in flight, for the per-row spinner. */
   scanningRef: string | null;
   onScan: (imageRef: string, scanners: ScannerKind[]) => void;
+  /** Preselects the severity/fixable filter, e.g. when arriving from an
+   *  overview "fixable findings" link. Applied whenever the value changes. */
+  initialFilter?: ImageFilterValue;
 }
 
 /** Latest-scan index for real images (stack/config scans live in Compose risks). */
-export function ImagesTab({ summaries, loading, error, onInspect, canScan, scanningRef, onScan }: ImagesTabProps) {
+export function ImagesTab({ summaries, loading, error, onInspect, canScan, scanningRef, onScan, initialFilter }: ImagesTabProps) {
   const isMobile = useIsMobile();
   const [search, setSearch] = useState('');
-  const [severity, setSeverity] = useState<ImageFilterValue>('all');
+  const [severity, setSeverity] = useState<ImageFilterValue>(initialFilter ?? 'all');
   const [sortKey, setSortKey] = useState<SortKey>('scanned_at');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [page, setPage] = useState(0);
+
+  // Apply an externally-driven filter (e.g. an overview "fixable" deep link).
+  // Keyed on the incoming value so re-navigating to the same filter re-applies.
+  useEffect(() => {
+    if (initialFilter) { setSeverity(initialFilter); setPage(0); }
+  }, [initialFilter]);
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -198,7 +208,7 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
           options={FILTER_OPTIONS}
           value={severity}
           onValueChange={(v) => { setSeverity((v || 'all') as ImageFilterValue); setPage(0); }}
-          className="w-[180px]"
+          className="w-[200px]"
         />
       </div>
 

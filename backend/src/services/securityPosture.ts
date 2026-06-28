@@ -60,6 +60,9 @@ export interface PostureReason {
 export interface PostureAction {
   label: string;
   targetTab: SecurityPostureTargetTab;
+  /** The reason kind that produced this action, so the UI can target the
+   *  affected items precisely (e.g. filter Images to fixable findings). */
+  kind: PostureReasonKind;
 }
 
 export interface SecurityPostureFacts {
@@ -123,7 +126,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       targetTab: 'images',
     };
     reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Update affected images', targetTab: 'images' };
+    if (!primaryAction) primaryAction = { label: 'Update affected images', targetTab: r.targetTab, kind: r.kind };
   }
 
   if (f.knownExploited > 0) {
@@ -136,7 +139,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       targetTab: 'images',
     };
     reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review exploited findings', targetTab: 'images' };
+    if (!primaryAction) primaryAction = { label: 'Review exploited findings', targetTab: r.targetTab, kind: r.kind };
   }
 
   if (f.secrets > 0) {
@@ -149,7 +152,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       targetTab: 'secrets',
     };
     reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review detected secrets', targetTab: 'secrets' };
+    if (!primaryAction) primaryAction = { label: 'Review detected secrets', targetTab: r.targetTab, kind: r.kind };
   }
 
   if (f.dangerousCompose > 0) {
@@ -162,7 +165,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       targetTab: 'compose',
     };
     reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review Compose risks', targetTab: 'compose' };
+    if (!primaryAction) primaryAction = { label: 'Review Compose risks', targetTab: r.targetTab, kind: r.kind };
   }
 
   if (f.exposedBlocker > 0) {
@@ -175,7 +178,7 @@ export function derivePostureReasons(f: SecurityPostureFacts): {
       targetTab: 'images',
     };
     reasons.push(r);
-    if (!primaryAction) primaryAction = { label: 'Review public exposure', targetTab: 'images' };
+    if (!primaryAction) primaryAction = { label: 'Review public exposure', targetTab: r.targetTab, kind: r.kind };
   }
 
   // Review items. These appear in-page but do not force a red masthead.

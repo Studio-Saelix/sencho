@@ -263,6 +263,9 @@ export interface PostureReason {
 export interface PostureAction {
   label: string;
   targetTab: SecurityTab;
+  /** The reason kind behind this action, so the UI can target the affected
+   *  items precisely (e.g. filter Images to fixable findings). */
+  kind: PostureReasonKind;
 }
 
 /** Node-scoped security posture rollup for the Security page Overview. */

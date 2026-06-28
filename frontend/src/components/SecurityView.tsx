@@ -17,11 +17,13 @@ import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, type Tone } from './mobile/mobile-ui';
 import { SecurityMobileTabs, type SecurityMobileTab } from './security/SecurityMobile';
 import type { SecurityTab } from '@/lib/events';
+import type { ImageFilterValue } from '@/lib/severityStyles';
 import type { SecurityOverview, ScanSummary, ScanDetailTab, SecurityRiskTrendPoint, ExploitIntelFinding, FleetRole } from '@/types/security';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SuppressionsPanel } from './settings/SuppressionsPanel';
 import { MisconfigAckPanel } from './settings/MisconfigAckPanel';
 import { OverviewTab } from './security/OverviewTab';
+import { reasonImageFilter } from './security/postureNavigation';
 import { ImagesTab } from './security/ImagesTab';
 import { FindingsTab } from './security/FindingsTab';
 import { ScanPolicyManager } from './security/ScanPolicyManager';
@@ -85,6 +87,16 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
   const [inspectScanId, setInspectScanId] = useState<number | null>(null);
   const [inspectInitialTab, setInspectInitialTab] = useState<ScanDetailTab | undefined>(undefined);
+  // Filter to preselect on the Images tab when arriving from an overview link
+  // (e.g. "fixable findings"). Null leaves the Images tab on its own default.
+  const [imagesFilter, setImagesFilter] = useState<ImageFilterValue | null>(null);
+
+  // Navigate between security tabs, optionally preselecting an Images filter so
+  // an overview action link lands on exactly the affected images.
+  const handleNavigate = useCallback((tab: SecurityTab, filter?: ImageFilterValue) => {
+    if (tab === 'images' && filter) setImagesFilter(filter);
+    onTabChange(tab);
+  }, [onTabChange]);
 
   const onInspect = useCallback((scanId: number, initialTab?: ScanDetailTab) => {
     setInspectInitialTab(initialTab);
@@ -254,7 +266,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
             trend={trend}
             exploitIntel={exploitIntel}
             exploitTruncated={exploitTruncated}
-            onNavigate={onTabChange}
+            onNavigate={handleNavigate}
             onInspect={onInspect}
             canScan={canScan}
             onScanComplete={() => setReloadToken((t) => t + 1)}
@@ -272,6 +284,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               canScan={canScan}
               scanningRef={scanningRef}
               onScan={scanImage}
+              initialFilter={imagesFilter ?? undefined}
             />
           </CapabilityGate>
         </TabsContent>
@@ -382,7 +395,10 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         {overview?.posture === 'Action needed' && overview.primaryAction ? (
           <button
             type="button"
-            onClick={() => onTabChange(overview.primaryAction!.targetTab)}
+            onClick={() => handleNavigate(
+              overview.primaryAction!.targetTab,
+              reasonImageFilter(overview.primaryAction!.kind),
+            )}
             className="text-xs font-medium text-brand hover:underline whitespace-nowrap"
           >
             {overview.primaryAction.label} →

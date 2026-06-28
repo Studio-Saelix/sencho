@@ -348,7 +348,9 @@ export function CvssEpssQuadrantChart({ items }: { items: ExploitIntelFinding[] 
           <ZAxis range={[40, 40]} />
           <ReferenceLine x={10} stroke="var(--border)" strokeDasharray="4 4" />
           <ReferenceLine y={7} stroke="var(--border)" strokeDasharray="4 4" />
-          <Tooltip cursor={{ strokeDasharray: '3 3' }} content={<QuadrantTooltip />} />
+          {/* cursor=false: the default scatter cursor is a full-plot rectangle
+              that reads as selecting the whole chart. Points still hover/tooltip. */}
+          <Tooltip cursor={false} content={<QuadrantTooltip />} />
           <Scatter data={otherPoints} fill="var(--sev-high)" fillOpacity={0.7} />
           <Scatter data={kevPoints} fill="var(--sev-critical)" fillOpacity={0.9} />
         </ScatterChart>
