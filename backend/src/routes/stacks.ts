@@ -1102,6 +1102,7 @@ stacksRouter.get('/:stackName/containers', async (req: Request, res: Response) =
     res.status(400).json({ error: 'Invalid stack name' });
     return;
   }
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   try {
     const dockerController = DockerController.getInstance(req.nodeId);
     const containers = await dockerController.getContainersByStack(stackName);

@@ -51,6 +51,48 @@ export function failAllAssign(stackNames: string[], error: string): LabelAssignR
   return Array.from(new Set(stackNames)).map(stackName => ({ stackName, success: false, error }));
 }
 
+function isLabelAssignResult(value: unknown): value is LabelAssignResult {
+  if (typeof value !== 'object' || value === null) return false;
+  const r = value as Record<string, unknown>;
+  return typeof r.stackName === 'string'
+    && typeof r.success === 'boolean'
+    && (r.error === undefined || typeof r.error === 'string');
+}
+
+/**
+ * Validate a remote node's `local-assign` 200 body before the control trusts it.
+ *
+ * Beyond the `{ created: boolean, results: LabelAssignResult[] }` shape, this
+ * checks result *membership*: the receiver returns exactly one row per unique
+ * requested stack, so a body that drops rows (an empty `results` for a non-empty
+ * request), duplicates a stack, or returns a stack that was never requested is a
+ * remote contract failure, not a clean assign. Without this, an empty `results`
+ * passes the bare `Array.isArray` check and the control reports the node as a
+ * successful zero-stack assign, which the UI then renders as success.
+ *
+ * `requestedStacks` is the per-node target list the control sent; it is deduped
+ * here so the caller does not have to.
+ */
+export function validateRemoteAssignResults(
+  requestedStacks: string[],
+  body: unknown,
+): { ok: true; created: boolean; results: LabelAssignResult[] } | { ok: false } {
+  if (!body || typeof body !== 'object') return { ok: false };
+  const b = body as Record<string, unknown>;
+  if (typeof b.created !== 'boolean' || !Array.isArray(b.results)) return { ok: false };
+  const requested = new Set(requestedStacks);
+  const seen = new Set<string>();
+  const results: LabelAssignResult[] = [];
+  for (const row of b.results) {
+    if (!isLabelAssignResult(row)) return { ok: false };
+    if (!requested.has(row.stackName) || seen.has(row.stackName)) return { ok: false };
+    seen.add(row.stackName);
+    results.push(row);
+  }
+  if (seen.size !== requested.size) return { ok: false };
+  return { ok: true, created: b.created, results };
+}
+
 /**
  * Validate a label template (the name/color a cross-node assign propagates).
  * Mirrors the create-label rules in `routes/labels.ts` and is the single

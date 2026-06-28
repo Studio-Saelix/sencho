@@ -230,7 +230,9 @@ it('gates Stop fleet on a resolved preview, carries the node/stack list into the
 
   await waitFor(() => {
     const stopCall = mockedFetch.mock.calls.find(c => c[0] === '/fleet/labels/fleet-stop');
-    expect(JSON.parse(stopCall![1].body)).toEqual({ labelName: 'prod', dryRun: false });
+    // The real stop binds execution to the nodes resolved in the preview: it
+    // carries their ids so a node that was unreachable then cannot be added later.
+    expect(JSON.parse(stopCall![1].body)).toEqual({ labelName: 'prod', dryRun: false, nodeIds: [1] });
   });
   // Per-node results render in the card (the "· 1 stack" label is unique to the
   // results list, distinguishing it from the preview well).

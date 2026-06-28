@@ -640,6 +640,54 @@ describe('bulk-assign orchestrator: remote fan-out', () => {
     expect(row.error).toMatch(/malformed/);
     expect(row.stackResults).toEqual([{ stackName: 'r1', success: false, error: 'Remote returned a malformed response' }]);
   });
+
+  it('fails a node whose 200 body returns an empty results array for a non-empty request', async () => {
+    const remoteId = addRemote('assign-remote-empty');
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok' });
+    // A well-shaped { created, results } body whose results are empty used to
+    // pass the bare Array.isArray check and read as a successful zero-stack
+    // assign. Membership validation must fail the node instead.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ created: true, results: [] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+
+    const res = await request(app)
+      .post('/api/fleet/labels/bulk-assign')
+      .set('Authorization', authHeader)
+      .send({ label: { name: 'media', color: 'teal' }, targets: [{ nodeId: remoteId, stackNames: ['r1'] }] });
+
+    expect(res.status).toBe(200);
+    const row = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+    expect(row.reachable).toBe(false);
+    expect(row.error).toMatch(/malformed/);
+    expect(row.stackResults).toEqual([{ stackName: 'r1', success: false, error: 'Remote returned a malformed response' }]);
+  });
+
+  it('fails a node whose results omit one of the requested stacks', async () => {
+    const remoteId = addRemote('assign-remote-partial');
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockReturnValue({ apiUrl: 'https://remote.example.com:1852', apiToken: 'remote-tok' });
+    // Two stacks requested, only one row returned: a partial body the control
+    // must not accept as a clean assign of the covered stack alone.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ created: true, results: [{ stackName: 'r1', success: true }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+
+    const res = await request(app)
+      .post('/api/fleet/labels/bulk-assign')
+      .set('Authorization', authHeader)
+      .send({ label: { name: 'media', color: 'teal' }, targets: [{ nodeId: remoteId, stackNames: ['r1', 'r2'] }] });
+
+    expect(res.status).toBe(200);
+    const row = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+    expect(row.reachable).toBe(false);
+    expect(row.error).toMatch(/malformed/);
+    expect(row.stackResults).toEqual([
+      { stackName: 'r1', success: false, error: 'Remote returned a malformed response' },
+      { stackName: 'r2', success: false, error: 'Remote returned a malformed response' },
+    ]);
+  });
 });
 
 describe('fleet-stop degrades the local leg per-node instead of failing the whole fan-out', () => {

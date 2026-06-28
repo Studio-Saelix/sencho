@@ -36,7 +36,7 @@ type PreviewState =
 // One node and the stacks the resolved blast radius would stop on it. The
 // destructive Stop stays disabled until this is known, so the operator always
 // confirms against a concrete node/stack list rather than a label name alone.
-interface ResolvedTarget { nodeName: string; stackNames: string[] }
+interface ResolvedTarget { nodeId: number; nodeName: string; stackNames: string[] }
 
 const KICKER = 'font-mono text-[10px] uppercase tracking-[0.18em]';
 const PREVIEW_ROW_LIMIT = 6;
@@ -190,7 +190,7 @@ export function LabelFleetStopCard() {
 
   const blastTone = preview.kind === 'loading' || preview.kind === 'unavailable' ? 'muted' as const : undefined;
 
-  async function run(opts: { dryRun: boolean }) {
+  async function run(opts: { dryRun: boolean; nodeIds?: number[] }) {
     const trimmed = labelName.trim();
     if (!trimmed) return;
     const verb = opts.dryRun ? 'Dry-running' : 'Stopping';
@@ -198,9 +198,12 @@ export function LabelFleetStopCard() {
     setRunning(true);
     setResults([]);
     try {
+      // The real stop carries the node ids the operator confirmed in the preview
+      // so execution cannot expand to a node that was unreachable then and has
+      // since reconnected. The dry run sends no allowlist and scans the fleet.
       const res = await apiFetch('/fleet/labels/fleet-stop', {
         method: 'POST',
-        body: JSON.stringify({ labelName: trimmed, dryRun: opts.dryRun }),
+        body: JSON.stringify({ labelName: trimmed, dryRun: opts.dryRun, ...(opts.nodeIds ? { nodeIds: opts.nodeIds } : {}) }),
       });
       const body = await res.json().catch(() => ({}));
       toast.dismiss(toastId);
@@ -251,7 +254,7 @@ export function LabelFleetStopCard() {
         // against it even when the live preview endpoint is down.
         const targets = apiResults
           .filter(n => n.reachable && n.matched && Array.isArray(n.stackResults) && n.stackResults.length > 0)
-          .map(n => ({ nodeName: n.nodeName, stackNames: n.stackResults.map(s => s.stackName) }));
+          .map(n => ({ nodeId: n.nodeId, nodeName: n.nodeName, stackNames: n.stackResults.map(s => s.stackName) }));
         setDryRunResolved({ label: trimmed, targets });
       }
       const reachable = apiResults.filter(n => n.reachable);
@@ -288,7 +291,7 @@ export function LabelFleetStopCard() {
     if (preview.kind === 'ready') {
       return preview.data.perNode
         .filter(n => n.reachable && n.stackCount > 0)
-        .map(n => ({ nodeName: n.nodeName, stackNames: n.stackNames }));
+        .map(n => ({ nodeId: n.nodeId, nodeName: n.nodeName, stackNames: n.stackNames }));
     }
     if (dryRunResolved && dryRunResolved.label === trimmed && trimmed.length > 0) {
       return dryRunResolved.targets;
@@ -370,7 +373,7 @@ export function LabelFleetStopCard() {
         description="Sencho will stop the stacks listed below. Node labels are not used by this action. Services will be unavailable until restarted."
         confirmLabel="Stop fleet"
         confirming={running}
-        onConfirm={() => run({ dryRun: false })}
+        onConfirm={() => run({ dryRun: false, nodeIds: (resolvedTargets ?? []).map(t => t.nodeId) })}
       >
         {resolvedTargets && resolvedTargets.length > 0 && <ResolvedTargetsList targets={resolvedTargets} />}
       </ConfirmModal>
@@ -428,14 +431,15 @@ function renderPreviewSection(preview: PreviewState, trimmed: string) {
 
 // The resolved node/stack list carried into the destructive confirm modal, so
 // the operator confirms against the concrete blast radius rather than a label
-// name. Final membership is re-resolved per node at execution time (state can
-// drift between preview and confirm), which the header states plainly.
+// name. The node set is bound to this list (the stop sends these node ids and
+// the backend acts on no others); only the per-node stacks are re-matched by
+// label at execution, where state can still drift between preview and confirm.
 function ResolvedTargetsList({ targets }: { targets: ResolvedTarget[] }) {
   const stackCount = targets.reduce((n, t) => n + t.stackNames.length, 0);
   return (
     <div>
       <div className={cn(KICKER, 'text-stat-icon mb-2 normal-case tracking-normal text-[11px]')}>
-        Will stop {stackCount} stack{stackCount === 1 ? '' : 's'} across {targets.length} node{targets.length === 1 ? '' : 's'}. The final set is re-resolved on each node at execution time.
+        Will stop {stackCount} stack{stackCount === 1 ? '' : 's'} across {targets.length} node{targets.length === 1 ? '' : 's'}. The stacks on each node are re-matched by label at execution; the node set is fixed to those listed.
       </div>
       <div className="max-h-[180px] overflow-y-auto rounded border border-card-border/60 bg-card/40 p-2">
         <ul className="space-y-1.5">
