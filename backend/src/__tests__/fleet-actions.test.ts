@@ -321,6 +321,30 @@ describe('local-stop behavior', () => {
     }
   });
 
+  it('reports every confirmed stack under lock contention, including one that lost its label', async () => {
+    const label = db.createLabel(nodeId, 'contend-label', 'slate');
+    db.setStackLabels('contend-kept', nodeId, [label.id]);
+    // contend-lost was confirmed in the preview but no longer carries the label.
+    const { activeBulkActions } = await import('../routes/labels');
+    activeBulkActions.add(`bulk:${nodeId}`);
+    try {
+      const res = await request(app)
+        .post('/api/fleet-actions/labels/local-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: 'contend-label', stackNames: ['contend-kept', 'contend-lost'] });
+      expect(res.status).toBe(200);
+      // Both confirmed stacks surface as contention failures; the lost one is
+      // not dropped (which would read as "no stacks assigned"), and the result
+      // is never empty when stacks were confirmed.
+      expect(res.body.results).toHaveLength(2);
+      const byName = Object.fromEntries(res.body.results.map((r: { stackName: string }) => [r.stackName, r]));
+      expect(byName['contend-kept'].error).toMatch(/already running/);
+      expect(byName['contend-lost'].error).toMatch(/already running/);
+    } finally {
+      activeBulkActions.delete(`bulk:${nodeId}`);
+    }
+  });
+
   it('dry run returns dryRun:true per on-disk stack without touching Docker', async () => {
     makeStack('dry-stack');
     const label = db.createLabel(nodeId, 'dry-label', 'slate');

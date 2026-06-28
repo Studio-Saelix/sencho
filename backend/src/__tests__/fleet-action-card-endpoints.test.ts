@@ -22,6 +22,11 @@ const getContainersByStack = vi.fn();
 const stopContainer = vi.fn();
 const restartContainer = vi.fn();
 const invalidateNodeCaches = vi.fn();
+const remoteSupportsCrossNodeRbac = vi.fn();
+
+vi.mock('../helpers/remoteCapabilities', () => ({
+  remoteSupportsCrossNodeRbac,
+}));
 
 vi.mock('../services/FileSystemService', () => ({
   FileSystemService: {
@@ -83,6 +88,9 @@ beforeEach(() => {
   getContainersByStack.mockResolvedValue([{ Id: 'container-1' }]);
   stopContainer.mockResolvedValue(undefined);
   restartContainer.mockResolvedValue(undefined);
+  // Default: remotes are upgraded and honor the exact-stack allowlist. The
+  // mixed-version cases below flip this to false to exercise the gate.
+  remoteSupportsCrossNodeRbac.mockResolvedValue(true);
   activeBulkActions.clear();
   db.getDb().prepare('DELETE FROM stack_label_assignments').run();
   db.getDb().prepare('DELETE FROM stack_labels').run();
@@ -844,6 +852,60 @@ describe('POST /api/fleet/labels/fleet-stop confirmed-target allowlist', () => {
       .send({ labelName: 'whatever', targets: [{ nodeId: 2.5, stackNames: ['x'] }] });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/nodeId/);
+  });
+
+  it('refuses a real stop to a remote lacking cross-node-rbac and reports it as needing upgrade', async () => {
+    remoteSupportsCrossNodeRbac.mockResolvedValue(false);
+    const remoteId = db.addNode({
+      name: 'old-remote', type: 'remote', api_url: 'http://old.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: 'any-label', targets: [{ nodeId: remoteId, stackNames: ['alpha'] }] });
+      expect(res.status).toBe(200);
+      const node = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+      expect(node.reachable).toBe(false);
+      expect(node.error).toMatch(/upgrade/i);
+      expect(node.stackResults).toEqual([{ stackName: 'alpha', success: false, error: 'Node must be upgraded to honor an exact-stack stop' }]);
+      // The destructive local-stop receiver is never contacted on an old remote.
+      expect(fetchSpy.mock.calls.some(c => String(c[0]).endsWith('/api/fleet-actions/labels/local-stop'))).toBe(false);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('fails a node whose stop results name stacks outside the confirmed set', async () => {
+    remoteSupportsCrossNodeRbac.mockResolvedValue(true);
+    const remoteId = db.addNode({
+      name: 'lying-remote', type: 'remote', api_url: 'http://lying.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true, status: 200,
+        json: async () => ({
+          matched: true,
+          results: [
+            { stackName: 'alpha', success: true },
+            { stackName: 'unconfirmed-extra', success: true },
+          ],
+        }),
+      } as unknown as Response);
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: 'any-label', targets: [{ nodeId: remoteId, stackNames: ['alpha'] }] });
+      expect(res.status).toBe(200);
+      const node = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+      expect(node.reachable).toBe(false);
+      expect(node.error).toMatch(/outside the confirmed set/i);
+    } finally {
+      db.deleteNode(remoteId);
+    }
   });
 });
 

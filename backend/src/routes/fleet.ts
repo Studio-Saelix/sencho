@@ -20,6 +20,7 @@ import { requirePaid, requireAdmin, requireNodeProxy } from '../middleware/tierG
 import { requirePermission } from '../middleware/permissions';
 import { scheduleLocalUpdate } from './license';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
+import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
 import { getLatestVersion, getLatestRelease } from '../utils/version-check';
 import { isValidStackName } from '../utils/validation';
@@ -1464,6 +1465,22 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
       if (!target) {
         return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: formatNoTargetError(node) };
       }
+      // A real stop bound to a confirmed stack set must only go to a remote that
+      // honors the allowlist (cross-node-rbac). An older remote ignores
+      // `stackNames` and would stop every label-matched stack, including ones
+      // labelled after the preview. Refuse to send and report the node as
+      // needing an upgrade instead. Dry runs carry no allowlist and only
+      // preview, so they are safe to send to any version.
+      if (!isDryRun && allowedStacks) {
+        const supported = await remoteSupportsCrossNodeRbac(node.id);
+        if (!supported) {
+          return {
+            nodeId: node.id, nodeName: node.name, reachable: false, matched: false,
+            stackResults: failAllStacks([...allowedStacks], 'Node must be upgraded to honor an exact-stack stop'),
+            error: 'Node is running a version that cannot limit the stop to the confirmed stacks; upgrade it and retry.',
+          };
+        }
+      }
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
@@ -1489,6 +1506,14 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         const remote = await response.json().catch(() => null);
         if (!isLabelLocalStopResponse(remote)) {
           return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: 'Remote returned a malformed response' };
+        }
+        // Defense in depth behind the capability gate: if a confirmed allowlist
+        // was sent, the remote must report only stacks from it. A result naming
+        // a stack outside the confirmed set means the remote ignored the
+        // allowlist (an over-broad stop), so fail the node rather than render
+        // the extra stops as a clean result.
+        if (allowedStacks && !remote.results.every(r => allowedStacks.has(r.stackName))) {
+          return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: 'Remote stopped stacks outside the confirmed set' };
         }
         return {
           nodeId: node.id, nodeName: node.name, reachable: true,

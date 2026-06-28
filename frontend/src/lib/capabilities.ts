@@ -29,6 +29,7 @@ export const CAPABILITIES = [
   'env-inventory',
   'project-env-files',
   'compose-storage',
+  'cross-node-rbac',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];

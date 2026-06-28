@@ -41,7 +41,17 @@ export const CAPABILITIES = [
   'env-inventory',
   'project-env-files',
   'compose-storage',
+  'cross-node-rbac',
 ] as const;
+
+/**
+ * Advertised by instances that enforce the proxied actor's role (instead of
+ * treating every node-to-node request as admin) and honor the exact-stack
+ * allowlist on stop-by-label. The control instance refuses to forward a
+ * non-admin's request, or a confirmed stop, to a remote lacking this flag so a
+ * mixed-version fleet cannot escalate or over-stop on an un-upgraded node.
+ */
+export const CROSS_NODE_RBAC_CAPABILITY = 'cross-node-rbac';
 
 export type Capability = (typeof CAPABILITIES)[number];
 
