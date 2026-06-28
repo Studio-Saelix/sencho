@@ -27,15 +27,26 @@ fleetActionsRouter.post(
   async (req: Request, res: Response): Promise<void> => {
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
-    const { labelName, dryRun } = req.body as { labelName?: unknown; dryRun?: unknown };
+    const { labelName, dryRun, stackNames } = req.body as { labelName?: unknown; dryRun?: unknown; stackNames?: unknown };
     if (typeof labelName !== 'string' || labelName.trim().length === 0) {
       res.status(400).json({ error: 'labelName is required' });
       return;
     }
+    // Optional allowlist binding the stop to the stacks the control confirmed in
+    // its preview, so a stack labelled on this node after the preview is not
+    // stopped. Absent (e.g. a dry run) stops every currently label-matched stack.
+    let allowedStacks: Set<string> | undefined;
+    if (stackNames !== undefined) {
+      if (!Array.isArray(stackNames) || !stackNames.every(s => typeof s === 'string')) {
+        res.status(400).json({ error: 'stackNames must be an array of strings' });
+        return;
+      }
+      allowedStacks = new Set(stackNames as string[]);
+    }
     const nodeId = req.nodeId ?? 0;
     const trimmedLabel = labelName.trim();
     try {
-      const outcome = await runLocalLabelStop(nodeId, trimmedLabel, dryRun === true);
+      const outcome = await runLocalLabelStop(nodeId, trimmedLabel, dryRun === true, allowedStacks);
       if (isDebugEnabled()) console.debug('[FleetActions:debug] local-stop:', { nodeId, dryRun: dryRun === true, matched: outcome.matched, stacks: outcome.stackResults.length });
       const body: LabelLocalStopResponse = { matched: outcome.matched, results: outcome.stackResults };
       res.json(body);

@@ -230,9 +230,10 @@ it('gates Stop fleet on a resolved preview, carries the node/stack list into the
 
   await waitFor(() => {
     const stopCall = mockedFetch.mock.calls.find(c => c[0] === '/fleet/labels/fleet-stop');
-    // The real stop binds execution to the nodes resolved in the preview: it
-    // carries their ids so a node that was unreachable then cannot be added later.
-    expect(JSON.parse(stopCall![1].body)).toEqual({ labelName: 'prod', dryRun: false, nodeIds: [1] });
+    // The real stop binds execution to the exact node + stack list resolved in
+    // the preview, so neither a reconnecting node nor a newly labelled stack can
+    // be added later.
+    expect(JSON.parse(stopCall![1].body)).toEqual({ labelName: 'prod', dryRun: false, targets: [{ nodeId: 1, stackNames: ['web'] }] });
   });
   // Per-node results render in the card (the "· 1 stack" label is unique to the
   // results list, distinguishing it from the preview well).
@@ -526,4 +527,39 @@ it('renders an unreachable fleet-stop node as unreachable, not "no matching labe
   await user.click(screen.getByRole('button', { name: 'Dry run' }));
   expect(await screen.findByText(/edge-1 \(unreachable\)/)).toBeInTheDocument();
   await waitFor(() => expect(toastWarning).toHaveBeenCalled());
+});
+
+it('reports a confirmed node that vanished as a failure, not a clean success', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/labels/match-preview') {
+      return Promise.resolve(jsonResponse(200, {
+        matchedNodes: 1, matchedStacks: 1, unreachableNodes: 0,
+        perNode: [{ nodeId: 1, nodeName: 'central', reachable: true, labelExists: true, stackCount: 1, stackNames: ['web'] }],
+      }));
+    }
+    if (url === '/fleet/labels/fleet-stop') {
+      // One stopped node plus a confirmed node that disappeared from the
+      // registry: the backend returns its confirmed stacks as failures.
+      return Promise.resolve(jsonResponse(200, {
+        results: [
+          { nodeId: 1, nodeName: 'central', reachable: true, matched: true, stackResults: [{ stackName: 'web', success: true }] },
+          { nodeId: 2, nodeName: 'Node 2', reachable: false, matched: false, error: 'Node no longer exists', stackResults: [{ stackName: 'api', success: false, error: 'Node no longer exists' }] },
+        ],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+  render(<LabelFleetStopCard />);
+  await user.type(screen.getByPlaceholderText('e.g. production'), 'prod');
+  const stopBtn = screen.getByRole('button', { name: 'Stop fleet' });
+  await waitFor(() => expect(stopBtn).toBeEnabled(), { timeout: 2000 });
+  await user.click(stopBtn);
+  const dialog = await screen.findByRole('alertdialog');
+  await user.click(within(dialog).getByRole('button', { name: 'Stop fleet' }));
+  // The vanished confirmed node renders as an unreachable failure and flips the
+  // outcome to a warning, so a partial stop never reads as a clean success.
+  expect(await screen.findByText(/Node 2 \(unreachable\)/)).toBeInTheDocument();
+  await waitFor(() => expect(toastWarning).toHaveBeenCalled());
+  expect(toastSuccess).not.toHaveBeenCalled();
 });

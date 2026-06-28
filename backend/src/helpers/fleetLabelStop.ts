@@ -62,23 +62,36 @@ export function isLabelLocalStopResponse(value: unknown): value is LabelLocalSto
  *
  * Shares the per-node `bulk:<nodeId>` lock with `POST /api/labels/:id/action` so
  * a fleet-stop and a per-label action cannot double-stop the same containers.
+ *
+ * `allowedStacks`, when provided, binds the stop to exactly the stacks the
+ * operator confirmed in the preview: only stacks that are still label-matched
+ * AND in this set are stopped, so a stack that gained the label between preview
+ * and execution is never stopped. A confirmed stack that went the other way (it
+ * lost the label or left disk) is reported as a failure rather than dropped, so
+ * the stop never reads as clean for a stack that silently fell out of scope.
+ * Omitted (e.g. a dry run) means stop every currently label-matched stack.
  */
 export async function runLocalLabelStop(
   nodeId: number,
   labelName: string,
   dryRun: boolean,
+  allowedStacks?: ReadonlySet<string>,
 ): Promise<LabelStopOutcome> {
   const db = DatabaseService.getInstance();
   const label = db.getLabels(nodeId).find(l => l.name === labelName);
   if (!label) return { matched: false, stackResults: [] };
   const stackNames = db.getStacksForLabel(label.id, nodeId);
-  if (stackNames.length === 0) return { matched: true, stackResults: [] };
+  // With no confirmed allowlist this is the unbound path: an unassigned label is
+  // a clean no-op. When stacks were confirmed we fall through so any that left
+  // scope are reported rather than silently dropped (see the reconcile below).
+  if (stackNames.length === 0 && !allowedStacks) return { matched: true, stackResults: [] };
 
   const lockKey = `bulk:${nodeId}`;
   if (activeBulkActions.has(lockKey)) {
+    const busyStacks = allowedStacks ? stackNames.filter(name => allowedStacks.has(name)) : stackNames;
     return {
       matched: true,
-      stackResults: stackNames.map(stackName => ({
+      stackResults: busyStacks.map(stackName => ({
         stackName,
         success: false,
         error: 'A bulk action is already running on this node',
@@ -89,7 +102,9 @@ export async function runLocalLabelStop(
   try {
     const fsStacks = await FileSystemService.getInstance(nodeId).getStacks();
     const fsStackSet = new Set(fsStacks);
-    const validStacks = stackNames.filter(name => fsStackSet.has(name));
+    const validStacks = stackNames.filter(name =>
+      fsStackSet.has(name) && (!allowedStacks || allowedStacks.has(name)),
+    );
     const stackResults: StackStopResult[] = [];
     for (const stackName of validStacks) {
       if (dryRun) {
@@ -100,6 +115,22 @@ export async function runLocalLabelStop(
       if (outcome.kind === 'ok') stackResults.push({ stackName, success: true });
       else if (outcome.kind === 'no-containers') stackResults.push({ stackName, success: false, error: 'No containers found for this stack' });
       else stackResults.push({ stackName, success: false, error: outcome.message });
+    }
+    // Reconcile the confirmed set against what was actually stoppable. A stack
+    // the operator confirmed that has since lost the label or left disk is
+    // reported as a failure, so the stop never reads as clean for a stack that
+    // silently dropped out between preview and execution.
+    if (allowedStacks) {
+      const acted = new Set(validStacks);
+      const labelled = new Set(stackNames);
+      for (const stackName of allowedStacks) {
+        if (acted.has(stackName)) continue;
+        stackResults.push({
+          stackName,
+          success: false,
+          error: labelled.has(stackName) ? 'Stack not found on this node' : 'No longer carries this label',
+        });
+      }
     }
     if (!dryRun && stackResults.some(r => r.success)) invalidateNodeCaches(nodeId);
     return { matched: true, stackResults };
