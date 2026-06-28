@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { PROXY_TIER_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { getErrorMessage } from '../utils/errors';
@@ -49,6 +49,15 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         // state changes within one proxy call.
         const headers = LicenseService.getInstance().getProxyHeaders();
         proxyReq.setHeader(PROXY_TIER_HEADER, headers.tier);
+        // Forward the signed-in user's role so the remote enforces their RBAC
+        // rather than treating every proxied request as admin. Strip first so a
+        // browser/API client cannot smuggle the header through the gateway, then
+        // re-set from the authenticated session (authGate runs before this proxy,
+        // so req.user is always resolved here).
+        proxyReq.removeHeader(PROXY_ROLE_HEADER);
+        if (req.user?.role) {
+          proxyReq.setHeader(PROXY_ROLE_HEADER, req.user.role);
+        }
         // Strip the ?nodeId= query param so the remote's nodeContextMiddleware
         // doesn't reject the request with 404 ("Node X not found") - the remote
         // has no record of the gateway's node IDs and should treat the request
