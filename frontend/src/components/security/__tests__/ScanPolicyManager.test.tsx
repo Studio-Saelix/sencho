@@ -1,15 +1,13 @@
 /**
- * ScanPolicyManager is the paid deploy-enforcement surface on the Security
- * Policies tab. Key guards: it renders nothing for Community, and a failed
- * policy fetch surfaces an error state instead of a false "No scan policies
- * configured".
+ * ScanPolicyManager is the deploy-enforcement surface on the Security Policies
+ * tab. Key guard: a failed policy fetch surfaces an error state instead of a
+ * false "No scan policies configured".
  */
 import { it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, within } from '@testing-library/react';
 import { toast } from '@/components/ui/toast-store';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
-vi.mock('@/context/LicenseContext');
 vi.mock('@/context/AuthContext');
 vi.mock('@/context/NodeContext');
 vi.mock('@/hooks/useTrivyStatus');
@@ -18,7 +16,6 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
-import * as LicenseContext from '@/context/LicenseContext';
 import * as AuthContext from '@/context/AuthContext';
 import * as NodeContext from '@/context/NodeContext';
 import * as TrivyStatus from '@/hooks/useTrivyStatus';
@@ -30,8 +27,7 @@ function jsonResponse(status: number, body: unknown): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as unknown as Response;
 }
 
-function setup({ isPaid }: { isPaid: boolean }) {
-  vi.mocked(LicenseContext.useLicense).mockReturnValue({ isPaid } as unknown as ReturnType<typeof LicenseContext.useLicense>);
+function setup() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({ isAdmin: true } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(NodeContext.useNodes).mockReturnValue({ activeNode: { type: 'local', id: 1, name: 'local' } } as unknown as ReturnType<typeof NodeContext.useNodes>);
   vi.mocked(TrivyStatus.useTrivyStatus).mockReturnValue({
@@ -50,14 +46,8 @@ beforeEach(() => {
   );
 });
 
-it('renders nothing for a Community operator (paid surface)', () => {
-  setup({ isPaid: false });
-  const { container } = render(<ScanPolicyManager />);
-  expect(container).toBeEmptyDOMElement();
-});
-
 it('surfaces an error state when the policies fetch fails (no false "no policies")', async () => {
-  setup({ isPaid: true });
+  setup();
   mockedFetch.mockImplementation((url: string) =>
     Promise.resolve(url.startsWith('/fleet/role') ? jsonResponse(200, { role: 'control' }) : jsonResponse(500, {})),
   );
@@ -67,7 +57,7 @@ it('surfaces an error state when the policies fetch fails (no false "no policies
 });
 
 it('shows the empty state when there are genuinely no policies', async () => {
-  setup({ isPaid: true });
+  setup();
   render(<ScanPolicyManager />);
   await waitFor(() => expect(screen.getByText('No scan policies configured')).toBeInTheDocument());
 });
@@ -80,7 +70,7 @@ const riskPolicy = {
 };
 
 it('renders a per-input badge for each active input (KEV/Fixable, no severity)', async () => {
-  setup({ isPaid: true });
+  setup();
   mockedFetch.mockImplementation((url: string) =>
     Promise.resolve(url.startsWith('/fleet/role') ? jsonResponse(200, { role: 'control' }) : jsonResponse(200, [riskPolicy])),
   );
@@ -92,7 +82,7 @@ it('renders a per-input badge for each active input (KEV/Fixable, no severity)',
 });
 
 it('sends the risk-first defaults (KEV + fixable on, severity off) when creating a policy', async () => {
-  setup({ isPaid: true });
+  setup();
   render(<ScanPolicyManager />);
   await waitFor(() => expect(screen.getByText('Add policy')).toBeInTheDocument());
   fireEvent.click(screen.getByText('Add policy'));
@@ -108,7 +98,7 @@ it('sends the risk-first defaults (KEV + fixable on, severity off) when creating
 });
 
 it('blocks a save that turns on block-on-deploy with no active input', async () => {
-  setup({ isPaid: true });
+  setup();
   render(<ScanPolicyManager />);
   await waitFor(() => expect(screen.getByText('Add policy')).toBeInTheDocument());
   fireEvent.click(screen.getByText('Add policy'));

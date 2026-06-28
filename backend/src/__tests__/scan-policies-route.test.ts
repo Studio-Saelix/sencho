@@ -123,3 +123,47 @@ describe('PUT /api/security/policies/:id risk inputs', () => {
     expect(res.body).toMatchObject({ block_on_kev: 1, block_on_fixable: 0 });
   });
 });
+
+describe('scan policies on Community (no tier gate)', () => {
+  beforeEach(() => {
+    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+  });
+
+  it('lets a Community admin create, read, update, and delete a policy', async () => {
+    const created = await post({ name: 'community-gate', max_severity: 'CRITICAL', block_on_deploy: 1 });
+    expect(created.status).toBe(201);
+    const id = created.body.id as number;
+
+    const list = await request(app).get('/api/security/policies').set('Authorization', adminAuthHeader);
+    expect(list.status).toBe(200);
+    expect((list.body as Array<{ id: number }>).some((p) => p.id === id)).toBe(true);
+
+    const updated = await request(app)
+      .put(`/api/security/policies/${id}`)
+      .set('Authorization', adminAuthHeader)
+      .send({ name: 'community-gate-2' });
+    expect(updated.status).toBe(200);
+
+    const removed = await request(app)
+      .delete(`/api/security/policies/${id}`)
+      .set('Authorization', adminAuthHeader);
+    expect(removed.status).toBe(200);
+  });
+
+  it('lets a Community viewer read policies but denies a write (admin gate is the sole guard)', async () => {
+    const db = DatabaseService.getInstance();
+    if (!db.getUserByUsername('pol-viewer')) {
+      db.addUser({ username: 'pol-viewer', password_hash: 'x', role: 'viewer' });
+    }
+    const viewerHeader = `Bearer ${jwt.sign({ username: 'pol-viewer' }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
+
+    const read = await request(app).get('/api/security/policies').set('Authorization', viewerHeader);
+    expect(read.status).toBe(200);
+
+    const write = await request(app)
+      .post('/api/security/policies')
+      .set('Authorization', viewerHeader)
+      .send({ name: 'viewer-blocked', max_severity: 'CRITICAL', block_on_deploy: 1 });
+    expect(write.status).toBe(403);
+  });
+});

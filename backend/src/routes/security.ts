@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requirePaid } from '../middleware/tierGates';
+import { requireAdmin } from '../middleware/tierGates';
 import { trivyInstallLimiter } from '../middleware/rateLimiters';
 import TrivyService, { SbomFormat } from '../services/TrivyService';
 import TrivyInstaller from '../services/TrivyInstaller';
@@ -320,7 +320,6 @@ securityRouter.put('/cve-intel-enabled', authMiddleware, (req: Request, res: Res
 // deploys, against that node's own replicated suppression copy. Default off.
 securityRouter.put('/deploy-block-honor-suppressions', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   // Require an explicit boolean so a stringy `"1"` cannot silently disable the
   // gate (this toggle weakens a deploy block, so intent must be unambiguous).
   if (typeof req.body?.enabled !== 'boolean') {
@@ -340,7 +339,7 @@ securityRouter.put('/deploy-block-honor-suppressions', authMiddleware, (req: Req
 
 // Pre-deploy scan advisory toggle. When on, a manual stack deploy first shows
 // the latest cached scan severity for each image so the operator can review it
-// before deploying. Visibility only: it never blocks (that is the paid
+// before deploying. Visibility only: it never blocks (that is the
 // deploy-block policy). Per-instance, admin-only, all tiers. Default off.
 securityRouter.put('/pre-deploy-scan-advisory', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
@@ -1031,7 +1030,6 @@ securityRouter.get(
   authMiddleware,
   (req: Request, res: Response): void => {
     if (!requireAdmin(req, res)) return;
-    if (!requirePaid(req, res)) return;
     const scanId = Number(req.params.scanId);
     if (!Number.isFinite(scanId)) {
       res.status(400).json({ error: 'Invalid scan id' }); return;
@@ -1092,12 +1090,10 @@ securityRouter.get(
   },
 );
 
-// Export the instance's CVE triage decisions as an OpenVEX document. Authoring
-// fleet VEX is a governance feature, so it is Admiral (paid) + admin, mirroring
-// the SARIF export gate.
+// Export the instance's CVE triage decisions as an OpenVEX document. Admin-only,
+// mirroring the SARIF export.
 securityRouter.get('/vex/export', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   try {
     const suppressions = DatabaseService.getInstance().getCveSuppressions();
     const doc = generateOpenVex(suppressions, req.user?.username || 'sencho', new Date().toISOString());
@@ -1111,7 +1107,8 @@ securityRouter.get('/vex/export', authMiddleware, (req: Request, res: Response):
 });
 
 securityRouter.get('/policies', authMiddleware, (req: Request, res: Response): void => {
-  if (!requirePaid(req, res)) return;
+  // Reading policies is not privileged, so this stays auth-only; only the
+  // mutation routes below require admin.
   // Replicas see only policies that apply to themselves: local-only rows plus
   // fleet-wide and self-identity-matched replicated rows. Identity-scoped
   // rows targeting other replicas are filtered out at the SQL boundary.
@@ -1122,7 +1119,6 @@ securityRouter.get('/policies', authMiddleware, (req: Request, res: Response): v
 
 securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   if (blockIfReplica(res, 'security policies')) return;
   const { name, node_id, stack_pattern, max_severity, block_on_deploy, enabled, block_on_severity, block_on_kev, block_on_fixable } = req.body ?? {};
   if (!name || typeof name !== 'string' || !name.trim()) {
@@ -1173,7 +1169,6 @@ securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
 
 securityRouter.put('/policies/:id', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   if (blockIfReplica(res, 'security policies')) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
@@ -1232,7 +1227,6 @@ securityRouter.put('/policies/:id', authMiddleware, (req: Request, res: Response
 
 securityRouter.delete('/policies/:id', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
-  if (!requirePaid(req, res)) return;
   if (blockIfReplica(res, 'security policies')) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {

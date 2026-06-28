@@ -1,10 +1,7 @@
 /**
- * Tier split for the two scan-export endpoints:
- *   POST /api/security/sbom            -> Community (admin only, no tier gate)
- *   GET  /api/security/scans/:id/sarif -> Admiral (paid) only
- *
- * SBOM is a per-image artifact useful to any self-hoster; SARIF (CI/security
- * pipeline ingestion) stays a paid governance export.
+ * Both scan-export endpoints are available on every tier (admin only, no tier gate):
+ *   POST /api/security/sbom            -> per-image SBOM artifact
+ *   GET  /api/security/scans/:id/sarif -> SARIF for CI / code-scanning ingestion
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
@@ -68,24 +65,23 @@ describe('POST /api/security/sbom (Community)', () => {
   });
 });
 
-describe('GET /api/security/scans/:scanId/sarif (Admiral only)', () => {
+describe('GET /api/security/scans/:scanId/sarif (Community)', () => {
   afterEach(() => { vi.restoreAllMocks(); mockTier('paid'); });
 
-  it('rejects a Community admin with 403 PAID_REQUIRED', async () => {
+  it('lets a Community admin reach the route (404 for a missing scan, not 403)', async () => {
     mockTier('community');
-    const res = await request(app)
-      .get('/api/security/scans/999999/sarif')
-      .set('Cookie', adminCookie);
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
-  });
-
-  it('passes the tier gate for a paid admin (404 for a missing scan, not 403)', async () => {
-    mockTier('paid');
     const res = await request(app)
       .get('/api/security/scans/999999/sarif')
       .set('Cookie', adminCookie);
     expect(res.status).not.toBe(403);
     expect(res.status).toBe(404);
+  });
+
+  it('denies a non-admin (viewer) with 403 (admin gate is the sole guard now)', async () => {
+    mockTier('community');
+    const res = await request(app)
+      .get('/api/security/scans/999999/sarif')
+      .set('Cookie', viewerCookie);
+    expect(res.status).toBe(403);
   });
 });

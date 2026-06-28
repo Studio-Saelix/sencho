@@ -21,7 +21,6 @@ import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from './NodeManager'
 import type { ScanSummary } from '@/types/security';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { CapabilityGate } from './CapabilityGate';
 import LazyBoundary from './LazyBoundary';
 import { formatBytes } from '@/lib/utils';
@@ -326,7 +325,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [resourceTab, setResourceTab] = useState<'images' | 'volumes' | 'networks' | 'unmanaged'>('images');
     const { isAdmin } = useAuth();
     const { activeNode } = useNodes();
-    const { isPaid } = useLicense();
     const [networkViewMode, setNetworkViewMode] = useState<'list' | 'topology'>('list');
     const [usage, setUsage] = useState<UsageData | null>(null);
     const [images, setImages] = useState<DockerImage[]>([]);
@@ -1412,7 +1410,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 onClose={() => setInspectScanId(null)}
                 onRescan={isAdmin ? (imageRef) => { setInspectScanId(null); handleScanImage(imageRef, { force: true }); } : undefined}
                 canGenerateSbom={isAdmin}
-                canExportSarif={isPaid && isAdmin}
+                canExportSarif={isAdmin}
                 canCompare
                 canManageSuppressions={isAdmin}
             />

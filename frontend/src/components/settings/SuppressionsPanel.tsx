@@ -12,7 +12,6 @@ import { apiFetch } from '@/lib/api';
 import { FleetTabHeading } from '@/components/fleet/FleetEmptyState';
 import type { CveSuppression } from '@/types/security';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 const PAGE_SIZE = 8;
@@ -39,7 +38,6 @@ interface SuppressionsPanelProps {
 
 export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
   const { isAdmin } = useAuth();
-  const { isPaid } = useLicense();
   const [rows, setRows] = useState<CveSuppression[]>([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -205,12 +203,10 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
         action={
           isAdmin && !isReplica ? (
             <div className="flex items-center gap-2">
-              {isPaid && (
-                <Button size="sm" variant="outline" onClick={handleExportVex}>
-                  <Download className="w-4 h-4 mr-1.5" />
-                  Export VEX
-                </Button>
-              )}
+              <Button size="sm" variant="outline" onClick={handleExportVex}>
+                <Download className="w-4 h-4 mr-1.5" />
+                Export VEX
+              </Button>
               <Button size="sm" onClick={openCreate}>
                 <Plus className="w-4 h-4 mr-1.5" />
                 Add suppression

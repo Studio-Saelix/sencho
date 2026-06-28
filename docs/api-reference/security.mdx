@@ -5,7 +5,7 @@ description: Automate scan policies, CVE suppressions, and vulnerability scans f
 
 The Security API lets you manage scan policies, CVE suppressions, and trigger vulnerability scans from CI pipelines and automation scripts. Every endpoint in this reference is intended for external automation; internal frontend-only endpoints (finding listings, SARIF downloads) are not documented here.
 
-All endpoints require [Bearer token authentication](/api-reference/overview#authentication). Manual scans, secret and misconfiguration results, scan comparison, and CVE suppressions are available on every tier. Scan policies (with `block_on_deploy` enforcement), SBOM, and SARIF require Admiral. See the per-endpoint **License** row for details.
+All endpoints require [Bearer token authentication](/api-reference/overview#authentication). Every endpoint in this reference is available on every tier, including scan policies with `block_on_deploy` enforcement. See the per-endpoint **Role** row for the admin requirement on writes.
 
 ## Scan policies
 
@@ -17,7 +17,7 @@ Writes are admin-only and rejected on replica nodes (policies are managed on the
 
 **`GET /api/security/policies`**
 
-**License:** Admiral
+**License:** Community
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_TOKEN" \
@@ -51,7 +51,7 @@ curl -H "Authorization: Bearer YOUR_API_TOKEN" \
 
 **`POST /api/security/policies`**
 
-**License:** Admiral · **Role:** Admin
+**License:** Community · **Role:** Admin
 
 | Field | Type | Required | Description |
 |-------|------|:--------:|-------------|
@@ -93,7 +93,7 @@ curl -X POST https://your-sencho-instance:1852/api/security/policies \
 
 **`PUT /api/security/policies/{id}`**
 
-**License:** Admiral · **Role:** Admin
+**License:** Community · **Role:** Admin
 
 Any of the create fields can be updated individually. Omitted fields are left unchanged.
 
@@ -112,7 +112,7 @@ curl -X PUT https://your-sencho-instance:1852/api/security/policies/1 \
 
 **`DELETE /api/security/policies/{id}`**
 
-**License:** Admiral · **Role:** Admin
+**License:** Community · **Role:** Admin
 
 ```bash
 curl -X DELETE https://your-sencho-instance:1852/api/security/policies/1 \

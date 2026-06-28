@@ -14,7 +14,6 @@ import { SettingsCallout } from '@/components/settings/SettingsCallout';
 import { SettingsPrimaryButton } from '@/components/settings/SettingsActions';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import type { FleetRole, ScanPolicy, VulnSeverity } from '@/types/security';
 
@@ -53,14 +52,11 @@ const EMPTY_FORM: PolicyFormState = {
 /**
  * Deploy-enforcement scan policies (block-on-deploy severity thresholds), the
  * honor-suppressions toggle, and the replica "managed by control" state. This
- * is the paid governance surface for the Security page Policies tab; it returns
- * null for Community (no enforcement management) so the catalog is all a
- * Community operator sees. Policies are control-governed: fetched localOnly and
- * shown only on the local node, mirroring how the rest of the fleet-governance
- * UI behaves.
+ * is the governance surface for the Security page Policies tab. Policies are
+ * control-governed: fetched localOnly and shown only on the local node,
+ * mirroring how the rest of the fleet-governance UI behaves.
  */
 export function ScanPolicyManager() {
-  const { isPaid } = useLicense();
   const { isAdmin } = useAuth();
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
@@ -103,17 +99,17 @@ export function ScanPolicyManager() {
   };
 
   useEffect(() => {
-    if (!isPaid || isRemote) { setLoading(false); return; }
+    if (isRemote) { setLoading(false); return; }
     fetchPolicies();
-  }, [isPaid, isRemote]);
+  }, [isRemote]);
 
   useEffect(() => {
-    if (!isPaid || isRemote) return;
+    if (isRemote) return;
     void refreshTrivy();
-  }, [isPaid, isRemote, activeNode?.id, refreshTrivy]);
+  }, [isRemote, activeNode?.id, refreshTrivy]);
 
   useEffect(() => {
-    if (!isPaid || isRemote) return;
+    if (isRemote) return;
     let cancelled = false;
     (async () => {
       try {
@@ -135,7 +131,7 @@ export function ScanPolicyManager() {
       }
     })();
     return () => { cancelled = true; };
-  }, [isPaid, isRemote]);
+  }, [isRemote]);
 
   const handleHonorSuppressionsToggle = async (enabled: boolean) => {
     setHonorBusy(true);
@@ -263,11 +259,6 @@ export function ScanPolicyManager() {
       setDeleteId(null);
     }
   };
-
-  // Enforcement management is a paid governance surface; the Policies tab is
-  // hidden for Community entirely (gated in SecurityView), so this is a
-  // defensive guard.
-  if (!isPaid) return null;
 
   return (
     <div className="space-y-4">

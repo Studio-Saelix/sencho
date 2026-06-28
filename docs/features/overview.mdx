@@ -49,7 +49,7 @@ Sencho snapshots your compose and environment files before applying changes. If 
 
 ### Deploy enforcement
 
-Block deploys that violate a scan policy before `docker compose up` runs, with an admin bypass path and a full audit trail. The pre-flight gate enumerates images and rejects deploys when any image meets or exceeds the policy's severity threshold; drift detection continues post-deploy and on schedule. Admiral. [Learn more →](/features/deploy-enforcement)
+Block deploys that violate a scan policy before `docker compose up` runs, with an admin bypass path and a full audit trail. The pre-flight gate enumerates images and rejects deploys when any image meets or exceeds the policy's severity threshold; drift detection continues post-deploy and on schedule. [Learn more →](/features/deploy-enforcement)
 
 ### Blueprints
 
@@ -159,7 +159,7 @@ Generate scoped API tokens for CI/CD pipelines, scripts, and automation workflow
 
 ### Vulnerability scanning
 
-Scan container images for known CVEs with [Trivy](https://trivy.dev). Install Trivy with one click from the Security page Scanner setup tab on first use; the [setup guide](/operations/trivy-setup) covers bind-mounted and air-gapped alternatives. Manual scanning, secret and misconfiguration detection, scan comparison, scheduled scans, CVE suppressions, single-scan SBOM export, and auto-update of the managed Trivy binary are available on every tier; scan policies that gate deploys and SARIF export are Admiral. [Learn more →](/features/vulnerability-scanning)
+Scan container images for known CVEs with [Trivy](https://trivy.dev). Install Trivy with one click from the Security page Scanner setup tab on first use; the [setup guide](/operations/trivy-setup) covers bind-mounted and air-gapped alternatives. Manual scanning, secret and misconfiguration detection, scan comparison, scheduled scans, CVE suppressions, scan policies that gate deploys, SARIF export, single-scan SBOM export, and auto-update of the managed Trivy binary are all available on every tier. [Learn more →](/features/vulnerability-scanning)
 
 ### CVE suppressions
 
@@ -201,4 +201,4 @@ When you manage multiple nodes running different Sencho versions, the dashboard 
 
 ### Licensing & billing
 
-Community is the complete self-hosted control plane, free forever. Admiral adds governance, security, and fleet control for teams: advanced RBAC, audit log export and retention, Fleet Secrets, deploy enforcement, Blueprints, Sencho Mesh, and more. Manage your license, view subscription details, and access the billing portal from Settings. [Learn more →](/features/licensing)
+Community is the complete self-hosted control plane, free forever, including the full vulnerability-scanning and deploy-enforcement suite. Admiral adds governance and fleet control for teams: advanced RBAC, audit log export and retention, Fleet Secrets, Blueprints, Sencho Mesh, and more. Manage your license, view subscription details, and access the billing portal from Settings. [Learn more →](/features/licensing)

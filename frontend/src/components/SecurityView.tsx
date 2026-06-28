@@ -9,7 +9,6 @@ import { deriveMasthead, SCANNER_DETECTIONS_NOTE } from './security/securityMast
 import { springs } from '@/lib/motion';
 import { apiFetch } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
-import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { useImageScan } from '@/hooks/useImageScan';
@@ -63,7 +62,6 @@ const MOBILE_MASTHEAD_TONE: Record<MastheadTone, { dot: Tone; word: StateWordCla
 };
 
 export function SecurityView({ activeTab, onTabChange, headerActions }: SecurityViewProps) {
-  const { isPaid } = useLicense();
   const { isAdmin } = useAuth();
   const { activeNode } = useNodes();
   const isMobile = useIsMobile();
@@ -209,23 +207,17 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
     return () => { cancelled = true; };
   }, [isRemote, activeNode?.id]);
 
-  // The Policies tab hosts only the paid enforcement manager, so it is hidden for
-  // Community; redirect off it if a deep-link lands a Community user there.
-  useEffect(() => {
-    if (!isPaid && activeTab === 'policies') onTabChange('overview');
-  }, [isPaid, activeTab, onTabChange]);
-
   const { state, tone } = deriveMasthead(overview, overviewLoadError !== null);
   const pulsing = tone === 'live' && !!overview?.scanner.available;
 
-  // The mobile tab strip mirrors the desktop tab IA, including the paid-only
-  // Policies tab when licensed, so every section stays reachable by scroll.
+  // The mobile tab strip mirrors the desktop tab IA, so every section stays
+  // reachable by scroll.
   const mobileTabs: SecurityMobileTab[] = [
     { value: 'overview', label: 'Overview' },
     { value: 'images', label: 'Images' },
     { value: 'compose', label: 'Compose risks' },
     { value: 'secrets', label: 'Secrets' },
-    ...(isPaid ? [{ value: 'policies', label: 'Policies' } as const] : []),
+    { value: 'policies', label: 'Policies' },
     { value: 'suppressions', label: 'Suppressions' },
     { value: 'history', label: 'History' },
     { value: 'scanner', label: 'Scanner setup' },
@@ -270,7 +262,6 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
             onInspect={onInspect}
             canScan={canScan}
             onScanComplete={() => setReloadToken((t) => t + 1)}
-            isPaid={isPaid}
           />
         </TabsContent>
 
@@ -301,11 +292,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
           </CapabilityGate>
         </TabsContent>
 
-        {isPaid && (
-          <TabsContent value="policies">
-            <ScanPolicyManager />
-          </TabsContent>
-        )}
+        <TabsContent value="policies">
+          <ScanPolicyManager />
+        </TabsContent>
 
         <TabsContent value="suppressions">
           {isRemote ? (
@@ -344,7 +333,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       initialTab={inspectInitialTab}
       onClose={() => setInspectScanId(null)}
       canGenerateSbom={isAdmin}
-      canExportSarif={isPaid && isAdmin}
+      canExportSarif={isAdmin}
       canCompare
       canManageSuppressions={isAdmin}
     />
@@ -422,11 +411,9 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               <TabsTrigger value="secrets"><KeyRound className="w-4 h-4 mr-1.5" />Secrets</TabsTrigger>
             </TabsHighlightItem>
             <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-            {isPaid && (
-              <TabsHighlightItem value="policies">
-                <TabsTrigger value="policies"><BookCheck className="w-4 h-4 mr-1.5" />Policies</TabsTrigger>
-              </TabsHighlightItem>
-            )}
+            <TabsHighlightItem value="policies">
+              <TabsTrigger value="policies"><BookCheck className="w-4 h-4 mr-1.5" />Policies</TabsTrigger>
+            </TabsHighlightItem>
             <TabsHighlightItem value="suppressions">
               <TabsTrigger value="suppressions"><EyeOff className="w-4 h-4 mr-1.5" />Suppressions</TabsTrigger>
             </TabsHighlightItem>

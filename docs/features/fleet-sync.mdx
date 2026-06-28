@@ -115,7 +115,7 @@ Demote requires `{"confirm": true}` in the request body to prevent a misclick fr
 
 | Requirement | Why it matters |
 |---|---|
-| **A paid Sencho tier on the control instance** | Creating scan policies, CVE suppressions, and misconfig acknowledgements is a paid feature. Fleet Sync simply replicates rules that were created on the control, so a paid tier on the control is what enables the whole flow. Replicas accept pushes regardless of their own tier. |
+| **A paid Sencho tier on the control instance** | Authoring scan policies, CVE suppressions, and misconfig acknowledgements works on every tier, but replicating them across a fleet is the paid part: Fleet Sync's cross-node replication and anchor controls require a paid tier on the control. Replicas accept pushes regardless of their own tier. |
 | **Admin user role on the control** | Authoring the rules that replicate, and operating the re-anchor and demote endpoints on a replica, are all admin-only actions. Operator and viewer roles can read rules but cannot create or remove them. |
 | **Proxy-mode remotes with `api_url` and `api_token` configured in Settings → Nodes** | Fleet Sync pushes over HTTPS to each remote's Sencho API using its long-lived bearer token. Remotes without an `api_url` or `api_token`, or remotes that connect over the pilot tunnel, are skipped. |
 | **Network reachability from the control to each remote** | Pushes are HTTP requests originating on the control. A remote that is firewalled off, behind NAT without a forwarded port, or otherwise unreachable will queue retries until it returns. |

@@ -49,7 +49,7 @@ beforeEach(() => {
       mfaEnabled: null,
       ssoEnabled: false,
       ssoProvider: null,
-      scanPolicies: { total: 0, enabled: 0, locked: true },
+      scanPolicies: { total: 0, enabled: 0, locked: false },
     },
     thresholds: { cpuLimit: 90, ramLimit: 90, diskLimit: 90, dockerJanitorGb: 5, globalCrash: false, hostAlertsEnabled: true },
     backup: { provider: 'disabled', autoUpload: false, locked: false },
