@@ -35,8 +35,6 @@ interface OverviewTabProps {
   canScan: boolean;
   /** Refresh the overview after a node-wide scan completes. */
   onScanComplete: () => void;
-  /** Paid licensees can manage enforcement policies (the Policies tab is hidden otherwise). */
-  isPaid: boolean;
 }
 
 const STATUS_ROW_TONE: Record<'value' | 'warn' | 'subtitle', string> = {
@@ -131,7 +129,7 @@ function ReviewQueueCard({
   );
 }
 
-export function OverviewTab({ overview, loadError, trend, exploitIntel, exploitTruncated, onNavigate, onInspect, canScan, onScanComplete, isPaid }: OverviewTabProps) {
+export function OverviewTab({ overview, loadError, trend, exploitIntel, exploitTruncated, onNavigate, onInspect, canScan, onScanComplete }: OverviewTabProps) {
   const isMobile = useIsMobile();
 
   if (loadError === 'unsupported') {
@@ -293,7 +291,7 @@ export function OverviewTab({ overview, loadError, trend, exploitIntel, exploitT
             tone="subtitle"
           />
           <p className="mt-2 text-xs text-muted-foreground">
-            {isPaid ? 'Manage enforcement policies on the Policies tab. ' : ''}This is a read-only posture for the active node.
+            Manage enforcement policies on the Policies tab. This is a read-only posture for the active node.
           </p>
         </div>
       </div>

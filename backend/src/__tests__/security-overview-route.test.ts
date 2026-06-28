@@ -445,7 +445,7 @@ describe('GET /api/security/scans/:scanId/vulnerabilities', () => {
   });
 });
 
-describe('GET /api/security/vex/export (Admiral)', () => {
+describe('GET /api/security/vex/export (Community)', () => {
   beforeEach(() => {
     resetSecurity();
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
@@ -454,13 +454,17 @@ describe('GET /api/security/vex/export (Admiral)', () => {
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
   });
 
-  it('is gated to Admiral: 403 for Community', async () => {
+  it('lets a Community admin export (no tier gate)', async () => {
     const res = await request(app).get('/api/security/vex/export').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+  });
+
+  it('denies a non-admin (viewer) with 403 (admin gate is the sole guard now)', async () => {
+    const res = await request(app).get('/api/security/vex/export').set('Cookie', viewerCookie);
     expect(res.status).toBe(403);
   });
 
-  it('exports an OpenVEX document from triage decisions for Admiral', async () => {
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
+  it('exports an OpenVEX document from triage decisions', async () => {
     db().createCveSuppression({
       cve_id: 'CVE-2024-2222', pkg_name: null, image_pattern: 'nginx*', reason: 'not present in build',
       created_by: 'admin', created_at: Date.now(), expires_at: null, replicated_from_control: 0,

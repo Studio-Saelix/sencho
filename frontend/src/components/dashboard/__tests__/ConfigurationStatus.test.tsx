@@ -31,7 +31,7 @@ function makePayload(overrides: Partial<ConfigurationStatusPayload> = {}): Confi
       mfaEnabled: null,
       ssoEnabled: false,
       ssoProvider: null,
-      scanPolicies: { total: 0, enabled: 0, locked: true },
+      scanPolicies: { total: 0, enabled: 0, locked: false },
     },
     thresholds: { cpuLimit: 90, ramLimit: 90, diskLimit: 90, dockerJanitorGb: 5, globalCrash: false, hostAlertsEnabled: true },
     backup: { provider: 'disabled', autoUpload: false, locked: false },
@@ -71,7 +71,8 @@ describe('ConfigurationStatus row visibility', () => {
     expect(screen.queryByText('Notification routing')).toBeNull();
     expect(screen.queryByText('Webhooks')).toBeNull();
     expect(screen.queryByText('Scheduled tasks')).toBeNull();
-    expect(screen.queryByText('Vulnerability scanning')).toBeNull();
+    // Scan policies are free, so the Vulnerability scanning row renders.
+    expect(screen.getByText('Vulnerability scanning')).toBeDefined();
     // Cloud Backup row is universal (Custom S3 is open to every tier).
     expect(screen.getByText('Cloud Backup')).toBeDefined();
   });

@@ -52,7 +52,6 @@ export function buildLocalConfigurationStatus(
   tier: LicenseTier,
 ): ConfigurationStatus {
   const db = DatabaseService.getInstance();
-  const isPaid = tier === 'paid';
 
   const agents = db.getAgents(nodeId);
   const agentByType = (type: 'discord' | 'slack' | 'webhook'): AgentStatus => {
@@ -129,11 +128,11 @@ export function buildLocalConfigurationStatus(
       mfaEnabled: mfaRow ? mfaRow.enabled === 1 : null,
       ssoEnabled: !!enabledSso,
       ssoProvider: enabledSso?.provider ?? null,
-      // Scan policies (deploy enforcement) require a paid license.
+      // Scan policies are available on every tier.
       scanPolicies: {
         total: scanPolicies.length,
         enabled: scanPolicies.filter(p => p.enabled === 1).length,
-        locked: !isPaid,
+        locked: false,
       },
     },
     thresholds: {
