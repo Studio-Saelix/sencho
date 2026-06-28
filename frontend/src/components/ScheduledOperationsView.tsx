@@ -241,7 +241,15 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     setFormTargetId(task.target_id || '');
     setFormNodeId(task.node_id != null ? String(task.node_id) : '');
     setFormCron(task.cron_expression);
-    const parsed = parseCron(task.cron_expression, (task.delete_after_run ?? 0) === 1);
+    let parsed = parseCron(task.cron_expression, (task.delete_after_run ?? 0) === 1);
+    // The cron has no year field, so parseCron reconstructs a one-shot's date in
+    // the current year. Rebuild it from the persisted run_at instead, so editing
+    // (and re-saving) preserves the originally chosen instant rather than moving
+    // it to this year's occurrence.
+    if (parsed && parsed.frequency === 'once' && task.run_at != null) {
+      const pinned = new Date(task.run_at);
+      parsed = { ...parsed, date: pinned, hour: pinned.getHours(), minute: pinned.getMinutes() };
+    }
     setScheduleMode(parsed ? 'simple' : 'advanced');
     setSimpleSchedule(parsed ?? DEFAULT_SIMPLE_SCHEDULE);
     setSimpleReplacedCron(false);

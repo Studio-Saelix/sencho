@@ -251,11 +251,15 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
 
     const scheduler = SchedulerService.getInstance();
     const now = Date.now();
-    // A one-shot's run_at pins the exact instant (including year); fall back to
-    // the cron-derived next run when no explicit timestamp is supplied.
+    // Persist the one-shot's pinned instant in its own column so it survives a
+    // disabled state and edit (the yearless cron cannot reconstruct the year).
+    // next_run_at is the cron-derived run unless a run_at pins it, and is null
+    // while disabled; the pinned run_at is retained regardless so enabling later
+    // restores the exact instant.
+    const pinnedRunAt = typeof run_at === 'number' ? run_at : null;
     const nextRun = (enabled === false)
       ? null
-      : (typeof run_at === 'number' ? run_at : scheduler.calculateNextRun(cron_expression));
+      : (pinnedRunAt ?? scheduler.calculateNextRun(cron_expression));
     const normalizedTargetId = target_type === 'stack' ? target_id : null;
     const normalizedNodeId = actionRequiresNode(action) ? parsePositiveNodeId(node_id) : null;
 
@@ -278,6 +282,7 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
       target_services: action === 'restart' && target_type === 'stack' && target_services ? JSON.stringify(target_services) : null,
       prune_label_filter: action === 'prune' && prune_label_filter ? prune_label_filter.trim() : null,
       delete_after_run: delete_after_run ? 1 : 0,
+      run_at: pinnedRunAt,
     });
 
     console.log(`[ScheduledTasks] Created task id=${id} action=${sanitizeForLog(action)} target=${sanitizeForLog(target_id || 'none')}`);
@@ -385,14 +390,19 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     }
     if (delete_after_run !== undefined) updates.delete_after_run = delete_after_run ? 1 : 0;
 
+    // Persist a re-supplied run_at to its column (a number pins a one-shot; null
+    // clears it when an edit switches the schedule to a recurring shape). When
+    // run_at is omitted, the existing pinned value carries forward.
+    const runAtProvided = run_at !== undefined;
+    if (runAtProvided) updates.run_at = typeof run_at === 'number' ? run_at : null;
+    const effectiveRunAt = (runAtProvided ? updates.run_at : existing.run_at) ?? null;
+
     const finalCron = cron_expression || existing.cron_expression;
     const finalEnabled = enabled !== undefined ? enabled : existing.enabled;
     if (finalEnabled) {
-      // A re-supplied one-shot run_at pins the exact instant; otherwise recompute
-      // from the (possibly updated) cron.
-      updates.next_run_at = typeof run_at === 'number'
-        ? run_at
-        : SchedulerService.getInstance().calculateNextRun(finalCron);
+      // The pinned one-shot instant wins; otherwise recompute from the (possibly
+      // updated) cron.
+      updates.next_run_at = effectiveRunAt ?? SchedulerService.getInstance().calculateNextRun(finalCron);
     } else {
       updates.next_run_at = null;
     }
@@ -439,19 +449,13 @@ scheduledTasksRouter.patch('/:id/toggle', (req: Request, res: Response): void =>
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
 
     const newEnabled = existing.enabled ? 0 : 1;
-    // A one-shot's exact instant cannot be reconstructed from its yearless cron,
-    // so preserve its pinned next_run_at across a disable/enable cycle (the
-    // enabled=0 gate stops a disabled task from firing). Recurring tasks clear
-    // next_run_at while disabled and recompute it from the cron on enable.
-    const isOneShot = existing.delete_after_run === 1 && existing.next_run_at != null;
-    let nextRun: number | null;
-    if (isOneShot) {
-      // The pinned instant is kept in both directions: disabling leaves it set
-      // (the enabled=0 gate stops it firing) so re-enabling restores it.
-      nextRun = existing.next_run_at;
-    } else {
-      nextRun = newEnabled ? SchedulerService.getInstance().calculateNextRun(existing.cron_expression) : null;
-    }
+    // On enable, a one-shot's persisted run_at restores the exact pinned instant
+    // (its yearless cron cannot reconstruct the chosen year); a recurring task
+    // recomputes from the cron. Disabling clears next_run_at for both; the
+    // run_at column is untouched, so re-enabling later still restores the instant.
+    const nextRun: number | null = newEnabled
+      ? (existing.run_at ?? SchedulerService.getInstance().calculateNextRun(existing.cron_expression))
+      : null;
 
     db.updateScheduledTask(id, {
       enabled: newEnabled,

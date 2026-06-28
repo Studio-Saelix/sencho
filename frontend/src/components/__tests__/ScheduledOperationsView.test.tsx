@@ -647,6 +647,29 @@ describe('ScheduledOperationsView', () => {
       expect(screen.queryByText(/one-time schedule fires on the chosen date/i)).not.toBeInTheDocument();
     });
 
+    it('preserves the chosen year when editing a future-year one-shot without changing it', async () => {
+      // The cron (0 23 1 7 *) is yearless; the persisted run_at carries the real
+      // year. Editing and re-saving must send that year, not this year's occurrence.
+      const runAt = new Date(new Date().getFullYear() + 1, 6, 1, 23, 0, 0, 0).getTime();
+      tasksFixture = [makeTask({
+        id: 7, name: 'once-next-year', cron_expression: '0 23 1 7 *',
+        delete_after_run: 1, run_at: runAt, next_run_at: runAt,
+      })];
+      render(<ScheduledOperationsView />);
+
+      await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
+      await userEvent.click(await screen.findByTitle('Edit'));
+      await userEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+      await waitFor(() => {
+        const putCall = mockedFetch.mock.calls.find(
+          ([url, opts]) => url === '/scheduled-tasks/7' && opts?.method === 'PUT',
+        );
+        expect(putCall).toBeTruthy();
+        expect(JSON.parse(putCall![1].body).run_at).toBe(runAt);
+      });
+    });
+
     it('opens a non-simple cron in Advanced mode', async () => {
       tasksFixture = [makeTask({ id: 6, name: 'every-15', cron_expression: '*/15 * * * *' })];
       render(<ScheduledOperationsView />);

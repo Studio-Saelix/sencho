@@ -233,6 +233,8 @@ describe('POST /api/scheduled-tasks', () => {
     });
     expect(res.status).toBe(201);
     expect(res.body.next_run_at).toBe(runAt);
+    // run_at is persisted in its own column so it survives disable/enable and edit.
+    expect(res.body.run_at).toBe(runAt);
   });
 
   it('falls back to the cron-derived next run when no run_at is supplied', async () => {
@@ -269,13 +271,21 @@ describe('POST /api/scheduled-tasks', () => {
     expect(res.body.error).toMatch(/run_at must be an epoch-millisecond timestamp/);
   });
 
-  it('ignores run_at for a disabled task (next_run_at stays null)', async () => {
+  it('persists a disabled one-shot run_at (next_run_at null) so enabling restores the chosen instant', async () => {
+    const runAt = new Date(new Date().getFullYear() + 1, 6, 1, 23, 0, 0, 0).getTime();
     const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
-      ...basePayload, enabled: false, cron_expression: '0 23 1 7 *', delete_after_run: true,
-      run_at: new Date(new Date().getFullYear() + 1, 6, 1, 23, 0, 0, 0).getTime(),
+      ...basePayload, enabled: false, cron_expression: '0 23 1 7 *', delete_after_run: true, run_at: runAt,
     });
     expect(res.status).toBe(201);
+    // A disabled task does not schedule, but the pinned instant is retained.
     expect(res.body.next_run_at).toBeNull();
+    expect(res.body.run_at).toBe(runAt);
+
+    // Enabling it must restore the exact chosen instant, not the cron's annual occurrence.
+    const on = await request(app).patch(`/api/scheduled-tasks/${res.body.id}/toggle`).set('Cookie', adminCookie);
+    expect(on.status).toBe(200);
+    expect(on.body.enabled).toBe(1);
+    expect(on.body.next_run_at).toBe(runAt);
   });
 
   it('rejects unsupported actions', async () => {
@@ -472,7 +482,7 @@ describe('PATCH /api/scheduled-tasks/:id/toggle', () => {
     expect(typeof on.body.next_run_at).toBe('number');
   });
 
-  it('preserves a one-shot pinned next_run_at across a disable/enable cycle', async () => {
+  it('preserves a one-shot pinned run_at across a disable/enable cycle', async () => {
     const now = Date.now();
     // A one-shot pinned to next year (its yearless cron would resolve to this year).
     const pinned = new Date(new Date().getFullYear() + 1, 6, 1, 23, 0, 0, 0).getTime();
@@ -480,14 +490,15 @@ describe('PATCH /api/scheduled-tasks/:id/toggle', () => {
       name: 'once', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
       cron_expression: '0 23 1 7 *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: pinned, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1,
+      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1, run_at: pinned,
     });
 
     const off = await request(app).patch(`/api/scheduled-tasks/${id}/toggle`).set('Cookie', adminCookie);
     expect(off.status).toBe(200);
     expect(off.body.enabled).toBe(0);
-    // The pinned instant survives the disable so it can be restored on re-enable.
-    expect(off.body.next_run_at).toBe(pinned);
+    // Disabling clears next_run_at, but the run_at column retains the instant.
+    expect(off.body.next_run_at).toBeNull();
+    expect(off.body.run_at).toBe(pinned);
 
     const on = await request(app).patch(`/api/scheduled-tasks/${id}/toggle`).set('Cookie', adminCookie);
     expect(on.status).toBe(200);
@@ -677,6 +688,52 @@ describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
       .send({ cron_expression: '0 23 1 7 *', run_at: runAt });
     expect(res.status).toBe(200);
     expect(res.body.next_run_at).toBe(runAt);
+    // The column is persisted too, so a later disable/enable restores it.
+    expect(res.body.run_at).toBe(runAt);
+  });
+
+  it('clears run_at when an update switches a one-shot to a recurring schedule', async () => {
+    const now = Date.now();
+    const pinned = new Date(new Date().getFullYear() + 1, 6, 1, 23, 0, 0, 0).getTime();
+    const id = DatabaseService.getInstance().createScheduledTask({
+      name: 'once', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
+      cron_expression: '0 23 1 7 *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
+      last_run_at: null, next_run_at: pinned, last_status: null, last_error: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1, run_at: pinned,
+    });
+
+    // Editing to a recurring daily schedule sends run_at: null (the frontend
+    // sends null for every non-once shape). The pin must be cleared and
+    // next_run_at recomputed from the cron, not left on the stale instant.
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${id}`)
+      .set('Cookie', adminCookie)
+      .send({ cron_expression: '0 3 * * *', delete_after_run: false, run_at: null });
+    expect(res.status).toBe(200);
+    expect(res.body.run_at).toBeNull();
+    expect(res.body.next_run_at).not.toBe(pinned);
+    expect(res.body.next_run_at).toBeGreaterThan(Date.now());
+  });
+
+  it('keeps a one-shot run_at persisted when an update disables it', async () => {
+    const now = Date.now();
+    const pinned = new Date(new Date().getFullYear() + 1, 6, 1, 23, 0, 0, 0).getTime();
+    const id = DatabaseService.getInstance().createScheduledTask({
+      name: 'once', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
+      cron_expression: '0 23 1 7 *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
+      last_run_at: null, next_run_at: pinned, last_status: null, last_error: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1, run_at: pinned,
+    });
+
+    // Disabling via Save: next_run_at clears, but the pinned instant is retained
+    // so re-enabling later restores the exact date.
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${id}`)
+      .set('Cookie', adminCookie)
+      .send({ enabled: false, run_at: pinned });
+    expect(res.status).toBe(200);
+    expect(res.body.next_run_at).toBeNull();
+    expect(res.body.run_at).toBe(pinned);
   });
 
   it('rejects an update with a past run_at', async () => {
