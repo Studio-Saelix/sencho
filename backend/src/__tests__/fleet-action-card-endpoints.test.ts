@@ -757,11 +757,12 @@ describe('POST /api/fleet/labels/fleet-stop remote leg', () => {
   });
 });
 
-describe('POST /api/fleet/labels/fleet-stop nodeIds allowlist', () => {
-  // Guards the wrong-node drift fix: the real stop carries the node ids the
-  // operator confirmed in the preview, so a node that was unreachable then and
-  // reconnects before execution cannot silently enter the fan-out.
-  it('contacts a confirmed remote in the allowlist and excludes the unconfirmed local node', async () => {
+describe('POST /api/fleet/labels/fleet-stop confirmed-target allowlist', () => {
+  // Guards the drift fix: the real stop carries the exact node + stack list the
+  // operator confirmed in the preview. A node that was unreachable then and
+  // reconnects cannot enter the fan-out, and a stack labelled after the preview
+  // is not stopped (the per-node receiver intersects against the sent stacks).
+  it('contacts a confirmed remote and forwards its confirmed stacks, excluding the unconfirmed local node', async () => {
     const remoteId = db.addNode({
       name: 'confirmed-remote', type: 'remote', api_url: 'http://confirmed.example:1852',
       api_token: 'tok', compose_dir: '/app/compose', is_default: false,
@@ -773,14 +774,16 @@ describe('POST /api/fleet/labels/fleet-stop nodeIds allowlist', () => {
       const res = await request(app)
         .post('/api/fleet/labels/fleet-stop')
         .set('Authorization', authHeader)
-        .send({ labelName: 'any-label', nodeIds: [remoteId] });
+        .send({ labelName: 'any-label', targets: [{ nodeId: remoteId, stackNames: ['alpha'] }] });
       expect(res.status).toBe(200);
       // Only the confirmed remote is in the fan-out: its local-stop receiver is
       // contacted and the unconfirmed local node is absent from the results.
       expect(res.body.results).toHaveLength(1);
       expect(res.body.results[0].nodeId).toBe(remoteId);
-      const urls = fetchSpy.mock.calls.map(c => String(c[0]));
-      expect(urls.some(u => u.endsWith('/api/fleet-actions/labels/local-stop'))).toBe(true);
+      const stopCall = fetchSpy.mock.calls.find(c => String(c[0]).endsWith('/api/fleet-actions/labels/local-stop'));
+      expect(stopCall).toBeTruthy();
+      // The confirmed stacks are forwarded so the remote binds its stop to them.
+      expect(JSON.parse((stopCall![1] as RequestInit).body as string)).toMatchObject({ labelName: 'any-label', stackNames: ['alpha'] });
     } finally {
       db.deleteNode(remoteId);
     }
@@ -798,7 +801,7 @@ describe('POST /api/fleet/labels/fleet-stop nodeIds allowlist', () => {
       const res = await request(app)
         .post('/api/fleet/labels/fleet-stop')
         .set('Authorization', authHeader)
-        .send({ labelName: label.name, nodeIds: [localId] });
+        .send({ labelName: label.name, targets: [{ nodeId: localId, stackNames: ['alpha'] }] });
       expect(res.status).toBe(200);
       // The excluded remote has a proxy target and would otherwise be contacted;
       // the allowlist keeps it out of execution entirely.
@@ -811,36 +814,36 @@ describe('POST /api/fleet/labels/fleet-stop nodeIds allowlist', () => {
     }
   });
 
-  it('treats an empty allowlist as zero target nodes, stopping nothing', async () => {
+  it('treats empty targets as zero target nodes, stopping nothing', async () => {
     const label = await createAssignedLabel('empty-allow', ['alpha']);
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const res = await request(app)
       .post('/api/fleet/labels/fleet-stop')
       .set('Authorization', authHeader)
-      .send({ labelName: label.name, nodeIds: [] });
+      .send({ labelName: label.name, targets: [] });
     expect(res.status).toBe(200);
-    // An empty allowlist filters to no nodes: a fail-safe no-op rather than a
+    // Empty targets filter to no nodes: a fail-safe no-op rather than a
     // full-fleet stop. The local node is not acted on and no remote is contacted.
     expect(res.body.results).toEqual([]);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('rejects a non-array nodeIds with 400', async () => {
+  it('rejects a non-array targets with 400', async () => {
     const res = await request(app)
       .post('/api/fleet/labels/fleet-stop')
       .set('Authorization', authHeader)
-      .send({ labelName: 'whatever', nodeIds: 'oops' });
+      .send({ labelName: 'whatever', targets: 'oops' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/nodeIds/);
+    expect(res.body.error).toMatch(/targets/);
   });
 
-  it('rejects a non-integer nodeIds entry with 400', async () => {
+  it('rejects a non-integer target.nodeId with 400', async () => {
     const res = await request(app)
       .post('/api/fleet/labels/fleet-stop')
       .set('Authorization', authHeader)
-      .send({ labelName: 'whatever', nodeIds: [1, 2.5] });
+      .send({ labelName: 'whatever', targets: [{ nodeId: 2.5, stackNames: ['x'] }] });
     expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/nodeIds/);
+    expect(res.body.error).toMatch(/nodeId/);
   });
 });
 

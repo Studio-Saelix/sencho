@@ -1379,37 +1379,56 @@ type FleetStopNodeResult = {
 // Tier: requireAdmin (admin-only fleet plumbing; available on every license).
 fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-  const body = req.body as { labelName?: unknown; dryRun?: unknown; nodeIds?: unknown } | undefined;
+  const body = req.body as { labelName?: unknown; dryRun?: unknown; targets?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
     res.status(400).json({ error: 'Request body is required' });
     return;
   }
-  const { labelName, dryRun, nodeIds } = body;
+  const { labelName, dryRun, targets } = body;
   if (typeof labelName !== 'string' || labelName.trim().length === 0) {
     res.status(400).json({ error: 'labelName is required' });
     return;
   }
-  // Optional allowlist binding execution to the preview the operator confirmed.
-  // The confirm flow sends exactly the nodes shown in the resolved blast radius,
-  // so a node that was unreachable during preview and reconnects before the stop
-  // cannot silently enter execution and have unlisted stacks stopped. Absent
-  // (e.g. a dry run) the fan-out scans the whole fleet as before.
-  let allowedNodeIds: Set<number> | null = null;
-  if (nodeIds !== undefined) {
-    if (!Array.isArray(nodeIds) || !nodeIds.every(n => typeof n === 'number' && Number.isInteger(n))) {
-      res.status(400).json({ error: 'nodeIds must be an array of integers' });
+  // Optional per-node allowlist binding execution to exactly the preview the
+  // operator confirmed: each entry names a node and the stacks to stop on it.
+  // This binds both axes of drift between preview and execution: a node that was
+  // unreachable during preview and reconnects cannot enter the stop (it is not
+  // in the map), and a stack that gained the label after preview is never
+  // stopped (the executor intersects the live label match against this set).
+  // Absent (e.g. a dry run) the fan-out scans the whole fleet as before.
+  let confirmedStacksByNode: Map<number, Set<string>> | null = null;
+  if (targets !== undefined) {
+    if (!Array.isArray(targets)) {
+      res.status(400).json({ error: 'targets must be an array' });
       return;
     }
-    allowedNodeIds = new Set(nodeIds as number[]);
+    confirmedStacksByNode = new Map();
+    for (const raw of targets) {
+      if (!raw || typeof raw !== 'object') {
+        res.status(400).json({ error: 'each target must be an object' });
+        return;
+      }
+      const { nodeId, stackNames } = raw as { nodeId?: unknown; stackNames?: unknown };
+      if (typeof nodeId !== 'number' || !Number.isInteger(nodeId)) {
+        res.status(400).json({ error: 'target.nodeId must be an integer' });
+        return;
+      }
+      if (!Array.isArray(stackNames) || !stackNames.every(s => typeof s === 'string')) {
+        res.status(400).json({ error: 'target.stackNames must be an array of strings' });
+        return;
+      }
+      confirmedStacksByNode.set(nodeId, new Set(stackNames as string[]));
+    }
   }
   const trimmed = labelName.trim();
   const isDryRun = dryRun === true;
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
-    const targetNodes = allowedNodeIds ? nodes.filter(n => allowedNodeIds.has(n.id)) : nodes;
-    if (isDebugEnabled()) console.debug('[Fleet:debug] fleet-stop:', { labelName: trimmed, dryRun: isDryRun, nodes: targetNodes.length, scoped: allowedNodeIds !== null });
+    const targetNodes = confirmedStacksByNode ? nodes.filter(n => confirmedStacksByNode.has(n.id)) : nodes;
+    if (isDebugEnabled()) console.debug('[Fleet:debug] fleet-stop:', { labelName: trimmed, dryRun: isDryRun, nodes: targetNodes.length, scoped: confirmedStacksByNode !== null });
     const results = await Promise.all(targetNodes.map(async (node): Promise<FleetStopNodeResult> => {
+      const allowedStacks = confirmedStacksByNode?.get(node.id);
       if (node.type === 'local') {
         // Match + stop runs in-process against the control's own Docker. The
         // helper shares the per-node `bulk:<id>` lock with the per-label action
@@ -1417,12 +1436,13 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         // failure (e.g. the compose dir is unreadable) degrades to a per-stack
         // error for this node only; the node is reachable, the stop just failed.
         try {
-          const outcome = await runLocalLabelStop(node.id, trimmed, isDryRun);
+          const outcome = await runLocalLabelStop(node.id, trimmed, isDryRun, allowedStacks);
           return { nodeId: node.id, nodeName: node.name, reachable: true, matched: outcome.matched, stackResults: outcome.stackResults };
         } catch (err) {
           const errorMsg = getErrorMessage(err, 'Failed to stop local stacks');
           const localLabel = db.getLabels(node.id).find(l => l.name === trimmed);
-          const localStacks = localLabel ? db.getStacksForLabel(localLabel.id, node.id) : [];
+          const localStacks = (localLabel ? db.getStacksForLabel(localLabel.id, node.id) : [])
+            .filter(s => !allowedStacks || allowedStacks.has(s));
           return {
             nodeId: node.id, nodeName: node.name, reachable: true, matched: !!localLabel,
             stackResults: failAllStacks(localStacks, errorMsg),
@@ -1445,7 +1465,11 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         const response = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/fleet-actions/labels/local-stop`, {
           method: 'POST',
           headers,
-          body: JSON.stringify({ labelName: trimmed, dryRun: isDryRun }),
+          body: JSON.stringify({
+            labelName: trimmed,
+            dryRun: isDryRun,
+            ...(allowedStacks ? { stackNames: [...allowedStacks] } : {}),
+          }),
           signal: AbortSignal.timeout(60000),
         });
         if (!response.ok) {
@@ -1470,13 +1494,33 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: getErrorMessage(err, 'Failed to reach remote node') };
       }
     }));
-    if (isDebugEnabled()) {
-      const matched = results.filter(r => r.matched).length;
-      const stopped = results.reduce((n, r) => n + r.stackResults.filter(s => s.success).length, 0);
-      const failed = results.reduce((n, r) => n + r.stackResults.filter(s => !s.success).length, 0);
-      console.debug('[Fleet:debug] fleet-stop complete:', { matched, stopped, failed });
+    // A confirmed node that was deleted or unregistered between preview and
+    // execution would otherwise vanish from the response (the node-list filter
+    // above drops it), letting the remaining successes read as a clean stop.
+    // Surface each missing confirmed node as an unreachable failure, with its
+    // confirmed stacks marked failed so the run is reported as partial, not
+    // clean.
+    const missingResults: FleetStopNodeResult[] = [];
+    if (confirmedStacksByNode) {
+      const present = new Set(nodes.map(n => n.id));
+      for (const [nodeId, stacks] of confirmedStacksByNode) {
+        if (!present.has(nodeId)) {
+          missingResults.push({
+            nodeId, nodeName: `Node ${nodeId}`, reachable: false, matched: false,
+            stackResults: failAllStacks([...stacks], 'Node no longer exists'),
+            error: 'Node no longer exists',
+          });
+        }
+      }
     }
-    res.json({ results });
+    const allResults = [...results, ...missingResults];
+    if (isDebugEnabled()) {
+      const matched = allResults.filter(r => r.matched).length;
+      const stopped = allResults.reduce((n, r) => n + r.stackResults.filter(s => s.success).length, 0);
+      const failed = allResults.reduce((n, r) => n + r.stackResults.filter(s => !s.success).length, 0);
+      console.debug('[Fleet:debug] fleet-stop complete:', { matched, stopped, failed, missing: missingResults.length });
+    }
+    res.json({ results: allResults });
   } catch (error) {
     console.error('[Fleet] fleet-stop error:', error);
     res.status(500).json({ error: getErrorMessage(error, 'Failed to run fleet stop') });

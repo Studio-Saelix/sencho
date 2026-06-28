@@ -111,6 +111,24 @@ describe('Fleet Actions input validation', () => {
     expect(res.status).toBe(400);
   });
 
+  it('POST /api/fleet/labels/fleet-stop rejects a non-object target entry', async () => {
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'prod', targets: ['oops'] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/each target must be an object/);
+  });
+
+  it('POST /api/fleet/labels/fleet-stop rejects a target with non-array stackNames', async () => {
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'prod', targets: [{ nodeId: 1, stackNames: 'oops' }] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/target.stackNames must be an array/);
+  });
+
   it('POST /api/fleet/labels/bulk-assign rejects an invalid label color', async () => {
     const res = await request(app)
       .post('/api/fleet/labels/bulk-assign')
@@ -325,6 +343,135 @@ describe('local-stop behavior', () => {
       .send({ labelName: 'ghost-label' });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ matched: true, results: [] });
+  });
+
+  it('rejects a non-array stackNames allowlist', async () => {
+    const res = await request(app)
+      .post('/api/fleet-actions/labels/local-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'whatever', stackNames: 'oops' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/stackNames must be an array/);
+  });
+
+  it('stops only the stacks in the stackNames allowlist, not every labelled stack', async () => {
+    makeStack('allow-a');
+    makeStack('allow-b');
+    const label = db.createLabel(nodeId, 'allow-label', 'slate');
+    db.setStackLabels('allow-a', nodeId, [label.id]);
+    db.setStackLabels('allow-b', nodeId, [label.id]);
+    const res = await request(app)
+      .post('/api/fleet-actions/labels/local-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'allow-label', dryRun: true, stackNames: ['allow-a'] });
+    expect(res.status).toBe(200);
+    // allow-b carries the label too but was not confirmed, so it is excluded.
+    expect(res.body.results).toEqual([{ stackName: 'allow-a', success: true, dryRun: true }]);
+  });
+
+  it('reports a confirmed stack that no longer carries the label as a failure', async () => {
+    makeStack('drop-kept');
+    makeStack('drop-gone');
+    const label = db.createLabel(nodeId, 'drop-label', 'teal');
+    db.setStackLabels('drop-kept', nodeId, [label.id]);
+    // drop-gone was confirmed but does not carry the label at execution time.
+    const res = await request(app)
+      .post('/api/fleet-actions/labels/local-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'drop-label', dryRun: true, stackNames: ['drop-kept', 'drop-gone'] });
+    expect(res.status).toBe(200);
+    const byName = Object.fromEntries(res.body.results.map((r: { stackName: string }) => [r.stackName, r]));
+    expect(byName['drop-kept']).toEqual({ stackName: 'drop-kept', success: true, dryRun: true });
+    // The confirmed stack that fell out of scope is reported, not silently dropped.
+    expect(byName['drop-gone']).toEqual({ stackName: 'drop-gone', success: false, error: 'No longer carries this label' });
+  });
+
+  it('reports a confirmed labelled stack that is missing on disk as a failure', async () => {
+    const label = db.createLabel(nodeId, 'ghostdisk-label', 'rose');
+    db.setStackLabels('ghostdisk-stack', nodeId, [label.id]); // labelled but never created on disk
+    const res = await request(app)
+      .post('/api/fleet-actions/labels/local-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'ghostdisk-label', dryRun: true, stackNames: ['ghostdisk-stack'] });
+    expect(res.status).toBe(200);
+    expect(res.body.results).toEqual([{ stackName: 'ghostdisk-stack', success: false, error: 'Stack not found on this node' }]);
+  });
+});
+
+// Orchestrator-level binding: the control sends the exact node + stack list the
+// operator confirmed, and the fan-out must neither widen the stack set nor drop
+// a confirmed node that has since disappeared from the registry.
+describe('fleet-stop confirmed-target binding', () => {
+  let db: import('../services/DatabaseService').DatabaseService;
+  let localNodeId: number;
+
+  beforeAll(async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const { NodeRegistry } = await import('../services/NodeRegistry');
+    db = DatabaseService.getInstance();
+    localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('stops only the confirmed stacks even when others share the label', async () => {
+    makeStack('bind-a');
+    makeStack('bind-late');
+    const label = db.createLabel(localNodeId, 'bind-label', 'teal');
+    db.setStackLabels('bind-a', localNodeId, [label.id]);
+    // bind-late carries the label but was not in the confirmed preview (it
+    // stands in for a stack labelled between preview and execution).
+    db.setStackLabels('bind-late', localNodeId, [label.id]);
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'bind-label', dryRun: true, targets: [{ nodeId: localNodeId, stackNames: ['bind-a'] }] });
+    expect(res.status).toBe(200);
+    const local = res.body.results.find((r: { nodeId: number }) => r.nodeId === localNodeId);
+    expect(local.matched).toBe(true);
+    expect(local.stackResults.map((s: { stackName: string }) => s.stackName)).toEqual(['bind-a']);
+  });
+
+  it('surfaces a confirmed node that no longer exists as an unreachable failure', async () => {
+    makeStack('mix-a');
+    const label = db.createLabel(localNodeId, 'mix-label', 'rose');
+    db.setStackLabels('mix-a', localNodeId, [label.id]);
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-stop')
+      .set('Authorization', authHeader)
+      .send({
+        labelName: 'mix-label',
+        dryRun: true,
+        targets: [
+          { nodeId: localNodeId, stackNames: ['mix-a'] },
+          { nodeId: 999999, stackNames: ['ghost'] },
+        ],
+      });
+    expect(res.status).toBe(200);
+    const local = res.body.results.find((r: { nodeId: number }) => r.nodeId === localNodeId);
+    const missing = res.body.results.find((r: { nodeId: number }) => r.nodeId === 999999);
+    expect(local.stackResults.map((s: { stackName: string }) => s.stackName)).toEqual(['mix-a']);
+    expect(missing).toBeTruthy();
+    expect(missing.reachable).toBe(false);
+    expect(missing.error).toMatch(/no longer exists/i);
+    // The missing node's confirmed stacks are marked failed so the run reports
+    // as partial rather than a clean stop of the surviving node alone.
+    expect(missing.stackResults).toEqual([{ stackName: 'ghost', success: false, error: 'Node no longer exists' }]);
+  });
+
+  it('without targets, scans the whole label (no per-stack binding)', async () => {
+    makeStack('nobind-a');
+    makeStack('nobind-b');
+    const label = db.createLabel(localNodeId, 'nobind-label', 'amber');
+    db.setStackLabels('nobind-a', localNodeId, [label.id]);
+    db.setStackLabels('nobind-b', localNodeId, [label.id]);
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: 'nobind-label', dryRun: true });
+    expect(res.status).toBe(200);
+    const local = res.body.results.find((r: { nodeId: number }) => r.nodeId === localNodeId);
+    expect(local.stackResults.map((s: { stackName: string }) => s.stackName).sort()).toEqual(['nobind-a', 'nobind-b']);
   });
 });
 
