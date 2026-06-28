@@ -13,6 +13,7 @@ import { handleRemoteForwarder } from './remoteForwarder';
 import { handleLogsWs } from './logs';
 import { handleHostConsoleWs } from './hostConsole';
 import { handleGenericWs, attachGenericConnectionHandlers } from './generic';
+import { ROLE_PERMISSIONS } from '../middleware/permissions';
 import { rejectUpgrade as reject } from './reject';
 import { looksLikeApiToken } from '../utils/apiTokenFormat';
 import { validateApiToken, touchApiTokenLastUsed } from '../utils/apiTokenAuth';
@@ -28,6 +29,59 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
       .map((c) => c.trim().split('='))
       .filter(([k, v]) => k && v),
   );
+}
+
+// The two WebSocket paths open to any authenticated user (read-only/deploy-only
+// API tokens and non-admin sessions on a remote node). Defined once so the
+// scope gate and the remote-forward gate cannot drift apart.
+function isLogsPath(pathname: string): boolean {
+  return /^\/api\/stacks\/[^/]+\/logs$/.test(pathname);
+}
+function isNotificationsPath(pathname: string): boolean {
+  return pathname === '/ws/notifications';
+}
+
+/**
+ * Decide whether a principal may open a WebSocket to a REMOTE node, applying
+ * the same gate the local handlers apply before the request is forwarded.
+ *
+ * Logs and notifications are the only remote paths a non-admin may open (they
+ * mirror handleLogsWs and the notifications channel, neither of which gates on
+ * admin). Every other path is treated as an interactive terminal (container
+ * exec via `/ws` or host console) that handleGenericWs / handleHostConsoleWs
+ * gate on admin / system:console; the remote authenticates the forwarded
+ * upgrade as an admin-gated console_session, so the hub must apply that gate
+ * itself. Machine (node_proxy) tokens are rejected on interactive paths,
+ * matching local.
+ */
+export function remoteWsForwardAllowed(
+  pathname: string,
+  ctx: {
+    wsResolvedUser?: { role: UserRole };
+    wsApiTokenScope: string | null;
+    isProxyToken: boolean;
+    decoded: { scope?: string };
+  },
+): boolean {
+  if (isLogsPath(pathname) || isNotificationsPath(pathname)) return true;
+  // Interactive terminal path (or any unrecognized path): admin-gated on the hub.
+  if (ctx.isProxyToken) return false;
+  // console_session is pre-gated as admin at issuance (routes/console.ts).
+  if (ctx.decoded.scope === 'console_session') return true;
+  // A read-only/deploy-only api_token is already rejected for these paths by
+  // the scope gate; only full-admin survives to here.
+  if (ctx.wsApiTokenScope) return ctx.wsApiTokenScope === 'full-admin';
+  const role = ctx.wsResolvedUser?.role;
+  if (!role) return false;
+  // Mirror the exact local authority: host console requires system:console
+  // (handleHostConsoleWs); container exec and everything else require admin
+  // (handleGenericWs). These coincide today (only admin holds system:console),
+  // but keying off the permission keeps the remote gate in lockstep if the
+  // role table changes.
+  if (pathname.startsWith('/api/system/host-console')) {
+    return ROLE_PERMISSIONS[role]?.includes('system:console') ?? false;
+  }
+  return role === 'admin';
 }
 
 /**
@@ -128,10 +182,8 @@ export function attachUpgrade(
 
       // Gate WebSocket paths by API token scope
       if (wsApiTokenScope) {
-        const isLogPath = /^\/api\/stacks\/[^/]+\/logs$/.test(pathname);
-        const isNotifPath = pathname === '/ws/notifications';
         if (wsApiTokenScope === 'read-only' || wsApiTokenScope === 'deploy-only') {
-          if (!isLogPath && !isNotifPath) return reject(socket, 403, 'Forbidden');
+          if (!isLogsPath(pathname) && !isNotificationsPath(pathname)) return reject(socket, 403, 'Forbidden');
         }
       }
 
@@ -180,6 +232,17 @@ export function attachUpgrade(
       }
 
       if (node && node.type === 'remote') {
+        // Enforce the originating user's role on the hub BEFORE forwarding.
+        // handleRemoteForwarder exchanges the node's api_token for an
+        // admin-gated console_session on interactive paths, so the remote
+        // accepts the upgrade without re-checking the user. Without this gate a
+        // non-admin could open a remote container-exec or host-console socket
+        // that the local handlers (handleGenericWs / handleHostConsoleWs) would
+        // have refused. Logs and notifications stay open to any authenticated
+        // user, mirroring their local handlers.
+        if (!remoteWsForwardAllowed(pathname, { wsResolvedUser, wsApiTokenScope, isProxyToken, decoded })) {
+          return reject(socket, 403, 'Forbidden');
+        }
         // Resolve the proxy target through NodeRegistry so pilot-mode nodes
         // (empty api_url + api_token, loopback bridge instead) and proxy-mode
         // nodes share one dispatch path. Mirrors proxy/remoteNodeProxy.ts.

@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import WebSocket from 'ws';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import type { AddressInfo } from 'net';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
@@ -351,6 +352,73 @@ describe('WebSocket upgrade dispatch order', () => {
       const outcome = await waitForOutcome(ws);
       expect(outcome.kind).toBe('unexpected');
       if (outcome.kind === 'unexpected') expect(outcome.status).toBe(503);
+    });
+  });
+
+  describe('remote WebSocket actor authorization', () => {
+    // The hub must enforce the originating user's role before forwarding a
+    // remote upgrade: the forwarder authenticates the connection to the remote
+    // as an admin-gated console_session, so a non-admin's remote container-exec
+    // or host-console would otherwise open with admin rights on the remote. A
+    // denied request is a clean 403 from the dispatcher; an allowed one is
+    // forwarded and then fails against the unreachable test remote (not a 403).
+    let viewerCookie: string;
+
+    beforeAll(async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const db = DatabaseService.getInstance();
+      const hash = await bcrypt.hash('viewerpass', 1);
+      db.addUser({ username: 'ws-authz-viewer', password_hash: hash, role: 'viewer' });
+      const viewer = db.getUserByUsername('ws-authz-viewer')!;
+      const viewerToken = jwt.sign(
+        { username: 'ws-authz-viewer', role: 'viewer', tv: viewer.token_version },
+        TEST_JWT_SECRET,
+        { expiresIn: '1m' },
+      );
+      viewerCookie = `sencho_token=${viewerToken}`;
+    });
+
+    it('rejects a non-admin remote container-exec upgrade with 403 before forwarding', async () => {
+      const ws = connect(`/ws?nodeId=${remoteNodeId}`, { cookie: viewerCookie });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
+
+    it('rejects a non-admin remote host-console upgrade with 403 before forwarding', async () => {
+      const ws = connect(`/api/system/host-console?nodeId=${remoteNodeId}`, { cookie: viewerCookie });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
+
+    it('lets a non-admin remote logs upgrade past the gate (forwarding fails on the dead remote, not a 403)', async () => {
+      const ws = connect(`/api/stacks/web/logs?nodeId=${remoteNodeId}`, { cookie: viewerCookie });
+      const outcome = await waitForOutcome(ws);
+      if (outcome.kind === 'unexpected') expect(outcome.status).not.toBe(403);
+      try { ws.terminate(); } catch { /* ignore */ }
+    });
+
+    it('lets an admin remote container-exec upgrade past the gate (not a 403)', async () => {
+      const ws = connect(`/ws?nodeId=${remoteNodeId}`, { cookie: sessionCookie });
+      const outcome = await waitForOutcome(ws);
+      if (outcome.kind === 'unexpected') expect(outcome.status).not.toBe(403);
+      try { ws.terminate(); } catch { /* ignore */ }
+    });
+
+    it('rejects a non-admin remote exec to a pilot node with 403 before the missing-tunnel 503', async () => {
+      // The gate runs before proxy-target resolution, so a viewer is denied with
+      // 403 even when the pilot tunnel is down (which would otherwise be 503).
+      // The forward path is shared with proxy mode, so this covers pilot agents.
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const pilotId = DatabaseService.getInstance().addNode({
+        name: `ws-authz-pilot-${Date.now()}`, type: 'remote', mode: 'pilot_agent',
+        compose_dir: '/tmp/x', is_default: false, api_url: '', api_token: '',
+      });
+      const ws = connect(`/ws?nodeId=${pilotId}`, { cookie: viewerCookie });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
     });
   });
 
