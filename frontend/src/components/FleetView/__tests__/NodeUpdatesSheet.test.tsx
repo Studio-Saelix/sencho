@@ -54,6 +54,7 @@ describe('NodeUpdatesSheet', () => {
     apiFetchMock.mockResolvedValue({
       ok: true,
       json: async () => ({
+        version: '1.1.0',
         releaseNotes: '## [0.92.0](https://example.com/compare) (2026-06-19)\n\n### Added\n\n* add a toggle ([#1363](https://example.com/issues/1363))\n',
         htmlUrl: 'https://example.com/releases/v0.92.0',
       }),
@@ -88,7 +89,7 @@ describe('NodeUpdatesSheet', () => {
     await screen.findByText('No release notes to show');
     expect(releaseCalls()).toBe(1);
     rerender(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
-    // The releaseLoaded latch keeps a null result from re-triggering the fetch.
+    // The loadedForVersion latch keeps a null result from re-triggering the fetch.
     await waitFor(() => expect(releaseCalls()).toBe(1));
   });
 
@@ -147,10 +148,73 @@ describe('NodeUpdatesSheet', () => {
     await waitFor(() => expect(releaseCalls()).toBe(1));
   });
 
+  it('does not render notes whose version differs from the advertised update', async () => {
+    // Realistic cache offset: the advertised latest is 1.2.0 but the release-notes
+    // endpoint still returns 1.1.0 (the version lookup and notes lookup use
+    // independent caches; version can come from Docker Hub while notes are
+    // GitHub-only). The 1.1.0 notes must never render as the 1.2.0 changelog.
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: '1.1.0', releaseNotes: '## v1.1.0 notes', htmlUrl: 'https://example.com/v1.1.0' }),
+    });
+    const releaseCalls = () => apiFetchMock.mock.calls.filter(c => String(c[0]).includes('release-notes')).length;
+    const advertised120 = STATUSES.map(s => ({ ...s, latestVersion: '1.2.0' }));
+    render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog', updateStatuses: advertised120 })} />);
+
+    // The mismatched notes fall through to the empty state with the online link.
+    expect(await screen.findByText('No release notes to show')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'v1.1.0 notes' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Release v1.1.0')).not.toBeInTheDocument();
+    // The whole mismatched payload is discarded, including its GitHub link.
+    expect(screen.queryByRole('link', { name: /View on GitHub/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /View on Sencho/ })).toHaveAttribute('href', 'https://sencho.io/changelog');
+    // The settled mismatch does not loop the fetch.
+    await waitFor(() => expect(releaseCalls()).toBe(1));
+  });
+
+  it('recovers via Recheck when the endpoint catches up to the advertised version', async () => {
+    // Start mismatched (advertised 1.2.0, endpoint still 1.1.0): empty state.
+    const advertised120 = STATUSES.map(s => ({ ...s, latestVersion: '1.2.0' }));
+    apiFetchMock.mockImplementation((url: string) =>
+      String(url).includes('release-notes')
+        ? Promise.resolve({ ok: true, json: async () => ({ version: '1.1.0', releaseNotes: '## v1.1.0 notes', htmlUrl: null }) })
+        : Promise.resolve({ ok: true, json: async () => ({ rechecked: true }) }),
+    );
+    render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog', updateStatuses: advertised120 })} />);
+    expect(await screen.findByText('No release notes to show')).toBeInTheDocument();
+
+    // The recheck surfaces the matching 1.2.0 notes; clicking Recheck must
+    // recover the previously-mismatched changelog rather than stay empty.
+    apiFetchMock.mockImplementation((url: string) =>
+      String(url).includes('release-notes')
+        ? Promise.resolve({ ok: true, json: async () => ({ version: '1.2.0', releaseNotes: '## v1.2.0 notes', htmlUrl: null }) })
+        : Promise.resolve({ ok: true, json: async () => ({ rechecked: true }) }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Recheck' }));
+    expect(await screen.findByRole('heading', { name: 'v1.2.0 notes' })).toBeInTheDocument();
+    expect(screen.getByText('Release v1.2.0')).toBeInTheDocument();
+  });
+
+  it('shows the empty state without looping when the advertised version is unknown', async () => {
+    // Local node has no resolved latestVersion: advertisedLatest is null, so a
+    // non-null endpoint version cannot match and the notes must not render. The
+    // settle must still record null and not loop the fetch.
+    const noLatest = STATUSES.map(s => ({ ...s, latestVersion: null }));
+    apiFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ version: '1.1.0', releaseNotes: '## v1.1.0 notes', htmlUrl: null }),
+    });
+    const releaseCalls = () => apiFetchMock.mock.calls.filter(c => String(c[0]).includes('release-notes')).length;
+    render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog', updateStatuses: noLatest })} />);
+    expect(await screen.findByText('No release notes to show')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'v1.1.0 notes' })).not.toBeInTheDocument();
+    await waitFor(() => expect(releaseCalls()).toBe(1));
+  });
+
   it('Recheck resets and refetches release notes with the recheck flag', async () => {
     apiFetchMock.mockImplementation((url: string) =>
       String(url).includes('release-notes')
-        ? Promise.resolve({ ok: true, json: async () => ({ releaseNotes: '## v1', htmlUrl: null }) })
+        ? Promise.resolve({ ok: true, json: async () => ({ version: '1.1.0', releaseNotes: '## v1', htmlUrl: null }) })
         : Promise.resolve({ ok: true, json: async () => ({ rechecked: true }) }),
     );
     render(<NodeUpdatesSheet {...baseProps({ isAdmin: true, initialTab: 'changelog' })} />);
