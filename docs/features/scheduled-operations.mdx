@@ -81,7 +81,7 @@ Common fields:
 
 - **Name.** A descriptive label.
 - **Action.** Pick the operation. Once selected, the form shows a risk badge and a one-line helper text below the picker so you can see the blast radius at a glance. The six risk levels are Safe (informational, no risk), Read-only (observation only), Interruptive (temporarily disrupts running state), Runtime change (changes running state, not destructive), Removes containers (tears down containers), and Destructive (irreversibly deletes resources).
-- **Cron Expression.** A standard 5-field cron. A human-readable preview appears below the input as you type (`At 03:00 AM`, `At 04:00 AM, only on Sunday`, and so on). See [Cron expression reference](#cron-expression-reference).
+- **Schedule.** Choose when the task runs. The section opens in **Simple** mode, where you pick a frequency (Once, Hourly, Daily, Weekly, or Monthly) and a time, and Sencho builds the cron expression for you. Switch to **Advanced** to type a raw 5-field cron by hand. Either way a human-readable preview appears below the controls (`At 03:00 AM`, `At 04:00 AM, only on Sunday`, and so on). See [Simple and Advanced modes](#simple-and-advanced-modes) and the [Cron expression reference](#cron-expression-reference).
 - **Enabled.** Toggle the task on or off without deleting it.
 - **Delete after successful run.** When enabled, the task removes itself from the schedule after its first successful execution. Failures keep the task so you can inspect the error and retry. See [Delete after successful run](#delete-after-successful-run).
 
@@ -96,6 +96,26 @@ Conditional fields per action:
 <Frame>
   <img src="/images/scheduled-operations/create-restart.png" alt="The New scheduled task modal configured for a Restart Stack task. Name reads 'Nightly staging restart'. Action is Restart Stack. Node is Local. Stack is 'audit-mesh-prod'. A Services group with helper text '(leave empty for all)' shows two unchecked checkboxes labelled 'echo' and 'prober'. Cron Expression is '0 3 * * *' with the preview 'At 03:00 AM'. The Enabled toggle reads ON. The Delete after successful run checkbox is unchecked. Cancel and Create buttons sit at the bottom right." />
 </Frame>
+
+### Simple and Advanced modes
+
+The **Schedule** section has two modes, toggled at the top right of the section.
+
+**Simple** (the default) turns a frequency and a time into a cron expression so you do not have to write one by hand:
+
+- **Once** runs the task a single time on a date you pick. Selecting Once turns on **Delete after successful run** and locks it on (see [One-time schedules](#one-time-schedules)).
+- **Hourly** runs at a chosen minute past every hour.
+- **Daily** runs once a day at a chosen time.
+- **Weekly** runs at a chosen time on the weekdays you select.
+- **Monthly** runs at a chosen time on a chosen day of the month.
+
+The generated cron and its plain-language description appear beneath the controls, and times run in the node's local timezone.
+
+**Advanced** swaps the controls for a single cron input where you type a raw 5-field expression. Use it for cadences Simple mode does not cover, such as "every 6 hours" (`0 */6 * * *`). Editing a task whose schedule is not expressible in Simple mode opens directly in Advanced; switching such a task to Simple replaces the custom expression and tells you so before you save.
+
+#### One-time schedules
+
+Because cron has no year field, a one-time schedule is stored as a fully pinned `minute hour day month *` expression that would otherwise repeat on that date every year. To keep it genuinely one-time, selecting **Once** turns on **Delete after successful run** and locks it on: the task fires on the chosen date and then removes itself once it succeeds. A failed run is kept so you can retry or debug. To build a recurring schedule instead, choose a different frequency or use Advanced cron.
 
 ## Granular targeting
 

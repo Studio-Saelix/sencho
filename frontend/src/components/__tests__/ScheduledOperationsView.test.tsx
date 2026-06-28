@@ -191,6 +191,8 @@ describe('ScheduledOperationsView', () => {
     const createButton = screen.getByRole('button', { name: 'Create' });
     expect(createButton).toBeEnabled();
 
+    // The raw cron input lives in Advanced mode; Simple mode generates the cron.
+    await userEvent.click(screen.getByRole('radio', { name: 'Advanced' }));
     const cronInput = screen.getByPlaceholderText('0 3 * * *');
     await userEvent.clear(cronInput);
     await userEvent.type(cronInput, '30 0 3 * * *');
@@ -529,6 +531,135 @@ describe('ScheduledOperationsView', () => {
       expect(screen.getByText(
         'Removes unused Docker resources on the selected node. Be careful when pruning volumes.',
       )).toBeInTheDocument();
+    });
+  });
+
+  describe('Simple schedule mode', () => {
+    const deleteCheckboxState = () =>
+      document.querySelector('#task-delete-after-run')?.getAttribute('data-state');
+
+    it('defaults to Simple / Daily / 03:00 generating "0 3 * * *"', async () => {
+      render(<ScheduledOperationsView />);
+      await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+
+      expect(screen.getByRole('radio', { name: 'Simple' })).toHaveAttribute('aria-checked', 'true');
+      expect(screen.getByRole('radio', { name: 'Daily' })).toHaveAttribute('aria-checked', 'true');
+      expect(screen.getByLabelText('Hour')).toHaveTextContent('03');
+      expect(screen.getByText(/0 3 \* \* \*/)).toBeInTheDocument();
+    });
+
+    it('updates the cron preview when the frequency changes', async () => {
+      render(<ScheduledOperationsView />);
+      await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+
+      await userEvent.click(screen.getByRole('radio', { name: 'Hourly' }));
+      expect(screen.getByText(/^· 0 \* \* \* \*$/)).toBeInTheDocument();
+    });
+
+    it('locks delete-after-run on for a one-time schedule and keeps it on (editable) after leaving', async () => {
+      render(<ScheduledOperationsView />);
+      await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+      const deleteCheckbox = () => document.querySelector('#task-delete-after-run');
+      expect(deleteCheckboxState()).toBe('unchecked');
+      expect(deleteCheckbox()).toBeEnabled();
+
+      await userEvent.click(screen.getByRole('radio', { name: 'Once' }));
+      expect(deleteCheckboxState()).toBe('checked');
+      expect(deleteCheckbox()).toBeDisabled(); // cannot be turned off for one-time schedules
+      expect(screen.getByText(/Required for one-time schedules/i)).toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('radio', { name: 'Daily' }));
+      expect(screen.queryByText(/Required for one-time schedules/i)).not.toBeInTheDocument();
+      expect(deleteCheckboxState()).toBe('checked'); // not reverted
+      expect(deleteCheckbox()).toBeEnabled(); // editable again
+    });
+
+    it('blocks save for invalid simple schedules', async () => {
+      render(<ScheduledOperationsView />);
+      await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+      await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'one-off');
+      // Fleet Snapshot needs neither node nor stack, isolating the schedule gate.
+      await userEvent.click(screen.getAllByRole('combobox')[0]);
+      await userEvent.click(await screen.findByRole('button', { name: 'Create Fleet Snapshot' }));
+
+      const createBtn = () => screen.getByRole('button', { name: 'Create' });
+      expect(createBtn()).toBeEnabled();
+
+      await userEvent.click(screen.getByRole('radio', { name: 'Once' })); // no date chosen
+      expect(createBtn()).toBeDisabled();
+
+      await userEvent.click(screen.getByRole('radio', { name: 'Weekly' })); // no weekdays
+      expect(createBtn()).toBeDisabled();
+
+      await userEvent.click(screen.getByRole('radio', { name: 'Monthly' }));
+      expect(createBtn()).toBeEnabled(); // day defaults to 1
+      const dom = screen.getByLabelText('Day of month');
+      await userEvent.clear(dom);
+      await userEvent.type(dom, '0');
+      expect(createBtn()).toBeDisabled();
+      await userEvent.clear(dom);
+      await userEvent.type(dom, '32');
+      expect(createBtn()).toBeDisabled();
+    });
+
+    it('opens an existing simple cron in Simple mode without the one-time caveat', async () => {
+      tasksFixture = [makeTask({ id: 5, name: 'daily-prune', cron_expression: '0 3 * * *', delete_after_run: 0 })];
+      render(<ScheduledOperationsView />);
+
+      await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
+      await userEvent.click(await screen.findByTitle('Edit'));
+
+      expect(screen.getByRole('radio', { name: 'Simple' })).toHaveAttribute('aria-checked', 'true');
+      expect(screen.getByRole('radio', { name: 'Daily' })).toHaveAttribute('aria-checked', 'true');
+      expect(screen.queryByText(/one-time schedule fires on the chosen date/i)).not.toBeInTheDocument();
+    });
+
+    it('opens a non-simple cron in Advanced mode', async () => {
+      tasksFixture = [makeTask({ id: 6, name: 'every-15', cron_expression: '*/15 * * * *' })];
+      render(<ScheduledOperationsView />);
+
+      await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
+      await userEvent.click(await screen.findByTitle('Edit'));
+
+      expect(screen.getByRole('radio', { name: 'Advanced' })).toHaveAttribute('aria-checked', 'true');
+      expect(screen.getByDisplayValue('*/15 * * * *')).toBeInTheDocument();
+    });
+
+    it('warns that switching Advanced -> Simple replaces a custom cron expression', async () => {
+      render(<ScheduledOperationsView />);
+      await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+
+      await userEvent.click(screen.getByRole('radio', { name: 'Advanced' }));
+      const input = screen.getByDisplayValue('0 3 * * *');
+      await userEvent.clear(input);
+      await userEvent.type(input, '*/15 * * * *');
+      await userEvent.click(screen.getByRole('radio', { name: 'Simple' }));
+
+      expect(screen.getByText(/Switching to Simple mode replaces your custom cron expression/i)).toBeInTheDocument();
+      expect(screen.getByText(/0 3 \* \* \*/)).toBeInTheDocument();
+    });
+
+    it('saves the compiled cron from a non-default Simple schedule (weekly)', async () => {
+      render(<ScheduledOperationsView />);
+      await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+      await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'weekly-snapshot');
+      await userEvent.click(screen.getAllByRole('combobox')[0]);
+      await userEvent.click(await screen.findByRole('button', { name: 'Create Fleet Snapshot' }));
+
+      await userEvent.click(screen.getByRole('radio', { name: 'Weekly' }));
+      await userEvent.click(screen.getByRole('checkbox', { name: 'Monday' }));
+      await userEvent.click(screen.getByRole('checkbox', { name: 'Wednesday' }));
+
+      await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+      await waitFor(() => {
+        const postCall = mockedFetch.mock.calls.find(
+          ([url, opts]) => url === '/scheduled-tasks' && opts?.method === 'POST',
+        );
+        expect(postCall).toBeTruthy();
+        // Compiled from the weekday selection, not the legacy default literal.
+        expect(JSON.parse(postCall![1].body).cron_expression).toBe('0 3 * * 1,3');
+      });
     });
   });
 });
