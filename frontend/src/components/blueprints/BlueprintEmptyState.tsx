@@ -16,7 +16,7 @@ export function BlueprintEmptyState({ onCreate, canCreate }: BlueprintEmptyState
                         <span className="font-mono text-[10px] uppercase tracking-[0.2em]">Deployments · Blueprints</span>
                     </div>
                 </div>
-                <h3 className="font-serif text-2xl italic leading-tight tracking-[-0.01em] text-stat-value">
+                <h3 className="font-serif text-2xl [font-style:var(--heading-style)] leading-tight tracking-[-0.01em] text-stat-value">
                     Declare once. Distribute everywhere.
                 </h3>
                 <p className="font-sans text-sm leading-relaxed text-stat-subtitle">
@@ -47,7 +47,7 @@ function Step({ kicker, title, copy }: { kicker: string; title: string; copy: st
     return (
         <div className="flex flex-col gap-1.5">
             <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-brand">{kicker}</span>
-            <span className="font-serif italic text-base text-stat-value">{title}</span>
+            <span className="font-serif [font-style:var(--heading-style)] text-base text-stat-value">{title}</span>
             <span className="text-xs text-stat-subtitle leading-relaxed">{copy}</span>
         </div>
     );

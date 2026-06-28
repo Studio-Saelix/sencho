@@ -31,9 +31,12 @@ import { SecretsTab } from './fleet/secrets/SecretsTab';
 import { DependencyMapTab } from './fleet/DependencyMapTab';
 import { useNodeActions } from './nodes/useNodeActions';
 import type { FleetTab } from '@/lib/events';
+import type { SectionId } from '@/components/settings/types';
 
 interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
+    /** Opens a Settings section (used to send "Add node" to Settings > Nodes). */
+    onOpenSettingsSection?: (section: SectionId) => void;
     fleetUpdatesIntent?: { tab: 'nodes' | 'changelog' } | null;
     onFleetUpdatesIntentConsumed?: () => void;
     /** Deep-link target tab (e.g. 'snapshots' from the stack storage warning). */
@@ -41,7 +44,7 @@ interface FleetViewProps {
     onFleetTabConsumed?: () => void;
 }
 
-export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdatesIntentConsumed, fleetTab, onFleetTabConsumed }: FleetViewProps) {
+export function FleetView({ onNavigateToNode, onOpenSettingsSection, fleetUpdatesIntent, onFleetUpdatesIntentConsumed, fleetTab, onFleetTabConsumed }: FleetViewProps) {
     const { isPaid } = useLicense();
     const { isAdmin } = useAuth();
 
@@ -81,7 +84,7 @@ export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdates
 
     const { mastheadStats, lastSyncAt, loading, refreshing } = overview;
 
-    const { openCreate, openEdit, openDelete, NodeActionModals } = useNodeActions({
+    const { openEdit, openDelete, NodeActionModals } = useNodeActions({
         onNodeChange: () => { void overview.fetchOverview(true); },
     });
 
@@ -103,7 +106,9 @@ export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdates
 
             <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as FleetTab)}>
                 <div className="flex items-center justify-between gap-3 mb-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
-                    <TabsList className="max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
+                    {/* Flatten the list's own pill band so the tabs sit directly in
+                        the single full-width band, not a nested second band. */}
+                    <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
                         <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
                             <TabsHighlightItem value="overview">
                                 <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -216,7 +221,7 @@ export function FleetView({ onNavigateToNode, fleetUpdatesIntent, onFleetUpdates
                         onCordonChange={() => { void overview.fetchOverview(true); }}
                         onEditNode={isAdmin ? openEdit : undefined}
                         onDeleteNode={isAdmin ? openDelete : undefined}
-                        onAddNode={isAdmin ? openCreate : undefined}
+                        onAddNode={isAdmin && onOpenSettingsSection ? () => onOpenSettingsSection('nodes') : undefined}
                         onCheckUpdates={updateStatus.checkUpdates}
                         checkingUpdates={updateStatus.checkingUpdates}
                         topologyMode={topology.prefs.mode}
