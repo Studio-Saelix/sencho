@@ -224,6 +224,60 @@ describe('POST /api/scheduled-tasks', () => {
     expect(res.body.cron_expression).toBe('@daily');
   });
 
+  it('pins next_run_at to an explicit one-shot run_at instead of the cron-derived next run', async () => {
+    // A one-shot for next year: the cron (0 23 1 7 *) would otherwise resolve to
+    // this year's occurrence. run_at must win so the task fires on the chosen year.
+    const runAt = new Date(new Date().getFullYear() + 1, 6, 1, 23, 0, 0, 0).getTime();
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, cron_expression: '0 23 1 7 *', delete_after_run: true, run_at: runAt,
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.next_run_at).toBe(runAt);
+  });
+
+  it('falls back to the cron-derived next run when no run_at is supplied', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, cron_expression: '0 3 * * *',
+    });
+    expect(res.status).toBe(201);
+    // Cron-derived next run is some future instant, not pinned to a passed timestamp.
+    expect(typeof res.body.next_run_at).toBe('number');
+    expect(res.body.next_run_at).toBeGreaterThan(Date.now());
+  });
+
+  it('rejects a run_at in the past with 400', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, cron_expression: '0 23 1 7 *', delete_after_run: true, run_at: Date.now() - 60_000,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/run_at must be in the future/);
+  });
+
+  it('rejects a non-numeric run_at with 400', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, cron_expression: '0 23 1 7 *', run_at: '2027-07-01',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/run_at must be an epoch-millisecond timestamp/);
+  });
+
+  it('rejects a fractional run_at with 400 (must be an integer epoch-ms)', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, cron_expression: '0 23 1 7 *', run_at: Date.now() + 100000.5,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/run_at must be an epoch-millisecond timestamp/);
+  });
+
+  it('ignores run_at for a disabled task (next_run_at stays null)', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, enabled: false, cron_expression: '0 23 1 7 *', delete_after_run: true,
+      run_at: new Date(new Date().getFullYear() + 1, 6, 1, 23, 0, 0, 0).getTime(),
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.next_run_at).toBeNull();
+  });
+
   it('rejects unsupported actions', async () => {
     const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
       ...basePayload, action: 'nuke',
@@ -417,6 +471,30 @@ describe('PATCH /api/scheduled-tasks/:id/toggle', () => {
     expect(on.body.enabled).toBe(1);
     expect(typeof on.body.next_run_at).toBe('number');
   });
+
+  it('preserves a one-shot pinned next_run_at across a disable/enable cycle', async () => {
+    const now = Date.now();
+    // A one-shot pinned to next year (its yearless cron would resolve to this year).
+    const pinned = new Date(new Date().getFullYear() + 1, 6, 1, 23, 0, 0, 0).getTime();
+    const id = DatabaseService.getInstance().createScheduledTask({
+      name: 'once', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
+      cron_expression: '0 23 1 7 *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
+      last_run_at: null, next_run_at: pinned, last_status: null, last_error: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1,
+    });
+
+    const off = await request(app).patch(`/api/scheduled-tasks/${id}/toggle`).set('Cookie', adminCookie);
+    expect(off.status).toBe(200);
+    expect(off.body.enabled).toBe(0);
+    // The pinned instant survives the disable so it can be restored on re-enable.
+    expect(off.body.next_run_at).toBe(pinned);
+
+    const on = await request(app).patch(`/api/scheduled-tasks/${id}/toggle`).set('Cookie', adminCookie);
+    expect(on.status).toBe(200);
+    expect(on.body.enabled).toBe(1);
+    // Re-enable restores the exact chosen instant, not the cron's annual occurrence.
+    expect(on.body.next_run_at).toBe(pinned);
+  });
 });
 
 describe('DELETE /api/scheduled-tasks/:id', () => {
@@ -581,6 +659,41 @@ describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
       .send({ delete_after_run: false });
     expect(res2.status).toBe(200);
     expect(res2.body.delete_after_run).toBe(0);
+  });
+
+  it('pins next_run_at to a re-supplied one-shot run_at on update', async () => {
+    const now = Date.now();
+    const id = DatabaseService.getInstance().createScheduledTask({
+      name: 'once', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
+      cron_expression: '0 23 1 7 *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
+      last_run_at: null, next_run_at: now + 1000, last_status: null, last_error: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1,
+    });
+
+    const runAt = new Date(new Date().getFullYear() + 1, 6, 1, 23, 0, 0, 0).getTime();
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${id}`)
+      .set('Cookie', adminCookie)
+      .send({ cron_expression: '0 23 1 7 *', run_at: runAt });
+    expect(res.status).toBe(200);
+    expect(res.body.next_run_at).toBe(runAt);
+  });
+
+  it('rejects an update with a past run_at', async () => {
+    const now = Date.now();
+    const id = DatabaseService.getInstance().createScheduledTask({
+      name: 'once', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
+      cron_expression: '0 23 1 7 *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
+      last_run_at: null, next_run_at: now + 1000, last_status: null, last_error: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1,
+    });
+
+    const res = await request(app)
+      .put(`/api/scheduled-tasks/${id}`)
+      .set('Cookie', adminCookie)
+      .send({ run_at: Date.now() - 60_000 });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/run_at must be in the future/);
   });
 });
 

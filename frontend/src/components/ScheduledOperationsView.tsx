@@ -22,6 +22,7 @@ import {
   buildCron,
   parseCron,
   getSimpleScheduleError,
+  getOnceRunAt,
   type SimpleSchedule,
 } from '@/lib/scheduling';
 import { ScheduleSimplePanel } from './ScheduleSimplePanel';
@@ -277,6 +278,11 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     // backend stores; Advanced mode sends the raw expression as-is.
     const cronExpression = scheduleMode === 'simple' ? buildCron(simpleSchedule) : formCron;
 
+    // A one-time ('once') Simple schedule pins its exact run instant (including
+    // year) via run_at, because the 5-field cron cannot encode a year. null for
+    // every recurring shape and for Advanced mode, where the cron is authoritative.
+    const runAt = scheduleMode === 'simple' ? getOnceRunAt(simpleSchedule) : null;
+
     const body: Record<string, unknown> = {
       name: formName,
       target_type: actionDef.targetType,
@@ -284,6 +290,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       cron_expression: cronExpression,
       enabled: formEnabled,
       delete_after_run: formDeleteAfterRun,
+      run_at: runAt,
       target_id: actionDef.requiresStack ? formTargetId : null,
       node_id: actionDef.requiresNode && formNodeId ? parseInt(formNodeId, 10) : null,
       prune_targets: formAction === 'prune' && formPruneTargets.length > 0 ? formPruneTargets : null,
