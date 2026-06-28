@@ -806,6 +806,11 @@ export default function EditorLayout() {
               />
             );
           case 'fleet':
+            // Never mount the mobile fleet view without node:read: the redirect
+            // effect bounces the deep-link to the dashboard, but MobileFleet is a
+            // static (non-lazy) render, so without this guard it would fire one
+            // /fleet/overview (now 403) before the redirect unmounts it.
+            if (!can('node:read')) return null;
             return (
               <MobileFleet
                 headerActions={mobileMastheadActions}

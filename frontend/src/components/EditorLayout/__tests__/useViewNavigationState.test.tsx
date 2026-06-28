@@ -16,10 +16,23 @@ function mockActiveNode(type: 'local' | 'remote' | null) {
   } as unknown as ReturnType<typeof NodeContext.useNodes>);
 }
 
+// A community non-admin user with node:read (e.g. a viewer): sees Fleet, no
+// admin-only items.
 function mockCommunityUser() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     isAdmin: false,
-    can: () => false,
+    can: (p: string) => p === 'node:read',
+  } as unknown as ReturnType<typeof AuthContext.useAuth>);
+  vi.mocked(LicenseContext.useLicense).mockReturnValue({
+    isPaid: false,
+  } as unknown as ReturnType<typeof LicenseContext.useLicense>);
+}
+
+// A deployer: stack permissions but no node:read, so no Fleet affordance.
+function mockDeployer() {
+  vi.mocked(AuthContext.useAuth).mockReturnValue({
+    isAdmin: false,
+    can: (p: string) => p === 'stack:read' || p === 'stack:deploy',
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
     isPaid: false,
@@ -29,7 +42,7 @@ function mockCommunityUser() {
 function mockPaidAdmin() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     isAdmin: true,
-    can: (p: string) => p === 'system:audit',
+    can: (p: string) => p === 'system:audit' || p === 'node:read',
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
     isPaid: true,
@@ -39,7 +52,7 @@ function mockPaidAdmin() {
 function mockCommunityAdmin() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     isAdmin: true,
-    can: () => false,
+    can: (p: string) => p === 'node:read',
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
     isPaid: false,
@@ -207,6 +220,30 @@ describe('useViewNavigationState', () => {
     expect(values).not.toContain('host-console');
     expect(values).not.toContain('audit-log');
     expect(values).not.toContain('scheduled-ops');
+  });
+
+  it('hides Fleet from a user without node:read (deployer)', () => {
+    mockDeployer();
+    const { result } = renderHook(() => useViewNavigationState());
+    const values = result.current.navItems.map(i => i.value);
+    expect(values).not.toContain('fleet');
+    // The other base items remain reachable.
+    expect(values).toContain('dashboard');
+    expect(values).toContain('resources');
+    expect(values).toContain('templates');
+  });
+
+  it('redirects a user without node:read off the Fleet view reached via a deep-link event', () => {
+    const onNavigateToDashboard = vi.fn();
+    mockDeployer();
+    const { result } = renderHook(() => useViewNavigationState({ onNavigateToDashboard }));
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(SENCHO_NAVIGATE_EVENT, { detail: { view: 'fleet' } }),
+      );
+    });
+    expect(result.current.activeView).toBe('dashboard');
+    expect(onNavigateToDashboard).toHaveBeenCalled();
   });
 
   it('shows the admin-only Logs entry for an admin on any tier (role gate, not tier gate)', () => {

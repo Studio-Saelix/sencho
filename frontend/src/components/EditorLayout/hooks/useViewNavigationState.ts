@@ -115,13 +115,18 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   const navItems = useMemo((): NavItem[] => {
     const items: NavItem[] = [
       { value: 'dashboard', label: 'Home', icon: Home },
-      { value: 'fleet', label: 'Fleet', icon: Radar },
+    ];
+    // Fleet surfaces node topology and host stats, so it is gated on node:read
+    // (held by every role except deployer), matching the backend guard on the
+    // fleet overview / configuration / dependency / networking reads.
+    if (can('node:read')) items.push({ value: 'fleet', label: 'Fleet', icon: Radar });
+    items.push(
       { value: 'resources', label: 'Resources', icon: HardDrive },
       // Security is a Community, node-scoped review surface (not hub-only), so
       // it shows for every authenticated user and on remote nodes too.
       { value: 'security', label: 'Security', icon: ShieldCheck },
       { value: 'templates', label: 'App Store', icon: CloudDownload },
-    ];
+    );
     // The aggregated Logs feed crosses every managed stack, so it is an
     // admin-only operator view (the backend gates the same routes on admin).
     if (isAdmin) items.push({ value: 'global-observability', label: 'Logs', icon: Activity });
@@ -140,16 +145,19 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
 
   useEffect(() => {
     // Redirect off a view the active context can't reach: a hub-only view while
-    // a remote node is active, or the admin-only Logs view as a non-admin (e.g.
-    // arrived via a deep-link event rather than the now-hidden nav item).
+    // a remote node is active, the admin-only Logs view as a non-admin, or the
+    // Fleet view without node:read (e.g. arrived via a deep-link event rather
+    // than the now-hidden nav item).
     const blockedByRemote = isRemote && HUB_ONLY_VIEWS.has(activeView);
-    const blockedByRole = !isAdmin && activeView === 'global-observability';
+    const blockedByRole =
+      (!isAdmin && activeView === 'global-observability')
+      || (!can('node:read') && activeView === 'fleet');
     if (blockedByRemote || blockedByRole) {
       onNavigateToDashboard?.();
       setActiveView('dashboard');
       setFilterNodeId(null);
     }
-  }, [isRemote, isAdmin, activeView, onNavigateToDashboard]);
+  }, [isRemote, isAdmin, can, activeView, onNavigateToDashboard]);
 
   return {
     activeView, setActiveView,

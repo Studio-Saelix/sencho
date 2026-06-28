@@ -549,7 +549,8 @@ fleetRouter.get('/sync-status', authMiddleware, (req: Request, res: Response): v
   res.json(DatabaseService.getInstance().getFleetSyncStatuses());
 });
 
-fleetRouter.get('/overview', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
+fleetRouter.get('/overview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const debug = isDebugEnabled();
     const db = DatabaseService.getInstance();
@@ -602,6 +603,7 @@ interface FleetNodeConfiguration {
 }
 
 fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
@@ -670,7 +672,8 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
  * and via its auth-only per-node route for remotes, then merges with per-node
  * attribution. Unreachable nodes degrade to nodeErrors so the rest still draws.
  */
-fleetRouter.get('/dependency-map', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
+fleetRouter.get('/dependency-map', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
@@ -748,7 +751,8 @@ function isNodeNetworkingSummary(v: unknown): v is NodeNetworkingSummary {
  * 404 and degrades to a skip, so one unreachable or unsupported node never fails
  * the filter for the rest.
  */
-fleetRouter.get('/networking-summary', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
+fleetRouter.get('/networking-summary', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
@@ -884,6 +888,7 @@ fleetRouter.get('/node/:nodeId/stacks/:stackName/containers', authMiddleware, as
 });
 
 fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
