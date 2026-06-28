@@ -252,7 +252,23 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
         return data;
       },
     );
-    res.json(result);
+    // Git-source labels are computed live, outside the cache, so linking or
+    // unlinking a stack's Git source is reflected immediately. The Docker
+    // status portion keeps its short TTL; only the cheap source label is fresh.
+    // The label is cosmetic, so a lookup failure must not take down the primary
+    // status payload: fall back to labeling everything 'local'.
+    let gitStackNames = new Set<string>();
+    try {
+      gitStackNames = new Set(GitSourceService.getInstance().list().map((s) => s.stack_name));
+    } catch (sourceError) {
+      console.error('Failed to load git sources for status labels; defaulting to local:', sourceError);
+    }
+    const withSource: Record<string, BulkStackInfo & { source: 'local' | 'git' }> = {};
+    for (const [stack, info] of Object.entries(result)) {
+      const name = stack.replace(/\.(yml|yaml)$/, '');
+      withSource[stack] = { ...info, source: gitStackNames.has(name) ? 'git' : 'local' };
+    }
+    res.json(withSource);
   } catch (error) {
     console.error('Failed to fetch stack statuses:', error);
     res.status(500).json({ error: 'Failed to fetch stack statuses' });
