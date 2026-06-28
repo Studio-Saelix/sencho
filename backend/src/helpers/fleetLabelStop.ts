@@ -88,7 +88,12 @@ export async function runLocalLabelStop(
 
   const lockKey = `bulk:${nodeId}`;
   if (activeBulkActions.has(lockKey)) {
-    const busyStacks = allowedStacks ? stackNames.filter(name => allowedStacks.has(name)) : stackNames;
+    // Report every confirmed stack as a contention failure, not just the
+    // currently label-matched subset: a confirmed stack that lost its label
+    // must still surface (the operator asked to stop it), and the result must
+    // not be empty when stacks were confirmed, or the UI reads it as "label
+    // matched but no stacks assigned" instead of a contention failure.
+    const busyStacks = allowedStacks ? [...allowedStacks] : stackNames;
     return {
       matched: true,
       stackResults: busyStacks.map(stackName => ({

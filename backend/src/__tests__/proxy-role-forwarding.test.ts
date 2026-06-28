@@ -171,6 +171,14 @@ describe('remote proxy gateway - actor role header forwarding', () => {
 
   beforeAll(async () => {
     captureServer = http.createServer((req, res) => {
+      // The proxy gate probes /api/meta first to confirm the remote enforces
+      // cross-node RBAC before forwarding a non-admin request; advertise it so
+      // the viewer forward is allowed and we can assert the forwarded headers.
+      if (req.url?.startsWith('/api/meta')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ version: '0.93.0', capabilities: ['cross-node-rbac'] }));
+        return;
+      }
       captured = req.headers;
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end('[]');
