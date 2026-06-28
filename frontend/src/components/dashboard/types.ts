@@ -76,6 +76,8 @@ export interface StackStatusEntry {
   mainPort?: number;
   /** Unix seconds of the oldest running container (approximates stack uptime). */
   runningSince?: number;
+  /** Provenance of the stack: 'git' when linked to a Git source, else 'local'. */
+  source?: 'local' | 'git';
 }
 
 export type HealthLevel = 'healthy' | 'degraded' | 'critical';

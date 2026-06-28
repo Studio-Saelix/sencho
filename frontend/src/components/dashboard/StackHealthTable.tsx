@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Sparkline } from '@/components/ui/sparkline';
-import { ChevronLeft, ChevronRight, Layers } from 'lucide-react';
+import { ArrowUp, ArrowDown, ChevronLeft, ChevronRight, Layers } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import type { StackStatusEntry, MetricPoint, StackCpuSeries } from './types';
 import { aggregateCurrentUsage } from './aggregateCurrentUsage';
 import { classifyRow, type RowState } from './classifyRow';
@@ -10,20 +11,50 @@ interface StackHealthTableProps {
   stackStatuses: Record<string, StackStatusEntry>;
   metrics: MetricPoint[];
   stackCpuSeries: Record<string, StackCpuSeries>;
-  activeNodeName: string;
   onNavigateToStack: (stackFile: string) => void;
 }
+
+type SortKey = 'stack' | 'up' | 'cpu' | 'mem';
 
 const PAGE_SIZE = 8;
 // Shared by the header and data rows so their columns stay aligned. The
 // `max-md:min-w` keeps both at the same width below md, where the card scrolls
-// horizontally; desktop is unaffected by the `max-md:` prefix.
-const GRID_TEMPLATE = 'grid-cols-[14px_minmax(0,1fr)_minmax(0,120px)_52px_52px_72px_110px_16px] max-md:min-w-[600px]';
+// horizontally; desktop is unaffected by the `max-md:` prefix. Columns:
+// dot · STACK · SOURCE · PORT · UP · CPU · MEM · CPU·10m · chevron.
+const GRID_TEMPLATE = 'grid-cols-[14px_minmax(0,1fr)_64px_56px_52px_52px_72px_110px_16px] max-md:min-w-[640px]';
 
 const formatMemory = (mb: number): string => {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
   return `${mb.toFixed(0)} MB`;
 };
+
+// Grid-compatible sortable header cell. Renders a <button> inside the grid
+// <span> (the security ImagesTab pattern uses <TableHead>, which is invalid
+// inside this CSS-grid layout, so only the sort logic is shared here).
+function SortHeader({ label, k, sortKey, sortDir, onSort, align = 'left' }: {
+  label: string;
+  k: SortKey;
+  sortKey: SortKey | null;
+  sortDir: 'asc' | 'desc';
+  onSort: (k: SortKey) => void;
+  align?: 'left' | 'right';
+}) {
+  return (
+    <span className={align === 'right' ? 'text-right' : undefined}>
+      <button
+        type="button"
+        onClick={() => onSort(k)}
+        className={cn(
+          'inline-flex items-center gap-1 uppercase tracking-[0.22em] hover:text-stat-value',
+          align === 'right' && 'flex-row-reverse',
+        )}
+      >
+        {label}
+        {sortKey === k && (sortDir === 'asc' ? <ArrowUp className="h-2.5 w-2.5" /> : <ArrowDown className="h-2.5 w-2.5" />)}
+      </button>
+    </span>
+  );
+}
 
 function formatUptime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return '--';
@@ -58,10 +89,13 @@ export function StackHealthTable({
   stackStatuses,
   metrics,
   stackCpuSeries,
-  activeNodeName,
   onNavigateToStack,
 }: StackHealthTableProps) {
   const [page, setPage] = useState(0);
+  // null = the default health-state ordering (worst first); a SortKey switches
+  // to user-driven column sort.
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   // Live-tick the current second so uptime labels advance without a parent
   // refetch. Thirty-second cadence keeps the DOM calm while still refreshing
   // every "Nm" bucket change.
@@ -73,8 +107,8 @@ export function StackHealthTable({
 
   const stackAggregates = useMemo(() => aggregateCurrentUsage(metrics), [metrics]);
 
-  const rows = useMemo(() => {
-    const list = Object.entries(stackStatuses).map(([file, entry]) => {
+  const baseRows = useMemo(() => {
+    return Object.entries(stackStatuses).map(([file, entry]) => {
       const name = file.replace(/\.(yml|yaml)$/, '');
       const agg = stackAggregates[name];
       const series = stackCpuSeries[name];
@@ -91,16 +125,44 @@ export function StackHealthTable({
         peakIndex: series?.peakIndex ?? -1,
         state,
         runningSince: entry.runningSince ?? null,
+        source: entry.source ?? 'local',
+        mainPort: entry.mainPort ?? null,
       };
     });
-    const stateOrder: Record<RowState, number> = { error: 0, warn: 1, healthy: 2 };
+  }, [stackStatuses, stackAggregates, stackCpuSeries]);
+
+  const rows = useMemo(() => {
+    const list = [...baseRows];
+    if (sortKey === null) {
+      const stateOrder: Record<RowState, number> = { error: 0, warn: 1, healthy: 2 };
+      list.sort((a, b) => {
+        const diff = stateOrder[a.state] - stateOrder[b.state];
+        if (diff !== 0) return diff;
+        return b.peakCpu - a.peakCpu;
+      });
+      return list;
+    }
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const nowSecs = now / 1000;
+    const uptime = (rs: number | null) => (rs !== null ? nowSecs - rs : -1);
     list.sort((a, b) => {
-      const diff = stateOrder[a.state] - stateOrder[b.state];
-      if (diff !== 0) return diff;
-      return b.peakCpu - a.peakCpu;
+      switch (sortKey) {
+        case 'stack': return a.name.localeCompare(b.name) * dir;
+        case 'up': return (uptime(a.runningSince) - uptime(b.runningSince)) * dir;
+        case 'cpu': return ((a.cpu ?? -1) - (b.cpu ?? -1)) * dir;
+        case 'mem': return ((a.memory ?? -1) - (b.memory ?? -1)) * dir;
+        // Exhaustive: a new SortKey must add a case or this fails to compile.
+        default: { const _exhaustive: never = sortKey; return _exhaustive; }
+      }
     });
     return list;
-  }, [stackStatuses, stackAggregates, stackCpuSeries]);
+  }, [baseRows, sortKey, sortDir, now]);
+
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    else { setSortKey(key); setSortDir(key === 'stack' ? 'asc' : 'desc'); }
+    setPage(0);
+  };
 
   const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);
@@ -128,7 +190,7 @@ export function StackHealthTable({
             Stack health
           </h2>
           <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-stat-subtitle">
-            {stackCount} {stackCount === 1 ? 'stack' : 'stacks'} · sorted by load
+            {stackCount} {stackCount === 1 ? 'stack' : 'stacks'}{sortKey === null ? ' · sorted by load' : ''}
           </span>
         </div>
         {needsPagination ? (
@@ -159,11 +221,12 @@ export function StackHealthTable({
       </div>
       <div className={`grid ${GRID_TEMPLATE} items-center gap-4 border-t border-border/60 px-[var(--density-row-x)] py-[var(--density-cell-y)] font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle`}>
         <span />
-        <span>STACK</span>
-        <span>HOST</span>
-        <span className="text-right">UP</span>
-        <span className="text-right">CPU</span>
-        <span className="text-right">MEM</span>
+        <SortHeader label="STACK" k="stack" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
+        <span>SOURCE</span>
+        <span>PORT</span>
+        <SortHeader label="UP" k="up" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
+        <SortHeader label="CPU" k="cpu" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
+        <SortHeader label="MEM" k="mem" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} align="right" />
         <span className="text-right">CPU · 10m</span>
         <span />
       </div>
@@ -184,7 +247,12 @@ export function StackHealthTable({
           >
             <span className={`h-1.5 w-1.5 rounded-full justify-self-center ${stateDot[row.state]}`} aria-hidden="true" />
             <span className="truncate font-mono text-sm text-stat-value">{row.name}</span>
-            <span className="truncate font-mono text-xs text-stat-subtitle">{activeNodeName}</span>
+            <span className="truncate font-mono text-[11px] uppercase tracking-wide text-stat-subtitle">
+              {row.source === 'git' ? 'Git' : 'Local'}
+            </span>
+            <span className="truncate font-mono text-xs tabular-nums text-stat-subtitle">
+              {row.mainPort !== null ? row.mainPort : '--'}
+            </span>
             <span className="text-right font-mono text-xs tabular-nums text-stat-subtitle">
               {row.runningSince !== null
                 ? formatUptime(Math.max(0, Math.floor(now / 1000 - row.runningSince)))
