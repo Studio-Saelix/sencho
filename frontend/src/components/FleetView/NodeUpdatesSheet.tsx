@@ -72,34 +72,42 @@ export function NodeUpdatesSheet({
     useEffect(() => {
         if (!open || loadingRelease) return;
         if (loadedForVersion === advertisedLatest) return;
+        // Drop any previously loaded notes before fetching for a (possibly) newer
+        // advertised version. If this fetch mismatches, returns null, errors, or
+        // rejects, the panel must fall to the empty state rather than keep showing
+        // the prior version's notes; a confirmed match repopulates below. The
+        // skeleton (loadingRelease) covers the in-flight gap, so this does not flash.
+        setReleaseNotes(null);
+        setReleaseHtmlUrl(null);
+        setReleaseVersion(null);
         setLoadingRelease(true);
         const recheck = recheckingUpdates ? '?recheck=true' : '';
         apiFetch(`/fleet/update-status/release-notes${recheck}`, { localOnly: true })
             .then(res => res.ok ? res.json() as Promise<{ version: string | null; releaseNotes: string | null; htmlUrl: string | null }> : null)
             .then(data => {
-                if (data) {
-                    // Bind strictly to the advertised update: only render notes the
-                    // endpoint confirms belong to the advertised version. The version
-                    // lookup and the release-notes lookup use independent caches (and
-                    // version can fall back to Docker Hub while notes are GitHub-only),
-                    // so a drifted response must fall through to the empty state with
-                    // the online changelog link rather than show another version's notes.
-                    const matches = data.version !== null && data.version === advertisedLatest;
-                    setReleaseNotes(matches ? data.releaseNotes : null);
-                    setReleaseHtmlUrl(matches ? data.htmlUrl : null);
-                    setReleaseVersion(matches ? data.version : null);
+                // Bind strictly to the advertised update: render only notes the
+                // endpoint confirms belong to the advertised version. The version
+                // lookup and the release-notes lookup use independent caches (and
+                // version can fall back to Docker Hub while notes are GitHub-only),
+                // so a drifted, null, or failed response keeps the cleared state set
+                // above and falls through to the empty state with the online link.
+                if (data && data.version !== null && data.version === advertisedLatest) {
+                    setReleaseNotes(data.releaseNotes);
+                    setReleaseHtmlUrl(data.htmlUrl);
+                    setReleaseVersion(data.version);
                 }
             })
             .catch((err) => {
-                // Informational panel: a failure falls through to the empty
-                // state (with an online changelog link) rather than a toast,
-                // but leave a breadcrumb so the failure is diagnosable.
+                // Informational panel: a failure falls through to the empty state
+                // (notes already cleared above) rather than a toast, but leave a
+                // breadcrumb so the failure is diagnosable.
                 console.warn('[Fleet] Release-notes fetch failed:', err);
             })
             .finally(() => {
                 setLoadingRelease(false);
                 // Record the advertised version this fetch settled for, so a null
-                // result does not loop and a later version change forces a refetch.
+                // or failed result does not loop and a later version change forces
+                // a refetch.
                 setLoadedForVersion(advertisedLatest);
             });
     }, [open, advertisedLatest, loadedForVersion, loadingRelease, recheckingUpdates]);

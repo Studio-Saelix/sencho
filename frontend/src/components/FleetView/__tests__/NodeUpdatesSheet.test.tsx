@@ -133,6 +133,49 @@ describe('NodeUpdatesSheet', () => {
     await waitFor(() => expect(releaseCalls()).toBe(2));
   });
 
+  it('clears stale notes when the refetch after a version change returns a non-OK response', async () => {
+    apiFetchMock.mockResolvedValue({ ok: true, json: async () => ({ version: '1.1.0', releaseNotes: '## v1.1.0 notes', htmlUrl: 'https://example.com/v1.1.0' }) });
+    const releaseCalls = () => apiFetchMock.mock.calls.filter(c => String(c[0]).includes('release-notes')).length;
+    const { rerender } = render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
+    await screen.findByRole('heading', { name: 'v1.1.0 notes' });
+    expect(releaseCalls()).toBe(1);
+
+    // Advertised version moves to 1.2.0 but the refetch fails (HTTP 500). The
+    // previously loaded 1.1.0 notes must not linger as the 1.2.0 changelog.
+    apiFetchMock.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+    const bumped = STATUSES.map(s => ({ ...s, latestVersion: '1.2.0' }));
+    rerender(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog', updateStatuses: bumped })} />);
+
+    expect(await screen.findByText('No release notes to show')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'v1.1.0 notes' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Release v1.1.0')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /View on GitHub/ })).not.toBeInTheDocument();
+    // The failed refetch settles without looping.
+    await waitFor(() => expect(releaseCalls()).toBe(2));
+  });
+
+  it('clears stale notes when the refetch after a version change rejects', async () => {
+    let calls = 0;
+    apiFetchMock.mockImplementation(() => {
+      calls += 1;
+      return calls === 1
+        ? Promise.resolve({ ok: true, json: async () => ({ version: '1.1.0', releaseNotes: '## v1.1.0 notes', htmlUrl: null }) })
+        : Promise.reject(new Error('network down'));
+    });
+    const releaseCalls = () => apiFetchMock.mock.calls.filter(c => String(c[0]).includes('release-notes')).length;
+    const { rerender } = render(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog' })} />);
+    await screen.findByRole('heading', { name: 'v1.1.0 notes' });
+
+    // A rejected (network/JSON) refetch after the version change must also clear
+    // the stale notes rather than leave them mislabelled as the new version.
+    const bumped = STATUSES.map(s => ({ ...s, latestVersion: '1.2.0' }));
+    rerender(<NodeUpdatesSheet {...baseProps({ initialTab: 'changelog', updateStatuses: bumped })} />);
+
+    expect(await screen.findByText('No release notes to show')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'v1.1.0 notes' })).not.toBeInTheDocument();
+    await waitFor(() => expect(releaseCalls()).toBe(2));
+  });
+
   it('does not refetch loaded notes on re-render when the version is unchanged', async () => {
     apiFetchMock.mockResolvedValue({
       ok: true,
