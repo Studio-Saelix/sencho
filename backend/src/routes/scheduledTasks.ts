@@ -163,6 +163,25 @@ function validateCronExpression(cron: unknown): string | null {
   return null;
 }
 
+/**
+ * Validate the optional explicit fire time. When present it must be a future
+ * epoch-ms integer; absent (undefined/null) leaves the cron-derived next run in
+ * place. By convention only a one-time ('once') schedule populates run_at (the
+ * frontend's getOnceRunAt), because a 5-field cron has no year field and the
+ * cron alone would fire on the next annual occurrence rather than the exact date
+ * the admin chose; this validator itself only checks shape and futureness.
+ */
+function validateRunAt(runAt: unknown): string | null {
+  if (runAt === undefined || runAt === null) return null;
+  if (typeof runAt !== 'number' || !Number.isInteger(runAt)) {
+    return 'run_at must be an epoch-millisecond timestamp.';
+  }
+  if (runAt <= Date.now()) {
+    return 'run_at must be in the future.';
+  }
+  return null;
+}
+
 export const scheduledTasksRouter = Router();
 
 scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
@@ -201,7 +220,7 @@ scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
 scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
   try {
-    const { name, target_type, target_id, node_id, action, cron_expression, enabled, prune_targets, target_services, prune_label_filter, delete_after_run } = req.body;
+    const { name, target_type, target_id, node_id, action, cron_expression, enabled, prune_targets, target_services, prune_label_filter, delete_after_run, run_at } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       res.status(400).json({ error: 'Name is required' }); return;
@@ -227,9 +246,16 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
     const cronErr = validateCronExpression(cron_expression);
     if (cronErr) { res.status(400).json({ error: cronErr }); return; }
 
+    const runAtErr = validateRunAt(run_at);
+    if (runAtErr) { res.status(400).json({ error: runAtErr }); return; }
+
     const scheduler = SchedulerService.getInstance();
     const now = Date.now();
-    const nextRun = (enabled !== false) ? scheduler.calculateNextRun(cron_expression) : null;
+    // A one-shot's run_at pins the exact instant (including year); fall back to
+    // the cron-derived next run when no explicit timestamp is supplied.
+    const nextRun = (enabled === false)
+      ? null
+      : (typeof run_at === 'number' ? run_at : scheduler.calculateNextRun(cron_expression));
     const normalizedTargetId = target_type === 'stack' ? target_id : null;
     const normalizedNodeId = actionRequiresNode(action) ? parsePositiveNodeId(node_id) : null;
 
@@ -288,7 +314,7 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     const existing = db.getScheduledTask(id);
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
 
-    const { name, target_type, target_id, node_id, action, cron_expression, enabled, prune_targets, target_services, prune_label_filter, delete_after_run } = req.body;
+    const { name, target_type, target_id, node_id, action, cron_expression, enabled, prune_targets, target_services, prune_label_filter, delete_after_run, run_at } = req.body;
 
     if (target_type !== undefined && !(VALID_TARGET_TYPES as readonly string[]).includes(target_type)) {
       res.status(400).json({ error: 'Invalid target_type' }); return;
@@ -321,6 +347,9 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
       const cronErr = validateCronExpression(cron_expression);
       if (cronErr) { res.status(400).json({ error: cronErr }); return; }
     }
+
+    const runAtErr = validateRunAt(run_at);
+    if (runAtErr) { res.status(400).json({ error: runAtErr }); return; }
 
     const updates: Partial<Omit<ScheduledTask, 'id'>> = { updated_at: Date.now() };
     if (name !== undefined) {
@@ -359,7 +388,11 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     const finalCron = cron_expression || existing.cron_expression;
     const finalEnabled = enabled !== undefined ? enabled : existing.enabled;
     if (finalEnabled) {
-      updates.next_run_at = SchedulerService.getInstance().calculateNextRun(finalCron);
+      // A re-supplied one-shot run_at pins the exact instant; otherwise recompute
+      // from the (possibly updated) cron.
+      updates.next_run_at = typeof run_at === 'number'
+        ? run_at
+        : SchedulerService.getInstance().calculateNextRun(finalCron);
     } else {
       updates.next_run_at = null;
     }
@@ -406,7 +439,19 @@ scheduledTasksRouter.patch('/:id/toggle', (req: Request, res: Response): void =>
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
 
     const newEnabled = existing.enabled ? 0 : 1;
-    const nextRun = newEnabled ? SchedulerService.getInstance().calculateNextRun(existing.cron_expression) : null;
+    // A one-shot's exact instant cannot be reconstructed from its yearless cron,
+    // so preserve its pinned next_run_at across a disable/enable cycle (the
+    // enabled=0 gate stops a disabled task from firing). Recurring tasks clear
+    // next_run_at while disabled and recompute it from the cron on enable.
+    const isOneShot = existing.delete_after_run === 1 && existing.next_run_at != null;
+    let nextRun: number | null;
+    if (isOneShot) {
+      // The pinned instant is kept in both directions: disabling leaves it set
+      // (the enabled=0 gate stops it firing) so re-enabling restores it.
+      nextRun = existing.next_run_at;
+    } else {
+      nextRun = newEnabled ? SchedulerService.getInstance().calculateNextRun(existing.cron_expression) : null;
+    }
 
     db.updateScheduledTask(id, {
       enabled: newEnabled,

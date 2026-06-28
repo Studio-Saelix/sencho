@@ -70,6 +70,19 @@ export function buildCron(s: SimpleSchedule): string {
   }
 }
 
+/**
+ * Absolute epoch-ms fire time for a one-time ('once') schedule: the picked date
+ * at the chosen hour and minute. Returns null when the schedule is not 'once' or
+ * has no date. A 5-field cron cannot encode a year, so a one-shot sends this
+ * explicit timestamp to the backend to pin the exact run (year and time of day);
+ * relying on the cron alone fires on the next annual occurrence, which can be a
+ * different year than the date the admin selected.
+ */
+export function getOnceRunAt(s: SimpleSchedule): number | null {
+  if (s.frequency !== 'once' || !s.date) return null;
+  return new Date(s.date.getFullYear(), s.date.getMonth(), s.date.getDate(), s.hour, s.minute, 0, 0).getTime();
+}
+
 function parseIntField(field: string, min: number, max: number): number | null {
   if (!/^\d+$/.test(field)) return null;
   const n = Number(field);
@@ -167,9 +180,14 @@ export function getSimpleScheduleError(s: SimpleSchedule, now: Date = new Date()
   }
   if (s.frequency === 'once') {
     if (!s.date) return 'Select a date.';
-    const picked = new Date(s.date.getFullYear(), s.date.getMonth(), s.date.getDate()).getTime();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    if (picked < today) return 'The selected date is in the past and this schedule would never fire.';
+    // Compare the full chosen instant (date + time), not just the day: a time
+    // earlier today has already passed. The backend also rejects a past run_at
+    // with a 400; this is the friendlier, save-blocking guard surfaced before
+    // the request is sent.
+    const when = getOnceRunAt(s);
+    if (when !== null && when <= now.getTime()) {
+      return 'The selected date and time are in the past and this schedule would never fire.';
+    }
   }
   return null;
 }

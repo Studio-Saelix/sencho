@@ -4,6 +4,7 @@ import {
   buildCron,
   parseCron,
   getSimpleScheduleError,
+  getOnceRunAt,
   type SimpleSchedule,
 } from './scheduling';
 
@@ -140,6 +141,24 @@ describe('parseCron', () => {
   });
 });
 
+describe('getOnceRunAt', () => {
+  it('returns the exact picked instant (date + chosen time) for a once schedule', () => {
+    const runAt = getOnceRunAt(schedule({ frequency: 'once', minute: 30, hour: 23, date: new Date(2027, 6, 1) }));
+    expect(runAt).toBe(new Date(2027, 6, 1, 23, 30, 0, 0).getTime());
+  });
+
+  it('preserves the selected year so a future-year once does not collapse to this year', () => {
+    const runAt = getOnceRunAt(schedule({ frequency: 'once', minute: 0, hour: 9, date: new Date(2030, 0, 15) }));
+    expect(new Date(runAt as number).getFullYear()).toBe(2030);
+  });
+
+  it('returns null for a once schedule with no date and for recurring frequencies', () => {
+    expect(getOnceRunAt(schedule({ frequency: 'once', date: null }))).toBeNull();
+    expect(getOnceRunAt(schedule({ frequency: 'daily' }))).toBeNull();
+    expect(getOnceRunAt(schedule({ frequency: 'monthly', dayOfMonth: 5 }))).toBeNull();
+  });
+});
+
 describe('getSimpleScheduleError', () => {
   const now = new Date(2026, 5, 28);
 
@@ -162,11 +181,22 @@ describe('getSimpleScheduleError', () => {
 
   it('blocks once with a past date', () => {
     expect(getSimpleScheduleError(schedule({ frequency: 'once', date: new Date(2026, 5, 1) }), now))
-      .toBe('The selected date is in the past and this schedule would never fire.');
+      .toBe('The selected date and time are in the past and this schedule would never fire.');
   });
 
   it('passes once with a future date', () => {
     expect(getSimpleScheduleError(schedule({ frequency: 'once', date: new Date(2026, 11, 25) }), now)).toBeNull();
+  });
+
+  it('blocks once for a time earlier today that has already passed', () => {
+    const noon = new Date(2026, 5, 28, 12, 0);
+    expect(getSimpleScheduleError(schedule({ frequency: 'once', date: new Date(2026, 5, 28), hour: 1, minute: 0 }), noon))
+      .toBe('The selected date and time are in the past and this schedule would never fire.');
+  });
+
+  it('passes once for a later time today that has not yet passed', () => {
+    const noon = new Date(2026, 5, 28, 12, 0);
+    expect(getSimpleScheduleError(schedule({ frequency: 'once', date: new Date(2026, 5, 28), hour: 23, minute: 0 }), noon)).toBeNull();
   });
 
   it('blocks an invalid time', () => {
