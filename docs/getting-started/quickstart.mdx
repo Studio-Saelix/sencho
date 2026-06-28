@@ -82,7 +82,7 @@ The Compose directory must be mounted at the **same path** inside and outside th
 Open `http://localhost:1852` in a browser. On a fresh install you land on the **Cold start** card, where Sencho asks you to create the first admin account.
 
 <Frame>
-  <img src="/images/quickstart/setup-cold-start.png" alt="Sencho first-boot Cold start card with Username, Password, and Confirm password fields, and an Initialize console button" />
+  <img src="/images/quickstart/setup-cold-start.png" alt="Sencho first-boot Cold start card with Username, Password, and Confirm password fields, a password strength indicator, and an Initialize console button" />
 </Frame>
 
 Pick a username, choose a password, confirm it, and click **Initialize console**. The username placeholder shows `admin`. The password must be at least eight characters, and the strength indicator labels the password **Weak**, **Fair**, or **Strong** as you type.
@@ -90,7 +90,7 @@ Pick a username, choose a password, confirm it, and click **Initialize console**
 Sencho then runs a short **environment preflight**: it confirms the Docker engine and Compose plugin are reachable, the compose directory is writable and mounted at a matching host path, the dashboard is behind TLS, and there is disk headroom. Anything that needs attention shows an inline fix. The checks never block you, so click **Enter Sencho** to continue; you can re-run them anytime from **Settings · Recovery**.
 
 <Frame>
-  <img src="/images/quickstart/setup-environment.png" alt="Sencho first-boot environment preflight with check rows for Docker engine, Docker Compose, Compose directory, path mapping, TLS, and disk space, each showing an OK or warning result, a Re-run button, and an Enter Sencho button" />
+  <img src="/images/quickstart/setup-environment.png" alt="Sencho first-boot environment preflight with check rows for Docker engine, Docker Compose, Compose directory, path mapping, TLS, and disk space, each showing a pass or warning status with inline remediation text, a Re-run button, and an Enter Sencho button" />
 </Frame>
 
 <Note>
@@ -99,15 +99,15 @@ Sencho then runs a short **environment preflight**: it confirms the Docker engin
 
 ## After signing in
 
-You land on **Home**, the default operational view. The health masthead reports **Healthy**, **Degraded**, or **Critical**, names the active node, shows how many nodes are registered, and lists any signals that need attention. The resource gauge strip tracks **CPU**, **Memory**, **Disk**, and **Network**. **Stack health** lists discovered stacks on the active node, sorted so exited or high-load stacks rise to the top.
+You land on **Home**, the default operational view. The health masthead reports **Healthy**, **Degraded**, or **Critical**, names the active node, shows how many nodes are registered, and lists any signals that need attention. The resource gauge strip tracks **CPU**, **Memory**, **Disk**, and **Network** with sparklines and threshold coloring. **Stack health** lists the active node's stacks, sorted by state then load, with uptime, CPU, memory, and a 10-minute CPU sparkline per row.
 
 <Frame>
-  <img src="/images/quickstart/dashboard.png" alt="Sencho Home view with the health masthead, CPU, Memory, Disk, and Network gauges, Stack health, Configuration Status, an activity panel, and Recent Alerts" />
+  <img src="/images/quickstart/dashboard.png" alt="Sencho Home view with the health masthead, resource gauges with sparklines, Stack health table, Configuration Status, Fleet Heartbeat panel, and Recent Alerts" />
 </Frame>
 
-Below the stack table, **Configuration Status** summarizes notification delivery, alert rules, automation, account security, backups, host thresholds, and crash detection. The neighboring activity card shows **Fleet Heartbeat** when remote nodes exist, or **Stack Restarts (7d)** on a local-only install. **Recent Alerts** shows the latest notification feed and includes **Clear All Notifications** when there is anything to clear.
+Below the stack table, **Configuration Status** summarizes notifications, alerts, automation, security, backups, thresholds, and crash detection. The neighboring activity card shows **Fleet Heartbeat** when remote nodes exist, or **Stack Restarts (7d)** on a local-only install. **Recent Alerts** shows the latest notification feed and includes **Clear All Notifications** when there is anything to clear.
 
-On the local node, the top navigation includes **Home**, **Fleet**, **Resources**, **App Store**, and **Logs**. Depending on license, role, and node context, it can also include **Update**, **Schedules**, **Console**, and **Audit**; hub-only views are hidden when a remote node is active. The right side of the top bar holds global search, notifications, and the profile menu entries **Settings**, **Documentation**, **Feedback**, **Appearance**, and **Log Out**.
+On the local node, the top navigation includes **Home**, **Fleet**, **Resources**, **Security**, **App Store**, and **Logs**. Depending on license, role, and node context, it can also include **Update**, **Schedules**, **Console**, and **Audit**; hub-only views are hidden when a remote node is active. The right side of the top bar holds global search, notifications, and the profile menu entries **Settings**, **Documentation**, **Feedback**, **Appearance**, and **Log Out**.
 
 The left sidebar is the stack workspace. Below the Sencho brand, it starts with the node switcher, then **Create Stack**, a bulk-mode toggle, and **Scan stacks folder** for importing Compose projects added outside Sencho. Use **Search stacks...** with the **All**, **Up**, **Down**, and **Updates** chips to narrow the list. On a fresh install the stack list is empty until you create a stack or scan a populated `COMPOSE_DIR`.
 
