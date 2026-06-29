@@ -1,60 +1,121 @@
 ---
 title: Storage Portability
-description: See every mount a stack depends on, learn whether it is portable or tied to this node, and find out what will break if you move or restore it, all before you deploy.
+description: See every mount a stack depends on, understand whether it can move cleanly between nodes, and find out what you need to back up before you move or restore it.
 ---
 
-The **Storage** tab in the right-hand **Anatomy** panel answers a Compose-first question: *what storage does this stack depend on, and what happens to it if I move or restore the stack?* It renders the effective Compose model, the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied, lists every mount, and gives the stack a single portability verdict.
+The **Storage** tab in the right-hand **Anatomy** panel answers a Compose-first question before you deploy, move, or restore a stack: *what storage does this stack depend on, and is it tied to this node?* It renders the effective Compose model (the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied), lists every mount, and gives the stack a single portability verdict with the specific reasons behind it.
 
-The view is read-only with respect to the stack and the host: it never changes a mount, and it never reads, moves, or changes the ownership of any file. It inspects structure only, mount type, source and target paths, the read-only flag, and a host path's existence, type, and owner, so nothing inside a volume or bind mount is ever opened. One caveat: a bind source or target assembled from a secret `${VAR}` is resolved before the model is read, so its value does show. Keep secrets in `environment:` or `env_file:` rather than interpolating them into mount paths. See [Environment and Secrets Guardrails](/features/environment-guardrails).
+The view is read-only. It never changes a mount, and it never reads, moves, or changes the ownership of any file. It inspects structure only: mount type, source and target paths, the read-only flag, and for bind mounts inside the stack directory, whether the path exists, its type, and its POSIX owner. One caveat: a bind source that interpolates a secret from `${VAR}` is resolved before the model is read, so that value will appear. Keep secrets in `environment:` or `env_file:` rather than interpolating them into mount paths. See [Environment and Secrets Guardrails](/features/environment-guardrails).
+
+## Where to find it
+
+Click any stack in the left sidebar, then switch to the **Storage** tab in the Anatomy panel header.
+
+<Frame>
+  <img
+    src="/images/compose-storage/storage-tab.png"
+    alt="The Anatomy panel with the Storage tab selected, showing the STORAGE PORTABILITY label, a node-bound verdict card with the reason that a bind path outside the stack directory must exist on every target node, and a SNAPSHOT COVERAGE section below"
+  />
+</Frame>
+
+The tab only appears when the active node reports that it supports storage portability. A node running an older version does not advertise this capability, so the tab stays hidden until that node is updated.
 
 ## Storage inventory
 
-Each service lists its mounts, grouped by service:
+Every service is listed under its own heading. For each mount, Sencho shows:
 
-- **bind** mounts a host path into the container. For a path inside the stack directory, Sencho also shows whether it exists, whether it is a file, directory, socket, or symlink, and its owner on Linux hosts.
-- **named** uses a Docker-managed volume. An **external** chip marks a volume the stack expects to already exist on the node.
-- **anonymous** is an unnamed volume. Because it has no name, it is easy to miss when backing up and is orphaned when the container is recreated.
-- **tmpfs** is an in-memory mount that holds nothing on disk.
-- A **socket** chip marks a mount of the Docker socket.
+- A **type chip**: `bind`, `named`, `anonymous`, `tmpfs`, or `socket` (when the Docker socket is mounted).
+- An **access chip**: `ro` when the mount is read-only, `rw` when it is read-write.
+- An **external chip** (warning color) when a named volume declares `external: true` in the Compose file. This means Docker expects the volume to already exist on the node; Sencho will not create it on deploy.
+- For bind mounts outside the stack directory: the word `external` in muted text, indicating Sencho cannot verify the path because it is outside the area it can see.
+- For bind mounts inside the stack directory: an inline status word (`file`, `directory`, `socket`, `symlink`, or `missing`) and on Linux hosts the owner as `uid X:gid Y`.
+- If a bind source inside the stack directory is a symlink that resolves outside the directory: `symlink escapes` in muted text.
+- The source path and target path: `source → target`.
 
-Every mount also shows whether it is **read-only** or **read-write**.
+If the stack declares no mounts at all, the inventory shows a single card: "This stack declares no mounts."
 
-## Portability
+## Portability verdict
 
-The top of the tab gives the stack one verdict, with the reasons behind it:
+The top of the tab gives the stack a single verdict. Below the verdict chip, Sencho lists every specific reason that contributed to it, so you know exactly what is tying the stack to the node or limiting its portability.
 
-| Status | Meaning |
-|--------|---------|
-| **Portable** | Every mount is inside the stack directory, or there is no persistent storage, so the stack moves cleanly with its files. |
-| **Partially portable** | The Compose structure moves cleanly, but named or anonymous volume data lives on this node and is not carried by moving the files. Back that data up separately. |
-| **Node-bound** | The stack binds host paths outside its directory, or mounts the Docker socket, so it is tied to this specific host. Those paths must exist on any node you move it to. |
-| **Unknown** | The effective model could not be rendered, so portability cannot be determined. |
+| Verdict | Meaning |
+|---------|---------|
+| **Portable** | Every bind mount resolves inside the stack directory (or there are no mounts at all). The stack moves cleanly with its files. |
+| **Partially portable** | The Compose files move cleanly, but one or more named or anonymous volumes hold data on this node. That data does not travel with the files when you move the stack. Back it up separately. |
+| **Node-bound** | The stack binds host paths outside the stack directory, mounts the Docker socket, or has a bind source that is a symlink pointing outside the stack directory. All of these require the relevant path or socket to exist on every node you move this stack to. |
+| **Unknown** | Sencho could not render the effective Compose model, so portability cannot be determined. |
 
-A read-only bind to an outside path is still node-bound: read-only lowers the risk of a change, not the need for the path to exist on the target. A bind that is a symlink pointing outside the stack directory is treated as node-bound as well.
+A few things worth knowing:
+
+- A read-only bind to an outside path is still **node-bound**. The `ro` flag lowers the risk of an accidental write, not the requirement that the path exist on the target node.
+- A symlink inside the stack directory that resolves outside it is treated as **node-bound** for the same reason: moving the stack files does not bring the symlink target with them.
+- For **partially portable** stacks, anonymous volumes are the most common oversight. Because they have no name, they are easy to miss when taking a manual backup and are orphaned when the container is recreated.
+
+<Frame>
+  <img
+    src="/images/compose-storage/storage-node-bound.png"
+    alt="The Storage panel for a stack that mounts the Docker socket, showing a node-bound verdict card with the reason 'Service mounts the Docker socket, tying the stack to this host's Docker engine', followed by the socket mount row with SOCKET, RW, and external chips and the path /var/run/docker.sock"
+  />
+</Frame>
 
 ## Snapshot coverage
 
-A stack with persistent storage is only as safe as its backups. Sencho shows administrators whether a recent fleet snapshot covers the stack, and warns when a stack that holds data has not been snapshotted in the last seven days.
+Persistent storage is only as safe as its backups. Sencho shows administrators whether a recent fleet snapshot covers the stack:
 
-Fleet snapshots capture Compose and env files, not the data inside named volumes or bind mounts. The tab states this plainly so a snapshot is never mistaken for an application-data backup. Back up volume data separately before moving or restoring a stack.
+- When the stack has persistent storage and has not been included in a fleet snapshot in the last 7 days, a **warning card** appears with a "Take a fleet snapshot" link. On remote nodes the link is hidden; take the snapshot from the Fleet view on the hub instead.
+- When a recent snapshot exists, the section shows the relative time: "Last fleet snapshot 3d ago."
+- The section is visible to **administrators only**. Other roles see only the caveat below.
+
+The section always displays a reminder: **fleet snapshots capture Compose and env files, not the data inside named volumes or bind mounts.** A snapshot is not a substitute for a data backup. Back up volume data separately before moving or restoring a stack.
 
 ## Findings in Doctor
 
-Storage risk findings live in the **Doctor** tab, which reads the same model: a missing bind-mount path, a mount whose ownership is likely to mismatch the container user, a mounted Docker socket, a required external volume that does not exist, and an anonymous volume whose data has no name to back up by.
+Storage risk findings appear in the **Doctor** tab, which reads the same effective model. Sencho checks for:
+
+- A bind-mount source path that is missing on the current node.
+- A bind mount whose file owner is likely to mismatch the user the container runs as.
+- A mount of the Docker socket.
+- An `external: true` named volume that does not yet exist on the node.
+- An anonymous volume whose data has no name to identify it by when backing up.
+
+See [Compose Doctor](/features/compose-doctor) for the full rule reference and how to run a preflight check.
 
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="The Storage tab is not there">
-    The Storage tab appears on nodes that support storage portability. A node that does not advertise the capability does not show the tab.
+  <Accordion title="The Storage tab is not visible">
+    The Storage tab appears only when the active node reports that it supports this feature. A node running an older version of Sencho does not advertise the capability, so the tab is hidden for that node until it is updated.
   </Accordion>
-  <Accordion title="A bind path shows no existence or owner">
-    Existence, type, and owner are resolved only for paths inside the stack directory. A host path elsewhere on the machine is outside Sencho's view, so it is listed but left unverified, and it counts toward a node-bound verdict.
+  <Accordion title="A bind mount shows no existence status or owner">
+    Existence, type, and owner are resolved only for bind sources that sit inside the stack directory. A path anywhere else on the host is outside Sencho's scope, so it is listed as `external` but left unverified. It still counts toward a node-bound verdict because it must exist on any node you move the stack to.
   </Accordion>
-  <Accordion title="It says the model cannot render">
-    `docker compose config` could not produce an effective model, usually a YAML error, an unresolved include or merge, or a required variable with no value. Fix the reported problem and reopen the tab.
+  <Accordion title="A named volume shows an external chip">
+    The orange `external` chip on a named volume means the Compose file declares `external: true` for that volume. Docker expects the volume to already exist on the node and will not create it on deploy. If the volume does not exist, the deploy will fail. The [Compose Doctor](/features/compose-doctor) external-volume-missing rule catches this before you deploy.
   </Accordion>
-  <Accordion title="There is no snapshot coverage shown">
-    Snapshot coverage is shown to administrators. The warning and the last-snapshot line appear for a stack that holds persistent data once a snapshot has run on its node.
+  <Accordion title="The panel says it cannot render the model">
+    Sencho calls `docker compose config` to produce the effective model. If that fails, the panel shows a red card with a specific message. Common causes are a YAML syntax error, an unresolved `include` or merge key, or a required variable with no value. Sencho names any missing required variables by name. Fix the Compose or env file and reopen the tab.
+  </Accordion>
+  <Accordion title="Snapshot coverage is not shown">
+    The snapshot coverage section is visible to administrators only. If you are signed in as an administrator and the coverage line is not shown, no fleet snapshot has run yet on this node. Take an initial snapshot from the Fleet view to establish baseline coverage.
+  </Accordion>
+  <Accordion title="The 'Take a fleet snapshot' link is not there">
+    The link only appears on local nodes. When the active node is a remote proxy, initiate the snapshot from the Fleet view on the hub, where the full fleet action controls are available.
   </Accordion>
 </AccordionGroup>
+
+## Related features
+
+<CardGroup cols={2}>
+  <Card title="Compose Doctor" icon="stethoscope" href="/features/compose-doctor">
+    Run a preflight check that surfaces storage risks as actionable findings before you deploy.
+  </Card>
+  <Card title="Fleet Snapshots" icon="camera" href="/features/fleet-backups">
+    Back up Compose and env files across all nodes in one action. Covers configuration, not volume data.
+  </Card>
+  <Card title="Files and Volumes" icon="folder-open" href="/features/stack-file-explorer">
+    Browse and edit the files inside a stack directory and read the contents of named volumes.
+  </Card>
+  <Card title="Environment Guardrails" icon="key" href="/features/environment-guardrails">
+    Keep secrets out of mount paths so they are not exposed in the storage inventory.
+  </Card>
+</CardGroup>

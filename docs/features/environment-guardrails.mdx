@@ -1,11 +1,15 @@
 ---
 title: Environment and Secrets Guardrails
-description: See every environment variable a stack uses, where it comes from, and whether it is likely a secret, without ever exposing a value. Sencho derives a per-stack env inventory, flags missing and duplicate variables, and can block a deploy when a required variable has no value.
+description: See every environment variable a stack uses, where it comes from, and whether it is likely a secret, without ever exposing a value. Sencho builds a per-stack inventory, shows env file status, flags missing and duplicate variables, and can block a deploy when a required variable has no value.
 ---
 
-The **Environment** tab in the right-hand **Anatomy** panel answers a question Compose makes surprisingly hard: *which environment variables does this stack actually use, where does each one come from, and is anything missing or sensitive?* Sencho derives the answer from the stack's Compose files and env files and presents it as a single inventory.
+The **Environment** tab in the right-hand **Anatomy** panel answers a question Compose makes surprisingly hard: which environment variables does this stack actually use, where does each one come from, and is anything missing or sensitive? Sencho derives the answer from the stack's Compose files and env files and presents it as a single inventory.
 
 The inventory is advisory and read only. It never changes a stack, and it works entirely from variable **names**: a value is never read into the report, the checklist, or the logs, so nothing sensitive is exposed.
+
+<Frame>
+  <img src="/images/environment-guardrails/env-overview.png" alt="Environment tab open on a stack. The panel shows a PROJECT ENVIRONMENT FILE section, a summary line reading '19 vars · 2 likely secret', an ENV FILES section with .env marked missing and a globals.env marked unverifiable, and a PRESENT group listing injected variables." />
+</Frame>
 
 ## Interpolation versus container injection
 
@@ -22,6 +26,12 @@ The inventory labels each variable with how it is used, so you can tell at a gla
 
 ## What the inventory shows
 
+### Summary
+
+At the top of the variable list, a summary line reports the total variable count and how many fall into each problem category: missing, duplicate, shell-only, unused, and likely secret. Problem counts are highlighted in color so issues stand out at a glance without scrolling through every variable.
+
+### Status
+
 For every variable, Sencho records its source, its scope, and a status:
 
 | Status | Meaning |
@@ -32,9 +42,41 @@ For every variable, Sencho records its source, its scope, and a status:
 | **Duplicate** | Defined in two different places, which can resolve to different effective values. |
 | **Shell-only** | Referenced and resolved only from the shell of the host, not persisted with the stack, so it will not follow the stack to another node. |
 
+A variable marked with `${VAR:?message}` in the Compose file is **required**: if it is unset or empty, Compose refuses to start. Required variables carry a separate **required** badge alongside their status badge.
+
 Variables whose name suggests a secret, such as `DB_PASSWORD`, `API_KEY`, or `CLIENT_SECRET`, are marked with a lock and show presence only. Their value is never read, so it cannot appear in the inventory, the checklist, or anywhere else.
 
-### Copy env checklist
+<Frame>
+  <img src="/images/environment-guardrails/env-secrets.png" alt="Variable list showing TUNNEL_TOKEN and VPN_PASS, each with a lock badge labelled 'secret' next to their present status badge." />
+</Frame>
+
+The classification is a heuristic based on the variable name. It errs toward marking things as secret. Marking a non-secret as a likely secret only hides a value that the inventory never reads anyway, so there is no downside.
+
+## Env file status
+
+The **ENV FILES** section lists every env file the stack declares, with a three-state badge showing whether the file is reachable:
+
+| Badge | Meaning |
+|-------|---------|
+| **present** | The file exists and is readable. |
+| **missing** | The file is declared in an `env_file:` entry but was not found. Compose will refuse to start the stack until the file is created or the declaration is removed. |
+| **unverifiable** | The path is absolute or points outside the compose directory. Sencho cannot confirm whether it exists from the hub. The file may work at runtime; use [Compose Doctor](/features/compose-doctor) for a pre-deploy check. |
+
+Each row also names the services that declare the file.
+
+## Project environment file
+
+Compose auto-discovers `.env` in the project directory for `${VAR}` interpolation. When no custom file is configured, the panel shows **Using .env (default)**.
+
+Users with stack edit permission can replace or supplement this default. An **Add env file** dropdown lists candidates found in the stack directory (`.env`, `*.env`, `.env.*` files). Files are evaluated in the order listed; the first definition of a key wins. Removing all configured files reverts to auto-discovery.
+
+Any change to the project env file list saves immediately and refreshes the inventory, so the effect on interpolation status is visible at once.
+
+<Note>
+  The project environment file sub-panel requires the `project-env-files` capability on the active node. Nodes running an older version of Sencho do not have this capability and do not show the sub-panel.
+</Note>
+
+## Copy env checklist
 
 The **copy env checklist** action copies the inventory as a Markdown checklist of variable names, status, and source. It is built for sharing in a ticket or a runbook, so it deliberately contains no values, including for likely secrets.
 
@@ -48,6 +90,10 @@ A `${VAR:?message}` reference tells Compose the variable is required: the deploy
 
 If you would rather fail fast with a clear message before anything runs, turn on **Block deploy on missing required env vars** under **Settings → Infrastructure → Stacks → Deploy Guardrails**. With it on, a deploy or update is refused up front when a required variable is unset or empty, before any backup, image pull, or container change happens. It is off by default, applies to the node you set it on, and requires an admin to change.
 
+<Frame>
+  <img src="/images/environment-guardrails/settings-deploy-guardrails.png" alt="Settings page at Infrastructure > Stacks showing the Deploy Guardrails section. The 'Block deploy on missing required env vars' toggle is set to OFF." />
+</Frame>
+
 ## Opening the inventory
 
 1. Click any stack in the left sidebar to open it.
@@ -55,6 +101,29 @@ If you would rather fail fast with a clear message before anything runs, turn on
 3. Review the variables grouped by status, and use **copy env checklist** to share a values-free summary.
 
 The inventory is built against the **active node**, so selecting a remote node inspects the stack on the machine that owns it.
+
+## Permissions
+
+Any authenticated user with `stack:read` permission can view the environment inventory, the env file status list, and the summary line.
+
+Configuring the project environment file list requires `stack:edit` permission. Read-only users see the configured files but cannot add, remove, or reorder them.
+
+## Connected features
+
+<CardGroup cols={2}>
+  <Card title="Compose Doctor" icon="stethoscope" href="/features/compose-doctor">
+    Pre-deploy preflight that surfaces missing env files as high-risk findings before any container changes.
+  </Card>
+  <Card title="Stack Dossier" icon="file-lines" href="/features/stack-dossier">
+    The generated facts panel shows the env file path and variable count derived from the same Compose source.
+  </Card>
+  <Card title="Fleet Secrets" icon="lock" href="/features/fleet-secrets">
+    Author encrypted env-var bundles on the hub and push them to labeled stacks across the fleet.
+  </Card>
+  <Card title="Health-Gated Updates" icon="shield-check" href="/features/health-gated-updates">
+    Post-deploy health observation is configured in the same Deploy Guardrails settings section.
+  </Card>
+</CardGroup>
 
 ## Troubleshooting
 
@@ -70,6 +139,12 @@ The inventory is built against the **active node**, so selecting a remote node i
   </Accordion>
   <Accordion title="A likely secret is flagged that is not actually sensitive">
     The classification is a heuristic based on the variable name, and it errs toward marking things as secret. Marking a non-secret as a likely secret only hides a value that the inventory never reads anyway, so there is no downside; the variable still shows its name, source, and status.
+  </Accordion>
+  <Accordion title="An env file shows as unverifiable">
+    The path is absolute or points outside the stack's compose directory, so Sencho cannot check whether it exists from the hub. The file may work fine at runtime. To confirm it is actually present, use the [Compose Doctor](/features/compose-doctor) preflight, which performs an on-node check and will flag the file as missing if it is not found.
+  </Accordion>
+  <Accordion title="The project environment file sub-panel is not visible">
+    The sub-panel requires the `project-env-files` capability on the active node. A node running an older version of Sencho does not have this capability. Update the node to the current version and the sub-panel will appear.
   </Accordion>
   <Accordion title="The Environment tab is not there on a remote node">
     The tab appears when the active node reports that it supports the env inventory. A node running an older version of Sencho does not advertise it, so the tab is hidden for that node until it is updated.

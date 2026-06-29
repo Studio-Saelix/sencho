@@ -3,7 +3,9 @@ title: Configuration
 description: Environment variables, volume mounts, and the 1:1 path rule.
 ---
 
-Sencho is configured entirely through environment variables and Docker volume mounts. There is no config file to edit inside the container.
+Sencho's deployment is configured through environment variables and Docker volume mounts set on the Sencho container itself: there is no config file to edit inside the container. This page covers that deployment layer.
+
+Operational settings (host alerts, data retention, image-update automation, mesh networking, registries, notifications, and more) are configured in the app after first boot, in the Settings Hub. See the [Settings Reference](/reference/settings) for that runtime layer.
 
 ## Required environment variables
 
@@ -29,7 +31,20 @@ When you point `COMPOSE_DIR` at a directory, Sencho expects each stack to live i
 | `SENCHO_USER` | *(unset)* | When set to a username present inside the container (`sencho` is pre-created for this purpose), the entrypoint drops privileges to that user at startup instead of running as `root`. See [Running as a non-root user](#running-as-a-non-root-user) below. |
 | `API_RATE_LIMIT` | `200` | Global API requests per minute per user session. Applies in production only; development uses a fixed higher cap. Authenticated requests are keyed by user ID, unauthenticated by IP. Internal node-to-node traffic bypasses this limit. |
 | `API_POLLING_RATE_LIMIT` | `300` | Rate limit for dashboard polling endpoints, in requests per minute. Applies in production only; development uses a fixed higher cap. Raise it for environments with many concurrent browser sessions behind shared NAT. |
-| `SENCHO_COMPOSE_STALL_TIMEOUT_MS` | `600000` | Idle-output backstop for deploy and update compose steps (pull and recreate). If a step produces no output for this long while still running, Sencho treats it as stalled and stops it, so a hung image pull surfaces a clear failure and the in-app recovery actions instead of spinning. Raise it on slow links or for heavy local image builds. |
+
+## Advanced environment variables
+
+These tune optional subsystems. Most deployments never set them; the defaults are sensible.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRIVY_BIN` | *(unset)* | Path to a host-installed [Trivy](/operations/trivy-setup) binary for image vulnerability scanning. Sencho prefers a managed install under `DATA_DIR/bin/trivy`, then this path, then `trivy` on `PATH`. |
+| `SENCHO_MESH_SUBNET` | *(auto)* | CIDR for this node's `sencho_mesh` network. When unset, Sencho picks the first free `/24` from its candidate list or adopts an existing mesh subnet. Set one only to avoid an overlap with another network on the host. See [Sencho Mesh](/features/sencho-mesh). |
+| `GITSOURCE_MAX_CLONE_BYTES` | `104857600` | Maximum bytes a single [Git Source](/features/git-sources) clone may download before it is aborted (100 MB). A shallow Compose clone is tiny; raise it only if you track Compose files in a legitimately large repository. |
+| `SENCHO_PUBLIC_URL` | *(request host)* | Set on the primary instance. Its externally reachable `http(s)://` URL, no trailing slash, baked into pilot enrollment so remote agents dial the public hostname rather than the address the admin used at setup. |
+| `SENCHO_COMPOSE_STALL_TIMEOUT_MS` | `600000` | Idle-output backstop for deploy and update Compose steps (pull and recreate). If a step produces no output for this long while still running, Sencho stops it so a hung image pull surfaces a clear failure and the in-app recovery actions instead of spinning. Raise it on slow links or for heavy local image builds. |
+
+Running a remote host as a pilot agent uses four more variables (`SENCHO_MODE`, `SENCHO_PRIMARY_URL`, `SENCHO_ENROLL_TOKEN`, and `SENCHO_PILOT_CA_FILE`), set only on the remote agent container. Sencho bakes them into the enrollment Compose file it generates, so you rarely write them by hand. See [Pilot Agent](/features/pilot-agent) for the full enrollment walkthrough.
 
 ## Listen port
 

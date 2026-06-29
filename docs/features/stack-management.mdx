@@ -135,10 +135,15 @@ Each row leads with a two-character status indicator that summarizes the stack's
 | Indicator | Meaning |
 |-----------|---------|
 | `UP` (green) | All containers running |
-| `DN` (red) | One or more containers exited |
-| (blank) | No containers running, status unknown, or the stack has never been deployed |
+| `PARTIAL` (orange) | Some containers running, at least one exited |
+| `DN` (red) | All containers stopped or exited |
+| (blank) | No containers running, never deployed, or status unknown |
 
-A small fuchsia dot to the right of the stack name flags that an image update is available. A pulsing brand-color dot on the **Git Source** affordance signals the upstream branch has moved ahead of the working copy.
+Additional indicators appear to the right of the stack name:
+
+- A pulsing fuchsia dot flags that an image update is available.
+- A muted alert icon replaces the dot when the update check ran but failed to reach the registry or errored.
+- A branch icon signals that the Git source's upstream branch has moved ahead of the working copy.
 
 ### Search and filter chips
 
@@ -239,19 +244,20 @@ The structured viewer holds up to 10,000 lines; older entries are dropped from t
 
 ## Anatomy panel
 
-The right column of the stack view is a two-tab panel: **Anatomy** is the read-only summary of what the compose file declares, and **Activity** is the audit log for that stack.
+The right column of the stack view is a tabbed panel. Tabs appear only when the data they need is available.
 
 <Frame>
-  <img src="/images/stack-view/anatomy-panel.png" alt="Anatomy panel with services, ports, volumes, restart, env_file, network, and source rows, plus a footer link for the exposed port" />
+  <img src="/images/stack-view/anatomy-panel.png" alt="Anatomy panel showing all eight tabs: Anatomy, Activity, Dossier, Drift, Environment, Networking, Doctor, and Storage, with the Networking tab active" />
 </Frame>
 
-The header carries:
+The **Files** and **Edit** buttons sit to the right of the tab row.
 
-- **Anatomy / Activity tabs.** Activity is documented on its own page; see [Stack Activity](/features/stack-activity).
-- **Files** button. Opens the in-stack file explorer; see [Stack File Explorer](/features/stack-file-explorer).
-- **Edit** button. Slides the Monaco editor over the panel for inline compose and env edits.
+- **Files**: opens the in-stack file explorer; see [Stack File Explorer](/features/stack-file-explorer).
+- **Edit**: slides the Monaco editor over the panel for inline compose and env edits.
 
-Each row inside the **Anatomy** tab maps one compose concept to the value it resolves to right now:
+### Anatomy
+
+Each row maps one compose concept to the value it resolves to right now:
 
 - **Services**: Cyan pills, one per key under `services:`.
 - **Ports**: `{host} → {container}/{proto}` per service, host port highlighted.
@@ -263,7 +269,58 @@ Each row inside the **Anatomy** tab maps one compose concept to the value it res
 
 A footer card under the rows surfaces the first published port as a clickable **EXPOSED** link, so you can jump straight to the running app.
 
-If an image update is available for the primary service, an inline banner appears below the rows with the version bump (`27.1.4 → 27.1.5`), risk classification (`safe · patch`, `minor`, or `major · review required`), and an **apply** button that runs the update on this stack. Major bumps show a rose banner and require explicit review before applying.
+If an image update is available for the primary service, an inline banner appears below the rows with the version bump (`27.1.4 → 27.1.5`), risk classification (`safe · patch`, `minor`, or `major · review required`), and an **apply** button. Major bumps show a rose banner and require explicit review before applying.
+
+### Activity
+
+A timestamped audit trail of every deploy, restart, stop, update, and rollback on this stack, attributed to the user or subsystem that triggered it. See [Stack Activity](/features/stack-activity).
+
+### Dossier
+
+A generated summary of what the stack declares (services, ports, volumes, network, source) combined with a free-text notes section where you can record purpose, owner, access URLs, backup procedure, and recovery steps. Exports to Markdown. See [Stack Dossier](/features/stack-dossier).
+
+### Drift
+
+Compares the running containers against what the compose file declares. Reports services, images, and ports that have diverged from the compose definition since the last deploy. See [Stack Drift](/features/stack-drift).
+
+### Environment
+
+An inventory of every environment variable the stack uses, organized by status:
+
+- **Present**: defined in the env file and referenced by the compose file.
+- **Missing**: referenced in the compose file but absent from the env file.
+- **Duplicate**: defined more than once across env files or sources.
+- **Unpersisted**: injected at runtime (shell export) but not saved to any file.
+- **Unused**: defined in the env file but never referenced by any service.
+
+Variables that look like secrets (tokens, passwords, keys) are marked with a lock icon. When the stack references multiple env files, use the file picker in the tab header to switch between them.
+
+### Networking
+
+Shows the stack's defined networks, external network attachments, and the driver for each, along with an exposure-intent classification per service. A Runtime Drift row confirms whether the running network topology matches what the compose file declares. See [Compose Networking](/features/compose-networking).
+
+### Doctor
+
+Runs preflight checks against the compose file and reports findings grouped by severity:
+
+| Severity | Meaning |
+|----------|---------|
+| **Blocker** | Deploy will fail or behave incorrectly as configured |
+| **High risk** | Significant misconfiguration or security concern |
+| **Warning** | Best-practice deviation worth reviewing |
+| **Info** | Informational observation, no action required |
+
+Each finding includes the affected service, a description, and a remediation suggestion. Click the refresh button to rerun the checks. See [Compose Doctor](/features/compose-doctor).
+
+### Storage
+
+Analyzes the stack's volume and bind-mount configuration and reports a portability status:
+
+- **Portable**: all mounts use named volumes or relative bind paths. The stack can be moved to another host without path changes.
+- **Partially portable**: some mounts use absolute host paths; others are portable.
+- **Node-bound**: one or more mounts pin the stack to a specific host path, socket, or symlink that may not exist on another node.
+
+Each mount row shows its type (bind, named, anonymous, tmpfs, socket), permissions (rw or ro), the host path, the container path, and whether the source path exists on disk. See [Compose Storage](/features/compose-storage).
 
 ### Editing compose.yaml
 
@@ -274,6 +331,8 @@ Click **Edit** in the panel header to open the Monaco editor. Tabs at the top sw
 Select a stack and click **Start** (or **Restart** when it's already running) in the stack header. This runs `docker compose up -d`, pulling images if needed and creating or recreating containers.
 
 For deploy progress, error surfacing, atomic backups, and rollback, see [Atomic Deployments](/features/atomic-deployments).
+
+If a deploy policy is configured, Sencho checks it before the deploy runs. When a policy is violated, a dialog lists the triggered rules and blocks the deploy. Admin users see a **Deploy anyway** button to override the block. See [Deploy Enforcement](/features/deploy-enforcement) for configuring policies.
 
 ## Controlling a running stack
 
@@ -395,10 +454,11 @@ Click the **Scan stacks folder** icon button to the right of **Create Stack**. S
 
 ## Troubleshooting
 
-### Service action returns a "service not found" error
-
-The service name used in the action must match the `services:` key in the stack's `compose.yaml`. This error occurs when no running containers match that service name, either because the service was never deployed or because the compose file defines a different name. Verify the service key in your compose file and ensure the stack has been deployed at least once so containers exist for that service.
-
-### A published port link opens but the service does not load
-
-The link targets the active node's host and the published host port. It cannot reach a service bound only to `127.0.0.1` on the node, or one published on a port your browser cannot route to. For a remote node, the link uses that node's host; if the service lives at a different address, open it there directly. A port that is not published to a host port has no link.
+<AccordionGroup>
+  <Accordion title="Service action returns a 'service not found' error">
+    The service name used in the action must match the `services:` key in the stack's `compose.yaml`. This error occurs when no running containers match that service name, either because the service was never deployed or because the compose file defines a different name. Verify the service key in your compose file and ensure the stack has been deployed at least once so containers exist for that service.
+  </Accordion>
+  <Accordion title="A published port link opens but the service does not load">
+    The link targets the active node's host and the published host port. It cannot reach a service bound only to `127.0.0.1` on the node, or one published on a port your browser cannot route to. For a remote node, the link uses that node's host; if the service lives at a different address, open it there directly. A port that is not published to a host port has no link.
+  </Accordion>
+</AccordionGroup>

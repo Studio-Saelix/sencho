@@ -24,17 +24,17 @@ The verdict is computed from signals Sencho already tracks, so the check is fast
 - **Compose Doctor**: the stored result of the last [preflight run](/features/compose-doctor). A blocker finding makes the verdict Blocked; high-risk findings ask for review. If Compose Doctor has never run, the dialog says so without dragging the verdict down.
 - **Drift**: open [drift findings](/features/stack-drift) warn you that the running state has diverged, so the rollback target may not match what is running.
 - **Current containers**: a container that is already unhealthy, restarting, or crashed before the update makes the result hard to evaluate; the dialog asks you to look first.
-- **Pending image change**: the [update preview](/features/auto-update-policies) classifies the pending change. A major version bump asks for review; patch updates and same-tag refreshes pass quietly.
+- **Healthcheck coverage**: how many services define healthchecks, which determines how thoroughly the post-update health gate can verify the result.
+- **Pending update**: the [update preview](/features/auto-update-policies) classifies the pending change. A major version bump asks for review; patch updates and same-tag refreshes pass quietly.
 - **Rollback backup**: whether a backup slot exists and how old it is. A missing backup is only a note, because the update itself creates a fresh one when it starts.
 - **Node disk**: disk usage near or above the node's alert threshold warns you before a large pull fills the disk.
-- **Healthcheck coverage**: how many services define healthchecks, which determines how thoroughly the post-update health gate can verify the result.
 
 Admins also see whether a [fleet snapshot](/features/fleet-backups) covers this stack and can tick **Create a fleet snapshot before updating** to capture one as part of proceeding. If the snapshot fails, the update does not start.
 
 Every verdict keeps the **Update now** button enabled. The dialog informs the decision; it does not make it for you.
 
 <Frame>
-  <img src="/images/health-gated-updates/readiness-dialog.png" alt="Update readiness dialog for a stack, showing the verdict chip, the signal rows for Compose Doctor, drift, containers, pending update, rollback backup and node disk, the fleet snapshot row with the create-snapshot checkbox, and the Cancel and Update now buttons" />
+  <img src="/images/health-gated-updates/readiness-dialog.png" alt="Update readiness dialog showing the verdict chip, signal rows for Compose Doctor, Drift, Current containers, Healthcheck coverage, Pending update, Rollback backup and Node disk, the fleet snapshot row with its checkbox, and the Cancel and Update now buttons" />
 </Frame>
 
 ## The post-update health gate
@@ -54,11 +54,11 @@ The deploy progress modal treats the gate verdict as the real result: while the 
 The live verifying and recovery view is part of the deploy progress panel. If you have turned that panel off, the in-browser gate view does not appear, but the gate still runs on the node and records its verdict on the stack timeline.
 
 <Frame>
-  <img src="/images/health-gated-updates/modal-verifying.png" alt="Deploy progress modal after an update finished, with the status indicator showing Verifying health and the health gate banner reading observing containers" />
+  <img src="/images/health-gated-updates/modal-verifying.png" alt="Deploy progress modal after an update succeeded, showing the Verifying health status and the health gate banner observing containers" />
 </Frame>
 
 <Frame>
-  <img src="/images/health-gated-updates/modal-gate-failed.png" alt="Deploy progress modal with the headline status Health gate failed and the banner naming the unhealthy container, with the hint that rollback options are available on the stack" />
+  <img src="/images/health-gated-updates/modal-gate-failed.png" alt="Deploy progress modal with the Health gate failed headline and the banner identifying the unhealthy container, with the hint that rollback options are available on the stack" />
 </Frame>
 
 When the gate fails, the stack page surfaces the same [recovery actions](/features/deploy-progress#recovery-actions) as a failed update: retry, restart, roll back when a backup exists, refresh the container state, or copy diagnostics. Rolling back is always your call; the gate never rolls anything back on its own.
@@ -73,7 +73,7 @@ Open **Settings > Infrastructure > Stacks > Deploy Guardrails** on the node you 
 - **Observation window** sets how long containers are watched, from 15 to 600 seconds. The default is 90 seconds; raise it for stacks that take a while to settle, since a healthcheck still starting at the end of the window records an unknown verdict instead of a pass.
 
 <Frame>
-  <img src="/images/health-gated-updates/settings.png" alt="Stacks settings page with the Deploy Guardrails subsection, showing the Observe health after updates toggle and the Observation window field" />
+  <img src="/images/health-gated-updates/settings.png" alt="Stacks settings page showing the Deploy Guardrails subsection, with the Observe health after updates toggle set to On and the Observation window field set to 90 seconds" />
 </Frame>
 
 ## Rollback readiness
@@ -88,7 +88,7 @@ The Stack Dossier carries a **Rollback readiness** section that answers one ques
 - **Application data**: always reported as not covered. Named volumes and bind-mounted data are not included in file backups; a rollback restores compose and env files only, and your application data keeps its current state. This row exists so the limit is stated where you decide, not discovered during an incident.
 
 <Frame>
-  <img src="/images/health-gated-updates/dossier-rollback-readiness.png" alt="Rollback readiness section in the Stack Dossier with the overall Ready chip and the six rows: previous compose file, previous env file with variable names only, previous image tag, last successful deploy, healthchecks, and the application data non-coverage disclosure" />
+  <img src="/images/health-gated-updates/dossier-rollback-readiness.png" alt="Rollback readiness section in the Stack Dossier showing the overall state chip and the six rows: Previous compose file, Previous env file, Previous image tag, Last successful deploy, Healthchecks, and the Application data row marked not covered" />
 </Frame>
 
 ## Classified failures

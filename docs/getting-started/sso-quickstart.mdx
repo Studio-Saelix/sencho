@@ -3,22 +3,28 @@ title: SSO Setup Guide
 description: Step-by-step instructions for connecting Sencho to your identity provider.
 ---
 
-SSO can be configured from the Settings UI or seeded via environment variables (shown below).
+SSO is configured from the dashboard at **Settings → Access → SSO** (admin only) or seeded via environment variables (shown below).
 
 <Note>
   **Tier availability.** Custom OIDC and the Google, GitHub, and Okta preset providers are available on every tier, including Community. LDAP / Active Directory requires Admiral. See [Licensing & Billing](/features/licensing#feature-breakdown) for the full breakdown.
 </Note>
 
 <Frame>
-  <img src="/images/sso/sso-quickstart-overview.png" alt="Settings > SSO panel showing all five provider cards with PROVIDERS and ENABLED stats in the masthead" />
+  <img src="/images/sso/sso-quickstart-overview.png" alt="Settings → Access → SSO panel: five provider cards (Custom OIDC, Google, GitHub, Okta, LDAP / Active Directory) with PROVIDERS and ENABLED counts in the masthead" />
 </Frame>
+
+Each provider is a collapsible card you switch on, fill in, and test in place. The masthead tracks how many providers are configured (**PROVIDERS**) and how many are switched on (**ENABLED**).
+
+<Note>
+  **What your users see.** Once a provider is enabled, it appears on the login page. The OIDC providers (Custom OIDC, Google, GitHub, Okta) show up as buttons under an **Or continue with** divider; LDAP adds a **Local / LDAP** toggle beside the **Sign in** heading. Password sign-in stays available alongside the SSO options.
+</Note>
 
 ## How to configure
 
 You can wire SSO two ways. Both reach the same database row, and you can mix and match.
 
 - **Environment variables** seed the SSO configuration the first time Sencho boots with that variable set. They are useful for infrastructure-as-code, fresh deployments, and disaster recovery. After a configuration row exists in the database, the database is authoritative; subsequent restarts do not re-read the env vars or overwrite changes you made in the UI.
-- **Settings > SSO** in the dashboard lets admins enable, edit, save, and remove providers without restarting. Changes apply immediately. Each provider card has a **Test Connection** button that validates connectivity before you commit (LDAP bind plus search for LDAP, OIDC discovery plus token endpoint reachability for OIDC).
+- **Settings → Access → SSO** in the dashboard lets admins enable, edit, save, and remove providers without restarting. Changes apply immediately. Each provider card has a **Test Connection** button that validates connectivity before you commit (LDAP bind plus search for LDAP, OIDC discovery plus token endpoint reachability for OIDC).
 
 If you want a guided UI walkthrough rather than the env-var path below, jump to the [SSO feature page](/features/sso#configuration).
 
@@ -141,10 +147,10 @@ If your provider uses non-standard claim names, add claim mapping:
       - SSO_LDAP_DEFAULT_ROLE=viewer
 ```
 
-Once Sencho is running, open **Settings > SSO**, expand the LDAP card, and click **Test Connection**. Sencho binds with the service account, runs the search filter, and reports the result inline.
+Once Sencho is running, open **Settings → Access → SSO**, expand the LDAP card, and click **Test Connection**. Sencho binds with the service account, runs the search filter, and reports the result inline.
 
 <Frame>
-  <img src="/images/sso/sso-quickstart-ldap-test.png" alt="LDAP provider card expanded showing the configuration form with example values, the Verify TLS certificate toggle, and Save and Test Connection buttons" />
+  <img src="/images/sso/sso-quickstart-ldap-test.png" alt="LDAP / Active Directory card expanded in the SSO panel, showing the configuration form with example values, the Verify TLS certificate toggle, the Save and Test Connection buttons, and an inline error indicator after a failed test" />
 </Frame>
 
 <Warning>
@@ -172,7 +178,7 @@ By default, all SSO users are assigned the **Viewer** role. To grant Admin to sp
 This tells Sencho to check the `groups` claim in the OIDC ID token. If it contains `sencho-admins`, the user gets Admin. Roles are synced on every login, so removing a user from the admin group will demote them on their next sign-in.
 
 <Note>
-  Some providers (e.g., Okta, Zitadel) require custom scopes to include group claims in the ID token. You can configure additional scopes in the **Scopes** field in Settings > SSO, or via environment variable. The default is `openid email profile`.
+  Some providers (e.g., Okta, Zitadel) require custom scopes to include group claims in the ID token. You can configure additional scopes in the **Scopes** field in Settings → Access → SSO, or via environment variable. The default is `openid email profile`.
 </Note>
 
 ## Full docker-compose.yml example with SSO

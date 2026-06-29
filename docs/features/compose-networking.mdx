@@ -1,78 +1,249 @@
 ---
 title: Compose Networking
-description: Inspect how a stack is networked and exposed, classify what its exposure should be, and see where the running containers disagree with the Compose file, all without opening a terminal.
+description: Inspect how a stack is connected and exposed, classify its intended exposure, and see where the running containers disagree with the Compose file, all without opening a terminal.
 ---
 
-The **Networking** tab in the right-hand **Anatomy** panel answers a Compose-first question: *is this stack networked and exposed the way the Compose file says it is, and are the dangerous or confusing parts visible before I deploy?* It renders the effective Compose model, the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied, pairs it with the live Docker state when that node is reachable, and shows the result as plain facts.
+The **Networking** tab in the right-hand **Anatomy** panel answers two questions about any stack: *how is it networked and exposed according to the Compose file*, and *does what is actually running agree with that?* It renders the effective Compose model (the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied), pairs it with a live Docker snapshot when the node is reachable, and presents both as plain, scannable facts.
 
-The view is read-only with respect to the stack: it never changes a deployment. The one thing you can edit here is the stack's *exposure intent*, which is stored separately so Sencho can flag mismatches over time.
+The tab is read-only with respect to stack deployments: it never alters a container, a Compose file, or an existing network attachment. Two write operations are available: setting the stack's *exposure intent* (stored separately so Sencho can flag mismatches over time) and creating a new Docker network on the active node, which is available to admins and covered in [Creating networks](#creating-networks) below.
 
-Compose Networking reads the structure of the model, network names, service-to-network membership, published ports, and the *names* of environment variables and labels, never their values, so a secret injected through `environment:` or `env_file:` never appears in the view or the logs. One caveat: a structural field built by interpolating a secret, such as a network name, a published port, or an `extra_hosts` entry assembled from a `${VAR}`, is resolved before the tab reads it, so its value does show. Keep secrets in `environment:` or `env_file:` rather than interpolating them into these fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
+Compose Networking reads structure: network names, service-to-network membership, published ports, network modes, and the *names* of environment variables and labels, never their values. A secret injected through `environment:` or `env_file:` never appears in the view or the logs. One caveat: a structural field assembled by interpolating a secret (a network `name:`, a published port, or an `extra_hosts` entry built from `${VAR}`) is resolved before the inspector reads it, so its value does show. Keep secrets in `environment:` or `env_file:` rather than interpolating them into structural fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
 
-## Networks
+<img
+  src="/images/compose-networking/networking-tab-overview.png"
+  alt="The Networking tab showing the full panel: EXPOSURE INTENT section with REVERSE-PROXY selected for the stack and INHERIT for the service, NETWORKS section listing arr-net with an external badge, SERVICES section showing swag with ports 443/tcp and 80/tcp both marked 'all interfaces', and RUNTIME DRIFT section showing the green 'runtime matches compose' card"
+/>
 
-The top of the tab lists the stack's networks with the facts that matter:
+## Accessing the Networking tab
 
-- The resolved Docker network name, and the Compose key it came from.
-- **external** when the network is one the stack expects to already exist on the node.
-- **internal** when the network has no outbound or host connectivity.
-- **created by stack** when deploying the stack will create the network.
+1. Click any stack in the left sidebar to open it.
+2. Switch to the **Networking** tab in the Anatomy panel header.
 
-## Published ports and bindings
+On a phone, the same information appears under the **Compose** section of the stack detail.
 
-Each service lists its published ports with the interface they bind to:
+The tab appears only when the active node reports that it supports Compose Networking. A node running an older version of Sencho hides the tab until it is updated.
 
-- **all interfaces** marks a port published on `0.0.0.0`, reachable from every network the host is attached to.
-- **loopback** marks a port bound only to `127.0.0.1`, reachable only from the host itself.
-- A specific address is shown as-is.
+<Frame>
+  <img
+    src="/images/compose-networking/networking-tab-location.png"
+    alt="The Anatomy panel tab strip showing ANATOMY, ACTIVITY, DOSSIER, DRIFT, ENVIRONMENT, NETWORKING (active and underlined), DOCTOR, STORAGE tabs alongside FILES and EDIT action buttons"
+  />
+</Frame>
 
-A service running with `network_mode: host` is treated as **host-exposed**: it publishes every container port directly on the host, so it counts as exposed regardless of whether it declares any `ports:`. The exposure summary reflects that even when the port list is empty.
+## Effective model rendering
 
-The tab also surfaces each service's network membership and aliases, `network_mode` (`host`, `none`, `service:`, and `container:` modes are called out), and `extra_hosts` entries.
+When you open the tab, Sencho runs `docker compose config` on the active node to produce the effective model: the Compose file with all variable substitutions resolved, any `include:` and `extends:` directives merged, profiles filtered, and `.env` and `env_file` values applied. The networking facts you see always reflect this resolved model, not the raw file text.
+
+**Network name resolution** follows Compose rules:
+
+- By default, Docker names a network `<project>_<key>`, where `project` is the Compose project name (the `name:` field in the file, or the stack's directory name if absent) and `key` is the network's Compose key.
+- If the network block declares its own `name:` field, that exact name is used instead of the `<project>_<key>` default.
+- External networks use the Compose key directly (or the `name:` field if set), because they are expected to already exist on the host rather than being created by the stack.
+
+When the Compose key and the resolved Docker name differ, the tab shows both: the Docker name in full text and the key in parentheses beside it.
+
+If `docker compose config` cannot produce a model (usually a YAML error, an unresolved variable, or a broken `include`), the tab shows the error message and cannot display any facts. Fix the Compose file and reopen the tab to continue.
 
 ## Exposure intent
 
-Exposure intent is how you tell Sencho what a stack *should* be reachable from, so it can warn you when the Compose file says otherwise. Set it for the whole stack, or override it per service:
+<Frame>
+  <img
+    src="/images/compose-networking/networking-exposure-intent.png"
+    alt="The exposure intent section showing a stack row with REVERSE-PROXY highlighted, and one service row (swag) with INHERIT highlighted and an arrow indicator reading 'reverse-proxy', showing the intent inherited from the stack"
+  />
+</Frame>
+
+Exposure intent is how you tell Sencho what a stack *should* be reachable from, so it can warn you when the runtime says otherwise. Set one intent for the whole stack, or override it per service when individual services have different exposure profiles.
 
 | Intent | Meaning |
 |--------|---------|
-| **internal** | Not published to the host at all. |
-| **same-node** | Reachable only from the host (loopback bindings). |
-| **LAN** | Published for the local network. |
-| **reverse proxy** | Reached through a reverse proxy, not a direct host port. |
+| **internal** | Not reachable from the host at all. Containers communicate only within Docker networks. |
+| **same-node** | Reachable only from the host itself, through loopback-bound ports. |
+| **lan** | Published for the local network. |
+| **reverse-proxy** | Reached through a reverse proxy; no direct host port exposure expected. |
 | **public** | Intentionally reachable from the internet. |
-| **temporary** | A short-lived exposure (a classification label only). |
+| **temporary** | A short-lived exposure (a label for tracking only, not a functional configuration). |
 | **unknown** | Not yet classified. |
 
-A service with no intent of its own inherits the stack's. Clearing a service returns it to **inherit**; clearing the stack returns it to unclassified. Sencho stores the intent apart from the generated facts, so when the two drift apart the **Doctor** tab can point it out.
+**How inheritance works:** a service with no intent of its own inherits the stack's. In the per-service row, the **inherit** pill is selected when no override is set; an arrow indicator shows the intent the service inherits from the stack. Clearing a service's override returns it to **inherit**. Clearing the stack's intent returns it to unclassified.
 
-## Findings
+**Permissions:** editing the intent requires stack edit access. With read-only access you can see the current classification but not change it.
 
-Risk findings live in the **Doctor** tab, which reads the same model. On top of its existing deploy and security checks (host-port conflicts, missing external networks, host networking, broad exposure, and a mounted Docker socket), it adds exposure-aware findings:
+**How Doctor uses it:** Sencho stores the intent separately from the computed networking facts. When the two drift apart (a service classified `internal` that is publishing a host port, for example), the **Doctor** tab flags the mismatch. See [Compose Doctor](/features/compose-doctor) for the full list of exposure-aware findings.
 
-- A service classified **internal** or **same-node** that publishes a host port.
-- A database or admin image published on every interface.
-- A stack that publishes ports but has no exposure intent set.
-- A published port that the Stack Dossier's documented access URLs do not mention.
-- Reverse-proxy labels with no documented URL or reverse-proxy intent.
+## Networks
+
+<Frame>
+  <img
+    src="/images/compose-networking/networking-networks.png"
+    alt="The networks section showing one network row: 'arr-net' with a blue external badge, indicating the network is expected to already exist on the host"
+  />
+</Frame>
+
+The Networks section lists every network the effective model declares:
+
+| Element | What it shows |
+|---------|--------------|
+| **Name** | The resolved Docker network name Compose will use. |
+| **Key** | The Compose key in parentheses, when it differs from the resolved name. |
+| **external** badge | The network is expected to already exist on the host. The stack does not create or remove it on deploy. |
+| **internal** badge | The network has no outbound connectivity; containers on it cannot reach the internet or the host network. |
+| **created by stack** badge | Deploying the stack will create this network; it is absent until then. |
+
+When a stack declares no explicit networks, the section shows **default network only**: all services share the implicit Docker bridge that Compose creates automatically.
+
+External networks that do not exist on the node when you deploy will cause the deploy to fail. Compose Doctor flags missing external networks before you apply a change.
+
+## Services
+
+<Frame>
+  <img
+    src="/images/compose-networking/networking-services.png"
+    alt="The services section showing a card for the 'swag' service with network membership on 'arr-net', two published ports (443/tcp and 80/tcp), each with an amber 'all interfaces' badge indicating they are bound to 0.0.0.0"
+  />
+</Frame>
+
+Each service gets a card that summarises its networking configuration as Compose will actually apply it.
+
+### Network membership and aliases
+
+The card lists the networks each service belongs to. When a service declares `aliases:` for a network, those names appear in parentheses after the network key. Aliases are additional DNS names the service is reachable by within that network: any other service on the same network can connect to this one using the alias as a hostname, in addition to the default service name.
+
+### Port bindings
+
+Published ports appear with a badge indicating which interface they are bound to on the host:
+
+| Badge | Colour | What it means |
+|-------|--------|---------------|
+| **all interfaces** | Amber | The port is bound to `0.0.0.0` (or `::` for IPv6), making it reachable from every network the host is attached to. |
+| **loopback** | Green | The port is bound to `127.0.0.1` (or `::1`), reachable only from the host itself. |
+| *Specific IP* | Neutral | The port is bound to the address shown. |
+
+Port ranges appear as `startPort-endPort/protocol`, for example `8000-8002/tcp`.
+
+### Network modes
+
+When a service uses `network_mode:` instead of individual network attachments, the mode appears as an amber badge beside the service name:
+
+- **`network_mode: host`**: the service shares the host network stack entirely. Every container port is accessible directly on the host, even without any `ports:` entries. The card shows **all container ports / host-exposed** to make this explicit.
+- **`network_mode: none`**: the service has no network connectivity at all.
+- **`network_mode: service:<name>`** or **`network_mode: container:<name>`**: the service shares another container's network namespace.
+
+### Extra hosts
+
+When a service declares `extra_hosts:`, the resolved hostname-to-IP mappings are listed at the bottom of the card. These entries are injected into the container's `/etc/hosts` file at startup.
 
 ## Runtime drift
 
-When the node is reachable, the tab compares the running containers to the Compose file and reports where they disagree: a container on a network the file does not declare, a container on a network owned by another stack, and a declared network that no running service uses or that is missing from the runtime. These also appear on the **Drift** tab, where their history is tracked over time. When the node is not reachable, the tab shows the declared model only and says so.
+<Frame>
+  <img
+    src="/images/compose-networking/networking-runtime-matches.png"
+    alt="The runtime drift section showing a green card with a globe icon and the text 'runtime matches compose' in uppercase"
+  />
+</Frame>
+
+When the node is reachable, the tab compares the declared effective model against the live Docker state and reports where they disagree. Four types of drift are detected:
+
+| Finding | What it means |
+|---------|---------------|
+| **Attached to undeclared network** | A running container is connected to a network the Compose file does not declare for that service. Common after a manual `docker network connect` or a Compose file change that has not been applied yet. |
+| **Foreign network attachment** | A container from this stack is connected to a network owned by a different stack. Cross-stack networking the file does not account for. |
+| **Declared but unused** | A network is declared in the Compose file but no currently running service is connected to it. Often seen when a service is stopped or removed without `docker compose down`. |
+| **Missing from runtime** | A network is declared but does not exist in Docker. The stack may not have been deployed, or the network was deleted externally. |
+
+System-managed networks (`bridge`, `host`, `none`) and Docker's implicit default bridge are excluded from all drift findings.
+
+When the runtime matches the Compose file, the section shows a green **runtime matches compose** card.
+
+When Docker is not reachable, the section shows **runtime unavailable, showing the declared model only**. The networks, ports, and exposure facts are still accurate; drift comparison resumes once the node is reachable.
+
+**Relationship to the Drift tab:** the runtime drift shown here uses the same comparison logic as the [Drift Detection](/features/stack-drift) tab. The difference is history: the Drift tab records findings over time and shows when drift first appeared and when it cleared. The Networking tab always shows the current live state.
+
+## Doctor findings
+
+When Compose Doctor is available on the active node, a prompt at the bottom of the Networking tab directs you to the Doctor tab for deploy and security checks. The Doctor tab reads the same effective model and, when exposure intents are set, adds five exposure-aware findings on top of its standard checks:
+
+1. A service classified **internal** or **same-node** that publishes a host port.
+2. A database or admin image published on all interfaces.
+3. A stack that publishes ports but has no exposure intent set.
+4. A published port that the Stack Dossier's documented access URLs do not mention.
+5. Reverse-proxy labels with no documented URL or reverse-proxy intent set.
+
+See [Compose Doctor](/features/compose-doctor) for the complete check set and severity levels.
+
+## Creating networks
+
+<Frame>
+  <img
+    src="/images/compose-networking/networking-create-dialog.png"
+    alt="The Create network dialog showing a Name field, a Driver dropdown set to bridge, optional Subnet and Gateway inputs, and Internal and Attachable toggles"
+  />
+</Frame>
+
+Admins can create a new Docker network directly from the Networking tab using the **create network** button in the panel header. This is the same action available from the Resources Hub Networks tab.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| **Name** | Yes | The Docker network name. Must be unique on the node. |
+| **Driver** | Yes (default: bridge) | `bridge` for isolated single-host networks; `overlay` for multi-host Swarm networks; `macvlan` to assign MAC addresses; `host` or `none` for special cases. |
+| **Subnet** | No | CIDR notation, e.g. `172.20.0.0/16`. Docker chooses a subnet automatically when left blank. |
+| **Gateway** | No | Gateway IP for the subnet, e.g. `172.20.0.1`. |
+| **Internal** | No | Prevents outbound connectivity from containers on this network. |
+| **Attachable** | No | Allows containers outside Compose to connect to the network manually. |
+
+After the network is created, the Networking tab refreshes automatically. The network appears in the Networks section of any stack that declares it as `external:`.
+
+<Note>
+  Creating a network here does not attach it to the current stack. To use the new network in a stack, add it to the Compose file under `networks:` with `external: true` (since Sencho created it, not the stack) and redeploy.
+</Note>
+
+## Limitations
+
+- **No modify or delete.** Sencho can create networks (via the create network dialog) but never modifies or deletes existing networks from this tab. Cleanup is handled by `docker compose down` or the Resources Hub prune actions.
+- **Structural fields only.** Environment variable values and label values are never returned. Secrets interpolated into structural fields (network `name:`, ports, `extra_hosts`) are resolved and do appear.
+- **Runtime drift requires Docker reachability.** When the node is not reachable, the tab shows the declared model but cannot compare against the live state.
+- **Capability-gated tab.** The Networking tab only appears when the active node reports that it supports Compose Networking. Older nodes hide the tab until they are updated.
+- **Render failure blocks all facts.** If `docker compose config` fails, the tab cannot show any networking information until the model can be rendered. The error message is shown, but raw Docker output is redacted.
 
 ## Troubleshooting
 
 <AccordionGroup>
   <Accordion title="The Networking tab is not there">
-    The tab appears once the node advertises support for it. A node running an older Sencho version hides the tab until it is updated.
+    The tab appears once the active node advertises support for it. A node running an older version of Sencho hides the tab until it is updated.
   </Accordion>
   <Accordion title="The view says the runtime is unavailable">
     Sencho could not reach Docker on that node, so it shows the declared Compose model only and skips runtime drift. The networks, ports, and exposure facts are still accurate; the live comparison resumes once the node is reachable.
   </Accordion>
   <Accordion title="It says the model cannot render">
-    `docker compose config` could not produce an effective model, usually a YAML error, an unresolved include or merge, or a required variable with no value. Fix the reported problem and reopen the tab.
+    `docker compose config` could not produce an effective model, usually a YAML error, an unresolved include or merge, or a required variable with no value. Fix the reported problem in the Compose file and reopen the tab.
   </Accordion>
   <Accordion title="I cannot change the exposure intent">
-    Editing the intent needs stack edit access. With read access you can see the current classification but not change it.
+    Editing the intent requires stack edit access. With read-only access you can see the current classification but not change it.
+  </Accordion>
+  <Accordion title="The runtime matches compose but I changed the Compose file">
+    The drift comparison compares the declared model against what is currently running in Docker, not against what Docker would run if you deployed now. The runtime reflects the last deploy. Deploy the updated file to bring the runtime in line with the file, at which point the comparison clears.
+  </Accordion>
+  <Accordion title="I see a foreign network attachment I did not configure">
+    A foreign network attachment means a container from this stack is connected to a network owned by a different stack. This can happen when two stacks share a network by each declaring it as `external:`, when you ran `docker network connect` manually, or when a previously external network changed ownership. Check the Compose files for both stacks and compare against what the Docker daemon shows with `docker network ls` and `docker network inspect`.
+  </Accordion>
+  <Accordion title="A service shows no network membership">
+    A service with no explicit `networks:` block attaches to the stack's implicit default network, which Docker creates automatically. The service card shows no named network membership in that case. Services on the same default network can still communicate with each other using the service name as a hostname.
   </Accordion>
 </AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Compose Doctor" icon="stethoscope" href="/features/compose-doctor">
+    Runs preflight checks against the same effective model, including the five exposure-aware findings that rely on the intents set in the Networking tab.
+  </Card>
+  <Card title="Drift Detection" icon="code-compare" href="/features/stack-drift">
+    Shows the same four runtime drift types with a persistent history, so you can see when drift first appeared and when it cleared.
+  </Card>
+  <Card title="Resources Hub" icon="network-wired" href="/features/resources">
+    Host-wide view of every Docker network and container attachment on the node, independent of which stack they belong to.
+  </Card>
+  <Card title="Environment and Secrets Guardrails" icon="shield-halved" href="/features/environment-guardrails">
+    Documents which fields Sencho reads and which it redacts, and how to keep secrets safe from interpolation into structural fields.
+  </Card>
+</CardGroup>

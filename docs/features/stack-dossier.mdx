@@ -1,64 +1,126 @@
 ---
 title: Stack Dossier
-description: Turn each Compose stack into living documentation by pairing the facts Sencho already derives with operator notes it cannot infer, then export the whole thing as Markdown.
+description: Pair the operational facts Sencho derives from each stack with your own notes, then export everything as a portable Markdown document.
 ---
 
-The **Dossier** tab in the right-hand **Anatomy** panel turns a stack into living documentation. Sencho fills in the operational facts it already knows from your Compose file, and you add the context it cannot infer: what the stack is for, who owns it, where it lives on your network, and how to recover it. The `files` and `edit` actions on the same strip belong to the panel as a whole and stay available regardless of which tab is active.
+The **Dossier** tab in the Anatomy panel is where you turn a running stack into something a teammate, a future self, or a runbook can actually use. It pairs facts Sencho already has (services, ports, volumes, env files, restart policy) with the context only you know: what the stack does, who owns it, where it sits on the network, and how to recover it if the host is lost. The result is a single document that stays current on the generated side and grows richer as you fill in the operator side.
 
-The goal is to stop scattering this information across spreadsheets, `.env` comments, and memory. Sencho is already close to the source of truth, so it keeps the generated half in sync while you maintain the rest.
+This stops operational knowledge from living in spreadsheets, comments, and people's heads while Sencho is already reading the Compose file.
+
+## How it works
+
+The tab has two halves. The top half is read-only: Sencho derives facts from the Compose file on every load. The bottom half is a form you fill in. Neither half depends on the other; a stack with no operator notes still has accurate generated facts, and a stack you have not deployed yet still accepts operator notes.
+
+The export (copy or download) combines both halves into one Markdown document. The document format is designed to be readable outside Sencho: in a Git repo, a wiki, an Obsidian vault, or alongside a backup. Sencho never embeds secrets into the export; only variable names and counts appear from the generated side, and your operator notes are exported as you write them.
 
 ## Generated facts
 
-The top of the tab shows a read-only summary derived live from the stack's current Compose anatomy. It is never copied into a field you have to maintain, so it can never drift:
+The top of the tab shows a read-only summary derived live from the stack's Compose file. Because it is never copied into a field you maintain, it cannot drift independently of the file.
 
-| Fact | Source |
-|------|--------|
-| **Services** | Service names declared in the Compose file |
-| **Ports** | Published host ports across all services |
-| **Volumes** | Mounted volumes count |
-| **Network** | The stack's network |
-| **Restart** | The restart policy |
-| **Env file** | The env file, its variable count, and any referenced `${VAR}` with no value |
-| **Source** | Git source when the stack is linked, otherwise local |
+<Frame>
+  <img src="/images/stack-dossier/dossier-overview.png" alt="Dossier tab showing the Generated Facts panel above and the Operator Notes form below" />
+</Frame>
 
-Environment and label values are never read or shown: only variable **names** and **counts** appear, exactly as in the Anatomy tab. The one exception is a secret interpolated into a structural fact, such as a published port written as `${DB_PORT}`, which Compose resolves before the facts are read, so its value appears. The same is true of the resolved paths and network names shown on the Storage and Networking tabs. Keep secrets in `environment:` or `env_file:` rather than interpolating them into structural fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
+| Fact | What is shown | Source |
+|------|--------------|--------|
+| **Services** | Names of declared services | Compose file service keys |
+| **Ports** | Count and all published host ports across all services | `ports:` entries, host-side bindings only |
+| **Volumes** | Count of mounted volumes | `volumes:` references across services |
+| **Network** | Stack's primary network name and type (for example, `arr-net · bridge`) | Compose network definitions |
+| **Restart** | Restart policy of the first service with one set | `restart:` key |
+| **Env file** | The env file path, its variable count, and names of any `${VAR}` with no supplied value | `.env` / `env_file:` at the stack root |
+| **Source** | `local`, or the Git remote URL, branch, and path when the stack is linked | Stack's git source configuration |
+
+**Multi-file Compose stacks:** when a stack has a Git source with multiple Compose files, Sencho merges them (equivalent to `docker compose config`) before reading facts. Services, ports, and volumes shown in the Generated Facts reflect the merged result, not any individual file.
+
+Environment and label values are never read or shown: only variable names and counts appear, exactly as in the Anatomy tab. The one exception is a value interpolated into a structural field such as `${DB_PORT}` in a port declaration, which Compose resolves before the facts are read. Keep secrets in `environment:` or `env_file:` rather than interpolating them into structural fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
 
 ## Operator notes
 
-Below the generated facts is a form for the details Sencho cannot derive. Every field is optional:
+Below the generated facts is a form for the details Sencho cannot derive. Every field is optional. Save applies all fields at once; clearing a field and saving removes it. The Save button activates only when there are unsaved changes.
 
-| Field | What to record |
-|-------|----------------|
-| **Purpose** | What this stack is for |
-| **Owner** | Who maintains it |
-| **Access URLs** | Where it is reached (one URL per line) |
-| **Static IP** | The stack's static or LAN IP |
-| **VLAN** | The VLAN it sits on |
-| **Firewall** | Ports opened, rules, zones |
-| **Reverse proxy** | Hostnames, upstreams, TLS notes |
-| **Backup** | What to back up and how |
-| **Upgrade** | Upgrade steps and gotchas |
-| **Recovery** | How to rebuild the stack from scratch |
-| **Notes** | Anything else worth recording |
-
-Notes are saved per stack and per node, so the same stack name on two different nodes keeps its own dossier. Anyone can read a dossier; saving changes requires stack edit permission, so read-only users see the notes but not a Save button.
+| Field | Max length | What to record |
+|-------|-----------|---------------|
+| **Purpose** | 1,000 chars | One or two sentences: what the stack does and why it runs |
+| **Owner** | 1,000 chars | Team, person, or alias responsible for this stack |
+| **Static IP** | 255 chars | The host IP or LAN address this stack is pinned to, if any |
+| **VLAN** | 255 chars | VLAN tag or name if the stack is on a segmented network |
+| **Access URLs** | 2,000 chars | Full URLs where the stack is reachable, one per line. Include the port explicitly (`http://homelab:8096`) rather than relying on scheme defaults, so the documentation drift check can validate the port against what the stack publishes. |
+| **Firewall** | 8,000 chars | Ports opened in firewall rules, zone assignments, any ingress or egress rules |
+| **Reverse proxy** | 8,000 chars | Upstream name and port, virtual host, TLS termination, cert source |
+| **Backup** | 8,000 chars | Which volumes or bind-mounts matter, backup tool, schedule, offsite policy |
+| **Upgrade** | 8,000 chars | Steps required to update this stack, any ordering dependencies, known breaking changes between versions |
+| **Recovery** | 8,000 chars | Steps to rebuild this stack from scratch if the host is lost. Write this as if no prior state exists. |
+| **Notes** | 8,000 chars | Anything else: quirks, known bugs, related stacks, useful references |
 
 ## Documentation drift
 
-Documentation should describe reality, so Sencho watches the one place it most often slips: a port you wrote into **Access URLs** that the stack no longer publishes. When Compose moves a service from `:32400` to `:32401`, or an access URL points at a port nothing serves, a warning appears in the Dossier tab naming the port to review.
+Documentation should describe reality, so Sencho watches the one place it most often slips: a port you wrote into **Access URLs** that the stack no longer publishes. When Compose moves a service from `:32400` to `:32401`, or an access URL points at a port nothing serves, a warning appears in the Dossier tab naming the port to review. This is why the Access URLs field asks for full URLs with explicit ports.
 
-The check is deterministic and advisory. It reads the ports in your Access URLs and compares them against the published ports in the generated facts above, the same ports the Anatomy tab shows. It never edits your notes or your Compose file, and it never guesses: a URL with no explicit port, or on the scheme default (`:80` for `http`, `:443` for `https`), is left alone, since those usually reach the stack through a reverse proxy rather than a published port. When a stack publishes a port through a variable (such as `${PLEX_PORT}:32400`), the real value is unknown, so the check stays quiet rather than risk a false warning. A bare single-label host with a port (such as `plex:32400`) is also left alone, since it cannot be told apart from a plain note; write it as a full URL (`http://plex:32400`) to have its port checked. Fix either side, the access URL or the stack's ports, and the warning clears on its own.
+<Frame>
+  <img src="/images/stack-dossier/dossier-doc-drift.png" alt="Dossier tab showing a documentation drift warning for an access URL whose port does not match any published port" />
+</Frame>
+
+The check is deterministic and advisory. It reads the ports in your Access URLs and compares them against the published ports in the generated facts above, the same ports the Anatomy tab shows. It never edits your notes or your Compose file, and it never guesses:
+
+- A URL with no explicit port, or on the scheme default (`:80` for `http`, `:443` for `https`), is left alone. Those usually reach the stack through a reverse proxy rather than a published port.
+- When a stack publishes a port through a variable such as `${PLEX_PORT}:32400`, Sencho does not know the resolved value from the Compose source, so the check stays quiet rather than risk a false warning.
+- A bare single-label host with a port (such as `plex:32400`) is also left alone, since it cannot be distinguished from a plain note. Write it as a full URL (`http://plex:32400`) to have its port checked.
+
+Fix either side (the access URL or the stack's ports) and the warning clears on its own.
 
 ## Markdown export
 
-Two actions in the tab header produce a single Markdown document combining the generated facts and your notes:
+Two actions in the tab header produce a single Markdown document combining the generated facts and your operator notes:
 
-- **copy md** copies it to the clipboard.
-- **download** saves it as `<stack>-dossier.md`.
+<Frame>
+  <img src="/images/stack-dossier/dossier-export-bar.png" alt="Dossier tab header showing the COPY MD and DOWNLOAD export buttons" />
+</Frame>
+
+- **copy md** copies the document to the clipboard.
+- **download** saves it as `<stack-name>-dossier.md`.
+
+The exported document always includes the Generated Facts and all Operator Notes. When the Networking tab capability is available on the active node, the export also includes a network exposure summary. When the Storage tab capability is available, the export also includes a storage summary. Both additions are automatic when the capability is present.
 
 The export is clean Markdown that reads well in Git, Obsidian, BookStack, a README, or stored alongside a backup. The generated facts never include `.env` values, only variable names and counts. Your operator notes are exported exactly as you write them, so treat them like any document you might share and avoid pasting secrets you do not want in the export.
 
+The export buttons are disabled when the Compose file cannot be parsed. Your operator notes are unaffected and still save normally even when parsing fails.
+
 To export every stack across every node at once, use the [Fleet Dossier](/features/fleet-dossier) action in the Fleet view.
+
+## Connected features
+
+### Drift tab (compose vs runtime)
+
+Adjacent to the Dossier tab in the same Anatomy panel is the **Drift** tab. It answers a different question: does what is actually running still match the Compose file? Drift detection compares services, images, and published ports against the live Docker runtime. It is independent of the dossier: you do not need operator notes for drift detection, and documentation drift warnings in the Dossier tab are separate from runtime drift in the Drift tab. See [Drift Detection](/features/stack-drift).
+
+### Fleet Dossier
+
+The [Fleet Dossier](/features/fleet-dossier) export in the Fleet view produces a ZIP archive containing Markdown documents for every stack on every node, organized by node. It uses the same per-stack dossier format and pulls the operator notes you have saved in each stack's Dossier tab.
+
+### Fleet Snapshots and dossier notes
+
+Fleet Snapshots can optionally capture dossier notes alongside Compose files. When the **snapshot documentation** setting is enabled, each snapshot includes the operator notes for every stack that has them. When restoring a snapshot, you can choose whether to restore files only, or files and dossier notes together. Dossier restore is opt-in at restore time and does not overwrite notes unless you confirm it. See [Fleet Backups](/features/fleet-backups).
+
+### Activity timeline
+
+Events from the Drift tab (drift detected, drift resolved) appear in the stack's **Activity** timeline alongside deploys and restarts, giving a chronological view of when the stack drifted and when it recovered.
+
+## Permissions and per-node scoping
+
+Any authenticated user with `stack:read` permission can view a stack's dossier. Read-only users see all fields and the export buttons, but no Save button appears.
+
+Saving changes requires stack edit permission (`stack:edit`). In multi-user setups with role-based access control, check your role if the Save button is absent.
+
+Dossiers are stored per stack and per node. A stack named `plex` on your home node and `plex` on a remote VPS have independent dossiers. Edit a stack's dossier while that node is the active node to update the right one.
+
+## Limitations
+
+- **Operator notes are per-instance.** Notes entered on one Sencho instance are not synchronized to another instance that manages the same stack. Fleet Snapshots with documentation capture is the only way to transfer notes between instances.
+- **Documentation drift checks Access URLs only.** The port-validity check applies only to the Access URLs field. It does not validate other fields or check hostnames.
+- **No history on operator notes.** The dossier stores only the current version of each field. Sencho does not record change history for operator notes. Use a version-controlled wiki or Git if you need note history.
+- **Export requires a parseable Compose file.** When the Compose file cannot be parsed, the export buttons are disabled. Operator notes are unaffected and still save normally.
+- **Rollback readiness requires a specific capability.** The rollback readiness section is shown only when the `update-guard` capability is active for the node.
 
 ## Accessing the Dossier tab
 
@@ -66,22 +128,35 @@ To export every stack across every node at once, use the [Fleet Dossier](/featur
 2. Switch to the **Dossier** tab in the Anatomy panel header.
 3. Fill in any fields you want and click **Save**. An **unsaved changes** marker appears while edits are pending.
 
+The Anatomy panel is visible in the right column when a stack is open and the editor is not active (that is, when not in the compose-file edit mode). If the panel is hidden, click away from the edit view or close the editor using the `X` button at the top of the editor card.
+
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="The Save button stays greyed out">
-    Save is enabled only when there are unsaved changes. Edit any field and it activates. If it never activates, you may be signed in as a read-only user: editing a dossier requires stack edit permission, while reading it does not.
+  <Accordion title="The Save button is not visible or stays greyed out">
+    The Save button appears only for users with stack edit permission. If you do not see it, you are signed in as a read-only user or your role does not include `stack:edit` for this stack. Users with read-only access can view all fields and use the export buttons.
+
+    If the button is visible but greyed out, it activates only when there are unsaved changes. Edit any field and it enables.
   </Accordion>
-  <Accordion title="The generated facts say 'Unable to parse compose.yaml'">
-    The summary is built from the stack's Compose file. If the file is empty or not valid YAML, the facts cannot be generated and the export buttons are disabled. Fix the Compose file in the editor and the facts reappear. Your operator notes are unaffected and still save.
+  <Accordion title="Generated facts show 'Unable to parse compose.yaml'">
+    The facts panel is built from the stack's Compose file. If the file is empty, missing, or not valid YAML, the facts cannot be generated. Fix the Compose file in the editor and the panel updates. Your operator notes are unaffected and save normally even when the compose file is unparseable. The export buttons are also disabled when the file cannot be parsed.
   </Accordion>
-  <Accordion title="My notes for the same stack differ between two nodes">
-    That is expected. A dossier is stored per stack and per node, so a stack with the same name on two nodes has an independent dossier on each. Edit the dossier while that node is the active node to update the right one.
+  <Accordion title="My notes for the same stack name differ between two nodes">
+    That is expected. A dossier is stored per stack and per node, so a stack with the same name on two nodes keeps an independent dossier on each. Make sure the correct node is active before saving, or use Fleet Snapshots with documentation capture to copy notes between instances.
   </Accordion>
   <Accordion title="An access URL spilled onto one line in the export">
-    The Access URLs field treats each line as a separate URL. Put one URL per line in the form and they are preserved as separate lines in the exported Markdown.
+    The Access URLs field treats each line as one URL. If a URL wrapped visually in the form, it was entered on a single line. Paste each URL on its own line to have them appear as separate entries in the export.
   </Accordion>
   <Accordion title="A documentation drift warning flags a port my reverse proxy fronts">
-    The warning means an access URL names a port no service in the stack publishes. That is expected when a reverse proxy serves the stack on a port the stack itself does not publish. The warning is advisory and changes nothing: either record the reverse-proxied URL without the internal port, or publish the port in Compose if the URL should reach it directly.
+    The warning appears when an access URL names a port the stack does not publish. That is expected when a reverse proxy answers on a port the stack never published. The warning is advisory and changes nothing: either write the reverse-proxied URL without an explicit port (so it is not checked), or publish the port in the Compose file if the URL should reach the stack directly.
+  </Accordion>
+  <Accordion title="A documentation drift warning appears for a port defined as a variable">
+    When a stack's compose file publishes a port through a variable such as `${PLEX_PORT}:32400`, Sencho does not know the resolved value from the Compose source, so it treats that port as unverifiable and stays quiet. If your access URL refers to the same port and a warning still appears, the URL's port does not match any statically declared published port. Either update the URL or pin the port in the Compose file.
+  </Accordion>
+  <Accordion title="The networking or storage summary is missing from the export">
+    The Markdown export includes a network exposure summary and a storage summary only when the corresponding capabilities are available on the active node. If those sections are missing, the capabilities are not enabled for that node. The core generated facts and all operator notes are always included regardless of capabilities.
+  </Accordion>
+  <Accordion title="Dossier notes were not restored after a fleet snapshot restore">
+    Fleet snapshot restore has two steps: restoring Compose files and optionally restoring dossier notes. Notes are restored only when you explicitly choose to restore them at restore time. If you did not select that option, or if the original snapshot was captured without documentation enabled, the notes will not be present. To restore notes, choose a snapshot that includes documentation and confirm the notes restore option during the restore flow.
   </Accordion>
 </AccordionGroup>

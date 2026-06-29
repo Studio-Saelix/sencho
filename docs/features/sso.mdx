@@ -21,14 +21,14 @@ SSO is available on every Sencho tier. Custom OIDC and the preset providers for 
 
 ### LDAP flow
 
-1. User enters their directory username and password on the Sencho login page.
+1. User selects **LDAP** on the **Local / LDAP** toggle beside the **Sign in** heading and enters their directory username and password.
 2. Sencho binds to LDAP with a service account, locates the user, then verifies their password.
 3. On the user's first login, a Sencho account is created automatically.
 4. Sencho issues a session JWT and the user is logged in, identical to a password login.
 
 ### OIDC / OAuth flow (Google, GitHub, Okta, Custom OIDC)
 
-1. User clicks the provider button on the login page (e.g., **Sign in with Google**).
+1. User clicks the provider button on the login page (the provider name under an **Or continue with** divider, e.g., **Google**).
 2. The browser is redirected to the identity provider for authentication.
 3. After granting consent, the provider redirects back to Sencho with an authorization code.
 4. Sencho exchanges the code for tokens, verifies the ID token, and reads user information.
@@ -72,12 +72,12 @@ If the user's ID token contains a `groups` claim with the value `sencho-admins`,
 
 SSO can be configured two ways:
 
-1. **Settings UI**: go to **Settings → SSO** in the Sencho dashboard. Enable providers, paste credentials, and test connections from the UI. Changes take effect immediately, no restart required.
+1. **Settings UI**: go to **Settings → Access → SSO** in the Sencho dashboard. Enable providers, paste credentials, and test connections from the UI. Changes take effect immediately, no restart required.
 2. **Environment variables**: set `SSO_*` variables in your Docker Compose file. They seed the database on first boot; afterwards the Settings UI is authoritative.
 
 ### Via Settings UI
 
-Admins manage SSO providers in **Settings → SSO**. The page lists every provider as a collapsible card with a label, an **enable / disable** toggle pill on the right, and an **Active** badge on the header when the provider is on.
+Admins manage SSO providers in **Settings → Access → SSO** (admin only; hidden on remote nodes). The masthead shows the SCOPE (global), the number of configured **PROVIDERS**, and how many are **ENABLED**. The page lists every provider as a collapsible card with a label, an **enable / disable** toggle pill on the right, and an **Active** badge on the header when the provider is on.
 
 <Frame>
   <img src="/images/sso/sso-settings.png" alt="SSO settings panel listing the five identity providers as collapsible cards with enable / disable toggles" />
@@ -309,7 +309,7 @@ If not set, Sencho auto-detects the URL from the request's `Host` header and pro
   </Accordion>
 
   <Accordion title="SSO buttons do not appear on the login page">
-    Verify the provider is **enabled** (toggle on the Active state) in **Settings → SSO** and that the configuration saved successfully. The login page fetches the list of enabled providers when it loads; hard-refresh the tab if changes were just made.
+    Verify the provider is **enabled** (toggle on, showing the **Active** badge) in **Settings → Access → SSO** and that the configuration saved successfully. The login page fetches the list of enabled providers when it loads; hard-refresh the tab if changes were just made.
   </Accordion>
 </AccordionGroup>
 
@@ -317,4 +317,4 @@ The [operations troubleshooting page](/operations/troubleshooting#ldap-connectio
 
 ## Combining SSO with two-factor authentication
 
-SSO and [two-factor authentication](/features/two-factor-authentication) work together. By default, SSO sign-ins skip the TOTP challenge, since the identity provider has already authenticated the user. Operators who want a stricter posture can flip **Require 2FA on SSO sign-in** on their **Settings → Account & Security** card to require both factors on every SSO sign-in. The toggle only appears once at least one SSO provider is enabled.
+SSO and [two-factor authentication](/features/two-factor-authentication) work together. By default, SSO sign-ins skip the TOTP challenge, since the identity provider has already authenticated the user. Operators who want a stricter posture can turn on **Require 2FA on SSO sign-in** in **Settings → Personal → Account** to require both factors on every SSO sign-in. The toggle sits in the Two-factor authentication section and appears once you have 2FA enrolled and at least one SSO provider is enabled.

@@ -5,7 +5,15 @@ description: Personalize Sencho's look. Choose a visual style, tune readability 
 
 **Settings → Appearance** is where you make Sencho look the way you want. Choose between the Calm and Signature visual styles, dial in readability, set how the security charts are colored, pick a theme and accent, choose the interface and data fonts, and scale the text. A live preview reflects every change as you make it.
 
-Several of these controls are also one click away from anywhere in the app: the **palette button** in the top bar, between the search and notification icons, opens a quick switcher for the theme mode, accent, visual style, readability, and text size.
+<Frame>
+  <img src="/images/settings/appearance-overview.png" alt="The Settings → Appearance page showing the Visual Style section with two preview cards: Calm (selected, with upright Critical heading and muted severity-color dots) and Signature (with italic serif Critical heading and saturated dots). Below are the Security Visualization chart-palette control with Muted selected, and the Readability section with its mode toggle, header-style control, and contrast slider." />
+</Frame>
+
+Several of these controls are also one click away from anywhere in the app: the **palette button** in the top bar, between the search and notification icons, opens a quick switcher for the theme mode, accent, visual style, readability, and text size. The sliders for contrast, borders, and glow stay in this Settings section.
+
+<Frame>
+  <img src="/images/settings/appearance-quick-switch.png" alt="The top-bar Theme quick-switcher popover: a Mode row with icon-only buttons for Dim, OLED, Light, and Auto (Dim selected); an eight-swatch Accent grid with Cyan selected; a Visual style row with Calm and Signature buttons (Calm selected) above a Readability toggle set to off; a Text size row with S, M, L, and XL preset buttons (M selected); and a footer line reading 'Saved to this browser · fine-tune borders & glow in Settings'." />
+</Frame>
 
 <Note>
   Appearance choices are saved to **this browser only**. They follow you across tabs on the same browser, and every device remembers its own look. Nothing here changes what other operators see.
@@ -57,6 +65,10 @@ The **accent** is Sencho's one data color. It drives charts, sparklines, progres
 
 Sencho uses three type contexts. The interface and data faces are yours to change; the heading style follows your Visual style choice.
 
+<Frame>
+  <img src="/images/settings/appearance-typography.png" alt="The Appearance Typography section with Interface font chips showing Ag sample text (Geist selected, IBM Plex, Hanken Grotesk) and Data font chips showing 01 sample text (Geist Mono selected, Plex Mono, Fira Code), with a Text size slider at 1.00×." />
+</Frame>
+
 - **Interface font** sets the sans face used for body text, labels, navigation, and buttons. Choose **Geist** (default), **IBM Plex Sans**, or **Hanken Grotesk**.
 - **Data font** sets the monospace face used for the terminal, stat values, codes, and timestamps. Choose **Geist Mono** (default), **IBM Plex Mono**, or **Fira Code**.
 - **Text size** scales the entire interface from a single root multiplier. In Settings this is a continuous slider (default `1.00×`); the top-bar quick switcher offers **S / M / L / XL** presets. Both stay in sync.
@@ -67,5 +79,27 @@ The **Display** group holds the remaining per-browser preferences:
 
 - **Density** switches between **Comfortable** (roomy rows, the default) and **Compact** (tighter rows and tiles that fit more on screen for dense dashboards).
 - **Top navigation labels** shows text labels beside the top navigation icons. Turn it off for an icon-only bar; the destinations stay reachable by hover tooltip, accessible name, and the command palette. On the phone layout the navigation always keeps its labels. With labels off, **Top navigation alignment** chooses whether the icon-only bar sits to the left or centered.
+- **Log chip color** controls how service chips are colored in log views. **Unified** uses the accent color for all service chips. **Per service** assigns each service a stable label color for faster visual scanning when following multiple services at once.
+
+<Frame>
+  <img src="/images/settings/appearance-display.png" alt="The Appearance Display section with a Density selector set to Comfortable, a Top navigation labels toggle turned off revealing a Top navigation alignment control with Left selected and Center, and a Log chip color control with Unified selected alongside Per service." />
+</Frame>
 
 Deploy-progress behavior and the diff-preview-before-save step are stack workflow preferences, so they live in **Settings → Infrastructure → Stacks**, not here.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="My theme didn't carry over to another device or browser">
+    Appearance is saved to the browser you set it in, not to your account. Every browser and every device keeps its own look on purpose, so a compact laptop setup never forces the same rhythm on a large desktop. Open Sencho on the new browser, pick your theme, accent, fonts, and density again, and they persist there from then on.
+  </Accordion>
+  <Accordion title="My appearance reset to the defaults">
+    Sencho reads your choices from this browser's local storage. Clearing site data, signing in from a private or incognito window, or a browser that blocks local storage drops you back to the defaults: **Dim** mode, **Cyan** accent, **Geist** and **Geist Mono** fonts, **1.00×** text size, and **Comfortable** density. Re-pick what you want and it sticks for that browser.
+  </Accordion>
+  <Accordion title="Will changing my accent or theme affect other operators?">
+    No. Appearance is local to your browser and is never sent to the server or shared. Other operators, and your own other devices, keep whatever look they set. There is no shared or organization-wide appearance setting; each person chooses their own.
+  </Accordion>
+  <Accordion title="The quick switcher doesn't have the contrast, border, and glow sliders">
+    The top-bar palette button is a fast path for the most-used controls: mode, accent, visual style, readability, and text size. Contrast, border brightness, and ambient glow live here in **Settings → Appearance**, where the live preview reflects each change as you drag. Both paths write to the same per-browser storage, so a change in one shows up immediately in the other.
+  </Accordion>
+</AccordionGroup>

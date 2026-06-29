@@ -3,15 +3,40 @@ title: Compose Doctor
 description: Run a preflight check on a stack before you deploy. Compose Doctor renders the effective Compose model and reports common failure modes, grouped by severity, with a clear fix for each.
 ---
 
-The **Doctor** tab in the right-hand **Anatomy** panel answers one question before you apply a change: *what will Docker actually run, and is it safe on this node?* Compose Doctor renders the effective Compose model, the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied, and then runs a set of deterministic checks against it and the node it would deploy to.
+The **Doctor** tab in the right-hand **Anatomy** panel answers one question before you apply a change: *what will Docker actually run, and is it safe on this node?* Compose Doctor renders the effective Compose model (the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied) and then runs a set of deterministic checks against it and the live Docker state on the node it would deploy to.
 
-The check is advisory. It never blocks a deploy and never changes a stack; it tells you what it found so you can decide. It runs on demand: press **run preflight** and Sencho renders the model, runs the checks, and stores the result so the tab still shows it the next time you open the stack.
+The check is advisory. It never blocks a deploy and never changes a stack. It runs on demand: press **run preflight** and Sencho renders the model, runs all 30 checks, and stores the result so the tab still shows it the next time you open the stack.
 
-Compose Doctor reads the structure of the effective model, service names, images, ports, volumes, and the *names* of environment variables, never their values, so a secret injected through `environment:` or `env_file:` never appears in the report, the stored run, or the logs. One caveat: a secret interpolated into a structural field, such as a port, an image tag, or a volume path built from a `${VAR}`, is resolved before the model is read, so its value does show. Keep secrets in `environment:` or `env_file:` rather than interpolating them into these fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
+## Where to find it
 
-## Severity
+<Frame>
+  <img
+    src="/images/compose-doctor/compose-doctor-tab.png"
+    alt="The tab bar at the top of the Anatomy panel showing the Doctor tab selected"
+  />
+</Frame>
 
-Every finding is graded so you can triage at a glance. The tab groups findings under four headings and the summary line reflects the most severe one:
+The **Doctor** tab appears in the Anatomy panel header when the active node supports Compose Doctor. Click any stack in the sidebar, then switch to the **Doctor** tab.
+
+## How it works
+
+Every preflight run follows three steps:
+
+1. **Render** the effective model. Sencho calls `docker compose config` on the stack, which resolves all variable interpolation, `include` directives, profile overrides, and `env_file` references into a single, normalized model.
+2. **Snapshot** live Docker state. Sencho reads which host ports are in use, which containers are running, and which named networks and volumes exist on the target node.
+3. **Run 30 deterministic rules** against the combination. Each rule is pure and produces zero or more findings with a severity, a message, and a suggested fix.
+
+Sencho stores exactly one run per stack per node, so a new run immediately overwrites the previous one; there is no history.
+
+## Privacy and environment values
+
+Compose Doctor reads the structure of the effective model (service names, images, ports, volumes, and the *names* of environment variables), never their values. A secret injected through `environment:` or `env_file:` never appears in the report, the stored run, or the logs.
+
+One caveat: a secret interpolated into a structural field (such as a port, an image tag, or a volume path built from `${VAR}`) is resolved before the model is read, so its value does show in the rendered model. Render errors are redacted before storage; Sencho never writes the raw `docker compose config` error to the database. See [Environment and Secrets Guardrails](/features/environment-guardrails).
+
+## Severity levels
+
+Every finding is graded so you can triage at a glance. The tab groups findings under four headings and the summary reflects the most severe one:
 
 | Severity | Meaning |
 |----------|---------|
@@ -20,50 +45,235 @@ Every finding is graded so you can triage at a glance. The tab groups findings u
 | **Warning** | A reliability or reproducibility concern, such as a moving `latest` tag or a missing restart policy. |
 | **Info** | Something to be aware of, such as a network or volume that will be created on first deploy. |
 
-A stack with unresolved blocker or high-risk findings also shows a small coloured dot on the **Doctor** tab, so you can see there is something to look at without opening it.
+## Run status
+
+The summary card at the top of the Doctor tab reflects the overall outcome of the last run:
+
+| Status | When it appears | Summary card |
+|--------|-----------------|--------------|
+| **No run yet** | Preflight has never been triggered for this stack on this node | Placeholder with "no preflight yet" and a Stethoscope icon |
+| **All clear** | Model rendered; no findings | Green card with "No issues found in the effective model." |
+| **Cannot render** | `docker compose config` failed | Red card with the (redacted) render error message |
+| **Blocker** | Highest finding is a blocker | Red card with a count of findings by severity |
+| **High risk** | Highest finding is high risk | Amber card with a count of findings by severity |
+| **Warning** | Highest finding is a warning | Blue card with a count of findings by severity |
+| **Info** | All findings are informational | Muted card with a count of findings by severity |
+
+The summary card also shows when the run happened and who triggered it: "ran 5 minutes ago by admin".
+
+A small colored dot appears on the **Doctor** tab label when the last run found blockers (red) or high-risk issues (amber). Opening the tab removes neither the dot nor the findings; run preflight again after fixing the issues to clear them.
+
+<Frame>
+  <img
+    src="/images/compose-doctor/compose-doctor-severity-dot.png"
+    alt="The tab bar showing a small amber dot on the Doctor tab label indicating a high-risk finding from the last preflight run"
+  />
+</Frame>
 
 ## What it checks
 
-Compose Doctor renders the model first. If `docker compose config` cannot produce a model, the report says so and stops, since nothing else can be trusted. When the model renders, the checks cover:
+All 30 rules are listed below, organized by topic.
 
-- **Environment.** Variables referenced by the model but not set in any consulted env file, which Compose silently turns into empty strings.
-- **Ports.** Host ports already in use by another stack on the node, two services in the same stack claiming the same port, and ports published on all interfaces (`0.0.0.0`).
-- **Host paths.** Bind-mount directories that do not exist yet, and paths that look likely to have ownership problems for a container running as a non-root user.
-- **Privilege and exposure.** A mounted Docker socket, `privileged: true`, and `network_mode: host`.
-- **Reliability.** Images pinned to a moving `latest` tag, services with no restart policy, and services with no healthcheck.
-- **Compose semantics.** `deploy` fields that standalone Compose ignores, and required external networks or volumes that do not exist on the node.
-- **Surprises.** Duplicate or already-taken `container_name`s, and services that the effective model pulls in via `include` or `extends` that are not in the file you are looking at.
+### Model rendering
 
-Each finding states what was detected, why it matters, where in the model it came from, and how to fix it.
+| Rule | Severity | What it detects |
+|------|----------|----------------|
+| Compose model could not be rendered | Blocker | `docker compose config` failed; the model cannot be assessed and all other rules are skipped. Fix the reported error first. |
+
+### Environment
+
+| Rule | Severity | What it detects |
+|------|----------|----------------|
+| Unset variable | High | A variable referenced by the model has no value in the environment or any consulted env file. Compose silently substitutes an empty string, which often breaks the container without a clear error. |
+| Missing env file | High | A path listed under `env_file:` does not exist in the stack directory. Compose fails to start the stack when a required env file is absent. |
+
+### Port conflicts
+
+| Rule | Severity | What it detects |
+|------|----------|----------------|
+| Host port is already in use | Blocker | Another stack or unmanaged container on this node already binds the same host port. The deploy will fail. Requires live Docker state; skipped when the daemon is unreachable. |
+| Two services publish the same port | Blocker | Two services within this stack both claim the same host port on overlapping interfaces. Only one can bind it. |
+| Port exposed on all interfaces | High | A port is published on all interfaces (`0.0.0.0`), making it reachable from every network the host is attached to. |
+
+### Bind mounts
+
+| Rule | Severity | What it detects |
+|------|----------|----------------|
+| Bind mount path is missing | High | A relative host path referenced by the model does not exist inside the node's Compose base directory. Docker will create it as a root-owned directory on deploy, which often leaves the container unable to write to it. |
+| Bind mount may have wrong ownership | Warning | A resolvable path is owned by root but the container runs as a non-root user. Applies to POSIX nodes only. |
+
+### Security
+
+| Rule | Severity | What it detects |
+|------|----------|----------------|
+| Docker socket mounted | High | A service mounts `docker.sock`, which grants it root-equivalent control over the host. |
+| Privileged container | High | A service runs with `privileged: true`, disabling most container isolation. |
+| Host network mode | High | A service uses `network_mode: host`, bypassing Docker's network isolation and ignoring published-port mappings. |
+| Check UID/GID alignment | Warning | A service sets a UID or GID and mounts host paths that Sencho cannot inspect from inside its container. Mismatched ownership between the host path and the container user is a common source of permission errors. |
+
+### Reliability
+
+| Rule | Severity | What it detects |
+|------|----------|----------------|
+| Image uses a moving tag | Warning | A service uses `:latest` or a tag-less image reference, making deploys non-reproducible and subject to unexpected changes. |
+| No restart policy | Warning | A service has no restart policy and will not come back after a crash or host reboot. |
+| No healthcheck | Warning | A service declares no healthcheck in the Compose model. The image itself may define one, but Sencho cannot see it from the model alone. |
+
+### Compose semantics
+
+| Rule | Severity | What it detects |
+|------|----------|----------------|
+| Swarm-only deploy fields | Warning | A service sets `deploy` keys (`placement`, `update_config`, `rollback_config`, `endpoint_mode`) that standalone Compose ignores; these apply to Swarm only. |
+| Duplicate container_name | Blocker | Two services within this stack both set the same `container_name`. Docker requires unique names; the deploy will fail. |
+| Anonymous volume in use | Info | A service mounts one or more anonymous volumes. Anonymous volumes have no name, so they are easy to miss when backing up and are orphaned when the container is recreated. |
+| Effective model adds services | Info | The effective model includes services not visible in this file, pulled in via `include`, `extends`, or profiles. What deploys may differ from what you see here. |
+
+### Node state
+
+The rules in this category (except "Node-state checks skipped" itself) read live Docker state. When the daemon is unreachable, they are all skipped and the "Node-state checks skipped" info finding is added in their place. "Host port is already in use" in Port conflicts also reads node state and is skipped under the same conditions. See [Node-state checks and graceful degradation](#node-state-checks-and-graceful-degradation).
+
+| Rule | Severity | What it detects |
+|------|----------|----------------|
+| Node-state checks skipped | Info | The Docker daemon could not be reached; node-state rules did not run and this result is partial. |
+| External network not found | Blocker | A network declared `external: true` does not exist on this node. The deploy will fail. |
+| External volume not found | Blocker | A volume declared `external: true` does not exist on this node. The deploy will fail. |
+| New network will be created | Info | A non-external network that does not yet exist on this node will be created on first deploy. |
+| New volume will be created | Info | A named volume that does not yet exist on this node will be created on first deploy. |
+| container_name already in use | Blocker | A service's `container_name` is already used by a different stack or unmanaged container on this node. The deploy will fail with a name conflict. |
+
+### Exposure intent
+
+These rules activate when the stack publishes at least one host port. They use the exposure intent you set in the Networking tab and any access URLs documented in the Stack Dossier to flag mismatches. See [Exposure intent checks](#exposure-intent-checks).
+
+| Rule | Severity | What it detects |
+|------|----------|----------------|
+| Classified internal but publishes a host port | High | A service is classified as internal or same-node exposure but publishes a host port that contradicts that intent. |
+| Sensitive service exposed on all interfaces | High | A service that looks like a database or admin tool (postgres, redis, adminer, and similar) publishes on all interfaces. |
+| Stack publishes ports without an exposure intent | Warning | The stack publishes host ports but no exposure intent has been set in the Networking tab. |
+| Published port not in documented access URLs | Warning | A host port is not referenced by any access URL recorded in the Stack Dossier; the documentation may be stale. |
+| Has reverse-proxy labels but no documented URL | Warning | A service carries Traefik, Caddy, or similar reverse-proxy labels but has no documented access URL or reverse-proxy intent set. |
+
+## Exposure intent checks
+
+Five of the 30 rules cross-reference the stack's exposure intent and the access URLs documented in the Stack Dossier. These rules only fire when the stack publishes at least one host port.
+
+To resolve exposure-related findings:
+
+- **Set an exposure intent** in the [Compose Networking](/features/compose-networking) tab. Options are: internal (no host access), same-node (loopback only), LAN, reverse proxy (traffic arrives via a proxy), and public.
+- **Document access URLs** in the [Stack Dossier](/features/stack-dossier). When a dossier URL references a host port, the port-vs-dossier rule uses that to confirm the port is intentional and expected.
+
+Once an intent and access URLs are set, Sencho can detect when the configuration contradicts the documented intent, making future runs more precise.
+
+## Node-state checks and graceful degradation
+
+Six of the 30 rules require live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision) and one is "Host port is already in use" in Port conflicts. All six are skipped when the Docker daemon is unreachable.
+
+When the daemon is unreachable:
+
+- All model-only rules still run and produce findings as normal.
+- All node-state rules are skipped.
+- An info finding ("Node-state checks skipped") is added to make the gap visible.
+- The run completes with a valid status reflecting whatever model-only rules found.
+
+A partial run (where node-state checks were skipped) is stored and displayed like any other run. Run preflight again once the node is reachable to get full coverage.
+
+## Health-Gated Updates
+
+The last stored preflight result feeds directly into the [Health-Gated Updates](/features/health-gated-updates) readiness check. When you trigger **Update** from a stack, Sencho opens a readiness dialog before pulling anything. The dialog reads your most recent preflight result:
+
+- A blocker finding sets the update verdict to **Blocked**.
+- One or more high-risk findings set the verdict to **Review required**.
+- Preflight that has never run is noted in the dialog without dragging the verdict down.
+
+Running preflight before updating gives the readiness check the most accurate signal. A clean pass after resolving findings contributes a positive readiness signal for that stack.
 
 ## Running preflight
 
+<Frame>
+  <img
+    src="/images/compose-doctor/compose-doctor-never-run.png"
+    alt="The Doctor tab in the never-run state, showing the 'no preflight yet' placeholder with a Stethoscope icon and the run preflight button in the top-right corner"
+  />
+</Frame>
+
 1. Click any stack in the left sidebar to open it.
 2. Switch to the **Doctor** tab in the Anatomy panel header.
-3. Press **run preflight**. The summary updates with the result and findings grouped by severity.
-4. Fix anything that matters, then run it again to confirm it clears.
+3. Press **run preflight**. Sencho renders the effective model, runs all checks, and updates the tab with the result.
+4. Fix anything that matters, then run it again to confirm the findings clear.
 
-Preflight runs against the **active node**, so selecting a remote node checks the stack on the machine that actually owns it. On a phone, the same report appears under the **Compose** section of the stack detail.
+Preflight runs against the **active node**, so selecting a remote node checks the stack against that machine's live Docker state. On mobile, the same report appears under the **Compose** section of the stack detail view.
+
+<Frame>
+  <img
+    src="/images/compose-doctor/compose-doctor-findings.png"
+    alt="The Doctor tab showing an amber high-risk summary card with counts for high-risk and warning findings, followed by grouped finding rows each showing a service tag, title, explanation, suggested fix, and source file path"
+  />
+</Frame>
+
+## Capability gating
+
+The **Doctor** tab only appears when the active node reports the `compose-doctor` capability. A node running an older version of Sencho does not advertise this capability and the tab is hidden for that node until it is updated.
+
+There is no tier gate: Compose Doctor is available on all plans.
+
+## Limitations
+
+- **Advisory only.** Compose Doctor never blocks a deploy or changes any stack configuration. Act on findings or ignore them; the choice is always yours.
+- **Bind-mount checks are scoped.** Only paths that resolve inside the node's Compose base directory can be checked for existence and ownership. Absolute host paths outside that directory (such as `/mnt/media`) are not reported as missing.
+- **Healthcheck rule cannot see image-level healthchecks.** The no-healthcheck rule fires when the Compose model does not declare a healthcheck. Many images define one internally that Sencho cannot see from the rendered model; treat the finding as a prompt to confirm the image provides one.
+- **One run stored per node.** There is no history. Each new run overwrites the previous one for that stack on that node.
+- **Node-state rules require a reachable Docker daemon.** See [Node-state checks and graceful degradation](#node-state-checks-and-graceful-degradation).
+- **Port conflict check excludes the checked stack.** Host ports already held by the stack being checked are ignored, so redeploying a running stack does not generate a false conflict with itself.
+- **Exposure intent rules require published ports.** All five exposure intent rules are skipped entirely when the stack publishes no host ports.
 
 ## Troubleshooting
 
 <AccordionGroup>
   <Accordion title="The report says it cannot render the model">
-    Compose Doctor runs `docker compose config` to resolve the effective model, and that command failed. The usual causes are a YAML syntax error, an unresolved `include` or `merge`, or a required variable with no value. Fix the Compose or env file and run preflight again. Sencho deliberately does not echo the raw error, since it can contain values from your files.
+    Compose Doctor runs `docker compose config` to resolve the effective model, and that command failed. Common causes are a YAML syntax error, an unresolved `include` or `merge` key, or a required variable with no value. Fix the Compose or env file and run preflight again. Sencho does not echo the raw error in the UI because it can contain values from your files.
   </Accordion>
   <Accordion title="A bind mount I use every day is flagged as missing">
-    Compose Doctor can only check paths that live inside the node's Compose directory, such as a relative `./data` mount. An absolute host path like `/mnt/media` is outside what Sencho can see from inside its container, so it is never reported as missing. A missing relative path is real: Docker would create it as a root-owned directory on deploy.
+    Compose Doctor can only check paths that resolve inside the node's Compose base directory, such as a relative `./data` mount. An absolute host path like `/mnt/media` is outside what Sencho can see from inside its container and is never reported as missing. A missing relative path is a real finding: Docker would create it as a root-owned directory on deploy.
   </Accordion>
   <Accordion title="Every service is flagged for no healthcheck">
-    Compose Doctor reports a healthcheck only when the Compose file does not declare one. Many images define their own healthcheck internally, which Sencho cannot see from the model alone, so treat these as a prompt to confirm rather than a hard problem.
+    The no-healthcheck rule fires when the Compose model does not declare a healthcheck. Many images define their own healthcheck internally, which Sencho cannot see from the model alone. Treat these findings as a prompt to confirm the image provides a healthcheck rather than a hard problem.
   </Accordion>
   <Accordion title="A port conflict is flagged for a port my own stack uses">
-    Preflight ignores ports already held by the stack you are checking, so redeploying a running stack does not flag its own bindings. A conflict means a *different* stack, or an unmanaged container, holds that host port on this node.
+    Preflight ignores ports already held by the stack being checked, so redeploying a running stack does not flag its own bindings. A conflict finding means a different stack or an unmanaged container holds that host port on this node.
   </Accordion>
   <Accordion title="The report says node-state checks were skipped">
-    The node-state checks (external networks and volumes, host-port conflicts, and `container_name` collisions) read the node's live Docker state. When the Docker daemon on the target node is unreachable, Sencho cannot read that state, so those checks are skipped and the report shows an info notice rather than guessing. The model checks still run. Confirm the daemon is reachable on the node, then run preflight again for full coverage.
+    The node-state checks (external networks and volumes, host-port conflicts, and container_name collisions) read live Docker state. When the Docker daemon on the target node is unreachable, those checks are skipped and the report shows an info finding instead of those results. The model checks still run. Confirm the daemon is reachable on the node, then run preflight again for full coverage.
   </Accordion>
-  <Accordion title="The Doctor tab is not there on a remote node">
-    The tab appears when the active node reports that it supports Compose Doctor. A node running an older version of Sencho does not advertise it, so the tab is hidden for that node until it is updated.
+  <Accordion title="The Doctor tab is not visible on a remote node">
+    The tab appears when the active node reports that it supports Compose Doctor. A node running an older version of Sencho does not advertise that capability, so the tab is hidden for that node until it is updated.
+  </Accordion>
+  <Accordion title="Exposure intent rules are firing unexpectedly">
+    The five exposure intent rules activate when the stack publishes at least one host port. The "unclassified" warning clears as soon as you set an exposure intent in the Networking tab. The "port not in dossier" warning clears once you add a matching access URL in the Stack Dossier. If an intent is already set and the finding still fires, check that the intent is configured on the correct node and for the correct service.
+  </Accordion>
+  <Accordion title="I want to see who ran preflight last">
+    The summary card shows the username and relative time: "ran 5 minutes ago by admin". This reflects the most recent run stored for this stack on the currently active node.
   </Accordion>
 </AccordionGroup>
+
+## Related features
+
+<CardGroup cols={2}>
+  <Card title="Compose Networking" icon="network-wired" href="/features/compose-networking">
+    Set the exposure intent that drives the exposure intent preflight rules.
+  </Card>
+  <Card title="Stack Dossier" icon="book-open" href="/features/stack-dossier">
+    Document access URLs that Compose Doctor uses to verify published ports are intentional.
+  </Card>
+  <Card title="Health-Gated Updates" icon="shield-alt" href="/features/health-gated-updates">
+    Preflight results feed directly into the update readiness check before every update.
+  </Card>
+  <Card title="Environment Guardrails" icon="key" href="/features/environment-guardrails">
+    Keep secrets out of structural Compose fields to avoid them appearing in the rendered model.
+  </Card>
+  <Card title="Stack Drift" icon="code-branch" href="/features/stack-drift">
+    Drift detection checks whether what is running still matches the Compose file.
+  </Card>
+  <Card title="Compose Storage" icon="database" href="/features/compose-storage">
+    Understand named and anonymous volumes before running preflight on storage-heavy stacks.
+  </Card>
+</CardGroup>

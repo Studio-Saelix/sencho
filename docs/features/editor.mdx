@@ -65,9 +65,26 @@ When the container has a compose service name attached, an extra `⋮` button ap
 
 ## Anatomy panel
 
-The right column shows the **Anatomy panel** by default: a read-only summary of the compose file, alongside tabs for the stack's activity timeline and its dossier.
+The right column shows the **Anatomy panel** by default: a read-only summary of the compose file alongside a scrollable tab row for other stack views.
 
-The header strip carries three tabs (**Anatomy**, **Activity**, and **Dossier**) plus shortcuts to open the **files** tab and enter **edit** mode. The shortcuts belong to the strip itself and remain available regardless of which tab is active.
+<Frame>
+  <img src="/images/editor/anatomy-tabs.png" alt="Anatomy panel header strip showing the Anatomy, Activity, Dossier, Drift, Environment, Networking, Doctor, and Storage tab row with Files and Edit shortcuts on the right" />
+</Frame>
+
+The tab row always shows four tabs: **Anatomy**, **Activity**, **Dossier**, and **Drift**. Four more tabs appear when the active node advertises the matching capability.
+
+| Tab | Always present? | What it shows |
+|-----|----------------|--------------|
+| **Anatomy** | Yes | Read-only compose file summary. |
+| **Activity** | Yes | Operational event timeline for this stack. See [Stack Activity](/features/stack-activity). |
+| **Dossier** | Yes | Exportable Markdown of the anatomy combined with operator notes. See [Stack Dossier](/features/stack-dossier). |
+| **Drift** | Yes | Live comparison of the declared compose against the running containers. See [Stack Drift](/features/stack-drift). |
+| **Environment** | When `env-inventory` capability is present | Variable inventory across all env files, with status for each variable. See [Environment Guardrails](/features/environment-guardrails). |
+| **Networking** | When `compose-networking` capability is present | Port exposure summary per service with intent classification. See [Compose Networking](/features/compose-networking). |
+| **Doctor** | When `compose-doctor` capability is present | Preflight check results grouped by severity. The tab gains a red dot for blocker findings and an amber dot for high-risk findings. See [Compose Doctor](/features/compose-doctor). |
+| **Storage** | When `compose-storage` capability is present | Mount inventory with portability assessment and snapshot coverage. See [Compose Storage](/features/compose-storage). |
+
+The **Files** shortcut and the **Edit** button sit at the right end of the strip and stay available regardless of which tab is active.
 
 The Anatomy tab lists:
 
@@ -80,12 +97,6 @@ The Anatomy tab lists:
 - **source** with `git · <host>/<repo>#<branch>` when the stack is linked to a Git repository, or `local` when it is not. Clicking the row opens the Git source dialog. A pulsing brand-color dot means an upstream change is queued.
 
 When an image update is available, an inline banner appears at the top of the panel. Its tone follows the version-bump severity: `safe to apply` (patch), `review recommended` (minor), `breaking changes possible` (major), or `review required` when the bump cannot be classified. The banner has an inline **apply** button that runs the same operation as the action bar's **Update**; it is hidden for roles that lack the `stack:edit` permission and when the bump is flagged as blocked.
-
-### Markdown export
-
-The **Dossier** tab turns this same anatomy into an exportable Markdown document, combined with your own operator notes, with copy-to-clipboard and download actions. Empty sections render cleanly as *none*. The generated facts carry only variable **names** and **counts**, never the values stored in your `.env` file; your own notes are exported as written. See [Stack Dossier](/features/stack-dossier).
-
-The **Activity** tab streams every operational event scoped to this stack. See [Stack Activity](/features/stack-activity) for the full event catalog and attribution rules.
 
 ## Editor mode
 
