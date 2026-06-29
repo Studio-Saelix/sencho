@@ -450,7 +450,7 @@ export class MonitorService {
                     JANITOR_COOLDOWN_MS,
                     'info',
                     'system',
-                    `Node "${nodeLabel}" has accumulated ${reclaimGb.toFixed(1)} GB of unused Docker data. Consider using the Janitor tool.`,
+                    `Node "${nodeLabel}" has accumulated ${reclaimGb.toFixed(1)} GB of unused Docker data. Open Resources to reclaim space, or set up a Prune Node Resources schedule.`,
                 );
             }
         } finally {

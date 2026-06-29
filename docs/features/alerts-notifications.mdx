@@ -290,9 +290,9 @@ The suppression window defaults to 60 minutes and is configured per node in **Se
 
 The entire host threshold evaluation can be silenced per node from **Settings · Monitoring · Host Alerts · Host threshold alerts** while keeping the configured limit values. This toggle affects only the CPU, RAM, and disk threshold checks; crash capture, stack alert rules, and health gate checks all continue to run independently.
 
-### Docker janitor
+### Reclaimable Docker data
 
-`info`/`system`: `Node "<name>" has accumulated <N> GB of unused Docker data. Consider using the Janitor tool.` 24-hour cooldown.
+`info`/`system`: `Node "<name>" has accumulated <N> GB of unused Docker data. Open Resources to reclaim space, or set up a Prune Node Resources schedule.` 24-hour cooldown.
 
 ### Sencho version availability
 
@@ -375,7 +375,7 @@ The global crash-capture switch lives under **Settings · Monitoring · Containe
 
 The **Container crash & health alerts** toggle controls whether `DockerEventService` raises crash, OOM, and healthcheck alerts on the active node. Helper text: `Send alerts for unexpected container exits, OOM kills, and Docker healthcheck failures. Auto-Heal can still observe crash signals independently.` Defaults to on; if the database read fails, Sencho falls back to default-deny so the system never leaks alerts you cannot turn off.
 
-The **Host Alerts** panel carries the **Host thresholds** rows (CPU limit, RAM limit, Disk limit, all expressed as percent) that drive the host-level monitor warnings. Container crash and health alerts live in the **Container Alerts** panel. The **Janitor threshold** (in GiB) that drives the unused-Docker-data alert lives in the **Docker & Storage** panel.
+The **Host Alerts** panel carries the **Host thresholds** rows (CPU limit, RAM limit, Disk limit, all expressed as percent) that drive the host-level monitor warnings. Container crash and health alerts live in the **Container Alerts** panel. The **Reclaimable Docker data threshold** (in GiB) that drives the unused-Docker-data alert lives in the **Docker & Storage** panel.
 
 ## Refresh cadence
 

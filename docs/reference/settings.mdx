@@ -271,7 +271,7 @@ Configure the reclaimable-space alert, the reclaimable-space banner, and automat
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| **Janitor threshold** | 5 GiB | Alert when reclaimable Docker data (images, volumes, build cache that `docker prune` could free) exceeds this size. Set to `0` to disable the alert. |
+| **Reclaimable Docker data threshold** | 5 GiB | Alert when reclaimable Docker data (images, volumes, build cache that `docker prune` could free) exceeds this size. Set to `0` to disable the alert. |
 | **Show reclaimable-space banner** | On | Show the reclaimable-space banner at the top of the Resource Hub when this node has unused images, stopped containers, or dangling volumes to clear. |
 
 ### Image cleanup

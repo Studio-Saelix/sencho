@@ -195,7 +195,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         group: 'monitoring',
         label: 'Docker & Storage',
         description: 'Reclaimable-space alerts and Docker image cleanup after updates.',
-        keywords: ['docker', 'janitor', 'prune', 'reclaim', 'storage', 'images', 'cleanup', 'dangling'],
+        keywords: ['docker', 'prune', 'reclaim', 'storage', 'images', 'cleanup', 'dangling'],
         tier: null,
         scope: 'node',
     },

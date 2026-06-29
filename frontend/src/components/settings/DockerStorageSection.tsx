@@ -115,7 +115,7 @@ export function DockerStorageSection({ onDirtyChange }: DockerStorageSectionProp
         <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
             <SettingsSection title="Storage alerts">
                 <SettingsField
-                    label="Janitor threshold"
+                    label="Reclaimable Docker data threshold"
                     helper="Alert when reclaimable Docker data exceeds this size."
                 >
                     <NumberChip
