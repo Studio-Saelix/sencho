@@ -3,78 +3,175 @@ title: Drift Detection
 description: See at a glance whether a stack's running containers still match the Compose file on disk, with specific, actionable reasons when they have diverged.
 ---
 
-The **Drift** tab in the right-hand **Anatomy** panel answers a single day-two question: does what is actually running still match the Compose file on disk? Sencho treats your Compose file as the source of truth, so it compares the file against the live Docker runtime and reports exactly where the two have diverged.
+The **Drift** tab answers the core day-two operations question: does what is actually running still match the Compose file on disk?
 
-The check is read-only. It tells you what changed and never alters a stack on its own, so you can trust the report before deciding what to do about it. Opening the tab builds the comparison fresh. When you deploy a stack through Sencho, it also records the Compose file it deployed as a baseline, so it can later tell you whether the file has changed since then, and it keeps a short history of the findings it has seen.
+Sencho treats your Compose file as the source of truth. Every time you open the Drift tab, it compares the live Docker runtime against the file and tells you exactly where the two differ. If you have deployed through Sencho, it also compares the current file against the baseline it recorded at deploy time, so you know whether the file has already changed for the next deploy.
+
+The check is always read-only. It reports drift; it never fixes it on its own.
+
+<img
+  src="/images/stack-drift/drift-in-sync.png"
+  alt="The Drift tab showing In sync status with Matches last deploy below it and a resolved network finding in the history"
+/>
+
+## How it works
+
+Drift detection is split into two layers that work together.
+
+**The spatial engine** performs a stateless diff between the Compose file on disk and the containers currently running in Docker, then returns a report. It never writes anything to the database, so opening the tab is always side-effect-free.
+
+**The drift ledger** sits on top of the spatial engine and provides persistence. When you click re-check, or when Sencho automatically reconciles after a deploy, it records new findings with timestamps, marks resolved findings as cleared, and writes events to the stack's Activity timeline. This turns a point-in-time snapshot into a short history of when drift appeared and when it cleared.
 
 ## Status
 
-Every stack resolves to one of four states, shown as a badge at the top of the tab:
+The status badge at the top of the tab summarizes the comparison between the Compose file and the running containers.
 
 | Status | Meaning |
 |--------|---------|
-| **In sync** | The running containers match the Compose file: same services, images, and published ports. |
-| **Drifted** | Something running differs from the file. The specific reasons are listed below the badge. |
-| **Not running** | The stack is defined on disk but no containers are running. |
-| **Unreachable** | Docker could not be reached, so drift cannot be assessed right now. |
+| **In sync** | Running containers match the Compose file: same services, images, and published ports. |
+| **Drifted** | Something running differs from the file. Specific findings are listed below the badge. |
+| **Not running** | The stack has no running containers. The file is present but nothing is up. |
+| **Unreachable** | Docker could not be reached on the active node, so drift cannot be assessed. |
 
 ## Since your last deploy
 
-Below the status badge, a second line compares the Compose file on disk against the version you last deployed through Sencho:
+Below the status badge, a second signal compares the Compose file on disk against the version that was deployed through Sencho most recently.
+
+<img
+  src="/images/stack-drift/drift-drifted.png"
+  alt="The Drift tab showing Drifted status with Source changed below it, and an image finding in the Findings section showing expected vs running image"
+/>
 
 | Signal | Meaning |
 |--------|---------|
-| **Matches last deploy** | The Compose file is unchanged since you last deployed it. |
-| **Source changed** | The Compose file has been edited since the last deploy. If the change affects the model (an image, port, or service), Sencho says so; a comments or formatting only edit is called out separately. |
-| **No deploy baseline** | This stack has not been deployed through Sencho yet, so there is nothing to compare against. Deploy it once to start tracking. |
+| **Matches last deploy** | The Compose file is unchanged since the last deploy. |
+| **Source changed** | The Compose file has changed since the last deploy. If the change is structural (an image, port, or service definition), Sencho says so. A formatting-only or comment-only edit is noted separately. |
+| **No deploy baseline** | This stack has not yet been deployed through Sencho, so there is no recorded baseline. Deploy it once to start tracking. |
 
-This is independent of the runtime status above: a stack can be **In sync** with its running containers while its file has already **changed** for the next deploy.
+This signal is independent of the runtime status. A stack can be **In sync** with its running containers while its file has **already changed** for the next deploy, or it can be **drifted** at runtime while the file itself is unchanged from what was deployed.
+
+<Note>
+Sencho records two hashes at deploy time: a raw-file hash (catches any text change, including formatting) and a parsed-model hash (only changes when structure changes, ignoring comments and whitespace). The "source changed" signal uses both: if only the raw hash differs, the edit was formatting or comments. If the model hash also differs, a structural change has been made.
+</Note>
 
 ## Findings
 
-When a stack is drifted, each reason is listed against the service it affects:
+When a stack is drifted, each reason is listed in the **Findings** section against the service it affects.
 
 | Finding | What it means |
 |---------|---------------|
-| **Service missing** | The Compose file declares a service, but it has no running container. |
-| **Undeclared** | A container is running for the stack, but no matching service exists in the Compose file. |
-| **Image** | A running container uses a different image than the Compose file declares. The expected and running values are shown side by side. |
+| **Image** | A running container uses a different image than the Compose file declares. Expected and actual values are shown side by side. |
 | **Ports** | The published ports of a service differ from what the Compose file declares. |
+| **Service missing** | The Compose file declares a service, but no running container matches it. |
+| **Undeclared service** | A container is running for the stack but no matching service exists in the Compose file. |
+| **Network undeclared** | A running service is attached to a network that is not declared in the Compose file. |
+| **Network missing** | A network declared in the Compose file is not used by any running service or is absent from the runtime. |
 
-Image references are compared after normalizing the implicit Docker Hub registry and a missing tag to `:latest`, so `nginx` and `docker.io/library/nginx:latest` are treated as the same image. A running container pinned to a digest is compared against the declared tag as written.
+### Image comparison
+
+Image references are normalized before comparison, so equivalent forms do not produce false positives. `nginx`, `docker.io/nginx`, and `docker.io/library/nginx:latest` all resolve to the same reference.
+
+If a service has multiple replicas, any replica running a different image than the declared one triggers an image finding. This catches stacks that are mid-update with mixed versions running simultaneously.
+
+If the Compose file declares a tag (`:latest`, `:1.25`) and the running container was pulled from a digest pin, the two forms are compared as-is. A digest-pinned container reads as an image mismatch against a tag declaration. This is intentional: the two references are not equivalent.
+
+### Port ranges
+
+A Compose port range such as `8000-8002:8000-8002` is compared conservatively. Because the runtime expands ranges into individual ports, the comparison can read as a difference even when the deployment is correct. Sencho errs toward surfacing the possible difference rather than hiding it.
+
+## When drift is recorded
+
+**Opening the tab** runs the spatial engine and displays the current state. It does not write anything to the ledger or update the history.
+
+**Clicking re-check** runs the spatial engine and then reconciles the result into the ledger: new findings are recorded with a detection timestamp, cleared findings are marked resolved, and Activity timeline events are written for any change. The history and "checked" timestamp update after a re-check.
+
+**After every deploy or update**, Sencho automatically records a new baseline hash and runs a full reconciliation. You do not need to click re-check after deploying; the ledger is updated as part of the deploy pipeline.
+
+<img
+  src="/images/stack-drift/drift-history.png"
+  alt="The Drift tab showing both the Findings section and the Drift history section with an open finding marked just now"
+/>
 
 ## Drift history
 
-Each time you **re-check** a stack, and after every deploy, Sencho records the findings it sees. The **Drift history** list under the findings shows recent entries with when each was first **detected** and, once it clears, when it was **resolved**. This turns a point-in-time check into a short ledger of how a stack has drifted and recovered over time.
+The **Drift history** section shows up to the 20 most recent findings, both open and resolved. Open findings appear first.
 
-The history is labelled with when it was last checked. The status badge at the top is always live, recomputed each time you open the tab, while the history reflects the last time the ledger was reconciled. When the two differ, re-check to bring the history up to date.
+Each entry shows:
+- The service name and finding type (image, ports, service, or network)
+- A description of the specific difference
+- When the finding was first detected
+- When it was resolved, if it has cleared
 
-Drift that appears or clears is also written to the stack's **Activity** timeline, so **Drift detected** and **Drift resolved** events sit alongside deploys and restarts.
+The history header shows when the ledger was last reconciled ("checked X ago"). The status badge at the top always reflects the current runtime state, computed fresh each time the tab is loaded. If the two disagree, a re-check will bring the history up to date.
+
+### Activity timeline
+
+Drift events also appear in the stack's **Activity** tab alongside deploys, restarts, and updates:
+
+- **Drift detected**: recorded when a re-check or post-deploy reconciliation finds new open findings
+- **Drift resolved**: recorded when findings that were previously open have all cleared
 
 ## Accessing the Drift tab
 
-1. Click any stack in the left sidebar to open it.
-2. Switch to the **Drift** tab in the Anatomy panel header.
-3. Read the status badge and any findings. Use **re-check** to run the comparison again after you deploy or change something.
+<img
+  src="/images/stack-drift/drift-tab-location.png"
+  alt="The tab bar at the top of the Anatomy panel showing Anatomy, Activity, Dossier, Drift, Environment, Networking, Doctor, and Files tabs with Drift selected"
+/>
 
-On a phone, the same report appears under the **Compose** section of the stack detail.
+1. Click any stack in the sidebar to open it.
+2. In the right-hand Anatomy panel, switch to the **Drift** tab.
+3. Read the status badge and any findings.
+4. Click **re-check** after editing the Compose file or after a manual Docker operation to refresh the ledger.
+
+On mobile, the same report appears under the **Compose** section of the stack detail view.
+
+## Requirements
+
+Drift detection is available on all plans with no additional configuration. As long as the stack has a Compose file and Docker is reachable on the node, the tab is functional.
+
+## Limitations
+
+**Read-only and advisory.** Drift detection never alters a stack. It reports differences and records them in the ledger, but deploying to resolve drift is a separate, explicit action.
+
+**No automatic background scanning.** Drift is checked when you open the tab, when you click re-check, and after every deploy or update through Sencho. There is no automatic background poll that checks stacks on a schedule outside of those events.
+
+**History cap.** The ledger keeps the 20 most recent findings per stack. Older entries are not shown in the UI.
+
+**Port ranges.** Compose port ranges are compared conservatively and may report a difference even when the deployment is correct.
+
+**Unreachable Docker.** When Docker cannot be reached, the status shows as Unreachable and no findings are reported. Open findings in the ledger are not resolved just because the check could not run; they remain open until a successful check confirms they have cleared.
+
+**Parse errors.** If the Compose file cannot be parsed, no findings are extracted from it and the ledger is not updated. Resolve the parse error and re-check.
 
 ## Troubleshooting
 
 <AccordionGroup>
   <Accordion title="A stack I deliberately stopped shows as 'Not running'">
-    That is expected. Drift compares the file on disk against what is actually running, so a stack with no running containers reports **Not running** even when you stopped it on purpose. Deploy it to return it to **In sync**.
+    That is expected. Drift compares the file on disk against what is actually running, so a stack with no running containers reports **Not running** even when you stopped it intentionally. Deploy it to return it to **In sync**.
   </Accordion>
   <Accordion title="The image finding flags a stack I just updated">
-    Open **re-check** after the deploy finishes. During a rolling update, replicas can briefly run different images, and the report is a snapshot of that moment. Once every container is on the declared image, the finding clears.
+    Click **re-check** after the deploy finishes. During a rolling update, replicas can briefly run different images, and the report captures that moment. Once every container is on the declared image, the finding clears.
   </Accordion>
   <Accordion title="A stack that uses a published port range shows a ports finding">
-    A Compose port range such as `8000-8002:8000-8002` is compared conservatively and can read as a ports difference even when the deployment is correct. Sencho errs toward surfacing a possible difference rather than hiding one. The status reflects this as drift you can confirm against the file.
+    A Compose port range such as `8000-8002:8000-8002` is compared conservatively and can read as a ports difference even when the deployment is correct. Sencho errs toward surfacing a possible difference rather than hiding one.
   </Accordion>
   <Accordion title="The status says 'Unreachable'">
-    Sencho could not reach Docker on the active node, so it cannot compare the runtime. Confirm the Docker engine is running and the node is online, then use **re-check**. Other stacks on the same node will show the same state until Docker responds. While Docker is unreachable, Sencho does not change the recorded drift history, so an open finding is never cleared just because the check could not run.
+    Sencho could not reach Docker on the active node, so it cannot compare the runtime. Confirm the Docker engine is running and the node is online, then use **re-check**. Other stacks on the same node will show the same state until Docker responds. While Docker is unreachable, Sencho does not update the drift history, so open findings are never cleared just because the check could not run.
   </Accordion>
   <Accordion title="The tab says 'No deploy baseline'">
-    Sencho records a baseline the first time you deploy a stack through it. A stack you imported or have not yet deployed from Sencho has nothing to compare against. Deploy it once from Sencho and the line changes to **Matches last deploy**.
+    Sencho records a baseline the first time you deploy a stack through it. A stack that was imported or has not yet been deployed from Sencho has nothing to compare against. Deploy it once from Sencho and the signal changes to **Matches last deploy**.
+  </Accordion>
+  <Accordion title="The Activity tab shows a drift event but the Drift tab now shows In sync">
+    The Activity event was written when drift was detected or resolved during a previous reconciliation. The Drift tab always shows the current live state, which may already be back in sync. If the history and badge disagree, click **re-check** to reconcile the ledger with the current runtime.
+  </Accordion>
+  <Accordion title="Opening the tab does not update the history">
+    Opening the tab runs the spatial engine (read-only) and updates the status badge, but does not write to the ledger. Only **re-check** and post-deploy reconciliation persist findings and update the history. Click re-check explicitly when you want the history to reflect the current state.
   </Accordion>
 </AccordionGroup>
+
+## Related
+
+- [Stack Activity](/features/stack-activity): Drift detected and resolved events appear in the Activity timeline alongside deploys and restarts.
+- [Stack Dossier](/features/stack-dossier): The Dossier tab stores documentation and access URLs for a stack; its documentation drift feature checks whether documented URLs still match the stack's published ports.
+- [Atomic Deployments](/features/atomic-deployments): Understanding how Sencho deploys stacks explains when and how drift baselines are recorded.
+- [Blueprint Model](/features/blueprint-model): Blueprints have a separate policy-based drift mode (observe, suggest, enforce) that governs whether Sencho proposes or enforces blueprint conformance. This is distinct from the runtime drift detection described on this page.
