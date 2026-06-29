@@ -79,7 +79,19 @@ export async function runLocalLabelStop(
 ): Promise<LabelStopOutcome> {
   const db = DatabaseService.getInstance();
   const label = db.getLabels(nodeId).find(l => l.name === labelName);
-  if (!label) return { matched: false, stackResults: [] };
+  if (!label) {
+    // With a confirmed allowlist, report each confirmed stack as a failure
+    // rather than an empty result: the label vanished here between preview and
+    // execution, so none can be stopped, and the control's exact-membership
+    // check must still see one result per confirmed stack (not a silent no-op).
+    if (allowedStacks) {
+      return {
+        matched: false,
+        stackResults: [...allowedStacks].map(stackName => ({ stackName, success: false, error: 'No longer carries this label' })),
+      };
+    }
+    return { matched: false, stackResults: [] };
+  }
   const stackNames = db.getStacksForLabel(label.id, nodeId);
   // With no confirmed allowlist this is the unbound path: an unassigned label is
   // a clean no-op. When stacks were confirmed we fall through so any that left

@@ -14,6 +14,7 @@ import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 
 let mockFsStacks: string[] = [];
+let mockFsStacksError: Error | null = null;
 const pruneManagedOnly = vi.fn();
 const pruneSystem = vi.fn();
 const estimateManagedReclaim = vi.fn();
@@ -31,7 +32,10 @@ vi.mock('../helpers/remoteCapabilities', () => ({
 vi.mock('../services/FileSystemService', () => ({
   FileSystemService: {
     getInstance: vi.fn(() => ({
-      getStacks: vi.fn(async () => mockFsStacks),
+      getStacks: vi.fn(async () => {
+        if (mockFsStacksError) throw mockFsStacksError;
+        return mockFsStacks;
+      }),
     })),
   },
 }));
@@ -81,6 +85,7 @@ beforeEach(() => {
   vi.restoreAllMocks();
   vi.clearAllMocks();
   mockFsStacks = ['alpha', 'beta'];
+  mockFsStacksError = null;
   pruneManagedOnly.mockResolvedValue({ success: true, reclaimedBytes: 0 });
   pruneSystem.mockResolvedValue({ success: true, reclaimedBytes: 0 });
   estimateManagedReclaim.mockResolvedValue({ reclaimableBytes: 0 });
@@ -878,7 +883,7 @@ describe('POST /api/fleet/labels/fleet-stop confirmed-target allowlist', () => {
     }
   });
 
-  it('fails a node whose stop results name stacks outside the confirmed set', async () => {
+  it('fails a node whose stop results include a stack outside the confirmed set', async () => {
     remoteSupportsCrossNodeRbac.mockResolvedValue(true);
     const remoteId = db.addNode({
       name: 'lying-remote', type: 'remote', api_url: 'http://lying.example:1852',
@@ -902,10 +907,56 @@ describe('POST /api/fleet/labels/fleet-stop confirmed-target allowlist', () => {
       expect(res.status).toBe(200);
       const node = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
       expect(node.reachable).toBe(false);
-      expect(node.error).toMatch(/outside the confirmed set/i);
+      expect(node.error).toMatch(/exactly the confirmed stacks/i);
     } finally {
       db.deleteNode(remoteId);
     }
+  });
+
+  it('fails a node whose stop results omit a confirmed stack (partial result)', async () => {
+    remoteSupportsCrossNodeRbac.mockResolvedValue(true);
+    const remoteId = db.addNode({
+      name: 'dropping-remote', type: 'remote', api_url: 'http://dropping.example:1852',
+      api_token: 'tok', compose_dir: '/app/compose', is_default: false,
+    });
+    try {
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true, status: 200,
+        // Two stacks confirmed, but the remote reports only one.
+        json: async () => ({ matched: true, results: [{ stackName: 'alpha', success: true }] }),
+      } as unknown as Response);
+      const res = await request(app)
+        .post('/api/fleet/labels/fleet-stop')
+        .set('Authorization', authHeader)
+        .send({ labelName: 'any-label', targets: [{ nodeId: remoteId, stackNames: ['alpha', 'beta'] }] });
+      expect(res.status).toBe(200);
+      const node = res.body.results.find((r: { nodeId: number }) => r.nodeId === remoteId);
+      expect(node.reachable).toBe(false);
+      expect(node.error).toMatch(/exactly the confirmed stacks/i);
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('local exception path reports every confirmed stack, including one that lost its label', async () => {
+    // runLocalLabelStop throws (filesystem read fails) after the label is
+    // resolved; the catch must report the full confirmed set, not the current
+    // assignment, so a confirmed stack that lost its label still surfaces.
+    const localNodeId = db.getNodes().find(n => n.type === 'local')!.id;
+    const label = await createAssignedLabel('local-throw', ['alpha']); // only alpha is still assigned
+    expect(label.node_id).toBe(localNodeId);
+    mockFsStacksError = new Error('compose dir unreadable');
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-stop')
+      .set('Authorization', authHeader)
+      .send({ labelName: label.name, targets: [{ nodeId: localNodeId, stackNames: ['alpha', 'lost-label-stack'] }] });
+    expect(res.status).toBe(200);
+    const node = res.body.results.find((r: { nodeId: number }) => r.nodeId === localNodeId);
+    const byName = Object.fromEntries(node.stackResults.map((s: { stackName: string }) => [s.stackName, s]));
+    // Both confirmed stacks are failed; the one that lost its label is not dropped.
+    expect(byName['alpha']).toMatchObject({ success: false });
+    expect(byName['lost-label-stack']).toMatchObject({ success: false });
+    expect(node.stackResults).toHaveLength(2);
   });
 });
 

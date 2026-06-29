@@ -23,8 +23,9 @@ let noCapNodeId: number;
 
 const PROXIED_PATH = '/api/stacks';
 
-function metaServer(capabilities: string[]): http.Server {
+function metaServer(capabilities: string[], seen?: string[]): http.Server {
   return http.createServer((req, res) => {
+    if (seen && req.url) seen.push(req.url);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     if (req.url?.startsWith('/api/meta')) {
       res.end(JSON.stringify({ version: '0.93.0', capabilities }));
@@ -34,6 +35,8 @@ function metaServer(capabilities: string[]): http.Server {
     }
   });
 }
+
+const noCapPaths: string[] = [];
 
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -53,7 +56,7 @@ beforeAll(async () => {
   adminBearer = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
 
   capServer = metaServer(['cross-node-rbac']);
-  noCapServer = metaServer(['fleet']); // older remote: no cross-node-rbac
+  noCapServer = metaServer(['fleet'], noCapPaths); // older remote: no cross-node-rbac
   const capPort = await listen(capServer);
   const noCapPort = await listen(noCapServer);
 
@@ -98,5 +101,23 @@ describe('remote proxy cross-node-rbac gate', () => {
       .set('Authorization', `Bearer ${adminBearer}`)
       .set('x-node-id', String(noCapNodeId));
     expect(res.status).not.toBe(403);
+  });
+
+  it('refuses a real stop to a remote lacking cross-node-rbac via the live probe, never contacting its local-stop receiver', async () => {
+    // Exercises the fleet-stop gate end to end through the REAL capability
+    // helper (not a mock): the live /api/meta probe of the no-cap remote returns
+    // no capability, so the stop is refused and the destructive receiver on that
+    // remote is never contacted.
+    noCapPaths.length = 0;
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-stop')
+      .set('Authorization', `Bearer ${adminBearer}`)
+      .send({ labelName: 'any-label', targets: [{ nodeId: noCapNodeId, stackNames: ['x'] }] });
+    expect(res.status).toBe(200);
+    const node = res.body.results.find((r: { nodeId: number }) => r.nodeId === noCapNodeId);
+    expect(node.reachable).toBe(false);
+    expect(node.error).toMatch(/upgrade/i);
+    expect(noCapPaths.some(p => p.startsWith('/api/meta'))).toBe(true);
+    expect(noCapPaths.some(p => p.includes('/api/fleet-actions/labels/local-stop'))).toBe(false);
   });
 });

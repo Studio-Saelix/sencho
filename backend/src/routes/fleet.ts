@@ -1447,8 +1447,13 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         } catch (err) {
           const errorMsg = getErrorMessage(err, 'Failed to stop local stacks');
           const localLabel = db.getLabels(node.id).find(l => l.name === trimmed);
-          const localStacks = (localLabel ? db.getStacksForLabel(localLabel.id, node.id) : [])
-            .filter(s => !allowedStacks || allowedStacks.has(s));
+          // With a confirmed allowlist, report the full confirmed set as
+          // failures rather than the current label assignment: a confirmed stack
+          // that lost its label after the preview must still surface, not vanish
+          // because it is no longer assigned when the exception is reconstructed.
+          const localStacks = allowedStacks
+            ? [...allowedStacks]
+            : (localLabel ? db.getStacksForLabel(localLabel.id, node.id) : []);
           return {
             nodeId: node.id, nodeName: node.name, reachable: true, matched: !!localLabel,
             stackResults: failAllStacks(localStacks, errorMsg),
@@ -1508,12 +1513,22 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
           return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: 'Remote returned a malformed response' };
         }
         // Defense in depth behind the capability gate: if a confirmed allowlist
-        // was sent, the remote must report only stacks from it. A result naming
-        // a stack outside the confirmed set means the remote ignored the
-        // allowlist (an over-broad stop), so fail the node rather than render
-        // the extra stops as a clean result.
-        if (allowedStacks && !remote.results.every(r => allowedStacks.has(r.stackName))) {
-          return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: 'Remote stopped stacks outside the confirmed set' };
+        // was sent, the remote must report exactly the confirmed set: one result
+        // per confirmed stack, no extras, no duplicates. Extras mean the remote
+        // ignored the allowlist (an over-broad stop); a missing confirmed stack
+        // means it silently dropped one. Either way fail the node rather than
+        // render an over-broad or partial result as clean. A current remote
+        // always reconciles to one result per confirmed stack, so this only
+        // rejects an older or misbehaving receiver.
+        if (allowedStacks) {
+          const returned = remote.results.map(r => r.stackName);
+          const returnedSet = new Set(returned);
+          const exact = returned.length === allowedStacks.size
+            && returnedSet.size === returned.length
+            && [...allowedStacks].every(s => returnedSet.has(s));
+          if (!exact) {
+            return { nodeId: node.id, nodeName: node.name, reachable: false, matched: false, stackResults: [], error: 'Remote did not report exactly the confirmed stacks' };
+          }
         }
         return {
           nodeId: node.id, nodeName: node.name, reachable: true,
