@@ -256,7 +256,7 @@ describe('forced-recheck throttle', () => {
       .set('Authorization', adminAuth);
     expect(first.status).toBe(200);
     expect(first.body.rechecked).toBe(true);
-    expect(invalidateSpy).toHaveBeenCalledWith('latest-version');
+    expect(invalidateSpy).toHaveBeenCalledWith('latest-version-info');
 
     invalidateSpy.mockClear();
 
