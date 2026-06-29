@@ -1,9 +1,9 @@
 ---
 title: Deploy Progress
-description: Stream live output from stack deploy, install, update, restart, and stop operations in a structured log view.
+description: Stream live output from stack deploy, update, install, restart, stop, and scan operations with a structured log view, a minimizable pill, and an optional inline status band.
 ---
 
-When you trigger a stack action that runs through `docker compose` (Deploy, Update, Install from the App Store, Apply with deploy from a Git Source), a progress modal opens and streams the output in real time. Each line is parsed into a timestamped row with a stage badge so you can track the deployment lifecycle as it runs. The modal can be minimized to a small pill that follows you across navigation, so you can leave the App Store mid-install and still see the status from any screen. If an operation goes quiet or fails, Sencho keeps the state observable: the modal warns when output has stopped, and the stack page surfaces recovery actions you can take without leaving Sencho.
+When you trigger a stack operation that runs through `docker compose` or the Docker Engine, Sencho opens a live progress view that streams output as it happens. Each line becomes a timestamped row with a stage badge so you can track the deployment lifecycle as it runs. The progress view appears as a centered modal overlay by default or as a quiet status band on the stack detail when you prefer a less intrusive style. Either way, the view can be minimized to a floating pill that follows you across navigation so you can leave the App Store mid-install and still see the status from any screen.
 
 ## Showing, hiding, and styling deploy progress
 
@@ -15,25 +15,46 @@ Deploy progress is **on by default**. To run operations without it, open **Setti
 The choices are saved to the current browser only and synced across tabs in the same browser without a reload.
 
 <Frame>
-  <img src="/images/deploy-progress/setting-toggle.png" alt="Settings Stacks panel with the deploy progress toggle." />
+  <img src="/images/deploy-progress/setting-toggle.png" alt="Settings Stacks panel showing the Deploy progress toggle set to Enabled, the Progress style selector with Modal selected, the Observe health after updates toggle, and the Observation window field." />
 </Frame>
 
 ## Using the modal
 
-The modal opens automatically when you trigger an action. It floats centered in the viewport and does not block access to the rest of the UI.
+The modal opens automatically when you trigger an action. It floats centered in the viewport and does not block the rest of the UI.
 
 ### What the modal shows
 
-- **Header**: the action verb (Deploying, Updating, Installing, Restarting, Stopping), the stack name in monospace truncated at 200 px, and an elapsed-time chip that appears once the connection moves past the initial **Connecting...** state.
+- **Header**: the action verb (Deploying, Updating, Installing, Restarting, Stopping, Scanning), the stack name in monospace truncated at 200 px, and an elapsed-time chip that appears once the connection moves past the initial **Connecting...** state.
 - **Status indicator** in the upper right: one of `Connecting...` while the stream attaches, a live `<n> lines` counter while output is flowing, `Succeeded · closes in <n>s` after a clean finish, or the failure message itself when the run errors out. If the live stream cannot attach or drops, the indicator switches to `Live progress unavailable` and the operation keeps running in the background.
 - **Structured log body**: one row per output line. Each row carries a timestamp, a fixed-width stage badge, and the log message. Error rows have a destructive left border and tinted background so they stand out without scanning.
 - **Footer**: a `Raw output` / `Hide raw` toggle on the left, with **Minimize** and **Close** buttons on the right.
 
 <Frame>
-  <img src="/images/deploy-progress/modal-streaming.png" alt="Deploy progress modal mid-flight, showing the elapsed timer, a live line count in the header, and a populated body of timestamped LOG rows from a docker compose pull" />
+  <img src="/images/deploy-progress/modal-streaming.png" alt="Deploy progress modal mid-flight, showing the elapsed timer, a live line count in the status area, and a populated body of timestamped LOG rows from a docker compose pull." />
 </Frame>
 
-### Stage badges
+## Health gate
+
+After a deploy or update completes, Sencho keeps watching the stack's containers for the configured observation window (90 seconds by default) before issuing a final success verdict. This observation period is the health gate. The modal withholds the success state and auto-close during observation and shows a banner describing the current verdict:
+
+| State | Banner text |
+|-------|-------------|
+| Observing | `Health gate: observing containers (Xs of Ys). Closing this panel does not stop the observation.` where X is the elapsed seconds and Y is the configured window. |
+| Passed | `Health gate passed: containers stayed healthy through the observation window.` |
+| Failed | `Health gate failed: <reason>. Rollback options are available on the stack.` |
+| Unknown | `Health gate result is unknown: <reason>. Check the stack's containers directly.` |
+
+When the gate passes, the success state and 4-second auto-close resume. When the gate fails or returns an unknown result, the modal stays open with the reason visible and must be dismissed manually.
+
+Closing or minimizing the modal never stops the observation. The gate runs to completion in the background regardless of what happens to the progress view.
+
+The health gate activates only for **deploy** and **update** actions. Restart, stop, and scan do not trigger it.
+
+<Frame>
+  <img src="/images/deploy-progress/modal-health-gate.png" alt="Deploy progress modal showing the health gate observing banner with an elapsed counter, the green health gate passed banner below it, and the full structured log body." />
+</Frame>
+
+## Stage badges
 
 Each log row is classified by content. Most lines render as **LOG** because the badges are gated on Docker Compose's `[+] Pulling` / `[+] Creating` / `[+] Starting` progress prefixes, which only appear when Compose is run in TTY mode. The full set of badges Sencho can render:
 
@@ -49,64 +70,72 @@ Each log row is classified by content. Most lines render as **LOG** because the 
 | ERR | Error line (`Error response from daemon` or text starting with `error`) |
 | LOG | Default for any line that does not match the patterns above |
 
-**ERR** rows pick up the destructive left border and the tinted background. **WARN** rows use a softer warning tint without the border.
+**ERR** rows get the destructive left border and the tinted background. **WARN** rows use a softer warning tint without the border.
 
-### Raw output toggle
+## Raw output
 
-Click **Raw output** in the footer to expand a 200 px raw terminal panel beneath the structured rows. The raw view shows the unprocessed compose stream, including the progress bars and ANSI-formatted output that the structured parser does not render. Clicking the toggle a second time (now labelled **Hide raw**) collapses the panel.
+Click **Raw output** in the footer to expand a raw terminal panel beneath the structured rows. The raw view shows the unprocessed compose stream, including the progress bars and ANSI-formatted output that the structured parser does not render. Clicking the toggle a second time (now labelled **Hide raw**) collapses the panel.
 
 <Frame>
-  <img src="/images/deploy-progress/modal-raw-output.png" alt="Deploy progress modal with the Raw output panel expanded, showing structured rows above and the green-on-black raw terminal stream below" />
+  <img src="/images/deploy-progress/modal-raw-output.png" alt="Deploy progress modal with the Raw output panel expanded, showing structured rows above and the green-on-black raw terminal stream below." />
 </Frame>
 
-### Auto-close on success
+## Auto-close on success
 
 When an action completes successfully, the status indicator switches to `Succeeded · closes in <n>s` and a 4-second countdown begins. Hover anywhere over the modal to pause the countdown; moving the cursor away restarts a fresh 4 seconds. Clicking **Close** dismisses the modal immediately.
 
-When the [health gate](/features/health-gated-updates) is observing the stack after a deploy or update, the modal withholds the success verdict: the status indicator shows **Verifying health** instead of **Succeeded**, and the auto-close waits for the gate. A passed gate shows the success state and resumes the countdown; a failed or unknown verdict becomes the headline result and keeps the modal open with the reason. Closing the modal never stops the observation.
+When the [health gate](#health-gate) is observing the stack after a deploy or update, the modal withholds the success verdict: the status indicator shows **Verifying health** instead of **Succeeded**, and the auto-close waits for the gate result. A passed gate resumes the countdown; a failed or unknown result keeps the modal open until you close it manually.
 
 <Frame>
-  <img src="/images/deploy-progress/modal-succeeded.png" alt="Deploy progress modal in the succeeded state with a green checkmark, the text 'Succeeded' and 'closes in 2s' in the header, and the full structured log body visible beneath" />
+  <img src="/images/deploy-progress/modal-succeeded.png" alt="Deploy progress modal in the succeeded state with a green checkmark, the text 'Succeeded closes in 0s' in the header, the health gate passed banner below it, and the full structured log body visible." />
 </Frame>
 
-### Stalled-output warning
+## Stalled-output warning
 
-A long pull or recreate can go quiet for a stretch. When an operation is still running but has produced no new output for a while, the modal shows a warning strip with the elapsed quiet time and the last line received (or a note that no output has arrived yet). The operation keeps running; the strip only makes the quiet visible so you are not left guessing whether anything is happening. If a step is genuinely hung, Sencho stops it after a longer idle window and shows a failure with recovery actions (see [Recovery actions](#recovery-actions)).
+A long pull or recreate can go quiet. When an operation is still running but has produced no new output for 75 seconds, the modal shows a warning strip with the elapsed quiet time and the last line received (or a note that no output has arrived yet). The operation keeps running; the strip only makes the quiet visible so you know something is still in progress.
 
-### On failure
+## On failure
 
-If the action fails, the modal stays open. The status indicator switches to a destructive icon and shows the error message itself, truncated to 200 px in the header with the full text available on hover. Error rows in the body pick up the destructive left border so they are easy to find when scrolling. The modal stays open until you click **Close**. Close it to reveal the recovery panel on the stack page.
+If the action fails, the modal stays open until you click **Close**. The status indicator switches to a destructive icon and shows the error message itself, truncated to 200 px in the header with the full text available on hover. Error rows in the body get the destructive left border so they are easy to find when scrolling. Close the modal to reveal the recovery panel on the stack page.
 
 <Frame>
-  <img src="/images/deploy-progress/modal-failed.png" alt="Deploy progress modal in the failed state, with the truncated error message visible in the header and several ERR rows highlighted with a destructive border in the body" />
+  <img src="/images/deploy-progress/modal-failed.png" alt="Deploy progress modal in the failed state, with the truncated error message visible in the header and several ERR rows highlighted with a destructive border in the body." />
 </Frame>
 
-### Minimize to pill
+## Minimize to pill
 
-Click **Minimize** to collapse the modal to a small status pill anchored at the bottom center of the viewport. The pill shows the action verb, the stack name in monospace, and a status dot that animates while the run is in flight (brand color, pulsing) and goes solid green or red at completion. Click the pill to expand the modal back.
+Click **Minimize** to collapse the modal to a small status pill anchored at the bottom center of the viewport. The pill shows the action verb, the stack name in monospace, and a status dot that pulses with the brand color while the run is in flight and goes solid green or red at completion. Click the pill to expand the modal back.
 
 The pill is mounted as a portal, so it persists across navigation: leave the App Store mid-install and the pill follows you to the dashboard, the editor, or any other view.
 
 Minimizing, closing, or navigating away never cancels the operation. The progress view only displays output; the deploy, update, or stop runs to completion on its own. If you dismiss the view while live output is flowing, the run still finishes in the background, and its success or failure lands in your notifications.
 
 <Frame>
-  <img src="/images/deploy-progress/pill.png" alt="Minimized deploy progress pill anchored at the bottom center of a stack editor view, showing the brand-colored pulsing dot and the text 'Updating docs-demo'" />
+  <img src="/images/deploy-progress/pill.png" alt="Minimized deploy progress pill anchored at the bottom center of the dashboard, showing the brand-colored pulsing dot and the text 'Updating dozzle'." />
 </Frame>
 
 ## Inline style
 
 With **Progress style** set to **Inline**, the modal does not open on its own. Instead, the stack detail shows a compact status band for the running operation, between the action buttons and the container list (a status card on a phone). The band shows:
 
-- the operation and its elapsed time,
-- the current phase while images pull and containers recreate,
-- the latest output line,
-- the post-update [health gate](/features/health-gated-updates) result once the operation succeeds.
+- a pulsing dot (brand color while running, green on success),
+- the operation verb and elapsed time,
+- the current status: the active compose phase while the operation is in progress, `Verifying health` during the health gate, `Health gate passed` or `Health check unknown` after the gate settles, or `Live progress unavailable` when the live stream cannot attach,
+- the latest output line beneath the status (while the operation is running),
+- a **View output** button to open the full log modal on demand,
+- a dismiss button to clear the band.
 
-A **View output** button opens the full log modal on demand, and a dismiss control clears the band. When the operation finishes cleanly, the elapsed time freezes at its final duration and the band clears itself a few seconds later. Closing the opened log modal in this style only hides it again; the band stays until the operation is done or you dismiss it. If the live stream cannot attach or drops, the band shows the same **Live progress unavailable** state and the operation keeps running in the background.
+When the operation finishes cleanly and the health gate (if any) has passed, the band clears itself 4 seconds later. Closing the opened log modal in this style only hides it again; the band stays until the operation is done or you dismiss it. If a health gate fails, the band steps aside and the recovery surface on the stack page takes over.
+
+When you navigate away from the stack detail while an operation is running, the band hands off to the floating pill so you always have a status surface.
+
+<Frame>
+  <img src="/images/deploy-progress/inline-banner.png" alt="Stack detail in Inline progress style, showing the status band between the action buttons and the container list, with the pulsing dot, verb, elapsed time, latest output line, and View output button." />
+</Frame>
 
 ## Recovery actions
 
-When a deploy or update fails, times out, or its outcome is ambiguous, the stack page offers safe next steps so you can fix the stack in place. On desktop a small **Update failed** chip appears in the stack card; click it to open a menu of recovery actions. On a phone the same actions show as an inline card on the stack detail. Either way it shows the failed action, the error, and how long the operation ran, and it works whether or not the progress modal is enabled.
+When a deploy or update fails, times out, or its outcome is ambiguous, the stack page offers safe next steps so you can fix the stack in place. On desktop a small **Update failed** chip appears in the stack card; click it to open a menu of recovery actions. On a phone the same actions show as an inline card on the stack detail. Either way, it shows the failed action, the error, and how long the operation ran, and it works whether or not the progress modal is enabled.
 
 The available actions are:
 
@@ -120,13 +149,16 @@ Retry, Restart, and Roll back require deploy permission on the stack. After a fa
 
 ## Supported entry points
 
-The modal opens for the following actions:
+The progress view opens for the following actions:
 
 - **Deploy**, **Update**, **Restart**, **Stop** from the stack editor's action bar.
 - **Install** from the App Store.
 - **Apply** from a Git Source panel when the apply request includes a deploy.
+- **Scanning** a stack's image configuration.
 
-Of those, **Deploy**, **Update**, **Install**, and Git **Apply** route through `docker compose up` and produce a populated structured-log body. **Restart** and **Stop** call the Docker Engine directly to act on existing containers; they bypass compose, so the modal opens, registers `0 lines`, and finishes. Useful as a confirmation surface for those actions, but with no log content.
+Of those, **Deploy**, **Update**, **Install**, and Git **Apply** route through `docker compose up` and produce a populated structured-log body. **Restart** and **Stop** call the Docker Engine directly to act on existing containers; they bypass compose, so the modal opens, registers `0 lines`, and finishes. **Scanning** streams its own output as LOG rows.
+
+The [health gate](#health-gate) activates only after **Deploy** and **Update**; it does not fire for Restart, Stop, Install, Git Apply, or Scanning.
 
 The HTTP API also exposes a `down` action (compose-level teardown) that streams its output the same way Deploy and Update do, but no UI control currently triggers it; the `down` endpoint is reachable from automation and from Sencho's own internal cleanup paths.
 
@@ -149,9 +181,32 @@ The HTTP API also exposes a `down` action (compose-level teardown) that streams 
     Some compose wrappers and Docker plugins emit non-standard output. The parser falls back to a **LOG** row for any line it cannot classify, but if a line is consumed entirely by ANSI control sequences it can drop out of the structured view. Toggle **Raw output** to see the full stream.
   </Accordion>
   <Accordion title="An update stalled or appears stuck">
-    If a pull or recreate produces no output for a while, the modal shows a stalled-output warning so you know the operation has gone quiet. The operation keeps running. If a step is genuinely hung, Sencho stops it after a longer idle window (10 minutes by default) and the stack page offers recovery actions where you can retry, restart, roll back when a backup exists, refresh the container state, or copy troubleshooting details. To change how long Sencho waits before treating a silent step as stalled, set `SENCHO_COMPOSE_STALL_TIMEOUT_MS`; raise it on slow links or for heavy local image builds.
+    If a pull or recreate produces no output for 75 seconds, the modal shows a stalled-output warning so you know the operation has gone quiet. The operation keeps running in the background. If a step is genuinely hung, use the recovery panel on the stack page to retry, restart, roll back when a backup exists, refresh the container state, or copy troubleshooting details.
+  </Accordion>
+  <Accordion title="The health gate is blocking the modal from closing">
+    The modal withholds auto-close while the health gate is observing containers and whenever the gate result is failed or unknown. A failed or unknown gate means the containers did not stay healthy through the observation window; the modal stays open so you can see the reason. Use the recovery actions on the stack page to retry, restart, or roll back. Clicking **Close** on the modal dismisses it manually at any time; it does not cancel the gate observation if it is still running.
+  </Accordion>
+  <Accordion title="No health gate appeared after a restart or scan">
+    The health gate only fires after **deploy** and **update** actions. Restart, stop, install, git apply, and scan complete without a post-operation observation period. If you want health monitoring after a restart, deploy or update the stack instead.
   </Accordion>
   <Accordion title="I changed the deploy progress setting but it did not take effect">
     The settings live in `localStorage`: the on/off toggle under `sencho.deploy-feedback.enabled` and the Modal/Inline choice under `sencho.deploy-feedback.style`. Both apply to the current tab without a reload, and other tabs in the same browser pick up the change through a `storage` event. Deploy progress defaults to on in Modal style, so only an explicit choice changes it. If a tab still does not honour the setting, refresh that tab. The settings do not sync across browsers or devices; each one carries its own choice.
   </Accordion>
 </AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Health-gated updates" icon="heart-pulse" href="/features/health-gated-updates">
+    Configure the observation window and understand how the gate classifies a passed, failed, or unknown result.
+  </Card>
+  <Card title="Stack activity" icon="clock-rotate-left" href="/features/stack-activity">
+    Every deploy, update, and health gate verdict is recorded in the stack's activity timeline.
+  </Card>
+  <Card title="Deploy enforcement" icon="shield-check" href="/features/deploy-enforcement">
+    Set risk policies that block or require review before a deploy or update can start.
+  </Card>
+  <Card title="Atomic deployments" icon="rotate" href="/features/atomic-deployments">
+    How Sencho backs up compose files before each update and rolls back automatically on failure.
+  </Card>
+</CardGroup>
