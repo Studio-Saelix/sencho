@@ -5,18 +5,22 @@ description: "Block deploys that violate a scan policy before docker compose up 
 
 Deploy enforcement is the pre-flight half of Sencho's vulnerability workflow. When a [scan policy](/features/vulnerability-scanning#scan-policies) with **Block on deploy** enabled matches a stack, Sencho scans every image referenced by the stack's compose file before starting any container. A policy gates on exploitation risk: a known-exploited CVE (CISA KEV), a fixable Critical/High finding, or a raw severity threshold. If any image matches an enabled condition, the deploy is rejected and the stack never starts. Detection always continues post-deploy and on a schedule, so images that develop new vulnerabilities after the initial deploy still surface through alerts.
 
+<Note>
+  Deploy enforcement and scan policies require an **Admiral** license.
+</Note>
+
 ## Configuring a block policy
 
-Policies are managed on the **Security** page → **Policies** tab. The **Add policy** button opens the editor; existing policies appear as a list of cards with a badge per active block condition (`KEV`, `Fixable`, and `max: <SEVERITY>` when the severity threshold is on), a `block` badge, the configured stack-pattern scope, and pencil and trash buttons.
+Policies are managed on the **Security** page → **Policies** tab. The **Add policy** button opens the editor. When no policies exist, an empty-state callout reads "No scan policies configured" with a prompt to add one. Existing policies appear as a list of cards: each card shows the policy name, a badge per active block condition (`max: <SEVERITY>` when the severity threshold is on, `KEV`, and `Fixable`), a destructive `block` badge when the pre-flight gate is active, and a `disabled` badge when the policy is off. Below the name, the card shows `Scope:` followed by the stack-pattern glob in monospace, or `all stacks` in italics when no pattern is set. Pencil and trash buttons appear for admins on control nodes.
 
 <Frame>
-  <img src="/images/deploy-enforcement/policy-list.png" alt="Scan Policies card showing a configured policy with the name 'Production block on critical', a max: CRITICAL badge, a block badge, and the Scope demo-blocked-* set as the stack pattern" />
+  <img src="/images/deploy-enforcement/policy-list.png" alt="Policies tab showing a policy named 'Production block on critical' with max: CRITICAL, KEV, Fixable, and block badges and Scope: prod-*, with pencil and trash action buttons to the right. The Honor suppressions in deploy blocks toggle sits below the policy card." />
 </Frame>
 
 The editor exposes the fields that govern enforcement:
 
 <Frame>
-  <img src="/images/deploy-enforcement/policy-edit-modal.png" alt="New policy modal with kicker SECURITY · NEW POLICY, fields for Name, Stack pattern, the Block conditions group (Severity threshold, Known-exploited (KEV), Fixable Critical/High), a Block on deploy toggle, and an Enabled toggle" />
+  <img src="/images/deploy-enforcement/policy-edit-modal.png" alt="New policy modal with kicker SECURITY · NEW POLICY and title New policy. Fields shown: Name filled with 'Production block on critical', Stack pattern (optional) empty, Block conditions section with Severity threshold toggled ON and the Critical severity dropdown visible, Known-exploited (KEV) ON, Fixable Critical/High ON, Block on deploy OFF, Enabled ON. Cancel and Create buttons at the bottom." />
 </Frame>
 
 | Field | Purpose |
@@ -30,6 +34,10 @@ The editor exposes the fields that govern enforcement:
 New policies default to a risk-first posture: known-exploited and fixable conditions on, the severity threshold off until you turn it on. CVSS is always captured and shown for context but is never the sole basis for a block. A finding whose exploitability cannot be confirmed is treated as risky, not safe.
 
 The editor sets the pattern, the block conditions, and the toggles. Per-node scoping is set via the [Security API](/api-reference/security#scan-policies) (`node_id`) or replicated from a control node via [Fleet Federation](/features/fleet-federation). When more than one enabled policy matches a stack on the target node, a node-scoped policy wins over a fleet-wide one, a policy with a stack pattern wins over a catch-all, and the lowest-numbered policy breaks any remaining tie.
+
+### Honor suppressions
+
+The **Honor suppressions in deploy blocks** toggle sits at the bottom of the **Policies** tab, below the policy list. When on, a [suppressed CVE](/features/cve-suppressions) no longer counts toward a block-on-deploy policy, so an accepted finding will not stop a deploy on this instance. When off (the default), policies evaluate the raw scan result and block on any finding that matches a condition, including those you have suppressed elsewhere.
 
 ## How enforcement runs
 
@@ -60,14 +68,15 @@ Pre-flight scans use the same 24-hour digest cache as on-demand scans, so the se
 ## What the block dialog shows
 
 <Frame>
-  <img src="/images/deploy-enforcement/block-dialog.png" alt="Deploy blocked dialog with kicker DEMO-BLOCKED-APP · SCAN POLICY · BLOCKED, title 'Deploy blocked by security policy', a row listing the offending image redis:7.0-alpine with 8 critical · 59 high counts and a CRITICAL severity chip, a Close button, and a destructive Deploy anyway button" />
+  <img src="/images/deploy-enforcement/block-dialog.png" alt="Deploy blocked dialog with kicker PROFILARR · SCAN POLICY · BLOCKED, title 'Deploy blocked by security policy', a description naming the policy and block conditions, a violation row for santiagosayshey/profilarr:latest with 16 CRITICAL · 111 HIGH · 59 FIXABLE counts and Severity and Fixable reason badges and a CRITICAL severity chip, and Close and Deploy anyway buttons." />
 </Frame>
 
 The dialog shows:
 
 - A kicker with the stack name, the words **SCAN POLICY**, and **BLOCKED** in the destructive accent color.
-- The policy name and a sentence naming the conditions the policy blocks on.
-- One row per offending image, with the image reference in monospace, the counts of critical and high findings (plus known-exploited and fixable counts when present), a badge for each matched condition, and a severity chip in the matching color.
+- The policy name and a sentence naming every condition the policy blocks on.
+- One row per offending image, with the image reference in monospace, the counts of critical and high findings (plus known-exploited and fixable counts when present), a badge for each matched condition (`Severity`, `KEV`, or `Fixable`), and a severity chip in the matching color.
+- If an image could not be scanned rather than failing a policy check, the row shows a **Could not be scanned** subtitle and the scan error text. A note below the list reads "The deploy was blocked because the scan did not complete. Resolve the issue above and deploy again, or bypass if you accept the risk."
 - A **Close** button that dismisses the dialog without deploying.
 - A destructive **Deploy anyway** button when the current user is an admin (see bypass below). For non-admin sessions the primary slot is replaced by a disabled outline button labeled **Admin required to bypass**.
 
@@ -91,6 +100,14 @@ API callers can pass `?ignorePolicy=true` on any deploy endpoint to request a by
 ### Auto-update scheduler interaction
 
 The auto-update scheduler runs deploys without an interactive user, so the bypass flag does not apply. When a scheduled auto-update is rejected by a policy, Sencho dispatches a `scan_finding` warning alert with the stack name, the policy name, and the offending images, then skips that stack and continues the rest of the schedule. Re-enabling that stack in auto-update means either bringing the image down to compliant severity or relaxing the policy. A scheduled auto-start that is rejected is reported as a failed run with the same warning alert.
+
+## Fleet policy replication
+
+Scan policies are evaluated on the node that runs the deploy, so the **Policies** tab always manages the local Sencho instance. When you view a remote node's Security page through the fleet hub, the Policies section shows a "Managed on the local instance" notice; switch to that node's own UI to manage its policies.
+
+When a node joins [Fleet Federation](/features/fleet-federation) as a replica, its scan policies and CVE suppressions are mirrored from the control node. The Policies tab on a replica shows a **Managed by control node** banner in place of the **Add policy** button. Admins can view the replicated policies for audit but cannot edit them directly; edits must be made on the control node, where they propagate to all replicas.
+
+The **Demote to control** button in the replica banner removes every replicated policy and CVE suppression from the instance and re-enables local policy editing. This action is irreversible and requires confirmation. After demotion the node operates as an independent control with no policies until new ones are added.
 
 ## Drift detection keeps running
 
@@ -128,5 +145,8 @@ Neither drift mechanism blocks, stops, or quarantines a running stack automatica
   </Accordion>
   <Accordion title="I want a block policy that only applies to a subset of my fleet">
     Combine two mechanisms: scope the policy to a specific node (policies scoped to a node win over global ones) and tighten the stack-pattern glob. For example, a policy with `stack_pattern=prod-*` scoped to your production node fires only on `prod-*` stacks deployed to that node.
+  </Accordion>
+  <Accordion title="The Policies tab is read-only on this node">
+    This occurs when the node is enrolled in Fleet Federation as a replica. The **Managed by control node** banner confirms this state; the policy list is visible for audit but edits are locked. To manage policies, either open the control node and edit them there (changes propagate to all replicas automatically), or click **Demote to control** to disconnect this node from federation and re-enable local editing, which removes all replicated policies and CVE suppressions from this instance.
   </Accordion>
 </AccordionGroup>
