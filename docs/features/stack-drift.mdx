@@ -171,7 +171,17 @@ Drift detection is available on all plans with no additional configuration. As l
 
 ## Related
 
-- [Stack Activity](/features/stack-activity): Drift detected and resolved events appear in the Activity timeline alongside deploys and restarts.
-- [Stack Dossier](/features/stack-dossier): The Dossier tab stores documentation and access URLs for a stack; its documentation drift feature checks whether documented URLs still match the stack's published ports.
-- [Atomic Deployments](/features/atomic-deployments): Understanding how Sencho deploys stacks explains when and how drift baselines are recorded.
-- [Blueprint Model](/features/blueprint-model): Blueprints have a separate policy-based drift mode (observe, suggest, enforce) that governs whether Sencho proposes or enforces blueprint conformance. This is distinct from the runtime drift detection described on this page.
+<CardGroup cols={2}>
+  <Card title="Stack Activity" icon="clock-rotate-left" href="/features/stack-activity">
+    Drift detected and resolved events appear in the Activity timeline alongside deploys and restarts.
+  </Card>
+  <Card title="Stack Dossier" icon="book-open" href="/features/stack-dossier">
+    The Dossier tab stores documentation and access URLs; its documentation drift feature checks whether URLs still match the stack's published ports.
+  </Card>
+  <Card title="Atomic Deployments" icon="rocket" href="/features/atomic-deployments">
+    Understanding how Sencho deploys stacks explains when and how drift baselines are recorded.
+  </Card>
+  <Card title="Blueprint Model" icon="drafting-compass" href="/features/blueprint-model">
+    Blueprints have a separate policy-based drift mode (observe, suggest, enforce) distinct from the runtime drift detection described on this page.
+  </Card>
+</CardGroup>
