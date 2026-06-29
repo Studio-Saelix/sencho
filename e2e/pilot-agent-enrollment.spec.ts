@@ -87,7 +87,7 @@ test.describe('Pilot Agent enrollment', () => {
     const cmd = await composeFile.innerText();
     expect(cmd).toContain('SENCHO_MODE: pilot');
     expect(cmd).toContain('SENCHO_PRIMARY_URL:');
-    expect(cmd).toMatch(/SENCHO_ENROLL_TOKEN: [A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
+    expect(cmd).toMatch(/SENCHO_ENROLL_TOKEN: "?[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"?/);
   });
 
   test('regenerating the enrollment token issues a fresh compose file', async ({ page }) => {
@@ -108,7 +108,7 @@ test.describe('Pilot Agent enrollment', () => {
     const firstCompose = page.locator('pre').filter({ hasText: /SENCHO_MODE: pilot/ });
     await expect(firstCompose).toBeVisible({ timeout: 10_000 });
     const firstText = await firstCompose.innerText();
-    const firstToken = firstText.match(/SENCHO_ENROLL_TOKEN: ([A-Za-z0-9_.-]+)/)?.[1];
+    const firstToken = firstText.match(/SENCHO_ENROLL_TOKEN: "?([A-Za-z0-9_.-]+)"?/)?.[1];
     expect(firstToken).toBeTruthy();
 
     // Close the enrollment dialog (Escape lands on the row view).
@@ -123,7 +123,7 @@ test.describe('Pilot Agent enrollment', () => {
     const secondCompose = page.locator('pre').filter({ hasText: /SENCHO_MODE: pilot/ });
     await expect(secondCompose).toBeVisible({ timeout: 10_000 });
     const secondText = await secondCompose.innerText();
-    const secondToken = secondText.match(/SENCHO_ENROLL_TOKEN: ([A-Za-z0-9_.-]+)/)?.[1];
+    const secondToken = secondText.match(/SENCHO_ENROLL_TOKEN: "?([A-Za-z0-9_.-]+)"?/)?.[1];
     expect(secondToken).toBeTruthy();
     expect(secondToken).not.toBe(firstToken);
   });
