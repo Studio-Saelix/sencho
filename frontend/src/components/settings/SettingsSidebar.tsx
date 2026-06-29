@@ -93,13 +93,6 @@ export function SettingsSidebar({ currentSection, onSectionChange, dirtyFlags, o
                                                     className="absolute inset-y-0 left-0 w-[2px] rounded-sm bg-brand"
                                                 />
                                             )}
-                                            <span
-                                                aria-hidden="true"
-                                                className={cn(
-                                                    'h-1 w-1 shrink-0 rounded-full',
-                                                    isActive ? 'bg-brand' : 'bg-stat-subtitle/40',
-                                                )}
-                                            />
                                             <span className="flex-1 truncate text-left">{item.label}</span>
                                             {isDirty && (
                                                 <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" />

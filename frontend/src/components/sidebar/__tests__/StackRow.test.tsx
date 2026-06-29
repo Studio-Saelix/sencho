@@ -93,13 +93,13 @@ describe('StackRow', () => {
     expect(screen.queryByText('UP')).not.toBeInTheDocument();
   });
 
-  it('renders label indicators', () => {
+  it('does not render trailing label color dots when labels are assigned', () => {
     const labels: Label[] = [
       { id: 1, node_id: 0, name: 'prod', color: 'teal' },
       { id: 2, node_id: 0, name: 'media', color: 'blue' },
     ];
     const { container } = render(<StackRow {...base({ labels })} />);
-    expect(container.querySelectorAll('[style*="--label-"]')).toHaveLength(2);
+    expect(container.querySelectorAll('[style*="--label-"]')).toHaveLength(0);
   });
 
   // ── Image-update check status indicator ────────────────────────────────

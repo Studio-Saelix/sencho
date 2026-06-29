@@ -3,7 +3,6 @@ import { GitBranch, Loader2, AlertCircle } from 'lucide-react';
 import type { CheckStatus } from '@/types/imageUpdates';
 import { Cursor, CursorContainer, CursorFollow, CursorProvider } from '@/components/animate-ui/primitives/animate/cursor';
 import { Checkbox } from '@/components/ui/checkbox';
-import { LabelDot } from '@/components/LabelPill';
 import type { Label } from '@/components/label-types';
 import { cn } from '@/lib/utils';
 import { sidebarRowActive, sidebarRowBase, sidebarRowCheckboxSlot } from './sidebar-styles';
@@ -47,17 +46,12 @@ function RowTooltip({ trigger, label }: { trigger: ReactNode; label: string }) {
   );
 }
 
-const MAX_VISIBLE_LABELS = 3;
-
 export function StackRow(props: StackRowProps) {
   const {
-    file, displayName, status, running, total, isBusy, isActive, labels,
+    file, displayName, status, running, total, isBusy, isActive,
     hasUpdate, checkStatus, lastError, hasGitPending, onSelect, kebabSlot,
     bulkMode = false, isSelected = false, onToggleSelect,
   } = props;
-
-  const visibleLabels = labels.slice(0, MAX_VISIBLE_LABELS);
-  const overflowCount = Math.max(0, labels.length - MAX_VISIBLE_LABELS);
 
   const handleClick = () => {
     if (bulkMode) onToggleSelect?.(file);
@@ -109,16 +103,6 @@ export function StackRow(props: StackRowProps) {
 
       {/* Stack name */}
       <span className="flex-1 truncate font-mono text-sm min-w-0">{displayName}</span>
-
-      {/* Trailing: label dots (max 3 + overflow count) */}
-      {visibleLabels.length > 0 && (
-        <span className="flex items-center gap-0.5 shrink-0">
-          {visibleLabels.map(l => <LabelDot key={l.id} color={l.color} />)}
-          {overflowCount > 0 && (
-            <span className="font-mono text-[10px] leading-3 text-stat-icon">+{overflowCount}</span>
-          )}
-        </span>
-      )}
 
       {/* Fixed trailing icon slot: update dot > check-failed > git pending */}
       <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0">

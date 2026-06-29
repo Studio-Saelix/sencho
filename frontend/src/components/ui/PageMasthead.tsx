@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { cn } from '@/lib/utils';
+import { MastheadRail } from '@/components/ui/MastheadRail';
 
 export type MastheadTone = 'live' | 'idle' | 'warn' | 'error';
 
@@ -14,6 +15,7 @@ export interface PageMastheadProps {
     kicker?: string;
     state: string;
     tone: MastheadTone;
+    /** When true with tone `live`, the left rail shimmers; otherwise the rail glows subtly. */
     pulsing?: boolean;
     metadata?: MastheadMetadataItem[];
     /** Optional meta line under the state word (e.g. a one-line posture summary). */
@@ -29,27 +31,27 @@ export interface PageMastheadProps {
 }
 
 const toneConfig: Record<MastheadTone, {
-    dotClass: string;
+    railClass: string;
     stateTextClass: string;
     tintClass: string;
 }> = {
     live: {
-        dotClass: 'bg-brand shadow-[0_0_0_3px_color-mix(in_oklch,var(--brand)_22%,transparent)]',
+        railClass: 'bg-brand',
         stateTextClass: 'text-stat-value',
         tintClass: 'from-brand/[0.06] via-transparent to-transparent',
     },
     idle: {
-        dotClass: 'bg-stat-subtitle',
+        railClass: 'bg-stat-subtitle',
         stateTextClass: 'text-stat-title',
         tintClass: 'from-transparent via-transparent to-transparent',
     },
     warn: {
-        dotClass: 'bg-warning shadow-[0_0_0_3px_color-mix(in_oklch,var(--warning)_22%,transparent)]',
+        railClass: 'bg-warning',
         stateTextClass: 'text-warning',
         tintClass: 'from-warning/[0.06] via-transparent to-transparent',
     },
     error: {
-        dotClass: 'bg-destructive shadow-[0_0_0_3px_color-mix(in_oklch,var(--destructive)_24%,transparent)]',
+        railClass: 'bg-destructive',
         stateTextClass: 'text-destructive',
         tintClass: 'from-destructive/[0.06] via-transparent to-transparent',
     },
@@ -74,7 +76,7 @@ export function PageMasthead({
     size = 'default',
 }: PageMastheadProps) {
     const config = toneConfig[tone];
-    const shouldPulse = pulsing && (tone === 'live' || tone === 'warn');
+    const railVariant = tone === 'live' && pulsing ? 'shimmer' : 'glow';
 
     return (
         <div
@@ -84,17 +86,9 @@ export function PageMasthead({
             )}
         >
             <div className={cn('pointer-events-none absolute inset-0 bg-gradient-to-r', config.tintClass)} />
-            <div className="absolute inset-y-0 left-0 w-[3px] bg-brand" />
+            <MastheadRail variant={railVariant} className={config.railClass} />
             <div className="relative grid grid-cols-[1fr_auto] items-center gap-6 py-5 pl-7 pr-6">
                 <div className="flex min-w-0 items-center gap-4">
-                    <span
-                        aria-hidden="true"
-                        className={cn(
-                            'h-2.5 w-2.5 shrink-0 rounded-full',
-                            config.dotClass,
-                            shouldPulse && 'animate-[pulse_2.4s_ease-in-out_infinite]',
-                        )}
-                    />
                     <div className="flex min-w-0 flex-col gap-1">
                         {kicker ? (
                             <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
