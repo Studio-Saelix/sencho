@@ -3,18 +3,19 @@ title: "Stack Labels"
 description: "Per-node tags that group your stacks by purpose, surface them under collapsible headers in the sidebar, and unlock cross-stack bulk actions across the fleet."
 ---
 
-A **Stack Label** is a per-node tag (name plus color) you can stick on any stack. Once a stack carries a label, the sidebar groups it under that label's header instead of dumping every stack into a flat list, and Fleet View can filter the overview by tag. Admins also get a pair of fleet-wide actions powered by labels: stop every stack labeled `prod` across every node, or add a label to stacks across nodes in one shot.
+A **Stack Label** is a per-node tag (name plus color) applied to any stack. A labeled stack groups under that label's header in the sidebar instead of the flat list, and Fleet View can filter the overview by tag. Admins also get two label-driven fleet actions: stop every stack labeled `prod` across every node, or add a label to stacks across nodes in one shot.
 
-<Frame>
-  <img src="/images/stack-labels/sidebar-grouping.png" alt="Sidebar showing stacks grouped under three uppercase label headers (MEDIA 6, UTILITIES 5, NETWORK 3) and an UNLABELED 1 group at the bottom. Each stack row carries a small colored dot on the trailing edge that matches the group's color." />
-</Frame>
+<img
+  src="/images/stack-labels/sidebar-grouping.png"
+  alt="Sidebar showing stacks grouped under four uppercase label headers (MEDIA 7, UTILITIES 4, NETWORK 3, DATABASE 1). Each group shows its stacks with a small colored dot on the trailing edge of each row."
+/>
 
 ## What problem this solves
 
-A flat sidebar of fifteen stacks all rendering at the same level forces you to scan every name to find the one you want. With Stack Labels:
+A flat sidebar of fifteen same-level stacks forces a scan of every name. With Stack Labels:
 
 - **Stacks group by purpose, not by alphabet.** Each label becomes a collapsible section header, sorted by stack count, so the busy buckets (your media stack, your network stack) sit at the top and rarely-touched ones can be folded away.
-- **A glance is enough.** Each row also carries up to three colored dots on its trailing edge, so a stack tagged with two purposes (for example `prod` and `media`) shows both colors without you having to open the assignment menu.
+- **A glance is enough.** Each row carries up to three colored dots on its trailing edge, so a stack tagged with two purposes (for example `prod` and `media`) shows both colors.
 - **Bulk operations stop being copy-paste.** Stop every `prod` stack across the fleet from one card. Re-tag eight stacks at once when a service moves between concerns. No scripting, no per-stack menu hunt.
 
 ## Anatomy of a label
@@ -24,13 +25,13 @@ A flat sidebar of fifteen stacks all rendering at the same level forces you to s
 | **Name** | 1 to 30 characters. Letters, digits, spaces, and hyphens only (`^[a-zA-Z0-9 -]+$`). Case-sensitive and unique per node. |
 | **Color** | One of ten swatches: teal, blue, purple, rose, amber, green, orange, pink, cyan, slate. The color drives the dot on each row, the bullet on the group header, and the swatch in the Fleet View **Tags** filter. |
 | **Scope** | Per-node. The same name can exist on two different nodes with two different colors; the fleet-stop card matches by name across nodes. |
-| **Limit** | 50 labels per node. The **New label** primary button switches to **Limit reached** when you hit the cap. |
+| **Limit** | 50 labels per node. The **+ New label** button switches to **Limit reached** when you hit the cap. |
 
 ## Where labels appear
 
 ### Sidebar grouping
 
-The stack list is split into one collapsible section per label. Group headers render in uppercase mono with a count chip on the right (`MEDIA 6`). Order is fixed: a `★ PINNED` group first if any stacks are pinned, then label groups sorted by stack count descending and by label name ascending, then `UNLABELED` last for stacks that carry no label. A stack tagged with two labels appears in both groups, the same row twice. Search and the **All / Up / Down / Updates** filter chips above the list operate on rows inside whichever groups are expanded.
+The stack list is split into one collapsible section per label. Group headers render in uppercase mono with a count chip on the right (`MEDIA 7`). Order is fixed: a `★ PINNED` group first if any stacks are pinned, then label groups sorted by stack count descending and by label name ascending, then `UNLABELED` last for stacks that carry no label. A stack tagged with two labels appears in both groups. Search and the **All / Up / Down / Updates** filter chips above the list operate on rows inside whichever groups are expanded.
 
 Every row also carries up to three colored trailing dots that mirror the assigned labels. Beyond three, an additional `+N` counter appears next to the dots so the row never grows unbounded.
 
@@ -38,11 +39,12 @@ Every row also carries up to three colored trailing dots that mirror the assigne
 
 The [Fleet View](/features/fleet-view) overview toolbar carries a **Filters** popover with a **Tags** multi-select. The dropdown lists every label that exists on any node in the fleet, with each entry rendered as a colored dot plus the label name. Selecting one or more tags filters the node cards to nodes that contain at least one stack with that label.
 
-<Frame>
-  <img src="/images/stack-labels/fleet-tags-filter.png" alt="Fleet Overview Filters popover open. The popover shows four sections (Status, Type, Severity, Tags). The Tags multi-select is expanded into a dropdown with five options: Media, Network, Prod, staging, Utilities, each prefixed by a small colored dot." />
-</Frame>
+<img
+  src="/images/stack-labels/fleet-tags-filter.png"
+  alt="Fleet Overview Filters popover open. The popover shows four sections: Status, Type, Severity, and Tags. The Tags multi-select is expanded into a dropdown listing five labels (Database, Media, Network, Prod, Utilities), each prefixed by a small colored dot."
+/>
 
-The Tags filter aggregates label rows across nodes by name, so a label called `prod` that only exists on one of four nodes still shows up in the dropdown but the filter resolves to that single node.
+A label that exists on only one of four nodes still appears in the dropdown; selecting it resolves to that single node.
 
 ## Working with labels
 
@@ -50,15 +52,21 @@ The Tags filter aggregates label rows across nodes by name, so a label called `p
 
 **Settings · Organization · Labels** is the canonical place to create, rename, recolor, and delete labels. The masthead shows a `LABELS N/50` counter so you can see how close the active node is to the cap, and a per-row stack count tells you how many stacks currently carry each label.
 
-<Frame>
-  <img src="/images/stack-labels/settings-labels.png" alt="Settings page open on the Organization · Labels section. The right pane shows a 'Per-node labels for stacks and containers.' description, a 'New label' primary button, and three label rows: Media (purple dot, 6 stacks), Network (orange dot, 3 stacks), Utilities (slate dot, 5 stacks). The masthead shows the LABELS 3/50 stat." />
-</Frame>
+<Note>
+  The Labels panel requires the `labels` capability on the active node. If the active node does not advertise this capability, a lock card appears instead of the label list. Switching to a node that supports labels, or updating the node, resolves this.
+</Note>
+
+<img
+  src="/images/stack-labels/settings-labels.png"
+  alt="Settings page open on the Organization section with Labels selected in the sidebar. The main panel shows the heading Labels with a LABELS 5/50 stat in the top right. Five label rows are listed: Database (teal dot, 1 stack), Media (blue dot, 7 stacks), Network (amber dot, 3 stacks), Prod (amber dot, 0 stacks), Utilities (gray dot, 4 stacks). A cyan plus New label button sits in the top right."
+/>
 
 Hover any row to reveal a **Pencil** edit icon and a destructive **Trash** icon on the trailing edge. The edit dialog shares its chrome with the create dialog: the kicker reads `LABELS · NEW` for a new label or `LABELS · EDIT` when you opened it from the pencil, the body has a single `Label name` input plus the ten color swatches, and the footer has **Cancel** and **Create** (or **Save**) buttons.
 
-<Frame>
-  <img src="/images/stack-labels/create-label-dialog.png" alt="Create label modal. Kicker reads 'LABELS · NEW', title 'Create label', subtitle 'Manage label properties'. The body has a 'Label name' text input above a Color section with ten circular swatches arranged in a wrap (nine in the first row, slate alone in the second). Footer buttons are Cancel and a disabled Create." />
-</Frame>
+<img
+  src="/images/stack-labels/create-label-dialog.png"
+  alt="Create label modal centered over the blurred Settings page. The kicker reads 'LABELS · NEW' and the title reads 'Create label'. The body has a focused Label name text input followed by a Color section showing ten circular swatches in two rows: teal, blue, purple, rose, amber, green, orange, pink, cyan in the first row, and slate alone in the second. The footer shows Cancel and Create buttons."
+/>
 
 Deleting a label opens a destructive confirmation with the kicker `LABELS · DELETE · IRREVERSIBLE` and the body line `Removes the label from every stack across the fleet.` There is no undo: the label row is dropped, every assignment row pointing to it is dropped, and the affected stacks fall back to whatever other labels they still carry. Stacks left with no remaining labels move into the `UNLABELED` group on the next sidebar refresh.
 
@@ -69,47 +77,61 @@ Right-clicking a stack in the sidebar (or using the three-dot kebab menu on its 
 - **New label** drops an inline form into the same submenu (text input with placeholder `Label name`, the ten color swatches, **Create** / **Cancel** buttons). Submitting creates the label on this node and assigns it to the stack in a single round trip. The entry hides itself once the node hits 50 labels.
 - **Manage labels...** sends you to **Settings · Organization · Labels** for bulk renames, recolors, and deletions.
 
-<Frame>
-  <img src="/images/stack-labels/context-menu-labels.png" alt="Right-click context menu on a sidebar stack row. The Labels submenu is open and shows three label rows (Media with a checkmark on the right, Network, Utilities), a separator, a + New label entry, and a Manage labels... entry." />
-</Frame>
+<img
+  src="/images/stack-labels/context-menu-labels.png"
+  alt="Stack context menu open on the Home page with the Labels submenu expanded. The submenu lists five labels: Database, Media (with a checkmark indicating it is assigned to this stack), Network, Prod, and Utilities, each with a colored dot. Below a separator are a plus New label entry and a Manage labels link."
+/>
 
-<Frame>
-  <img src="/images/stack-labels/inline-create-form.png" alt="The Labels submenu after the user clicked New label. The submenu now shows a text input with the placeholder 'Label name', a row of ten colored circles (teal selected by default), and a row of two buttons labelled Create (disabled while the input is empty) and Cancel." />
-</Frame>
+<img
+  src="/images/stack-labels/inline-create-form.png"
+  alt="The Labels submenu showing the inline create form after clicking New label. The submenu shows a focused Label name text input followed by a row of ten colored circles and a row of two buttons: Create (disabled while the name field is empty) and Cancel."
+/>
 
 A stack can carry multiple labels and will then appear under each label's group in the sidebar. There is no per-stack label cap; the only cap is the per-node total of 50.
 
 ## Fleet · Fleet Actions
 
 <Note>
-  The Fleet Actions cards run admin-only on every tier. Operator and viewer roles see the cards but cannot apply them.
+  The label-based Fleet Actions require the admin role. All other roles can view the cards but cannot execute them.
 </Note>
 
 Two cards in the **Fleet · Actions** tab use labels to drive cross-node operations. See [Fleet Actions](/features/fleet-actions) for the full reference.
 
-<Frame>
-  <img src="/images/stack-labels/fleet-actions.png" alt="Fleet Actions tab with two cards side by side. Left card 'Stop fleet by label' (rose accent rail) has a Stack label combobox containing 'Media' and a Stop fleet button beneath. Right card 'Bulk label assign' (purple accent rail) has a label source row with a highlighted Media pill, a target-stacks list grouped by node with several stacks ticked, a per-node create-or-reuse preview, and an Apply button." />
-</Frame>
+<img
+  src="/images/stack-labels/fleet-actions.png"
+  alt="Fleet Actions tab. The left column shows the bottom portion of the Prune fleet-wide card and below it the Stop by label card (kicker FLEET · ACTIONS · STOP BY LABEL) with a DESTRUCTIVE badge, DRY RUN and STOP FLEET buttons, and a label name input field. The right column shows the Bulk label assign card with five label pills (Database, Media, Network, Prod, Utilities) and a scrollable stack checklist grouped by node."
+/>
 
 ### Stop fleet by label
 
-Type a stack label name; Sencho fans the request out to every node and stops every stack on that node assigned a stack label with the same name. This action targets stack labels only, never node labels. The picker queries each reachable node for its own stack labels, so a label that exists only on a remote node still appears, listed once with its combined stack and node counts (and the carrying node names) so the scope is unmistakable. When a node cannot be reached, the picker notes that the suggestions may be incomplete. The result list shows a per-node breakdown with success and failure counts, and the helper line under the input states the scope: `Stops every stack assigned this stack label on every reachable node across the fleet. Node labels are not used by this action.` A confirmation modal titled `Stop all stacks with the stack label "<name>"?` with the **Stop fleet** primary action runs the action.
+Type a stack label name into the input field. Sencho fans the request out to every node and stops every stack on that node assigned a stack label with the same name.
 
-A node that carries no matching stack label is shown as such, and a node Sencho could not reach is reported as unreachable, so a partial-fleet stop is observable rather than silent. Unreachable nodes never block the stop on the reachable ones.
+**Live preview.** As you type (debounced 500 ms), a preview lists which stacks on which nodes would be stopped. The **Stop fleet** button stays disabled until the preview resolves to at least one matching stack.
+
+<img
+  src="/images/stack-labels/fleet-stop-preview.png"
+  alt="Stop by label card with 'Media' typed in the label input. The badge reads 'DESTRUCTIVE · 7 STACKS · 1 NODES'. Below the input a preview panel shows the label Media with the entry 'Local · 7 stacks · 1 node', and beneath that a list of six stacks: bazarr, plex, radarr, seerr, sonarr, tautulli, each tagged UP and LOCAL."
+/>
+
+**Dry run.** Click **Dry run** to simulate the operation without stopping any containers. The card shows the per-node breakdown labelled as a dry run and records the resolved target list. A completed dry run also unblocks the **Stop fleet** button when the live preview endpoint is unavailable.
+
+This action targets stack labels only, never node labels. A confirmation modal shows the concrete list of nodes and stacks before the stop runs. A node with no matching label is noted as such; an unreachable node is reported but never blocks the stop on reachable nodes.
 
 ### Bulk label assign
 
-Pick a label that exists anywhere in the fleet, then tick the stacks you want across one or more nodes (grouped by node, with a filter and per-node select-all). The preview shows, per node, whether the label will be created or reused; **Apply** adds the label to each chosen stack on its node, creating it there first with the same name and color if the node does not have it yet. Existing labels on the selected stacks are preserved. The confirmation modal summarizes the blast radius before you commit, and the result list breaks down per node, noting whether the label was created or reused.
+Pick a label that exists anywhere in the fleet, then tick the stacks you want across one or more nodes (grouped by node, with a filter and per-node select-all).
 
-Because labels are node-local, each target node uses its own copy of the label rather than the control node's, so propagating a label keeps every node's label table self-consistent.
+When the chosen label name exists with different colors on different nodes, the card shows a notice: "This label uses different colors on different nodes. The shown color is applied where it is created." Color resolution order is: the local node's color first, then the most common color across nodes, then the first seen.
+
+**Apply** adds the label to each chosen stack on its node, creating it there first with the chosen name and color if the node does not have it yet. Existing labels on the selected stacks are preserved. The confirmation modal summarizes the blast radius before you commit, and the result list breaks down per node, noting whether the label was created or reused.
 
 ## Limits and rules
 
-- **50 labels per node.** Settings hides the **New label** button at the cap; the inline `+ New label` entry in the stack menu hides itself too.
+- **50 labels per node.** Settings hides the **+ New label** button at the cap; the inline `New label` entry in the stack menu hides itself too.
 - **Names are unique per node**, case-sensitive. The same name on two nodes is two separate label rows. Cross-node fleet stop and bulk assign both match by name across nodes; each node resolves the name to its own label (and bulk assign creates it there if missing).
 - **Allowed name characters**: letters, digits, spaces, and hyphens. Empty names and names beyond 30 characters are rejected at the API.
 - **Bulk-action concurrency**: only one label-driven bulk action can run on a single node at a time. A second concurrent attempt against the same node returns HTTP 429 and the operator sees an error toast; the in-flight action keeps running.
-- **Role visibility**: label authoring is open to every signed-in role. Sidebar grouping, trailing dots on stack rows, the **Settings · Organization · Labels** panel, the inline create form in the stack menu, and the Fleet View **Tags** filter all work for every user.
+- **Permissions**: Every signed-in user can view labels: sidebar grouping, trailing dots on stack rows, the Settings panel (read-only), and the Fleet View Tags filter all work for every user. Creating, renaming, recoloring, and deleting labels requires the **admin** or **node-admin** role. The label-based Fleet Actions (Stop fleet by label, Bulk label assign) require the **admin** role.
 
 ## Troubleshooting
 
@@ -120,23 +142,26 @@ Because labels are node-local, each target node uses its own copy of the label r
   <Accordion title="The trailing colored dots are missing on stack rows">
     A stack row only renders trailing dots when at least one label is assigned to that stack. Right-click the row, open the **Labels** submenu, and tick at least one label; the dots appear on the next sidebar refresh. If a stack already has labels assigned but the dots still do not appear, check that the active node is the one that owns the assignments. Labels are per-node, so switching the node switcher to a different instance shows that instance's assignments only.
   </Accordion>
-  <Accordion title="`+ New label` is missing from the stack context menu">
-    The active node already has 50 labels (the per-node cap). Both the inline `New label` entry in the stack submenu and the **New label** button in **Settings · Organization · Labels** hide themselves at the cap. Delete an unused label or rename an existing one to free a slot.
+  <Accordion title="New label is missing from the stack context menu">
+    The active node already has 50 labels (the per-node cap). Both the inline New label entry in the stack submenu and the + New label button in **Settings · Organization · Labels** hide themselves at the cap. Delete an unused label or rename an existing one to free a slot.
   </Accordion>
   <Accordion title="The Tags filter does not list a label I just created">
-    The Tags filter aggregates labels across every node in the fleet by name. If the new label only exists on one node and that node was offline at the moment the page loaded, the dropdown may not include it. Refresh **Fleet · Overview** with the **Refresh** button in the toolbar to repull node state.
+    The Tags filter aggregates labels across every node in the fleet by name. If the new label only exists on one node and that node was offline at the moment the page loaded, the dropdown may not include it. Refresh **Fleet · Overview** with the toolbar refresh button to repull node state.
   </Accordion>
-  <Accordion title="`Stop fleet by label` reports `No node carries a stack label by that name`">
+  <Accordion title="The Settings Labels panel shows a lock card instead of the label list">
+    The active node does not advertise the `labels` capability. Switch to a node that supports labels, or update the node to a version that includes this capability.
+  </Accordion>
+  <Accordion title="Stop fleet by label reports no matching stacks">
     Stack labels are per-node, so the fleet-stop matches by name across nodes. If the stack label you typed only exists on one node and you typed the wrong case (`prod` versus `Prod`), no node will match. The picker queries each reachable node for its own stack labels; node labels never appear there. A label on a node Sencho cannot currently reach will not be suggested, and the picker flags that the list may be incomplete. Pick from the suggestion list rather than typing freehand to avoid case mistakes.
   </Accordion>
-  <Accordion title="`Bulk label assign` did not remove the old labels on my stacks">
+  <Accordion title="Bulk label assign did not remove the old labels on my stacks">
     By design it never does: the card only adds the label you picked, leaving each stack's other labels intact. There is no clear or replace mode. To remove or swap a stack's labels, edit them from that stack's own **Labels** menu.
   </Accordion>
   <Accordion title="A label did not appear on a remote node after bulk assign">
     Confirm the node was reachable when you applied: an unreachable node is shown in the target list and reported in the per-node results rather than silently skipped. If the node was reachable, the label is created there by name with the chosen color and assigned; re-run to retry any node that failed.
   </Accordion>
-  <Accordion title="The Fleet Actions cards return an error when I click Apply">
-    The cards run admin-only. Confirm the active user has the admin role under **Settings · Users**; operator and viewer roles see the cards rendered but cannot apply them. All other Stack Labels surfaces (sidebar grouping, trailing dots, the Settings panel, the inline create form, the Fleet View Tags filter) work for every role.
+  <Accordion title="The Fleet Actions cards return an error when I click Apply or Stop fleet">
+    The label-based Fleet Actions require the admin role. Confirm the active user has the admin role under **Settings · Users**; all other roles see the cards but cannot execute them.
   </Accordion>
   <Accordion title="Deleting a label removed it from every stack">
     Working as designed. The destructive confirmation reads `Removes the label from every stack across the fleet.` The label row and every assignment row that pointed to it are dropped in a single transaction. There is no undo; recreate the label by name and color and reassign the affected stacks if you need to recover.
