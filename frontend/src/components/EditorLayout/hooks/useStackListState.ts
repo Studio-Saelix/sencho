@@ -9,11 +9,35 @@ import { useBulkStackActions, type BulkAction } from '@/hooks/useBulkStackAction
 import { useCrossNodeStackSearch } from '@/hooks/useCrossNodeStackSearch';
 import { SENCHO_LABELS_CHANGED } from '@/lib/events';
 import { isInputFocused, isPaletteOpen } from '@/lib/keyboard-guards';
-import type { StackAction, StackActionResult, ContainerInfo } from '../EditorView';
+import type { StackAction, StackActionResult } from '../EditorView';
 import type { Label as StackLabel } from '../../label-types';
 import type { FilterChip } from '../../sidebar/sidebar-types';
-import { isDownStatus } from '../../sidebar/stack-status-utils';
+import { isDownStatus, classifyContainersStatus, isBulkStatusObjectFormat } from '../../sidebar/stack-status-utils';
 import type { StackRowStatus } from '../../sidebar/stack-status-utils';
+
+/** Compatibility path for remote nodes whose `/stacks/statuses` is absent or
+ *  returns the legacy plain-string format: query each stack's containers and
+ *  classify them so a degraded (partial) stack is not reported as healthy. */
+async function deriveStatusesFromContainers(
+  fileList: string[],
+): Promise<Record<string, StackRowStatus>> {
+  const results = await Promise.allSettled(
+    fileList.map(async (file) => {
+      const containersRes = await apiFetch(`/stacks/${file}/containers`);
+      if (!containersRes.ok) return { file, status: 'unknown' as StackRowStatus };
+      const containers = await containersRes.json();
+      return {
+        file,
+        status: Array.isArray(containers) ? classifyContainersStatus(containers) : 'unknown',
+      };
+    }),
+  );
+  const out: Record<string, StackRowStatus> = {};
+  for (const result of results) {
+    if (result.status === 'fulfilled') out[result.value.file] = result.value.status;
+  }
+  return out;
+}
 
 interface StackStatus {
   [key: string]: StackRowStatus;
@@ -170,50 +194,32 @@ export function useStackListState() {
       setFiles(fileList);
       setFilesNodeId(fetchNodeId);
 
-      // Fetch all stack statuses in a single bulk call (falls back to per-stack queries for older remote nodes)
+      // Fetch all stack statuses in a single bulk call. Only the current object
+      // format can express `partial`; a node lacking the endpoint or returning
+      // the legacy plain-string format is re-derived from per-stack containers
+      // so a crashed container is not hidden behind a healthy sibling.
       const statusRes = await apiFetch('/stacks/statuses');
       if (stale()) return fileList;
-      let bulkStatuses: Record<string, StackRowStatus> | null = null;
+      let bulkStatuses: Record<string, StackRowStatus> = {};
       const bulkPorts: Record<string, number | undefined> = {};
       const bulkCounts: StackCounts = {};
-      if (statusRes.ok) {
-        const raw = await statusRes.json();
-        bulkStatuses = {};
-        // Handle both old format (plain string) and new format ({ status, mainPort, running, total })
-        for (const [key, val] of Object.entries(raw)) {
-          if (typeof val === 'string') {
-            bulkStatuses[key] = val as StackRowStatus;
-          } else if (val && typeof val === 'object' && 'status' in val) {
-            const info = val as StackStatusInfo;
-            bulkStatuses[key] = info.status;
-            if (info.mainPort) bulkPorts[key] = info.mainPort;
-            if (info.running !== undefined && info.total !== undefined) {
-              bulkCounts[key] = { running: info.running, total: info.total };
-            }
+
+      const raw: unknown = statusRes.ok ? await statusRes.json() : null;
+      if (isBulkStatusObjectFormat(raw)) {
+        for (const [key, val] of Object.entries(raw as Record<string, StackStatusInfo>)) {
+          bulkStatuses[key] = val.status;
+          if (val.mainPort) bulkPorts[key] = val.mainPort;
+          if (val.running !== undefined && val.total !== undefined) {
+            bulkCounts[key] = { running: val.running, total: val.total };
           }
         }
       } else {
-        // Fallback: query each stack individually (remote node may not have bulk endpoint)
-        const statusResults = await Promise.allSettled(
-          fileList.map(async (file) => {
-            const containersRes = await apiFetch(`/stacks/${file}/containers`);
-            if (!containersRes.ok) return { file, status: 'unknown' as const };
-            const containers = await containersRes.json();
-            const hasRunning = Array.isArray(containers) && containers.some((c: ContainerInfo) => c.State === 'running');
-            return { file, status: hasRunning ? 'running' as const : (Array.isArray(containers) && containers.length > 0 ? 'exited' as const : 'unknown' as const) };
-          })
-        );
-        bulkStatuses = {};
-        for (const result of statusResults) {
-          if (result.status === 'fulfilled') {
-            bulkStatuses[result.value.file] = result.value.status;
-          }
-        }
+        bulkStatuses = await deriveStatusesFromContainers(fileList);
       }
       setStackStatuses(prev => {
         const next: StackStatus = {};
         for (const file of fileList) {
-          const status = bulkStatuses?.[file] ?? 'unknown';
+          const status = bulkStatuses[file] ?? 'unknown';
           next[file] = (file in stackActionsRef.current) ? (prev[file] ?? status) : status;
         }
         return next;
