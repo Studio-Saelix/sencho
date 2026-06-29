@@ -222,12 +222,37 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
     try {
       const localNode = nodesRef.current.find(n => n.type === 'local');
       const unreadNodeIds = [...new Set(notifications.filter(n => !n.is_read && n.nodeId != null).map(n => n.nodeId as number))];
-      await Promise.allSettled(unreadNodeIds.map(nodeId =>
+      if (unreadNodeIds.length === 0) return;
+
+      const results = await Promise.allSettled(unreadNodeIds.map(nodeId =>
         nodeId === localNode?.id
           ? apiFetch('/notifications/read', { method: 'POST', localOnly: true } as Parameters<typeof apiFetch>[1])
           : fetchForNode('/notifications/read', nodeId, { method: 'POST' }),
       ));
-      setNotifications(prev => prev.map(n => ({ ...n, is_read: 1 })));
+
+      const succeededNodeIds = new Set<number>();
+      let hadFailure = false;
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i];
+        const nodeId = unreadNodeIds[i];
+        if (result.status === 'fulfilled' && result.value.ok) {
+          succeededNodeIds.add(nodeId);
+        } else {
+          hadFailure = true;
+        }
+      }
+
+      if (succeededNodeIds.size > 0) {
+        setNotifications(prev => prev.map(n =>
+          n.nodeId != null && succeededNodeIds.has(n.nodeId) ? { ...n, is_read: 1 } : n,
+        ));
+      }
+
+      if (hadFailure) {
+        toast.error('Some notifications could not be marked as read');
+      }
+
+      void fetchNotificationsRef.current();
     } catch (e: unknown) {
       const err = e as { message?: string; error?: string };
       toast.error(err?.message || err?.error || 'Failed to mark notifications as read');

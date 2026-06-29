@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Bell } from 'lucide-react';
 import type { Stats, SystemStats, NotificationItem, HealthLevel } from './types';
 import { deriveHealth } from './deriveHealth';
+import { countVisibleUnread } from '@/lib/notificationVisibility';
 
 interface HealthStatusBarProps {
   stats: Stats;
@@ -78,7 +79,7 @@ export function HealthStatusBar({
   );
   const config = healthConfig[level];
   const now = useTicker(SYNC_LABEL_TICK_MS);
-  const unreadAlerts = notifications.filter(n => !n.is_read).length;
+  const unreadAlerts = countVisibleUnread(notifications);
   const running = `${stats.active}/${stats.total}`;
   const cpuLabel = systemStats ? `${parseFloat(systemStats.cpu.usage).toFixed(0)}%` : '--';
   const memLabel = systemStats ? formatGib(systemStats.memory.used) : '--';

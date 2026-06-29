@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Info, AlertTriangle, AlertOctagon, CheckCircle2, Trash2, ChevronLeft, ChevronRight } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { formatRelativeTime } from '@/lib/utils';
+import { filterPanelVisible } from '@/lib/notificationVisibility';
 import type { NotificationItem } from './types';
 import type { Node } from '@/context/NodeContext';
 
@@ -26,7 +27,7 @@ export function RecentAlerts({ notifications, nodes, onCleared }: RecentAlertsPr
   const [clearing, setClearing] = useState(false);
   const [page, setPage] = useState(0);
 
-  const sorted = notifications
+  const sorted = filterPanelVisible(notifications)
     .slice()
     .sort((a, b) => b.timestamp - a.timestamp);
 
@@ -93,7 +94,7 @@ export function RecentAlerts({ notifications, nodes, onCleared }: RecentAlertsPr
                 const Icon = config.icon;
                 return (
                   <div
-                    key={n.id}
+                    key={`${n.nodeId ?? 'local'}:${n.id}`}
                     className="flex items-center gap-2.5 py-1.5 px-1 rounded-sm hover:bg-accent/5"
                   >
                     <Icon className={`h-3.5 w-3.5 shrink-0 ${config.className}`} strokeWidth={1.5} />

@@ -25,6 +25,7 @@ import { cn } from '@/lib/utils';
 import type { NotificationCategory, NotificationItem } from './dashboard/types';
 import type { Node } from '@/context/NodeContext';
 import { CATEGORY_LABELS } from '@/lib/notificationCategories';
+import { countVisibleUnread, filterPanelVisible } from '@/lib/notificationVisibility';
 
 const NODE_FILTER_ALL = 'all' as const;
 const CATEGORY_FILTER_ALL = 'all' as const;
@@ -94,25 +95,13 @@ function formatRelative(ms: number): string {
     return new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-const USER_OP_CATEGORIES = new Set([
-    'deploy_success', 'stack_started', 'stack_stopped', 'stack_restarted', 'image_update_applied',
-]);
-
-function isUserInitiatedSuccess(n: NotificationItem): boolean {
-    return n.level === 'info'
-        && n.category !== undefined
-        && USER_OP_CATEGORIES.has(n.category)
-        && n.actor_username != null
-        && n.actor_username !== 'system';
-}
-
 function applyFilter(
     items: NotificationItem[],
     filter: NotifFilter,
     nodeFilter: NodeFilter,
     categoryFilter: CategoryFilter,
 ): NotificationItem[] {
-    let result = items.filter(n => !isUserInitiatedSuccess(n));
+    let result = filterPanelVisible(items);
     if (filter === 'unread') result = result.filter((n) => !n.is_read);
     else if (filter === 'alerts') result = result.filter((n) => n.level === 'warning' || n.level === 'error');
     if (nodeFilter !== NODE_FILTER_ALL) result = result.filter((n) => n.nodeId === nodeFilter);
@@ -149,7 +138,7 @@ export function NotificationPanel({
         nodeFilter !== NODE_FILTER_ALL || categoryFilter !== CATEGORY_FILTER_ALL;
 
     const unreadCount = useMemo(
-        () => notifications.filter((n) => !n.is_read).length,
+        () => countVisibleUnread(notifications),
         [notifications],
     );
 
@@ -358,7 +347,11 @@ export function NotificationPanel({
 
                 {/* Stream */}
                 {groups.length === 0 ? (
-                    <EmptyState filter={filter} hasAny={notifications.length > 0} />
+                    <EmptyState
+                        filter={filter}
+                        hasAny={notifications.length > 0}
+                        hasVisibleUnread={unreadCount > 0}
+                    />
                 ) : (
                     <div className="max-h-[480px] overflow-y-auto border-t border-card-border/60">
                         {groups.map((group) => (
@@ -493,13 +486,14 @@ function NotificationRow({ notif, showNodeName, onDelete, onNavigate, onNavigate
 interface EmptyStateProps {
     filter: NotifFilter;
     hasAny: boolean;
+    hasVisibleUnread: boolean;
 }
 
-function EmptyState({ filter, hasAny }: EmptyStateProps) {
+function EmptyState({ filter, hasAny, hasVisibleUnread }: EmptyStateProps) {
     let title = "You're all caught up";
     let subtitle = 'New notifications appear here in real time.';
 
-    if (hasAny && filter === 'unread') {
+    if (hasAny && filter === 'unread' && !hasVisibleUnread) {
         title = 'No unread notifications';
         subtitle = 'Everything in your feed has been read.';
     } else if (hasAny && filter === 'alerts') {
