@@ -19,11 +19,11 @@ The search bar at the top filters tiles by name, description, or category in rea
 
 ### Categories rail
 
-The left rail lists every category the registry exposes, plus an **All** entry, with a count for each. The active category gets a brand-coloured rail and tinted background. The rail appears once at least one template has loaded.
+The left rail lists every category the registry exposes, plus an **All** entry, with a count for each. The active category gets a brand-coloured rail and tinted background. The rail appears once at least one template has loaded. The category rail is desktop only; see [Mobile](#mobile) for the small-screen layout.
 
 ### Featured template
 
-A single template is pinned to the top of the grid in a wide editorial banner. Sencho rotates the featured pick **weekly** through the five most-starred templates in the registry, so the catalogue stays fresh without you doing anything. The banner disappears whenever you have a search query active.
+A single template is pinned to the top of the grid in a wide editorial banner. The banner includes its own **Deploy** button so you can ship the featured template without opening its tile. Sencho rotates the featured pick **weekly** through the five most-starred templates in the registry, so the catalogue stays fresh without you doing anything. The banner disappears whenever you have a search query active.
 
 ### Tiles
 
@@ -39,6 +39,14 @@ Each tile shows:
   - **Unscanned** (no scan has been recorded for this image yet)
 
 Tiles are sorted by GitHub star count, descending. Click any tile to open the deployment sheet on the right.
+
+### Mobile
+
+On small screens, the App Store adapts to a single-column layout. The masthead shows the store label, the total app count, the category count, and an action menu for navigation. Templates are listed alphabetically rather than by star count, and the category sidebar and featured hero are not shown on mobile.
+
+<Frame>
+  <img src="/images/app-store/app-store-mobile.png" alt="App Store on a mobile device: status masthead showing APP STORE, 202 apps, and 12 categories, with an alphabetical single-column template list below" />
+</Frame>
 
 ## Deploying a template
 
@@ -127,8 +135,12 @@ Sencho can stream the live `docker compose` output for every template install. O
 
 By default Sencho uses LinuxServer.io's hosted catalogue. To point at your own:
 
+<Note>
+  Changing the registry URL requires an **admin** account.
+</Note>
+
 <Frame>
-  <img src="/images/app-store/app-store-settings-registry.png" alt="Settings · Infrastructure · App Store with two panels: Default registry showing LinuxServer.io and the api.linuxserver.io/api/v1/images URL, and Custom registry with a Registry URL input, a 'using default' hint, and Reset to default and Save & refresh buttons" />
+  <img src="/images/app-store/app-store-settings-registry.png" alt="Settings › Infrastructure › App Store with two panels: Default registry showing LinuxServer.io and the api.linuxserver.io/api/v1/images URL, and Custom registry with a Registry URL input, a using-default hint, and Reset to default and Save and refresh buttons" />
 </Frame>
 
 1. Open **Settings › Infrastructure › App Store**.
@@ -155,3 +167,20 @@ The default registry display at the top of the page is informational only; you c
     The **Scan images for vulnerabilities after deploy** checkbox renders only when the active node reports that Trivy is installed. Configure scanning per the [Vulnerability Scanning](/features/vulnerability-scanning) page, then reopen the deployment sheet. Even with the checkbox missing, the rest of the Advanced tab works exactly the same; you just lose the post-deploy scan trigger.
   </Accordion>
 </AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Vulnerability Scanning" icon="shield-halved" href="/features/vulnerability-scanning">
+    Understand the CVE badges that appear on every template tile and what they mean.
+  </Card>
+  <Card title="Deploy Progress" icon="chart-line" href="/features/deploy-progress">
+    Stream live docker compose output for every App Store deploy.
+  </Card>
+  <Card title="Deploy Enforcement" icon="ban" href="/features/deploy-enforcement">
+    Set risk policies that gate App Store deploys before the stack is created.
+  </Card>
+  <Card title="Resources Hub" icon="box-archive" href="/features/resources">
+    View scan results for images pulled by App Store templates.
+  </Card>
+</CardGroup>
