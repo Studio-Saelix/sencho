@@ -17,11 +17,12 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let ensurePilotJwtSecret: typeof import('../bootstrap/startup').ensurePilotJwtSecret;
+let reconcilePilotComposeDir: typeof import('../bootstrap/startup').reconcilePilotComposeDir;
 
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ DatabaseService } = await import('../services/DatabaseService'));
-    ({ ensurePilotJwtSecret } = await import('../bootstrap/startup'));
+    ({ ensurePilotJwtSecret, reconcilePilotComposeDir } = await import('../bootstrap/startup'));
 });
 
 afterAll(() => {
@@ -30,10 +31,38 @@ afterAll(() => {
 
 beforeEach(() => {
     delete process.env.SENCHO_MODE;
+    delete process.env.COMPOSE_DIR;
 });
 
 afterEach(() => {
     delete process.env.SENCHO_MODE;
+    delete process.env.COMPOSE_DIR;
+});
+
+describe('pilot-agent compose directory bootstrap', () => {
+    it('reconciles the persisted local node with COMPOSE_DIR in pilot mode', () => {
+        const db = DatabaseService.getInstance();
+        const node = db.getDefaultNode();
+        expect(node).toBeDefined();
+        db.updateNode(node!.id, { compose_dir: '/app/compose' });
+
+        process.env.SENCHO_MODE = 'pilot';
+        process.env.COMPOSE_DIR = '/opt/docker/sencho';
+
+        expect(reconcilePilotComposeDir()).toBe(true);
+        expect(db.getDefaultNode()?.compose_dir).toBe('/opt/docker/sencho');
+    });
+
+    it('does not change the local node outside pilot mode', () => {
+        const db = DatabaseService.getInstance();
+        const node = db.getDefaultNode();
+        expect(node).toBeDefined();
+        db.updateNode(node!.id, { compose_dir: '/app/compose' });
+        process.env.COMPOSE_DIR = '/opt/docker/sencho';
+
+        expect(reconcilePilotComposeDir()).toBe(false);
+        expect(db.getDefaultNode()?.compose_dir).toBe('/app/compose');
+    });
 });
 
 describe('pilot-agent bootstrap auth_jwt_secret', () => {

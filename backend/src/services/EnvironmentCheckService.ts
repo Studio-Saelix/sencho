@@ -26,6 +26,7 @@ import DockerController from './DockerController';
 import { NodeRegistry } from './NodeRegistry';
 import SelfIdentityService from './SelfIdentityService';
 import { withTimeout } from '../utils/withTimeout';
+import { pathsMatch, resolveHostBindPath } from '../utils/composePathMapping';
 
 const execFileAsync = promisify(execFile);
 
@@ -222,17 +223,8 @@ function checkPathMapping(dir: string, mounts: BindMounts): EnvironmentCheck {
             detail: 'Sencho is not running in a container; host and container paths are the same.',
         };
     }
-    const target = normPath(dir);
-    // The bind mount covering the compose dir is the one whose destination is the
-    // longest path prefix of it, so a parent bind (-v /opt:/opt) covers
-    // COMPOSE_DIR=/opt/compose just as a direct -v /opt/compose:/opt/compose does.
-    const match = mounts
-        .filter(m => {
-            const d = normPath(m.destination);
-            return target === d || target.startsWith(d + '/') || target.startsWith(d + '\\');
-        })
-        .sort((a, b) => normPath(b.destination).length - normPath(a.destination).length)[0];
-    if (!match) {
+    const hostPath = resolveHostBindPath(dir, mounts);
+    if (!hostPath) {
         return {
             ...base,
             status: 'warn',
@@ -242,11 +234,7 @@ function checkPathMapping(dir: string, mounts: BindMounts): EnvironmentCheck {
                 + `bind mounts in your stacks resolve against the container filesystem instead of the host.`,
         };
     }
-    // The host path the daemon resolves for the compose dir: the mount source
-    // plus the compose dir's path below the mount destination.
-    const relative = target.slice(normPath(match.destination).length);
-    const hostPath = normPath(normPath(match.source) + relative);
-    if (hostPath !== target) {
+    if (!pathsMatch(hostPath, dir)) {
         return {
             ...base,
             status: 'warn',

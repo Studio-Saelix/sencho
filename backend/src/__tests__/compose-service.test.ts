@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import os from 'os';
+import path from 'path';
 import type WebSocket from 'ws';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
@@ -17,7 +18,7 @@ const {
   mockBackupStackFiles, mockRestoreStackFiles,
   mockGetComposeFilename, mockGetOverrideFilename, mockEnsureStackOverride,
   mockMkdtempSync, mockWriteFileSync, mockUnlinkSync, mockRmdirSync,
-  mockGetGlobalSettings, mockPruneDanglingImages,
+  mockGetGlobalSettings, mockPruneDanglingImages, mockGetBindMounts,
 } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
@@ -38,6 +39,7 @@ const {
   mockRmdirSync: vi.fn(),
   mockGetGlobalSettings: vi.fn().mockReturnValue({}),
   mockPruneDanglingImages: vi.fn().mockResolvedValue({ reclaimedBytes: 0 }),
+  mockGetBindMounts: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
@@ -125,11 +127,18 @@ vi.mock('../services/MeshService', () => ({
   },
 }));
 
+vi.mock('../services/SelfIdentityService', () => ({
+  default: {
+    getInstance: () => ({ getBindMounts: mockGetBindMounts }),
+  },
+}));
+
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import { DriftLedgerService } from '../services/DriftLedgerService';
 
 const originalComposeTimeout = process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS;
 const originalStallTimeout = process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS;
+const originalSenchoMode = process.env.SENCHO_MODE;
 
 /** Creates an EventEmitter that mimics a child_process spawn result */
 function createMockProcess() {
@@ -196,6 +205,8 @@ beforeEach(() => {
   mockGetComposeFilename.mockResolvedValue('compose.yaml');
   mockGetOverrideFilename.mockResolvedValue(null);
   mockEnsureStackOverride.mockResolvedValue(null);
+  mockGetBindMounts.mockResolvedValue(null);
+  delete process.env.SENCHO_MODE;
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
 
@@ -210,6 +221,11 @@ afterEach(() => {
     delete process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS;
   } else {
     process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = originalStallTimeout;
+  }
+  if (originalSenchoMode === undefined) {
+    delete process.env.SENCHO_MODE;
+  } else {
+    process.env.SENCHO_MODE = originalSenchoMode;
   }
 });
 
@@ -530,6 +546,79 @@ describe('ComposeService - authoredComposeArgs mesh override', () => {
 // ── deployStack ────────────────────────────────────────────────────────
 
 describe('ComposeService - deployStack', () => {
+  it('blocks a pilot deploy with relative binds before replacing containers when path mapping differs', async () => {
+    process.env.SENCHO_MODE = 'pilot';
+    const composeDir = path.resolve('/test/compose');
+    mockGetBindMounts.mockResolvedValue([
+      { source: '/opt/docker/sencho', destination: composeDir },
+    ]);
+    const configProc = createMockProcess();
+    mockSpawn.mockReturnValue(configProc);
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.deployStack('my-stack').then(() => null, (error: Error) => error);
+    await waitForSpawn();
+    configProc.stdout.emit('data', Buffer.from(JSON.stringify({
+      name: 'my-stack',
+      services: {
+        db: {
+          image: 'postgres:17',
+          volumes: [{
+            type: 'bind',
+            source: path.join(composeDir, 'my-stack', 'data'),
+            target: '/var/lib/postgresql/data',
+          }],
+        },
+      },
+    })));
+    configProc.emit('close', 0);
+
+    const error = await result;
+    expect(error?.message).toContain('1:1');
+    expect(mockGetContainersByStack).not.toHaveBeenCalled();
+    expect(mockRemoveContainers).not.toHaveBeenCalled();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a pilot deploy that uses only absolute external bind sources', async () => {
+    process.env.SENCHO_MODE = 'pilot';
+    const composeDir = path.resolve('/test/compose');
+    mockGetBindMounts.mockResolvedValue([
+      { source: '/opt/docker/sencho', destination: composeDir },
+    ]);
+    let spawnCount = 0;
+    mockSpawn.mockImplementation(() => {
+      spawnCount += 1;
+      const proc = createMockProcess();
+      Promise.resolve().then(() => {
+        if (spawnCount === 1) {
+          proc.stdout.emit('data', Buffer.from(JSON.stringify({
+            name: 'my-stack',
+            services: {
+              db: {
+                image: 'postgres:17',
+                volumes: [{
+                  type: 'bind',
+                  source: '/srv/postgres/data',
+                  target: '/var/lib/postgresql/data',
+                }],
+              },
+            },
+          })));
+        }
+        proc.emit('close', 0);
+      });
+      return proc;
+    });
+    mockListContainers.mockResolvedValue([]);
+
+    const promise = ComposeService.getInstance(1).deployStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+
+    await expect(promise).resolves.toBeUndefined();
+    expect(mockGetContainersByStack).toHaveBeenCalledWith('my-stack');
+  });
+
   it('runs docker compose up -d --remove-orphans', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([]);

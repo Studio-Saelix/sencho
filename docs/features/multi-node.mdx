@@ -56,7 +56,7 @@ On the control instance, click your avatar in the top-right and choose **Setting
 | **Name** | A display name (e.g. `staging-vps`, `media-box`). Visible in the switcher and across the UI. |
 | **Type** | Set to **Remote**. |
 | **Mode** | Set to **Pilot Agent**. |
-| **Compose Directory** | The root directory where compose stack folders live on the remote host. Defaults to `/app/compose`; change it if the remote uses a different volume mount. |
+| **Compose Directory** | The absolute directory where compose stack folders live on the remote host. Pilot Agent defaults to `/opt/docker/sencho` and mounts the directory at the same path inside the agent so relative stack bind mounts remain host-correct. |
 
 Click **Add node**.
 

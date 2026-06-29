@@ -23,7 +23,11 @@ interface ComposeService {
   image: string;
   container_name: string;
   restart: string;
-  volumes: string[];
+  volumes: Array<string | {
+    type: string;
+    source: string;
+    target: string;
+  }>;
   environment: Record<string, string>;
 }
 
@@ -60,7 +64,8 @@ describe('POST /api/nodes (pilot_agent mode)', () => {
     expect(res.body.enrollment.token).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
     expect(typeof res.body.enrollment.composeYaml).toBe('string');
     expect(res.body.enrollment.composeYaml).toContain('SENCHO_MODE: pilot');
-    expect(res.body.enrollment.composeYaml).toContain(`SENCHO_ENROLL_TOKEN: ${res.body.enrollment.token}`);
+    const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+    expect(parsed.services.agent.environment.SENCHO_ENROLL_TOKEN).toBe(res.body.enrollment.token);
     expect(res.body.enrollment.expiresAt).toBeGreaterThan(Date.now());
     expect(res.body.enrollment).not.toHaveProperty('dockerRun');
   });
@@ -115,11 +120,52 @@ describe('POST /api/nodes (pilot_agent mode)', () => {
 
     expect(volumes).toContain('/var/run/docker.sock:/var/run/docker.sock');
     expect(volumes).toContain('sencho-agent-data:/app/data');
-    expect(volumes).toContain('/opt/docker/sencho:/app/compose');
+    expect(volumes).toContainEqual({
+      type: 'bind',
+      source: '/opt/docker/sencho',
+      target: '/opt/docker/sencho',
+    });
+    expect(parsed.services.agent.environment.COMPOSE_DIR).toBe('/opt/docker/sencho');
     expect(parsed.volumes).toHaveProperty('sencho-agent-data');
   });
 
-  it('composeYaml embeds the three pilot env vars with the enrollment token', async () => {
+  it('uses a custom absolute compose directory as a safe 1:1 mount', async () => {
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .send({
+        name: 'pilot-custom-compose',
+        type: 'remote',
+        mode: 'pilot_agent',
+        compose_dir: '/srv/compose projects',
+      });
+
+    expect(res.status).toBe(200);
+    const parsed = parseYaml(res.body.enrollment.composeYaml) as ComposeFile;
+    expect(parsed.services.agent.volumes).toContainEqual({
+      type: 'bind',
+      source: '/srv/compose projects',
+      target: '/srv/compose projects',
+    });
+    expect(parsed.services.agent.environment.COMPOSE_DIR).toBe('/srv/compose projects');
+  });
+
+  it('rejects a relative pilot compose directory', async () => {
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .send({
+        name: 'pilot-relative-compose',
+        type: 'remote',
+        mode: 'pilot_agent',
+        compose_dir: './compose',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('absolute');
+  });
+
+  it('composeYaml embeds the Pilot connection and compose environment', async () => {
     const res = await request(app)
       .post('/api/nodes')
       .set('Cookie', adminCookie)
@@ -131,6 +177,7 @@ describe('POST /api/nodes (pilot_agent mode)', () => {
     expect(env.SENCHO_MODE).toBe('pilot');
     expect(env.SENCHO_PRIMARY_URL).toMatch(/^https?:\/\//);
     expect(env.SENCHO_ENROLL_TOKEN).toBe(res.body.enrollment.token);
+    expect(env.COMPOSE_DIR).toBe('/opt/docker/sencho');
   });
 });
 
@@ -204,7 +251,12 @@ describe('POST /api/nodes/:id/pilot/enroll', () => {
     const create = await request(app)
       .post('/api/nodes')
       .set('Cookie', adminCookie)
-      .send({ name: 'pilot-regen', type: 'remote', mode: 'pilot_agent' });
+      .send({
+        name: 'pilot-regen',
+        type: 'remote',
+        mode: 'pilot_agent',
+        compose_dir: '/srv/pilot-stacks',
+      });
     const original = create.body.enrollment.token;
 
     const regen = await request(app)
@@ -213,6 +265,13 @@ describe('POST /api/nodes/:id/pilot/enroll', () => {
 
     expect(regen.status).toBe(200);
     expect(regen.body.enrollment.token).not.toBe(original);
+    const parsed = parseYaml(regen.body.enrollment.composeYaml) as ComposeFile;
+    expect(parsed.services.agent.environment.COMPOSE_DIR).toBe('/srv/pilot-stacks');
+    expect(parsed.services.agent.volumes).toContainEqual({
+      type: 'bind',
+      source: '/srv/pilot-stacks',
+      target: '/srv/pilot-stacks',
+    });
   });
 
   it('rejects regeneration for proxy-mode remote nodes', async () => {
@@ -239,6 +298,23 @@ describe('POST /api/nodes/:id/pilot/enroll', () => {
       .post('/api/nodes/999999/pilot/enroll')
       .set('Cookie', adminCookie);
     expect(res.status).toBe(404);
+  });
+});
+
+describe('PUT /api/nodes/:id Pilot compose directory', () => {
+  it('rejects a relative compose directory for an existing pilot node', async () => {
+    const create = await request(app)
+      .post('/api/nodes')
+      .set('Cookie', adminCookie)
+      .send({ name: 'pilot-update-path', type: 'remote', mode: 'pilot_agent' });
+
+    const update = await request(app)
+      .put(`/api/nodes/${create.body.id}`)
+      .set('Cookie', adminCookie)
+      .send({ compose_dir: '../stacks' });
+
+    expect(update.status).toBe(400);
+    expect(update.body.error).toContain('absolute');
   });
 });
 
