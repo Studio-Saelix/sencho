@@ -3,7 +3,7 @@ title: Remote Updates
 description: Pull the latest Sencho image and recreate the container on any node in the fleet, including the gateway, from the Fleet view.
 ---
 
-Sencho can update any node in the fleet to the latest published release without ever opening an SSH session. The control instance opens the **Node updates** sheet, dispatches the update to one or more nodes, and watches each one come back online with the new version.
+Sencho can update any node in the fleet to the latest published release without ever opening an SSH session. The control instance opens the **Node updates** sheet, dispatches the update to one or more nodes, and watches each one come back online with the new version. Update availability is confirmed against a pullable Docker image on the public registry mirrors, not merely the GitHub Release timestamp, so the **Update** button does not appear until the release image has finished publishing.
 
 This page covers the mechanism: prerequisites, what happens on a node during an update, how completion and failure are detected, and how to recover. The full UI tour for the Node updates sheet itself lives in [Fleet View](/features/fleet-view#node-updates).
 

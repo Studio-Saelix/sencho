@@ -8,7 +8,7 @@ import { normalizeImageRef } from './DriftDetectionService';
 import { NotificationService } from './NotificationService';
 import { FleetUpdateTrackerService } from './FleetUpdateTrackerService';
 import { isValidVersion, getSenchoVersion } from './CapabilityRegistry';
-import { getLatestVersion } from '../utils/version-check';
+import { getLatestVersionInfo } from '../utils/version-check';
 import { isDebugEnabled } from '../utils/debug';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
 
@@ -537,10 +537,10 @@ export class MonitorService {
 
     /**
      * Check GitHub/Docker Hub for a newer Sencho release and dispatch a
-     * one-shot notification. Uses getLatestVersion() which wraps CacheService
-     * (30 min TTL + inflight dedup + stale-on-error) so transient network
-     * blips do not cause gaps, and the check stays consistent with the Fleet
-     * update banner.
+     * one-shot notification. Uses getLatestVersionInfo() which wraps CacheService
+     * (30 min TTL when published, shorter while a GitHub release awaits registry
+     * publish + inflight dedup) so transient network blips do not cause gaps,
+     * and the check stays consistent with the Fleet update banner.
      *
      * The 6-hour cooldown gate prevents bell spam: it is only advanced on a
      * SUCCESSFUL lookup. A failed lookup retries on the next eval cycle
@@ -564,15 +564,23 @@ export class MonitorService {
             return;
         }
 
-        const latest = await getLatestVersion();
-        if (!isValidVersion(latest)) {
+        const versionInfo = await getLatestVersionInfo();
+        if (!versionInfo || !isValidVersion(versionInfo.version)) {
             // Network failure (GitHub + Docker Hub both down, no stale cache).
             // Do NOT advance the cooldown so the next eval retries.
             if (isDebugEnabled()) console.debug('[Monitor:diag] Latest Sencho version unresolvable; will retry next cycle');
             return;
         }
 
+        if (versionInfo.publishPending) {
+            // GitHub announced a release before the image is pullable. Retry on
+            // the next eval cycle without advancing the 6-hour cooldown.
+            if (isDebugEnabled()) console.debug('[Monitor:diag] Sencho release pending registry publish; will retry next cycle');
+            return;
+        }
+
         this.lastVersionCheckAt = Date.now();
+        const latest = versionInfo.version;
 
         const db = DatabaseService.getInstance();
         const stateKey = MonitorService.SENCHO_UPDATE_NOTIFIED_KEY;
