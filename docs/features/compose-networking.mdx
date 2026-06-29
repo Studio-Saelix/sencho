@@ -9,6 +9,11 @@ The tab is read-only with respect to stack deployments: it never alters a contai
 
 Compose Networking reads structure: network names, service-to-network membership, published ports, network modes, and the *names* of environment variables and labels, never their values. A secret injected through `environment:` or `env_file:` never appears in the view or the logs. One caveat: a structural field assembled by interpolating a secret (a network `name:`, a published port, or an `extra_hosts` entry built from `${VAR}`) is resolved before the inspector reads it, so its value does show. Keep secrets in `environment:` or `env_file:` rather than interpolating them into structural fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
 
+<img
+  src="/images/compose-networking/networking-tab-overview.png"
+  alt="The Networking tab showing the full panel: EXPOSURE INTENT section with REVERSE-PROXY selected for the stack and INHERIT for the service, NETWORKS section listing arr-net with an external badge, SERVICES section showing swag with ports 443/tcp and 80/tcp both marked 'all interfaces', and RUNTIME DRIFT section showing the green 'runtime matches compose' card"
+/>
+
 ## Accessing the Networking tab
 
 1. Click any stack in the left sidebar to open it.
@@ -21,7 +26,7 @@ The tab appears only when the active node reports that it supports Compose Netwo
 <Frame>
   <img
     src="/images/compose-networking/networking-tab-location.png"
-    alt="The Anatomy panel header strip showing tabs: ANATOMY, ACTIVITY, DOSSIER, DRIFT, ENVIRONMENT, NETWORKING (active, underlined), DOCTOR, STORAGE"
+    alt="The Anatomy panel tab strip showing ANATOMY, ACTIVITY, DOSSIER, DRIFT, ENVIRONMENT, NETWORKING (active and underlined), DOCTOR, STORAGE tabs alongside FILES and EDIT action buttons"
   />
 </Frame>
 
@@ -44,7 +49,7 @@ If `docker compose config` cannot produce a model (usually a YAML error, an unre
 <Frame>
   <img
     src="/images/compose-networking/networking-exposure-intent.png"
-    alt="The exposure intent section showing a stack row with the 'reverse-proxy' pill highlighted, and two service rows beneath it: one with 'internal' selected, another showing 'inherit' selected with an arrow indicating the inherited stack intent 'reverse-proxy'"
+    alt="The exposure intent section showing a stack row with REVERSE-PROXY highlighted, and one service row (swag) with INHERIT highlighted and an arrow indicator reading 'reverse-proxy', showing the intent inherited from the stack"
   />
 </Frame>
 
@@ -71,7 +76,7 @@ Exposure intent is how you tell Sencho what a stack *should* be reachable from, 
 <Frame>
   <img
     src="/images/compose-networking/networking-networks.png"
-    alt="The networks section showing two network rows: 'traefik_proxy' with a blue external badge, and 'myapp_internal' with its Compose key shown in parentheses, a created-by-stack badge, and an internal badge with a lock icon"
+    alt="The networks section showing one network row: 'arr-net' with a blue external badge, indicating the network is expected to already exist on the host"
   />
 </Frame>
 
@@ -94,7 +99,7 @@ External networks that do not exist on the node when you deploy will cause the d
 <Frame>
   <img
     src="/images/compose-networking/networking-services.png"
-    alt="The services section showing two service cards. The first card for 'web' lists network membership on 'frontend' with alias 'app' and a published port 80/tcp with an amber 'all interfaces' badge. The second card for 'db' shows network membership on 'backend' with no published ports"
+    alt="The services section showing a card for the 'swag' service with network membership on 'arr-net', two published ports (443/tcp and 80/tcp), each with an amber 'all interfaces' badge indicating they are bound to 0.0.0.0"
   />
 </Frame>
 
