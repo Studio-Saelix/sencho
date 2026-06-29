@@ -39,13 +39,22 @@ interface NodeFormData {
   is_default: boolean;
 }
 
+const DEFAULT_COMPOSE_DIR = '/app/compose';
+const DEFAULT_PILOT_COMPOSE_DIR = '/opt/docker/sencho';
+
+function defaultComposeDir(type: NodeFormData['type'], mode: NodeMode): string {
+  return type === 'remote' && mode === 'pilot_agent'
+    ? DEFAULT_PILOT_COMPOSE_DIR
+    : DEFAULT_COMPOSE_DIR;
+}
+
 const defaultFormData: NodeFormData = {
   name: '',
   type: 'remote',
   mode: 'pilot_agent',
   api_url: '',
   api_token: '',
-  compose_dir: '/app/compose',
+  compose_dir: DEFAULT_PILOT_COMPOSE_DIR,
   is_default: false,
 };
 
@@ -268,7 +277,19 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
         <Label htmlFor="node-type">Type</Label>
         <Select
           value={formData.type}
-          onValueChange={(val) => setFormData({ ...formData, type: val as 'local' | 'remote', api_url: '', api_token: '' })}
+          onValueChange={(val) => {
+            const type = val as NodeFormData['type'];
+            const currentDefault = defaultComposeDir(formData.type, formData.mode);
+            setFormData({
+              ...formData,
+              type,
+              api_url: '',
+              api_token: '',
+              compose_dir: formData.compose_dir === currentDefault
+                ? defaultComposeDir(type, formData.mode)
+                : formData.compose_dir,
+            });
+          }}
         >
           <SelectTrigger id="node-type">
             <SelectValue placeholder="Select type" />
@@ -296,7 +317,19 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
           <Combobox
             id="node-mode"
             value={formData.mode}
-            onValueChange={(val) => setFormData({ ...formData, mode: val as NodeMode, api_url: '', api_token: '' })}
+            onValueChange={(val) => {
+              const mode = val as NodeMode;
+              const currentDefault = defaultComposeDir(formData.type, formData.mode);
+              setFormData({
+                ...formData,
+                mode,
+                api_url: '',
+                api_token: '',
+                compose_dir: formData.compose_dir === currentDefault
+                  ? defaultComposeDir(formData.type, mode)
+                  : formData.compose_dir,
+              });
+            }}
             options={[
               { value: 'pilot_agent', label: 'Pilot Agent - outbound tunnel from remote host' },
               { value: 'proxy', label: 'Distributed API Proxy - primary dials the remote' },
@@ -360,12 +393,14 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
         <Label htmlFor="node-compose-dir">Compose Directory</Label>
         <Input
           id="node-compose-dir"
-          placeholder="/app/compose"
+          placeholder={defaultComposeDir(formData.type, formData.mode)}
           value={formData.compose_dir}
           onChange={(e) => setFormData({ ...formData, compose_dir: e.target.value })}
         />
         <p className="text-xs text-muted-foreground">
-          The root directory where compose stack folders live on this node.
+          {formData.type === 'remote' && formData.mode === 'pilot_agent'
+            ? 'Absolute host path for compose stacks. The generated agent mounts this same path inside the container.'
+            : 'The root directory where compose stack folders live on this node.'}
         </p>
       </div>
     </div>

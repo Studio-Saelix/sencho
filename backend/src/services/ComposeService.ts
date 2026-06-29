@@ -11,6 +11,7 @@ import { LogFormatter } from './LogFormatter';
 import { NodeRegistry } from './NodeRegistry';
 import { RegistryService } from './RegistryService';
 import { DriftLedgerService } from './DriftLedgerService';
+import SelfIdentityService from './SelfIdentityService';
 import { parseEffectiveModel } from './preflight/effectiveModel';
 import { deriveStackExposure } from './preflight/exposure';
 
@@ -22,6 +23,7 @@ import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
+import { pathsMatch, resolveHostBindPath } from '../utils/composePathMapping';
 
 export class ComposeRollbackError extends Error {
   public readonly rollbackAttempted: boolean;
@@ -413,8 +415,47 @@ export class ComposeService {
     );
   }
 
+  private async assertSafePilotBindMapping(stackName: string): Promise<void> {
+    if (process.env.SENCHO_MODE !== 'pilot') return;
+
+    let mounts: Array<{ source: string; destination: string }> | null;
+    try {
+      mounts = await SelfIdentityService.getInstance().getBindMounts();
+    } catch (error) {
+      console.warn('[ComposeService] Could not verify pilot compose path mapping:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return;
+    }
+    if (mounts === null) return;
+
+    const composeDir = path.resolve(this.baseDir);
+    const hostComposeDir = resolveHostBindPath(composeDir, mounts);
+    if (!hostComposeDir || pathsMatch(hostComposeDir, composeDir)) return;
+
+    const rendered = await this.renderConfig(stackName);
+    if (rendered.rendered === null) return;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rendered.rendered);
+    } catch (error) {
+      console.warn('[ComposeService] Could not inspect rendered binds for pilot path safety:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return;
+    }
+    const model = parseEffectiveModel(parsed, stackName);
+    const unsafeBind = model.services
+      .flatMap((service) => service.binds)
+      .find((bind) => isPathWithinBase(path.resolve(bind.source), composeDir));
+    if (!unsafeBind) return;
+
+    throw new Error(
+      `Deploy blocked: relative bind mounts resolve under ${composeDir}, but the host path is ${hostComposeDir}. ` +
+      `Use a 1:1 mount with the same absolute path on the host and in the Pilot Agent, then retry.`,
+    );
+  }
+
   async deployStack(stackName: string, ws?: WebSocket, atomic?: boolean): Promise<void> {
     await this.assertRequiredEnvPresent(stackName);
+    await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const debug = isDebugEnabled();
     const t0 = Date.now();
@@ -608,6 +649,7 @@ export class ComposeService {
 
   async updateStack(stackName: string, ws?: WebSocket, atomic?: boolean): Promise<void> {
     await this.assertRequiredEnvPresent(stackName);
+    await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const debug = isDebugEnabled();
     const t0 = Date.now();

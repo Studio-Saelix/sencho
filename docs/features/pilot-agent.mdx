@@ -44,7 +44,7 @@ You do not have to pick one mode for the whole fleet. Mix and match per node.
 
 Conceptually, the agent reverses the usual client/server direction.
 
-1. The agent container starts on the remote host with three environment variables: a mode flag, the control instance URL, and a short-lived enrollment token.
+1. The agent container starts on the remote host with its mode, control instance URL, short-lived enrollment token, and compose directory configured.
 2. It dials `wss://<control-instance>/api/pilot/tunnel` and holds the WebSocket open for as long as the container runs.
 3. For every request the control instance needs to make against that node (listing containers, deploying a stack, streaming logs, opening a console, forwarding mesh traffic), frames are multiplexed over that single connection.
 4. On the agent side, those frames are demultiplexed and replayed locally against the host's Docker socket and filesystem.
@@ -78,7 +78,7 @@ Pilot mode narrows the operator surface in a couple of places where parity with 
 
 | Requirement | Detail |
 |---|---|
-| **Remote host** | Docker installed and a user that can run containers. About 1 GB free on the volume that backs `/app/data` and whatever you point `/app/compose` at. |
+| **Remote host** | Docker installed and a user that can run containers. About 1 GB free on the volume that backs `/app/data` and the selected compose directory. |
 | **Network from remote → control instance** | Outbound TCP to the control instance's HTTPS port (whatever your reverse proxy or Sencho exposes). Nothing inbound. |
 | **Network at the control instance** | The path from the remote to the control instance must allow WebSocket upgrades end-to-end. If you terminate TLS at a reverse proxy in front of Sencho, that proxy needs `Upgrade: websocket` passthrough. |
 | **Operator role** | Admin on the control instance. The Settings → Nodes panel is admin-only. |
@@ -114,7 +114,7 @@ When you submit the Add Node form with Mode set to Pilot Agent, the control inst
 
 The enrollment token is one-time and short-lived by design. If a token is intercepted or leaked, the window of risk is small and the slot is consumed on first use.
 
-The generated compose file looks like this, with the three pilot env vars already baked in:
+The generated compose file looks like this, with the Pilot connection and compose path already configured:
 
 ```yaml
 name: sencho-agent
@@ -126,11 +126,14 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sencho-agent-data:/app/data
-      - /opt/docker/sencho:/app/compose
+      - type: bind
+        source: /opt/docker/sencho
+        target: /opt/docker/sencho
     environment:
       SENCHO_MODE: pilot
       SENCHO_PRIMARY_URL: https://sencho.example.com
       SENCHO_ENROLL_TOKEN: <short-lived token>
+      COMPOSE_DIR: /opt/docker/sencho
 
 volumes:
   sencho-agent-data:
@@ -146,7 +149,7 @@ Deploying through Compose also lets the control instance push over-the-air updat
 
 ### First connect
 
-The agent boots, reads the three env vars, and dials `wss://<control-instance>/api/pilot/tunnel` carrying the enrollment token in an `Authorization: Bearer` header.
+The agent boots, reads its configuration, and dials `wss://<control-instance>/api/pilot/tunnel` carrying the enrollment token in an `Authorization: Bearer` header.
 
 The control instance verifies the token, marks the enrollment slot consumed, and replies with a `hello` frame followed by a control frame that carries a **long-lived tunnel JWT** (365-day expiry). The agent writes that token to its data volume at `/app/data/pilot.jwt`. The original enrollment token is now useless: the agent does not need it again, and the control instance refuses to accept it a second time.
 
@@ -218,13 +221,16 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sencho-agent-data:/app/data
-      - /opt/docker/sencho:/app/compose
+      - type: bind
+        source: /opt/docker/sencho
+        target: /opt/docker/sencho
       - /etc/ssl/internal-ca.pem:/etc/ssl/internal-ca.pem:ro
     environment:
       SENCHO_MODE: pilot
       SENCHO_PRIMARY_URL: https://sencho.internal.example.com
       SENCHO_ENROLL_TOKEN: <short-lived token>
       SENCHO_PILOT_CA_FILE: /etc/ssl/internal-ca.pem
+      COMPOSE_DIR: /opt/docker/sencho
 
 volumes:
   sencho-agent-data:
@@ -258,7 +264,7 @@ These environment variables are read by the **agent** container at boot.
 | `SENCHO_ENROLL_TOKEN` | First boot only | none | The 15-minute enrollment token issued by the control instance. Ignored on subsequent boots once `pilot.jwt` is on disk. |
 | `SENCHO_PILOT_CA_FILE` | Optional | unset | Absolute path inside the container to a PEM bundle. Use when your control instance's TLS chain is rooted in a private CA. |
 | `DATA_DIR` | Optional | `/app/data` | Where the persisted `pilot.jwt` is stored. Override only if you are mounting a different volume layout. |
-| `COMPOSE_DIR` | Optional | `/app/compose` | Root directory on the agent host where compose stack folders live. The control instance reads and writes stacks under this path. |
+| `COMPOSE_DIR` | Optional | `/app/compose` | Root directory where compose stack folders live. Enrollment sets it to the absolute path selected for the node and mounts that path identically on the host and in the agent. |
 
 One variable is read on the **control instance** side, not the agent:
 
@@ -322,7 +328,7 @@ The generic node-connectivity issues (a node showing Offline, a pilot agent stuc
   </Accordion>
 
   <Accordion title="Stacks tab on a pilot node shows nothing or fails to list">
-    The agent's compose directory is missing or not writable. Verify the host path you mounted at `/app/compose` exists, is owned by a user the agent container can write as, and matches the Compose Directory configured for the node in Settings → Nodes. If the host path has moved, edit the node and update the Compose Directory field.
+    The agent's compose directory is missing or not writable. Verify the selected absolute path exists, is owned by a user the agent container can write as, and is mounted at the same path on the host and inside the agent. The Compose Directory in Settings → Nodes controls the generated enrollment file.
   </Accordion>
 
   <Accordion title="I changed the Mode on a pilot node in Edit and now it is broken">

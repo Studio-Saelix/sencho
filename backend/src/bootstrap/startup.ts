@@ -54,6 +54,21 @@ export function ensurePilotJwtSecret(): boolean {
   return true;
 }
 
+/** Keep the pilot's persisted local node aligned with its configured mount. */
+export function reconcilePilotComposeDir(): boolean {
+  if (!isPilotMode()) return false;
+  const configuredDir = process.env.COMPOSE_DIR?.trim();
+  if (!configuredDir) return false;
+
+  const db = DatabaseService.getInstance();
+  const localNode = db.getDefaultNode();
+  if (!localNode || localNode.compose_dir === configuredDir) return false;
+
+  db.updateNode(localNode.id, { compose_dir: configuredDir });
+  console.log(`[Startup] pilot-agent: compose directory set to ${configuredDir}`);
+  return true;
+}
+
 function clearSelfContainerNotificationRouting(): void {
   const identity = SelfIdentityService.getInstance().getIdentity();
   const changed = DatabaseService.getInstance().clearSelfContainerNotificationRouting(
@@ -87,6 +102,8 @@ export async function startServer(server: Server): Promise<void> {
       'with misleading ENOENT errors under memory pressure.'
     );
   }
+
+  reconcilePilotComposeDir();
 
   try {
     console.log('Running stack migration check...');

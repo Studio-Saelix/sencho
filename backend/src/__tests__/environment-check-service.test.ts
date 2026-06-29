@@ -185,6 +185,14 @@ describe('collectEnvironmentReport', () => {
             expect(byId(checks, 'path_mapping').status).toBe('pass');
         });
 
+        it('passes a 1:1 root bind that covers the compose dir', async () => {
+            const { checks } = await collectEnvironmentReport(baseProbes({
+                composeDir: '/opt/compose',
+                bindMounts: async () => [{ source: '/', destination: '/' }],
+            }));
+            expect(byId(checks, 'path_mapping').status).toBe('pass');
+        });
+
         it('warns when a parent bind maps the compose dir to a different host path', async () => {
             const { checks } = await collectEnvironmentReport(baseProbes({
                 composeDir: '/opt/compose',

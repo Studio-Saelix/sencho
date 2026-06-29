@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import path from 'path';
 import { authMiddleware } from '../middleware/auth';
 import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
@@ -24,6 +25,20 @@ import { sanitizeForLog } from '../utils/safeLog';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
+const DEFAULT_COMPOSE_DIR = '/app/compose';
+const DEFAULT_PILOT_COMPOSE_DIR = '/opt/docker/sencho';
+
+function normalizePilotComposeDir(value: unknown): string | null {
+  if (value !== undefined && value !== null && typeof value !== 'string') return null;
+  const raw = typeof value === 'string' ? value.trim() : '';
+  const candidate = raw || DEFAULT_PILOT_COMPOSE_DIR;
+  if (!path.posix.isAbsolute(candidate) || /[\0\r\n]/.test(candidate)) return null;
+  return path.posix.normalize(candidate);
+}
+
+function yamlString(value: string): string {
+  return JSON.stringify(value);
+}
 
 /**
  * Pick the URL the pilot agent should dial. SENCHO_PUBLIC_URL wins when set
@@ -48,6 +63,10 @@ function resolvePrimaryUrl(req: Request): string {
 
 function mintPilotEnrollment(nodeId: number, req: Request): { token: string; expiresAt: number; composeYaml: string } {
   const db = DatabaseService.getInstance();
+  const node = db.getNode(nodeId);
+  if (!node) throw new Error('Node not found');
+  const composeDir = normalizePilotComposeDir(node.compose_dir);
+  if (!composeDir) throw new Error('Pilot compose directory must be an absolute path');
   const jwtSecret = db.getGlobalSettings().auth_jwt_secret;
   if (!jwtSecret) throw new Error('JWT secret not configured');
 
@@ -77,11 +96,14 @@ function mintPilotEnrollment(nodeId: number, req: Request): { token: string; exp
     `    volumes:`,
     `      - /var/run/docker.sock:/var/run/docker.sock`,
     `      - sencho-agent-data:/app/data`,
-    `      - /opt/docker/sencho:/app/compose`,
+    `      - type: bind`,
+    `        source: ${yamlString(composeDir)}`,
+    `        target: ${yamlString(composeDir)}`,
     `    environment:`,
     `      SENCHO_MODE: pilot`,
-    `      SENCHO_PRIMARY_URL: ${primaryUrl}`,
-    `      SENCHO_ENROLL_TOKEN: ${token}`,
+    `      SENCHO_PRIMARY_URL: ${yamlString(primaryUrl)}`,
+    `      SENCHO_ENROLL_TOKEN: ${yamlString(token)}`,
+    `      COMPOSE_DIR: ${yamlString(composeDir)}`,
     ``,
     `volumes:`,
     `  sencho-agent-data:`,
@@ -170,6 +192,10 @@ nodesRouter.post('/', enrollmentLimiter, async (req: Request, res: Response) => 
     }
 
     const resolvedMode: 'proxy' | 'pilot_agent' = type === 'remote' && mode === 'pilot_agent' ? 'pilot_agent' : 'proxy';
+    const pilotComposeDir = resolvedMode === 'pilot_agent' ? normalizePilotComposeDir(compose_dir) : null;
+    if (resolvedMode === 'pilot_agent' && !pilotComposeDir) {
+      return res.status(400).json({ error: 'Pilot compose directory must be an absolute path' });
+    }
 
     if (type === 'remote' && resolvedMode === 'proxy') {
       if (!api_url || typeof api_url !== 'string') {
@@ -184,7 +210,7 @@ nodesRouter.post('/', enrollmentLimiter, async (req: Request, res: Response) => 
     const id = DatabaseService.getInstance().addNode({
       name,
       type,
-      compose_dir: compose_dir || '/app/compose',
+      compose_dir: pilotComposeDir ?? (compose_dir || DEFAULT_COMPOSE_DIR),
       is_default: is_default || false,
       api_url: resolvedMode === 'pilot_agent' ? '' : (api_url || ''),
       api_token: resolvedMode === 'pilot_agent' ? '' : (api_token || ''),
@@ -272,6 +298,14 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
     const existingNode = DatabaseService.getInstance().getNode(id);
     if (!existingNode) {
       return res.status(404).json({ error: 'Node not found' });
+    }
+
+    if (existingNode.mode === 'pilot_agent' && updates.compose_dir !== undefined) {
+      const composeDir = normalizePilotComposeDir(updates.compose_dir);
+      if (!composeDir) {
+        return res.status(400).json({ error: 'Pilot compose directory must be an absolute path' });
+      }
+      updates.compose_dir = composeDir;
     }
 
     if (updates.api_url !== undefined && updates.api_url !== '') {
