@@ -947,6 +947,52 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/stacks/{stackName}/label-inventory:
+    get:
+      operationId: getStackLabelInventory
+      tags: [Stacks]
+      summary: Get Docker label inventory for a stack
+      description: >-
+        Returns declared Compose labels and runtime container labels per service,
+        with reconciliation hints (only in Compose, only on running container,
+        present in both). Secret-like label values are redacted unless the caller
+        is an admin and passes `reveal=1`. Requires `stack:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+        - name: reveal
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['1', 'true']
+      responses:
+        "200":
+          description: Stack label inventory.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [stackName, renderable, services, generatedAt]
+                properties:
+                  stackName: { type: string }
+                  renderable: { type: boolean }
+                  generatedAt: { type: integer }
+                  services:
+                    type: array
+                    items:
+                      type: object
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Stack not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/stacks/{stackName}/env:
     get:
       operationId: getStackEnv

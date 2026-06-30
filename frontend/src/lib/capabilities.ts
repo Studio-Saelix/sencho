@@ -27,6 +27,7 @@ export const CAPABILITIES = [
   'update-guard',
   'compose-networking',
   'env-inventory',
+  'container-label-inventory',
   'project-env-files',
   'compose-storage',
   'cross-node-rbac',

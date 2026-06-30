@@ -9,6 +9,9 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
+import { buildNodeLabelInventory, type NodeLabelInventory } from '../services/LabelInventoryService';
+import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
+import { requirePermission } from '../middleware/permissions';
 
 // `docker system df` (the call backing estimateSystemReclaim) can take 30+
 // seconds on Docker Desktop with many volumes; 8s matches the MonitorService
@@ -215,6 +218,19 @@ systemMaintenanceRouter.get('/docker-df', async (req: Request, res: Response) =>
   } catch (error) {
     console.error('Failed to fetch docker disk usage:', error);
     res.status(500).json({ error: 'Failed to fetch docker disk usage' });
+  }
+});
+
+// Node-wide Docker/Compose label inventory for fleet fan-out and local audit.
+systemMaintenanceRouter.get('/container-labels', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'node:read')) return;
+  if (!requireRevealAdmin(req, res)) return;
+  try {
+    const inventory = await buildNodeLabelInventory(req.nodeId, labelInventoryOptionsFromRequest(req));
+    res.json(inventory);
+  } catch (error) {
+    console.error('Failed to build container label inventory:', error);
+    res.status(500).json({ error: 'Failed to build container label inventory' });
   }
 });
 

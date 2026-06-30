@@ -42,6 +42,7 @@ export type FleetTab =
   | 'snapshots'
   | 'configuration'
   | 'dependencies'
+  | 'container-labels'
   | 'deployments'
   | 'routing'
   | 'federation'
