@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Bell } from 'lucide-react';
+import { MastheadRail } from '@/components/ui/MastheadRail';
 import type { Stats, SystemStats, NotificationItem, HealthLevel } from './types';
 import { deriveHealth } from './deriveHealth';
 import { countVisibleUnread } from '@/lib/notificationVisibility';
@@ -15,24 +16,21 @@ interface HealthStatusBarProps {
   metricsStale?: boolean;
 }
 
-const healthConfig: Record<HealthLevel, { label: string; dotClass: string; textClass: string; railClass: string; tintClass: string }> = {
+const healthConfig: Record<HealthLevel, { label: string; textClass: string; railClass: string; tintClass: string }> = {
   healthy: {
     label: 'Healthy',
-    dotClass: 'bg-success shadow-[0_0_0_3px_color-mix(in_oklch,var(--success)_20%,transparent)]',
     textClass: 'text-stat-value',
     railClass: 'bg-brand',
     tintClass: 'from-brand/[0.06] via-transparent to-transparent',
   },
   degraded: {
     label: 'Degraded',
-    dotClass: 'bg-warning shadow-[0_0_0_3px_color-mix(in_oklch,var(--warning)_22%,transparent)]',
     textClass: 'text-warning',
     railClass: 'bg-warning',
     tintClass: 'from-warning/[0.06] via-transparent to-transparent',
   },
   critical: {
     label: 'Critical',
-    dotClass: 'bg-destructive shadow-[0_0_0_3px_color-mix(in_oklch,var(--destructive)_24%,transparent)]',
     textClass: 'text-destructive',
     railClass: 'bg-destructive',
     tintClass: 'from-destructive/[0.06] via-transparent to-transparent',
@@ -92,14 +90,10 @@ export function HealthStatusBar({
       className={`relative overflow-hidden rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel transition-colors`}
     >
       <div className={`pointer-events-none absolute inset-0 bg-gradient-to-r ${config.tintClass}`} />
-      <div className={`absolute inset-y-0 left-0 w-[3px] ${config.railClass}`} />
+      <MastheadRail variant={level === 'healthy' ? 'shimmer' : 'glow'} className={config.railClass} />
       <div className="relative grid grid-cols-[auto_1fr_auto] items-center gap-6 py-5 pl-7 pr-6">
         {/* State column */}
         <div className="flex items-center gap-4">
-          <span
-            aria-hidden="true"
-            className={`h-2.5 w-2.5 rounded-full ${config.dotClass} ${level === 'healthy' ? '' : 'animate-[pulse_2.4s_ease-in-out_infinite]'}`}
-          />
           <div className="flex flex-col gap-1">
             <span className={`font-heading text-3xl leading-none tracking-tight ${config.textClass}`}>
               {config.label}
