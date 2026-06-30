@@ -9,7 +9,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
-import { buildNodeLabelInventory, type NodeLabelInventory } from '../services/LabelInventoryService';
+import { buildNodeLabelInventory } from '../services/LabelInventoryService';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
 import { requirePermission } from '../middleware/permissions';
 

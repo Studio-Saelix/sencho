@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import ComposeLabelsPanel from '../ComposeLabelsPanel';
 import { LABEL_DISAMBIGUATION_COPY } from '@/lib/labelInventory';
 
