@@ -195,7 +195,7 @@ jobs:
 
       - name: Comment on pull request with pull instructions
         continue-on-error: true
-        uses: actions/github-script@ed597411d8f9240738b6aec6e6bc2f24db7bbd28 # v8.0.0
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
