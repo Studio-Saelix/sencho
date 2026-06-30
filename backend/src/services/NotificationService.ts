@@ -192,8 +192,12 @@ export class NotificationService {
             }
 
             const suppressionRules = this.dbService.getEnabledNotificationSuppressionRules();
-            const needsSuppressionLabels = stackName !== undefined && ruleNeedsStackLabels(suppressionRules);
-            const suppressionLabelIds = needsSuppressionLabels
+            const routes = this.dbService.getEnabledNotificationRoutes();
+            const needsStackLabels = stackName !== undefined && (
+                ruleNeedsStackLabels(suppressionRules)
+                || routes.some((r) => r.label_ids != null && r.label_ids.length > 0)
+            );
+            const stackLabelIds = needsStackLabels
                 ? this.dbService.getStackLabelIds(localNodeId, stackName!)
                 : [];
             const matchCtx = {
@@ -201,7 +205,7 @@ export class NotificationService {
                 stackName,
                 category,
                 level,
-                stackLabelIds: suppressionLabelIds,
+                stackLabelIds,
             };
             const matchedSuppression = suppressionRules.filter((r) => matchesNotificationFilters(matchCtx, r));
             const suppressBell = matchedSuppression.some((r) => appliesToBell(r.applies_to));
@@ -222,10 +226,6 @@ export class NotificationService {
 
             // 3. Check notification routing rules — always evaluated, matchers compose AND
             const errors: string[] = [];
-
-            const routes = this.dbService.getEnabledNotificationRoutes();
-            const needsLabels = stackName !== undefined && routes.some(r => r.label_ids != null && r.label_ids.length > 0);
-            const stackLabelIds = needsLabels ? this.dbService.getStackLabelIds(localNodeId, stackName!) : [];
 
             const matched = routes.filter(r => matchesNotificationFilters(matchCtx, r));
             if (matched.length > 0) {

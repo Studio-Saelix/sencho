@@ -8,12 +8,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const {
   mockGetEnabledNotificationRoutes,
+  mockGetEnabledNotificationSuppressionRules,
   mockGetEnabledAgents,
   mockGetStackLabelIds,
   mockAddNotificationHistory,
   mockUpdateNotificationDispatchError,
 } = vi.hoisted(() => ({
   mockGetEnabledNotificationRoutes: vi.fn().mockReturnValue([]),
+  mockGetEnabledNotificationSuppressionRules: vi.fn().mockReturnValue([]),
   mockGetEnabledAgents: vi.fn().mockReturnValue([]),
   mockGetStackLabelIds: vi.fn().mockReturnValue([]),
   mockAddNotificationHistory: vi.fn().mockReturnValue({
@@ -30,6 +32,7 @@ vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
     getInstance: () => ({
       getEnabledNotificationRoutes: mockGetEnabledNotificationRoutes,
+      getEnabledNotificationSuppressionRules: mockGetEnabledNotificationSuppressionRules,
       getEnabledAgents: mockGetEnabledAgents,
       getStackLabelIds: mockGetStackLabelIds,
       addNotificationHistory: mockAddNotificationHistory,
