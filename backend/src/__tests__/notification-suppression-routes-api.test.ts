@@ -105,6 +105,45 @@ describe('Notification suppression - CRUD', () => {
     expect(res.status).toBe(400);
   });
 
+  it('POST accepts history-only category update_started (bell-visible)', async () => {
+    const res = await request(app)
+      .post('/api/notification-suppression-rules')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'Mute stack updates',
+        stack_patterns: [],
+        categories: ['update_started'],
+        levels: null,
+        applies_to: 'both',
+        enabled: true,
+        expires_at: null,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.categories).toEqual(['update_started']);
+    if (typeof res.body?.id === 'number') {
+      DatabaseService.getInstance().deleteNotificationSuppressionRule(res.body.id);
+    }
+  });
+
+  it('POST accepts routable category image_update_available', async () => {
+    const res = await request(app)
+      .post('/api/notification-suppression-rules')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'Mute image updates',
+        stack_patterns: [],
+        categories: ['image_update_available'],
+        levels: null,
+        applies_to: 'both',
+        enabled: true,
+        expires_at: null,
+      });
+    expect(res.status).toBe(201);
+    if (typeof res.body?.id === 'number') {
+      DatabaseService.getInstance().deleteNotificationSuppressionRule(res.body.id);
+    }
+  });
+
   it('PUT updates a rule', async () => {
     const created = await request(app)
       .post('/api/notification-suppression-rules')

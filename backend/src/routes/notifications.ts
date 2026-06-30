@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService, type NotificationSuppressionAppliesTo, type NotificationSuppressionRule } from '../services/DatabaseService';
-import { NotificationService, ALL_NOTIFICATION_CATEGORIES } from '../services/NotificationService';
+import { NotificationService, ALL_NOTIFICATION_CATEGORIES, ALL_SUPPRESSIBLE_CATEGORIES } from '../services/NotificationService';
 import type { NotificationCategory } from '../services/NotificationService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { authMiddleware } from '../middleware/auth';
@@ -21,6 +21,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { parseIntParam } from '../utils/parseIntParam';
 
 const VALID_CATEGORIES: ReadonlySet<NotificationCategory> = new Set(ALL_NOTIFICATION_CATEGORIES);
+const VALID_SUPPRESSION_CATEGORIES: ReadonlySet<NotificationCategory> = new Set(ALL_SUPPRESSIBLE_CATEGORIES);
 const VALID_LEVELS = new Set(['info', 'warning', 'error']);
 const VALID_APPLIES_TO = new Set<NotificationSuppressionAppliesTo>(['bell', 'external', 'both']);
 
@@ -47,9 +48,13 @@ function validateLabelIds(label_ids: unknown, res: Response): boolean {
   return true;
 }
 
-function validateCategories(categories: unknown, res: Response): boolean {
+function validateCategories(
+  categories: unknown,
+  res: Response,
+  allowed: ReadonlySet<NotificationCategory> = VALID_CATEGORIES,
+): boolean {
   if (categories === undefined || categories === null) return true;
-  if (!Array.isArray(categories) || categories.some((c: unknown) => typeof c !== 'string' || !VALID_CATEGORIES.has(c as NotificationCategory))) {
+  if (!Array.isArray(categories) || categories.some((c: unknown) => typeof c !== 'string' || !allowed.has(c as NotificationCategory))) {
     res.status(400).json({ error: 'categories must be an array of valid category names' });
     return false;
   }
@@ -144,7 +149,7 @@ function parseSuppressionRuleBody(
   }
 
   if (!validateLabelIds(label_ids, res)) return null;
-  if (!validateCategories(categories, res)) return null;
+  if (!validateCategories(categories, res, VALID_SUPPRESSION_CATEGORIES)) return null;
   if (!validateLevels(levels, res)) return null;
 
   const appliesToResult = isCreate
@@ -532,7 +537,7 @@ notificationSuppressionRouter.put('/:id', authMiddleware, (req: Request, res: Re
     }
 
     if (!validateLabelIds(label_ids, res)) return;
-    if (!validateCategories(categories, res)) return;
+    if (!validateCategories(categories, res, VALID_SUPPRESSION_CATEGORIES)) return;
     if (!validateLevels(levels, res)) return;
 
     let validatedAppliesTo: NotificationSuppressionAppliesTo | undefined;

@@ -50,6 +50,13 @@ export const ALL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [
     'node_update_available', 'system',
 ];
 
+/** Every category that can appear in notification history / the bell panel. */
+export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
+    ...ALL_NOTIFICATION_CATEGORIES,
+    'drift_detected', 'drift_resolved',
+    'update_started', 'health_gate_passed', 'health_gate_failed',
+];
+
 /** Webhook timeout: 10 seconds per external dispatch call. */
 const WEBHOOK_TIMEOUT_MS = 10_000;
 
