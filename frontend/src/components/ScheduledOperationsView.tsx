@@ -46,6 +46,18 @@ const DEFAULT_SIMPLE_SCHEDULE: SimpleSchedule = {
 const TIMELINE_WINDOW_HOURS = 24;
 const TIMELINE_WINDOW_MS = TIMELINE_WINDOW_HOURS * 60 * 60 * 1000;
 
+interface ContainerListItem {
+  Id: string;
+  Names?: string[];
+  State?: string;
+  Image?: string;
+  Labels?: Record<string, string>;
+}
+
+function containerDisplayName(c: ContainerListItem): string {
+  return c.Names?.[0]?.replace(/^\//, '') || c.Id.slice(0, 12);
+}
+
 function formatHourTick(ts: number): string {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -106,8 +118,9 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const [runsTotal, setRunsTotal] = useState(0);
   const runsLimit = 20;
 
-  // Available stacks and nodes for selection
+  // Available stacks, containers, and nodes for selection
   const [stacks, setStacks] = useState<string[]>([]);
+  const [containers, setContainers] = useState<ContainerListItem[]>([]);
   const [nodes, setNodes] = useState<NodeOption[]>([]);
 
   const filteredTasks = filterNodeId != null
@@ -143,6 +156,19 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       }
     } catch {
       // Non-critical
+    }
+  }, []);
+
+  const fetchContainers = useCallback(async (nodeId: string) => {
+    try {
+      const res = await fetchForNode('/containers?all=true', parseInt(nodeId, 10));
+      if (res.ok) {
+        setContainers(await res.json());
+      } else {
+        setContainers([]);
+      }
+    } catch {
+      setContainers([]);
     }
   }, []);
 
@@ -202,17 +228,20 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     return () => { cancelled = true; };
   }, [formAction, formTargetId, formNodeId]);
 
-  // Re-fetch stacks when the node changes. Clearing a stale stack selection is
-  // done in the Node picker's onValueChange (a user-driven change), not here, so
-  // a prefilled or edited node keeps its stack instead of being wiped on open.
   useEffect(() => {
     if (!dialogOpen) return;
-    if (formNodeId) {
+    const actionDef = getActionById(formAction);
+    if (actionDef?.requiresContainer && formNodeId) {
+      fetchContainers(formNodeId);
       fetchStacks(formNodeId);
+    } else if (formNodeId) {
+      fetchStacks(formNodeId);
+      setContainers([]);
     } else {
       setStacks([]);
+      setContainers([]);
     }
-  }, [formNodeId, dialogOpen, fetchStacks]);
+  }, [formNodeId, formAction, dialogOpen, fetchStacks, fetchContainers]);
 
   const openCreate = (prefillData?: { stackName: string; nodeId: string }) => {
     const nodeId = prefillData?.nodeId ?? (filterNodeId != null ? String(filterNodeId) : '');
@@ -299,7 +328,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       enabled: formEnabled,
       delete_after_run: formDeleteAfterRun,
       run_at: runAt,
-      target_id: actionDef.requiresStack ? formTargetId : null,
+      target_id: (actionDef.requiresStack || actionDef.requiresContainer) ? formTargetId : null,
       node_id: actionDef.requiresNode && formNodeId ? parseInt(formNodeId, 10) : null,
       prune_targets: formAction === 'prune' && formPruneTargets.length > 0 ? formPruneTargets : null,
       target_services: actionDef.supportsServiceSelection && formTargetServices.length > 0 ? formTargetServices : null,
@@ -453,13 +482,31 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     [nodes],
   );
   const currentNodeOptions = currentAction?.nodeScope === 'local' ? localNodeOptions : nodeOptions;
+  const containerOptions = useMemo(
+    () => containers.map(c => {
+      const name = containerDisplayName(c);
+      const state = c.State ?? 'unknown';
+      const image = (c.Image ?? '').split('@')[0];
+      return { value: name, label: `${name} · ${state} · ${image}` };
+    }),
+    [containers],
+  );
+  const selectedContainer = useMemo(
+    () => containers.find(c => containerDisplayName(c) === formTargetId),
+    [containers, formTargetId],
+  );
+  const selectedContainerStack = selectedContainer?.Labels?.['com.docker.compose.project'];
+  const isUnmanagedContainer = !!selectedContainer && (
+    !selectedContainerStack || !stacks.includes(selectedContainerStack)
+  );
   const scheduleInvalid = scheduleMode === 'simple'
     ? !!simpleCronError
     : (!formCron || !!cronFieldError);
   const isSaveDisabled =
     saving || !currentAction || !formName || scheduleInvalid
     || (!!currentAction?.requiresStack && (!formTargetId || !formNodeId))
-    || (!!currentAction?.requiresNode && !currentAction.requiresStack && !formNodeId)
+    || (!!currentAction?.requiresContainer && (!formTargetId || !formNodeId))
+    || (!!currentAction?.requiresNode && !currentAction.requiresStack && !currentAction.requiresContainer && !formNodeId)
     || (formAction === 'prune' && formPruneTargets.length === 0);
 
   const windowEnd = now + TIMELINE_WINDOW_MS;
@@ -699,6 +746,8 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                         ? task.target_services
                           ? `${task.target_id} (${(JSON.parse(task.target_services) as string[]).join(', ')})`
                           : task.target_id
+                        : task.target_type === 'container'
+                          ? task.target_id
                         : task.action === 'update'
                           ? 'All eligible stacks'
                           : task.target_type}
@@ -799,6 +848,40 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
               )}
             </div>
 
+            {currentAction?.requiresContainer && (
+              <>
+                <div className="space-y-2">
+                  <Label>Node</Label>
+                  <Combobox
+                    options={nodeOptions}
+                    value={formNodeId}
+                    onValueChange={(val) => { setFormNodeId(val); setFormTargetId(''); }}
+                    placeholder="Select node..."
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Container</Label>
+                  <Combobox
+                    options={containerOptions}
+                    value={formTargetId}
+                    onValueChange={setFormTargetId}
+                    placeholder={formNodeId ? 'Select container...' : 'Select a node first'}
+                    disabled={!formNodeId}
+                  />
+                </div>
+                {isUnmanagedContainer && (
+                  <p className="text-xs text-muted-foreground">
+                    This container is not associated with a Sencho stack. The schedule will target the container by node and name.
+                  </p>
+                )}
+                {selectedContainerStack && stacks.includes(selectedContainerStack) && (
+                  <p className="text-xs text-muted-foreground">
+                    Part of stack: {selectedContainerStack}
+                  </p>
+                )}
+              </>
+            )}
+
             {currentAction?.requiresStack && (
               <>
                 <div className="space-y-2">
@@ -853,7 +936,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
               </div>
             )}
 
-            {currentAction?.requiresNode && !currentAction.requiresStack && (
+            {currentAction?.requiresNode && !currentAction.requiresStack && !currentAction.requiresContainer && (
               <div className="space-y-2">
                 <Label>Node</Label>
                 <Combobox

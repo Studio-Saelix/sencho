@@ -536,7 +536,7 @@ export interface ApiToken {
 export interface ScheduledTask {
     id: number;
     name: string;
-    target_type: 'stack' | 'fleet' | 'system';
+    target_type: 'stack' | 'fleet' | 'system' | 'container';
     target_id: string | null;
     node_id: number | null;
     action: BackendScheduledAction;

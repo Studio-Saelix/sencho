@@ -424,6 +424,9 @@ export class SchedulerService {
     }
 
     private async executeRestart(task: ScheduledTask): Promise<string> {
+        if (task.target_type === 'container') {
+            return this.executeContainerRestart(task);
+        }
         if (!task.target_id || task.node_id == null) {
             throw new Error('Stack restart requires target_id and node_id');
         }
@@ -507,6 +510,9 @@ export class SchedulerService {
     }
 
     private async executeAutoStop(task: ScheduledTask): Promise<string> {
+        if (task.target_type === 'container') {
+            return this.executeContainerStop(task);
+        }
         this.assertStackTarget(task, 'Auto-stop');
         if (this.isRemoteNode(task.node_id)) {
             await this.postToRemoteStack(task.node_id, `${encodeURIComponent(task.target_id)}/stop`);
@@ -537,6 +543,9 @@ export class SchedulerService {
     }
 
     private async executeAutoStart(task: ScheduledTask): Promise<string> {
+        if (task.target_type === 'container') {
+            return this.executeContainerStart(task);
+        }
         this.assertStackTarget(task, 'Auto-start');
         // Remote auto-start proxies to the remote's own deploy route, which runs
         // that node's scan-policy gate against the images it actually holds. The
@@ -802,6 +811,120 @@ export class SchedulerService {
      * `routeSuffix` is the path under `/api/stacks/`; the caller URL-encodes each
      * segment.
      */
+    private containerNotFoundMessage(containerName: string, nodeId: number): string {
+        const nodeName = NodeRegistry.getInstance().getNode(nodeId)?.name ?? String(nodeId);
+        return `Container "${containerName}" not found on node "${nodeName}". It may have been renamed or removed.`;
+    }
+
+    private async resolveContainerId(task: ScheduledTask): Promise<{ id: string; name: string }> {
+        if (!task.target_id || task.node_id == null) {
+            throw new Error('Container operations require target_id and node_id');
+        }
+        const name = task.target_id;
+        if (this.isRemoteNode(task.node_id)) {
+            const containers = await this.getRemoteContainers(task.node_id);
+            const match = containers.find(
+                c => c.Names?.[0]?.replace(/^\//, '') === name,
+            );
+            if (!match) throw new Error(this.containerNotFoundMessage(name, task.node_id));
+            return { id: match.Id, name };
+        }
+        const found = await DockerController.getInstance(task.node_id).findContainerByName(name);
+        if (!found) throw new Error(this.containerNotFoundMessage(name, task.node_id));
+        return { id: found.id, name: found.name };
+    }
+
+    private async executeContainerRestart(task: ScheduledTask): Promise<string> {
+        const { id, name } = await this.resolveContainerId(task);
+        const nodeId = task.node_id!;
+        if (this.isRemoteNode(nodeId)) {
+            await this.postToRemoteContainer(nodeId, id, 'restart');
+        } else {
+            await DockerController.getInstance(nodeId).restartContainer(id);
+        }
+        const nodeName = NodeRegistry.getInstance().getNode(nodeId)?.name ?? String(nodeId);
+        return `Restarted container "${name}" (id ${id.slice(0, 12)}) on node "${nodeName}"`;
+    }
+
+    private async executeContainerStop(task: ScheduledTask): Promise<string> {
+        const { id, name } = await this.resolveContainerId(task);
+        const nodeId = task.node_id!;
+        if (this.isRemoteNode(nodeId)) {
+            await this.postToRemoteContainer(nodeId, id, 'stop');
+        } else {
+            await DockerController.getInstance(nodeId).stopContainer(id);
+        }
+        const nodeName = NodeRegistry.getInstance().getNode(nodeId)?.name ?? String(nodeId);
+        return `Stopped container "${name}" (id ${id.slice(0, 12)}) on node "${nodeName}"`;
+    }
+
+    private async executeContainerStart(task: ScheduledTask): Promise<string> {
+        const { id, name } = await this.resolveContainerId(task);
+        const nodeId = task.node_id!;
+        if (this.isRemoteNode(nodeId)) {
+            await this.postToRemoteContainer(nodeId, id, 'start');
+        } else {
+            await DockerController.getInstance(nodeId).startContainer(id);
+        }
+        const nodeName = NodeRegistry.getInstance().getNode(nodeId)?.name ?? String(nodeId);
+        return `Started container "${name}" (id ${id.slice(0, 12)}) on node "${nodeName}"`;
+    }
+
+    private async getRemoteContainers(nodeId: number): Promise<Array<{
+        Id: string;
+        Names?: string[];
+        State?: string;
+        Image?: string;
+    }>> {
+        const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
+        if (!proxyTarget) {
+            throw new Error('Remote node is not configured or missing API credentials');
+        }
+        const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
+        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+        const response = await fetch(`${baseUrl}/api/containers?all=true`, {
+            headers: {
+                'Authorization': `Bearer ${proxyTarget.apiToken}`,
+                [PROXY_TIER_HEADER]: proxyHeaders.tier,
+            },
+            signal: AbortSignal.timeout(60_000),
+        });
+        if (!response.ok) {
+            const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+            throw new Error((body as { error?: string }).error || `Remote node returned ${response.status}`);
+        }
+        return response.json() as Promise<Array<{ Id: string; Names?: string[]; State?: string; Image?: string }>>;
+    }
+
+    private async postToRemoteContainer(
+        nodeId: number,
+        containerId: string,
+        action: 'start' | 'stop' | 'restart',
+    ): Promise<void> {
+        const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
+        if (!proxyTarget) {
+            throw new Error('Remote node is not configured or missing API credentials');
+        }
+        const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
+        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+        const response = await fetch(
+            `${baseUrl}/api/containers/${encodeURIComponent(containerId)}/${action}`,
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${proxyTarget.apiToken}`,
+                    [PROXY_TIER_HEADER]: proxyHeaders.tier,
+                },
+                signal: AbortSignal.timeout(300_000),
+            },
+        );
+        if (!response.ok) {
+            const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+            throw new Error((body as { error?: string }).error || `Remote node returned ${response.status}`);
+        }
+    }
+
     private async postToRemoteStack(nodeId: number, routeSuffix: string): Promise<void> {
         const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
         if (!proxyTarget) {

@@ -14,7 +14,8 @@ const {
   mockCreateSnapshot, mockInsertSnapshotFiles, mockClearStackUpdateStatus,
   mockMarkStaleRunsAsFailed, mockDeleteOldScans,
   mockGetTier, mockGetProxyHeaders,
-  mockGetContainersByStack, mockRestartContainer, mockPruneSystem,
+  mockGetContainersByStack, mockRestartContainer, mockFindContainerByName,
+  mockStartContainer, mockStopContainer, mockPruneSystem,
   mockUpdateStack,
   mockGetStacks, mockGetStackContent, mockGetEnvContent,
   mockCheckImage,
@@ -48,6 +49,9 @@ const {
   mockGetProxyHeaders: vi.fn().mockReturnValue({ tier: 'paid' }),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
   mockRestartContainer: vi.fn().mockResolvedValue(undefined),
+  mockFindContainerByName: vi.fn().mockResolvedValue(null),
+  mockStartContainer: vi.fn().mockResolvedValue(undefined),
+  mockStopContainer: vi.fn().mockResolvedValue(undefined),
   mockPruneSystem: vi.fn().mockResolvedValue({ success: true, reclaimedBytes: 0 }),
   mockUpdateStack: vi.fn().mockResolvedValue(undefined),
   mockGetStacks: vi.fn().mockResolvedValue([]),
@@ -117,6 +121,9 @@ vi.mock('../services/DockerController', () => ({
     getInstance: () => ({
       getContainersByStack: mockGetContainersByStack,
       restartContainer: mockRestartContainer,
+      findContainerByName: mockFindContainerByName,
+      startContainer: mockStartContainer,
+      stopContainer: mockStopContainer,
       pruneSystem: mockPruneSystem,
     }),
   },
@@ -529,6 +536,105 @@ describe('SchedulerService - executeRestart', () => {
       expect.any(Number),
       expect.objectContaining({ status: 'failure', error: expect.stringContaining('No containers') })
     );
+  });
+
+  it('restarts a standalone container by name', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 63,
+      name: 'restart-ctr',
+      action: 'restart',
+      target_type: 'container',
+      cron_expression: '0 3 * * *',
+      enabled: true,
+      target_id: 'watchtower',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockFindContainerByName.mockResolvedValue({
+      id: 'abc123deadbeef',
+      name: 'watchtower',
+      state: 'running',
+      image: 'containrrr/watchtower',
+      stackProject: null,
+    });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(63);
+
+    expect(mockFindContainerByName).toHaveBeenCalledWith('watchtower');
+    expect(mockRestartContainer).toHaveBeenCalledWith('abc123deadbeef');
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({
+        status: 'success',
+        output: expect.stringContaining('watchtower'),
+      }),
+    );
+  });
+
+  it('records failure when container name is missing', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 64,
+      name: 'restart-missing',
+      action: 'restart',
+      target_type: 'container',
+      cron_expression: '0 3 * * *',
+      enabled: true,
+      target_id: 'gone-container',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockFindContainerByName.mockResolvedValue(null);
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(64);
+
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({
+        status: 'failure',
+        error: expect.stringContaining('gone-container'),
+      }),
+    );
+  });
+
+  it('resolves a new container ID when the name matches after recreation', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 65,
+      name: 'restart-recreated',
+      action: 'restart',
+      target_type: 'container',
+      cron_expression: '0 3 * * *',
+      enabled: true,
+      target_id: 'sidecar',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockFindContainerByName
+      .mockResolvedValueOnce({
+        id: 'old-id-111',
+        name: 'sidecar',
+        state: 'running',
+        image: 'sidecar:latest',
+        stackProject: null,
+      })
+      .mockResolvedValueOnce({
+        id: 'new-id-222',
+        name: 'sidecar',
+        state: 'running',
+        image: 'sidecar:latest',
+        stackProject: null,
+      });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(65);
+    await svc.triggerTask(65);
+
+    expect(mockRestartContainer).toHaveBeenNthCalledWith(1, 'old-id-111');
+    expect(mockRestartContainer).toHaveBeenNthCalledWith(2, 'new-id-222');
   });
 });
 

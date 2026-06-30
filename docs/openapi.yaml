@@ -386,13 +386,13 @@ components:
           type: string
         target_type:
           type: string
-          enum: [stack, fleet, system]
+          enum: [stack, fleet, system, container]
         target_id:
           type: ["string", "null"]
-          description: Stack name (when target_type is `stack`).
+          description: Stack or container name (when target_type is `stack` or `container`).
         node_id:
           type: ["integer", "null"]
-          description: Target node ID (when target_type is `stack`).
+          description: Target node ID (when target_type is `stack` or `container`).
         action:
           type: string
           enum: [restart, snapshot, prune]
@@ -2717,7 +2717,8 @@ paths:
       summary: Create scheduled task
       description: |
         Creates a new recurring task. Action-target rules:
-        - `restart` requires `target_type: stack` (with `target_id` and `node_id`)
+        - `restart` requires `target_type: stack` or `target_type: container` (with `target_id` and `node_id`)
+        - `auto_stop` and `auto_start` accept `target_type: stack` or `target_type: container`
         - `snapshot` requires `target_type: fleet`
         - `prune` requires `target_type: system`
 
@@ -2735,13 +2736,13 @@ paths:
                   example: Nightly restart
                 target_type:
                   type: string
-                  enum: [stack, fleet, system]
+                  enum: [stack, fleet, system, container]
                 target_id:
                   type: string
-                  description: Stack name (required when target_type is `stack`).
+                  description: Stack or container name (required when target_type is `stack` or `container`).
                 node_id:
                   type: integer
-                  description: Target node ID (required when target_type is `stack`).
+                  description: Target node ID (required when target_type is `stack` or `container`).
                 action:
                   type: string
                   enum: [restart, snapshot, prune]
@@ -2828,9 +2829,10 @@ paths:
                   type: string
                 target_type:
                   type: string
-                  enum: [stack, fleet, system]
+                  enum: [stack, fleet, system, container]
                 target_id:
                   type: string
+                  description: Stack or container name when target_type is `stack` or `container`.
                 node_id:
                   type: integer
                 action:

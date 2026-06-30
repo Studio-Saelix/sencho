@@ -341,7 +341,7 @@ describe('ScheduledOperationsView', () => {
   it('renders the five registry category lanes in the timeline view', async () => {
     render(<ScheduledOperationsView />);
     // Timeline is the default view; the lane track always renders.
-    for (const lane of ['Stack lifecycle', 'Updates', 'Security', 'Maintenance', 'Backups']) {
+    for (const lane of ['Lifecycle', 'Updates', 'Security', 'Maintenance', 'Backups']) {
       expect(await screen.findByText(lane)).toBeInTheDocument();
     }
   });
@@ -425,6 +425,54 @@ describe('ScheduledOperationsView', () => {
     await selectAction('Prune Node Resources');
     expect(screen.getByText('Prune Targets')).toBeInTheDocument();
     expect(screen.getByText('Node')).toBeInTheDocument();
+
+    // Container action: Node + Container, no Stack.
+    await selectAction('Restart Container');
+    expect(screen.getByText('Node')).toBeInTheDocument();
+    expect(screen.getByText('Container')).toBeInTheDocument();
+    expect(screen.queryByText('Stack')).not.toBeInTheDocument();
+  });
+
+  it('emits container target payload for a container restart save', async () => {
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url === '/stacks') return jsonResponse(['web']);
+      if (url.startsWith('/containers')) {
+        return jsonResponse([
+          { Id: 'abc', Names: ['/watchtower'], State: 'running', Image: 'containrrr/watchtower' },
+        ]);
+      }
+      return jsonResponse([]);
+    });
+
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.type(await screen.findByPlaceholderText('e.g. Nightly stack restart'), 'daily-watchtower');
+
+    await userEvent.click(screen.getAllByRole('combobox')[0]);
+    await userEvent.click(await screen.findByRole('button', { name: 'Restart Container' }));
+
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'hub' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: /watchtower/ }));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => {
+      const postCall = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/scheduled-tasks' && opts?.method === 'POST',
+      );
+      expect(postCall).toBeTruthy();
+      const body = JSON.parse(postCall![1].body);
+      expect(body).toMatchObject({
+        name: 'daily-watchtower',
+        target_type: 'container',
+        action: 'restart',
+        target_id: 'watchtower',
+        node_id: 1,
+      });
+    });
   });
 
   it('emits node_id and target_id for a stack update save', async () => {
