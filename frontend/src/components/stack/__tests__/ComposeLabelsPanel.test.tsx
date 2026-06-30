@@ -51,7 +51,7 @@ describe('ComposeLabelsPanel', () => {
     render(<ComposeLabelsPanel stackName="demo" />);
     expect(await screen.findByText(LABEL_DISAMBIGUATION_COPY)).toBeInTheDocument();
     expect(await screen.findByText('web')).toBeInTheDocument();
-    expect(await screen.findByText('traefik.enable')).toBeInTheDocument();
+    expect(screen.getAllByText('traefik.enable')).toHaveLength(2);
     expect(screen.getByTestId('mismatch-only-container')).toBeInTheDocument();
     expect(screen.getByTestId('mismatch-both')).toBeInTheDocument();
   });
