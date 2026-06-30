@@ -101,6 +101,36 @@ Three icon actions appear on the right edge of each card:
 
 The masthead carries `SCOPE` (`global`), `ROUTES` (total), and `ENABLED` (count).
 
+## Suppression rules
+
+<Note>
+  Admin role is required to create, edit, or delete suppression rules.
+</Note>
+
+Suppression rules **hide or drop** matching alerts. They do not send alerts elsewhere. Routing and suppression are separate: a rule can match the same alert as a route, but suppression is evaluated first and can block bell delivery, external channels, or both.
+
+Open **Settings · Notifications · Suppression Rules** and click **+ Add suppression rule**.
+
+| Field | Purpose |
+|-------|---------|
+| **Name** | A human label, up to 100 characters. |
+| **Node scope** | `Any node` or a specific fleet node. Limits which node emits the alert before the rule can match. |
+| **Stacks** *(optional)* | Stack names. Empty matches any stack. |
+| **Labels** *(optional)* | Stack labels. Empty matches any label. |
+| **Categories** *(optional)* | Notification categories. Empty matches any category. |
+| **Severity** *(optional)* | One or more of info, warning, or error. Empty matches any severity. |
+| **Apply to** | **Bell**, **External**, or **Both**. Bell skips the notification popover WebSocket push. External skips routing rules and global channels. |
+| **Expiration** | Forever, 1 hour, 24 hours, or a custom date. Expired rules stop matching automatically. |
+| **Enabled** | Toggle the rule without deleting it. |
+
+All non-empty matchers must match (AND). Suppressed alerts are still written to stack activity history; only delivery is affected.
+
+Rules you create on the control instance replicate to remote nodes so alerts emitted on a remote stack honor the same suppression. From the bell, admins can open a row menu and choose **Mute this category**, **Mute notifications like this**, or **Mute this stack** to create a quick rule with default **Both** targeting.
+
+### Built-in bell quieting (not a suppression rule)
+
+Sencho also hides one class of notification from the popover without a user rule: rows where the category is one of `deploy_success`, `stack_started`, `stack_stopped`, `stack_restarted`, or `image_update_applied`, and the row carries an `actor_username` other than `system`. These are confirmations of an action you just clicked. The rows are still persisted and still dispatched externally; only the bell render hides them. Use suppression rules when you need configurable, operator-controlled muting.
+
 ## Notification categories
 
 Every alert Sencho dispatches carries a category that you can filter on in the bell, target with a routing rule's **Categories** matcher, or reason about when reading audit history.

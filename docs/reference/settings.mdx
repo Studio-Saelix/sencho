@@ -419,6 +419,32 @@ See [Notification Routing](/features/alerts-notifications#notification-routing) 
 
 ---
 
+## Suppression Rules
+
+<Note>
+  Creating, editing, and deleting suppression rules is admin-only.
+</Note>
+
+**Scope:** Global, admin-only
+
+Create rules that mute or drop matching alerts from the bell, external channels, or both. Suppression is evaluated before routing. The masthead publishes **RULES** and **ACTIVE** counts.
+
+| Field | Description |
+|-------|-------------|
+| **Name** | Operator-facing label for the rule. |
+| **Node** | Specific node, or all nodes if left empty. |
+| **Stack patterns** | Stack names to match (multi-select). |
+| **Labels** | Match stacks that carry any selected label. |
+| **Categories** | Notification categories to suppress. |
+| **Severity** | Info, warning, and/or error levels to suppress. |
+| **Apply to** | Bell only, external channels only, or both. |
+| **Expiration** | Forever, 1 hour, 24 hours, or a custom timestamp. |
+| **Enabled** toggle | Disable a rule without deleting it. |
+
+See [Suppression rules](/features/alerts-notifications#suppression-rules) for the full walkthrough and bell shortcuts.
+
+---
+
 ## Image update checks
 
 **Scope:** Per-node (applies to the currently selected node)

@@ -9,6 +9,7 @@ import {
     Trash2,
     SlidersHorizontal,
     CheckCheck,
+    MoreHorizontal,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -22,10 +23,19 @@ import {
     SelectValue,
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
-import type { NotificationCategory, NotificationItem } from './dashboard/types';
-import type { Node } from '@/context/NodeContext';
+import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
+import { useAuth } from '@/context/AuthContext';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { CATEGORY_LABELS } from '@/lib/notificationCategories';
 import { countVisibleUnread, filterPanelVisible } from '@/lib/notificationVisibility';
+import type { NotificationCategory, NotificationItem } from './dashboard/types';
+import type { Node } from '@/context/NodeContext';
 
 const NODE_FILTER_ALL = 'all' as const;
 const CATEGORY_FILTER_ALL = 'all' as const;
@@ -128,6 +138,7 @@ export function NotificationPanel({
     onNavigate,
     onNavigateChangelog,
 }: NotificationPanelProps) {
+    const { isAdmin } = useAuth();
     const [filter, setFilter] = useState<NotifFilter>('all');
     const [nodeFilter, setNodeFilter] = useState<NodeFilter>(NODE_FILTER_ALL);
     const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>(CATEGORY_FILTER_ALL);
@@ -369,6 +380,7 @@ export function NotificationPanel({
                                         onDelete={onDelete}
                                         onNavigate={onNavigate ? handleNavigate : undefined}
                                         onNavigateChangelog={onNavigateChangelog}
+                                        canMute={isAdmin}
                                     />
                                 ))}
                             </div>
@@ -386,9 +398,58 @@ interface NotificationRowProps {
     onDelete: (notif: NotificationItem) => void;
     onNavigate?: (notif: NotificationItem) => void;
     onNavigateChangelog?: (notif: NotificationItem) => void;
+    canMute?: boolean;
 }
 
-function NotificationRow({ notif, showNodeName, onDelete, onNavigate, onNavigateChangelog }: NotificationRowProps) {
+async function createQuickSuppressionRule(
+    notif: NotificationItem,
+    mode: 'category' | 'similar' | 'stack',
+): Promise<void> {
+    const categoryLabel = notif.category ? CATEGORY_LABELS[notif.category as NotificationCategory] : 'alert';
+    const body: Record<string, unknown> = {
+        applies_to: 'both',
+        enabled: true,
+        expires_at: null,
+        node_id: notif.nodeId ?? null,
+        stack_patterns: [],
+        label_ids: null,
+        categories: null,
+        levels: null,
+    };
+
+    if (mode === 'category' && notif.category) {
+        body.name = `Mute ${categoryLabel}`;
+        body.categories = [notif.category];
+    } else if (mode === 'stack' && notif.stack_name) {
+        body.name = `Mute ${notif.stack_name}`;
+        body.stack_patterns = [notif.stack_name];
+    } else if (mode === 'similar') {
+        body.name = `Mute similar alerts`;
+        if (notif.category) body.categories = [notif.category];
+        body.levels = [notif.level];
+        if (notif.stack_name) body.stack_patterns = [notif.stack_name];
+    } else {
+        toast.error('This notification cannot be muted with that shortcut.');
+        return;
+    }
+
+    try {
+        const res = await apiFetch('/notification-suppression-rules', {
+            method: 'POST',
+            body: JSON.stringify(body),
+        });
+        if (res.ok) {
+            toast.success('Suppression rule created. Open Settings · Suppression Rules to edit it.');
+        } else {
+            const err = await res.json().catch(() => ({}));
+            toast.error(err?.error || 'Failed to create suppression rule.');
+        }
+    } catch {
+        toast.error('Network error.');
+    }
+}
+
+function NotificationRow({ notif, showNodeName, onDelete, onNavigate, onNavigateChangelog, canMute }: NotificationRowProps) {
     const config = LEVEL_CONFIG[notif.level];
     const Icon = config.icon;
     const isUnread = !notif.is_read;
@@ -470,15 +531,48 @@ function NotificationRow({ notif, showNodeName, onDelete, onNavigate, onNavigate
             ) : (
                 <div className={surfaceClasses}>{content}</div>
             )}
-            <Button
-                variant="ghost"
-                size="icon"
-                className="absolute right-2 top-2 z-20 h-6 w-6 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-                onClick={() => onDelete(notif)}
-                title="Dismiss"
-            >
-                <X className="h-3 w-3" strokeWidth={1.5} />
-            </Button>
+            <div className="absolute right-2 top-2 z-20 flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                {canMute ? (
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6"
+                                title="Mute options"
+                                aria-label="Mute options"
+                                onClick={(e) => e.stopPropagation()}
+                            >
+                                <MoreHorizontal className="h-3 w-3" strokeWidth={1.5} />
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-52">
+                            {notif.category ? (
+                                <DropdownMenuItem onClick={() => void createQuickSuppressionRule(notif, 'category')}>
+                                    Mute this category
+                                </DropdownMenuItem>
+                            ) : null}
+                            <DropdownMenuItem onClick={() => void createQuickSuppressionRule(notif, 'similar')}>
+                                Mute notifications like this
+                            </DropdownMenuItem>
+                            {notif.stack_name ? (
+                                <DropdownMenuItem onClick={() => void createQuickSuppressionRule(notif, 'stack')}>
+                                    Mute this stack
+                                </DropdownMenuItem>
+                            ) : null}
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+                ) : null}
+                <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6"
+                    onClick={() => onDelete(notif)}
+                    title="Dismiss"
+                >
+                    <X className="h-3 w-3" strokeWidth={1.5} />
+                </Button>
+            </div>
         </div>
     );
 }

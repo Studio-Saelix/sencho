@@ -1,22 +1,28 @@
 import { Router, type Request, type Response } from 'express';
-import { DatabaseService } from '../services/DatabaseService';
+import { DatabaseService, type NotificationSuppressionAppliesTo, type NotificationSuppressionRule } from '../services/DatabaseService';
 import { NotificationService, ALL_NOTIFICATION_CATEGORIES } from '../services/NotificationService';
 import type { NotificationCategory } from '../services/NotificationService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin } from '../middleware/tierGates';
+import { requireAdmin, requireNodeProxy } from '../middleware/tierGates';
 import {
   NOTIFICATION_CHANNEL_TYPES,
   validateHttpsUrl,
   cleanStackPatterns,
   maskWebhookUrl,
 } from '../helpers/notificationChannels';
+import {
+  deleteSuppressionRuleFromFleet,
+  syncSuppressionRuleToFleet,
+} from '../helpers/notificationSuppressionSync';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { parseIntParam } from '../utils/parseIntParam';
 
 const VALID_CATEGORIES: ReadonlySet<NotificationCategory> = new Set(ALL_NOTIFICATION_CATEGORIES);
+const VALID_LEVELS = new Set(['info', 'warning', 'error']);
+const VALID_APPLIES_TO = new Set<NotificationSuppressionAppliesTo>(['bell', 'external', 'both']);
 
 function validateNodeId(nodeId: unknown, res: Response): number | null | false {
   if (nodeId === undefined || nodeId === null) return null;
@@ -48,6 +54,125 @@ function validateCategories(categories: unknown, res: Response): boolean {
     return false;
   }
   return true;
+}
+
+function validateSuppressionNodeId(nodeId: unknown, res: Response): number | null | false {
+  if (nodeId === undefined || nodeId === null) return null;
+  if (typeof nodeId !== 'number' || !Number.isInteger(nodeId)) {
+    res.status(400).json({ error: 'node_id must be an integer or null' });
+    return false;
+  }
+  const node = DatabaseService.getInstance().getNode(nodeId);
+  if (!node) {
+    res.status(400).json({ error: 'node_id must reference a registered node or be null' });
+    return false;
+  }
+  return nodeId;
+}
+
+function validateLevels(levels: unknown, res: Response): boolean {
+  if (levels === undefined || levels === null) return true;
+  if (!Array.isArray(levels) || levels.some((l: unknown) => typeof l !== 'string' || !VALID_LEVELS.has(l))) {
+    res.status(400).json({ error: 'levels must be an array of info, warning, or error' });
+    return false;
+  }
+  return true;
+}
+
+function validateAppliesTo(applies_to: unknown, res: Response): NotificationSuppressionAppliesTo | false {
+  if (typeof applies_to !== 'string' || !VALID_APPLIES_TO.has(applies_to as NotificationSuppressionAppliesTo)) {
+    res.status(400).json({ error: 'applies_to must be bell, external, or both' });
+    return false;
+  }
+  return applies_to as NotificationSuppressionAppliesTo;
+}
+
+function validateExpiresAt(expires_at: unknown, res: Response): number | null | false | undefined {
+  if (expires_at === undefined) return undefined;
+  if (expires_at === null) return null;
+  if (typeof expires_at !== 'number' || !Number.isFinite(expires_at)) {
+    res.status(400).json({ error: 'expires_at must be a finite timestamp or null' });
+    return false;
+  }
+  return expires_at;
+}
+
+function parseSuppressionRuleBody(
+  req: Request,
+  res: Response,
+  isCreate: boolean,
+): Omit<NotificationSuppressionRule, 'id' | 'created_at' | 'updated_at'> | null {
+  const {
+    name,
+    node_id: rawNodeId,
+    stack_patterns,
+    label_ids,
+    categories,
+    levels,
+    applies_to,
+    enabled,
+    expires_at,
+  } = req.body;
+
+  if (isCreate && (!name || typeof name !== 'string' || !name.trim())) {
+    res.status(400).json({ error: 'Name is required' });
+    return null;
+  }
+  if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
+    res.status(400).json({ error: 'Name must be a non-empty string' });
+    return null;
+  }
+  if (name !== undefined && name.trim().length > 100) {
+    res.status(400).json({ error: 'Name must be 100 characters or fewer' });
+    return null;
+  }
+
+  const nodeIdResult = isCreate || 'node_id' in req.body
+    ? validateSuppressionNodeId(rawNodeId, res)
+    : undefined;
+  if (nodeIdResult === false) return null;
+
+  let cleanedPatterns: string[] | undefined;
+  if (stack_patterns !== undefined) {
+    if (!Array.isArray(stack_patterns) || stack_patterns.some((p: unknown) => typeof p !== 'string')) {
+      res.status(400).json({ error: 'stack_patterns must be an array of strings' });
+      return null;
+    }
+    cleanedPatterns = cleanStackPatterns(stack_patterns);
+  } else if (isCreate) {
+    cleanedPatterns = [];
+  }
+
+  if (!validateLabelIds(label_ids, res)) return null;
+  if (!validateCategories(categories, res)) return null;
+  if (!validateLevels(levels, res)) return null;
+
+  const appliesToResult = isCreate
+    ? validateAppliesTo(applies_to, res)
+    : applies_to !== undefined
+      ? validateAppliesTo(applies_to, res)
+      : undefined;
+  if (appliesToResult === false) return null;
+
+  const expiresAtResult = validateExpiresAt(expires_at, res);
+  if (expiresAtResult === false) return null;
+
+  if (enabled !== undefined && typeof enabled !== 'boolean') {
+    res.status(400).json({ error: 'enabled must be a boolean' });
+    return null;
+  }
+
+  return {
+    name: (name as string).trim(),
+    node_id: nodeIdResult ?? null,
+    stack_patterns: cleanedPatterns ?? [],
+    label_ids: Array.isArray(label_ids) && label_ids.length > 0 ? label_ids : null,
+    categories: Array.isArray(categories) && categories.length > 0 ? categories : null,
+    levels: Array.isArray(levels) && levels.length > 0 ? levels : null,
+    applies_to: (appliesToResult ?? 'both') as NotificationSuppressionAppliesTo,
+    enabled: enabled !== false,
+    expires_at: expiresAtResult ?? null,
+  };
 }
 
 export const notificationsRouter = Router();
@@ -290,6 +415,184 @@ notificationRoutesRouter.post('/:id/test', authMiddleware, async (req: Request, 
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Test failed', details: getErrorMessage(error, String(error)) });
+  }
+});
+
+export const notificationSuppressionRouter = Router();
+
+notificationSuppressionRouter.post('/replica', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireNodeProxy(req, res)) return;
+  try {
+    const rule = req.body?.rule as NotificationSuppressionRule | undefined;
+    if (!rule || typeof rule.id !== 'number' || typeof rule.name !== 'string') {
+      res.status(400).json({ error: 'rule object with id and name is required' });
+      return;
+    }
+    if (!VALID_APPLIES_TO.has(rule.applies_to)) {
+      res.status(400).json({ error: 'Invalid applies_to on rule' });
+      return;
+    }
+    DatabaseService.getInstance().upsertNotificationSuppressionRuleReplica(rule);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to apply suppression rule replica:', error);
+    res.status(500).json({ error: 'Failed to apply suppression rule replica' });
+  }
+});
+
+notificationSuppressionRouter.delete('/replica/:id', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireNodeProxy(req, res)) return;
+  try {
+    const id = parseIntParam(req, res, 'id', 'suppression rule ID');
+    if (id === null) return;
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(id);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to delete suppression rule replica:', error);
+    res.status(500).json({ error: 'Failed to delete suppression rule replica' });
+  }
+});
+
+notificationSuppressionRouter.get('/', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const rules = DatabaseService.getInstance().getNotificationSuppressionRules();
+    res.json(rules);
+  } catch (error) {
+    console.error('Failed to fetch notification suppression rules:', error);
+    res.status(500).json({ error: 'Failed to fetch notification suppression rules' });
+  }
+});
+
+notificationSuppressionRouter.post('/', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const parsed = parseSuppressionRuleBody(req, res, true);
+    if (!parsed) return;
+
+    const now = Date.now();
+    const rule = DatabaseService.getInstance().createNotificationSuppressionRule({
+      ...parsed,
+      created_at: now,
+      updated_at: now,
+    });
+    syncSuppressionRuleToFleet(rule);
+    console.log(`[Suppression] Rule "${sanitizeForLog(rule.name)}" created (id=${rule.id})`);
+    res.status(201).json(rule);
+  } catch (error) {
+    console.error('Failed to create notification suppression rule:', error);
+    res.status(500).json({ error: 'Failed to create notification suppression rule' });
+  }
+});
+
+notificationSuppressionRouter.put('/:id', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const id = parseIntParam(req, res, 'id', 'suppression rule ID');
+    if (id === null) return;
+
+    const existing = DatabaseService.getInstance().getNotificationSuppressionRule(id);
+    if (!existing) { res.status(404).json({ error: 'Suppression rule not found' }); return; }
+
+    const {
+      name,
+      node_id: rawNodeId,
+      stack_patterns,
+      label_ids,
+      categories,
+      levels,
+      applies_to,
+      enabled,
+      expires_at,
+    } = req.body;
+
+    if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
+      res.status(400).json({ error: 'Name must be a non-empty string' });
+      return;
+    }
+    if (name !== undefined && name.trim().length > 100) {
+      res.status(400).json({ error: 'Name must be 100 characters or fewer' });
+      return;
+    }
+
+    let validatedNodeId: number | null | undefined;
+    if ('node_id' in req.body) {
+      const result = validateSuppressionNodeId(rawNodeId, res);
+      if (result === false) return;
+      validatedNodeId = result;
+    }
+
+    let cleanedPatterns: string[] | undefined;
+    if (stack_patterns !== undefined) {
+      if (!Array.isArray(stack_patterns) || stack_patterns.some((p: unknown) => typeof p !== 'string')) {
+        res.status(400).json({ error: 'stack_patterns must be an array of strings' });
+        return;
+      }
+      cleanedPatterns = cleanStackPatterns(stack_patterns);
+    }
+
+    if (!validateLabelIds(label_ids, res)) return;
+    if (!validateCategories(categories, res)) return;
+    if (!validateLevels(levels, res)) return;
+
+    let validatedAppliesTo: NotificationSuppressionAppliesTo | undefined;
+    if (applies_to !== undefined) {
+      const result = validateAppliesTo(applies_to, res);
+      if (result === false) return;
+      validatedAppliesTo = result;
+    }
+
+    let validatedExpiresAt: number | null | undefined;
+    if ('expires_at' in req.body) {
+      const result = validateExpiresAt(expires_at, res);
+      if (result === false) return;
+      validatedExpiresAt = result;
+    }
+
+    if (enabled !== undefined && typeof enabled !== 'boolean') {
+      res.status(400).json({ error: 'enabled must be a boolean' });
+      return;
+    }
+
+    const updates: Partial<Omit<NotificationSuppressionRule, 'id' | 'created_at'>> = { updated_at: Date.now() };
+    if (name !== undefined) updates.name = name.trim();
+    if (validatedNodeId !== undefined) updates.node_id = validatedNodeId;
+    if (cleanedPatterns !== undefined) updates.stack_patterns = cleanedPatterns;
+    if ('label_ids' in req.body) updates.label_ids = Array.isArray(label_ids) && label_ids.length > 0 ? label_ids : null;
+    if ('categories' in req.body) updates.categories = Array.isArray(categories) && categories.length > 0 ? categories : null;
+    if ('levels' in req.body) updates.levels = Array.isArray(levels) && levels.length > 0 ? levels : null;
+    if (validatedAppliesTo !== undefined) updates.applies_to = validatedAppliesTo;
+    if (enabled !== undefined) updates.enabled = enabled;
+    if (validatedExpiresAt !== undefined) updates.expires_at = validatedExpiresAt;
+
+    const db = DatabaseService.getInstance();
+    db.updateNotificationSuppressionRule(id, updates);
+    const updated = db.getNotificationSuppressionRule(id)!;
+    syncSuppressionRuleToFleet(updated);
+    console.log(`[Suppression] Rule ${id} updated`);
+    res.json(updated);
+  } catch (error) {
+    console.error('Failed to update notification suppression rule:', error);
+    res.status(500).json({ error: 'Failed to update notification suppression rule' });
+  }
+});
+
+notificationSuppressionRouter.delete('/:id', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const id = parseIntParam(req, res, 'id', 'suppression rule ID');
+    if (id === null) return;
+
+    const existing = DatabaseService.getInstance().getNotificationSuppressionRule(id);
+    if (!existing) { res.status(404).json({ error: 'Suppression rule not found' }); return; }
+
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(id);
+    deleteSuppressionRuleFromFleet(existing);
+    console.log(`[Suppression] Rule ${id} deleted`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to delete notification suppression rule:', error);
+    res.status(500).json({ error: 'Failed to delete notification suppression rule' });
   }
 });
 

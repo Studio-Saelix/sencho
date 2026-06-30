@@ -600,6 +600,23 @@ export interface NotificationRoute {
     updated_at: number;
 }
 
+export type NotificationSuppressionAppliesTo = 'bell' | 'external' | 'both';
+
+export interface NotificationSuppressionRule {
+    id: number;
+    name: string;
+    node_id: number | null;
+    stack_patterns: string[];
+    label_ids: number[] | null;
+    categories: string[] | null;
+    levels: ('info' | 'warning' | 'error')[] | null;
+    applies_to: NotificationSuppressionAppliesTo;
+    enabled: boolean;
+    expires_at: number | null;
+    created_at: number;
+    updated_at: number;
+}
+
 export type VulnSeverity = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN';
 export type VulnScanStatus = 'in_progress' | 'completed' | 'failed';
 export type VulnScanTrigger = 'manual' | 'scheduled' | 'deploy' | 'deploy-preflight';
@@ -871,6 +888,7 @@ export class DatabaseService {
         this.migrateNotificationRoutes();
         this.migrateNotificationRoutesNodeId();
         this.migrateNotificationRoutesMatchers();
+        this.migrateNotificationSuppressionRules();
         this.migrateNotificationHistoryContext();
         this.migrateScanPolicyFleetColumns();
         this.migrateScanPolicyRiskColumns();
@@ -1814,6 +1832,27 @@ export class DatabaseService {
         this.tryAddColumn('notification_routes', 'categories', 'TEXT NULL');
     }
 
+    private migrateNotificationSuppressionRules(): void {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS notification_suppression_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                node_id INTEGER NULL,
+                stack_patterns TEXT NOT NULL,
+                label_ids TEXT NULL,
+                categories TEXT NULL,
+                levels TEXT NULL,
+                applies_to TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                expires_at INTEGER NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_notification_suppression_enabled
+                ON notification_suppression_rules(enabled, expires_at);
+        `);
+    }
+
     private migrateNotificationHistoryContext(): void {
         this.tryAddColumn('notification_history', 'stack_name', 'TEXT');
         this.tryAddColumn('notification_history', 'container_name', 'TEXT');
@@ -2291,6 +2330,135 @@ export class DatabaseService {
 
     public deleteNotificationRoute(id: number): number {
         return this.db.prepare('DELETE FROM notification_routes WHERE id = ?').run(id).changes;
+    }
+
+    // --- Notification Suppression Rules ---
+
+    private parseNotificationSuppressionRule(row: Record<string, unknown>): NotificationSuppressionRule {
+        return {
+            id: row.id as number,
+            name: row.name as string,
+            node_id: row.node_id != null ? (row.node_id as number) : null,
+            stack_patterns: JSON.parse(row.stack_patterns as string) as string[],
+            label_ids: row.label_ids ? JSON.parse(row.label_ids as string) as number[] : null,
+            categories: row.categories ? JSON.parse(row.categories as string) as string[] : null,
+            levels: row.levels ? JSON.parse(row.levels as string) as ('info' | 'warning' | 'error')[] : null,
+            applies_to: row.applies_to as NotificationSuppressionAppliesTo,
+            enabled: row.enabled === 1,
+            expires_at: row.expires_at != null ? (row.expires_at as number) : null,
+            created_at: row.created_at as number,
+            updated_at: row.updated_at as number,
+        };
+    }
+
+    public getNotificationSuppressionRules(): NotificationSuppressionRule[] {
+        return this.db.prepare('SELECT * FROM notification_suppression_rules ORDER BY created_at ASC')
+            .all()
+            .map((row) => this.parseNotificationSuppressionRule(row as Record<string, unknown>));
+    }
+
+    public getEnabledNotificationSuppressionRules(now = Date.now()): NotificationSuppressionRule[] {
+        return this.db.prepare(
+            'SELECT * FROM notification_suppression_rules WHERE enabled = 1 AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at ASC',
+        )
+            .all(now)
+            .map((row) => this.parseNotificationSuppressionRule(row as Record<string, unknown>));
+    }
+
+    public getNotificationSuppressionRule(id: number): NotificationSuppressionRule | undefined {
+        const row = this.db.prepare('SELECT * FROM notification_suppression_rules WHERE id = ?').get(id) as Record<string, unknown> | undefined;
+        return row ? this.parseNotificationSuppressionRule(row) : undefined;
+    }
+
+    public createNotificationSuppressionRule(
+        rule: Omit<NotificationSuppressionRule, 'id'>,
+    ): NotificationSuppressionRule {
+        const result = this.db.prepare(
+            'INSERT INTO notification_suppression_rules (name, node_id, stack_patterns, label_ids, categories, levels, applies_to, enabled, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        ).run(
+            rule.name,
+            rule.node_id ?? null,
+            JSON.stringify(rule.stack_patterns),
+            rule.label_ids ? JSON.stringify(rule.label_ids) : null,
+            rule.categories ? JSON.stringify(rule.categories) : null,
+            rule.levels ? JSON.stringify(rule.levels) : null,
+            rule.applies_to,
+            rule.enabled ? 1 : 0,
+            rule.expires_at ?? null,
+            rule.created_at,
+            rule.updated_at,
+        );
+        return this.getNotificationSuppressionRule(result.lastInsertRowid as number)!;
+    }
+
+    public upsertNotificationSuppressionRuleReplica(rule: NotificationSuppressionRule): void {
+        const existing = this.getNotificationSuppressionRule(rule.id);
+        if (existing) {
+            this.db.prepare(
+                `UPDATE notification_suppression_rules SET
+                    name = ?, node_id = ?, stack_patterns = ?, label_ids = ?, categories = ?, levels = ?,
+                    applies_to = ?, enabled = ?, expires_at = ?, updated_at = ?
+                 WHERE id = ?`,
+            ).run(
+                rule.name,
+                rule.node_id ?? null,
+                JSON.stringify(rule.stack_patterns),
+                rule.label_ids ? JSON.stringify(rule.label_ids) : null,
+                rule.categories ? JSON.stringify(rule.categories) : null,
+                rule.levels ? JSON.stringify(rule.levels) : null,
+                rule.applies_to,
+                rule.enabled ? 1 : 0,
+                rule.expires_at ?? null,
+                rule.updated_at,
+                rule.id,
+            );
+            return;
+        }
+        this.db.prepare(
+            `INSERT INTO notification_suppression_rules
+                (id, name, node_id, stack_patterns, label_ids, categories, levels, applies_to, enabled, expires_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+            rule.id,
+            rule.name,
+            rule.node_id ?? null,
+            JSON.stringify(rule.stack_patterns),
+            rule.label_ids ? JSON.stringify(rule.label_ids) : null,
+            rule.categories ? JSON.stringify(rule.categories) : null,
+            rule.levels ? JSON.stringify(rule.levels) : null,
+            rule.applies_to,
+            rule.enabled ? 1 : 0,
+            rule.expires_at ?? null,
+            rule.created_at,
+            rule.updated_at,
+        );
+    }
+
+    public updateNotificationSuppressionRule(
+        id: number,
+        updates: Partial<Omit<NotificationSuppressionRule, 'id' | 'created_at'>>,
+    ): void {
+        const fields: string[] = [];
+        const values: unknown[] = [];
+
+        if (updates.name !== undefined) { fields.push('name = ?'); values.push(updates.name); }
+        if ('node_id' in updates) { fields.push('node_id = ?'); values.push(updates.node_id ?? null); }
+        if (updates.stack_patterns !== undefined) { fields.push('stack_patterns = ?'); values.push(JSON.stringify(updates.stack_patterns)); }
+        if ('label_ids' in updates) { fields.push('label_ids = ?'); values.push(updates.label_ids ? JSON.stringify(updates.label_ids) : null); }
+        if ('categories' in updates) { fields.push('categories = ?'); values.push(updates.categories ? JSON.stringify(updates.categories) : null); }
+        if ('levels' in updates) { fields.push('levels = ?'); values.push(updates.levels ? JSON.stringify(updates.levels) : null); }
+        if (updates.applies_to !== undefined) { fields.push('applies_to = ?'); values.push(updates.applies_to); }
+        if (updates.enabled !== undefined) { fields.push('enabled = ?'); values.push(updates.enabled ? 1 : 0); }
+        if ('expires_at' in updates) { fields.push('expires_at = ?'); values.push(updates.expires_at ?? null); }
+        if (updates.updated_at !== undefined) { fields.push('updated_at = ?'); values.push(updates.updated_at); }
+
+        if (fields.length === 0) return;
+        values.push(id);
+        this.db.prepare(`UPDATE notification_suppression_rules SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+    }
+
+    public deleteNotificationSuppressionRule(id: number): number {
+        return this.db.prepare('DELETE FROM notification_suppression_rules WHERE id = ?').run(id).changes;
     }
 
     // --- Global Settings ---

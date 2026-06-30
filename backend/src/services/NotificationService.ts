@@ -6,6 +6,12 @@ import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
 import { StackActivityMetricsService } from './StackActivityMetricsService';
+import {
+    appliesToBell,
+    appliesToExternal,
+    matchesNotificationFilters,
+    ruleNeedsStackLabels,
+} from '../helpers/notificationMatchers';
 
 export type NotificationCategory =
     | 'deploy_success'
@@ -185,8 +191,34 @@ export class NotificationService {
                 });
             }
 
+            const suppressionRules = this.dbService.getEnabledNotificationSuppressionRules();
+            const needsSuppressionLabels = stackName !== undefined && ruleNeedsStackLabels(suppressionRules);
+            const suppressionLabelIds = needsSuppressionLabels
+                ? this.dbService.getStackLabelIds(localNodeId, stackName!)
+                : [];
+            const matchCtx = {
+                localNodeId,
+                stackName,
+                category,
+                level,
+                stackLabelIds: suppressionLabelIds,
+            };
+            const matchedSuppression = suppressionRules.filter((r) => matchesNotificationFilters(matchCtx, r));
+            const suppressBell = matchedSuppression.some((r) => appliesToBell(r.applies_to));
+            const suppressExternal = matchedSuppression.some((r) => appliesToExternal(r.applies_to));
+
+            if (isDebugEnabled() && matchedSuppression.length > 0) {
+                console.log(`[Notify:diag] Suppression matched ${matchedSuppression.length} rule(s); bell=${suppressBell}, external=${suppressExternal}`);
+            }
+
             // 2. Push to connected browser clients via WebSocket
-            this.broadcastToSubscribers(notification);
+            if (!suppressBell) {
+                this.broadcastToSubscribers(notification);
+            }
+
+            if (suppressExternal) {
+                return;
+            }
 
             // 3. Check notification routing rules — always evaluated, matchers compose AND
             const errors: string[] = [];
@@ -195,13 +227,7 @@ export class NotificationService {
             const needsLabels = stackName !== undefined && routes.some(r => r.label_ids != null && r.label_ids.length > 0);
             const stackLabelIds = needsLabels ? this.dbService.getStackLabelIds(localNodeId, stackName!) : [];
 
-            const matched = routes.filter(r => {
-                if (r.node_id != null && r.node_id !== localNodeId) return false;
-                if (r.stack_patterns.length > 0 && (stackName === undefined || !r.stack_patterns.includes(stackName))) return false;
-                if (r.label_ids != null && r.label_ids.length > 0 && !r.label_ids.some(id => stackLabelIds.includes(id))) return false;
-                if (r.categories != null && r.categories.length > 0 && !r.categories.includes(category)) return false;
-                return true;
-            });
+            const matched = routes.filter(r => matchesNotificationFilters(matchCtx, r));
             if (matched.length > 0) {
                 if (isDebugEnabled()) console.log(`[Notify:diag] Matched ${matched.length} route(s) for stack "${sanitizeForLog(stackName ?? '(none)')}", category="${sanitizeForLog(category)}"`);
                 await Promise.allSettled(

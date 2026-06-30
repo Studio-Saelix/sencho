@@ -44,6 +44,9 @@ const LabelsSection = lazy(() =>
 const NotificationRoutingSection = lazy(() =>
     import('./NotificationRoutingSection').then(m => ({ default: m.NotificationRoutingSection })),
 );
+const NotificationSuppressionSection = lazy(() =>
+    import('./NotificationSuppressionSection').then(m => ({ default: m.NotificationSuppressionSection })),
+);
 const CloudBackupSection = lazy(() =>
     import('./CloudBackupSection').then(m => ({ default: m.CloudBackupSection })),
 );
@@ -89,6 +92,7 @@ function renderSection(
         case 'fleet-mesh': return <FleetMeshSection onDirtyChange={(d) => onDirtyChange('fleet-mesh', d)} />;
         case 'notifications': return <NotificationsSection />;
         case 'notification-routing': return <NotificationRoutingSection />;
+        case 'notification-suppression': return <NotificationSuppressionSection />;
         case 'webhooks': return <WebhooksSection />;
         case 'cloud-backup': return <CloudBackupSection />;
         case 'developer': return <DeveloperSection onDirtyChange={(d) => onDirtyChange('developer', d)} />;
