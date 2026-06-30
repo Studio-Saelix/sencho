@@ -3,7 +3,11 @@ title: Verifying Published Images
 description: How to verify signatures, provenance, SBOMs, and CVE triage for Sencho Docker images.
 ---
 
-Every Sencho release image is published to two registries with identical content: Docker Hub (`saelix/sencho`) and GitHub Container Registry (`ghcr.io/studio-saelix/sencho`). Every image is signed and carries verifiable supply-chain artifacts on both registries. The `cosign verify` examples below use the Docker Hub path; substitute `ghcr.io/studio-saelix/sencho:<tag>` to verify the GHCR copy.
+Every Sencho **release** image is published to two registries with identical content: Docker Hub (`saelix/sencho`) and GitHub Container Registry (`ghcr.io/studio-saelix/sencho`). Release tags are signed and carry verifiable supply-chain artifacts on both registries. The `cosign verify` examples below use the Docker Hub path; substitute `ghcr.io/studio-saelix/sencho:<tag>` to verify the GHCR copy.
+
+<Note>
+Pre-merge preview tags (`pr-*`, `preview-*` on Docker Hub) are maintainer-published tester builds. They are **not** cosign-signed and have no SBOM or VEX attestations. Use them only for feature validation before merge; pin production to a release semver tag and verify signatures as below.
+</Note>
 
 ## Prerequisites
 
@@ -25,7 +29,7 @@ brew install trivy
 
 ## Verify the image signature
 
-Every published tag is signed with cosign keyless signing via GitHub Actions OIDC. No private key is stored anywhere; the signing identity is bound to the GitHub Actions workflow that published the image.
+Every **release** tag is signed with cosign keyless signing via GitHub Actions OIDC. No private key is stored anywhere; the signing identity is bound to the GitHub Actions workflow that published the image. Preview tags (`pr-*`, `preview-*`) are not signed.
 
 ```bash
 cosign verify saelix/sencho:<tag> \
@@ -114,6 +118,8 @@ Trivy 0.36.0 or later is required for `--vex` flag support.
 
 ## Available tags
 
+### Release tags
+
 Each release publishes two moving tags plus one immutable tag, so you can choose how aggressively you want to track updates:
 
 | Tag | Example | Updates on |
@@ -123,3 +129,12 @@ Each release publishes two moving tags plus one immutable tag, so you can choose
 | `X.Y.Z` | `saelix/sencho:0.42.7` | Never (immutable) |
 
 For production, pin to `X.Y.Z` or `X.Y` and verify the signature on every pull. For staging or development, `latest` is fine.
+
+### Preview tags (pre-merge only)
+
+Maintainers publish these from open PRs for external validation. They are unsigned and not for production.
+
+| Tag | Example | Updates on |
+|---|---|---|
+| `pr-<N>` | `saelix/sencho:pr-1526` | Each re-run of the preview workflow for that PR |
+| `preview-<sha>` | `saelix/sencho:preview-abc1234` | Never (immutable per build) |
