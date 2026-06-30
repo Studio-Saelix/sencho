@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.93.1](https://github.com/Studio-Saelix/sencho/compare/v0.93.0...v0.93.1) (2026-06-30)
+
+
+### Fixed
+
+* align notification unread badge with panel visibility rules ([#1520](https://github.com/Studio-Saelix/sencho/issues/1520)) ([1b9a40f](https://github.com/Studio-Saelix/sencho/commit/1b9a40f874e11f91610b75065278796d65832e00)), closes [#1513](https://github.com/Studio-Saelix/sencho/issues/1513)
+* enforce 1:1 compose path mapping for Pilot agent mounts ([#1516](https://github.com/Studio-Saelix/sencho/issues/1516)) ([41dc339](https://github.com/Studio-Saelix/sencho/commit/41dc339c26ccf950d42b813ff10a10623848751a))
+* make auth canvas scroll actually constrain on short viewports ([#1523](https://github.com/Studio-Saelix/sencho/issues/1523)) ([e1176fb](https://github.com/Studio-Saelix/sencho/commit/e1176fbb269c98752d96c5e28fc990598b09b4d4))
+* polish sidebar and masthead chrome, scroll setup preflight ([#1522](https://github.com/Studio-Saelix/sencho/issues/1522)) ([322d337](https://github.com/Studio-Saelix/sencho/commit/322d337d2073d93362b908627060d082b824c6d9))
+* replace Janitor wording with reclaim/prune actions in user-facing copy ([#1518](https://github.com/Studio-Saelix/sencho/issues/1518)) ([89b9341](https://github.com/Studio-Saelix/sencho/commit/89b9341568c402ec74bc87813443c5908f22560c))
+* scroll auth canvas when preflight content overflows ([#1521](https://github.com/Studio-Saelix/sencho/issues/1521)) ([da73ee0](https://github.com/Studio-Saelix/sencho/commit/da73ee071795fedd2f499476f8361f2e6cb0c5a8))
+
 ## [0.93.0](https://github.com/Studio-Saelix/sencho/compare/v0.92.0...v0.93.0) (2026-06-29)
 
 
