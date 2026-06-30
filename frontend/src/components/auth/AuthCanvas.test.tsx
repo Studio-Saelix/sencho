@@ -11,8 +11,13 @@ describe('AuthCanvas', () => {
     );
 
     const card = screen.getByRole('group');
-    expect(card.className).toContain('max-h-[calc(100svh-5rem)]');
+    expect(card.className).toContain('max-h-[calc(100dvh-5rem)]');
+    expect(card.className).toContain('min-h-0');
+    expect(card.className).toContain('my-auto');
     expect(card.className).toContain('flex-col');
+
+    const shell = card.parentElement;
+    expect(shell?.className).toContain('overflow-y-auto');
 
     const body = screen.getByText('Tall content').parentElement;
     expect(body?.className).toContain('overflow-y-auto');

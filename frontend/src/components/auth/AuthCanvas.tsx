@@ -9,7 +9,10 @@ export function AuthCanvas({ children, className, footer, ...props }: AuthCanvas
   return (
     <div
       className={cn(
-        'relative flex min-h-svh flex-col items-center justify-center px-4 py-10 sm:px-6',
+        // overflow-y-auto: html/body are overflow:hidden, so this shell must scroll
+        // when the card still exceeds the viewport. my-auto on the card centers it
+        // when content is short (replaces justify-center, which clips tall cards).
+        'relative flex min-h-svh flex-col items-center overflow-y-auto px-4 py-10 sm:px-6',
         className,
       )}
       {...props}
@@ -21,7 +24,7 @@ export function AuthCanvas({ children, className, footer, ...props }: AuthCanvas
 
       <div
         role="group"
-        className="relative flex max-h-[calc(100svh-5rem)] w-full max-w-[440px] flex-col animate-scale-in overflow-hidden rounded-lg border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel"
+        className="relative my-auto flex min-h-0 w-full max-w-[440px] max-h-[calc(100dvh-5rem)] flex-col animate-scale-in overflow-hidden rounded-lg border border-card-border border-t-card-border-top bg-card text-card-foreground shadow-card-bevel"
         style={{ animationDuration: 'var(--duration-base)', animationTimingFunction: 'var(--ease-out-expo)' }}
       >
         <div aria-hidden className="absolute inset-y-0 left-0 w-[3px] overflow-hidden bg-brand/70">
