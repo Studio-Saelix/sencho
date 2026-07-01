@@ -33,7 +33,6 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   push_preview_image:
@@ -180,7 +179,6 @@ jobs:
           exit 1
 
       - name: Build and push preview image
-        id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
         with:
           context: .
@@ -192,41 +190,3 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             APK_CACHE_BUST=${{ steps.apk-bust.outputs.date }}
-
-      - name: Comment on pull request with pull instructions
-        continue-on-error: true
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
-        env:
-          PR_NUMBER: ${{ inputs.pr_number }}
-          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-        with:
-          script: |
-            const prNumber = Number(process.env.PR_NUMBER);
-            const shortSha = process.env.HEAD_SHA.slice(0, 7);
-            const digest = process.env.DIGEST;
-            const body = [
-              '## Preview image published',
-              '',
-              'Docker Hub preview tags for this PR:',
-              '',
-              '```bash',
-              `docker pull saelix/sencho:pr-${prNumber}`,
-              '```',
-              '',
-              'Pinned build:',
-              '',
-              '```bash',
-              `docker pull saelix/sencho:preview-${shortSha}`,
-              '```',
-              '',
-              `Manifest digest: \`${digest}\``,
-              '',
-              'These tags are for pre-merge validation only. They are not cosign-signed and are not suitable as a production pin.',
-            ].join('\n');
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-              body,
-            });
