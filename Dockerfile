@@ -6,7 +6,7 @@ FROM --platform=$BUILDPLATFORM tonistiigi/xx@sha256:c64defb9ed5a91eacb37f96ccc3d
 # Stage 1: Build Frontend
 # Runs on the BUILD platform (amd64) - frontend has no native modules so the
 # compiled output (JS/CSS/HTML) is entirely platform-agnostic.
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606 AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:725aeba2364a9b16beae49e180d83bd597dbd0b15c47f1f28875c290bfd255b9 AS frontend-builder
 
 WORKDIR /app/frontend
 
@@ -22,7 +22,7 @@ RUN npm run build
 
 # Stage 2: Compile TypeScript
 # Runs on the BUILD platform (amd64) - tsc output is platform-agnostic JS.
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606 AS backend-builder
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:725aeba2364a9b16beae49e180d83bd597dbd0b15c47f1f28875c290bfd255b9 AS backend-builder
 
 WORKDIR /app/backend
 
@@ -44,7 +44,7 @@ RUN npm run build
 # tonistiigi/xx + clang as the cross-compiler.
 # This avoids the Node.js v20 SIGILL crash that occurs when npm runs
 # under QEMU because QEMU lacks ARMv8.1 LSE atomic instruction support.
-FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606 AS prod-deps
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:725aeba2364a9b16beae49e180d83bd597dbd0b15c47f1f28875c290bfd255b9 AS prod-deps
 
 # Copy xx cross-compilation tools into this stage
 COPY --from=xx / /
@@ -237,7 +237,7 @@ RUN test -f /build/docker-compose \
 # in this image; operators who want the feature install Trivy on the host
 # and mount the binary into the container, or run a sidecar. See
 # docs/operations/trivy-setup.mdx for the supported integration paths.
-FROM node:26-alpine@sha256:a2dc166a387cc6ca1e62d0c8e265e49ca985d6e60abc9fe6e6c3d6ce8e63f606
+FROM node:26-alpine@sha256:725aeba2364a9b16beae49e180d83bd597dbd0b15c47f1f28875c290bfd255b9
 
 # Daily cache-bust for the apk upgrade layer. CI passes the current date
 # (YYYY-MM-DD) as a build-arg, so this RUN layer's hash changes at most
