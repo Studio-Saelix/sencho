@@ -937,7 +937,12 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
 
             <div className="flex items-center gap-2">
               <TogglePill checked={formEnabled} onChange={setFormEnabled} id="task-enabled" />
-              <Label htmlFor="task-enabled">Enabled</Label>
+              <label
+                htmlFor="task-enabled"
+                className="text-sm text-stat-value cursor-pointer select-none"
+              >
+                {formEnabled ? 'Enabled' : 'Disabled'}
+              </label>
             </div>
 
             <label className="flex items-start gap-2 cursor-pointer">
