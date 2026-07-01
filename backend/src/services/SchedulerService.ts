@@ -22,6 +22,7 @@ import TrivyInstaller from './TrivyInstaller';
 import { CloudBackupService } from './CloudBackupService';
 import { buildSystemPolicyGateOptions } from '../helpers/policyGate';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
+import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
 import { enforcePolicyPreDeploy } from './PolicyEnforcement';
 import { summarizeBlockReasons } from '../utils/policy-risk';
 
@@ -894,7 +895,13 @@ export class SchedulerService {
             const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
             throw new Error((body as { error?: string }).error || `Remote node returned ${response.status}`);
         }
-        return response.json() as Promise<Array<{ Id: string; Names?: string[]; State?: string; Image?: string }>>;
+        return excludeSelfContainers(await response.json() as Array<{
+            Id: string;
+            Names?: string[];
+            State?: string;
+            Image?: string;
+            ImageID?: string;
+        }>);
     }
 
     private async postToRemoteContainer(

@@ -1,22 +1,12 @@
 import { Router, type Request, type Response } from 'express';
 import DockerController from '../services/DockerController';
-import SelfIdentityService from '../services/SelfIdentityService';
 import { FileSystemService } from '../services/FileSystemService';
+import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
 import { requireAdmin } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 
 export const containersRouter = Router();
-
-function excludeSelfContainers<T extends { Id: string; Names?: string[] }>(containers: T[]): T[] {
-  const self = SelfIdentityService.getInstance();
-  return containers.filter(c => {
-    const name = c.Names?.[0]?.replace(/^\//, '') ?? '';
-    if (self.isOwnContainer(c.Id)) return false;
-    if (name && self.isOwnContainer(name)) return false;
-    return true;
-  });
-}
 
 containersRouter.get('/', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:read')) return;
@@ -26,7 +16,7 @@ containersRouter.get('/', async (req: Request, res: Response) => {
     const containers = all
       ? await dockerController.getAllContainers()
       : await dockerController.getRunningContainers();
-    res.json(excludeSelfContainers(containers));
+    res.json(await excludeSelfContainers(containers));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch containers' });
   }

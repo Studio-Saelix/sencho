@@ -12,6 +12,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Clock, Plus, Pencil, Trash2, History, RefreshCw, Play, ChevronLeft, ChevronRight, Download, CalendarClock, Table2 } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
+import { excludeLikelySenchoContainers } from '@/lib/senchoContainerFilter';
 import { Combobox } from '@/components/ui/combobox';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import type { ScheduledTask, TaskRun, NodeOption } from '@/types/scheduling';
@@ -163,7 +164,8 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     try {
       const res = await fetchForNode('/containers?all=true', parseInt(nodeId, 10));
       if (res.ok) {
-        setContainers(await res.json());
+        const rows = (await res.json()) as ContainerListItem[];
+        setContainers(excludeLikelySenchoContainers(rows));
       } else {
         setContainers([]);
       }

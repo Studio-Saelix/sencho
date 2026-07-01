@@ -11,7 +11,7 @@ let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let DockerController: typeof import('../services/DockerController').default;
-let SelfIdentityService: typeof import('../services/SelfIdentityService').default;
+let SelfIdentityServiceMod: typeof import('../services/SelfIdentityService').default;
 
 const VIEWER = 'container-self-filter-viewer';
 
@@ -24,7 +24,7 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
   ({ default: DockerController } = await import('../services/DockerController'));
-  ({ default: SelfIdentityService } = await import('../services/SelfIdentityService'));
+  ({ default: SelfIdentityServiceMod } = await import('../services/SelfIdentityService'));
   ({ app } = await import('../index'));
 
   const hash = await bcrypt.hash('password123', 1);
@@ -41,9 +41,11 @@ afterEach(() => {
 
 describe('GET /api/containers self-filter', () => {
   beforeEach(() => {
-    vi.spyOn(SelfIdentityService, 'getInstance').mockReturnValue({
+    vi.spyOn(SelfIdentityServiceMod, 'getInstance').mockReturnValue({
+      initialize: vi.fn().mockResolvedValue(undefined),
       isOwnContainer: (idOrName: string) => idOrName === 'sencho' || idOrName.startsWith('sencho-id'),
-    } as ReturnType<typeof SelfIdentityService.getInstance>);
+      isOwnImage: vi.fn().mockReturnValue(false),
+    } as unknown as ReturnType<typeof SelfIdentityServiceMod.getInstance>);
 
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
       getAllContainers: vi.fn().mockResolvedValue([
@@ -55,6 +57,30 @@ describe('GET /api/containers self-filter', () => {
   });
 
   it('excludes Sencho from all=true container list', async () => {
+    const res = await request(app)
+      .get('/api/containers?all=true')
+      .set('Authorization', `Bearer ${viewerToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].Names).toEqual(['/mariadb']);
+  });
+
+  it('excludes official Sencho images when SelfIdentity does not match by id', async () => {
+    vi.spyOn(SelfIdentityServiceMod, 'getInstance').mockReturnValue({
+      initialize: vi.fn().mockResolvedValue(undefined),
+      isOwnContainer: vi.fn().mockReturnValue(false),
+      isOwnImage: vi.fn().mockReturnValue(false),
+    } as unknown as ReturnType<typeof SelfIdentityServiceMod.getInstance>);
+
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getAllContainers: vi.fn().mockResolvedValue([
+        { Id: 'remote-sencho', Names: ['/sencho'], Image: 'saelix/sencho:latest', State: 'running' },
+        { Id: 'other-id', Names: ['/mariadb'], State: 'running' },
+      ]),
+      getRunningContainers: vi.fn().mockResolvedValue([]),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
     const res = await request(app)
       .get('/api/containers?all=true')
       .set('Authorization', `Bearer ${viewerToken()}`);
