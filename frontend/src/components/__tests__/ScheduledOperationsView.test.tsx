@@ -366,7 +366,7 @@ describe('ScheduledOperationsView', () => {
     await userEvent.click(screen.getAllByRole('combobox')[2]);
     await userEvent.click(await screen.findByRole('button', { name: 'web' }));
 
-    const servicesBlock = (await screen.findByText(/^Services/)).closest('.space-y-2');
+    const servicesBlock = (await screen.findByText(/^Services/)).closest<HTMLElement>('.space-y-2');
     expect(within(servicesBlock!).getAllByRole('checkbox')).toHaveLength(2);
   });
 
