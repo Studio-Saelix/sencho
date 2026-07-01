@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import {
     AlertDialog,
     AlertDialogAction,
@@ -798,31 +799,35 @@ function PolicyRow({ policy, onDelete, onToggle, deleting, saving, isAdmin }: Po
             </div>
 
             {historyOpen && (
-                <div className="border-t border-card-border/40 mt-2 pt-2 space-y-1.5 min-w-0">
+                <div className="border-t border-card-border/40 mt-2 pt-2 min-w-0">
                     <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Recent activity</p>
                     {history.length === 0 ? (
                         <p className="text-xs text-muted-foreground text-center py-2">No history yet.</p>
                     ) : (
-                        history.map((entry) => (
-                            <div key={entry.id} className="py-1">
-                                <div className="flex items-baseline justify-between gap-2 text-xs">
-                                    <span className={`font-medium ${actionColorClass(entry.action)}`}>
-                                        {actionLabel(entry.action)}
-                                    </span>
-                                    <span className="text-muted-foreground shrink-0 tabular-nums font-mono text-[10px]">
-                                        {new Date(entry.timestamp).toLocaleString()}
-                                    </span>
-                                </div>
-                                <div className="mt-0.5 min-w-0 font-mono text-[11px] text-foreground break-all">
-                                    {entry.container_name}
-                                </div>
-                                {entry.reason ? (
-                                    <div className="mt-0.5 text-[11px] text-muted-foreground break-words">
-                                        {entry.reason}
+                        <ScrollArea className="h-[200px] pr-2">
+                            <div className="space-y-1.5">
+                                {history.map((entry) => (
+                                    <div key={entry.id} className="py-1">
+                                        <div className="flex items-baseline justify-between gap-2 text-xs">
+                                            <span className={`font-medium ${actionColorClass(entry.action)}`}>
+                                                {actionLabel(entry.action)}
+                                            </span>
+                                            <span className="text-muted-foreground shrink-0 tabular-nums font-mono text-[10px]">
+                                                {new Date(entry.timestamp).toLocaleString()}
+                                            </span>
+                                        </div>
+                                        <div className="mt-0.5 min-w-0 font-mono text-[11px] text-foreground break-all">
+                                            {entry.container_name}
+                                        </div>
+                                        {entry.reason ? (
+                                            <div className="mt-0.5 text-[11px] text-muted-foreground break-words">
+                                                {entry.reason}
+                                            </div>
+                                        ) : null}
                                     </div>
-                                ) : null}
+                                ))}
                             </div>
-                        ))
+                        </ScrollArea>
                     )}
                 </div>
             )}
