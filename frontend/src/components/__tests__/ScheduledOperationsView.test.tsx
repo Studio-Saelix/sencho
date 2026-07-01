@@ -6,7 +6,7 @@
  * hub-local endpoint.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ScheduledTask } from '@/types/scheduling';
 
@@ -366,8 +366,8 @@ describe('ScheduledOperationsView', () => {
     await userEvent.click(screen.getAllByRole('combobox')[2]);
     await userEvent.click(await screen.findByRole('button', { name: 'web' }));
 
-    expect(await screen.findByText(/^Services/)).toBeInTheDocument();
-    expect(screen.getAllByRole('checkbox')).toHaveLength(2);
+    const servicesBlock = (await screen.findByText(/^Services/)).closest('.space-y-2');
+    expect(within(servicesBlock!).getAllByRole('checkbox')).toHaveLength(2);
   });
 
   it('renders the five registry category lanes in the timeline view', async () => {
