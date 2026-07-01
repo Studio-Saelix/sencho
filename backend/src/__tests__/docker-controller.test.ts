@@ -991,12 +991,15 @@ describe('DockerController - inspectImageLabels', () => {
     expect(mockDocker.getImage).toHaveBeenCalledWith('sha256:img');
   });
 
-  it('returns null (not a silent empty map) when the image inspect fails', async () => {
+  it('returns null (not a silent empty map) and logs when the image inspect fails', async () => {
     mockDocker.getImage.mockReturnValue({
       inspect: vi.fn().mockRejectedValue(new Error('No such image')),
     });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const dc = DockerController.getInstance(1);
     expect(await dc.inspectImageLabels('missing')).toBeNull();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 
   it('short-circuits an empty image id without inspecting', async () => {
@@ -1016,12 +1019,15 @@ describe('DockerController - inspectContainerLabelsAndImage', () => {
     expect(result).toEqual({ labels: { 'traefik.enable': 'true' }, imageId: 'sha256:imgref' });
   });
 
-  it('returns null when the container inspect fails', async () => {
+  it('returns null and logs when the container inspect fails', async () => {
     mockDocker.getContainer.mockReturnValue({
       inspect: vi.fn().mockRejectedValue(new Error('no such container')),
     });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const dc = DockerController.getInstance(1);
     expect(await dc.inspectContainerLabelsAndImage('gone')).toBeNull();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 });
 

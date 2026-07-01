@@ -304,8 +304,11 @@ export async function buildStackLabelInventory(
   const revealSecrets = options.revealSecrets === true;
   const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
   let renderable = false;
-  // A failed render leaves the declared map empty, which would misattribute genuinely
-  // Compose-declared labels as image/unknown; flag the inventory partial so that gap is honest.
+  // A failed render leaves the declared map empty. Without the declared model we cannot
+  // tell a Compose-declared label from a runtime one, so non-system runtime labels are
+  // resolved to `unknown` and reconciliation is skipped rather than shown as false drift.
+  // `renderable === false` (not `partial`) signals this to the UI; `partial` is reserved
+  // for inspection failures so the two banners stay distinct.
   let renderFailed = false;
   const declaredByService = new Map<string, Record<string, string>>();
 
@@ -317,12 +320,12 @@ export async function buildStackLabelInventory(
       }
       renderable = true;
     } catch (err) {
-      console.error('[LabelInventory] Failed to parse rendered compose for stack ' + sanitizeForLog(stackName) + ':', err);
+      console.error('[LabelInventory] Failed to parse rendered compose for stack %s:', sanitizeForLog(stackName), err);
       renderFailed = true;
     }
   } else {
-    console.error('[LabelInventory] Compose render failed for stack ' + sanitizeForLog(stackName)
-      + ' (code ' + result.code + '): ' + sanitizeForLog(result.stderr));
+    console.error('[LabelInventory] Compose render failed for stack %s (code %s): %s',
+      sanitizeForLog(stackName), result.code, sanitizeForLog(result.stderr));
     renderFailed = true;
   }
 
@@ -338,7 +341,7 @@ export async function buildStackLabelInventory(
   });
 
   const { map: imageLabelMap, partial: imagePartial } = await buildImageLabelMap(docker, inspected.map(r => r.imageId));
-  let partial = imagePartial || renderFailed;
+  let partial = imagePartial;
 
   const replicasByService = new Map<string, typeof inspected>();
   for (const replica of inspected) {
@@ -373,11 +376,20 @@ export async function buildStackLabelInventory(
       }
       const imageLabels = rep.imageId ? (imageLabelMap.get(rep.imageId) ?? null) : null;
       if (!rep.imageId) partial = true;
+      // Without a declared model, only compose-system keys can be attributed with
+      // confidence; everything else is unknown, and reconciliation is skipped.
       const runtimeLabels = Object.entries(rep.labels)
-        .map(([key, value]) => toLabelValue(key, value, resolveLabelSource(key, value, imageLabels, declared), revealSecrets))
+        .map(([key, value]) => {
+          const source: LabelSource = renderFailed && !key.startsWith(COMPOSE_SYSTEM_PREFIX)
+            ? 'unknown'
+            : resolveLabelSource(key, value, imageLabels, declared);
+          return toLabelValue(key, value, source, revealSecrets);
+        })
         .sort((a, b) => a.key.localeCompare(b.key));
       const runtimeMap = Object.fromEntries(Object.entries(rep.labels));
-      const { onlyInCompose, onlyOnContainer, inBoth, changed } = reconcileKeys(declared, runtimeMap);
+      const { onlyInCompose, onlyOnContainer, inBoth, changed } = renderFailed
+        ? { onlyInCompose: [], onlyOnContainer: [], inBoth: [], changed: [] }
+        : reconcileKeys(declared, runtimeMap);
       return {
         id: rep.id,
         name: rep.name,

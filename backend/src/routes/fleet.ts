@@ -750,6 +750,27 @@ function isLabelIndexContainerRef(v: unknown): boolean {
     && isStringOrNull(o.service);
 }
 
+function isLabelValue(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.key === 'string'
+    && typeof o.value === 'string'
+    && typeof o.source === 'string'
+    && VALID_LABEL_SOURCES.has(o.source);
+}
+
+function isContainerLabelRow(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.id === 'string'
+    && typeof o.name === 'string'
+    && typeof o.state === 'string'
+    && isStringOrNull(o.stack)
+    && isStringOrNull(o.service)
+    && Array.isArray(o.labels)
+    && o.labels.every(isLabelValue);
+}
+
 function isLabelIndexRow(v: unknown): boolean {
   if (!v || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
@@ -762,9 +783,10 @@ function isLabelIndexRow(v: unknown): boolean {
 }
 
 /**
- * Validate a remote node's label-inventory payload deeply enough that aggregation and the
- * frontend never receive a malformed row. A single bad `byLabel` element would otherwise
- * flow into the aggregation sort and crash the whole fleet request. Only wire fields are
+ * Validate a remote node's label-inventory payload deeply enough that neither the
+ * aggregation sort nor the Fleet UI ever receives a malformed row. A single bad
+ * `byLabel` or `containers` element would otherwise crash the whole fleet request (or
+ * the client) rather than degrading that node into `nodeErrors`. Only wire fields are
  * checked; the internal `imageId` is not part of the shape sent over the wire.
  */
 function isNodeLabelInventory(v: unknown): v is NodeLabelInventory {
@@ -772,6 +794,7 @@ function isNodeLabelInventory(v: unknown): v is NodeLabelInventory {
   const o = v as Record<string, unknown>;
   return typeof o.nodeId === 'number'
     && Array.isArray(o.containers)
+    && o.containers.every(isContainerLabelRow)
     && Array.isArray(o.byLabel)
     && o.byLabel.every(isLabelIndexRow);
 }

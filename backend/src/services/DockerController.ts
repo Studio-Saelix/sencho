@@ -883,7 +883,7 @@ class DockerController {
       const info = await this.docker.getContainer(containerId).inspect();
       return { labels: info.Config?.Labels ?? {}, imageId: info.Image ?? '' };
     } catch (err) {
-      console.error(`[DockerController] Container inspect failed for ${sanitizeForLog(containerId)}:`, err);
+      console.error('[DockerController] Container inspect failed for %s:', sanitizeForLog(containerId), err);
       return null;
     }
   }
@@ -895,7 +895,7 @@ class DockerController {
       const info = await this.docker.getImage(imageId).inspect();
       return { labels: info.Config?.Labels ?? {} };
     } catch (err) {
-      console.error(`[DockerController] Image inspect failed for ${sanitizeForLog(imageId)}:`, err);
+      console.error('[DockerController] Image inspect failed for %s:', sanitizeForLog(imageId), err);
       return null;
     }
   }
@@ -950,7 +950,7 @@ class DockerController {
           labels = info.Config?.Labels ?? {};
           imageId = info.Image ?? '';
         } catch (err) {
-          console.error(`[DockerController] Container inspect failed for ${sanitizeForLog(id)}:`, err);
+          console.error('[DockerController] Container inspect failed for %s:', sanitizeForLog(id), err);
           labels = c.Labels ?? {};
           imageId = c.ImageID ?? '';
           inspectFailed = true;

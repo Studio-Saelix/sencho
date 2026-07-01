@@ -67,4 +67,15 @@ describe('fleet topology reads require node:read', () => {
     const res = await request(app).get('/api/fleet/container-labels?reveal=1').set('Authorization', `Bearer ${viewerToken}`);
     expect(res.status).toBe(403);
   });
+
+  it('denies the node-local /api/system/container-labels for a role without node:read (deployer)', async () => {
+    const res = await request(app).get('/api/system/container-labels').set('Authorization', `Bearer ${deployerToken}`);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+  });
+
+  it('denies ?reveal=1 on the node-local container-labels for a non-admin (viewer)', async () => {
+    const res = await request(app).get('/api/system/container-labels?reveal=1').set('Authorization', `Bearer ${viewerToken}`);
+    expect(res.status).toBe(403);
+  });
 });

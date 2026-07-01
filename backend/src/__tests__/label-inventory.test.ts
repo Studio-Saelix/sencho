@@ -203,6 +203,27 @@ describe('buildNodeLabelInventory', () => {
     expect(plain?.redacted).toBeUndefined();
   });
 
+  it('redacts Traefik basicauth and digestauth label values', async () => {
+    stubDockerList([
+      {
+        id: 'c1', name: 'web-1', state: 'running', stack: 's', service: 'web', imageId: 'img1',
+        labels: {
+          'traefik.http.middlewares.foo.basicauth.users': 'admin:$apr1$abc123',
+          'traefik.http.middlewares.bar.digestauth.users': 'admin:realm:deadbeef',
+          'traefik.enable': 'true',
+        },
+      },
+    ]);
+    const inv = await buildNodeLabelInventory(nodeId);
+    const basic = inv.containers[0].labels.find(l => l.key.endsWith('basicauth.users'));
+    const digest = inv.containers[0].labels.find(l => l.key.endsWith('digestauth.users'));
+    expect(basic?.value).toBe(REDACTED_SENTINEL);
+    expect(basic?.redacted).toBe(true);
+    expect(digest?.value).toBe(REDACTED_SENTINEL);
+    expect(digest?.redacted).toBe(true);
+    expect(inv.containers[0].labels.find(l => l.key === 'traefik.enable')?.redacted).toBeUndefined();
+  });
+
   it('reveals secret-like values when revealSecrets is true', async () => {
     stubDockerList([
       {
@@ -363,6 +384,26 @@ describe('buildStackLabelInventory', () => {
     const inv = await buildStackLabelInventory(nodeId, 'lbl3');
     expect(inv.renderable).toBe(false);
   });
+
+  it('resolves non-system labels to unknown and skips reconciliation when render fails', async () => {
+    writeStack('rf1', { 'compose.yaml': 'services:\n  web:\n    image: nginx\n' });
+    stubRender(null);
+    stubDockerList([
+      {
+        id: 'c1', name: 'rf1-web-1', state: 'running', stack: 'rf1', service: 'web', imageId: 'img1',
+        labels: { 'traefik.enable': 'true', 'com.docker.compose.service': 'web' },
+      },
+    ]);
+    const inv = await buildStackLabelInventory(nodeId, 'rf1');
+    expect(inv.renderable).toBe(false);
+    // Render failure is signalled by renderable, not partial (which is for inspect failures).
+    expect(inv.partial).toBe(false);
+    const rep = inv.services.find(s => s.service === 'web')?.replicas[0];
+    expect(rep?.runtimeLabels.find(l => l.key === 'traefik.enable')?.source).toBe('unknown');
+    expect(rep?.runtimeLabels.find(l => l.key === 'com.docker.compose.service')?.source).toBe('compose-system');
+    expect(rep?.onlyOnContainer).toEqual([]);
+    expect(rep?.changed).toEqual([]);
+  });
 });
 
 describe('GET /api/system/container-labels', () => {
@@ -442,7 +483,8 @@ describe('GET /api/fleet/container-labels', () => {
     const res = await request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
     const dup = res.body.aggregatedByLabel.filter((r: { key: string }) => r.key === 'dup.label');
     expect(dup).toHaveLength(2);
-    expect(dup.map((r: { source: string }) => r.source).sort()).toEqual(['image', 'runtime']);
+    // The server sorts by key, value, then source; assert that order directly (no re-sort).
+    expect(dup.map((r: { source: string }) => r.source)).toEqual(['image', 'runtime']);
   });
 
   it('degrades an unreachable remote into nodeErrors without failing the whole request', async () => {
@@ -493,6 +535,22 @@ describe('GET /api/fleet/container-labels', () => {
       const res = await request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
       expect(res.status).toBe(200);
       expect(res.body.nodeErrors[remoteId]).toBe('Remote returned an unexpected label-inventory payload');
+    } finally {
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('degrades a remote with a malformed inventory container into nodeErrors', async () => {
+    stubDockerList([]);
+    const db = DatabaseService.getInstance();
+    const remoteId = db.addNode({ name: 'remote-cont', type: 'remote', compose_dir: '/app/compose', is_default: false, api_url: 'http://remote.invalid', api_token: 't' });
+    vi.spyOn(NodeRegistry.getInstance(), 'getProxyTarget').mockImplementation((id: number) => id === remoteId ? { apiUrl: 'http://remote.invalid', apiToken: 't' } : null);
+    const badContainer = JSON.stringify({ nodeId: remoteId, byLabel: [], partial: false, generatedAt: 0, containers: [{}] });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(badContainer, { status: 200, headers: { 'content-type': 'application/json' } }));
+    try {
+      const res = await request(app).get('/api/fleet/container-labels').set('Cookie', authCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.nodeErrors[remoteId]).toBeDefined();
     } finally {
       db.deleteNode(remoteId);
     }
