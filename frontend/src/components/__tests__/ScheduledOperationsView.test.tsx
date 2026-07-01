@@ -338,6 +338,38 @@ describe('ScheduledOperationsView', () => {
     );
   });
 
+  it('hides service checkboxes when the stack has only one service', async () => {
+    mockedFetchForNode.mockImplementation(async (url: string) => {
+      if (url.endsWith('/services')) return jsonResponse(['mariadb']);
+      return jsonResponse(['db-compose']);
+    });
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'db-compose' }));
+
+    await waitFor(() =>
+      expect(mockedFetchForNode).toHaveBeenCalledWith('/stacks/db-compose/services', 2),
+    );
+    expect(screen.queryByText(/^Services/)).not.toBeInTheDocument();
+  });
+
+  it('shows service checkboxes when the stack has multiple services', async () => {
+    render(<ScheduledOperationsView />);
+
+    await userEvent.click(await screen.findByRole('button', { name: /New Schedule/ }));
+    await userEvent.click(screen.getAllByRole('combobox')[1]);
+    await userEvent.click(await screen.findByRole('button', { name: 'edge' }));
+    await userEvent.click(screen.getAllByRole('combobox')[2]);
+    await userEvent.click(await screen.findByRole('button', { name: 'web' }));
+
+    expect(await screen.findByText(/^Services/)).toBeInTheDocument();
+    expect(screen.getAllByRole('checkbox')).toHaveLength(2);
+  });
+
   it('renders the five registry category lanes in the timeline view', async () => {
     render(<ScheduledOperationsView />);
     // Timeline is the default view; the lane track always renders.

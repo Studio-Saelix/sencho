@@ -218,7 +218,11 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
           ? await fetchForNode(endpoint, parseInt(formNodeId, 10))
           : await apiFetch(endpoint);
         if (res.ok && !cancelled) {
-          setAvailableServices(await res.json());
+          const services = (await res.json()) as string[];
+          setAvailableServices(services);
+          if (services.length <= 1) {
+            setFormTargetServices([]);
+          }
         }
       } catch {
         // Non-critical
@@ -864,7 +868,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                   <Combobox
                     options={containerOptions}
                     value={formTargetId}
-                    onValueChange={setFormTargetId}
+                    onValueChange={(val) => { setFormTargetId(val); setFormTargetServices([]); }}
                     placeholder={formNodeId ? 'Select container...' : 'Select a node first'}
                     disabled={!formNodeId}
                   />
@@ -898,12 +902,12 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                   <Combobox
                     options={stacks.map(s => ({ value: s, label: s }))}
                     value={formTargetId}
-                    onValueChange={setFormTargetId}
+                    onValueChange={(val) => { setFormTargetId(val); setFormTargetServices([]); }}
                     placeholder={formNodeId ? "Select stack..." : "Select a node first"}
                     disabled={!formNodeId}
                   />
                 </div>
-                {currentAction.supportsServiceSelection && formTargetId && availableServices.length > 0 && (
+                {currentAction.supportsServiceSelection && formTargetId && availableServices.length > 1 && (
                   <div className="space-y-2">
                     <Label>Services <span className="text-xs text-muted-foreground">(leave empty for all)</span></Label>
                     <div className="grid grid-cols-2 gap-2">

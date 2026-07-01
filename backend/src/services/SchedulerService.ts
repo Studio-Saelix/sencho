@@ -21,6 +21,7 @@ import type { ScanAllNodeImagesResult } from './TrivyService';
 import TrivyInstaller from './TrivyInstaller';
 import { CloudBackupService } from './CloudBackupService';
 import { buildSystemPolicyGateOptions } from '../helpers/policyGate';
+import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { enforcePolicyPreDeploy } from './PolicyEnforcement';
 import { summarizeBlockReasons } from '../utils/policy-risk';
 
@@ -442,7 +443,7 @@ export class SchedulerService {
         let filtered = containers;
         if (task.target_services) {
             const serviceNames: string[] = JSON.parse(task.target_services);
-            filtered = containers.filter(c => c.Service && serviceNames.includes(c.Service));
+            filtered = serviceNames.flatMap(svc => filterContainersByComposeService(containers, svc));
             if (filtered.length === 0) {
                 throw new Error(`No containers found matching services [${serviceNames.join(', ')}] in stack "${task.target_id}"`);
             }
