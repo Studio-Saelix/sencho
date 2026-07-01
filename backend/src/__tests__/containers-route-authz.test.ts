@@ -16,6 +16,7 @@ let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let DockerController: typeof import('../services/DockerController').default;
 let FileSystemService: typeof import('../services/FileSystemService').FileSystemService;
+let SelfIdentityService: typeof import('../services/SelfIdentityService').default;
 let ROLE_PERMISSIONS: typeof import('../middleware/permissions').ROLE_PERMISSIONS;
 
 const VIEWER = 'container-read-viewer';
@@ -28,7 +29,7 @@ function viewerToken(): string {
 }
 
 /**
- * Replace the DockerController / FileSystemService singletons with stubs so the
+ * Replace the DockerController / FileSystemService / SelfIdentityService singletons with stubs so the
  * handlers run without a Docker daemon. The logs stub ends the response itself
  * (the real streamContainerLogs flushes SSE headers and streams), so a request
  * that clears the guard resolves instead of hanging. Returns the spies so a test
@@ -46,6 +47,11 @@ function stubDockerAndFs(): { docker: ReturnType<typeof vi.spyOn>; fs: ReturnTyp
   const fs = vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({
     getStacks: vi.fn().mockResolvedValue([]),
   } as unknown as ReturnType<typeof FileSystemService.getInstance>);
+  vi.spyOn(SelfIdentityService, 'getInstance').mockReturnValue({
+    initialize: vi.fn().mockResolvedValue(undefined),
+    isOwnContainer: vi.fn().mockReturnValue(false),
+    isOwnImage: vi.fn().mockReturnValue(false),
+  } as unknown as ReturnType<typeof SelfIdentityService.getInstance>);
   return { docker, fs };
 }
 
@@ -54,6 +60,7 @@ beforeAll(async () => {
   ({ DatabaseService } = await import('../services/DatabaseService'));
   ({ default: DockerController } = await import('../services/DockerController'));
   ({ FileSystemService } = await import('../services/FileSystemService'));
+  ({ default: SelfIdentityService } = await import('../services/SelfIdentityService'));
   ({ ROLE_PERMISSIONS } = await import('../middleware/permissions'));
   ({ app } = await import('../index'));
 
