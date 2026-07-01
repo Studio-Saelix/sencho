@@ -55,4 +55,45 @@ describe('ComposeLabelsPanel', () => {
     expect(screen.getByTestId('mismatch-only-container')).toBeInTheDocument();
     expect(screen.getByTestId('mismatch-both')).toBeInTheDocument();
   });
+
+  it('renders a value-changed badge when a label value drifted', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'web',
+          declaredLabels: [{ key: 'watchtower.enable', value: 'true', source: 'compose' as const }],
+          replicas: [{
+            id: 'c1', name: 'demo-web-1', state: 'running',
+            runtimeLabels: [{ key: 'watchtower.enable', value: 'false', source: 'runtime' as const }],
+            onlyInCompose: [], onlyOnContainer: [], inBoth: [], changed: ['watchtower.enable'],
+          }],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    expect(await screen.findByTestId('mismatch-changed')).toBeInTheDocument();
+  });
+
+  it('shows "Runtime labels unavailable" for a replica whose inspect failed', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: true, generatedAt: Date.now(),
+        services: [{
+          service: 'web',
+          declaredLabels: [{ key: 'traefik.enable', value: 'true', source: 'compose' as const }],
+          replicas: [{
+            id: 'c1', name: 'demo-web-1', state: 'running',
+            runtimeLabels: [], onlyInCompose: [], onlyOnContainer: [], inBoth: [], changed: [],
+            inspectFailed: true,
+          }],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    expect(await screen.findByText('Runtime labels unavailable for this container.')).toBeInTheDocument();
+    expect(screen.getByText(/could not be inspected/i)).toBeInTheDocument();
+  });
 });

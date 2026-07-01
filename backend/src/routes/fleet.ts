@@ -46,7 +46,7 @@ import { runLocalLabelAssign, validateLabelTemplate, validateRemoteAssignResults
 import { MAX_ASSIGNMENTS } from '../helpers/constants';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
-import { buildNodeLabelInventory, type NodeLabelInventory } from '../services/LabelInventoryService';
+import { buildNodeLabelInventory, VALID_LABEL_SOURCES, type NodeLabelInventory } from '../services/LabelInventoryService';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
 import { PROXY_TIER_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
@@ -737,10 +737,43 @@ interface FleetNodeLabelInventoryResult {
   error: string | null;
 }
 
+function isStringOrNull(v: unknown): boolean {
+  return typeof v === 'string' || v === null;
+}
+
+function isLabelIndexContainerRef(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.id === 'string'
+    && typeof o.name === 'string'
+    && isStringOrNull(o.stack)
+    && isStringOrNull(o.service);
+}
+
+function isLabelIndexRow(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.key === 'string'
+    && typeof o.value === 'string'
+    && typeof o.source === 'string'
+    && VALID_LABEL_SOURCES.has(o.source)
+    && Array.isArray(o.containers)
+    && o.containers.every(isLabelIndexContainerRef);
+}
+
+/**
+ * Validate a remote node's label-inventory payload deeply enough that aggregation and the
+ * frontend never receive a malformed row. A single bad `byLabel` element would otherwise
+ * flow into the aggregation sort and crash the whole fleet request. Only wire fields are
+ * checked; the internal `imageId` is not part of the shape sent over the wire.
+ */
 function isNodeLabelInventory(v: unknown): v is NodeLabelInventory {
   if (!v || typeof v !== 'object') return false;
   const o = v as Record<string, unknown>;
-  return typeof o.nodeId === 'number' && Array.isArray(o.containers) && Array.isArray(o.byLabel);
+  return typeof o.nodeId === 'number'
+    && Array.isArray(o.containers)
+    && Array.isArray(o.byLabel)
+    && o.byLabel.every(isLabelIndexRow);
 }
 
 /**
@@ -797,7 +830,7 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
     for (const nodeResult of perNode) {
       if (nodeResult.status !== 'ok' || !nodeResult.inventory) continue;
       for (const row of nodeResult.inventory.byLabel) {
-        const key = `${row.key}\0${row.value}`;
+        const key = `${row.key}\0${row.value}\0${row.source}`;
         const existing = aggregatedByLabel.get(key);
         if (!existing) {
           aggregatedByLabel.set(key, {
@@ -825,7 +858,8 @@ fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: R
 
     res.json({
       nodes: perNode,
-      aggregatedByLabel: [...aggregatedByLabel.values()].sort((a, b) => a.key.localeCompare(b.key) || a.value.localeCompare(b.value)),
+      aggregatedByLabel: [...aggregatedByLabel.values()].sort((a, b) =>
+        a.key.localeCompare(b.key) || a.value.localeCompare(b.value) || a.source.localeCompare(b.source)),
       nodeErrors,
       generatedAt: Date.now(),
     });

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import {
     RefreshCw, Camera, FileDown,
     Network, SlidersHorizontal,
-    Send, KeyRound, ArrowLeftRight, Wrench, Workflow, Radio,
+    Send, KeyRound, ArrowLeftRight, Wrench, Workflow, Tag,
 } from 'lucide-react';
 import { FleetMasthead } from './fleet/FleetMasthead';
 import { ReconnectingOverlay } from './FleetView/ReconnectingOverlay';
@@ -137,7 +137,7 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, fleetUpdate
                             {containerLabelsEnabled && (
                                 <TabsHighlightItem value="container-labels">
                                     <TabsTrigger value="container-labels">
-                                        <Radio className="w-4 h-4 mr-1.5" />Automation
+                                        <Tag className="w-4 h-4 mr-1.5" />Docker Labels
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             )}

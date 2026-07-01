@@ -60,6 +60,9 @@ export interface StackLabelReplica {
   onlyInCompose: string[];
   onlyOnContainer: string[];
   inBoth: string[];
+  // Optional so older nodes (pre-provenance) still typecheck during mixed-version operation.
+  changed?: string[];
+  inspectFailed?: boolean;
 }
 
 export interface StackServiceLabelRow {
@@ -72,6 +75,8 @@ export interface StackLabelInventory {
   stackName: string;
   renderable: boolean;
   services: StackServiceLabelRow[];
+  // Optional so older nodes still typecheck during mixed-version operation.
+  partial?: boolean;
   generatedAt: number;
 }
 

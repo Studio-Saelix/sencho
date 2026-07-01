@@ -978,6 +978,53 @@ describe('DockerController - inspectImage', () => {
   });
 });
 
+// --- label / image inspection for the label inventory --------------------------
+
+describe('DockerController - inspectImageLabels', () => {
+  it('returns the image label map', async () => {
+    mockDocker.getImage.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Config: { Labels: { 'org.opencontainers.image.title': 'Plex' } } }),
+    });
+    const dc = DockerController.getInstance(1);
+    const result = await dc.inspectImageLabels('sha256:img');
+    expect(result).toEqual({ labels: { 'org.opencontainers.image.title': 'Plex' } });
+    expect(mockDocker.getImage).toHaveBeenCalledWith('sha256:img');
+  });
+
+  it('returns null (not a silent empty map) when the image inspect fails', async () => {
+    mockDocker.getImage.mockReturnValue({
+      inspect: vi.fn().mockRejectedValue(new Error('No such image')),
+    });
+    const dc = DockerController.getInstance(1);
+    expect(await dc.inspectImageLabels('missing')).toBeNull();
+  });
+
+  it('short-circuits an empty image id without inspecting', async () => {
+    const dc = DockerController.getInstance(1);
+    expect(await dc.inspectImageLabels('')).toBeNull();
+    expect(mockDocker.getImage).not.toHaveBeenCalled();
+  });
+});
+
+describe('DockerController - inspectContainerLabelsAndImage', () => {
+  it('returns labels and the image ref from container inspect', async () => {
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Config: { Labels: { 'traefik.enable': 'true' } }, Image: 'sha256:imgref' }),
+    });
+    const dc = DockerController.getInstance(1);
+    const result = await dc.inspectContainerLabelsAndImage('c1');
+    expect(result).toEqual({ labels: { 'traefik.enable': 'true' }, imageId: 'sha256:imgref' });
+  });
+
+  it('returns null when the container inspect fails', async () => {
+    mockDocker.getContainer.mockReturnValue({
+      inspect: vi.fn().mockRejectedValue(new Error('no such container')),
+    });
+    const dc = DockerController.getInstance(1);
+    expect(await dc.inspectContainerLabelsAndImage('gone')).toBeNull();
+  });
+});
+
 // --- createNetwork validation --------------------------------------------------
 
 describe('createNetwork', () => {

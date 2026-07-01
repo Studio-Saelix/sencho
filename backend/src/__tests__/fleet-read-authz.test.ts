@@ -21,6 +21,7 @@ const NODE_READ_ROUTES = [
   '/api/fleet/dependency-map',
   '/api/fleet/networking-summary',
   '/api/fleet/update-status',
+  '/api/fleet/container-labels',
 ];
 
 beforeAll(async () => {
@@ -60,5 +61,10 @@ describe('fleet topology reads require node:read', () => {
   it('rejects an unauthenticated request', async () => {
     const res = await request(app).get('/api/fleet/overview');
     expect(res.status).toBe(401);
+  });
+
+  it('denies ?reveal=1 on container-labels for a non-admin (viewer)', async () => {
+    const res = await request(app).get('/api/fleet/container-labels?reveal=1').set('Authorization', `Bearer ${viewerToken}`);
+    expect(res.status).toBe(403);
   });
 });

@@ -7,12 +7,12 @@ Docker labels are metadata declared on Compose services or attached to running c
 
 Sencho surfaces two read-only audit views for these labels:
 
-- **Fleet · Automation** for estate-wide visibility across every node
+- **Fleet · Docker Labels** for estate-wide visibility across every node
 - **Stack · Compose Labels** for per-stack reconciliation between declared Compose labels and labels present on running containers
 
-## Fleet Automation tab
+## Fleet Docker Labels tab
 
-Open **Fleet** and select the **Automation** tab (after **Map**). The panel is titled **Docker label audit** and offers two layouts:
+Open **Fleet** and select the **Docker Labels** tab (after **Map**). The panel is titled **Docker label audit** and offers two layouts:
 
 | View | What it shows |
 |------|----------------|
@@ -21,7 +21,14 @@ Open **Fleet** and select the **Automation** tab (after **Map**). The panel is t
 
 Use the search box to filter by label key, value, container name, stack, or node. When a container belongs to a known stack, **Open stack** jumps to that stack in the editor.
 
-Labels whose keys start with `com.docker.compose.` are tagged as Docker Compose system labels. Other keys are called out as external automation labels (Watchtower, Traefik, Drydock, and similar tools).
+Every label carries a provenance badge so you can tell where it came from:
+
+- **Declared in Compose** for labels defined on the service in the compose file
+- **Image** for labels inherited from the container image (for example OCI `org.opencontainers.image.*` metadata)
+- **Present at runtime** for labels set on the running container
+- **Docker Compose system label** for keys starting with `com.docker.compose.`
+
+Automation tools such as Watchtower, Diun, and Traefik read these labels, so the audit makes it easy to confirm which containers are opted in or out. When a container or its image cannot be inspected, the affected labels are shown as **Unknown** and the panel notes that it is showing partial data with the affected nodes named.
 
 Runtime labels are static until the container is recreated. Changes declared in Compose require save and redeploy before they appear on running containers.
 
@@ -30,10 +37,10 @@ Runtime labels are static until the container is recreated. Changes declared in 
 Inside the stack editor, open the **Compose Labels** tab in the anatomy strip. For each service you see:
 
 - **Declared in Compose** labels from the effective rendered compose model
-- **Present at runtime** labels read from each running replica
-- Mismatch hints: **Only in Compose**, **Only on running container**, or **Present in both**
+- **Present at runtime** labels read from each running replica, each with its provenance badge (Compose, Image, or runtime)
+- Reconciliation hints: **only in Compose**, **only on running container**, **present in both**, or **value changed** when a key is declared and running but the values differ
 
-When Compose cannot be fully rendered, the panel warns that declared labels may be incomplete but still shows whatever runtime data is available.
+When Compose cannot be fully rendered, the panel warns that declared labels may be incomplete but still shows whatever runtime data is available. If a replica cannot be inspected, it is flagged with **Runtime labels unavailable** and the panel notes that provenance may be incomplete.
 
 ## Sensitive values
 

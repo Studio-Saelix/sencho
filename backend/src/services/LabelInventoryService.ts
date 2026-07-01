@@ -6,8 +6,18 @@
 import { ComposeService } from './ComposeService';
 import DockerController from './DockerController';
 import { redactLabelValue } from '../helpers/labelValueRedaction';
+import { sanitizeForLog } from '../utils/safeLog';
 
 export type LabelSource = 'compose' | 'runtime' | 'image' | 'compose-system' | 'unknown';
+
+/**
+ * Every valid label source, typed as a set of strings so the wire validator can test an
+ * untrusted `string` without a cast. The literals are `LabelSource` members, so the union
+ * still documents the valid values.
+ */
+export const VALID_LABEL_SOURCES: ReadonlySet<string> = new Set<LabelSource>([
+  'compose', 'runtime', 'image', 'compose-system', 'unknown',
+]);
 
 export interface LabelValue {
   key: string;
@@ -58,6 +68,10 @@ export interface StackLabelReplica {
   onlyInCompose: string[];
   onlyOnContainer: string[];
   inBoth: string[];
+  /** Keys declared in Compose and present at runtime but with a different value. */
+  changed: string[];
+  /** Runtime labels could not be read for this replica; reconciliation is skipped. */
+  inspectFailed?: boolean;
 }
 
 export interface StackServiceLabelRow {
@@ -70,6 +84,8 @@ export interface StackLabelInventory {
   stackName: string;
   renderable: boolean;
   services: StackServiceLabelRow[];
+  /** A replica or its image could not be fully inspected; some provenance is unknown. */
+  partial: boolean;
   generatedAt: number;
 }
 
@@ -86,8 +102,45 @@ function str(v: unknown): string | undefined {
   return undefined;
 }
 
-function runtimeSourceForKey(key: string): LabelSource {
-  return key.startsWith(COMPOSE_SYSTEM_PREFIX) ? 'compose-system' : 'runtime';
+/**
+ * Truthful provenance for a runtime label. Precedence: compose-system prefix, then
+ * (stack path only) a Compose-declared key with the same value, then an exact image
+ * label match, then plain runtime. When the image could not be inspected
+ * (`imageLabels === null`) an otherwise-unattributable label is `unknown`, not `runtime`.
+ */
+function resolveLabelSource(
+  key: string,
+  value: string,
+  imageLabels: Record<string, string> | null,
+  declared?: Record<string, string>,
+): LabelSource {
+  if (key.startsWith(COMPOSE_SYSTEM_PREFIX)) return 'compose-system';
+  if (declared && declared[key] === value) return 'compose';
+  if (imageLabels) return imageLabels[key] === value ? 'image' : 'runtime';
+  return 'unknown';
+}
+
+/**
+ * Inspect each unique, non-empty image id once (deduped, bounded concurrency). Returns a
+ * map from image id to its label map, or `null` for an image that could not be inspected,
+ * and whether any inspection failed (so callers can mark the inventory partial).
+ */
+async function buildImageLabelMap(
+  docker: DockerController,
+  imageIds: string[],
+): Promise<{ map: Map<string, Record<string, string> | null>; partial: boolean }> {
+  const unique = [...new Set(imageIds.filter(id => id.length > 0))];
+  const inspected = await mapWithConcurrency(unique, INSPECT_CONCURRENCY, async (imageId) => {
+    const result = await docker.inspectImageLabels(imageId);
+    return { imageId, labels: result ? result.labels : null };
+  });
+  const map = new Map<string, Record<string, string> | null>();
+  let partial = false;
+  for (const { imageId, labels } of inspected) {
+    map.set(imageId, labels);
+    if (labels === null) partial = true;
+  }
+  return { map, partial };
 }
 
 function parseLabelsMap(labels: unknown): Record<string, string> {
@@ -157,7 +210,7 @@ function buildByLabelIndex(
   const map = new Map<string, LabelIndexRow>();
   for (const container of containers) {
     for (const label of container.labels) {
-      const mapKey = `${label.key}\0${label.value}`;
+      const mapKey = `${label.key}\0${label.value}\0${label.source}`;
       let row = map.get(mapKey);
       if (!row) {
         row = {
@@ -179,29 +232,32 @@ function buildByLabelIndex(
       });
     }
   }
-  return [...map.values()].sort((a, b) => a.key.localeCompare(b.key) || a.value.localeCompare(b.value));
+  return [...map.values()].sort((a, b) =>
+    a.key.localeCompare(b.key) || a.value.localeCompare(b.value) || a.source.localeCompare(b.source));
 }
 
 function reconcileKeys(
   declared: Record<string, string>,
   runtime: Record<string, string>,
-): { onlyInCompose: string[]; onlyOnContainer: string[]; inBoth: string[] } {
-  const declaredKeys = new Set(Object.keys(declared));
+): { onlyInCompose: string[]; onlyOnContainer: string[]; inBoth: string[]; changed: string[] } {
   const runtimeKeys = new Set(Object.keys(runtime));
   const onlyInCompose: string[] = [];
   const onlyOnContainer: string[] = [];
   const inBoth: string[] = [];
-  for (const k of declaredKeys) {
-    if (runtimeKeys.has(k)) inBoth.push(k);
-    else onlyInCompose.push(k);
+  const changed: string[] = [];
+  for (const k of Object.keys(declared)) {
+    if (!runtimeKeys.has(k)) onlyInCompose.push(k);
+    else if (declared[k] === runtime[k]) inBoth.push(k);
+    else changed.push(k);
   }
   for (const k of runtimeKeys) {
-    if (!declaredKeys.has(k)) onlyOnContainer.push(k);
+    if (!(k in declared)) onlyOnContainer.push(k);
   }
   onlyInCompose.sort();
   onlyOnContainer.sort();
   inBoth.sort();
-  return { onlyInCompose, onlyOnContainer, inBoth };
+  changed.sort();
+  return { onlyInCompose, onlyOnContainer, inBoth, changed };
 }
 
 /** Node-wide Docker label inventory for fleet and system routes. */
@@ -212,23 +268,29 @@ export async function buildNodeLabelInventory(
   const revealSecrets = options.revealSecrets === true;
   const docker = DockerController.getInstance(nodeId);
   const rows = await docker.listContainersForLabelInventory();
+  const { map: imageLabelMap, partial: imagePartial } = await buildImageLabelMap(docker, rows.map(r => r.imageId));
 
-  const containers: ContainerLabelRow[] = rows.map((row) => ({
-    id: row.id,
-    name: row.name,
-    stack: row.stack,
-    service: row.service,
-    state: row.state,
-    labels: Object.entries(row.labels).map(([key, value]) =>
-      toLabelValue(key, value, runtimeSourceForKey(key), revealSecrets),
-    ).sort((a, b) => a.key.localeCompare(b.key)),
-  }));
+  let missingImage = false;
+  const containers: ContainerLabelRow[] = rows.map((row) => {
+    const imageLabels = row.imageId ? (imageLabelMap.get(row.imageId) ?? null) : null;
+    if (!row.imageId) missingImage = true;
+    return {
+      id: row.id,
+      name: row.name,
+      stack: row.stack,
+      service: row.service,
+      state: row.state,
+      labels: Object.entries(row.labels).map(([key, value]) =>
+        toLabelValue(key, value, resolveLabelSource(key, value, imageLabels), revealSecrets),
+      ).sort((a, b) => a.key.localeCompare(b.key)),
+    };
+  });
 
   return {
     nodeId,
     containers,
     byLabel: buildByLabelIndex(containers),
-    partial: rows.some(r => r.inspectFailed),
+    partial: rows.some(r => r.inspectFailed) || imagePartial || missingImage,
     generatedAt: Date.now(),
   };
 }
@@ -242,6 +304,9 @@ export async function buildStackLabelInventory(
   const revealSecrets = options.revealSecrets === true;
   const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
   let renderable = false;
+  // A failed render leaves the declared map empty, which would misattribute genuinely
+  // Compose-declared labels as image/unknown; flag the inventory partial so that gap is honest.
+  let renderFailed = false;
   const declaredByService = new Map<string, Record<string, string>>();
 
   if (result.rendered !== null) {
@@ -251,9 +316,14 @@ export async function buildStackLabelInventory(
         declaredByService.set(serviceName, parseLabelsMap(svc.labels));
       }
       renderable = true;
-    } catch {
-      renderable = false;
+    } catch (err) {
+      console.error('[LabelInventory] Failed to parse rendered compose for stack ' + sanitizeForLog(stackName) + ':', err);
+      renderFailed = true;
     }
+  } else {
+    console.error('[LabelInventory] Compose render failed for stack ' + sanitizeForLog(stackName)
+      + ' (code ' + result.code + '): ' + sanitizeForLog(result.stderr));
+    renderFailed = true;
   }
 
   const docker = DockerController.getInstance(nodeId);
@@ -263,9 +333,12 @@ export async function buildStackLabelInventory(
     const name = stripContainerName(c.Names);
     const state = c.State ?? 'unknown';
     const service = c.Service ?? null;
-    const labels = id ? await docker.inspectContainerLabels(id) : {};
-    return { id, name, state, service, labels };
+    const result = id ? await docker.inspectContainerLabelsAndImage(id) : null;
+    return { id, name, state, service, labels: result?.labels ?? {}, imageId: result?.imageId ?? '', inspectFailed: result === null };
   });
+
+  const { map: imageLabelMap, partial: imagePartial } = await buildImageLabelMap(docker, inspected.map(r => r.imageId));
+  let partial = imagePartial || renderFailed;
 
   const replicasByService = new Map<string, typeof inspected>();
   for (const replica of inspected) {
@@ -287,12 +360,24 @@ export async function buildStackLabelInventory(
       .map(([key, value]) => toLabelValue(key, value, 'compose', revealSecrets))
       .sort((a, b) => a.key.localeCompare(b.key));
 
-    const replicas = (replicasByService.get(service) ?? []).map((rep) => {
+    const replicas: StackLabelReplica[] = (replicasByService.get(service) ?? []).map((rep) => {
+      // A failed inspect has no runtime labels; reconciling against {} would falsely
+      // report every declared label as Compose-only, so skip reconciliation and flag it.
+      if (rep.inspectFailed) {
+        partial = true;
+        return {
+          id: rep.id, name: rep.name, state: rep.state,
+          runtimeLabels: [], onlyInCompose: [], onlyOnContainer: [], inBoth: [], changed: [],
+          inspectFailed: true,
+        };
+      }
+      const imageLabels = rep.imageId ? (imageLabelMap.get(rep.imageId) ?? null) : null;
+      if (!rep.imageId) partial = true;
       const runtimeLabels = Object.entries(rep.labels)
-        .map(([key, value]) => toLabelValue(key, value, runtimeSourceForKey(key), revealSecrets))
+        .map(([key, value]) => toLabelValue(key, value, resolveLabelSource(key, value, imageLabels, declared), revealSecrets))
         .sort((a, b) => a.key.localeCompare(b.key));
       const runtimeMap = Object.fromEntries(Object.entries(rep.labels));
-      const { onlyInCompose, onlyOnContainer, inBoth } = reconcileKeys(declared, runtimeMap);
+      const { onlyInCompose, onlyOnContainer, inBoth, changed } = reconcileKeys(declared, runtimeMap);
       return {
         id: rep.id,
         name: rep.name,
@@ -301,6 +386,7 @@ export async function buildStackLabelInventory(
         onlyInCompose,
         onlyOnContainer,
         inBoth,
+        changed,
       };
     });
 
@@ -311,6 +397,7 @@ export async function buildStackLabelInventory(
     stackName,
     renderable,
     services,
+    partial,
     generatedAt: Date.now(),
   };
 }

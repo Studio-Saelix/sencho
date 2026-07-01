@@ -36,16 +36,18 @@ function LabelRow({ label, onReveal }: { label: LabelValue; onReveal?: () => voi
   );
 }
 
-function MismatchBadge({ kind, count }: { kind: 'only-compose' | 'only-container' | 'both'; count: number }) {
+function MismatchBadge({ kind, count }: { kind: 'only-compose' | 'only-container' | 'both' | 'changed'; count: number }) {
   const labels = {
     'only-compose': 'only in Compose',
     'only-container': 'only on running container',
     both: 'present in both',
+    changed: 'value changed',
   };
   const tones = {
     'only-compose': 'border-warning/40 bg-warning/[0.06] text-warning',
     'only-container': 'border-info/40 bg-info/[0.06] text-info',
     both: 'border-muted bg-card/40 text-stat-subtitle',
+    changed: 'border-warning/40 bg-warning/[0.06] text-warning',
   };
   if (count === 0) return null;
   return (
@@ -112,6 +114,13 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
         </div>
       )}
 
+      {inventory?.partial && (
+        <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/[0.06] px-3 py-2 text-xs text-warning">
+          <Info className="h-4 w-4 shrink-0 mt-0.5" strokeWidth={1.5} />
+          <span>Some containers or images could not be inspected. Label provenance may be incomplete.</span>
+        </div>
+      )}
+
       {inventory?.services.length === 0 && (
         <p className="text-sm text-stat-subtitle">No Compose or runtime labels found for this stack.</p>
       )}
@@ -134,19 +143,26 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
               <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle mb-1">
                 {rep.name || rep.id.slice(0, 12)} · {rep.state}
               </p>
-              {(rep.onlyInCompose.length > 0 || rep.onlyOnContainer.length > 0) && (
-                <div className="flex flex-wrap gap-1.5 mb-2">
-                  <MismatchBadge kind="only-compose" count={rep.onlyInCompose.length} />
-                  <MismatchBadge kind="only-container" count={rep.onlyOnContainer.length} />
-                  <MismatchBadge kind="both" count={rep.inBoth.length} />
-                </div>
-              )}
-              {rep.runtimeLabels.length > 0 ? (
-                rep.runtimeLabels.map((label) => (
-                  <LabelRow key={`rt-${label.key}`} label={label} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} />
-                ))
+              {rep.inspectFailed ? (
+                <p className="text-xs text-warning">Runtime labels unavailable for this container.</p>
               ) : (
-                <p className="text-xs text-stat-subtitle">No runtime labels on this container.</p>
+                <>
+                  {(rep.onlyInCompose.length > 0 || rep.onlyOnContainer.length > 0 || (rep.changed?.length ?? 0) > 0) && (
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      <MismatchBadge kind="only-compose" count={rep.onlyInCompose.length} />
+                      <MismatchBadge kind="changed" count={rep.changed?.length ?? 0} />
+                      <MismatchBadge kind="only-container" count={rep.onlyOnContainer.length} />
+                      <MismatchBadge kind="both" count={rep.inBoth.length} />
+                    </div>
+                  )}
+                  {rep.runtimeLabels.length > 0 ? (
+                    rep.runtimeLabels.map((label) => (
+                      <LabelRow key={`rt-${label.key}`} label={label} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} />
+                    ))
+                  ) : (
+                    <p className="text-xs text-stat-subtitle">No runtime labels on this container.</p>
+                  )}
+                </>
               )}
             </div>
           ))}

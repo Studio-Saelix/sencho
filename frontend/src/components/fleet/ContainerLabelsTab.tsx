@@ -107,6 +107,23 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
     );
   }, [data, search]);
 
+  // Nodes that were unreachable (nodeErrors) or whose inventory came back partial (some
+  // containers or images could not be inspected). Named so the warning is truthful.
+  const degradedNodes = useMemo(() => {
+    const unreachable: string[] = [];
+    const partial: string[] = [];
+    if (data) {
+      const nameById = new Map(data.nodes.map(n => [n.nodeId, n.nodeName] as const));
+      for (const idStr of Object.keys(data.nodeErrors)) {
+        unreachable.push(nameById.get(Number(idStr)) ?? `node ${idStr}`);
+      }
+      for (const n of data.nodes) {
+        if (n.status === 'ok' && n.inventory?.partial) partial.push(n.nodeName);
+      }
+    }
+    return { unreachable, partial };
+  }, [data]);
+
   const toggleExpanded = (id: string) => {
     setExpanded(prev => {
       const next = new Set(prev);
@@ -158,14 +175,16 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
         <p className="text-sm text-stat-subtitle">Loading Docker label audit...</p>
       )}
 
-      {!loading && data && Object.keys(data.nodeErrors).length > 0 && (
+      {!loading && data && (degradedNodes.unreachable.length > 0 || degradedNodes.partial.length > 0) && (
         <p className="text-xs text-warning">
-          Some nodes could not be reached. Showing partial fleet data.
+          {degradedNodes.unreachable.length > 0 && `Could not reach ${degradedNodes.unreachable.join(', ')}. `}
+          {degradedNodes.partial.length > 0 && `Some containers or images could not be inspected on ${degradedNodes.partial.join(', ')}. `}
+          Showing partial fleet data.
         </p>
       )}
 
       {viewMode === 'container' && (
-        <div className="rounded-lg border border-card-border overflow-hidden max-md:overflow-x-auto">
+        <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden max-md:overflow-x-auto">
           <Table>
             <TableHeader>
               <TableRow>
@@ -185,17 +204,17 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
                 return (
                   <Fragment key={rowKey}>
                     <TableRow className="hover:bg-muted/30">
-                      <TableCell className="py-2">
+                      <TableCell>
                         <button type="button" onClick={() => toggleExpanded(rowKey)} className="text-muted-foreground">
                           {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
                         </button>
                       </TableCell>
-                      <TableCell className="font-mono text-xs py-2">{c.name || c.id.slice(0, 12)}</TableCell>
-                      <TableCell className="text-xs py-2">{c.stack ?? '—'}</TableCell>
-                      <TableCell className="text-xs py-2">{c.nodeName}</TableCell>
-                      <TableCell className="text-xs py-2">{c.state}</TableCell>
-                      <TableCell className="text-right text-xs py-2 tabular-nums">{c.labels.length}</TableCell>
-                      <TableCell className="py-2 text-right">
+                      <TableCell className="font-mono text-xs">{c.name || c.id.slice(0, 12)}</TableCell>
+                      <TableCell className="text-xs">{c.stack ?? '—'}</TableCell>
+                      <TableCell className="text-xs">{c.nodeName}</TableCell>
+                      <TableCell className="text-xs">{c.state}</TableCell>
+                      <TableCell className="text-right text-xs tabular-nums">{c.labels.length}</TableCell>
+                      <TableCell className="text-right">
                         {c.stack && (
                           <Button variant="ghost" size="sm" className="h-7 text-[10px]" onClick={() => onNavigateToNode(c.nodeId, c.stack!)}>
                             <ExternalLink className="h-3 w-3 mr-1" /> Open stack
@@ -243,7 +262,7 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
       {viewMode === 'label' && (
         <div className="space-y-3">
           {filteredByLabel.map((row) => (
-            <LabelGroupCard key={`${row.key}=${row.value}`} row={row} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} onNavigateToNode={onNavigateToNode} />
+            <LabelGroupCard key={`${row.key}=${row.value}=${row.source}`} row={row} onReveal={isAdmin && !revealSecrets ? handleReveal : undefined} onNavigateToNode={onNavigateToNode} />
           ))}
           {filteredByLabel.length === 0 && !loading && (
             <p className="text-sm text-stat-subtitle py-4 text-center">No labels match this filter.</p>
@@ -267,7 +286,6 @@ function LabelGroupCard({
   onReveal?: () => void;
   onNavigateToNode: (nodeId: number, stackName: string) => void;
 }) {
-  const isExternal = !row.key.startsWith('com.docker.compose.');
   return (
     <div className="rounded-lg border border-card-border bg-card/40 p-3">
       <div className="flex flex-wrap items-center gap-2 mb-2">
@@ -275,9 +293,6 @@ function LabelGroupCard({
         <span className="text-muted-foreground">=</span>
         <LabelValueCell label={{ key: row.key, value: row.value, source: row.source, redacted: row.redacted }} onReveal={onReveal} />
         <Badge variant="outline" className="text-[10px]">{SOURCE_LABELS[row.source]}</Badge>
-        {isExternal && (
-          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">External automation label</span>
-        )}
       </div>
       <ul className="space-y-1">
         {row.containers.map((c) => (
