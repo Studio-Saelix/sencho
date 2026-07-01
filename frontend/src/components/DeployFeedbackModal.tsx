@@ -229,7 +229,7 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
               rowCount={logRows.length}
               errorMessage={errorMessage}
               countdown={countdown}
-              showCountdown={!gateHoldsOpen}
+              showCountdown={canAutoClose}
               gateStatus={healthGate?.status ?? null}
             />
             <Button
@@ -413,7 +413,7 @@ interface StatusIndicatorProps {
   rowCount: number;
   errorMessage?: string;
   countdown: number;
-  /** False while a health gate is observing or terminal-unhealthy (no auto-close). */
+  /** False when auto-close is not eligible: inline style, or while a gate is observing or terminal-unhealthy. */
   showCountdown: boolean;
   /** Active health gate status, or null when no gate was started. */
   gateStatus: 'observing' | 'passed' | 'failed' | 'unknown' | null;
