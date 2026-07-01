@@ -624,7 +624,7 @@ export default function StackAnatomyPanel({
         </TabsContent>
       )}
       {composeLabelsEnabled && (
-        <TabsContent value="compose-labels" className="flex flex-col flex-1 min-h-0 mt-0 overflow-auto">
+        <TabsContent value="compose-labels" className="flex flex-col flex-1 min-h-0 mt-0">
           <ComposeLabelsPanel stackName={stackName} />
         </TabsContent>
       )}

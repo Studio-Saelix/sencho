@@ -36,20 +36,21 @@ function LabelRow({ label, onReveal }: { label: LabelValue; onReveal?: () => voi
   );
 }
 
-function MismatchBadge({ kind }: { kind: 'only-compose' | 'only-container' | 'both' }) {
+function MismatchBadge({ kind, count }: { kind: 'only-compose' | 'only-container' | 'both'; count: number }) {
   const labels = {
-    'only-compose': 'Only in Compose',
-    'only-container': 'Only on running container',
-    both: 'Present in both',
+    'only-compose': 'only in Compose',
+    'only-container': 'only on running container',
+    both: 'present in both',
   };
   const tones = {
     'only-compose': 'border-warning/40 bg-warning/[0.06] text-warning',
     'only-container': 'border-info/40 bg-info/[0.06] text-info',
     both: 'border-muted bg-card/40 text-stat-subtitle',
   };
+  if (count === 0) return null;
   return (
     <span className={cn('inline-flex rounded border px-1.5 py-0.5 font-mono text-[10px]', tones[kind])} data-testid={`mismatch-${kind}`}>
-      {labels[kind]}
+      {count} {labels[kind]}
     </span>
   );
 }
@@ -90,16 +91,19 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
   };
 
   if (loading && !inventory) {
-    return <p className="text-sm text-stat-subtitle py-4">Loading Compose labels...</p>;
+    return <p className="px-3 py-3 font-mono text-[11px] text-stat-subtitle">Loading Compose labels…</p>;
   }
 
   if (loadError) {
-    return <p className="text-sm text-destructive py-4">Could not load Compose labels for this stack.</p>;
+    return <p className="px-3 py-3 font-mono text-[11px] text-destructive">Could not load Compose labels for this stack.</p>;
   }
 
   return (
-    <div className="space-y-4" data-testid="compose-labels-panel">
-      <p className="text-xs text-stat-subtitle leading-relaxed">{LABEL_DISAMBIGUATION_COPY}</p>
+    <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4" data-testid="compose-labels-panel">
+      <div className="flex items-center justify-between gap-2">
+        <span className={LABEL_CLASS}>compose labels</span>
+      </div>
+      <p className="text-[11px] leading-relaxed text-stat-subtitle">{LABEL_DISAMBIGUATION_COPY}</p>
 
       {!inventory?.renderable && (
         <div className="flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/[0.06] px-3 py-2 text-xs text-warning">
@@ -132,9 +136,9 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
               </p>
               {(rep.onlyInCompose.length > 0 || rep.onlyOnContainer.length > 0) && (
                 <div className="flex flex-wrap gap-1.5 mb-2">
-                  {rep.onlyInCompose.map(k => <MismatchBadge key={`oc-${k}`} kind="only-compose" />)}
-                  {rep.onlyOnContainer.map(k => <MismatchBadge key={`or-${k}`} kind="only-container" />)}
-                  {rep.inBoth.map(k => <MismatchBadge key={`ib-${k}`} kind="both" />)}
+                  <MismatchBadge kind="only-compose" count={rep.onlyInCompose.length} />
+                  <MismatchBadge kind="only-container" count={rep.onlyOnContainer.length} />
+                  <MismatchBadge kind="both" count={rep.inBoth.length} />
                 </div>
               )}
               {rep.runtimeLabels.length > 0 ? (
