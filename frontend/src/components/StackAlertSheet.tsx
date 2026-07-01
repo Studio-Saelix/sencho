@@ -738,13 +738,13 @@ function PolicyRow({ policy, onDelete, onToggle, deleting, saving, isAdmin }: Po
     };
 
     return (
-        <div className="flex flex-col gap-0 border-b border-card-border/40 last:border-b-0 text-sm py-2">
-            <div className="flex items-center justify-between gap-2">
-                <div className="flex flex-col gap-0.5 min-w-0">
-                    <span className="font-mono text-foreground truncate">
+        <div className="flex flex-col gap-0 border-b border-card-border/40 last:border-b-0 text-sm py-2 min-w-0">
+            <div className="flex items-start justify-between gap-2">
+                <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                    <span className="font-mono text-foreground break-words">
                         {policy.service_name ?? <span className="text-muted-foreground font-sans">All services</span>}
                     </span>
-                    <span className="text-muted-foreground text-xs">
+                    <span className="text-muted-foreground text-xs break-words">
                         Unhealthy for {policy.unhealthy_duration_mins} min
                         &bull; Cooldown: {policy.cooldown_mins} min
                         &bull; Max {policy.max_restarts_per_hour}/hr
@@ -798,25 +798,29 @@ function PolicyRow({ policy, onDelete, onToggle, deleting, saving, isAdmin }: Po
             </div>
 
             {historyOpen && (
-                <div className="border-t border-card-border/40 mt-2 pt-2 space-y-1.5">
+                <div className="border-t border-card-border/40 mt-2 pt-2 space-y-1.5 min-w-0">
                     <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Recent activity</p>
                     {history.length === 0 ? (
                         <p className="text-xs text-muted-foreground text-center py-2">No history yet.</p>
                     ) : (
                         history.map((entry) => (
-                            <div key={entry.id} className="flex items-start gap-2 text-xs">
-                                <span className="text-muted-foreground shrink-0 tabular-nums font-mono">
-                                    {new Date(entry.timestamp).toLocaleString()}
-                                </span>
-                                <span className="font-mono text-foreground shrink-0 truncate max-w-[100px]">
+                            <div key={entry.id} className="py-1">
+                                <div className="flex items-baseline justify-between gap-2 text-xs">
+                                    <span className={`font-medium ${actionColorClass(entry.action)}`}>
+                                        {actionLabel(entry.action)}
+                                    </span>
+                                    <span className="text-muted-foreground shrink-0 tabular-nums font-mono text-[10px]">
+                                        {new Date(entry.timestamp).toLocaleString()}
+                                    </span>
+                                </div>
+                                <div className="mt-0.5 min-w-0 font-mono text-[11px] text-foreground break-all">
                                     {entry.container_name}
-                                </span>
-                                <span className={`shrink-0 font-medium ${actionColorClass(entry.action)}`}>
-                                    {actionLabel(entry.action)}
-                                </span>
-                                <span className="text-muted-foreground truncate">
-                                    {entry.reason}
-                                </span>
+                                </div>
+                                {entry.reason ? (
+                                    <div className="mt-0.5 text-[11px] text-muted-foreground break-words">
+                                        {entry.reason}
+                                    </div>
+                                ) : null}
                             </div>
                         ))
                     )}
