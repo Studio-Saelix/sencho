@@ -10,7 +10,7 @@ Sencho is a solo-maintained project. Here is what to expect.
 - **Feature requests** → [Feature request](https://github.com/studio-saelix/sencho/issues/new?template=feature_request.yml)
 - **Security vulnerabilities** → [SECURITY.md](SECURITY.md). Do not open a public issue.
 - **Licensing, billing, refunds** → licensing@sencho.io
-- **Support the project** → [Buy Me a Coffee](https://buymeacoffee.com/sencho). Sponsorship is not required and does not change support response times; it helps fund the work.
+- **Support the project** → [GitHub Sponsors](https://github.com/sponsors/Studio-Saelix) or [Buy Me a Coffee](https://buymeacoffee.com/sencho). Sponsorship is not required and does not change support response times; it helps fund the work.
 
 ## Response times
 
