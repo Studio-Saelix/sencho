@@ -16,7 +16,7 @@ export function MastheadRail({ variant, className }: MastheadRailProps) {
             {variant === 'shimmer' ? (
                 <div className="masthead-rail-shimmer absolute inset-x-0 h-1/3 bg-gradient-to-b from-transparent via-white/50 to-transparent" />
             ) : (
-                <div className="masthead-rail-glow absolute inset-0" />
+                <div className="masthead-rail-glow absolute inset-0 bg-white/20" />
             )}
         </div>
     );
