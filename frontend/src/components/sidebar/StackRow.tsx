@@ -117,12 +117,12 @@ export function StackRow(props: StackRowProps) {
           />
         ) : checkStatus === 'failed' ? (
           <RowTooltip
-            trigger={<AlertCircle className="w-3 h-3 text-muted-foreground/70" strokeWidth={1.5} />}
+            trigger={<span><AlertCircle className="w-3 h-3 text-muted-foreground/70" strokeWidth={1.5} /></span>}
             label={lastError ? `Update check failed: ${lastError}` : 'Update check failed'}
           />
         ) : hasGitPending ? (
           <RowTooltip
-            trigger={<GitBranch className="w-3 h-3 text-brand" strokeWidth={1.5} />}
+            trigger={<span><GitBranch className="w-3 h-3 text-brand" strokeWidth={1.5} /></span>}
             label="Git source update pending"
           />
         ) : null}
