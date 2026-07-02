@@ -9,6 +9,7 @@ import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 import { STATS_CACHE_TTL_MS, SYSTEM_STATS_CACHE_TTL_MS } from '../helpers/constants';
+import { getHostMemory } from '../helpers/hostMemory';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { isManagedByComposeDir } from '../utils/managed-containers';
@@ -296,9 +297,9 @@ metricsRouter.get('/system/stats', authMiddleware, async (req: Request, res: Res
       async () => {
         // Remote-node requests are intercepted and proxied upstream before
         // reaching here; this fetcher only runs for local nodes.
-        const [currentLoad, mem, fsSize] = await Promise.all([
+        const [currentLoad, hostMem, fsSize] = await Promise.all([
           si.currentLoad(),
-          si.mem(),
+          getHostMemory(),
           si.fsSize(),
         ]);
 
@@ -310,13 +311,12 @@ metricsRouter.get('/system/stats', authMiddleware, async (req: Request, res: Res
             cores: currentLoad.cpus.length,
           },
           memory: {
-            total: mem.total,
-            // Percentage is keyed off mem.active (the real working set), not mem.used:
-            // on Linux/BSD/macOS mem.used counts reclaimable page cache and reads ~99%
-            // on a busy host. mem.available is total - active, so used + free = total.
-            used: mem.active,
-            free: mem.available,
-            usagePercent: ((mem.active / mem.total) * 100).toFixed(1),
+            total: hostMem.total,
+            // ZFS ARC aware: reclaimable ARC is added back into available so a
+            // large ARC cache is not reported as hard-used. See helpers/hostMemory.ts.
+            used: hostMem.used,
+            free: hostMem.free,
+            usagePercent: hostMem.usagePercent.toFixed(1),
           },
           disk: mainDisk ? {
             fs: mainDisk.fs,

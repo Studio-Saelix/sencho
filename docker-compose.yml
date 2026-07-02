@@ -29,15 +29,27 @@ services:
       # (Optional but Recommended) Media/Data Drives
       # Mount your media drives here so Docker Compose inside Sencho can validate paths during deployment.
       - /path/to/your/media/drives:/path/to/your/media/drives
-      
+
+      # (Optional, ZFS hosts only) OpenZFS ARC stats for ZFS-aware host memory.
+      # ARC cache is reclaimable but the kernel reports it as used, which can
+      # trigger false host-memory alerts. Uncomment to let Sencho treat ARC as
+      # available memory. Usually already visible in the container; only needed
+      # if your runtime does not expose /proc/spl/kstat/zfs/arcstats.
+      # - /proc/spl/kstat/zfs/arcstats:/host/proc/spl/kstat/zfs/arcstats:ro
+
     environment:
       # ENVIRONMENT VARIABLES FOR INSIDE THE CONTAINER
-      
+
       # This points to the Container Path (right side) of your 1:1 mount above
       - COMPOSE_DIR=/path/to/your/docker/folder/compose
-      
+
       # This points to the Container Path (right side) of your database mount above. Leave this as /app/data.
       - DATA_DIR=/app/data
+
+      # (Optional, ZFS hosts only) Container-side path to the OpenZFS ARC stats
+      # file, if it is not at a standard location. Leave empty to auto-detect
+      # /host/proc/spl/kstat/zfs/arcstats then /proc/spl/kstat/zfs/arcstats.
+      - SENCHO_ZFS_ARCSTATS_PATH=${SENCHO_ZFS_ARCSTATS_PATH:-}
     
     # ⚠️ GLOBAL ENVIRONMENT VARIABLES ⚠️
     # If your compose files rely on host-level shell variables (like $PUID, $TZ)

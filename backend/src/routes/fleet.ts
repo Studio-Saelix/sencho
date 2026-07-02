@@ -10,6 +10,7 @@ import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPD
 import { NodeRegistry } from '../services/NodeRegistry';
 import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../services/network/networkingSummary';
 import DockerController from '../services/DockerController';
+import { getHostMemory } from '../helpers/hostMemory';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
@@ -222,11 +223,11 @@ async function getCompareTarget(gatewayVersion: string | null) {
 async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
   try {
     const composeDir = path.resolve(NodeRegistry.getInstance().getComposeDir(node.id));
-    const [allContainers, stacks, currentLoad, mem, fsSize] = await Promise.all([
+    const [allContainers, stacks, currentLoad, hostMem, fsSize] = await Promise.all([
       DockerController.getInstance(node.id).getAllContainers(),
       FileSystemService.getInstance(node.id).getStacks(),
       si.currentLoad(),
-      si.mem(),
+      getHostMemory(),
       si.fsSize(),
     ]);
 
@@ -255,13 +256,12 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
       systemStats: {
         cpu: { usage: currentLoad.currentLoad.toFixed(1), cores: currentLoad.cpus.length },
         memory: {
-          total: mem.total,
-          // Percentage is keyed off mem.active (the real working set), not mem.used:
-          // on Linux/BSD/macOS mem.used counts reclaimable page cache and reads ~99%
-          // on a busy host. mem.available is total - active, so used + free = total.
-          used: mem.active,
-          free: mem.available,
-          usagePercent: ((mem.active / mem.total) * 100).toFixed(1),
+          total: hostMem.total,
+          // ZFS ARC aware: reclaimable ARC is added back into available so a
+          // large ARC cache is not reported as hard-used. See helpers/hostMemory.ts.
+          used: hostMem.used,
+          free: hostMem.free,
+          usagePercent: hostMem.usagePercent.toFixed(1),
         },
         disk: mainDisk ? {
           total: mainDisk.size,
