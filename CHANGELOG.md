@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.93.3](https://github.com/Studio-Saelix/sencho/compare/v0.93.2...v0.93.3) (2026-07-02)
+
+
+### Added
+
+* add GitHub Sponsors alongside Buy Me a Coffee ([#1535](https://github.com/Studio-Saelix/sencho/issues/1535)) ([7c759ff](https://github.com/Studio-Saelix/sencho/commit/7c759ff2b7614b2c26febe33463d38cd3e90fe14))
+
+
+### Fixed
+
+* **deploy-modal:** hide frozen countdown label in inline feedback style ([#1534](https://github.com/Studio-Saelix/sencho/issues/1534)) ([60de0dd](https://github.com/Studio-Saelix/sencho/commit/60de0ddec281187dd9ac6790168551630ebeeb9f))
+* **deps:** patch frontend dompurify and @babel/core advisories ([#1539](https://github.com/Studio-Saelix/sencho/issues/1539)) ([d80538f](https://github.com/Studio-Saelix/sencho/commit/d80538f2541ac08feb7255b47fff30fb4332d72d))
+* reflect toggle state in scheduled task Enabled/Disabled label ([#1533](https://github.com/Studio-Saelix/sencho/issues/1533)) ([90c69b1](https://github.com/Studio-Saelix/sencho/commit/90c69b1ea4135077d501399dd1e668b1b5113fa7))
+* wrap auto-heal policy history in stack monitor sheet ([#1538](https://github.com/Studio-Saelix/sencho/issues/1538)) ([c3dcf31](https://github.com/Studio-Saelix/sencho/commit/c3dcf31cc8012cb891534985a0d678d72d381baa))
+
+
+### Miscellaneous
+
+* correct release version after mistagged sponsors PR ([#1537](https://github.com/Studio-Saelix/sencho/issues/1537)) ([ad8d874](https://github.com/Studio-Saelix/sencho/commit/ad8d87429409de7d09ff7e53741d42e2fa4c3930))
+
 ## [0.93.2](https://github.com/Studio-Saelix/sencho/compare/v0.93.1...v0.93.2) (2026-06-30)
 
 
