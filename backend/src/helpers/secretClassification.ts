@@ -16,6 +16,7 @@ const SECRET_SEGMENTS = new Set([
   'SECRET', 'SECRETS',
   'TOKEN', 'KEY', 'APIKEY',
   'CREDENTIAL', 'CREDENTIALS', 'AUTH',
+  'BASIC',
 ]);
 
 /** Connection strings whose value is sensitive but whose segments are innocuous. */

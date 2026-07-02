@@ -108,6 +108,7 @@
                   "features/compose-doctor",
                   "features/compose-networking",
                   "features/environment-guardrails",
+                  "features/docker-label-audit",
                   "features/compose-storage",
                   "features/stack-labels",
                   "features/sidebar"

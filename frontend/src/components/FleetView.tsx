@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import {
     RefreshCw, Camera, FileDown,
     Network, SlidersHorizontal,
-    Send, KeyRound, ArrowLeftRight, Wrench, Workflow,
+    Send, KeyRound, ArrowLeftRight, Wrench, Workflow, Tag,
 } from 'lucide-react';
 import { FleetMasthead } from './fleet/FleetMasthead';
 import { ReconnectingOverlay } from './FleetView/ReconnectingOverlay';
@@ -20,6 +20,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightI
 import { springs } from '@/lib/motion';
 import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
+import { useNodes } from '@/context/NodeContext';
 import { PaidGate } from './PaidGate';
 import FleetSnapshots from './FleetSnapshots';
 import { FleetConfiguration } from './fleet/FleetConfiguration';
@@ -29,6 +30,7 @@ import { DeploymentsTab } from './blueprints/DeploymentsTab';
 import { FleetActionsTab } from './fleet/FleetActions/FleetActionsTab';
 import { SecretsTab } from './fleet/secrets/SecretsTab';
 import { DependencyMapTab } from './fleet/DependencyMapTab';
+import { ContainerLabelsTab } from './fleet/ContainerLabelsTab';
 import { useNodeActions } from './nodes/useNodeActions';
 import type { FleetTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
@@ -47,6 +49,8 @@ interface FleetViewProps {
 export function FleetView({ onNavigateToNode, onOpenSettingsSection, fleetUpdatesIntent, onFleetUpdatesIntentConsumed, fleetTab, onFleetTabConsumed }: FleetViewProps) {
     const { isPaid } = useLicense();
     const { isAdmin } = useAuth();
+    const { hasCapability } = useNodes();
+    const containerLabelsEnabled = hasCapability('container-label-inventory');
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
@@ -130,6 +134,13 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, fleetUpdate
                                     <Workflow className="w-4 h-4 mr-1.5" />Map
                                 </TabsTrigger>
                             </TabsHighlightItem>
+                            {containerLabelsEnabled && (
+                                <TabsHighlightItem value="container-labels">
+                                    <TabsTrigger value="container-labels">
+                                        <Tag className="w-4 h-4 mr-1.5" />Docker Labels
+                                    </TabsTrigger>
+                                </TabsHighlightItem>
+                            )}
                             <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
                             {isPaid && (
                                 <TabsHighlightItem value="deployments">
@@ -242,6 +253,11 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, fleetUpdate
                 <TabsContent value="dependencies">
                     <DependencyMapTab />
                 </TabsContent>
+                {containerLabelsEnabled && (
+                    <TabsContent value="container-labels">
+                        <ContainerLabelsTab onNavigateToNode={onNavigateToNode} />
+                    </TabsContent>
+                )}
                 {isPaid && (
                     <TabsContent value="deployments">
                         <DeploymentsTab />

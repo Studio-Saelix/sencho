@@ -909,7 +909,9 @@ describe('GitSourceService.createStackFromGit', () => {
             sha,
         });
         const svc = GitSourceService.getInstance();
+        const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
 
+        try {
         const result = await svc.createStackFromGit({
             stackName: 'create-happy',
             repoUrl: 'https://github.com/example/repo.git',
@@ -934,6 +936,9 @@ describe('GitSourceService.createStackFromGit', () => {
         expect(onDisk).toContain('image: nginx');
 
         await cleanupStackDir('create-happy');
+        } finally {
+            validateSpy.mockRestore();
+        }
     });
 
     it('multi-file create then pull reports no local changes (hash is path-independent)', async () => {

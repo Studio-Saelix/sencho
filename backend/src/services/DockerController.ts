@@ -8,6 +8,7 @@ import * as yaml from 'yaml';
 
 import { NodeRegistry } from './NodeRegistry';
 import { CacheService } from './CacheService';
+import { FileSystemService } from './FileSystemService';
 import SelfIdentityService from './SelfIdentityService';
 import { isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
@@ -220,6 +221,17 @@ export interface CreateNetworkOptions {
   Labels?: Record<string, string>;
   Internal?: boolean;
   Attachable?: boolean;
+}
+
+export interface LabelInventoryRow {
+  id: string;
+  name: string;
+  state: string;
+  stack: string | null;
+  service: string | null;
+  labels: Record<string, string>;
+  imageId: string;
+  inspectFailed: boolean;
 }
 
 class DockerController {
@@ -861,6 +873,93 @@ class DockerController {
   public async getAllContainers() {
     const containers = await this.docker.listContainers({ all: true });
     return this.validateApiData<any[]>(containers);
+  }
+
+  /** Runtime labels + image ref from container inspect. Null (logged) when inspect fails. */
+  public async inspectContainerLabelsAndImage(
+    containerId: string,
+  ): Promise<{ labels: Record<string, string>; imageId: string } | null> {
+    try {
+      const info = await this.docker.getContainer(containerId).inspect();
+      return { labels: info.Config?.Labels ?? {}, imageId: info.Image ?? '' };
+    } catch (err) {
+      console.error('[DockerController] Container inspect failed for %s:', sanitizeForLog(containerId), err);
+      return null;
+    }
+  }
+
+  /** Image-level labels for label provenance. Null (logged) when the image cannot be inspected. */
+  public async inspectImageLabels(imageId: string): Promise<{ labels: Record<string, string> } | null> {
+    if (!imageId) return null;
+    try {
+      const info = await this.docker.getImage(imageId).inspect();
+      return { labels: info.Config?.Labels ?? {} };
+    } catch (err) {
+      console.error('[DockerController] Image inspect failed for %s:', sanitizeForLog(imageId), err);
+      return null;
+    }
+  }
+
+  /**
+   * Containers with runtime labels for the label-inventory API. Resolves stack
+   * membership with the same multi-fallback strategy as bulk status. Captures the
+   * image ref so label provenance can distinguish image-inherited labels.
+   */
+  public async listContainersForLabelInventory(): Promise<LabelInventoryRow[]> {
+    const knownStacks = await FileSystemService.getInstance(this.nodeId).getStacks();
+    const listed = await this.getAllContainers() as Array<{
+      Id?: string;
+      Names?: string[];
+      State?: string;
+      Labels?: Record<string, string>;
+      ImageID?: string;
+    }>;
+    const projectToStack = await DockerController.resolveProjectNameMap(knownStacks);
+    const absDirToStack = DockerController.buildAbsDirMap(knownStacks);
+    const resolvedBase = path.resolve(COMPOSE_DIR);
+    const knownStackSet = new Set(knownStacks);
+
+    const CONCURRENCY = 8;
+    const results: LabelInventoryRow[] = new Array(listed.length);
+
+    let index = 0;
+    const worker = async () => {
+      while (index < listed.length) {
+        const i = index++;
+        const c = listed[i];
+        const id = c.Id ?? '';
+        const name = (c.Names?.[0] ?? '').replace(/^\//, '');
+        const state = c.State ?? 'unknown';
+        const stack = DockerController.resolveContainerStack(
+          c.Labels,
+          projectToStack,
+          knownStackSet,
+          absDirToStack,
+          resolvedBase,
+        );
+        const service = c.Labels?.['com.docker.compose.service'] ?? null;
+        if (!id) {
+          results[i] = { id, name, state, stack, service, labels: {}, imageId: c.ImageID ?? '', inspectFailed: true };
+          continue;
+        }
+        let labels: Record<string, string>;
+        let imageId: string;
+        let inspectFailed = false;
+        try {
+          const info = await this.docker.getContainer(id).inspect();
+          labels = info.Config?.Labels ?? {};
+          imageId = info.Image ?? '';
+        } catch (err) {
+          console.error('[DockerController] Container inspect failed for %s:', sanitizeForLog(id), err);
+          labels = c.Labels ?? {};
+          imageId = c.ImageID ?? '';
+          inspectFailed = true;
+        }
+        results[i] = { id, name, state, stack, service, labels, imageId, inspectFailed };
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, listed.length) }, worker));
+    return results;
   }
 
   /**

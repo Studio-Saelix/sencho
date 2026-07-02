@@ -149,6 +149,148 @@ components:
           type: boolean
           example: true
 
+    LabelSource:
+      type: string
+      description: Provenance of a label. `unknown` when a container or image could not be inspected.
+      enum: [compose, runtime, image, compose-system, unknown]
+
+    LabelValue:
+      type: object
+      required: [key, value, source]
+      properties:
+        key: { type: string }
+        value:
+          type: string
+          description: Redacted to `[redacted]` for secret-like keys unless the caller is an admin and passes `reveal=1`.
+        source: { $ref: "#/components/schemas/LabelSource" }
+        redacted: { type: boolean }
+
+    LabelIndexContainerRef:
+      type: object
+      required: [id, name, stack, service]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        stack: { type: string, nullable: true }
+        service: { type: string, nullable: true }
+        nodeId: { type: integer }
+        nodeName: { type: string }
+
+    LabelIndexRow:
+      type: object
+      description: One unique key/value/source and every container carrying it.
+      required: [key, value, source, containers]
+      properties:
+        key: { type: string }
+        value: { type: string }
+        source: { $ref: "#/components/schemas/LabelSource" }
+        redacted: { type: boolean }
+        containers:
+          type: array
+          items: { $ref: "#/components/schemas/LabelIndexContainerRef" }
+
+    ContainerLabelRow:
+      type: object
+      required: [id, name, stack, service, state, labels]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        stack: { type: string, nullable: true }
+        service: { type: string, nullable: true }
+        state: { type: string }
+        labels:
+          type: array
+          items: { $ref: "#/components/schemas/LabelValue" }
+
+    StackLabelReplica:
+      type: object
+      required: [id, name, state, runtimeLabels, onlyInCompose, onlyOnContainer, inBoth, changed]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        state: { type: string }
+        runtimeLabels:
+          type: array
+          items: { $ref: "#/components/schemas/LabelValue" }
+        onlyInCompose: { type: array, items: { type: string } }
+        onlyOnContainer: { type: array, items: { type: string } }
+        inBoth: { type: array, items: { type: string } }
+        changed:
+          type: array
+          items: { type: string }
+          description: Keys declared in Compose and present at runtime but with a different value.
+        inspectFailed:
+          type: boolean
+          description: Runtime labels could not be read for this replica; reconciliation was skipped.
+
+    StackServiceLabelRow:
+      type: object
+      required: [service, declaredLabels, replicas]
+      properties:
+        service: { type: string }
+        declaredLabels:
+          type: array
+          items: { $ref: "#/components/schemas/LabelValue" }
+        replicas:
+          type: array
+          items: { $ref: "#/components/schemas/StackLabelReplica" }
+
+    StackLabelInventory:
+      type: object
+      required: [stackName, renderable, services, partial, generatedAt]
+      properties:
+        stackName: { type: string }
+        renderable:
+          type: boolean
+          description: False when the Compose model could not be rendered; declared provenance is then unknown.
+        partial:
+          type: boolean
+          description: A replica or its image could not be fully inspected.
+        generatedAt: { type: integer }
+        services:
+          type: array
+          items: { $ref: "#/components/schemas/StackServiceLabelRow" }
+
+    NodeLabelInventory:
+      type: object
+      required: [nodeId, containers, byLabel, partial, generatedAt]
+      properties:
+        nodeId: { type: integer }
+        partial: { type: boolean }
+        generatedAt: { type: integer }
+        containers:
+          type: array
+          items: { $ref: "#/components/schemas/ContainerLabelRow" }
+        byLabel:
+          type: array
+          items: { $ref: "#/components/schemas/LabelIndexRow" }
+
+    FleetLabelInventory:
+      type: object
+      required: [nodes, aggregatedByLabel, nodeErrors, generatedAt]
+      properties:
+        generatedAt: { type: integer }
+        nodes:
+          type: array
+          items:
+            type: object
+            required: [nodeId, nodeName, status, inventory, error]
+            properties:
+              nodeId: { type: integer }
+              nodeName: { type: string }
+              status: { type: string, enum: [ok, error] }
+              inventory:
+                nullable: true
+                allOf: [{ $ref: "#/components/schemas/NodeLabelInventory" }]
+              error: { type: string, nullable: true }
+        aggregatedByLabel:
+          type: array
+          items: { $ref: "#/components/schemas/LabelIndexRow" }
+        nodeErrors:
+          type: object
+          additionalProperties: { type: string }
+          description: Map of node id to error for nodes that were unreachable or returned a malformed payload.
+
     FailureClassification:
       type: object
       description: Classified cause of a failed deploy or update, with a suggested next step.
@@ -944,6 +1086,107 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/stacks/{stackName}/label-inventory:
+    get:
+      operationId: getStackLabelInventory
+      tags: [Stacks]
+      summary: Get Docker label inventory for a stack
+      description: >-
+        Returns declared Compose labels and runtime container labels per service,
+        with reconciliation hints (only in Compose, only on running container,
+        present in both, or value changed when the values differ) and provenance
+        for each runtime label (compose, image, runtime, compose-system, or unknown
+        when a container or image cannot be inspected). Secret-like label values are
+        redacted unless the caller is an admin and passes `reveal=1`. Requires
+        `stack:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+        - name: reveal
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['1', 'true']
+      responses:
+        "200":
+          description: Stack label inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StackLabelInventory"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Stack not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/system/container-labels:
+    get:
+      operationId: getNodeContainerLabels
+      tags: [Fleet]
+      summary: Get the Docker label inventory for the active node
+      description: >-
+        Returns every container on the node with its labels and provenance
+        (compose, image, runtime, compose-system, or unknown), plus an inverted
+        `byLabel` index. Marks `partial` when a container or image inspect fails.
+        Secret-like values are redacted unless the caller is an admin and passes
+        `reveal=1`. Requires `node:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/nodeId"
+        - name: reveal
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['1', 'true']
+      responses:
+        "200":
+          description: Node container label inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeLabelInventory"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/fleet/container-labels:
+    get:
+      operationId: getFleetContainerLabels
+      tags: [Fleet]
+      summary: Get the Docker label inventory aggregated across the fleet
+      description: >-
+        Fans out to every node's container label inventory and aggregates the
+        inverted index by key, value, and source. Unreachable or malformed nodes
+        degrade into `nodeErrors` rather than failing the whole request. Secret-like
+        values are redacted unless the caller is an admin and passes `reveal=1`.
+        Requires `node:read` permission.
+      parameters:
+        - name: reveal
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ['1', 'true']
+      responses:
+        "200":
+          description: Fleet-wide container label inventory.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FleetLabelInventory"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 
