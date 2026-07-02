@@ -743,7 +743,7 @@ body {
   animation: shimmer 4.5s ease-in-out infinite alternate;
 }
 .masthead-rail-shimmer {
-  animation: shimmer 11s ease-in-out infinite alternate;
+  animation: shimmer 5s ease-in-out infinite alternate;
 }
 .masthead-rail-glow {
   animation: masthead-rail-glow 5.5s ease-in-out infinite alternate;
