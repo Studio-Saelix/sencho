@@ -36,22 +36,22 @@ const toneConfig: Record<MastheadTone, {
     tintClass: string;
 }> = {
     live: {
-        railClass: 'bg-brand',
+        railClass: 'bg-brand/70',
         stateTextClass: 'text-stat-value',
         tintClass: 'from-brand/[0.06] via-transparent to-transparent',
     },
     idle: {
-        railClass: 'bg-stat-subtitle',
+        railClass: 'bg-stat-subtitle/70',
         stateTextClass: 'text-stat-title',
         tintClass: 'from-transparent via-transparent to-transparent',
     },
     warn: {
-        railClass: 'bg-warning',
+        railClass: 'bg-warning/70',
         stateTextClass: 'text-warning',
         tintClass: 'from-warning/[0.06] via-transparent to-transparent',
     },
     error: {
-        railClass: 'bg-destructive',
+        railClass: 'bg-destructive/70',
         stateTextClass: 'text-destructive',
         tintClass: 'from-destructive/[0.06] via-transparent to-transparent',
     },

@@ -42,19 +42,19 @@ const healthConfig: Record<FleetHealth, { label: string; textClass: string; rail
   healthy: {
     label: 'The fleet',
     textClass: 'text-stat-value',
-    railClass: 'bg-brand',
+    railClass: 'bg-brand/70',
     tintClass: 'from-brand/[0.06] via-transparent to-transparent',
   },
   degraded: {
     label: 'The fleet',
     textClass: 'text-warning',
-    railClass: 'bg-warning',
+    railClass: 'bg-warning/70',
     tintClass: 'from-warning/[0.06] via-transparent to-transparent',
   },
   critical: {
     label: 'The fleet',
     textClass: 'text-destructive',
-    railClass: 'bg-destructive',
+    railClass: 'bg-destructive/70',
     tintClass: 'from-destructive/[0.06] via-transparent to-transparent',
   },
 };
