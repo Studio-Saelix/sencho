@@ -9,6 +9,7 @@ import { NotificationService } from './NotificationService';
 import { FleetUpdateTrackerService } from './FleetUpdateTrackerService';
 import { isValidVersion, getSenchoVersion } from './CapabilityRegistry';
 import { getLatestVersionInfo } from '../utils/version-check';
+import { getHostMemory } from '../helpers/hostMemory';
 import { isDebugEnabled } from '../utils/debug';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
 
@@ -287,9 +288,9 @@ export class MonitorService {
         // 1. Host Limits — fetch CPU, RAM, disk concurrently
         if (settings['host_alerts_enabled'] !== '0') {
             try {
-                const [currentLoad, mem, fsSize] = await Promise.all([
+                const [currentLoad, hostMem, fsSize] = await Promise.all([
                     withTimeout(si.currentLoad(), STATS_TIMEOUT_MS, 'host CPU stats'),
-                    withTimeout(si.mem(), STATS_TIMEOUT_MS, 'host RAM stats'),
+                    withTimeout(getHostMemory(), STATS_TIMEOUT_MS, 'host RAM stats'),
                     withTimeout(si.fsSize(), STATS_TIMEOUT_MS, 'host disk stats'),
                 ]);
 
@@ -302,10 +303,9 @@ export class MonitorService {
                     this.clearHostMetricSuppression('cpu');
                 }
 
-                // Key off mem.active (the real working set), not mem.used: on Linux/BSD/macOS
-                // mem.used counts reclaimable page cache and reads ~99% on a busy host, which
-                // would fire spurious host-memory alerts.
-                const ramUsage = (mem.active / mem.total) * 100;
+                // ZFS ARC aware: reclaimable ARC is added back into available so a large ARC
+                // cache does not fire spurious host-memory alerts. See helpers/hostMemory.ts.
+                const ramUsage = hostMem.usagePercent;
                 const ramLimit = parseFloat(settings['host_ram_limit']);
                 if (!isNaN(ramLimit) && ramLimit > 0 && ramUsage > ramLimit) {
                     await this.dispatchHostMetricAlert('ram', 'warning', suppressionMs,

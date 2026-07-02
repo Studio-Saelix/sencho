@@ -2,7 +2,8 @@
  * Unit tests for MonitorService — alert state machine, metric calculations,
  * cleanup delegation, global settings evaluation, and concurrency guards.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { installArcstatsFsMock, arcstatsBody, DEFAULT_ARC_PATH, type ArcstatsFsMock } from './helpers/arcstatsFsMock';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
@@ -138,8 +139,16 @@ vi.mock('util', () => ({
 
 import { MonitorService, _resetHostAlertSuppressionStateForTests } from '../services/MonitorService';
 
+// Host memory now reads ZFS ARC stats; intercept those reads so the suite does
+// not depend on whether the machine running it is itself a ZFS host.
+let arcFs: ArcstatsFsMock;
+beforeAll(() => {
+  arcFs = installArcstatsFsMock();
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
+  arcFs.clear();
   (MonitorService as any).instance = undefined;
   _resetHostAlertSuppressionStateForTests();
   mockGetSystemState.mockReturnValue(null);
@@ -361,6 +370,19 @@ describe('MonitorService - evaluateGlobalSettings', () => {
     await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
 
     expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Memory'));
+  });
+
+  it('does not alert when reclaimable ZFS ARC accounts for the memory pressure', async () => {
+    // Active working set reads 15G/16G (~94%, breaches 80%), but 5G of that is
+    // reclaimable ARC. Adding ARC back into available drops effective usage to
+    // ~62.5%, so no host-memory alert should fire.
+    mockMem.mockResolvedValue(memSample(15e9)); // available 1e9 -> 93.75%
+    arcFs.setRead(DEFAULT_ARC_PATH, arcstatsBody(5e9, 0)); // reclaimable 5e9
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluateGlobalSettings({ host_ram_limit: '80' });
+
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Memory'));
   });
 
   it('dispatches disk warning when over threshold', async () => {

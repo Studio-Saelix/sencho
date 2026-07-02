@@ -43,8 +43,24 @@ These tune optional subsystems. Most deployments never set them; the defaults ar
 | `GITSOURCE_MAX_CLONE_BYTES` | `104857600` | Maximum bytes a single [Git Source](/features/git-sources) clone may download before it is aborted (100 MB). A shallow Compose clone is tiny; raise it only if you track Compose files in a legitimately large repository. |
 | `SENCHO_PUBLIC_URL` | *(request host)* | Set on the primary instance. Its externally reachable `http(s)://` URL, no trailing slash, baked into pilot enrollment so remote agents dial the public hostname rather than the address the admin used at setup. |
 | `SENCHO_COMPOSE_STALL_TIMEOUT_MS` | `600000` | Idle-output backstop for deploy and update Compose steps (pull and recreate). If a step produces no output for this long while still running, Sencho stops it so a hung image pull surfaces a clear failure and the in-app recovery actions instead of spinning. Raise it on slow links or for heavy local image builds. |
+| `SENCHO_ZFS_ARCSTATS_PATH` | *(auto)* | Path **inside the container** to the OpenZFS ARC kstat file, for [ZFS ARC-aware host memory](#zfs-arc-aware-host-memory). Sencho checks this path first, then `/host/proc/spl/kstat/zfs/arcstats`, then `/proc/spl/kstat/zfs/arcstats`. Set it only when your ARC stats live at a non-standard path. |
 
 Running a remote host as a pilot agent uses four more variables (`SENCHO_MODE`, `SENCHO_PRIMARY_URL`, `SENCHO_ENROLL_TOKEN`, and `SENCHO_PILOT_CA_FILE`), set only on the remote agent container. Sencho bakes them into the enrollment Compose file it generates, so you rarely write them by hand. See [Pilot Agent](/features/pilot-agent) for the full enrollment walkthrough.
+
+## ZFS ARC-aware host memory
+
+On OpenZFS hosts (TrueNAS SCALE, Proxmox, ZFS on Ubuntu or Debian) the ZFS ARC cache can hold a large share of RAM. ARC is reclaimable on demand, but the Linux kernel reports it as unavailable, so a naive reading counts ARC as used memory and can raise false host-memory alerts.
+
+Sencho reads the ARC kstat when it is available and adds the reclaimable portion back into available memory, so the dashboard memory gauge and host RAM alerts reflect real memory pressure. When no ARC stats are readable the behavior is unchanged.
+
+The ARC kstat is usually visible inside the container at `/proc/spl/kstat/zfs/arcstats` with no extra configuration. If your runtime does not expose it, mount it read-only:
+
+```yaml
+volumes:
+  - /proc/spl/kstat/zfs/arcstats:/host/proc/spl/kstat/zfs/arcstats:ro
+```
+
+Sencho checks `SENCHO_ZFS_ARCSTATS_PATH`, then `/host/proc/spl/kstat/zfs/arcstats`, then `/proc/spl/kstat/zfs/arcstats`. Set `SENCHO_ZFS_ARCSTATS_PATH` only if your ARC stats live somewhere else inside the container.
 
 ## Listen port
 
