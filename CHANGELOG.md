@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.94.0](https://github.com/Studio-Saelix/sencho/compare/v0.93.4...v0.94.0) (2026-07-02)
+
+
+### Added
+
+* add notification suppression rules ([#1525](https://github.com/Studio-Saelix/sencho/issues/1525)) ([b65daf6](https://github.com/Studio-Saelix/sencho/commit/b65daf6845cbb4836638f0800a1f6b26a01ec50e))
+
 ## [0.93.4](https://github.com/Studio-Saelix/sencho/compare/v0.93.3...v0.93.4) (2026-07-02)
 
 
