@@ -1,7 +1,7 @@
 export interface ScheduledTask {
   id: number;
   name: string;
-  target_type: 'stack' | 'fleet' | 'system';
+  target_type: 'stack' | 'fleet' | 'system' | 'container';
   target_id: string | null;
   node_id: number | null;
   action: 'restart' | 'snapshot' | 'prune' | 'update' | 'scan' | 'auto_backup' | 'auto_stop' | 'auto_down' | 'auto_start';

@@ -863,6 +863,31 @@ class DockerController {
     return this.validateApiData<any[]>(containers);
   }
 
+  /** Resolve a container by its durable name (not ephemeral ID). */
+  public async findContainerByName(name: string): Promise<{
+    id: string;
+    name: string;
+    state: string;
+    image: string;
+    stackProject: string | null;
+  } | null> {
+    const normalized = name.replace(/^\//, '');
+    const containers = await this.getAllContainers();
+    for (const c of containers) {
+      const containerName = c.Names?.[0]?.replace(/^\//, '');
+      if (containerName === normalized) {
+        return {
+          id: c.Id,
+          name: containerName,
+          state: c.State ?? 'unknown',
+          image: c.Image ?? '',
+          stackProject: c.Labels?.['com.docker.compose.project'] ?? null,
+        };
+      }
+    }
+    return null;
+  }
+
   /**
    * Builds topology data with 2 Docker API calls instead of N+1.
    * Fetches all networks + all containers in parallel, then maps
@@ -1488,10 +1513,13 @@ class DockerController {
 
       // 2. Extract expected container names with legacy prefix support
       const expectedNames: string[] = [];
+      const nameToService = new Map<string, string>();
       for (const [serviceName, serviceConfig] of Object.entries(parsedYaml.services)) {
-        const config = serviceConfig as any;
+        const config = serviceConfig as { container_name?: string };
+        nameToService.set(serviceName, serviceName);
         if (config.container_name) {
           expectedNames.push(config.container_name);
+          nameToService.set(config.container_name, serviceName);
         } else {
           // Standard v2 naming
           expectedNames.push(serviceName);
@@ -1516,6 +1544,11 @@ class DockerController {
 
       // 5. Map to the frontend interface
       return fallbackContainers.map(c => {
+        const strippedName = c.Names?.[0]?.replace(/^\//, '') ?? '';
+        const labelService = c.Labels?.['com.docker.compose.service'];
+        const service = (typeof labelService === 'string' && labelService.length > 0
+          ? labelService
+          : nameToService.get(strippedName)) ?? '';
         let Ports: { PrivatePort: number, PublicPort: number, Type?: string }[] = [];
         if (c.Ports && Array.isArray(c.Ports)) {
           Ports = c.Ports
@@ -1525,8 +1558,10 @@ class DockerController {
         return {
           Id: c.Id,
           Names: c.Names,
+          Service: service,
           State: c.State,
           Status: c.Status,
+          Labels: c.Labels,
           Ports
         };
       });

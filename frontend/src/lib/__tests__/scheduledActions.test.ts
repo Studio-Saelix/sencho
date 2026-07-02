@@ -71,6 +71,12 @@ describe('scheduledActions registry', () => {
       expect(def?.id).toBe('update');
     });
 
+    it('maps container target types to container UI entries', () => {
+      expect(resolveTaskAction({ action: 'restart', target_type: 'container' })?.id).toBe('container-restart');
+      expect(resolveTaskAction({ action: 'auto_stop', target_type: 'container' })?.id).toBe('container-stop');
+      expect(resolveTaskAction({ action: 'auto_start', target_type: 'container' })?.id).toBe('container-start');
+    });
+
     it('maps a non-aliased action to its direct entry', () => {
       expect(resolveTaskAction({ action: 'restart', target_type: 'stack' })?.id).toBe('restart');
       expect(resolveTaskAction({ action: 'snapshot', target_type: 'fleet' })?.id).toBe('snapshot');
@@ -90,6 +96,7 @@ describe('scheduledActions registry', () => {
     // Verify the exact order: lifecycle first, then updates, security, maintenance, backups.
     expect(ids).toEqual([
       'auto_backup', 'auto_start', 'restart', 'auto_stop', 'auto_down',
+      'container-restart', 'container-stop', 'container-start',
       'update', 'update-fleet',
       'scan',
       'prune',
@@ -111,6 +118,9 @@ describe('scheduledActions registry', () => {
       'restart': 'Restarts containers in place. Running services are stopped and started again on the same configuration.',
       'auto_stop': 'Stops containers but keeps them in place for a faster start later.',
       'auto_down': 'Runs compose down. Containers are removed, but compose files remain on disk.',
+      'container-restart': 'Restarts a single container by name on the selected node. Targets the container directly, not through compose.',
+      'container-stop': 'Stops a single container by name. The container remains on disk for a faster start later.',
+      'container-start': 'Starts a stopped container by name on the selected node.',
       'update': "Checks this stack's images and recreates the stack only when newer images are available.",
       'update-fleet': 'Checks every stack on the selected node and updates stacks with newer images.',
       'scan': 'Runs Trivy against images on the selected local node and records the findings.',
@@ -132,6 +142,9 @@ describe('scheduledActions registry', () => {
       'restart': 'interruptive',
       'auto_stop': 'interruptive',
       'auto_down': 'removes-containers',
+      'container-restart': 'interruptive',
+      'container-stop': 'interruptive',
+      'container-start': 'runtime-change',
       'update': 'runtime-change',
       'update-fleet': 'runtime-change',
       'scan': 'read-only',
@@ -210,6 +223,16 @@ describe('scheduledActions registry', () => {
       const task: TargetTask = { action: 'snapshot', target_type: 'fleet', target_id: null, name: 'Nightly Snapshot' };
       expect(scheduleTargetDescriptor(task, 'edge-1')).toBe('Entire fleet');
       expect(scheduleTargetDescriptor(task)).toBe('Entire fleet');
+    });
+
+    it('shows the container name for container actions', () => {
+      const task: TargetTask = {
+        action: 'restart',
+        target_type: 'container',
+        target_id: 'watchtower',
+        name: 'Daily watchtower restart',
+      };
+      expect(scheduleTargetDescriptor(task, 'hub')).toBe('watchtower');
     });
 
     it('shows the node for system actions (prune / scan), with a fallback', () => {

@@ -17,7 +17,7 @@ import { escapeCsvField } from '../utils/csv';
 import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
 import { sanitizeForLog } from '../utils/safeLog';
-import { isValidStackName } from '../utils/validation';
+import { isValidStackName, isValidContainerName } from '../utils/validation';
 
 // Frontend listeners filter on scope === 'scheduled-tasks'. Wrapped so a
 // broken subscriber socket cannot turn a successful mutation into a 500.
@@ -78,12 +78,30 @@ function validateStackTarget(targetType: TargetType, targetId: unknown, nodeId: 
   return null;
 }
 
+function validateContainerTarget(targetType: TargetType, targetId: unknown, nodeId: unknown): string | null {
+  if (targetType !== 'container') return null;
+
+  if (typeof targetId !== 'string' || !targetId.trim() || nodeId === null || nodeId === undefined) {
+    return 'Container operations require target_id and node_id.';
+  }
+
+  if (targetId !== targetId.trim() || !isValidContainerName(targetId)) {
+    return 'Container target_id must be a valid container name.';
+  }
+
+  if (parsePositiveNodeId(nodeId) === null) {
+    return 'Container operations require a valid node_id.';
+  }
+
+  return null;
+}
+
 /**
  * Shared guard for non-stack actions that require a node. Stack actions use
  * validateStackTarget because they also require target_id.
  */
 function validateActionNode(action: BackendScheduledAction, targetType: TargetType, nodeId: unknown): string | null {
-  if (targetType === 'stack') return null;
+  if (targetType === 'stack' || targetType === 'container') return null;
   const def = getScheduledActionDefinition(action);
   if (!def?.requiresNode) return null;
 
@@ -226,7 +244,7 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
       res.status(400).json({ error: 'Name is required' }); return;
     }
     if (!(VALID_TARGET_TYPES as readonly string[]).includes(target_type)) {
-      res.status(400).json({ error: 'Invalid target_type. Must be stack, fleet, or system.' }); return;
+      res.status(400).json({ error: 'Invalid target_type. Must be stack, fleet, system, or container.' }); return;
     }
     if (!(VALID_ACTIONS as readonly string[]).includes(action)) {
       res.status(400).json({ error: INVALID_ACTION_MESSAGE }); return;
@@ -239,6 +257,8 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
     if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
     const stackTargetErr = validateStackTarget(target_type, target_id, node_id);
     if (stackTargetErr) { res.status(400).json({ error: stackTargetErr }); return; }
+    const containerTargetErr = validateContainerTarget(target_type, target_id, node_id);
+    if (containerTargetErr) { res.status(400).json({ error: containerTargetErr }); return; }
 
     const optionalErr = validateOptionalFields(action, target_type, prune_targets, target_services, prune_label_filter);
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }
@@ -260,7 +280,8 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
     const nextRun = (enabled === false)
       ? null
       : (pinnedRunAt ?? scheduler.calculateNextRun(cron_expression));
-    const normalizedTargetId = target_type === 'stack' ? target_id : null;
+    const normalizedTargetId =
+      target_type === 'stack' || target_type === 'container' ? target_id : null;
     const normalizedNodeId = actionRequiresNode(action) ? parsePositiveNodeId(node_id) : null;
 
     const id = DatabaseService.getInstance().createScheduledTask({
@@ -330,7 +351,7 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
 
     const finalAction = (action ?? existing.action) as BackendScheduledAction;
     const finalTargetType = (target_type ?? existing.target_type) as TargetType;
-    const finalTargetId = finalTargetType === 'stack'
+    const finalTargetId = finalTargetType === 'stack' || finalTargetType === 'container'
       ? (target_id !== undefined ? target_id : existing.target_id)
       : null;
     const finalNodeId = actionRequiresNode(finalAction)
@@ -344,6 +365,9 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
 
     const stackTargetErr = validateStackTarget(finalTargetType, finalTargetId, finalNodeId);
     if (stackTargetErr) { res.status(400).json({ error: stackTargetErr }); return; }
+
+    const containerTargetErr = validateContainerTarget(finalTargetType, finalTargetId, finalNodeId);
+    if (containerTargetErr) { res.status(400).json({ error: containerTargetErr }); return; }
 
     const optionalErr = validateOptionalFields(finalAction, finalTargetType, prune_targets, target_services, prune_label_filter);
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }
@@ -364,7 +388,9 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
       updates.name = name.trim();
     }
     if (target_type !== undefined) updates.target_type = finalTargetType;
-    if (target_id !== undefined || finalTargetType !== 'stack') updates.target_id = finalTargetId || null;
+    if (target_id !== undefined || (finalTargetType !== 'stack' && finalTargetType !== 'container')) {
+      updates.target_id = finalTargetId || null;
+    }
     if (node_id !== undefined || !actionRequiresNode(finalAction)) {
       updates.node_id = finalNodeId != null ? parsePositiveNodeId(finalNodeId) : null;
     }

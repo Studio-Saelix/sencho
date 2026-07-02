@@ -26,8 +26,8 @@ Open the **Schedules** tab from the top navigation bar. The page opens on the Ti
 The Timeline plots every firing of every enabled task across a rolling 24-hour window starting from the current minute.
 
 - **Masthead.** A `NEXT 24 HOURS` kicker, an italic display heading, the window's start and end timestamps in a monospace range, and a right-anchored **Next** pill that reads out the time and task name of the next firing and a relative countdown.
-- **Five lanes.** Stack lifecycle (label blue), Updates (success green), Security (label purple), Maintenance (warning amber), and Backups (brand cyan). The Stack lifecycle lane holds the five stack-lifecycle actions (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down); Updates holds per-node and fleet image updates; Security holds vulnerability scans; Maintenance holds node resource prunes; Backups holds fleet snapshots.
-- **Pills.** One pill per firing within the window, positioned proportionally to the firing's time. Each pill shows the firing time and a target: the stack for stack actions, the selected node for prune and scan, and "Entire fleet" for a fleet snapshot. Hover a pill for the full detail (action, task name, and node). Pills are color-matched to their lane. Click a pill to open the run history sheet for that task.
+- **Five lanes.** Lifecycle (label blue), Updates (success green), Security (label purple), Maintenance (warning amber), and Backups (brand cyan). The Lifecycle lane holds stack lifecycle actions (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down) and standalone container actions (Restart Container, Stop Container, Start Container); Updates holds per-node and fleet image updates; Security holds vulnerability scans; Maintenance holds node resource prunes; Backups holds fleet snapshots.
+- **Pills.** One pill per firing within the window, positioned proportionally to the firing's time. Each pill shows the firing time and a target: the stack for stack actions, the container name for container actions, the selected node for prune and scan, and "Entire fleet" for a fleet snapshot. Hover a pill for the full detail (action, task name, and node). Pills are color-matched to their lane. Click a pill to open the run history sheet for that task.
 - **Now rail.** A glowing vertical rail at the current minute, anchored to the left of the track at page open and drifting right as time passes (the page recomputes positions periodically).
 - **Axis.** Six monospace time ticks run along the bottom, evenly spaced through the window.
 
@@ -47,7 +47,7 @@ The All tasks toggle swaps the lane track for a sortable table.
 |---|---|
 | **Name** | The task name. |
 | **Action** | A badge labelling the operation (e.g. Restart Stack, Scan Node Images, Create Fleet Snapshot). |
-| **Target** | The stack the task targets (with a service list in parentheses when restart is scoped to specific services), or the target type for non-stack actions (`system`, `fleet`). |
+| **Target** | The stack the task targets (with a service list in parentheses when restart is scoped to specific services), the container name for container actions, or the target type for other non-stack actions (`system`, `fleet`). |
 | **Schedule** | A human-readable description of the cron with the raw expression on a second line. |
 | **Status** | The last run result: **Success** (green), **Failed** (red), or `Never run` if the task has not fired yet. |
 | **Next Run** | The timestamp of the next firing, or a dash if the task is disabled or has no upcoming runs. |
@@ -68,10 +68,13 @@ The All tasks toggle swaps the lane track for a sortable table.
 | **Stop Stack** | A specific stack on a specific node | Runs `docker compose stop`. Containers are stopped but preserved. Use for off-hours power saving when you want a fast restart later. |
 | **Take Stack Down** | A specific stack on a specific node | Runs `docker compose down`. Containers are removed. Use to fully release resources when the stack is not needed for an extended period. |
 | **Start / Bring Up Stack** | A specific stack on a specific node | Runs `docker compose up -d`. Works for both stopped and removed containers: if they exist they are started, if not they are created from the compose file. |
+| **Restart Container** | A specific container by name on a specific node | Restarts one container directly through Docker. Use for third-party or standalone containers that are not managed as a Sencho stack. |
+| **Stop Container** | A specific container by name on a specific node | Stops one container. The container remains on disk for a faster start later. |
+| **Start Container** | A specific container by name on a specific node | Starts one stopped container by name. |
 
 ## Creating a scheduled task
 
-Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation, grouped by category: Stack lifecycle, Updates, Security, Maintenance, and Backups.
+Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation, grouped by category: Lifecycle, Updates, Security, Maintenance, and Backups.
 
 <Frame>
   <img src="/images/scheduled-operations/action-picker.png" alt="The New scheduled task modal with the Action combobox expanded. The dropdown groups actions under category headers: Stack lifecycle (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down), Updates (Auto-update Stack, Auto-update All Stacks on Node), Security (Scan Node Images), Maintenance (Prune Node Resources), and Backups (Create Fleet Snapshot). Below the picker, partly visible, sit a Services row with 'echo' and 'prober' checkboxes, the Cron Expression input, the Enabled toggle, and the Delete after successful run checkbox." />
@@ -88,6 +91,7 @@ Common fields:
 Conditional fields per action:
 
 - **Stack actions** (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Auto-update Stack, Stop Stack, Take Stack Down) add a **Node** combobox and a **Stack** combobox. Restart Stack additionally renders a **Services** checkbox grid sourced from the stack's compose services on the selected node, so you can scope the restart to a subset instead of restarting the entire stack.
+- **Container actions** (Restart Container, Stop Container, Start Container) add a **Node** combobox and a **Container** combobox listing every container on that node (running and stopped). The picker shows each container's name, state, and image. When the container is not part of a Sencho stack, helper text explains that the schedule targets the container by node and name.
 - **Auto-update All Stacks on Node** adds a **Node** combobox. The helper text "Checks every stack on the selected node and updates stacks with newer images" appears above, next to the Runtime change badge.
 - **Scan Node Images** adds a **Node** combobox listing local nodes only. The helper text "Runs Trivy against images on the selected local node and records the findings" and Read-only badge appear above.
 - **Prune Node Resources** adds a **Node** combobox listing local nodes only, then a **Prune Targets** group (Containers, Images, Networks, Volumes; all selected by default) and a **Label Filter** input for scoping the prune to resources matching a Docker label.
