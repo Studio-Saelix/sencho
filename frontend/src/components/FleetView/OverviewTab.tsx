@@ -8,6 +8,7 @@ import type { FleetTopologyNode, LayoutMode, SavedPositions } from '@/lib/fleet-
 import type { Label as StackLabel } from '../label-types';
 import type { Node } from '@/context/NodeContext';
 import type { FleetNode, NodeUpdateStatus, ViewMode, FleetPreferences, FleetPaletteEntry } from './types';
+import type { MuteRuleDraft } from '@/lib/muteRules';
 
 interface OverviewTabProps {
     loading: boolean;
@@ -35,6 +36,7 @@ interface OverviewTabProps {
     onCordonChange?: () => void;
     onEditNode?: (node: Node) => void;
     onDeleteNode?: (node: Node) => void;
+    onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
     topologyMode: LayoutMode;
     onTopologyModeChange: (mode: LayoutMode) => void;
     topologyPositions: SavedPositions;
@@ -70,6 +72,7 @@ export function OverviewTab({
     onCordonChange,
     onEditNode,
     onDeleteNode,
+    onOpenMuteRulesWithPrefill,
     topologyMode,
     onTopologyModeChange,
     topologyPositions,
@@ -149,6 +152,7 @@ export function OverviewTab({
                                     onCordonChange={onCordonChange}
                                     onEdit={onEditNode}
                                     onDelete={onDeleteNode}
+                                    onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
                                 />
                             ))}
                         </div>

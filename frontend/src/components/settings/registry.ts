@@ -223,7 +223,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
     {
         id: 'notification-suppression',
         group: 'notifications',
-        label: 'Suppression Rules',
+        label: 'Mute Rules',
         description: 'Mute or drop matching alerts from the bell, external channels, or both.',
         keywords: ['mute', 'suppress', 'silence', 'hide', 'bell', 'rules'],
         tier: null,

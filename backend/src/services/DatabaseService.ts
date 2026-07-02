@@ -377,6 +377,7 @@ export interface NotificationHistory {
     stack_name?: string;
     container_name?: string;
     actor_username?: string | null;
+    suppression_match?: string | null;
 }
 
 export interface FleetSnapshot {
@@ -1856,6 +1857,7 @@ export class DatabaseService {
     private migrateNotificationHistoryContext(): void {
         this.tryAddColumn('notification_history', 'stack_name', 'TEXT');
         this.tryAddColumn('notification_history', 'container_name', 'TEXT');
+        this.tryAddColumn('notification_history', 'suppression_match', 'TEXT');
     }
 
     private migrateStackDossierHashes(): void {
@@ -2974,6 +2976,7 @@ export class DatabaseService {
             container_name: row.container_name ?? undefined,
             category: row.category ?? undefined,
             actor_username: row.actor_username ?? null,
+            suppression_match: row.suppression_match ?? null,
         };
     }
 
@@ -3080,6 +3083,13 @@ export class DatabaseService {
 
     public updateNotificationDispatchError(id: number, error: string): void {
         this.db.prepare('UPDATE notification_history SET dispatch_error = ? WHERE id = ?').run(error, id);
+    }
+
+    public updateNotificationSuppressionMatch(
+        id: number,
+        snapshot: { rules: { id: number; name: string }[]; bellSuppressed: boolean; externalSuppressed: boolean },
+    ): void {
+        this.db.prepare('UPDATE notification_history SET suppression_match = ? WHERE id = ?').run(JSON.stringify(snapshot), id);
     }
 
     public getStackRestartSummary(nodeId: number, days: number): StackRestartSummary[] {

@@ -82,7 +82,7 @@ describe('settings registry', () => {
         const byId = new Map(SETTINGS_ITEMS.map(i => [i.id, i]));
         expect(byId.get('notifications')?.label).toBe('Channels');
         expect(byId.get('notification-routing')?.label).toBe('Notification Routing');
-        expect(byId.get('notification-suppression')?.label).toBe('Suppression Rules');
+        expect(byId.get('notification-suppression')?.label).toBe('Mute Rules');
     });
 
     it('no longer registers the standalone Vulnerability Scanning section (moved to the Security page)', () => {

@@ -222,6 +222,14 @@ export class NotificationService {
                 console.log(`[Notify:diag] Suppression matched ${matchedSuppression.length} rule(s); bell=${suppressBell}, external=${suppressExternal}`);
             }
 
+            if (matchedSuppression.length > 0 && notification.id != null) {
+                this.dbService.updateNotificationSuppressionMatch(notification.id, {
+                    rules: matchedSuppression.map((r) => ({ id: r.id, name: r.name })),
+                    bellSuppressed: suppressBell,
+                    externalSuppressed: suppressExternal,
+                });
+            }
+
             // 2. Push to connected browser clients via WebSocket
             if (!suppressBell) {
                 this.broadcastToSubscribers(notification);

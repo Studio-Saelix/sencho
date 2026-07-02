@@ -10,10 +10,11 @@ interface StackGroupProps {
   collapsed: boolean;
   onToggle: () => void;
   variant?: 'default' | 'pinned';
+  headerActions?: ReactNode;
   children: ReactNode;
 }
 
-export function StackGroup({ id, label, count, collapsed, onToggle, variant = 'default', children }: StackGroupProps) {
+export function StackGroup({ id, label, count, collapsed, onToggle, variant = 'default', headerActions, children }: StackGroupProps) {
   const isPinned = variant === 'pinned';
   const labelColor = isPinned ? 'text-brand/90' : 'text-stat-subtitle';
   return (
@@ -32,6 +33,7 @@ export function StackGroup({ id, label, count, collapsed, onToggle, variant = 'd
           {isPinned ? '★ ' : ''}{label}
         </span>
         <span className="flex items-center gap-1.5">
+          {headerActions}
           <span className="font-mono text-[9px] tabular-nums text-stat-icon">{count}</span>
           {collapsed
             ? <ChevronRight className="w-3 h-3 text-stat-icon" strokeWidth={1.5} />

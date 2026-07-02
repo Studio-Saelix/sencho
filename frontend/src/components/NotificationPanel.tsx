@@ -23,8 +23,7 @@ import {
     SelectValue,
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
-import { apiFetch } from '@/lib/api';
-import { toast } from '@/components/ui/toast-store';
+import { createMuteFromNotification } from '@/lib/muteRules';
 import { useAuth } from '@/context/AuthContext';
 import {
     DropdownMenu,
@@ -405,48 +404,7 @@ async function createQuickSuppressionRule(
     notif: NotificationItem,
     mode: 'category' | 'similar' | 'stack',
 ): Promise<void> {
-    const categoryLabel = notif.category ? CATEGORY_LABELS[notif.category as NotificationCategory] : 'alert';
-    const body: Record<string, unknown> = {
-        applies_to: 'both',
-        enabled: true,
-        expires_at: null,
-        node_id: notif.nodeId ?? null,
-        stack_patterns: [],
-        label_ids: null,
-        categories: null,
-        levels: null,
-    };
-
-    if (mode === 'category' && notif.category) {
-        body.name = `Mute ${categoryLabel}`;
-        body.categories = [notif.category];
-    } else if (mode === 'stack' && notif.stack_name) {
-        body.name = `Mute ${notif.stack_name}`;
-        body.stack_patterns = [notif.stack_name];
-    } else if (mode === 'similar') {
-        body.name = `Mute similar alerts`;
-        if (notif.category) body.categories = [notif.category];
-        body.levels = [notif.level];
-        if (notif.stack_name) body.stack_patterns = [notif.stack_name];
-    } else {
-        toast.error('This notification cannot be muted with that shortcut.');
-        return;
-    }
-
-    try {
-        const res = await apiFetch('/notification-suppression-rules', {
-            method: 'POST',
-            body: JSON.stringify(body),
-        });
-        if (res.ok) {
-            toast.success('Suppression rule created. Open Settings · Suppression Rules to edit it.');
-        } else {
-            const err = await res.json().catch(() => ({}));
-            toast.error(err?.error || 'Failed to create suppression rule.');
-        }
-    } catch {
-        toast.error('Network error.');
-    }
+    await createMuteFromNotification(notif, mode);
 }
 
 function NotificationRow({ notif, showNodeName, onDelete, onNavigate, onNavigateChangelog, canMute }: NotificationRowProps) {

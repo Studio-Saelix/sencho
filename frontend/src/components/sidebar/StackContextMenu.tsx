@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react';
-import { Check, Plus } from 'lucide-react';
+import { Check, Plus, BellOff } from 'lucide-react';
 import {
   ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
   ContextMenuSub, ContextMenuSubContent, ContextMenuSubTrigger, ContextMenuTrigger,
@@ -72,6 +72,42 @@ function LabelsSub({ item, ctx }: { item: MenuItem; ctx: StackMenuCtx }) {
             <ContextMenuItem onClick={ctx.openLabelManager}>
               <span className="text-xs">Manage labels...</span>
             </ContextMenuItem>
+            {ctx.canMuteNotifications && ctx.labels.length > 0 && (
+              <>
+                <ContextMenuSeparator />
+                <ContextMenuSub>
+                  <ContextMenuSubTrigger>
+                    <BellOff className="w-3.5 h-3.5 mr-2" strokeWidth={1.5} />
+                    <span className="text-xs">Mute label…</span>
+                  </ContextMenuSubTrigger>
+                  <ContextMenuSubContent className="min-w-[200px]">
+                    {ctx.labels.map(label => (
+                      <ContextMenuSub key={label.id}>
+                        <ContextMenuSubTrigger>
+                          <LabelDot color={label.color} />
+                          <span className="font-mono text-[12px] ml-2">{label.name}</span>
+                        </ContextMenuSubTrigger>
+                        <ContextMenuSubContent>
+                          <ContextMenuItem onClick={() => ctx.muteLabelAll(label.id, label.name)}>
+                            <span className="text-xs">Mute notifications for this label</span>
+                          </ContextMenuItem>
+                          <ContextMenuItem onClick={() => ctx.muteLabelExternal(label.id, label.name)}>
+                            <span className="text-xs">Mute external alerts for this label</span>
+                          </ContextMenuItem>
+                          <ContextMenuItem onClick={() => ctx.muteLabelLowPriority(label.id, label.name)}>
+                            <span className="text-xs">Mute low-priority stack alerts</span>
+                          </ContextMenuItem>
+                          <ContextMenuSeparator />
+                          <ContextMenuItem onClick={() => ctx.openLabelMuteRules(label.id, label.name)}>
+                            <span className="text-xs">Manage label mute rules</span>
+                          </ContextMenuItem>
+                        </ContextMenuSubContent>
+                      </ContextMenuSub>
+                    ))}
+                  </ContextMenuSubContent>
+                </ContextMenuSub>
+              </>
+            )}
           </>
         )}
       </ContextMenuSubContent>
@@ -79,8 +115,44 @@ function LabelsSub({ item, ctx }: { item: MenuItem; ctx: StackMenuCtx }) {
   );
 }
 
+function SimpleSub({ item, MenuSub, MenuSubTrigger, MenuSubContent, MenuItem }: {
+  item: MenuItem;
+  MenuSub: typeof ContextMenuSub;
+  MenuSubTrigger: typeof ContextMenuSubTrigger;
+  MenuSubContent: typeof ContextMenuSubContent;
+  MenuItem: typeof ContextMenuItem;
+}) {
+  return (
+    <MenuSub>
+      <MenuSubTrigger>
+        <item.icon className="h-4 w-4 mr-2" strokeWidth={1.5} />
+        {item.label}
+      </MenuSubTrigger>
+      <MenuSubContent className="min-w-[220px]">
+        {item.subItems?.map((sub) => (
+          <MenuItem key={sub.id} onClick={() => sub.onSelect()}>
+            <span className="text-xs">{sub.label}</span>
+          </MenuItem>
+        ))}
+      </MenuSubContent>
+    </MenuSub>
+  );
+}
+
 function renderItem(item: MenuItem, ctx: StackMenuCtx) {
   if (item.id === 'labels') return <LabelsSub key={item.id} item={item} ctx={ctx} />;
+  if (item.subItems?.length) {
+    return (
+      <SimpleSub
+        key={item.id}
+        item={item}
+        MenuSub={ContextMenuSub}
+        MenuSubTrigger={ContextMenuSubTrigger}
+        MenuSubContent={ContextMenuSubContent}
+        MenuItem={ContextMenuItem}
+      />
+    );
+  }
   return (
     <ContextMenuItem
       key={item.id}

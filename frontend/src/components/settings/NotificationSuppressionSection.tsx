@@ -17,6 +17,8 @@ import { CapabilityGate } from '@/components/CapabilityGate';
 import type { NotificationCategory } from '@/components/dashboard/types';
 import type { Label as StackLabel } from '@/components/label-types';
 import { CATEGORY_LABELS } from '@/lib/notificationCategories';
+import { emitMuteRulesChanged, type MuteRuleDraft } from '@/lib/muteRules';
+import { useMuteRulesRefresh } from '@/hooks/useMuteRulesRefresh';
 import { Plus, Trash2, Pencil, RefreshCw, X, BellOff } from 'lucide-react';
 import { SettingsCallout } from './SettingsCallout';
 import { SettingsPrimaryButton } from './SettingsActions';
@@ -71,7 +73,38 @@ function formatExpiry(expires_at: number | null): string {
     return new Date(expires_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
-export function NotificationSuppressionSection() {
+function applyDraftToForm(
+    draft: MuteRuleDraft,
+    setters: {
+        setFormName: (v: string) => void;
+        setFormNodeId: (v: number | null) => void;
+        setFormStacks: (v: string[]) => void;
+        setFormLabelIds: (v: number[]) => void;
+        setFormCategories: (v: NotificationCategory[]) => void;
+        setFormLevels: (v: NotificationLevel[]) => void;
+        setFormAppliesTo: (v: AppliesTo) => void;
+        setFormEnabled: (v: boolean) => void;
+    },
+) {
+    setters.setFormName(draft.name);
+    setters.setFormNodeId(draft.node_id ?? null);
+    setters.setFormStacks(draft.stack_patterns ?? []);
+    setters.setFormLabelIds(draft.label_ids ?? []);
+    setters.setFormCategories(draft.categories ?? []);
+    setters.setFormLevels(draft.levels ?? []);
+    setters.setFormAppliesTo(draft.applies_to ?? 'both');
+    setters.setFormEnabled(draft.enabled ?? true);
+}
+
+interface NotificationSuppressionSectionProps {
+    prefill?: MuteRuleDraft | null;
+    onPrefillConsumed?: () => void;
+}
+
+export function NotificationSuppressionSection({
+    prefill = null,
+    onPrefillConsumed,
+}: NotificationSuppressionSectionProps) {
     const { nodes } = useNodes();
     const [rules, setRules] = useState<NotificationSuppressionRule[]>([]);
     const [loading, setLoading] = useState(true);
@@ -98,7 +131,7 @@ export function NotificationSuppressionSection() {
             const res = await apiFetch('/notification-suppression-rules');
             if (res.ok) setRules(await res.json());
         } catch {
-            toast.error('Failed to load suppression rules.');
+            toast.error('Failed to load mute rules.');
         } finally {
             setLoading(false);
         }
@@ -124,6 +157,27 @@ export function NotificationSuppressionSection() {
     useEffect(() => {
         void Promise.all([fetchRules(), fetchStacks(), fetchLabels()]);
     }, [fetchRules, fetchStacks, fetchLabels]);
+
+    useMuteRulesRefresh(fetchRules);
+
+    useEffect(() => {
+        if (!prefill) return;
+        applyDraftToForm(prefill, {
+            setFormName,
+            setFormNodeId,
+            setFormStacks,
+            setFormLabelIds,
+            setFormCategories,
+            setFormLevels,
+            setFormAppliesTo,
+            setFormEnabled,
+        });
+        setFormExpirationPreset('forever');
+        setFormCustomExpiry('');
+        setEditingId(null);
+        setShowForm(true);
+        onPrefillConsumed?.();
+    }, [prefill, onPrefillConsumed]);
 
     const resetForm = () => {
         setFormName('');
@@ -187,7 +241,8 @@ export function NotificationSuppressionSection() {
             });
 
             if (res.ok) {
-                toast.success(editingId ? 'Suppression rule updated.' : 'Suppression rule created.');
+                toast.success(editingId ? 'Mute rule updated.' : 'Mute rule created.');
+                emitMuteRulesChanged();
                 resetForm();
                 fetchRules();
             } else {
@@ -206,7 +261,8 @@ export function NotificationSuppressionSection() {
         try {
             const res = await apiFetch(`/notification-suppression-rules/${deleteRuleId}`, { method: 'DELETE' });
             if (res.ok) {
-                toast.success('Suppression rule deleted.');
+                toast.success('Mute rule deleted.');
+                emitMuteRulesChanged();
                 fetchRules();
             } else {
                 const err = await res.json().catch(() => ({}));
@@ -225,7 +281,10 @@ export function NotificationSuppressionSection() {
                 method: 'PUT',
                 body: JSON.stringify({ enabled: !rule.enabled }),
             });
-            if (res.ok) fetchRules();
+            if (res.ok) {
+                emitMuteRulesChanged();
+                fetchRules();
+            }
             else {
                 const err = await res.json().catch(() => ({}));
                 toast.error(err?.error || 'Something went wrong.');
@@ -284,25 +343,25 @@ export function NotificationSuppressionSection() {
     const deleteTarget = deleteRuleId != null ? rules.find((r) => r.id === deleteRuleId) : null;
 
     return (
-        <CapabilityGate capability="notification-suppression" featureName="Notification Suppression">
+        <CapabilityGate capability="notification-suppression" featureName="Mute Rules">
             <div className="space-y-6">
                 <SettingsCallout
                     icon={<BellOff className="h-4 w-4" strokeWidth={1.5} />}
-                    title="Suppression vs routing"
-                    subtitle="Routing sends matching alerts to another channel. Suppression hides or drops delivery to the bell, external channels, or both. Events still appear in stack activity history."
+                    title="Mute rules vs routing"
+                    subtitle="Routing sends matching alerts to another channel. Mute rules hide or drop delivery to the bell, external channels, or both. Events still appear in stack activity history."
                 />
 
                 <div className="flex justify-end">
                     <SettingsPrimaryButton size="sm" onClick={() => { resetForm(); setShowForm(true); }}>
-                        <Plus className="w-4 h-4" /> Add suppression rule
+                        <Plus className="w-4 h-4" /> Add mute rule
                     </SettingsPrimaryButton>
                 </div>
 
                 <Modal open={showForm} onOpenChange={(open) => { if (!open) resetForm(); }} size="lg">
                     <ModalHeader
-                        kicker={editingId ? 'SUPPRESSION · EDIT RULE' : 'SUPPRESSION · NEW RULE'}
-                        title={editingId ? 'Edit suppression rule' : 'New suppression rule'}
-                        description="Match alerts by node, stack, label, category, or severity, then choose where to suppress delivery."
+                        kicker={editingId ? 'MUTE RULES · EDIT RULE' : 'MUTE RULES · NEW RULE'}
+                        title={editingId ? 'Edit mute rule' : 'New mute rule'}
+                        description="Match alerts by node, stack, label, category, or severity, then choose where to mute delivery."
                     />
                     <ModalBody>
                         <div className="space-y-2">
@@ -421,9 +480,11 @@ export function NotificationSuppressionSection() {
                             )}
                         </div>
 
-                        <div className="space-y-2">
-                            <Label>Enabled</Label>
-                            <TogglePill checked={formEnabled} onChange={setFormEnabled} />
+                        <div className="flex items-center gap-2">
+                            <TogglePill checked={formEnabled} onChange={setFormEnabled} id="mute-rule-enabled" />
+                            <span className="text-sm text-stat-value select-none">
+                                {formEnabled ? 'Enabled' : 'Disabled'}
+                            </span>
                         </div>
                     </ModalBody>
                     <ModalFooter
@@ -446,8 +507,8 @@ export function NotificationSuppressionSection() {
                 {!loading && rules.length === 0 && (
                     <SettingsCallout
                         icon={<BellOff className="h-4 w-4" strokeWidth={1.5} />}
-                        title="No suppression rules configured"
-                        subtitle="Alerts follow your routing and global channels unless a suppression rule matches."
+                        title="No mute rules configured"
+                        subtitle="Alerts follow your routing and global channels unless a mute rule matches."
                     />
                 )}
 
@@ -497,8 +558,8 @@ export function NotificationSuppressionSection() {
                     open={deleteRuleId != null}
                     onOpenChange={(open) => { if (!open) setDeleteRuleId(null); }}
                     variant="destructive"
-                    kicker="SUPPRESSION · DELETE · IRREVERSIBLE"
-                    title="Delete suppression rule"
+                    kicker="MUTE RULES · DELETE · IRREVERSIBLE"
+                    title="Delete mute rule"
                     confirmLabel="Delete"
                     onConfirm={handleDelete}
                 >

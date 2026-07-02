@@ -10,6 +10,7 @@ const {
   mockAddNotificationHistory,
   mockUpdateNotificationDispatchError,
   mockGetEnabledNotificationSuppressionRules,
+  mockUpdateNotificationSuppressionMatch,
   mockBroadcast,
 } = vi.hoisted(() => ({
   mockGetEnabledNotificationRoutes: vi.fn().mockReturnValue([]),
@@ -24,6 +25,7 @@ const {
   }),
   mockUpdateNotificationDispatchError: vi.fn(),
   mockGetEnabledNotificationSuppressionRules: vi.fn().mockReturnValue([]),
+  mockUpdateNotificationSuppressionMatch: vi.fn(),
   mockBroadcast: vi.fn(),
 }));
 
@@ -36,6 +38,7 @@ vi.mock('../services/DatabaseService', () => ({
       addNotificationHistory: mockAddNotificationHistory,
       updateNotificationDispatchError: mockUpdateNotificationDispatchError,
       getEnabledNotificationSuppressionRules: mockGetEnabledNotificationSuppressionRules,
+      updateNotificationSuppressionMatch: mockUpdateNotificationSuppressionMatch,
     }),
   },
 }));
@@ -138,6 +141,11 @@ describe('NotificationService - suppression logic', () => {
 
     expect(mockBroadcast).not.toHaveBeenCalled();
     expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockUpdateNotificationSuppressionMatch).toHaveBeenCalledWith(1, {
+      rules: [{ id: 1, name: 'Mute crashes' }],
+      bellSuppressed: true,
+      externalSuppressed: true,
+    });
   });
 
   it('allows dispatch when no suppression rules match', async () => {

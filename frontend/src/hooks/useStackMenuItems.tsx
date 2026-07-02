@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import {
   Activity,
   ArrowUpRight,
+  BellOff,
   BellRing,
   CalendarClock,
   Download,
@@ -22,6 +23,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
     deploy, stop, restart, update, remove, pin, unpin, toggleLabel,
     menuVisibility, openScheduleTask,
+    canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
   } = ctx;
   const { showDeploy, showStop, showRestart, showUpdate } = menuVisibility;
 
@@ -35,6 +37,20 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
     inspect.push({ id: 'check-updates', label: 'Check updates', icon: RefreshCw, shortcut: 'U', onSelect: checkUpdates });
     if (stackStatus === 'running' && canOpenApp) {
       inspect.push({ id: 'open-app', label: 'Open App', icon: ArrowUpRight, shortcut: '↗', onSelect: openStackApp });
+    }
+    if (canMuteNotifications) {
+      inspect.push({
+        id: 'mute',
+        label: 'Mute',
+        icon: BellOff,
+        onSelect: () => {},
+        subItems: [
+          { id: 'mute-stack-all', label: 'Mute notifications for this stack', icon: BellOff, onSelect: muteStackAll },
+          { id: 'mute-stack-deploy', label: 'Mute deploy success noise', icon: BellOff, onSelect: muteStackDeploySuccess },
+          { id: 'mute-stack-monitor', label: 'Mute monitor alerts for this stack', icon: BellOff, onSelect: muteStackMonitor },
+          { id: 'mute-stack-manage', label: 'Manage stack mute rules', icon: BellOff, onSelect: openStackMuteRules },
+        ],
+      });
     }
     groups.push({ id: 'inspect', items: inspect });
 
@@ -82,5 +98,6 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
     showDeploy, showStop, showRestart, showUpdate,
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
     deploy, stop, restart, update, remove, pin, unpin, toggleLabel, openScheduleTask,
+    canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
   ]);
 }
