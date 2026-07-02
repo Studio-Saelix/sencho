@@ -78,6 +78,20 @@ describe('DeployFeedbackModal Inline vs Modal style', () => {
         expect(onMinimize).not.toHaveBeenCalled();
     });
 
+    it('inline style: succeeded state shows no auto-close countdown label', () => {
+        mockStyle = 'inline';
+        mockPanelState = panel({ status: 'succeeded' });
+        render(<DeployFeedbackModal isMinimized={false} onMinimize={onMinimize} />);
+        expect(screen.queryByText(/closes in/i)).toBeNull();
+    });
+
+    it('modal style: succeeded state shows auto-close countdown label', () => {
+        mockStyle = 'modal';
+        mockPanelState = panel({ status: 'succeeded' });
+        render(<DeployFeedbackModal isMinimized={false} onMinimize={onMinimize} />);
+        expect(screen.getByText(/closes in/i)).toBeInTheDocument();
+    });
+
     it('modal style owns the live terminal; inline style renders no terminal (single socket)', () => {
         mockStyle = 'modal';
         const view = render(<DeployFeedbackModal isMinimized={false} onMinimize={onMinimize} />);

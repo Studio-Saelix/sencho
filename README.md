@@ -10,7 +10,8 @@
     <a href="https://docs.sencho.io">Docs</a> ·
     <a href="https://sencho.io">Website</a> ·
     <a href="https://github.com/studio-saelix/sencho/discussions">Discussions</a> ·
-    <a href="https://buymeacoffee.com/sencho">Sponsor</a>
+    <a href="https://github.com/sponsors/Studio-Saelix">Sponsor</a> ·
+    <a href="https://buymeacoffee.com/sencho">Buy Me a Coffee</a>
   </p>
 
   [![Latest release](https://img.shields.io/github/v/release/studio-saelix/sencho?label=release)](https://github.com/studio-saelix/sencho/releases)
