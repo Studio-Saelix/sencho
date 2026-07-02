@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { ContainerLabelsTab } from '../ContainerLabelsTab';
 import { LABEL_DISAMBIGUATION_COPY } from '@/lib/labelInventory';
 
@@ -50,6 +51,17 @@ const mockFleet = {
   generatedAt: Date.now(),
 };
 
+// Two rows sharing the same key=value but distinct sources (image vs runtime).
+const dupMock = {
+  nodes: [{ nodeId: 1, nodeName: 'Local', status: 'ok' as const, error: null, inventory: { nodeId: 1, partial: false, generatedAt: Date.now(), containers: [], byLabel: [] } }],
+  aggregatedByLabel: [
+    { key: 'dup.label', value: 'v', source: 'image' as const, containers: [{ id: 'c1', name: 'a-1', stack: 's', service: 'a', nodeId: 1, nodeName: 'Local' }] },
+    { key: 'dup.label', value: 'v', source: 'runtime' as const, containers: [{ id: 'c2', name: 'b-1', stack: 's', service: 'b', nodeId: 1, nodeName: 'Local' }] },
+  ],
+  nodeErrors: {},
+  generatedAt: Date.now(),
+};
+
 describe('ContainerLabelsTab', () => {
   beforeEach(() => {
     vi.mocked(apiFetch).mockResolvedValue({
@@ -59,36 +71,61 @@ describe('ContainerLabelsTab', () => {
   });
 
   it('renders audit sections and toggles view mode', async () => {
-    const onNavigate = vi.fn();
-    render(<ContainerLabelsTab onNavigateToNode={onNavigate} />);
+    const user = userEvent.setup();
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
     expect(await screen.findByText(LABEL_DISAMBIGUATION_COPY)).toBeInTheDocument();
     expect(screen.getByText('Docker label audit')).toBeInTheDocument();
     expect(await screen.findByText('web-1')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText('By label'));
+    await user.click(screen.getByText('By label'));
     expect(await screen.findByText('traefik.enable')).toBeInTheDocument();
   });
 
   it('keeps the same key=value distinct per source with its own badge', async () => {
-    vi.mocked(apiFetch).mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        nodes: [{ nodeId: 1, nodeName: 'Local', status: 'ok' as const, error: null, inventory: { nodeId: 1, partial: false, generatedAt: Date.now(), containers: [], byLabel: [] } }],
-        aggregatedByLabel: [
-          { key: 'dup.label', value: 'v', source: 'image' as const, containers: [{ id: 'c1', name: 'a-1', stack: 's', service: 'a', nodeId: 1, nodeName: 'Local' }] },
-          { key: 'dup.label', value: 'v', source: 'runtime' as const, containers: [{ id: 'c2', name: 'b-1', stack: 's', service: 'b', nodeId: 1, nodeName: 'Local' }] },
-        ],
-        nodeErrors: {},
-        generatedAt: Date.now(),
-      }),
-    } as Response);
+    const user = userEvent.setup();
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => dupMock } as Response);
     render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
-    fireEvent.click(await screen.findByText('By label'));
-    expect(await screen.findByText('Image')).toBeInTheDocument();
-    expect(screen.getByText('Present at runtime')).toBeInTheDocument();
+    await user.click(await screen.findByText('By label'));
     expect(screen.getAllByText('dup.label')).toHaveLength(2);
     // The misleading "External automation label" marker on non-Compose keys was removed.
     expect(screen.queryByText(/External automation label/)).toBeNull();
+  });
+
+  it('exposes a facet in the Filters popover only for sources present, with exact labels', async () => {
+    const user = userEvent.setup();
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    await user.click(await screen.findByText('By label'));
+    await user.click(screen.getByRole('button', { name: /Filters/ }));
+    // mockFleet has only a runtime source.
+    expect(screen.getByRole('button', { name: 'Runtime' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Image' })).toBeNull();
+  });
+
+  it('filters the by-label list by source facet, hiding an unpressed source', async () => {
+    const user = userEvent.setup();
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => dupMock } as Response);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    await user.click(await screen.findByText('By label'));
+    expect(screen.getAllByText('dup.label')).toHaveLength(2);
+    await user.click(screen.getByRole('button', { name: /Filters/ }));
+    const imageBtn = screen.getByRole('button', { name: 'Image' });
+    expect(imageBtn).toHaveAttribute('aria-pressed', 'true');
+
+    await user.click(imageBtn);
+    expect(screen.getAllByText('dup.label')).toHaveLength(1);
+    // The facet stays present (just unpressed) because facets derive from unfiltered data.
+    expect(screen.getByRole('button', { name: 'Image' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('shows the empty state when every source facet is turned off', async () => {
+    const user = userEvent.setup();
+    vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => dupMock } as Response);
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    await user.click(await screen.findByText('By label'));
+    await user.click(screen.getByRole('button', { name: /Filters/ }));
+    await user.click(screen.getByRole('button', { name: 'Image' }));
+    await user.click(screen.getByRole('button', { name: 'Runtime' }));
+    expect(screen.getByText('No labels match this filter.')).toBeInTheDocument();
   });
 
   it('names unreachable and partial nodes in the warning', async () => {

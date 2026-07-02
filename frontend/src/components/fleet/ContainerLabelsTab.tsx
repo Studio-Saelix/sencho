@@ -1,24 +1,31 @@
 import { useCallback, useEffect, useMemo, useState, Fragment } from 'react';
-import { ChevronDown, ChevronRight, ExternalLink, Lock, RefreshCw, Search } from 'lucide-react';
+import { ChevronDown, ChevronRight, ExternalLink, Lock, RefreshCw, Search, SlidersHorizontal } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { SegmentedControl } from '@/components/ui/segmented-control';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { useAuth } from '@/context/AuthContext';
 import {
   LABEL_DISAMBIGUATION_COPY,
   SOURCE_LABELS,
+  SOURCE_FACET_LABELS,
+  matchesSearch,
+  sourcesPresent,
   type ContainerLabelRow,
   type FleetLabelInventoryResponse,
   type LabelIndexRow,
+  type LabelSource,
   type LabelValue,
 } from '@/lib/labelInventory';
 
 type ViewMode = 'container' | 'label';
+
+const FILTER_SECTION_LABEL_CLASS = 'text-[10px] leading-3 font-mono uppercase tracking-[0.18em] text-stat-subtitle';
 
 interface ContainerLabelsTabProps {
   onNavigateToNode: (nodeId: number, stackName: string) => void;
@@ -43,12 +50,6 @@ function LabelValueCell({ label, onReveal }: { label: LabelValue; onReveal?: () 
   );
 }
 
-function matchesSearch(q: string, ...parts: (string | null | undefined)[]): boolean {
-  if (!q) return true;
-  const needle = q.toLowerCase();
-  return parts.some(p => (p ?? '').toLowerCase().includes(needle));
-}
-
 export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps) {
   const { isAdmin } = useAuth();
   const [viewMode, setViewMode] = useState<ViewMode>('container');
@@ -57,6 +58,7 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
   const [revealSecrets, setRevealSecrets] = useState(false);
   const [data, setData] = useState<FleetLabelInventoryResponse | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [excludedSources, setExcludedSources] = useState<Set<LabelSource>>(new Set());
 
   const fetchInventory = useCallback(async (reveal = revealSecrets) => {
     setLoading(true);
@@ -91,21 +93,35 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
   }, [data]);
 
   const filteredContainers = useMemo(() => {
-    const q = search.trim();
     return allContainers.filter(c =>
-      matchesSearch(q, c.name, c.stack, c.service, c.state, c.nodeName)
-      || c.labels.some(l => matchesSearch(q, l.key, l.value)),
+      matchesSearch(search, c.name, c.stack, c.service, c.state, c.nodeName)
+      || c.labels.some(l => matchesSearch(search, l.key, l.value)),
     );
   }, [allContainers, search]);
 
+  // Sources present across the aggregated index, for the data-driven facet row. Derived from
+  // the unfiltered data so toggling a facet off never removes the facet itself.
+  const labelSourceFacets = useMemo(
+    () => sourcesPresent((data?.aggregatedByLabel ?? []).map(r => r.source)),
+    [data],
+  );
+
   const filteredByLabel = useMemo(() => {
-    const q = search.trim();
     const source = data?.aggregatedByLabel ?? [];
     return source.filter(row =>
-      matchesSearch(q, row.key, row.value)
-      || row.containers.some(c => matchesSearch(q, c.name, c.stack, c.nodeName)),
+      !excludedSources.has(row.source)
+      && (matchesSearch(search, row.key, row.value)
+        || row.containers.some(c => matchesSearch(search, c.name, c.stack, c.nodeName))),
     );
-  }, [data, search]);
+  }, [data, search, excludedSources]);
+
+  const toggleSource = (s: LabelSource) => {
+    setExcludedSources(prev => {
+      const next = new Set(prev);
+      if (next.has(s)) next.delete(s); else next.add(s);
+      return next;
+    });
+  };
 
   // Nodes that were unreachable (nodeErrors) or whose inventory came back partial (some
   // containers or images could not be inspected). Named so the warning is truthful.
@@ -165,6 +181,43 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
               className="h-9 w-56 pl-8 max-md:w-full"
             />
           </div>
+          {viewMode === 'label' && labelSourceFacets.length > 0 && (
+            <Popover>
+              <PopoverTrigger asChild>
+                <Button variant={excludedSources.size > 0 ? 'default' : 'outline'} size="sm" className="h-9 gap-2 shrink-0">
+                  <SlidersHorizontal className="w-4 h-4" />
+                  Filters
+                  {excludedSources.size > 0 && (
+                    <Badge variant="secondary" className="h-5 min-w-[1.25rem] px-1.5 text-[10px] tabular-nums">{excludedSources.size}</Badge>
+                  )}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-64 space-y-4">
+                <div className="space-y-1.5">
+                  <label className={FILTER_SECTION_LABEL_CLASS}>Defined by</label>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {labelSourceFacets.map((s) => (
+                      <Button
+                        key={s}
+                        variant={!excludedSources.has(s) ? 'default' : 'outline'}
+                        size="sm"
+                        className="h-7 text-xs px-2.5"
+                        aria-pressed={!excludedSources.has(s)}
+                        onClick={() => toggleSource(s)}
+                      >
+                        {SOURCE_FACET_LABELS[s]}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+                {excludedSources.size > 0 && (
+                  <Button variant="ghost" size="sm" className="w-full h-8 text-xs" onClick={() => setExcludedSources(new Set())}>
+                    Clear filters
+                  </Button>
+                )}
+              </PopoverContent>
+            </Popover>
+          )}
           <Button variant="outline" size="sm" className="h-9 w-9 p-0" onClick={() => void fetchInventory()} disabled={loading} aria-label="Refresh">
             <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
           </Button>
@@ -257,6 +310,12 @@ export function ContainerLabelsTab({ onNavigateToNode }: ContainerLabelsTabProps
             </TableBody>
           </Table>
         </div>
+      )}
+
+      {viewMode === 'label' && (
+        <p className="text-[10px] text-stat-subtitle leading-relaxed max-w-3xl">
+          Fleet shows container-level provenance and cannot distinguish Compose-declared labels from other container-set labels, so those appear as "Present at runtime".
+        </p>
       )}
 
       {viewMode === 'label' && (

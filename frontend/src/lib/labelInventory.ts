@@ -90,3 +90,28 @@ export const SOURCE_LABELS: Record<LabelSource, string> = {
   'compose-system': 'Docker Compose system label',
   unknown: 'Unknown',
 };
+
+/** Concise facet-chip labels (concept-aligned with SOURCE_LABELS, not a rename of the badges). */
+export const SOURCE_FACET_LABELS: Record<LabelSource, string> = {
+  compose: 'Compose File',
+  runtime: 'Runtime',
+  image: 'Image',
+  'compose-system': 'System',
+  unknown: 'Unknown',
+};
+
+/** Stable display order for source facets. */
+const SOURCE_ORDER: LabelSource[] = ['compose', 'image', 'runtime', 'compose-system', 'unknown'];
+
+/** The distinct sources present, in stable display order, for building data-driven facet rows. */
+export function sourcesPresent(sources: Iterable<LabelSource>): LabelSource[] {
+  const present = new Set(sources);
+  return SOURCE_ORDER.filter(s => present.has(s));
+}
+
+/** Case-insensitive substring match across a variable list of fields; empty query matches all. */
+export function matchesSearch(query: string, ...parts: (string | null | undefined)[]): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return parts.some(p => (p ?? '').toLowerCase().includes(q));
+}
