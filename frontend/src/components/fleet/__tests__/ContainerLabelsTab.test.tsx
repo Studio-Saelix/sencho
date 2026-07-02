@@ -91,6 +91,25 @@ describe('ContainerLabelsTab', () => {
     expect(screen.queryByText(/External automation label/)).toBeNull();
   });
 
+  it('filters the by-label list by search text', async () => {
+    const user = userEvent.setup();
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    await user.click(await screen.findByText('By label'));
+    expect(screen.getByText('traefik.enable')).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText(/Filter labels/), 'nope');
+    expect(screen.queryByText('traefik.enable')).toBeNull();
+    expect(screen.getByText('No labels match this filter.')).toBeInTheDocument();
+  });
+
+  it('filters the by-container list by search text', async () => {
+    const user = userEvent.setup();
+    render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);
+    expect(await screen.findByText('web-1')).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText(/Filter labels/), 'nope');
+    expect(screen.queryByText('web-1')).toBeNull();
+    expect(screen.getByText('No containers match this filter.')).toBeInTheDocument();
+  });
+
   it('exposes a facet in the Filters popover only for sources present, with exact labels', async () => {
     const user = userEvent.setup();
     render(<ContainerLabelsTab onNavigateToNode={vi.fn()} />);

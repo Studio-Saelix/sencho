@@ -130,6 +130,30 @@ describe('ComposeLabelsPanel', () => {
     expect(screen.queryByText('aaa.declared')).toBeNull();
   });
 
+  it('hides inBoth and changed badges when Compose File is filtered out', async () => {
+    const user = userEvent.setup();
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stackName: 'demo', renderable: true, partial: false, generatedAt: Date.now(),
+        services: [{
+          service: 'web',
+          declaredLabels: [{ key: 'watchtower.enable', value: 'true', source: 'compose' as const }],
+          replicas: [{
+            id: 'c1', name: 'demo-web-1', state: 'running',
+            runtimeLabels: [{ key: 'watchtower.enable', value: 'false', source: 'runtime' as const }],
+            onlyInCompose: [], onlyOnContainer: [], inBoth: [], changed: ['watchtower.enable'],
+          }],
+        }],
+      }),
+    } as Response);
+    render(<ComposeLabelsPanel stackName="demo" />);
+    expect(await screen.findByTestId('mismatch-changed')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /Filters/ }));
+    await user.click(screen.getByRole('button', { name: 'Compose File' }));
+    expect(screen.queryByTestId('mismatch-changed')).toBeNull();
+  });
+
   it('a source facet hides that source; turning off Compose File hides declared labels', async () => {
     const user = userEvent.setup();
     vi.mocked(apiFetch).mockResolvedValue({ ok: true, json: async () => searchMock } as Response);

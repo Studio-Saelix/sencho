@@ -151,8 +151,8 @@ export default function ComposeLabelsPanel({ stackName }: { stackName: string })
           const badges = {
             onlyInCompose: rep.onlyInCompose.filter(k => declaredVisibleKeys.has(k)).length,
             onlyOnContainer: rep.onlyOnContainer.filter(k => rtKeys.has(k)).length,
-            inBoth: rep.inBoth.filter(k => rtKeys.has(k)).length,
-            changed: (rep.changed ?? []).filter(k => rtKeys.has(k)).length,
+            inBoth: rep.inBoth.filter(k => rtKeys.has(k) && declaredVisibleKeys.has(k)).length,
+            changed: (rep.changed ?? []).filter(k => rtKeys.has(k) && declaredVisibleKeys.has(k)).length,
           };
           const anyBadge = badges.onlyInCompose + badges.onlyOnContainer + badges.inBoth + badges.changed > 0;
           const render = runtimeVisible.length > 0 || anyBadge || !filtersActive;
