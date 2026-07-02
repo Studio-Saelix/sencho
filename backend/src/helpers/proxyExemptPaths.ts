@@ -52,6 +52,7 @@ export const HUB_ONLY_PREFIXES: readonly string[] = [
   '/api/scheduled-tasks/',
   '/api/audit-log/',
   '/api/notification-routes/',
+  '/api/notification-suppression-rules/',
   '/api/logs/global/',
   '/api/system/log-stream-metrics/',
   '/api/registries/',

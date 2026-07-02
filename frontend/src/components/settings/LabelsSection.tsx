@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Plus, Pencil, Trash2 } from 'lucide-react';
+import { Plus, Pencil, Trash2, BellOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
@@ -13,13 +13,17 @@ import { LABEL_COLORS, MAX_LABELS_PER_NODE, type Label, type LabelColor } from '
 import { SettingsCallout } from './SettingsCallout';
 import { SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { labelMuteAllDraft, type MuteRuleDraft } from '@/lib/muteRules';
+import { useCanMuteNotifications } from '@/hooks/useMuteRuleActions';
 
 interface LabelsSectionProps {
     onLabelsChanged?: () => void;
+    onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
 }
 
-export function LabelsSection({ onLabelsChanged }: LabelsSectionProps = {}) {
-    const { can } = useAuth();
+export function LabelsSection({ onLabelsChanged, onOpenMuteRulesWithPrefill }: LabelsSectionProps = {}) {
+    const { can, isAdmin } = useAuth();
+    const canMute = useCanMuteNotifications();
     // Mirrors the backend `requirePermission('stack:edit')` guard on
     // POST/PUT/DELETE /api/labels, keeping a viewer/deployer/auditor from
     // clicking through to a guaranteed 403.
@@ -161,6 +165,17 @@ export function LabelsSection({ onLabelsChanged }: LabelsSectionProps = {}) {
                                     <span className="text-xs text-muted-foreground tabular-nums">
                                         {assignmentCounts[label.id] || 0} stack{(assignmentCounts[label.id] || 0) !== 1 ? 's' : ''}
                                     </span>
+                                    {canMute && onOpenMuteRulesWithPrefill && isAdmin && (
+                                        <Button
+                                            variant="ghost"
+                                            size="icon"
+                                            className="h-7 w-7 opacity-0 group-hover:opacity-100 transition-opacity"
+                                            title="Mute notifications for this label"
+                                            onClick={() => onOpenMuteRulesWithPrefill(labelMuteAllDraft(label.id, label.name))}
+                                        >
+                                            <BellOff className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                        </Button>
+                                    )}
                                     {canMutate && (
                                         <>
                                             <Button

@@ -32,11 +32,13 @@ import { DependencyMapTab } from './fleet/DependencyMapTab';
 import { useNodeActions } from './nodes/useNodeActions';
 import type { FleetTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
+import type { MuteRuleDraft } from '@/lib/muteRules';
 
 interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
     /** Opens a Settings section (used to send "Add node" to Settings > Nodes). */
     onOpenSettingsSection?: (section: SectionId) => void;
+    onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
     fleetUpdatesIntent?: { tab: 'nodes' | 'changelog' } | null;
     onFleetUpdatesIntentConsumed?: () => void;
     /** Deep-link target tab (e.g. 'snapshots' from the stack storage warning). */
@@ -44,7 +46,7 @@ interface FleetViewProps {
     onFleetTabConsumed?: () => void;
 }
 
-export function FleetView({ onNavigateToNode, onOpenSettingsSection, fleetUpdatesIntent, onFleetUpdatesIntentConsumed, fleetTab, onFleetTabConsumed }: FleetViewProps) {
+export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteRulesWithPrefill, fleetUpdatesIntent, onFleetUpdatesIntentConsumed, fleetTab, onFleetTabConsumed }: FleetViewProps) {
     const { isPaid } = useLicense();
     const { isAdmin } = useAuth();
 
@@ -221,6 +223,7 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, fleetUpdate
                         onCordonChange={() => { void overview.fetchOverview(true); }}
                         onEditNode={isAdmin ? openEdit : undefined}
                         onDeleteNode={isAdmin ? openDelete : undefined}
+                        onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
                         onAddNode={isAdmin && onOpenSettingsSection ? () => onOpenSettingsSection('nodes') : undefined}
                         onCheckUpdates={updateStatus.checkUpdates}
                         checkingUpdates={updateStatus.checkingUpdates}

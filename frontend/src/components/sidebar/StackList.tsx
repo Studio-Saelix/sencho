@@ -13,6 +13,9 @@ import { StackContextMenu } from './StackContextMenu';
 import { StackKebabMenu } from './StackKebabMenu';
 import { EmptyStackState } from './EmptyStackState';
 import type { StackMenuCtx, FilterChip } from './sidebar-types';
+import type { MuteRuleDraft } from '@/lib/muteRules';
+import { LabelGroupMuteKebab } from '@/components/mute/MuteMenuItems';
+import { useLabelMuteActions } from '@/hooks/useMuteRuleActions';
 
 interface RemoteNodeResult {
   nodeId: number;
@@ -54,6 +57,7 @@ export interface StackListProps {
   // Open the create dialog on a starting mode. Present only when the user can
   // create stacks; drives the zero-stacks empty state.
   onOpenCreate?: (mode: 'import' | 'empty') => void;
+  openMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
 }
 
 interface BuiltGroup {
@@ -63,6 +67,8 @@ interface BuiltGroup {
   count: number;
   files: string[];
   variant?: 'default' | 'pinned';
+  labelId?: number;
+  labelName?: string;
 }
 
 function buildGroups(
@@ -101,6 +107,8 @@ function buildGroups(
     result.push({
       kind: 'labeled', id: `label:${label.id}`,
       label: label.name.toUpperCase(), count: bucketFiles.length, files: bucketFiles,
+      labelId: label.id,
+      labelName: label.name,
     });
   }
 
@@ -109,6 +117,19 @@ function buildGroups(
   }
 
   return result;
+}
+
+function LabelGroupMuteActions({
+  labelId,
+  labelName,
+  openMuteRulesWithPrefill,
+}: {
+  labelId: number;
+  labelName: string;
+  openMuteRulesWithPrefill: (draft: MuteRuleDraft) => void;
+}) {
+  const actions = useLabelMuteActions(labelId, labelName, openMuteRulesWithPrefill);
+  return <LabelGroupMuteKebab actions={actions} />;
 }
 
 interface StackListBulkProps {
@@ -125,6 +146,7 @@ export function StackList(props: StackListProps & StackListBulkProps) {
     bulkMode, selectedFiles, onToggleSelect,
     remoteResults, remoteLoading, remoteFailedNodes, onSelectRemoteFile,
     filterChip, onOpenCreate,
+    openMuteRulesWithPrefill,
   } = props;
 
   const [failedNodesExpanded, setFailedNodesExpanded] = useState(false);
@@ -164,6 +186,17 @@ export function StackList(props: StackListProps & StackListBulkProps) {
           collapsed={isCollapsed(g.id)}
           onToggle={() => toggleCollapse(g.id)}
           variant={g.variant}
+          headerActions={
+            g.kind === 'labeled' && g.labelId != null && g.labelName && openMuteRulesWithPrefill
+              ? (
+                <LabelGroupMuteActions
+                  labelId={g.labelId}
+                  labelName={g.labelName}
+                  openMuteRulesWithPrefill={openMuteRulesWithPrefill}
+                />
+              )
+              : undefined
+          }
         >
           {g.files.map(file => {
             const ctx = buildMenuCtx(file);

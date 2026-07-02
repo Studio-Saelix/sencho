@@ -220,6 +220,17 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         adminOnly: true,
         hiddenOnRemote: true,
     },
+    {
+        id: 'notification-suppression',
+        group: 'notifications',
+        label: 'Mute Rules',
+        description: 'Mute or drop matching alerts from the bell, external channels, or both.',
+        keywords: ['mute', 'suppress', 'silence', 'hide', 'bell', 'rules'],
+        tier: null,
+        scope: 'global',
+        adminOnly: true,
+        hiddenOnRemote: true,
+    },
     // Automation
     {
         id: 'image-updates',

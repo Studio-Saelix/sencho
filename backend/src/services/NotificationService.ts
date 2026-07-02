@@ -6,6 +6,12 @@ import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
 import { StackActivityMetricsService } from './StackActivityMetricsService';
+import {
+    appliesToBell,
+    appliesToExternal,
+    matchesNotificationFilters,
+    ruleNeedsStackLabels,
+} from '../helpers/notificationMatchers';
 
 export type NotificationCategory =
     | 'deploy_success'
@@ -42,6 +48,13 @@ export const ALL_NOTIFICATION_CATEGORIES: readonly NotificationCategory[] = [
     'blueprint_deployed', 'blueprint_deployment_failed',
     'blueprint_drift_detected', 'blueprint_drift_correction_failed',
     'node_update_available', 'system',
+];
+
+/** Every category that can appear in notification history / the bell panel. */
+export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
+    ...ALL_NOTIFICATION_CATEGORIES,
+    'drift_detected', 'drift_resolved',
+    'update_started', 'health_gate_passed', 'health_gate_failed',
 ];
 
 /** Webhook timeout: 10 seconds per external dispatch call. */
@@ -185,23 +198,51 @@ export class NotificationService {
                 });
             }
 
+            const suppressionRules = this.dbService.getEnabledNotificationSuppressionRules();
+            const routes = this.dbService.getEnabledNotificationRoutes();
+            const needsStackLabels = stackName !== undefined && (
+                ruleNeedsStackLabels(suppressionRules)
+                || routes.some((r) => r.label_ids != null && r.label_ids.length > 0)
+            );
+            const stackLabelIds = needsStackLabels
+                ? this.dbService.getStackLabelIds(localNodeId, stackName!)
+                : [];
+            const matchCtx = {
+                localNodeId,
+                stackName,
+                category,
+                level,
+                stackLabelIds,
+            };
+            const matchedSuppression = suppressionRules.filter((r) => matchesNotificationFilters(matchCtx, r));
+            const suppressBell = matchedSuppression.some((r) => appliesToBell(r.applies_to));
+            const suppressExternal = matchedSuppression.some((r) => appliesToExternal(r.applies_to));
+
+            if (isDebugEnabled() && matchedSuppression.length > 0) {
+                console.log(`[Notify:diag] Suppression matched ${matchedSuppression.length} rule(s); bell=${suppressBell}, external=${suppressExternal}`);
+            }
+
+            if (matchedSuppression.length > 0 && notification.id != null) {
+                this.dbService.updateNotificationSuppressionMatch(notification.id, {
+                    rules: matchedSuppression.map((r) => ({ id: r.id, name: r.name })),
+                    bellSuppressed: suppressBell,
+                    externalSuppressed: suppressExternal,
+                });
+            }
+
             // 2. Push to connected browser clients via WebSocket
-            this.broadcastToSubscribers(notification);
+            if (!suppressBell) {
+                this.broadcastToSubscribers(notification);
+            }
+
+            if (suppressExternal) {
+                return;
+            }
 
             // 3. Check notification routing rules — always evaluated, matchers compose AND
             const errors: string[] = [];
 
-            const routes = this.dbService.getEnabledNotificationRoutes();
-            const needsLabels = stackName !== undefined && routes.some(r => r.label_ids != null && r.label_ids.length > 0);
-            const stackLabelIds = needsLabels ? this.dbService.getStackLabelIds(localNodeId, stackName!) : [];
-
-            const matched = routes.filter(r => {
-                if (r.node_id != null && r.node_id !== localNodeId) return false;
-                if (r.stack_patterns.length > 0 && (stackName === undefined || !r.stack_patterns.includes(stackName))) return false;
-                if (r.label_ids != null && r.label_ids.length > 0 && !r.label_ids.some(id => stackLabelIds.includes(id))) return false;
-                if (r.categories != null && r.categories.length > 0 && !r.categories.includes(category)) return false;
-                return true;
-            });
+            const matched = routes.filter(r => matchesNotificationFilters(matchCtx, r));
             if (matched.length > 0) {
                 if (isDebugEnabled()) console.log(`[Notify:diag] Matched ${matched.length} route(s) for stack "${sanitizeForLog(stackName ?? '(none)')}", category="${sanitizeForLog(category)}"`);
                 await Promise.allSettled(

@@ -22,6 +22,7 @@ import {
     getSettingsItem,
 } from './index';
 import type { SectionId } from './index';
+import type { MuteRuleDraft } from '@/lib/muteRules';
 import LazyBoundary from '../LazyBoundary';
 import { SectionGate } from './SectionGate';
 
@@ -43,6 +44,9 @@ const LabelsSection = lazy(() =>
 );
 const NotificationRoutingSection = lazy(() =>
     import('./NotificationRoutingSection').then(m => ({ default: m.NotificationRoutingSection })),
+);
+const NotificationSuppressionSection = lazy(() =>
+    import('./NotificationSuppressionSection').then(m => ({ default: m.NotificationSuppressionSection })),
 );
 const CloudBackupSection = lazy(() =>
     import('./CloudBackupSection').then(m => ({ default: m.CloudBackupSection })),
@@ -72,6 +76,9 @@ function SectionSkeleton() {
 function renderSection(
     sectionId: SectionId,
     onDirtyChange: (section: SectionId, dirty: boolean) => void,
+    muteRulePrefill: MuteRuleDraft | null | undefined,
+    onMutePrefillConsumed: (() => void) | undefined,
+    onOpenMuteRulesWithPrefill: ((draft: MuteRuleDraft) => void) | undefined,
 ) {
     switch (sectionId) {
         case 'account': return <AccountSection />;
@@ -81,7 +88,7 @@ function renderSection(
         case 'sso': return <SSOSection />;
         case 'api-tokens': return <ApiTokensSection />;
         case 'registries': return <RegistriesSection />;
-        case 'labels': return <LabelsSection />;
+        case 'labels': return <LabelsSection onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill} />;
         case 'host-alerts': return <HostAlertsSection onDirtyChange={(d) => onDirtyChange('host-alerts', d)} />;
         case 'container-alerts': return <ContainerAlertsSection onDirtyChange={(d) => onDirtyChange('container-alerts', d)} />;
         case 'docker-storage': return <DockerStorageSection onDirtyChange={(d) => onDirtyChange('docker-storage', d)} />;
@@ -89,6 +96,12 @@ function renderSection(
         case 'fleet-mesh': return <FleetMeshSection onDirtyChange={(d) => onDirtyChange('fleet-mesh', d)} />;
         case 'notifications': return <NotificationsSection />;
         case 'notification-routing': return <NotificationRoutingSection />;
+        case 'notification-suppression': return (
+            <NotificationSuppressionSection
+                prefill={muteRulePrefill}
+                onPrefillConsumed={onMutePrefillConsumed}
+            />
+        );
         case 'webhooks': return <WebhooksSection />;
         case 'cloud-backup': return <CloudBackupSection />;
         case 'developer': return <DeveloperSection onDirtyChange={(d) => onDirtyChange('developer', d)} />;
@@ -109,6 +122,9 @@ interface SettingsSectionContentProps {
     onDirtyChange: (section: SectionId, dirty: boolean) => void;
     /** Render the section's lead description paragraph above the content. */
     showDescription?: boolean;
+    muteRulePrefill?: MuteRuleDraft | null;
+    onMutePrefillConsumed?: () => void;
+    onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
 }
 
 /**
@@ -117,14 +133,18 @@ interface SettingsSectionContentProps {
  * the desktop SettingsPage and the mobile settings screen so the section switch,
  * lazy splitting, and gating live in exactly one place.
  */
-export function SettingsSectionContent({ sectionId, onDirtyChange, showDescription }: SettingsSectionContentProps) {
+export function SettingsSectionContent({
+    sectionId,
+    onDirtyChange,
+    showDescription,
+    muteRulePrefill,
+    onMutePrefillConsumed,
+    onOpenMuteRulesWithPrefill,
+}: SettingsSectionContentProps) {
     const item = getSettingsItem(sectionId);
-    // Memoize the section element so unrelated re-renders of the host page (the
-    // command palette opening, a dirty-flag toggle) do not re-render the active
-    // section. onDirtyChange is stable from both call sites.
     const element = useMemo(
-        () => renderSection(sectionId, onDirtyChange),
-        [sectionId, onDirtyChange],
+        () => renderSection(sectionId, onDirtyChange, muteRulePrefill, onMutePrefillConsumed, onOpenMuteRulesWithPrefill),
+        [sectionId, onDirtyChange, muteRulePrefill, onMutePrefillConsumed, onOpenMuteRulesWithPrefill],
     );
     return (
         <>
