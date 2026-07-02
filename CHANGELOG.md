@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.93.4](https://github.com/Studio-Saelix/sencho/compare/v0.93.3...v0.93.4) (2026-07-02)
+
+
+### Fixed
+
+* make host memory usage ZFS ARC-aware ([#1547](https://github.com/Studio-Saelix/sencho/issues/1547)) ([98667e0](https://github.com/Studio-Saelix/sencho/commit/98667e0d6f352daf53c7bdb6dff7b8370be0b809))
+
 ## [0.93.3](https://github.com/Studio-Saelix/sencho/compare/v0.93.2...v0.93.3) (2026-07-02)
 
 
