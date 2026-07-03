@@ -333,7 +333,7 @@ export function NodeManager() {
                         <TooltipTrigger>
                           <Star className="w-4 h-4 text-yellow-500 fill-yellow-500" />
                         </TooltipTrigger>
-                        <TooltipContent><span className="font-mono text-xs tabular-nums text-stat-value">Default Node</span></TooltipContent>
+                        <TooltipContent>Default Node</TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
                   )}
@@ -395,7 +395,7 @@ export function NodeManager() {
                                 </span>
                               </TooltipTrigger>
                               <TooltipContent>
-                                <span className="font-mono text-xs tabular-nums text-stat-value">{new Date(summary.next_run_at).toLocaleString()}</span>
+                                {new Date(summary.next_run_at).toLocaleString()}
                               </TooltipContent>
                             </Tooltip>
                           </TooltipProvider>
@@ -450,7 +450,7 @@ export function NodeManager() {
                             <Calendar className="w-4 h-4" strokeWidth={1.5} />
                           </Button>
                         </TooltipTrigger>
-                        <TooltipContent><span className="font-mono text-xs tabular-nums text-stat-value">View Schedules</span></TooltipContent>
+                        <TooltipContent>View Schedules</TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
 
@@ -469,7 +469,7 @@ export function NodeManager() {
                               <Wifi className={`w-4 h-4 ${testing === node.id ? 'animate-pulse' : ''}`} />
                             </Button>
                           </TooltipTrigger>
-                          <TooltipContent><span className="font-mono text-xs tabular-nums text-stat-value">Test Connection</span></TooltipContent>
+                          <TooltipContent>Test Connection</TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
                     )}
@@ -488,7 +488,7 @@ export function NodeManager() {
                               <Pencil className="w-4 h-4" />
                             </Button>
                           </TooltipTrigger>
-                          <TooltipContent><span className="font-mono text-xs tabular-nums text-stat-value">Edit Node</span></TooltipContent>
+                          <TooltipContent>Edit Node</TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
                     )}
@@ -507,7 +507,7 @@ export function NodeManager() {
                               <Trash2 className="w-4 h-4" />
                             </Button>
                           </TooltipTrigger>
-                          <TooltipContent><span className="font-mono text-xs tabular-nums text-stat-value">Delete Node</span></TooltipContent>
+                          <TooltipContent>Delete Node</TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
                     )}
