@@ -8,6 +8,7 @@ import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } f
 import { Button } from '@/components/ui/button';
 import { useChartStyle, type ChartStyle } from '@/hooks/use-theme';
 import { cn } from '@/lib/utils';
+import { TooltipProvider, Tooltip as RadixTooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import type { SecurityRiskTrendPoint, SecurityOverview, ExploitIntelFinding } from '@/types/security';
 
 // Severity colours resolve through the --sev-* tokens, which the appearance
@@ -260,7 +261,14 @@ export function TopExploitRiskList({
                   {f.epss_score !== null ? (
                     <span className="text-warning">{Math.round(f.epss_score * 100)}%</span>
                   ) : (
-                    <span className="text-stat-subtitle/70" title="Exploitability unrated; treated as potentially automatable">n/a</span>
+                    <TooltipProvider>
+                      <RadixTooltip>
+                        <TooltipTrigger asChild>
+                          <span className="text-stat-subtitle/70 cursor-help">n/a</span>
+                        </TooltipTrigger>
+                        <TooltipContent>Exploitability unrated; treated as potentially automatable</TooltipContent>
+                      </RadixTooltip>
+                    </TooltipProvider>
                   )}
                 </span>
                 <span className="text-right font-mono text-[11px] tabular-nums text-stat-subtitle">
