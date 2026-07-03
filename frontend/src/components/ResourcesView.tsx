@@ -13,6 +13,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Loader2, History, FolderOpen } from 'lucide-react';
 import { SeverityBadge } from '@/components/ui/SeverityBadge';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
@@ -183,9 +184,16 @@ function ManagedBadge({ status, managedBy, onOpenStack }: {
         const inner = (<><span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />{managedBy}</>);
         if (onOpenStack && managedBy) {
             return (
-                <button type="button" className={`${cls} hover:bg-success/15 transition-colors`} title={`Open stack ${managedBy}`} onClick={() => onOpenStack(managedBy)}>
-                    {inner}
-                </button>
+                <TooltipProvider>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <button type="button" className={`${cls} hover:bg-success/15 transition-colors`} onClick={() => onOpenStack(managedBy)}>
+                                {inner}
+                            </button>
+                        </TooltipTrigger>
+                        <TooltipContent>Open stack {managedBy}</TooltipContent>
+                    </Tooltip>
+                </TooltipProvider>
             );
         }
         return <span className={cls}>{inner}</span>;
@@ -213,13 +221,17 @@ function ManagedBadge({ status, managedBy, onOpenStack }: {
 
 function SenchoBadge() {
     return (
-        <span
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-brand/25 bg-brand/8 text-brand text-[10px] font-medium"
-            title="Protected · running Sencho instance"
-        >
-            <span className="w-1.5 h-1.5 rounded-full bg-brand shrink-0" />
-            Sencho
-        </span>
+        <TooltipProvider>
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-brand/25 bg-brand/8 text-brand text-[10px] font-medium">
+                        <span className="w-1.5 h-1.5 rounded-full bg-brand shrink-0" />
+                        Sencho
+                    </span>
+                </TooltipTrigger>
+                <TooltipContent>Protected · running Sencho instance</TooltipContent>
+            </Tooltip>
+        </TooltipProvider>
     );
 }
 
@@ -860,21 +872,27 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 }}
                             />
                             {trivy.available && (
-                                <Button
-                                    variant="outline"
-                                    size="sm"
-                                    className="h-7 text-xs gap-1.5 mr-3 shrink-0"
-                                    onClick={() => {
-                                        window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
-                                            detail: { view: 'security', tab: 'history' },
-                                        }));
-                                    }}
-                                    title="View completed vulnerability scans and compare them"
-                                    aria-label="Open scan history"
-                                >
-                                    <History className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                    Scan history
-                                </Button>
+                                <TooltipProvider>
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                className="h-7 text-xs gap-1.5 mr-3 shrink-0"
+                                                onClick={() => {
+                                                    window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
+                                                        detail: { view: 'security', tab: 'history' },
+                                                    }));
+                                                }}
+                                                aria-label="Open scan history"
+                                            >
+                                                <History className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                Scan history
+                                            </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>View completed vulnerability scans and compare them</TooltipContent>
+                                    </Tooltip>
+                                </TooltipProvider>
                             )}
                         </div>
                         <Table>
@@ -917,33 +935,45 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                             </TableCell>
                                             <TableCell className="text-right">
                                                 <div className="flex items-center justify-end gap-1">
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
-                                                        onClick={() => setInspectImageId(img.Id)}
-                                                        title="Inspect image"
-                                                        aria-label={`Inspect ${img.RepoTags?.[0] || 'image'}`}
-                                                    >
-                                                        <Eye className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                    </Button>
-                                                    {trivy.available && isAdmin && img.RepoTags?.[0] && img.RepoTags[0] !== '<none>:<none>' && (
-                                                        <DropdownMenu>
-                                                            <DropdownMenuTrigger asChild>
+                                                    <TooltipProvider>
+                                                        <Tooltip>
+                                                            <TooltipTrigger asChild>
                                                                 <Button
                                                                     variant="ghost"
                                                                     size="icon"
                                                                     className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
-                                                                    disabled={scanningImageRef === img.RepoTags[0]}
-                                                                    title="Scan for vulnerabilities"
+                                                                    onClick={() => setInspectImageId(img.Id)}
+                                                                    aria-label={`Inspect ${img.RepoTags?.[0] || 'image'}`}
                                                                 >
-                                                                    {scanningImageRef === img.RepoTags[0] ? (
-                                                                        <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
-                                                                    ) : (
-                                                                        <ShieldCheck className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                                    )}
+                                                                    <Eye className="w-3.5 h-3.5" strokeWidth={1.5} />
                                                                 </Button>
-                                                            </DropdownMenuTrigger>
+                                                            </TooltipTrigger>
+                                                            <TooltipContent>Inspect image</TooltipContent>
+                                                        </Tooltip>
+                                                    </TooltipProvider>
+                                                    {trivy.available && isAdmin && img.RepoTags?.[0] && img.RepoTags[0] !== '<none>:<none>' && (
+                                                        <DropdownMenu>
+                                                            <TooltipProvider>
+                                                                <Tooltip>
+                                                                    <TooltipTrigger asChild>
+                                                                        <DropdownMenuTrigger asChild>
+                                                                            <Button
+                                                                                variant="ghost"
+                                                                                size="icon"
+                                                                                className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
+                                                                                disabled={scanningImageRef === img.RepoTags[0]}
+                                                                            >
+                                                                                {scanningImageRef === img.RepoTags[0] ? (
+                                                                                    <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
+                                                                                ) : (
+                                                                                    <ShieldCheck className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                                                )}
+                                                                            </Button>
+                                                                        </DropdownMenuTrigger>
+                                                                    </TooltipTrigger>
+                                                                    <TooltipContent>Scan for vulnerabilities</TooltipContent>
+                                                                </Tooltip>
+                                                            </TooltipProvider>
                                                             <DropdownMenuContent align="end">
                                                                 <DropdownMenuItem
                                                                     onClick={() => handleScanImage(img.RepoTags![0], { scanners: ['vuln'] })}
@@ -958,16 +988,26 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                             </DropdownMenuContent>
                                                         </DropdownMenu>
                                                     )}
-                                                    {isAdmin && <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
-                                                        disabled={img.isSencho}
-                                                        title={img.isSencho ? 'Protected · running Sencho instance' : undefined}
-                                                        onClick={() => setConfirmDelete({ type: 'images', id: img.Id, name: img.RepoTags?.[0] })}
-                                                    >
-                                                        <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                    </Button>}
+                                                    {isAdmin && (
+                                                        <TooltipProvider>
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <span className={img.isSencho ? 'cursor-not-allowed' : undefined}>
+                                                                        <Button
+                                                                            variant="ghost"
+                                                                            size="icon"
+                                                                            className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
+                                                                            disabled={img.isSencho}
+                                                                            onClick={() => setConfirmDelete({ type: 'images', id: img.Id, name: img.RepoTags?.[0] })}
+                                                                        >
+                                                                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                                        </Button>
+                                                                    </span>
+                                                                </TooltipTrigger>
+                                                                {img.isSencho && <TooltipContent>Protected · running Sencho instance</TooltipContent>}
+                                                            </Tooltip>
+                                                        </TooltipProvider>
+                                                    )}
                                                 </div>
                                             </TableCell>
                                         </TableRow>
@@ -1020,27 +1060,43 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                             <TableCell className="text-right">
                                                 <div className="flex items-center justify-end gap-1">
                                                     {isAdmin && (
-                                                        <Button
-                                                            variant="ghost"
-                                                            size="icon"
-                                                            className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
-                                                            onClick={() => setBrowseVolume(vol.Name)}
-                                                            title="Browse volume contents"
-                                                            aria-label={`Browse ${vol.Name}`}
-                                                        >
-                                                            <FolderOpen className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                        </Button>
+                                                        <TooltipProvider>
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <Button
+                                                                        variant="ghost"
+                                                                        size="icon"
+                                                                        className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
+                                                                        onClick={() => setBrowseVolume(vol.Name)}
+                                                                        aria-label={`Browse ${vol.Name}`}
+                                                                    >
+                                                                        <FolderOpen className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                                    </Button>
+                                                                </TooltipTrigger>
+                                                                <TooltipContent>Browse volume contents</TooltipContent>
+                                                            </Tooltip>
+                                                        </TooltipProvider>
                                                     )}
-                                                    {isAdmin && <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
-                                                        disabled={vol.isSencho}
-                                                        title={vol.isSencho ? 'Protected · running Sencho instance' : undefined}
-                                                        onClick={() => setConfirmDelete({ type: 'volumes', id: vol.Name, name: vol.Name })}
-                                                    >
-                                                        <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                    </Button>}
+                                                    {isAdmin && (
+                                                        <TooltipProvider>
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <span className={vol.isSencho ? 'cursor-not-allowed' : undefined}>
+                                                                        <Button
+                                                                            variant="ghost"
+                                                                            size="icon"
+                                                                            className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
+                                                                            disabled={vol.isSencho}
+                                                                            onClick={() => setConfirmDelete({ type: 'volumes', id: vol.Name, name: vol.Name })}
+                                                                        >
+                                                                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                                        </Button>
+                                                                    </span>
+                                                                </TooltipTrigger>
+                                                                {vol.isSencho && <TooltipContent>Protected · running Sencho instance</TooltipContent>}
+                                                            </Tooltip>
+                                                        </TooltipProvider>
+                                                    )}
                                                 </div>
                                             </TableCell>
                                         </TableRow>
@@ -1173,16 +1229,26 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                     >
                                                         {inspectLoadingId === net.Id ? <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} /> : <Eye className="w-3.5 h-3.5" strokeWidth={1.5} />}
                                                     </Button>
-                                                    {isAdmin && <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
-                                                        disabled={net.managedStatus === 'system' || net.isSencho}
-                                                        title={net.isSencho ? 'Protected · running Sencho instance' : undefined}
-                                                        onClick={() => setConfirmDelete({ type: 'networks', id: net.Id, name: net.Name })}
-                                                    >
-                                                        <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                    </Button>}
+                                                    {isAdmin && (
+                                                        <TooltipProvider>
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <span className={net.isSencho ? 'cursor-not-allowed' : undefined}>
+                                                                        <Button
+                                                                            variant="ghost"
+                                                                            size="icon"
+                                                                            className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
+                                                                            disabled={net.managedStatus === 'system' || net.isSencho}
+                                                                            onClick={() => setConfirmDelete({ type: 'networks', id: net.Id, name: net.Name })}
+                                                                        >
+                                                                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                                        </Button>
+                                                                    </span>
+                                                                </TooltipTrigger>
+                                                                {net.isSencho && <TooltipContent>Protected · running Sencho instance</TooltipContent>}
+                                                            </Tooltip>
+                                                        </TooltipProvider>
+                                                    )}
                                                 </div>
                                             </TableCell>
                                         </TableRow>
