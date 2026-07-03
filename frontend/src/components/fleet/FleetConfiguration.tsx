@@ -84,7 +84,7 @@ function PolicySyncRow({ state }: { state: PolicySyncState }) {
               {state.kind === 'paused' ? 'paused' : 'degraded'}
             </span>
           </TooltipTrigger>
-          <TooltipContent>{tooltip}</TooltipContent>
+          <TooltipContent><span className="font-mono text-xs tabular-nums text-stat-value">{tooltip}</span></TooltipContent>
         </Tooltip>
       </TooltipProvider>
     </div>

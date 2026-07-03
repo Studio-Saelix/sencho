@@ -30,7 +30,7 @@ export function SidebarActions({ createStackSlot, onScan, isScanning, bulkMode, 
             </Button>
           </TooltipTrigger>
           <TooltipContent side="bottom">
-            <p>Bulk mode (B)</p>
+            <span className="font-mono text-xs tabular-nums text-stat-value">Bulk mode (B)</span>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
@@ -50,7 +50,7 @@ export function SidebarActions({ createStackSlot, onScan, isScanning, bulkMode, 
             </Button>
           </TooltipTrigger>
           <TooltipContent side="bottom">
-            <p>Scan stacks folder</p>
+            <span className="font-mono text-xs tabular-nums text-stat-value">Scan stacks folder</span>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>

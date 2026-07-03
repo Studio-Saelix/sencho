@@ -122,7 +122,7 @@ function FleetNodeCard({ data, selected }: { data: FleetNodeData; selected?: boo
                             </div>
                         </TooltipTrigger>
                         <TooltipContent side="top">
-                            {node.cordonedReason || 'Cordoned: scheduling paused.'}
+                            <span className="font-mono text-xs tabular-nums text-stat-value">{node.cordonedReason || 'Cordoned: scheduling paused.'}</span>
                         </TooltipContent>
                     </Tooltip>
                 </TooltipProvider>
@@ -141,9 +141,11 @@ function FleetNodeCard({ data, selected }: { data: FleetNodeData; selected?: boo
                                     <Clock className="h-3 w-3 text-warning" strokeWidth={2} aria-label="Pilot heartbeat stale" />
                                 </TooltipTrigger>
                                 <TooltipContent side="top">
-                                    {node.pilotLastSeen
-                                        ? `Pilot heartbeat ${formatRelative(node.pilotLastSeen)}`
-                                        : 'Pilot heartbeat stale'}
+                                    <span className="font-mono text-xs tabular-nums text-stat-value">
+                                        {node.pilotLastSeen
+                                            ? `Pilot heartbeat ${formatRelative(node.pilotLastSeen)}`
+                                            : 'Pilot heartbeat stale'}
+                                    </span>
                                 </TooltipContent>
                             </Tooltip>
                         </TooltipProvider>
@@ -179,7 +181,7 @@ function FleetNodeCard({ data, selected }: { data: FleetNodeData; selected?: boo
                                     </span>
                                 </TooltipTrigger>
                                 <TooltipContent side="top">
-                                    {labels.slice(MAX_INLINE_LABELS).join(', ')}
+                                    <span className="font-mono text-xs tabular-nums text-stat-value">{labels.slice(MAX_INLINE_LABELS).join(', ')}</span>
                                 </TooltipContent>
                             </Tooltip>
                         </TooltipProvider>
@@ -260,7 +262,7 @@ function TopologyToolbar({
                                 </button>
                             </TooltipTrigger>
                             <TooltipContent side="bottom">
-                                {spec.description}
+                                <span className="font-mono text-xs tabular-nums text-stat-value">{spec.description}</span>
                             </TooltipContent>
                         </Tooltip>
                     </TooltipProvider>

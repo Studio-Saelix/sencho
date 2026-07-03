@@ -90,7 +90,7 @@ export function TopBar({
                         ) : (
                             <Tooltip key={value}>
                                 <TooltipTrigger asChild>{button}</TooltipTrigger>
-                                <TooltipContent side="bottom">{label}</TooltipContent>
+                                <TooltipContent side="bottom"><span className="font-mono text-xs tabular-nums text-stat-value">{label}</span></TooltipContent>
                             </Tooltip>
                         );
                     })}

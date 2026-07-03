@@ -384,7 +384,7 @@ function AlertsTab({ stackName }: { stackName: string }) {
                                         <HelpCircle className="h-4 w-4 text-muted-foreground cursor-help" strokeWidth={1.5} />
                                     </TooltipTrigger>
                                     <TooltipContent>
-                                        <p className="max-w-[200px] text-sm">The system resource or metric to monitor. Select from CPU, Memory, Network I/O, or Restarts.</p>
+                                        <span className="font-mono text-xs tabular-nums text-stat-value max-w-[200px]">The system resource or metric to monitor. Select from CPU, Memory, Network I/O, or Restarts.</span>
                                     </TooltipContent>
                                 </Tooltip>
                             </div>
