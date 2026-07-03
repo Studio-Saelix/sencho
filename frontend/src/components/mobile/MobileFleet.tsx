@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ChevronRight, Loader2 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
-import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { cordonNode, uncordonNode } from '@/lib/nodesApi';
@@ -159,9 +158,8 @@ function NodeDetail({
   onInspectStack: (nodeId: number, stackName: string) => void;
   onCordonChange: () => void;
 }) {
-  const { isPaid } = useLicense();
   const { can } = useAuth();
-  const canCordon = isPaid && can('node:manage', 'node', String(node.id));
+  const canCordon = can('node:manage', 'node', String(node.id));
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 

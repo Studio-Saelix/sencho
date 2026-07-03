@@ -8,7 +8,7 @@ A **Blueprint** bundles a `docker-compose.yml` with a node selector and a drift 
 Blueprints live under **Fleet · Deployments**.
 
 <Note>
-  Blueprints are available on every tier as Sencho's Compose-first orchestration model. Creating, editing, withdrawing, and applying blueprints requires an admin role; operators and viewers can read the catalog and the detail sheet. Pinning a blueprint to a specific node requires Admiral and lives under **Fleet · Federation**.
+  Blueprints are available on every tier as Sencho's Compose-first orchestration model. Creating, editing, withdrawing, and applying blueprints requires an admin role; operators and viewers can read the catalog and the detail sheet. Pinning a blueprint to a specific node lives under **Fleet · Federation** on every tier (admin role required).
 </Note>
 
 <Frame caption="Fleet · Deployments catalog with blueprint tiles, the All / Drifted / Observe / Suggest / Enforce filter chips, and the New Blueprint action in the top-right.">
@@ -37,7 +37,7 @@ Drift detection runs on every tick for every Active deployment regardless of pol
 
 **Stateful safety rails.** Stateful and state-unknown blueprints enter **Awaiting confirmation** on every fresh node before the first deploy, and **Evict blocked** when a node falls out of the selector while still hosting a stateful deployment. The reconciler never deploys empty volumes or destroys named volumes without a human acknowledging the action.
 
-**Pin override and cordon respect.** Admiral users can pin a blueprint to a single node from **Fleet · Federation**. A pin replaces the selector entirely, deploys only to the pinned node, and overrides the cordon flag on that node. Cordoning a node otherwise prevents the reconciler from picking it for new placements; existing deployments on a cordoned node keep running and stay drift-checked.
+**Pin override and cordon respect.** Admins can pin a blueprint to a single node from **Fleet · Federation**. A pin replaces the selector entirely, deploys only to the pinned node, and overrides the cordon flag on that node. Cordoning a node otherwise prevents the reconciler from picking it for new placements; existing deployments on a cordoned node keep running and stay drift-checked.
 
 **Vulnerability-policy participation.** Local blueprint deploys evaluate against the same pre-deploy policy gate that the per-stack deploy lane uses. If an enabled policy blocks one of the blueprint's image references, the deployment row moves to **Failed** and the stack is never written to disk. Remote blueprint deploys are routed through the remote node's stack deploy endpoint, so policy enforcement runs on the remote instance with that node's credentials and scanner state.
 
@@ -47,8 +47,8 @@ Drift detection runs on every tick for every Active deployment regardless of pol
 
 | Requirement | Detail |
 |---|---|
-| License tier | **Community** to read, create, edit, withdraw, and apply blueprints. **Admiral** to pin a blueprint to a specific node (Federation). |
-| User role | **Admin** to create, edit, withdraw, accept, and apply. Operators and viewers can read the catalog and the detail sheet. Pinning requires admin on Admiral. |
+| License tier | **Community** to read, create, edit, withdraw, apply, and pin blueprints. |
+| User role | **Admin** to create, edit, withdraw, accept, and apply. Operators and viewers can read the catalog and the detail sheet. Pinning requires admin. |
 | Nodes | At least one node that the selector resolves to. Remote nodes need a healthy proxy connection; see [Multi-node management](/features/multi-node) and [Pilot Agent](/features/pilot-agent) for enrollment. |
 | Compose YAML | Valid `docker-compose.yml`, 96 KiB or fewer. |
 | Blueprint name | 1 to 64 characters matching `^[a-z0-9][a-z0-9_-]*$`. The name doubles as the stack directory on every targeted node and is immutable after creation. |
@@ -228,7 +228,7 @@ Stateless blueprints withdraw all deployments and then delete in a single click.
 
 ## Federation: pin a blueprint to a single node
 
-Admiral users can pin a blueprint to a specific node from **Fleet · Federation**. A pinned blueprint deploys only to its pinned node, regardless of the configured selector, and overrides the cordon flag on that node. The Blueprint detail sheet shows a read-only `Pin` section when a pin is in place; pin management itself lives in the Federation tab.
+Admins can pin a blueprint to a specific node from **Fleet · Federation**. A pinned blueprint deploys only to its pinned node, regardless of the configured selector, and overrides the cordon flag on that node. The Blueprint detail sheet shows a read-only `Pin` section when a pin is in place; pin management itself lives in the Federation tab.
 
 <Frame caption="Fleet · Federation, Blueprints subsection. Each row shows the blueprint, its configured selector, the Pinned to dropdown, and the effective placement that the reconciler will use.">
   <img src="/images/blueprint-model/federation-pin.png" alt="Federation tab pin policy table with one blueprint pinned and one unpinned" />
@@ -251,7 +251,7 @@ Both events route through the standard alert pipeline. Configure delivery channe
 
 ## Security and trust boundaries
 
-**Who can do what.** The license tier and the user role together determine the available actions. Reading the catalog, the detail sheet, and the deployment status is available on every tier. Creating, editing, withdrawing, accepting a stateful deploy, and applying on demand require the admin role. Pinning a blueprint requires Admiral and the admin role.
+**Who can do what.** The license tier and the user role together determine the available actions. Reading the catalog, the detail sheet, and the deployment status is available on every tier. Creating, editing, withdrawing, accepting a stateful deploy, and applying on demand require the admin role. Pinning a blueprint requires the admin role.
 
 **The marker file is the trust root.** The reconciler will only deploy into, modify, or withdraw a directory that carries a `.blueprint.json` marker whose blueprint ID matches. A pre-existing directory with no marker, or a marker referencing a different blueprint, surfaces as **Name conflict** and is never modified.
 
@@ -299,7 +299,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
 
 **Single-node managed Postgres.** A stateful `pg-fleet` blueprint with a `nodes` selector pointing at one database node and drift mode **Suggest**. The first deploy enters **Awaiting confirmation** so the operator chooses **Deploy fresh**. Subsequent compose changes (image bump, config change) re-enter **Awaiting confirmation** on the same node so the operator can decide whether the new revision is safe for the existing volume. Drift on the running container fires a `blueprint_drift_detected` notification but never auto-redeploys.
 
-**Pin a blueprint to a specific node despite the selector.** Admiral users open **Fleet · Federation**, find the blueprint in the pin policy table, and pick the target node from the **Pinned to** dropdown. The pin overrides the selector for that blueprint, deploys only to the pinned node, and also overrides cordon on that node. Useful for relocating a stateful service to a specific host without rewriting the selector. Clear the pin to restore selector-driven placement.
+**Pin a blueprint to a specific node despite the selector.** Open **Fleet · Federation**, find the blueprint in the pin policy table, and pick the target node from the **Pinned to** dropdown. The pin overrides the selector for that blueprint, deploys only to the pinned node, and also overrides cordon on that node. Useful for relocating a stateful service to a specific host without rewriting the selector. Clear the pin to restore selector-driven placement.
 
 **Observe-only audit blueprint.** A stateless monitoring stack (Vector, Promtail, a Prometheus exporter) with drift mode **Observe**. Drift is recorded silently in the deployment table; no notification fires and no auto-fix runs. Useful when you want Sencho to track placement and detect divergence on a low-signal stack without paging anyone.
 

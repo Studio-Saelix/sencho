@@ -21,7 +21,6 @@ import { formatBytes } from '@/lib/utils';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatVersion } from '@/lib/version';
-import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes, type Node } from '@/context/NodeContext';
 import { cordonNode, uncordonNode } from '@/lib/nodesApi';
@@ -71,16 +70,13 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
     const [cordonReason, setCordonReason] = useState('');
     const [cordonSubmitting, setCordonSubmitting] = useState(false);
 
-    const { isPaid } = useLicense();
     const { isAdmin, can } = useAuth();
     const { nodes: registryNodes } = useNodes();
     const registryNode = registryNodes.find(n => n.id === node.id);
     const canEdit = Boolean(isAdmin && onEdit && registryNode);
     const canDelete = Boolean(isAdmin && onDelete && registryNode && !registryNode.is_default);
-    // Cordon is a paid feature AND requires node:manage, matching the backend guard
-    // (requirePermission('node:manage','node',id) + requirePaid). Gating on tier
-    // alone would surface the control to deployer/viewer/auditor users whose calls 403.
-    const canCordon = isPaid && can('node:manage', 'node', String(node.id));
+    // Cordon requires node:manage, matching the backend guard.
+    const canCordon = can('node:manage', 'node', String(node.id));
     const nodeMuteActions = useNodeMuteActions(
         node.id,
         node.name,

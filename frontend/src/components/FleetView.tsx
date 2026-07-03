@@ -145,13 +145,11 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             )}
-                            {isPaid && (
-                                <TabsHighlightItem value="federation">
+                            <TabsHighlightItem value="federation">
                                     <TabsTrigger value="federation">
                                         <Network className="w-4 h-4 mr-1.5" />Federation
                                     </TabsTrigger>
                                 </TabsHighlightItem>
-                            )}
                             <TabsHighlightItem value="actions">
                                 <TabsTrigger value="actions">
                                     <Wrench className="w-4 h-4 mr-1.5" />Actions
@@ -253,13 +251,9 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
                         </PaidGate>
                     </TabsContent>
                 )}
-                {isPaid && (
-                    <TabsContent value="federation">
-                        <PaidGate>
-                            <FederationTab canManage={isAdmin} />
-                        </PaidGate>
-                    </TabsContent>
-                )}
+                <TabsContent value="federation">
+                    <FederationTab canManage={isAdmin} />
+                </TabsContent>
                 <TabsContent value="actions">
                     {/* Fleet Actions runs against the whole fleet, so it takes the
                         unfiltered node list rather than the overview-filtered view. */}

@@ -4,7 +4,7 @@
  * The Blueprints UI gates edit affordances on admin role; these tests pin the
  * matching server-side guards so a UI gate and a route guard cannot silently
  * drift apart. Specifically:
- *   - PUT /:id/pin requires the paid tier AND admin role (Federation placement).
+ *   - PUT /:id/pin requires admin role on every tier (Federation placement).
  *   - Core mutation routes require admin role on every tier.
  *   - Read routes require auth but NOT admin role.
  */
@@ -118,7 +118,7 @@ describe('PUT /api/blueprints/:id/pin authorization', () => {
         expect(res.body.pinned_node_id).toBeNull();
     });
 
-    it('rejects an admin on a Community license with PAID_REQUIRED', async () => {
+    it('lets a Community admin pin a blueprint', async () => {
         setLicense('community');
         const node = seedNode();
         const bp = seedBlueprint([node.id]);
@@ -128,8 +128,8 @@ describe('PUT /api/blueprints/:id/pin authorization', () => {
             .set('Cookie', adminCookie)
             .send({ nodeId: node.id });
 
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('PAID_REQUIRED');
+        expect(res.status).toBe(200);
+        expect(res.body.pinned_node_id).toBe(node.id);
     });
 
     it('rejects a non-admin on a paid license with ADMIN_REQUIRED', async () => {

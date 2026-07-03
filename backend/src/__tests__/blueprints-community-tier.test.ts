@@ -1,6 +1,6 @@
 /**
- * Confirms core Blueprint CRUD and reconciliation routes are reachable on the
- * Community tier. Pin remains Admiral-only.
+ * Confirms core Blueprint CRUD, reconciliation, and Federation pin routes are
+ * reachable on the Community tier.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
@@ -152,7 +152,7 @@ describe('Blueprints on Community tier', () => {
         expect(res.body.code).not.toBe('PAID_REQUIRED');
     });
 
-    it('PUT /api/blueprints/:id/pin stays PAID_REQUIRED on Community', async () => {
+    it('PUT /api/blueprints/:id/pin succeeds for a Community admin', async () => {
         const node = seedNode();
         counter += 1;
         const created = await request(app)
@@ -165,7 +165,7 @@ describe('Blueprints on Community tier', () => {
             .put(`/api/blueprints/${created.body.id}/pin`)
             .set('Cookie', adminCookie)
             .send({ nodeId: node.id });
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('PAID_REQUIRED');
+        expect(res.status).toBe(200);
+        expect(res.body.pinned_node_id).toBe(node.id);
     });
 });
