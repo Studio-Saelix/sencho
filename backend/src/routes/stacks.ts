@@ -44,6 +44,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
+import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
 import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
@@ -1646,7 +1647,7 @@ async function handleServiceAction(
       res.status(404).json({ error: 'No containers found for this stack.' });
       return;
     }
-    const matching = all.filter(c => c.Service === serviceName);
+    const matching = filterContainersByComposeService(all, serviceName);
     if (matching.length === 0) {
       res.status(404).json({ error: `Service '${serviceName}' not found in stack '${stackName}'.` });
       return;

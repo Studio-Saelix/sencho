@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
+import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
 import { requireAdmin } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -11,8 +12,11 @@ containersRouter.get('/', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const dockerController = DockerController.getInstance(req.nodeId);
-    const containers = await dockerController.getRunningContainers();
-    res.json(containers);
+    const all = req.query.all === 'true' || req.query.all === '1';
+    const containers = all
+      ? await dockerController.getAllContainers()
+      : await dockerController.getRunningContainers();
+    res.json(await excludeSelfContainers(containers));
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch containers' });
   }

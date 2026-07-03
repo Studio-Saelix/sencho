@@ -140,6 +140,28 @@ describe('POST /api/stacks/:stackName/services/:serviceName/restart', () => {
     expect(mockRestartContainer).toHaveBeenCalledWith('container-app-1');
     expect(mockRestartContainer).not.toHaveBeenCalledWith('container-db-1');
   });
+
+  it('matches smartFallback containers when Service is empty but container name equals service', async () => {
+    mockGetContainersByStack.mockResolvedValue([
+      {
+        Id: 'container-mariadb-1',
+        Service: '',
+        Names: ['/mariadb'],
+        State: 'running',
+        Status: 'Up 12 days',
+        Ports: [],
+      },
+      makeContainer('container-phpmyadmin-1', 'phpmyadmin'),
+    ]);
+
+    const res = await request(app)
+      .post('/api/stacks/db-compose/services/mariadb/restart')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(1);
+    expect(mockRestartContainer).toHaveBeenCalledWith('container-mariadb-1');
+  });
 });
 
 describe('POST /api/stacks/:stackName/services/:serviceName/stop', () => {

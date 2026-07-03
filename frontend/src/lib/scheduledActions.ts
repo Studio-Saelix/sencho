@@ -19,7 +19,7 @@ export type BackendAction = ScheduledTask['action'];
  * UI action ids. `update-fleet` is a frontend-only alias for `update` with
  * `target_type: 'fleet'`; it never reaches the backend.
  */
-export type ScheduledActionId = BackendAction | 'update-fleet';
+export type ScheduledActionId = BackendAction | 'update-fleet' | 'container-restart' | 'container-stop' | 'container-start';
 
 export type ScheduledActionCategory = 'lifecycle' | 'updates' | 'security' | 'maintenance' | 'backups';
 export type ScheduledActionTone = 'success' | 'warning' | 'destructive' | 'brand';
@@ -79,6 +79,7 @@ export interface ScheduledActionDefinition {
   tone: ScheduledActionTone;
   requiresNode: boolean;
   requiresStack: boolean;
+  requiresContainer: boolean;
   supportsServiceSelection: boolean;
   nodeScope?: 'local';
   /** One-line explanation shown below the action picker in the create/edit form. */
@@ -93,20 +94,23 @@ export const DEFAULT_SCHEDULED_ACTION_ID: ScheduledActionId = 'restart';
 /** Ordered for the create-flow action picker, grouped by category. */
 export const SCHEDULED_ACTIONS: ScheduledActionDefinition[] = [
   // Lifecycle
-  { id: 'auto_backup', backendAction: 'auto_backup', label: 'Backup Stack Compose Files', shortLabel: 'backup', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, supportsServiceSelection: false, helperText: 'Backs up compose and env files only. This does not back up application volumes.', riskLevel: 'safe' },
-  { id: 'auto_start', backendAction: 'auto_start', label: 'Start / Bring Up Stack', shortLabel: 'start', category: 'lifecycle', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, supportsServiceSelection: false, helperText: 'Creates containers if they do not exist, or starts existing stopped containers.', riskLevel: 'runtime-change' },
-  { id: 'restart', backendAction: 'restart', label: 'Restart Stack', shortLabel: 'restart', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, supportsServiceSelection: true, helperText: 'Restarts containers in place. Running services are stopped and started again on the same configuration.', riskLevel: 'interruptive' },
-  { id: 'auto_stop', backendAction: 'auto_stop', label: 'Stop Stack', shortLabel: 'stop', category: 'lifecycle', targetType: 'stack', tone: 'warning', requiresNode: true, requiresStack: true, supportsServiceSelection: false, helperText: 'Stops containers but keeps them in place for a faster start later.', riskLevel: 'interruptive' },
-  { id: 'auto_down', backendAction: 'auto_down', label: 'Take Stack Down', shortLabel: 'down', category: 'lifecycle', targetType: 'stack', tone: 'destructive', requiresNode: true, requiresStack: true, supportsServiceSelection: false, helperText: 'Runs compose down. Containers are removed, but compose files remain on disk.', riskLevel: 'removes-containers' },
+  { id: 'auto_backup', backendAction: 'auto_backup', label: 'Backup Stack Compose Files', shortLabel: 'backup', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Backs up compose and env files only. This does not back up application volumes.', riskLevel: 'safe' },
+  { id: 'auto_start', backendAction: 'auto_start', label: 'Start / Bring Up Stack', shortLabel: 'start', category: 'lifecycle', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Creates containers if they do not exist, or starts existing stopped containers.', riskLevel: 'runtime-change' },
+  { id: 'restart', backendAction: 'restart', label: 'Restart Stack', shortLabel: 'restart', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: true, helperText: 'Restarts containers in place. Running services are stopped and started again on the same configuration.', riskLevel: 'interruptive' },
+  { id: 'auto_stop', backendAction: 'auto_stop', label: 'Stop Stack', shortLabel: 'stop', category: 'lifecycle', targetType: 'stack', tone: 'warning', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Stops containers but keeps them in place for a faster start later.', riskLevel: 'interruptive' },
+  { id: 'auto_down', backendAction: 'auto_down', label: 'Take Stack Down', shortLabel: 'down', category: 'lifecycle', targetType: 'stack', tone: 'destructive', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Runs compose down. Containers are removed, but compose files remain on disk.', riskLevel: 'removes-containers' },
+  { id: 'container-restart', backendAction: 'restart', label: 'Restart Container', shortLabel: 'restart ctr', category: 'lifecycle', targetType: 'container', tone: 'brand', requiresNode: true, requiresStack: false, requiresContainer: true, supportsServiceSelection: false, helperText: 'Restarts a single container by name on the selected node. Targets the container directly, not through compose.', riskLevel: 'interruptive' },
+  { id: 'container-stop', backendAction: 'auto_stop', label: 'Stop Container', shortLabel: 'stop ctr', category: 'lifecycle', targetType: 'container', tone: 'warning', requiresNode: true, requiresStack: false, requiresContainer: true, supportsServiceSelection: false, helperText: 'Stops a single container by name. The container remains on disk for a faster start later.', riskLevel: 'interruptive' },
+  { id: 'container-start', backendAction: 'auto_start', label: 'Start Container', shortLabel: 'start ctr', category: 'lifecycle', targetType: 'container', tone: 'success', requiresNode: true, requiresStack: false, requiresContainer: true, supportsServiceSelection: false, helperText: 'Starts a stopped container by name on the selected node.', riskLevel: 'runtime-change' },
   // Updates
-  { id: 'update', backendAction: 'update', label: 'Auto-update Stack', shortLabel: 'update', category: 'updates', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, supportsServiceSelection: false, helperText: 'Checks this stack\'s images and recreates the stack only when newer images are available.', riskLevel: 'runtime-change' },
-  { id: 'update-fleet', backendAction: 'update', label: 'Auto-update All Stacks on Node', shortLabel: 'update node', category: 'updates', targetType: 'fleet', tone: 'success', requiresNode: true, requiresStack: false, supportsServiceSelection: false, helperText: 'Checks every stack on the selected node and updates stacks with newer images.', riskLevel: 'runtime-change' },
+  { id: 'update', backendAction: 'update', label: 'Auto-update Stack', shortLabel: 'update', category: 'updates', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Checks this stack\'s images and recreates the stack only when newer images are available.', riskLevel: 'runtime-change' },
+  { id: 'update-fleet', backendAction: 'update', label: 'Auto-update All Stacks on Node', shortLabel: 'update node', category: 'updates', targetType: 'fleet', tone: 'success', requiresNode: true, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, helperText: 'Checks every stack on the selected node and updates stacks with newer images.', riskLevel: 'runtime-change' },
   // Security
-  { id: 'scan', backendAction: 'scan', label: 'Scan Node Images', shortLabel: 'scan', category: 'security', targetType: 'system', tone: 'success', requiresNode: true, requiresStack: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Runs Trivy against images on the selected local node and records the findings.', riskLevel: 'read-only' },
+  { id: 'scan', backendAction: 'scan', label: 'Scan Node Images', shortLabel: 'scan', category: 'security', targetType: 'system', tone: 'success', requiresNode: true, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Runs Trivy against images on the selected local node and records the findings.', riskLevel: 'read-only' },
   // Maintenance
-  { id: 'prune', backendAction: 'prune', label: 'Prune Node Resources', shortLabel: 'prune', category: 'maintenance', targetType: 'system', tone: 'warning', requiresNode: true, requiresStack: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Removes unused Docker resources on the selected node. Be careful when pruning volumes.', riskLevel: 'destructive' },
+  { id: 'prune', backendAction: 'prune', label: 'Prune Node Resources', shortLabel: 'prune', category: 'maintenance', targetType: 'system', tone: 'warning', requiresNode: true, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Removes unused Docker resources on the selected node. Be careful when pruning volumes.', riskLevel: 'destructive' },
   // Backups
-  { id: 'snapshot', backendAction: 'snapshot', label: 'Create Fleet Snapshot', shortLabel: 'snapshot', category: 'backups', targetType: 'fleet', tone: 'warning', requiresNode: false, requiresStack: false, supportsServiceSelection: false, helperText: 'Creates a versioned snapshot of compose and env files across the fleet.', riskLevel: 'safe' },
+  { id: 'snapshot', backendAction: 'snapshot', label: 'Create Fleet Snapshot', shortLabel: 'snapshot', category: 'backups', targetType: 'fleet', tone: 'warning', requiresNode: false, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, helperText: 'Creates a versioned snapshot of compose and env files across the fleet.', riskLevel: 'safe' },
 ];
 
 const ACTION_BY_ID = new Map<string, ScheduledActionDefinition>(SCHEDULED_ACTIONS.map(a => [a.id, a]));
@@ -125,6 +129,11 @@ export function resolveTaskAction(
 ): ScheduledActionDefinition | undefined {
   if (task.action === 'update' && task.target_type === 'fleet') {
     return getActionById('update-fleet');
+  }
+  if (task.target_type === 'container') {
+    if (task.action === 'restart') return getActionById('container-restart');
+    if (task.action === 'auto_stop') return getActionById('container-stop');
+    if (task.action === 'auto_start') return getActionById('container-start');
   }
   return getActionById(task.action);
 }
@@ -153,6 +162,8 @@ export function scheduleTargetDescriptor(
         : 'Entire fleet';
     case 'system':
       return nodeName ?? 'Selected node';
+    case 'container':
+      return task.target_id ?? task.name;
     default: {
       const exhaustive: never = task.target_type;
       return exhaustive;
@@ -169,7 +180,7 @@ export interface ScheduledActionCategoryLane {
 
 /** Ordered Timeline lanes; each scheduled action maps to one lane by category. */
 export const SCHEDULED_ACTION_CATEGORIES: ScheduledActionCategoryLane[] = [
-  { key: 'lifecycle', label: 'Stack lifecycle', color: 'var(--label-blue)', bg: 'var(--label-blue-bg)' },
+  { key: 'lifecycle', label: 'Lifecycle', color: 'var(--label-blue)', bg: 'var(--label-blue-bg)' },
   { key: 'updates', label: 'Updates', color: 'var(--success)', bg: 'oklch(from var(--success) l c h / 0.18)' },
   { key: 'security', label: 'Security', color: 'var(--label-purple)', bg: 'var(--label-purple-bg)' },
   { key: 'maintenance', label: 'Maintenance', color: 'var(--warning)', bg: 'oklch(from var(--warning) l c h / 0.18)' },

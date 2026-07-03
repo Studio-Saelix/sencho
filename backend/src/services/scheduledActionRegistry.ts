@@ -10,7 +10,7 @@
  * each side.
  */
 
-export const VALID_TARGET_TYPES = ['stack', 'fleet', 'system'] as const;
+export const VALID_TARGET_TYPES = ['stack', 'fleet', 'system', 'container'] as const;
 export type TargetType = typeof VALID_TARGET_TYPES[number];
 
 export interface BackendScheduledActionDefinition {
@@ -26,15 +26,15 @@ export interface BackendScheduledActionDefinition {
  * in `routes/scheduledTasks.ts` ("Must be restart, snapshot, prune, ...").
  */
 export const BACKEND_SCHEDULED_ACTIONS = [
-  { id: 'restart', targetTypes: ['stack'], requiresNode: true },
+  { id: 'restart', targetTypes: ['stack', 'container'], requiresNode: true },
   { id: 'snapshot', targetTypes: ['fleet'], requiresNode: false },
   { id: 'prune', targetTypes: ['system'], requiresNode: true, nodeScope: 'local' },
   { id: 'update', targetTypes: ['stack', 'fleet'], requiresNode: true },
   { id: 'scan', targetTypes: ['system'], requiresNode: true, nodeScope: 'local' },
   { id: 'auto_backup', targetTypes: ['stack'], requiresNode: true },
-  { id: 'auto_stop', targetTypes: ['stack'], requiresNode: true },
+  { id: 'auto_stop', targetTypes: ['stack', 'container'], requiresNode: true },
   { id: 'auto_down', targetTypes: ['stack'], requiresNode: true },
-  { id: 'auto_start', targetTypes: ['stack'], requiresNode: true },
+  { id: 'auto_start', targetTypes: ['stack', 'container'], requiresNode: true },
 ] as const satisfies readonly BackendScheduledActionDefinition[];
 
 export type BackendScheduledAction = typeof BACKEND_SCHEDULED_ACTIONS[number]['id'];
@@ -58,15 +58,15 @@ const ACTION_BY_ID = new Map<BackendScheduledAction, BackendScheduledActionDefin
  * the API contract, so it is kept explicit rather than templated.
  */
 const TARGET_MISMATCH_MESSAGE: Record<BackendScheduledAction, string> = {
-  restart: 'Restart action requires target_type "stack".',
+  restart: 'Restart action requires target_type "stack" or "container".',
   snapshot: 'Snapshot action requires target_type "fleet".',
   prune: 'Prune action requires target_type "system".',
   update: 'Update action requires target_type "stack" or "fleet".',
   scan: 'Scan action requires target_type "system".',
   auto_backup: 'auto_backup action requires target_type "stack".',
-  auto_stop: 'auto_stop action requires target_type "stack".',
+  auto_stop: 'auto_stop action requires target_type "stack" or "container".',
   auto_down: 'auto_down action requires target_type "stack".',
-  auto_start: 'auto_start action requires target_type "stack".',
+  auto_start: 'auto_start action requires target_type "stack" or "container".',
 };
 
 /**

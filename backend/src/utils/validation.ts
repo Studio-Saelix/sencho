@@ -8,6 +8,10 @@ import { sanitizeForLog } from './safeLog';
 export const isValidStackName = (name: string): boolean =>
   /^[a-zA-Z0-9_-]+$/.test(name);
 
+/** Docker container name (no path separators). Used for scheduled container targets. */
+export const isValidContainerName = (name: string): boolean =>
+  !name.includes('..') && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,254}$/.test(name);
+
 /**
  * Validates that a remote node API URL is a safe, well-formed HTTP/HTTPS URL.
  * Rejects loopback addresses to prevent SSRF against local services.
