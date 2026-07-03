@@ -38,7 +38,7 @@ function RowTooltip({ trigger, label }: { trigger: ReactNode; label: string }) {
       <Tooltip>
         <TooltipTrigger asChild>{trigger}</TooltipTrigger>
         <TooltipContent side="bottom" sideOffset={4} align="center">
-          <span className="font-mono text-xs tabular-nums text-stat-value">{label}</span>
+          {label}
         </TooltipContent>
       </Tooltip>
     </TooltipProvider>
