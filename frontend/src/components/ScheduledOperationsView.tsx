@@ -484,26 +484,14 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
               <CardTitle>Scheduled Operations</CardTitle>
             </div>
             <div className="flex items-center gap-2">
-              <div className="inline-flex items-center rounded-md border border-card-border bg-card p-0.5 shadow-btn-glow">
-                <Button
-                  variant={view === 'timeline' ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-7 px-2.5 gap-1.5"
-                  onClick={() => setView('timeline')}
-                >
-                  <CalendarClock className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  <span className="text-xs">Timeline</span>
-                </Button>
-                <Button
-                  variant={view === 'table' ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-7 px-2.5 gap-1.5"
-                  onClick={() => setView('table')}
-                >
-                  <Table2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  <span className="text-xs">All tasks</span>
-                </Button>
-              </div>
+              <SegmentedControl<'timeline' | 'table'>
+                value={view}
+                options={[
+                  { value: 'timeline', label: 'Timeline', icon: CalendarClock },
+                  { value: 'table', label: 'All tasks', icon: Table2 },
+                ]}
+                onChange={(v) => setView(v)}
+              />
               <Button variant="outline" size="sm" onClick={fetchTasks} disabled={loading}>
                 <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} strokeWidth={1.5} />
                 Refresh
