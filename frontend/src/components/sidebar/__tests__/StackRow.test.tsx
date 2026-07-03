@@ -43,7 +43,7 @@ describe('StackRow', () => {
   });
 
   it('wraps the partial pill in a hover tooltip', () => {
-    const { container } = render(<StackRow {...base({ status: 'partial', running: 3, total: 5 })} />);
+    render(<StackRow {...base({ status: 'partial', running: 3, total: 5 })} />);
     const trigger = screen.getByText('PT');
     // Radix TooltipTrigger adds data-state to the wrapped element.
     expect(trigger.getAttribute('data-state')).toBe('closed');
