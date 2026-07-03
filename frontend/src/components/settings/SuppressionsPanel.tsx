@@ -8,6 +8,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { ChevronLeft, ChevronRight, Plus, Pencil, Trash2, Download } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
 import { FleetTabHeading } from '@/components/fleet/FleetEmptyState';
 import type { CveSuppression } from '@/types/security';
@@ -290,24 +291,36 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
                 </div>
                 {isAdmin && !isReplica && row.replicated_from_control === 0 && (
                   <div className="flex items-center gap-1 shrink-0">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-stat-subtitle hover:text-stat-value"
-                      onClick={() => openEdit(row)}
-                      title="Edit suppression"
-                    >
-                      <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
-                      onClick={() => setDeleteRow(row)}
-                      title="Remove suppression"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                    </Button>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-stat-subtitle hover:text-stat-value"
+                            onClick={() => openEdit(row)}
+                          >
+                            <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Edit suppression</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+                            onClick={() => setDeleteRow(row)}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Remove suppression</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </div>
                 )}
               </li>
