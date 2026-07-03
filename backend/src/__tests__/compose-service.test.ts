@@ -19,6 +19,7 @@ const {
   mockGetComposeFilename, mockGetOverrideFilename, mockEnsureStackOverride,
   mockMkdtempSync, mockWriteFileSync, mockUnlinkSync, mockRmdirSync,
   mockGetGlobalSettings, mockPruneDanglingImages, mockGetBindMounts,
+  mockGetStackContent, mockGetEnvContent,
 } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
@@ -40,6 +41,8 @@ const {
   mockGetGlobalSettings: vi.fn().mockReturnValue({}),
   mockPruneDanglingImages: vi.fn().mockResolvedValue({ reclaimedBytes: 0 }),
   mockGetBindMounts: vi.fn().mockResolvedValue(null),
+  mockGetStackContent: vi.fn().mockResolvedValue(''),
+  mockGetEnvContent: vi.fn().mockResolvedValue(''),
 }));
 
 vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
@@ -109,6 +112,8 @@ vi.mock('../services/FileSystemService', () => ({
       restoreStackFiles: mockRestoreStackFiles,
       getComposeFilename: mockGetComposeFilename,
       getOverrideFilename: mockGetOverrideFilename,
+      getStackContent: mockGetStackContent,
+      getEnvContent: mockGetEnvContent,
     }),
   },
 }));

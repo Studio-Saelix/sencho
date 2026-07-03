@@ -46,6 +46,7 @@ import { retryHandlerFor } from './recovery-retry';
 import type { NotificationItem } from '../dashboard/types';
 import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
+import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 
 export interface ContainerInfo {
     Id: string;
@@ -214,6 +215,8 @@ export interface EditorViewProps {
     // Mobile-only: notifications + more-menu cluster for the detail header right
     // slot (the global TopBar is dropped on the full-screen detail surface).
     headerActions?: React.ReactNode;
+
+    stackMuteActions?: ReturnType<typeof useStackMuteActions>;
 }
 
 export function EditorView(props: EditorViewProps) {
@@ -270,6 +273,7 @@ export function EditorView(props: EditorViewProps) {
         onRefreshState,
         onDismissRecovery,
         panelStartedAt,
+        stackMuteActions,
     } = props;
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
 
@@ -376,6 +380,7 @@ export function EditorView(props: EditorViewProps) {
                                         rollbackStack={rollbackStack}
                                         scanStackConfig={scanStackConfig}
                                         requestDeleteStack={requestDeleteStack}
+                                        stackMuteActions={stackMuteActions}
                                     />
                                 </div>
                                 {recoveryResult && loadingAction == null && (
@@ -616,6 +621,7 @@ export function EditorView(props: EditorViewProps) {
                         applying={loadingAction === 'update'}
                         canEdit={can('stack:edit', 'stack', stackName)}
                         notifications={notifications}
+                        stackMuteActions={stackMuteActions}
                     />
                 )}
             </div>

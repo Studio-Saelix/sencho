@@ -25,6 +25,7 @@ export const CAPABILITIES = [
   'network-topology',
   'notifications',
   'notification-routing',
+  'notification-suppression',
   'host-console',
   'container-exec',
   'audit-log',

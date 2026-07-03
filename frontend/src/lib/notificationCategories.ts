@@ -11,6 +11,11 @@ export const CATEGORY_LABELS: Record<NotificationCategory, string> = {
     autoheal_triggered: 'Auto-heal',
     monitor_alert: 'Monitor alert',
     scan_finding: 'Scan finding',
+    drift_detected: 'Drift detected',
+    drift_resolved: 'Drift resolved',
+    update_started: 'Update started',
+    health_gate_passed: 'Health gate passed',
+    health_gate_failed: 'Health gate failed',
     node_update_available: 'Node update',
     system: 'System',
 };

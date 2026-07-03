@@ -78,6 +78,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         onRefreshState,
         onDismissRecovery,
         panelStartedAt,
+        stackMuteActions,
     } = props;
 
     const [segment, setSegment] = useState<Segment>('logs');
@@ -152,6 +153,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                         rollbackStack={rollbackStack}
                         scanStackConfig={scanStackConfig}
                         requestDeleteStack={requestDeleteStack}
+                        stackMuteActions={stackMuteActions}
                     />
                 </div>
 
@@ -243,6 +245,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 applying={loadingAction === 'update'}
                                 canEdit={canEditStack}
                                 notifications={notifications}
+                                stackMuteActions={stackMuteActions}
                             />
                         </div>
                     )}

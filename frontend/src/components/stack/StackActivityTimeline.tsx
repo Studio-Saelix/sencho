@@ -5,6 +5,8 @@ import {
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
@@ -12,6 +14,12 @@ import type { NotificationItem } from '@/components/dashboard/types';
 
 type ActivityLevel = 'info' | 'warning' | 'error';
 const ACTIVITY_LEVELS: readonly string[] = ['info', 'warning', 'error'];
+
+interface SuppressionMatchSnapshot {
+  rules: { id: number; name: string }[];
+  bellSuppressed: boolean;
+  externalSuppressed: boolean;
+}
 
 interface ActivityEvent {
   id: number;
@@ -21,6 +29,7 @@ interface ActivityEvent {
   timestamp: number;
   stack_name?: string;
   actor_username?: string | null;
+  suppression_match?: string | SuppressionMatchSnapshot | null;
 }
 
 interface StackActivityTimelineProps {
@@ -59,6 +68,25 @@ const SYSTEM_ACTOR_LABEL: Record<string, string> = {
 function formatActor(actor: string): { label: string; isSystem: boolean } {
   const isSystem = actor === 'system' || actor.startsWith('system:');
   return { label: SYSTEM_ACTOR_LABEL[actor] ?? actor, isSystem };
+}
+
+function parseSuppressionMatch(raw: ActivityEvent['suppression_match']): SuppressionMatchSnapshot | null {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try {
+    const parsed = JSON.parse(raw) as SuppressionMatchSnapshot;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (!Array.isArray(parsed.rules)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function suppressionTooltip(match: SuppressionMatchSnapshot): string {
+  const names = match.rules.map((r) => r.name).filter(Boolean);
+  const ruleText = names.length > 0 ? names.join(', ') : 'Unnamed rule';
+  return `Matched rule: ${ruleText}`;
 }
 
 function isActivityEvent(value: unknown): value is ActivityEvent {
@@ -261,6 +289,10 @@ export function StackActivityTimeline({ stackName, liveEvents }: StackActivityTi
           {g.events.map(e => {
             const Icon = CATEGORY_ICON[e.category ?? ''] ?? Activity;
             const actor = e.actor_username ? formatActor(e.actor_username) : null;
+            const suppression = parseSuppressionMatch(e.suppression_match);
+            const showSuppressed = Boolean(
+              suppression && (suppression.bellSuppressed || suppression.externalSuppressed),
+            );
             return (
               <div
                 key={e.id}
@@ -274,6 +306,18 @@ export function StackActivityTimeline({ stackName, liveEvents }: StackActivityTi
                     <span className={`ml-1.5 font-mono text-[10px] text-stat-subtitle${actor.isSystem ? ' italic' : ''}`}>
                       {actor.isSystem ? `via ${actor.label}` : `by ${actor.label}`}
                     </span>
+                  )}
+                  {showSuppressed && suppression && (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Badge variant="outline" className="ml-1.5 align-middle text-[9px] font-mono uppercase tracking-wide px-1 py-0 h-4">
+                          Suppressed
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="font-mono text-[10px] max-w-xs">
+                        {suppressionTooltip(suppression)}
+                      </TooltipContent>
+                    </Tooltip>
                   )}
                 </div>
                 <span className="font-mono text-[10px] text-stat-subtitle shrink-0">{formatTimeAgo(e.timestamp)}</span>

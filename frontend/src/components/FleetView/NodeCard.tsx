@@ -14,6 +14,9 @@ import {
     DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { NodeMuteSubmenu } from '@/components/mute/MuteMenuItems';
+import { useNodeMuteActions } from '@/hooks/useMuteRuleActions';
+import type { MuteRuleDraft } from '@/lib/muteRules';
 import { formatBytes } from '@/lib/utils';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
@@ -42,6 +45,7 @@ export interface NodeCardProps {
     onCordonChange?: () => void;
     onEdit?: (node: Node) => void;
     onDelete?: (node: Node) => void;
+    onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
 }
 
 // --- Sub-Components ---
@@ -59,7 +63,7 @@ function UsageBar({ percent, color }: { percent: number; color: string }) {
 
 // --- Main Export ---
 
-export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete }: NodeCardProps) {
+export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill }: NodeCardProps) {
     const [expanded, setExpanded] = useState(false);
     const [stacks, setStacks] = useState<string[] | null>(node.stacks);
     const [loadingStacks, setLoadingStacks] = useState(false);
@@ -77,7 +81,12 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
     // (requirePermission('node:manage','node',id) + requirePaid). Gating on tier
     // alone would surface the control to deployer/viewer/auditor users whose calls 403.
     const canCordon = isPaid && can('node:manage', 'node', String(node.id));
-    const showMenu = canEdit || canDelete || canCordon;
+    const nodeMuteActions = useNodeMuteActions(
+        node.id,
+        node.name,
+        onOpenMuteRulesWithPrefill ?? (() => {}),
+    );
+    const showMenu = canEdit || canDelete || canCordon || (nodeMuteActions.canMute && Boolean(onOpenMuteRulesWithPrefill));
 
     const isOnline = node.status === 'online';
     const isLocal = node.type === 'local';
@@ -182,6 +191,7 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                                         {node.cordoned ? 'Uncordon node' : 'Cordon node'}
                                     </DropdownMenuItem>
                                 )}
+                                {onOpenMuteRulesWithPrefill && <NodeMuteSubmenu actions={nodeMuteActions} />}
                             </DropdownMenuContent>
                         </DropdownMenu>
                     </div>

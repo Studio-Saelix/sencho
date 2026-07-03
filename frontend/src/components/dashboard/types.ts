@@ -54,6 +54,11 @@ export type NotificationCategory =
     | 'autoheal_triggered'
     | 'monitor_alert'
     | 'scan_finding'
+    | 'drift_detected'
+    | 'drift_resolved'
+    | 'update_started'
+    | 'health_gate_passed'
+    | 'health_gate_failed'
     | 'node_update_available'
     | 'system';
 

@@ -69,6 +69,7 @@ export type SectionId =
     | 'app-store'
     | 'stacks'
     | 'notification-routing'
+    | 'notification-suppression'
     | 'recovery'
     | 'support'
     | 'about';

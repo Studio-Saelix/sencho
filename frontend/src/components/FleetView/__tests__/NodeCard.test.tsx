@@ -34,7 +34,7 @@ function baseProps(node: FleetNode) {
 }
 
 beforeEach(() => {
-  useNodesMock.mockReturnValue({ nodes: [] });
+  useNodesMock.mockReturnValue({ nodes: [], hasCapability: vi.fn(() => false) });
   useAuthMock.mockReturnValue({ isAdmin: true, can: vi.fn(() => true) });
   useLicenseMock.mockReturnValue({ isPaid: false });
 });

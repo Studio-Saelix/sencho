@@ -19,7 +19,7 @@ const EXPECTED_ACTIONS: BackendScheduledAction[] = [
   'auto_backup', 'auto_stop', 'auto_down', 'auto_start',
 ];
 
-const ALL_TARGET_TYPES: TargetType[] = ['stack', 'fleet', 'system'];
+const ALL_TARGET_TYPES: TargetType[] = ['stack', 'fleet', 'system', 'container'];
 
 describe('scheduledActionRegistry', () => {
   it('exposes exactly the known backend actions, in order', () => {
@@ -46,27 +46,27 @@ describe('scheduledActionRegistry', () => {
 
   describe('validateActionTarget', () => {
     const validPairs: Record<BackendScheduledAction, TargetType[]> = {
-      restart: ['stack'],
+      restart: ['stack', 'container'],
       snapshot: ['fleet'],
       prune: ['system'],
       update: ['stack', 'fleet'],
       scan: ['system'],
       auto_backup: ['stack'],
-      auto_stop: ['stack'],
+      auto_stop: ['stack', 'container'],
       auto_down: ['stack'],
-      auto_start: ['stack'],
+      auto_start: ['stack', 'container'],
     };
 
     const mismatchMessage: Record<BackendScheduledAction, string> = {
-      restart: 'Restart action requires target_type "stack".',
+      restart: 'Restart action requires target_type "stack" or "container".',
       snapshot: 'Snapshot action requires target_type "fleet".',
       prune: 'Prune action requires target_type "system".',
       update: 'Update action requires target_type "stack" or "fleet".',
       scan: 'Scan action requires target_type "system".',
       auto_backup: 'auto_backup action requires target_type "stack".',
-      auto_stop: 'auto_stop action requires target_type "stack".',
+      auto_stop: 'auto_stop action requires target_type "stack" or "container".',
       auto_down: 'auto_down action requires target_type "stack".',
-      auto_start: 'auto_start action requires target_type "stack".',
+      auto_start: 'auto_start action requires target_type "stack" or "container".',
     };
 
     for (const action of EXPECTED_ACTIONS) {

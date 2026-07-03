@@ -17,6 +17,7 @@
 import { describe, it, expect, beforeAll, afterAll, vi, beforeEach } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_PASSWORD } from './helpers/setupTestDb';
+import { installArcstatsFsMock, arcstatsBody, DEFAULT_ARC_PATH, type ArcstatsFsMock } from './helpers/arcstatsFsMock';
 import { GitSourceService } from '../services/GitSourceService';
 import type { PublicGitSource } from '../services/GitSourceService';
 
@@ -80,9 +81,13 @@ let tmpDir: string;
 let app: import('express').Express;
 let authCookie: string;
 let CacheService: typeof import('../services/CacheService').CacheService;
+let arcFs: ArcstatsFsMock;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
+  // Host memory reads ZFS ARC stats; intercept those reads so results do not
+  // depend on whether the CI host is itself ZFS. Default: no ARC present.
+  arcFs = installArcstatsFsMock();
   ({ app } = await import('../index'));
   ({ CacheService } = await import('../services/CacheService'));
 
@@ -98,6 +103,7 @@ afterAll(() => {
 
 beforeEach(() => {
   CacheService.getInstance().flush();
+  arcFs.clear();
 
   mockGetAllContainers.mockReset();
   mockGetBulkStackStatuses.mockReset();
@@ -178,13 +184,44 @@ describe('GET /api/system/stats caching', () => {
   it('reports memory from the active working set, excluding reclaimable cache', async () => {
     const res = await request(app).get('/api/system/stats').set('Cookie', authCookie);
     expect(res.status).toBe(200);
-    // Figures come from mem.active / mem.available (cache-excluded), not the
-    // cache-inclusive mem.used / mem.free, so a busy host does not read ~100%.
+    // With no ARC present, effective used is total - available (which equals
+    // mem.active), not the cache-inclusive mem.used / mem.free, so a busy host
+    // does not read ~100%.
     expect(res.body.memory).toMatchObject({
       total: 1000,
       used: 400,            // mem.active, not mem.used (500)
       free: 600,            // mem.available, not mem.free (500)
       usagePercent: '40.0', // 400 / 1000, not 500 / 1000
+    });
+  });
+
+  it('adds reclaimable ZFS ARC back into available memory', async () => {
+    arcFs.setRead(DEFAULT_ARC_PATH, arcstatsBody(300, 100)); // reclaimable 200
+    const res = await request(app).get('/api/system/stats').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    // available 600 + 200 reclaimable ARC = 800 effective free; used drops to 200.
+    expect(res.body.memory).toMatchObject({
+      total: 1000,
+      used: 200,
+      free: 800,
+      usagePercent: '20.0',
+    });
+  });
+});
+
+// ── /api/fleet/overview (local node) ───────────────────────────────────
+
+describe('GET /api/fleet/overview local-node memory', () => {
+  it('reports ARC-adjusted memory for the local node', async () => {
+    arcFs.setRead(DEFAULT_ARC_PATH, arcstatsBody(300, 100)); // reclaimable 200
+    const res = await request(app).get('/api/fleet/overview').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    const local = res.body.find((n: { type: string }) => n.type === 'local');
+    expect(local?.systemStats?.memory).toMatchObject({
+      total: 1000,
+      used: 200,
+      free: 800,
+      usagePercent: '20.0',
     });
   });
 });
