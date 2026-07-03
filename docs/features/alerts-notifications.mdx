@@ -148,10 +148,10 @@ Every alert Sencho dispatches carries a category that you can filter on in the b
 | `monitor_alert` | Monitor alert | Per-stack threshold breach, host CPU/RAM/disk warning, or healthcheck failure |
 | `scan_finding` | Scan finding | Vulnerability-scan completion, per-violation alert, post-deploy scan failure, or auto-update gate block |
 | `system` | System | Sencho version, Trivy auto-update, fleet sync, daemon connectivity, scheduled-task lifecycle, cloud-backup upload failure |
-| `blueprint_deployed` | `blueprint_deployed` | Blueprint provisioned a new deployment (Admiral) |
-| `blueprint_deployment_failed` | `blueprint_deployment_failed` | Blueprint deployment errored out (Admiral) |
-| `blueprint_drift_detected` | `blueprint_drift_detected` | Blueprint drift detected in `suggest` or `enforce` mode (Admiral) |
-| `blueprint_drift_correction_failed` | `blueprint_drift_correction_failed` | Blueprint enforce-mode redeploy failed (Admiral) |
+| `blueprint_deployed` | `blueprint_deployed` | Blueprint provisioned a new deployment |
+| `blueprint_deployment_failed` | `blueprint_deployment_failed` | Blueprint deployment errored out |
+| `blueprint_drift_detected` | `blueprint_drift_detected` | Blueprint drift detected in `suggest` or `enforce` mode |
+| `blueprint_drift_correction_failed` | `blueprint_drift_correction_failed` | Blueprint enforce-mode redeploy failed |
 
 The four `blueprint_*` categories are accepted by routing rules but render as raw category strings in the bell because the frontend label map omits them.
 
@@ -364,7 +364,7 @@ See [Vulnerability scanning](/features/vulnerability-scanning).
 
 `warning`/`system`: `Cloud backup failed for scheduled snapshot <id>: <message>`. See [Fleet backups](/features/fleet-backups).
 
-### Blueprints (Admiral)
+### Blueprints
 
 - `warning`/`blueprint_drift_detected`: `Blueprint "<n>" drifted on node "<n2>": <reason>` (suggest mode), with stateful-safeguard variants when enforce mode declines to redeploy.
 - `error`/`blueprint_drift_correction_failed`: `Auto-fix for "<n>" on node "<n2>" failed: <err>`.

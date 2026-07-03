@@ -1,13 +1,12 @@
 /**
  * Authorization parity tests for /api/blueprints.
  *
- * The Blueprints UI gates affordances on the paid tier and admin role; these
- * tests pin the matching server-side guards so a UI gate and a route guard
- * cannot silently drift apart. Specifically:
- *   - PUT /:id/pin requires the paid tier AND admin role (the admin-role half is
- *     the parity gap the Federation pin control was hardened to match).
- *   - The mutation routes require admin role.
- *   - The read routes require paid tier but NOT admin role.
+ * The Blueprints UI gates edit affordances on admin role; these tests pin the
+ * matching server-side guards so a UI gate and a route guard cannot silently
+ * drift apart. Specifically:
+ *   - PUT /:id/pin requires the paid tier AND admin role (Federation placement).
+ *   - Core mutation routes require admin role on every tier.
+ *   - Read routes require auth but NOT admin role.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
@@ -148,9 +147,8 @@ describe('PUT /api/blueprints/:id/pin authorization', () => {
 });
 
 describe('Blueprint mutation routes require admin role', () => {
-    // Tier is paid in beforeEach, so requirePaid passes and the admin guard is
-    // what rejects. The gate short-circuits before id parsing, so dummy ids are
-    // sufficient to prove the role boundary.
+    // The gate short-circuits before id parsing, so dummy ids are sufficient
+    // to prove the role boundary.
     const mutations: Array<{ name: string; method: 'post' | 'put' | 'delete'; path: string }> = [
         { name: 'create', method: 'post', path: '/api/blueprints' },
         { name: 'update', method: 'put', path: '/api/blueprints/1' },
@@ -166,18 +164,25 @@ describe('Blueprint mutation routes require admin role', () => {
         expect(res.body.code).toBe('ADMIN_REQUIRED');
     });
 
-    it('rejects an admin on a Community license from creating with PAID_REQUIRED', async () => {
+    it('lets a Community admin create when the body is valid (not PAID_REQUIRED)', async () => {
         setLicense('community');
+        const node = seedNode();
         const res = await request(app)
             .post('/api/blueprints')
             .set('Cookie', adminCookie)
-            .send({});
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('PAID_REQUIRED');
+            .send({
+                name: 'community-bp',
+                compose_content: 'services:\n  app:\n    image: nginx\n',
+                selector: { type: 'nodes', ids: [node.id] },
+                drift_mode: 'enforce',
+            });
+        expect(res.status).toBe(201);
+        expect(res.body.name).toBe('community-bp');
+        expect(res.body.code).not.toBe('PAID_REQUIRED');
     });
 });
 
-describe('Blueprint read routes require paid tier but not admin role', () => {
+describe('Blueprint read routes require auth but not admin role', () => {
     it('lets a non-admin paid user list blueprints', async () => {
         seedBlueprint([]);
         const res = await request(app).get('/api/blueprints').set('Cookie', viewerCookie);
@@ -209,10 +214,12 @@ describe('Blueprint read routes require paid tier but not admin role', () => {
         expect(res.body.classification).toBeDefined();
     });
 
-    it('rejects an admin on a Community license from listing with PAID_REQUIRED', async () => {
+    it('lets a Community admin list blueprints (not PAID_REQUIRED)', async () => {
         setLicense('community');
+        seedBlueprint([]);
         const res = await request(app).get('/api/blueprints').set('Cookie', adminCookie);
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('PAID_REQUIRED');
+        expect(res.status).toBe(200);
+        expect(Array.isArray(res.body)).toBe(true);
+        expect(res.body.code).not.toBe('PAID_REQUIRED');
     });
 });

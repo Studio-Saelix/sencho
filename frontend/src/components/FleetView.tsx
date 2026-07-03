@@ -133,13 +133,11 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
                                 </TabsTrigger>
                             </TabsHighlightItem>
                             <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-                            {isPaid && (
-                                <TabsHighlightItem value="deployments">
+                            <TabsHighlightItem value="deployments">
                                     <TabsTrigger value="deployments">
                                         <Send className="w-4 h-4 mr-1.5" />Deployments
                                     </TabsTrigger>
                                 </TabsHighlightItem>
-                            )}
                             {isPaid && (
                                 <TabsHighlightItem value="routing">
                                     <TabsTrigger value="routing">
@@ -245,11 +243,9 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
                 <TabsContent value="dependencies">
                     <DependencyMapTab />
                 </TabsContent>
-                {isPaid && (
-                    <TabsContent value="deployments">
+                <TabsContent value="deployments">
                         <DeploymentsTab />
                     </TabsContent>
-                )}
                 {isPaid && (
                     <TabsContent value="routing">
                         <PaidGate>

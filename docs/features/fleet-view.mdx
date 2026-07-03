@@ -38,7 +38,7 @@ A single rail summarises the state of every registered node so you can read the 
 
 ### Tabs
 
-The Fleet view is a tab strip. Five tab triggers are visible to every tier; the Deployments, Routing, Federation, and Secrets triggers only render when the active license unlocks them. A vertical separator after **Status** divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
+The Fleet view is a tab strip. Every tier sees Overview, Status, Map, Deployments, and Actions. Snapshots appears for admins. Deployments is available on Community. Routing, Federation, and Secrets render when the active license unlocks them. A vertical separator after **Status** divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
 
 | Tab | Tier | What it does |
 |-----|------|--------------|
@@ -46,7 +46,7 @@ The Fleet view is a tab strip. Five tab triggers are visible to every tier; the 
 | **Snapshots** | Community | Snapshot every compose file across the fleet. See [Fleet-Wide Backups](/features/fleet-backups). |
 | **Status** | Community | One card per node summarising which automations and security features are configured. Covered below. |
 | **Map** | Community | A read-only map of how stacks, services, networks, volumes, and ports relate across the fleet, with anomaly flags. Covered below. |
-| **Deployments** | Admiral | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
+| **Deployments** | Community | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
 | **Routing** | Admiral | Cross-node service routing via Sencho Mesh. See [Sencho Mesh](/features/sencho-mesh). |
 | **Federation** | Admiral | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
 | **Actions** | Community (admin role) | Fleet-wide bulk operations: stop stacks by label, bulk-assign labels, prune Docker resources. See [Fleet Actions](/features/fleet-actions). |
