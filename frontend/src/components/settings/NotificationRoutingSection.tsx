@@ -297,7 +297,7 @@ export function NotificationRoutingSection() {
     );
 
     return (
-        <CapabilityGate capability="notification-routing" featureName="Notification Routing">
+        <CapabilityGate capability="notification-routing" featureName="Routing">
             <div className="space-y-6">
                 <div className="flex justify-end">
                     <SettingsPrimaryButton size="sm" onClick={() => { resetForm(); setShowForm(true); }}>
