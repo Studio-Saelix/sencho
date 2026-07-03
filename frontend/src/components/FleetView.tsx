@@ -4,6 +4,7 @@ import {
     Network, SlidersHorizontal,
     Send, KeyRound, ArrowLeftRight, Wrench, Workflow,
 } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { FleetMasthead } from './fleet/FleetMasthead';
 import { ReconnectingOverlay } from './FleetView/ReconnectingOverlay';
 import { NodeUpdatesSheet } from './FleetView/NodeUpdatesSheet';
@@ -167,29 +168,41 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, fleetUpdate
                         </TabsHighlight>
                     </TabsList>
                     <div className="flex items-center gap-2 shrink-0">
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => overview.fetchOverview(true)}
-                            disabled={refreshing}
-                            className="h-9 w-9 p-0"
-                            title="Refresh"
-                            aria-label="Refresh"
-                        >
-                            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-                        </Button>
+                        <TooltipProvider>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() => overview.fetchOverview(true)}
+                                        disabled={refreshing}
+                                        className="h-9 w-9 p-0"
+                                        aria-label="Refresh"
+                                    >
+                                        <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                                    </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Refresh</TooltipContent>
+                            </Tooltip>
+                        </TooltipProvider>
                         {isAdmin && (
-                            <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => { void exportDossier(); }}
-                                disabled={exporting}
-                                className="h-9 w-9 p-0"
-                                title="Export Dossier"
-                                aria-label="Export Dossier"
-                            >
-                                <FileDown className={`w-4 h-4 ${exporting ? 'animate-pulse' : ''}`} />
-                            </Button>
+                            <TooltipProvider>
+                                <Tooltip>
+                                    <TooltipTrigger asChild>
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => { void exportDossier(); }}
+                                            disabled={exporting}
+                                            className="h-9 w-9 p-0"
+                                            aria-label="Export Dossier"
+                                        >
+                                            <FileDown className={`w-4 h-4 ${exporting ? 'animate-pulse' : ''}`} />
+                                        </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Export Dossier</TooltipContent>
+                                </Tooltip>
+                            </TooltipProvider>
                         )}
                     </div>
                 </div>
