@@ -14,7 +14,8 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Loader2, History, FolderOpen } from 'lucide-react';
+import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Loader2, History, FolderOpen, Search } from 'lucide-react';
+import { Input } from '@/components/ui/input';
 import { SeverityBadge } from '@/components/ui/SeverityBadge';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
@@ -144,29 +145,19 @@ function FilterToggle({ value, onChange, counts }: FilterToggleProps) {
     ];
 
     return (
-        <div className="flex items-center gap-1 px-3 py-2.5 border-b bg-muted/10">
-            <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
-                {options.map(({ key, label, count }) => (
-                    <button
-                        key={key}
-                        onClick={() => onChange(key)}
-                        className={cn(
-                            'flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all duration-200',
-                            value === key
-                                ? 'bg-background text-foreground shadow-sm'
-                                : 'text-muted-foreground hover:text-foreground',
-                        )}
-                    >
-                        {label}
-                        <span className={cn(
-                            'inline-flex items-center justify-center h-4 min-w-4 px-1 rounded-sm text-[10px] font-mono transition-colors duration-200',
-                            value === key ? 'bg-muted text-foreground' : 'text-stat-subtitle',
-                        )}>
-                            {count}
-                        </span>
-                    </button>
-                ))}
-            </div>
+        <div className="flex items-center gap-1">
+            {options.map(({ key, label, count }) => (
+                <Button
+                    key={key}
+                    variant={value === key ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-7 text-xs px-2.5 gap-1.5"
+                    onClick={() => onChange(key)}
+                >
+                    {label}
+                    <span className="font-mono tabular-nums text-[10px] opacity-70">{count}</span>
+                </Button>
+            ))}
         </div>
     );
 }
@@ -351,6 +342,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [imageFilter, setImageFilter] = useState<ResourceFilter>('all');
     const [volumeFilter, setVolumeFilter] = useState<ResourceFilter>('all');
     const [networkFilter, setNetworkFilter] = useState<ResourceFilter>('all');
+
+    // Search state
+    const [imageSearch, setImageSearch] = useState('');
+    const [volumeSearch, setVolumeSearch] = useState('');
+    const [networkSearch, setNetworkSearch] = useState('');
 
     // Modal states
     const [confirmPrune, setConfirmPrune] = useState<{ target: PruneTarget; scope: PruneScope } | null>(null);
@@ -629,16 +625,19 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     // Derived filtered lists
     const filteredImages = images.filter(img =>
-        imageFilter === 'managed' ? img.managedStatus === 'managed' :
-            imageFilter === 'unmanaged' ? img.managedStatus !== 'managed' : true
+        (imageFilter === 'managed' ? img.managedStatus === 'managed' :
+            imageFilter === 'unmanaged' ? img.managedStatus !== 'managed' : true) &&
+        (imageSearch === '' || (img.RepoTags?.[0] || '').toLowerCase().includes(imageSearch.toLowerCase()))
     );
     const filteredVolumes = volumes.filter(vol =>
-        volumeFilter === 'managed' ? vol.managedStatus === 'managed' :
-            volumeFilter === 'unmanaged' ? vol.managedStatus !== 'managed' : true
+        (volumeFilter === 'managed' ? vol.managedStatus === 'managed' :
+            volumeFilter === 'unmanaged' ? vol.managedStatus !== 'managed' : true) &&
+        (volumeSearch === '' || vol.Name.toLowerCase().includes(volumeSearch.toLowerCase()))
     );
     const filteredNetworks = networks.filter(net =>
-        networkFilter === 'managed' ? net.managedStatus === 'managed' :
-            networkFilter === 'unmanaged' ? net.managedStatus !== 'managed' : true
+        (networkFilter === 'managed' ? net.managedStatus === 'managed' :
+            networkFilter === 'unmanaged' ? net.managedStatus !== 'managed' : true) &&
+        (networkSearch === '' || net.Name.toLowerCase().includes(networkSearch.toLowerCase()))
     );
 
     // Sortable tables (standard sort behavior across the resource tables).
@@ -817,7 +816,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             <Tabs
                 value={resourceTab}
                 onValueChange={(v) => setResourceTab(v as typeof resourceTab)}
-                className="flex-1 flex flex-col w-full rounded-lg border bg-card shadow-card-bevel overflow-hidden min-h-[400px] animate-in fade-in-0 slide-in-from-bottom-2 duration-300 delay-150"
+                className="flex-1 flex flex-col w-full min-h-[400px]"
             >
                 {isMobile ? (
                     <MobileSubTabs
@@ -832,19 +831,23 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         ]}
                     />
                 ) : (
-                <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3">
-                    <TabsList className="grid grid-cols-4 w-full md:w-[680px] h-9 gap-1 p-0">
+                <div className="flex items-center gap-3 mb-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
+                    <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                             {(['images', 'volumes', 'networks'] as const).map(tab => (
                                 <TabsHighlightItem key={tab} value={tab}>
-                                    <TabsTrigger value={tab} className="capitalize text-xs">
-                                        {tab}
+                                    <TabsTrigger value={tab} className="text-xs">
+                                        {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                                        <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">
+                                            {tab === 'images' ? images.length : tab === 'volumes' ? volumes.length : networks.length}
+                                        </span>
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             ))}
                             <TabsHighlightItem value="unmanaged">
                                 <TabsTrigger value="unmanaged" className="relative text-xs">
                                     Unmanaged
+                                    <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{totalOrphansCount}</span>
                                     {totalOrphansCount > 0 && (
                                         <span className="absolute -top-1.5 -right-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-warning text-[9px] text-warning-foreground font-medium animate-in zoom-in-75 duration-200">
                                             {totalOrphansCount}
@@ -857,11 +860,20 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 </div>
                 )}
 
-                <ScrollArea className="flex-1 bg-background relative text-sm">
+                <ScrollArea className="flex-1 relative text-sm">
 
                     {/* Images */}
                     <TabsContent value="images" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
-                        <div className="flex items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-2 mb-4">
+                            <div className="relative flex-1 min-w-[200px] max-w-sm">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                                <Input
+                                    placeholder="Search images..."
+                                    value={imageSearch}
+                                    onChange={(e) => setImageSearch(e.target.value)}
+                                    className="pl-9 h-9"
+                                />
+                            </div>
                             <FilterToggle
                                 value={imageFilter}
                                 onChange={setImageFilter}
@@ -871,30 +883,25 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     unmanaged: images.filter(i => i.managedStatus !== 'managed').length,
                                 }}
                             />
+                            <div className="flex-1" />
                             {trivy.available && (
-                                <TooltipProvider>
-                                    <Tooltip>
-                                        <TooltipTrigger asChild>
-                                            <Button
-                                                variant="outline"
-                                                size="sm"
-                                                className="h-7 text-xs gap-1.5 mr-3 shrink-0"
-                                                onClick={() => {
-                                                    window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
-                                                        detail: { view: 'security', tab: 'history' },
-                                                    }));
-                                                }}
-                                                aria-label="Open scan history"
-                                            >
-                                                <History className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                Scan history
-                                            </Button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>View completed vulnerability scans and compare them</TooltipContent>
-                                    </Tooltip>
-                                </TooltipProvider>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-9 gap-2 shrink-0"
+                                    onClick={() => {
+                                        window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
+                                            detail: { view: 'security', tab: 'history' },
+                                        }));
+                                    }}
+                                    aria-label="Open scan history"
+                                >
+                                    <History className="w-4 h-4" strokeWidth={1.5} />
+                                    Scan history
+                                </Button>
                             )}
                         </div>
+                        <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
@@ -1015,19 +1022,32 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableBody>
                             )}
                         </Table>
+                        </div>
                     </TabsContent>
 
                     {/* Volumes */}
                     <TabsContent value="volumes" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
-                        <FilterToggle
-                            value={volumeFilter}
-                            onChange={setVolumeFilter}
-                            counts={{
-                                all: volumes.length,
-                                managed: volumes.filter(v => v.managedStatus === 'managed').length,
-                                unmanaged: volumes.filter(v => v.managedStatus !== 'managed').length,
-                            }}
-                        />
+                        <div className="flex flex-wrap items-center gap-2 mb-4">
+                            <div className="relative flex-1 min-w-[200px] max-w-sm">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                                <Input
+                                    placeholder="Search volumes..."
+                                    value={volumeSearch}
+                                    onChange={(e) => setVolumeSearch(e.target.value)}
+                                    className="pl-9 h-9"
+                                />
+                            </div>
+                            <FilterToggle
+                                value={volumeFilter}
+                                onChange={setVolumeFilter}
+                                counts={{
+                                    all: volumes.length,
+                                    managed: volumes.filter(v => v.managedStatus === 'managed').length,
+                                    unmanaged: volumes.filter(v => v.managedStatus !== 'managed').length,
+                                }}
+                            />
+                        </div>
+                        <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
@@ -1104,27 +1124,38 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableBody>
                             )}
                         </Table>
+                        </div>
                     </TabsContent>
 
                     {/* Networks */}
                     <TabsContent value="networks" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
-                        <div className="flex items-center justify-between">
+                        <div className="flex flex-wrap items-center gap-2 mb-4">
                             {networkViewMode === 'list' ? (
-                                <FilterToggle
-                                    value={networkFilter}
-                                    onChange={setNetworkFilter}
-                                    counts={{
-                                        all: networks.length,
-                                        managed: networks.filter(n => n.managedStatus === 'managed').length,
-                                        unmanaged: networks.filter(n => n.managedStatus !== 'managed').length,
-                                    }}
-                                />
+                                <>
+                                    <div className="relative flex-1 min-w-[200px] max-w-sm">
+                                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                                        <Input
+                                            placeholder="Search networks..."
+                                            value={networkSearch}
+                                            onChange={(e) => setNetworkSearch(e.target.value)}
+                                            className="pl-9 h-9"
+                                        />
+                                    </div>
+                                    <FilterToggle
+                                        value={networkFilter}
+                                        onChange={setNetworkFilter}
+                                        counts={{
+                                            all: networks.length,
+                                            managed: networks.filter(n => n.managedStatus === 'managed').length,
+                                            unmanaged: networks.filter(n => n.managedStatus !== 'managed').length,
+                                        }}
+                                    />
+                                </>
                             ) : (
-                                // Keep a left spacer so justify-between holds the toggle +
-                                // Create Network group anchored on the right in topology mode.
                                 <span aria-hidden="true" />
                             )}
-                            <div className="flex items-center gap-2 pr-3">
+                            <div className="flex-1" />
+                            <div className="flex items-center gap-2">
                                 <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
                                     <button
                                         onClick={() => setNetworkViewMode('list')}
@@ -1181,6 +1212,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </CapabilityGate>
                             </div>
                         ) : (
+                        <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
@@ -1256,11 +1288,13 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableBody>
                             )}
                         </Table>
+                        </div>
                         )}
                     </TabsContent>
 
                     {/* Unmanaged Containers */}
                     <TabsContent value="unmanaged" className="m-0 border-0 p-0 h-full flex flex-col animate-in fade-in-0 duration-200">
+                        <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
                         <div className="flex justify-between items-center px-4 py-2.5 border-b bg-muted/10 sticky top-0 z-10">
                             <div className="flex items-center gap-2.5">
                                 <input
@@ -1341,6 +1375,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 ))}
                             </div>
                         )}
+                        </div>
                     </TabsContent>
                 </ScrollArea>
             </Tabs>
