@@ -9,8 +9,9 @@ import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Clock, Plus, Pencil, Trash2, History, RefreshCw, Play, ChevronLeft, ChevronRight, Download, CalendarClock, Table2 } from 'lucide-react';
+import { Clock, Plus, Pencil, Trash2, History, RefreshCw, Play, ChevronLeft, ChevronRight, Download, CalendarClock, Table2, Copy } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
+import { copyToClipboard } from '@/lib/clipboard';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { Combobox } from '@/components/ui/combobox';
@@ -1058,8 +1059,32 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                           )}
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">{duration}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground max-w-[200px] truncate" title={run.output || run.error || ''}>
-                          {run.error || run.output || '-'}
+                        <TableCell className="text-xs text-muted-foreground max-w-[200px]">
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate" title={run.output || run.error || ''}>
+                              {run.error || run.output || '-'}
+                            </span>
+                            {(run.output || run.error) ? (
+                              <TooltipProvider>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+                                      onClick={() => {
+                                        copyToClipboard(run.output || run.error || '');
+                                        toast.info('Copied to clipboard');
+                                      }}
+                                    >
+                                      <Copy className="w-3 h-3" strokeWidth={1.5} />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Copy details</TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            ) : null}
+                          </div>
                         </TableCell>
                       </TableRow>
                     );
