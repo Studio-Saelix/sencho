@@ -25,6 +25,11 @@ export interface PreflightFinding {
   remediation?: string;
   /** Service the finding is scoped to, when applicable. */
   service?: string;
+  /** True when an active acknowledgement covers this finding. */
+  acknowledged?: boolean;
+  acknowledgementId?: number;
+  acknowledgementReason?: string;
+  acknowledgementExpiry?: 'forever' | 'until_compose_change' | 'days' | 'until_image_change';
 }
 
 /** The full report returned by both the GET (latest) and POST (run) routes. */
@@ -41,6 +46,11 @@ export interface PreflightReport {
   sourceHash: string | null;
   renderedHash: string | null;
   findings: PreflightFinding[];
+  /** Severity/status after filtering acknowledged findings. */
+  activeStatus: PreflightStatus;
+  activeHighestSeverity: PreflightSeverity | null;
+  activeCount: number;
+  acknowledgedCount: number;
 }
 
 /** A declared `env_file:` that is required and absent on disk (names only). */

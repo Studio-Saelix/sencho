@@ -80,3 +80,64 @@ describe('preflight routes', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('preflight acknowledgement routes', () => {
+  let stackDir: string;
+  beforeEach(() => {
+    stackDir = path.join(process.env.COMPOSE_DIR as string, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:latest\n    ports:\n      - "8080:80"\n');
+    stub();
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(stackDir, { recursive: true, force: true });
+  });
+
+  it('POST acknowledges a finding and GET preflight reflects activeStatus', async () => {
+    const run = await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    expect(run.status).toBe(200);
+    const target = run.body.findings.find((f: { ruleId: string }) => f.ruleId === 'port-exposed-all-interfaces');
+    expect(target).toBeTruthy();
+
+    const ack = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service ?? null, reason: 'intentional', expiryMode: 'forever' });
+    expect(ack.status).toBe(201);
+
+    const get = await request(app).get(`/api/stacks/${STACK}/preflight`).set('Authorization', authHeader);
+    expect(get.body.acknowledgedCount).toBeGreaterThanOrEqual(1);
+    const acked = get.body.findings.find((f: { ruleId: string; service?: string }) =>
+      f.ruleId === target.ruleId && f.service === target.service);
+    expect(acked?.acknowledged).toBe(true);
+    expect(get.body.activeCount).toBe(get.body.findings.length - get.body.acknowledgedCount);
+  });
+
+  it('DELETE clears an acknowledgement', async () => {
+    await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const list = await request(app).get(`/api/stacks/${STACK}/preflight`).set('Authorization', authHeader);
+    const target = list.body.findings[0];
+    const ack = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: target.ruleId, service: target.service ?? null, expiryMode: 'forever' });
+    const del = await request(app)
+      .delete(`/api/stacks/${STACK}/preflight/acknowledgements/${ack.body.id}`)
+      .set('Authorization', authHeader);
+    expect(del.status).toBe(204);
+    const get = await request(app).get(`/api/stacks/${STACK}/preflight`).set('Authorization', authHeader);
+    const again = get.body.findings.find((f: { ruleId: string; service?: string }) =>
+      f.ruleId === target.ruleId && f.service === target.service);
+    expect(again?.acknowledged).toBe(false);
+  });
+
+  it('rejects until_image_change without a service', async () => {
+    await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: 'port-exposed-all-interfaces', expiryMode: 'until_image_change' });
+    expect(res.status).toBe(400);
+  });
+});

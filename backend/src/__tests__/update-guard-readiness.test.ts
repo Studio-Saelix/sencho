@@ -39,17 +39,17 @@ const summary = (over: Partial<UpdatePreviewSummary> = {}): UpdatePreviewSummary
 
 describe('preflightSignal', () => {
   const cases = [
-    { status: 'never-run', expected: 'unknown', affects: false },
-    { status: 'blocker', expected: 'blocked', affects: true },
-    { status: 'unrenderable', expected: 'attention', affects: true },
-    { status: 'high', expected: 'attention', affects: true },
-    { status: 'warning', expected: 'warning', affects: true },
-    { status: 'pass', expected: 'ok', affects: true },
-    { status: 'info', expected: 'ok', affects: true },
+    { activeStatus: 'never-run', expected: 'unknown', affects: false },
+    { activeStatus: 'blocker', expected: 'blocked', affects: true },
+    { activeStatus: 'unrenderable', expected: 'attention', affects: true },
+    { activeStatus: 'high', expected: 'attention', affects: true },
+    { activeStatus: 'warning', expected: 'warning', affects: true },
+    { activeStatus: 'pass', expected: 'ok', affects: true },
+    { activeStatus: 'info', expected: 'ok', affects: true },
   ] as const;
 
-  it.each(cases)('maps preflight status $status to $expected', ({ status, expected, affects }) => {
-    const signal = preflightSignal({ status });
+  it.each(cases)('maps preflight activeStatus $activeStatus to $expected', ({ activeStatus, expected, affects }) => {
+    const signal = preflightSignal({ activeStatus });
     expect(signal.status).toBe(expected);
     expect(signal.affectsVerdict).toBe(affects);
   });
@@ -182,10 +182,10 @@ describe('aggregateVerdict', () => {
   });
 
   it('reaches every verdict from realistic signal sets', () => {
-    expect(aggregateVerdict([preflightSignal({ status: 'blocker' }), driftSignal(0)])).toBe('blocked');
-    expect(aggregateVerdict([preflightSignal({ status: 'high' }), driftSignal(0)])).toBe('review_required');
+    expect(aggregateVerdict([preflightSignal({ activeStatus: 'blocker' }), driftSignal(0)])).toBe('blocked');
+    expect(aggregateVerdict([preflightSignal({ activeStatus: 'high' }), driftSignal(0)])).toBe('review_required');
     expect(aggregateVerdict([containersSignal('error'), driftSignal(0)])).toBe('unknown');
-    expect(aggregateVerdict([driftSignal(1), preflightSignal({ status: 'pass' })])).toBe('ready_with_warnings');
-    expect(aggregateVerdict([driftSignal(0), preflightSignal({ status: 'pass' }), healthchecksSignal([probe()])])).toBe('ready');
+    expect(aggregateVerdict([driftSignal(1), preflightSignal({ activeStatus: 'pass' })])).toBe('ready_with_warnings');
+    expect(aggregateVerdict([driftSignal(0), preflightSignal({ activeStatus: 'pass' }), healthchecksSignal([probe()])])).toBe('ready');
   });
 });

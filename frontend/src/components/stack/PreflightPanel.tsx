@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  Check, TriangleAlert, ShieldAlert, Info, RefreshCw, Stethoscope, X, type LucideIcon,
+  Check, TriangleAlert, ShieldAlert, Info, RefreshCw, Stethoscope, X,
+  ChevronDown, ChevronRight, ShieldCheck, type LucideIcon,
 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -8,10 +9,13 @@ import { toast } from '@/components/ui/toast-store';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
+import { Button } from '@/components/ui/button';
+import { Label } from '@/components/ui/label';
+import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 
-// Mirrors the backend payload shape (the frontend never imports backend).
 type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
 type PreflightStatus = 'never-run' | 'pass' | 'unrenderable' | PreflightSeverity;
+type PreflightAckExpiryMode = 'forever' | 'until_compose_change' | 'days' | 'until_image_change';
 
 interface PreflightFinding {
   ruleId: string;
@@ -21,6 +25,10 @@ interface PreflightFinding {
   sourcePath?: string;
   remediation?: string;
   service?: string;
+  acknowledged?: boolean;
+  acknowledgementId?: number;
+  acknowledgementReason?: string;
+  acknowledgementExpiry?: PreflightAckExpiryMode;
 }
 
 interface PreflightReport {
@@ -31,6 +39,10 @@ interface PreflightReport {
   renderError: string | null;
   status: PreflightStatus;
   highestSeverity: PreflightSeverity | null;
+  activeStatus: PreflightStatus;
+  activeHighestSeverity: PreflightSeverity | null;
+  activeCount: number;
+  acknowledgedCount: number;
   findings: PreflightFinding[];
 }
 
@@ -48,7 +60,13 @@ const SEVERITY_META: Record<PreflightSeverity, { label: string; icon: LucideIcon
 
 const GROUP_ORDER: PreflightSeverity[] = ['blocker', 'high', 'warning', 'info'];
 
-/** The header summary card: a single read on the overall result. */
+const EXPIRY_LABELS: Record<PreflightAckExpiryMode, string> = {
+  forever: 'Forever',
+  until_compose_change: 'Until Compose changes',
+  days: '30 days',
+  until_image_change: 'Until image changes',
+};
+
 function summaryMeta(report: PreflightReport): { label: string; icon: LucideIcon; tone: string; line: string } {
   if (!report.renderable) {
     return {
@@ -58,26 +76,55 @@ function summaryMeta(report: PreflightReport): { label: string; icon: LucideIcon
       line: report.renderError ?? 'Sencho could not render the effective Compose model.',
     };
   }
-  if (report.findings.length === 0) {
+  if (report.activeCount === 0 && report.acknowledgedCount === 0) {
     return { label: 'all clear', icon: Check, tone: 'border-success/40 bg-success/[0.06] text-success', line: 'No issues found in the effective model.' };
   }
-  const meta = SEVERITY_META[report.highestSeverity ?? 'info'];
-  const counts = GROUP_ORDER
-    .map(sev => ({ sev, n: report.findings.filter(f => f.severity === sev).length }))
+  const meta = SEVERITY_META[report.activeHighestSeverity ?? 'info'];
+  const activeParts = GROUP_ORDER
+    .map(sev => ({ sev, n: report.findings.filter(f => !f.acknowledged && f.severity === sev).length }))
     .filter(c => c.n > 0)
     .map(c => `${c.n} ${SEVERITY_META[c.sev].label}`)
     .join(' · ');
-  return { label: meta.label, icon: meta.icon, tone: meta.tone, line: counts };
+  const line = report.acknowledgedCount > 0
+    ? `${report.activeCount} active${activeParts ? ` (${activeParts})` : ''} · ${report.acknowledgedCount} acknowledged`
+    : (activeParts || `${report.activeCount} active`);
+  return { label: report.activeCount === 0 ? 'acknowledged' : meta.label, icon: report.activeCount === 0 ? ShieldCheck : meta.icon, tone: report.activeCount === 0 ? 'border-muted bg-card/40 text-stat-subtitle' : meta.tone, line };
 }
 
-function FindingRow({ finding }: { finding: PreflightFinding }) {
+function expiryOptions(finding: PreflightFinding): PreflightAckExpiryMode[] {
+  const base: PreflightAckExpiryMode[] = ['forever', 'until_compose_change', 'days'];
+  if (finding.service) base.push('until_image_change');
+  return base;
+}
+
+function FindingRow({
+  finding,
+  canEdit,
+  onAcknowledge,
+}: {
+  finding: PreflightFinding;
+  canEdit: boolean;
+  onAcknowledge?: (finding: PreflightFinding) => void;
+}) {
   return (
     <div className="border-t border-muted py-2 first:border-t-0">
-      <div className="flex flex-wrap items-center gap-2">
-        {finding.service && (
-          <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{finding.service}</span>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          {finding.service && (
+            <span className="rounded-md bg-brand/15 px-1.5 py-0.5 font-mono text-[11px] text-brand">{finding.service}</span>
+          )}
+          <span className="text-[12px] font-medium text-foreground/90">{finding.title}</span>
+        </div>
+        {canEdit && onAcknowledge && (
+          <button
+            type="button"
+            data-testid={`preflight-ack-btn-${finding.ruleId}-${finding.service ?? 'stack'}`}
+            onClick={() => onAcknowledge(finding)}
+            className="shrink-0 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand"
+          >
+            acknowledge
+          </button>
         )}
-        <span className="text-[12px] font-medium text-foreground/90">{finding.title}</span>
       </div>
       <div className="mt-1 text-[12px] leading-relaxed text-foreground/80">{finding.message}</div>
       {finding.remediation && (
@@ -92,7 +139,50 @@ function FindingRow({ finding }: { finding: PreflightFinding }) {
   );
 }
 
-export default function PreflightPanel({ stackName }: { stackName: string }) {
+function AcknowledgedRow({
+  finding,
+  canEdit,
+  onClear,
+}: {
+  finding: PreflightFinding;
+  canEdit: boolean;
+  onClear: (finding: PreflightFinding) => void;
+}) {
+  return (
+    <div className="border-t border-muted py-2 first:border-t-0 opacity-80">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            {finding.service && (
+              <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px] text-stat-subtitle">{finding.service}</span>
+            )}
+            <span className="text-[12px] font-medium text-foreground/80">{finding.title}</span>
+          </div>
+          {finding.acknowledgementReason && (
+            <div className="mt-1 text-[11px] text-stat-subtitle">{finding.acknowledgementReason}</div>
+          )}
+          {finding.acknowledgementExpiry && (
+            <div className="mt-0.5 font-mono text-[10px] text-stat-subtitle">
+              expires: {EXPIRY_LABELS[finding.acknowledgementExpiry]}
+            </div>
+          )}
+        </div>
+        {canEdit && finding.acknowledgementId != null && (
+          <button
+            type="button"
+            data-testid={`preflight-clear-ack-${finding.acknowledgementId}`}
+            onClick={() => onClear(finding)}
+            className="shrink-0 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand"
+          >
+            clear
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function PreflightPanel({ stackName, canEdit = false }: { stackName: string; canEdit?: boolean }) {
   const { activeNode } = useNodes();
   const nodeId = activeNode?.id;
   const [report, setReport] = useState<PreflightReport | null>(null);
@@ -100,9 +190,34 @@ export default function PreflightPanel({ stackName }: { stackName: string }) {
   const [loadError, setLoadError] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [running, setRunning] = useState(false);
+  const [ackOpen, setAckOpen] = useState(false);
+  const [ackTarget, setAckTarget] = useState<PreflightFinding | null>(null);
+  const [ackReason, setAckReason] = useState('');
+  const [ackExpiry, setAckExpiry] = useState<PreflightAckExpiryMode>('forever');
+  const [ackSaving, setAckSaving] = useState(false);
+  const [clearTarget, setClearTarget] = useState<PreflightFinding | null>(null);
+  const [ackSectionOpen, setAckSectionOpen] = useState(false);
 
-  // Passive load of the last stored run when the stack or active node changes.
-  // Read-only: opening the tab never renders or stores anything.
+  const loadReport = async () => {
+    setLoading(true);
+    setLoadError(false);
+    try {
+      const res = await apiFetch(`/stacks/${stackName}/preflight`);
+      if (!res.ok) {
+        setLoadError(true);
+        toast.error('Failed to load the preflight report.');
+        return;
+      }
+      setReport((await res.json()) as PreflightReport);
+      setLoadError(false);
+    } catch {
+      setLoadError(true);
+      toast.error('Failed to load the preflight report.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
@@ -131,7 +246,6 @@ export default function PreflightPanel({ stackName }: { stackName: string }) {
     return () => { cancelled = true; };
   }, [stackName, nodeId, reloadKey]);
 
-  // Running preflight renders the effective model and stores the result.
   const runPreflight = async () => {
     setRunning(true);
     try {
@@ -149,13 +263,78 @@ export default function PreflightPanel({ stackName }: { stackName: string }) {
     }
   };
 
+  const activeFindings = useMemo(
+    () => report?.findings.filter(f => !f.acknowledged) ?? [],
+    [report?.findings],
+  );
+  const acknowledgedFindings = useMemo(
+    () => report?.findings.filter(f => f.acknowledged) ?? [],
+    [report?.findings],
+  );
+
   const summary = report && report.status !== 'never-run' ? summaryMeta(report) : null;
   const SummaryIcon = summary?.icon;
   const busy = loading || running;
 
-  // Dismiss the result banner (and the Doctor tab dot) until the findings change.
-  const { dismissed, dismiss } = usePreflightDismiss(stackName, nodeId, report?.findings);
-  const hasFindings = (report?.findings.length ?? 0) > 0;
+  const { dismissed, dismiss } = usePreflightDismiss(stackName, nodeId, activeFindings);
+  const hasActiveFindings = activeFindings.length > 0;
+
+  const openAckDialog = (finding: PreflightFinding) => {
+    setAckTarget(finding);
+    setAckReason('');
+    setAckExpiry('forever');
+    setAckOpen(true);
+  };
+
+  const submitAck = async () => {
+    if (!ackTarget) return;
+    setAckSaving(true);
+    try {
+      const res = await apiFetch(`/stacks/${stackName}/preflight/acknowledgements`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ruleId: ackTarget.ruleId,
+          service: ackTarget.service ?? null,
+          reason: ackReason.trim(),
+          expiryMode: ackExpiry,
+          expiresInDays: ackExpiry === 'days' ? 30 : undefined,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({})) as { error?: string };
+        toast.error(data.error ?? 'Failed to acknowledge the finding.');
+        return;
+      }
+      setAckOpen(false);
+      setAckTarget(null);
+      await loadReport();
+      toast.success('Finding acknowledged.');
+    } catch {
+      toast.error('Failed to acknowledge the finding.');
+    } finally {
+      setAckSaving(false);
+    }
+  };
+
+  const confirmClear = async () => {
+    if (!clearTarget?.acknowledgementId) return;
+    try {
+      const res = await apiFetch(
+        `/stacks/${stackName}/preflight/acknowledgements/${clearTarget.acknowledgementId}`,
+        { method: 'DELETE' },
+      );
+      if (!res.ok && res.status !== 204) {
+        toast.error('Failed to clear the acknowledgement.');
+        return;
+      }
+      setClearTarget(null);
+      await loadReport();
+      toast.success('Acknowledgement cleared.');
+    } catch {
+      toast.error('Failed to clear the acknowledgement.');
+    }
+  };
 
   return (
     <div data-testid="preflight-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
@@ -198,8 +377,8 @@ export default function PreflightPanel({ stackName }: { stackName: string }) {
       ) : (
         <>
           {summary && SummaryIcon && !dismissed && (
-            <div data-testid="preflight-status" data-status={report.status} className={cn(CARD_CLASS, summary.tone, 'relative')}>
-              {hasFindings && (
+            <div data-testid="preflight-status" data-status={report.activeStatus} className={cn(CARD_CLASS, summary.tone, 'relative')}>
+              {hasActiveFindings && (
                 <button
                   type="button"
                   onClick={dismiss}
@@ -225,19 +404,116 @@ export default function PreflightPanel({ stackName }: { stackName: string }) {
           )}
 
           {GROUP_ORDER.map(sev => {
-            const items = report.findings.filter(f => f.severity === sev);
+            const items = activeFindings.filter(f => f.severity === sev);
             if (items.length === 0) return null;
             return (
               <section key={sev}>
                 <div className={cn(LABEL_CLASS, 'mb-1.5')}>{SEVERITY_META[sev].label} · {items.length}</div>
                 <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
-                  {items.map((f, i) => <FindingRow key={`${f.ruleId}-${f.service ?? ''}-${i}`} finding={f} />)}
+                  {items.map((f, i) => (
+                    <FindingRow
+                      key={`${f.ruleId}-${f.service ?? ''}-${i}`}
+                      finding={f}
+                      canEdit={canEdit}
+                      onAcknowledge={openAckDialog}
+                    />
+                  ))}
                 </div>
               </section>
             );
           })}
+
+          {acknowledgedFindings.length > 0 && (
+            <section data-testid="preflight-acknowledged-section">
+              <button
+                type="button"
+                onClick={() => setAckSectionOpen(v => !v)}
+                className={cn(LABEL_CLASS, 'mb-1.5 inline-flex items-center gap-1 hover:text-brand')}
+              >
+                {ackSectionOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                acknowledged · {acknowledgedFindings.length}
+              </button>
+              {ackSectionOpen && (
+                <div className="rounded-lg border border-muted bg-card/30 px-3 py-1">
+                  {acknowledgedFindings.map((f, i) => (
+                    <AcknowledgedRow
+                      key={`ack-${f.acknowledgementId ?? i}`}
+                      finding={f}
+                      canEdit={canEdit}
+                      onClear={setClearTarget}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
         </>
       )}
+
+      <Modal open={ackOpen} onOpenChange={setAckOpen} size="md">
+        <ModalHeader
+          kicker="COMPOSE DOCTOR · ACKNOWLEDGE"
+          title="Accept this finding"
+          description="Acknowledged findings stay visible here but no longer count toward the active warning total or update readiness."
+        />
+        <ModalBody>
+          {ackTarget && (
+            <div className="rounded-md border border-muted bg-card/40 px-3 py-2 text-[12px] text-foreground/80">
+              {ackTarget.title}
+              {ackTarget.service ? ` · ${ackTarget.service}` : ''}
+            </div>
+          )}
+          <div className="space-y-2">
+            <Label htmlFor="preflight-ack-reason">Note (optional)</Label>
+            <textarea
+              id="preflight-ack-reason"
+              className="flex min-h-[72px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              placeholder="Why is this finding acceptable for this stack?"
+              value={ackReason}
+              onChange={(e) => setAckReason(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="preflight-ack-expiry">Show again when</Label>
+            <select
+              id="preflight-ack-expiry"
+              value={ackExpiry}
+              onChange={(e) => setAckExpiry(e.target.value as PreflightAckExpiryMode)}
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              {(ackTarget ? expiryOptions(ackTarget) : (['forever'] as const)).map((mode: PreflightAckExpiryMode) => (
+                <option key={mode} value={mode}>{EXPIRY_LABELS[mode]}</option>
+              ))}
+            </select>
+          </div>
+        </ModalBody>
+        <ModalFooter
+          secondary={(
+            <Button variant="outline" size="sm" onClick={() => setAckOpen(false)} disabled={ackSaving}>
+              Cancel
+            </Button>
+          )}
+          primary={(
+            <Button size="sm" onClick={submitAck} disabled={ackSaving}>
+              {ackSaving ? 'Saving…' : 'Acknowledge'}
+            </Button>
+          )}
+        />
+      </Modal>
+
+      <ConfirmModal
+        open={clearTarget !== null}
+        onOpenChange={(open) => !open && setClearTarget(null)}
+        variant="destructive"
+        kicker="COMPOSE DOCTOR · CLEAR ACK"
+        title="Clear acknowledgement"
+        confirmLabel="Clear"
+        onConfirm={confirmClear}
+      >
+        <p className="text-sm text-stat-subtitle">
+          This finding will count as active again on the next preflight read.
+        </p>
+      </ConfirmModal>
     </div>
   );
 }

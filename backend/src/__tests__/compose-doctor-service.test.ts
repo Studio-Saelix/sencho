@@ -248,11 +248,45 @@ describe('getLatest', () => {
   });
 });
 
+describe('preflight acknowledgements', () => {
+  const STACK = 'doctorack';
+  beforeEach(() => { writeStack(STACK); });
+  afterEach(() => { fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK), { recursive: true, force: true }); });
+
+  it('lowers activeStatus when a finding is acknowledged', async () => {
+    stubDocker(
+      { name: STACK, services: { web: { image: 'nginx:latest', ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} },
+    );
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.status).toBe('high');
+    const target = report.findings.find(f => f.ruleId === 'port-exposed-all-interfaces');
+    expect(target).toBeTruthy();
+    db().upsertPreflightAcknowledgement({
+      node_id: nodeId,
+      stack_name: STACK,
+      rule_id: target!.ruleId,
+      service: target!.service ?? null,
+      reason: 'intentional',
+      expiry_mode: 'forever',
+      expires_at: null,
+      anchor_rendered_hash: null,
+      anchor_image_ref: null,
+      created_by: 'tester',
+      created_at: Date.now(),
+    });
+    const latest = doctor().getLatest(nodeId, STACK);
+    expect(latest.acknowledgedCount).toBe(1);
+    expect(latest.activeCount).toBe(latest.findings.length - 1);
+    expect(latest.status).toBe('high');
+    expect(latest.activeStatus).not.toBe('high');
+  });
+});
+
 describe('node deletion cleanup', () => {
   it('removes preflight runs and findings for a deleted node', () => {
     const ghostNode = 987654;
     db().replacePreflightRun(
-      { id: 'run-x', node_id: ghostNode, stack_name: 's', source_hash: null, rendered_hash: null, status: 'pass', highest_severity: null, created_at: 1, created_by: null },
+      { id: 'run-x', node_id: ghostNode, stack_name: 's', source_hash: null, rendered_hash: null, service_images: null, status: 'pass', highest_severity: null, created_at: 1, created_by: null },
       [{ id: 'find-x', run_id: 'run-x', rule_id: 'privileged', severity: 'high', title: 't', message: 'm', source_path: null, remediation: null, service: 's', created_at: 1 }],
     );
     expect(db().getLatestPreflightRun(ghostNode, 's')).toBeDefined();

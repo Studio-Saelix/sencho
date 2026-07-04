@@ -140,8 +140,9 @@ export default function StackAnatomyPanel({
         if (cancelled || !res.ok) return;
         const data = await res.json();
         if (!cancelled) {
-          setPreflightSeverity(typeof data?.highestSeverity === 'string' ? data.highestSeverity : null);
-          setPreflightFindings(Array.isArray(data?.findings) ? data.findings : undefined);
+          setPreflightSeverity(typeof data?.activeHighestSeverity === 'string' ? data.activeHighestSeverity : null);
+          const findings = Array.isArray(data?.findings) ? data.findings : undefined;
+          setPreflightFindings(findings?.filter((f: { acknowledged?: boolean }) => !f.acknowledged));
         }
       } catch {
         if (!cancelled) { setPreflightSeverity(null); setPreflightFindings(undefined); }
@@ -635,7 +636,7 @@ export default function StackAnatomyPanel({
       )}
       {doctorEnabled && (
         <TabsContent value="doctor" className="flex flex-col flex-1 min-h-0 mt-0">
-          <PreflightPanel stackName={stackName} />
+          <PreflightPanel stackName={stackName} canEdit={canEdit} />
         </TabsContent>
       )}
       {storageEnabled && (

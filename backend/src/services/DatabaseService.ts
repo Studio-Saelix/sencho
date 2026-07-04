@@ -122,6 +122,8 @@ export interface PreflightRunRow {
     stack_name: string;
     source_hash: string | null;
     rendered_hash: string | null;
+    /** JSON map of service name to image ref at run time (for until_image_change acks). */
+    service_images: string | null;
     status: string;
     highest_severity: string | null;
     created_at: number;
@@ -165,6 +167,24 @@ export interface PreflightFindingRow {
     source_path: string | null;
     remediation: string | null;
     service: string | null;
+    created_at: number;
+}
+
+export type PreflightAckExpiryMode = 'forever' | 'until_compose_change' | 'days' | 'until_image_change';
+
+/** Operator acknowledgement of a specific Compose Doctor finding on a stack. */
+export interface PreflightAcknowledgement {
+    id: number;
+    node_id: number;
+    stack_name: string;
+    rule_id: string;
+    service: string | null;
+    reason: string;
+    expiry_mode: PreflightAckExpiryMode;
+    expires_at: number | null;
+    anchor_rendered_hash: string | null;
+    anchor_image_ref: string | null;
+    created_by: string;
     created_at: number;
 }
 
@@ -1470,6 +1490,26 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_preflight_findings_run
         ON preflight_findings(run_id);
 
+      CREATE TABLE IF NOT EXISTS preflight_acknowledgements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        rule_id TEXT NOT NULL,
+        service TEXT,
+        reason TEXT NOT NULL DEFAULT '',
+        expiry_mode TEXT NOT NULL DEFAULT 'forever'
+          CHECK (expiry_mode IN ('forever','until_compose_change','days','until_image_change')),
+        expires_at INTEGER,
+        anchor_rendered_hash TEXT,
+        anchor_image_ref TEXT,
+        created_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_preflight_ack_unique
+        ON preflight_acknowledgements(node_id, stack_name, rule_id, COALESCE(service,''));
+      CREATE INDEX IF NOT EXISTS idx_preflight_ack_stack
+        ON preflight_acknowledgements(node_id, stack_name);
+
       CREATE TABLE IF NOT EXISTS stack_exposure (
         node_id INTEGER NOT NULL DEFAULT 0,
         stack_name TEXT NOT NULL,
@@ -1582,6 +1622,8 @@ export class DatabaseService {
         // justification). Existing rows default to 'accepted' (the prior behavior).
         maybeAddCol('cve_suppressions', 'status', "TEXT NOT NULL DEFAULT 'accepted'");
         maybeAddCol('cve_suppressions', 'justification', 'TEXT');
+
+        maybeAddCol('preflight_runs', 'service_images', 'TEXT');
 
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
@@ -2883,9 +2925,12 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ? AND stack_name = ?').run(run.node_id, run.stack_name);
             this.db.prepare(
                 `INSERT INTO preflight_runs
-                    (id, node_id, stack_name, source_hash, rendered_hash, status, highest_severity, created_at, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            ).run(run.id, run.node_id, run.stack_name, run.source_hash, run.rendered_hash, run.status, run.highest_severity, run.created_at, run.created_by);
+                    (id, node_id, stack_name, source_hash, rendered_hash, service_images, status, highest_severity, created_at, created_by)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).run(
+                run.id, run.node_id, run.stack_name, run.source_hash, run.rendered_hash,
+                run.service_images ?? null, run.status, run.highest_severity, run.created_at, run.created_by,
+            );
             const insert = this.db.prepare(
                 `INSERT INTO preflight_findings
                     (id, run_id, rule_id, severity, title, message, source_path, remediation, service, created_at)
@@ -2909,6 +2954,55 @@ export class DatabaseService {
         return this.db.prepare(
             'SELECT * FROM preflight_findings WHERE run_id = ? ORDER BY rowid ASC'
         ).all(runId) as PreflightFindingRow[];
+    }
+
+    public getPreflightAcknowledgements(nodeId: number, stackName: string): PreflightAcknowledgement[] {
+        return this.db.prepare(
+            'SELECT * FROM preflight_acknowledgements WHERE node_id = ? AND stack_name = ? ORDER BY created_at DESC, id DESC',
+        ).all(nodeId, stackName) as PreflightAcknowledgement[];
+    }
+
+    public getPreflightAcknowledgement(id: number): PreflightAcknowledgement | null {
+        return (
+            (this.db.prepare('SELECT * FROM preflight_acknowledgements WHERE id = ?')
+                .get(id) as PreflightAcknowledgement | undefined) ?? null
+        );
+    }
+
+    public upsertPreflightAcknowledgement(
+        ack: Omit<PreflightAcknowledgement, 'id'>,
+    ): PreflightAcknowledgement {
+        const existing = this.db.prepare(
+            `SELECT id FROM preflight_acknowledgements
+             WHERE node_id = ? AND stack_name = ? AND rule_id = ? AND COALESCE(service, '') = COALESCE(?, '')`,
+        ).get(ack.node_id, ack.stack_name, ack.rule_id, ack.service) as { id: number } | undefined;
+        if (existing) {
+            this.db.prepare(
+                `UPDATE preflight_acknowledgements
+                 SET reason = ?, expiry_mode = ?, expires_at = ?, anchor_rendered_hash = ?,
+                     anchor_image_ref = ?, created_by = ?, created_at = ?
+                 WHERE id = ?`,
+            ).run(
+                ack.reason, ack.expiry_mode, ack.expires_at, ack.anchor_rendered_hash,
+                ack.anchor_image_ref, ack.created_by, ack.created_at, existing.id,
+            );
+            return this.getPreflightAcknowledgement(existing.id)!;
+        }
+        const result = this.db.prepare(
+            `INSERT INTO preflight_acknowledgements
+                (node_id, stack_name, rule_id, service, reason, expiry_mode, expires_at,
+                 anchor_rendered_hash, anchor_image_ref, created_by, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+            ack.node_id, ack.stack_name, ack.rule_id, ack.service, ack.reason, ack.expiry_mode,
+            ack.expires_at, ack.anchor_rendered_hash, ack.anchor_image_ref, ack.created_by, ack.created_at,
+        );
+        return { ...ack, id: result.lastInsertRowid as number };
+    }
+
+    public deletePreflightAcknowledgement(id: number): boolean {
+        const result = this.db.prepare('DELETE FROM preflight_acknowledgements WHERE id = ?').run(id);
+        return result.changes > 0;
     }
 
     // --- Health Gate Runs ---
@@ -3315,6 +3409,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM preflight_findings WHERE run_id IN (SELECT id FROM preflight_runs WHERE node_id = ?)').run(id);
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_exposure WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM health_gate_runs WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
