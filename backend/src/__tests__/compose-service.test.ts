@@ -12,7 +12,7 @@ import type WebSocket from 'ws';
 
 const {
   mockSpawn,
-  mockGetContainersByStack, mockRemoveContainers, mockListContainers,
+  mockGetContainersByStack, mockGetLegacyOrphanContainersByStack, mockRemoveContainers, mockListContainers,
   mockContainerInspect, mockContainerLogs,
   mockGetRegistries, mockResolveDockerConfig,
   mockBackupStackFiles, mockRestoreStackFiles,
@@ -23,6 +23,7 @@ const {
 } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
+  mockGetLegacyOrphanContainersByStack: vi.fn().mockResolvedValue([]),
   mockRemoveContainers: vi.fn().mockResolvedValue([]),
   mockListContainers: vi.fn().mockResolvedValue([]),
   mockContainerInspect: vi.fn().mockResolvedValue({ State: { ExitCode: 0 } }),
@@ -73,6 +74,7 @@ vi.mock('../services/DockerController', () => ({
   default: {
     getInstance: () => ({
       getContainersByStack: mockGetContainersByStack,
+      getLegacyOrphanContainersByStack: mockGetLegacyOrphanContainersByStack,
       removeContainers: mockRemoveContainers,
       pruneDanglingImages: mockPruneDanglingImages,
       getDocker: () => ({
@@ -580,7 +582,7 @@ describe('ComposeService - deployStack', () => {
 
     const error = await result;
     expect(error?.message).toContain('1:1');
-    expect(mockGetContainersByStack).not.toHaveBeenCalled();
+    expect(mockGetLegacyOrphanContainersByStack).not.toHaveBeenCalled();
     expect(mockRemoveContainers).not.toHaveBeenCalled();
     expect(mockSpawn).toHaveBeenCalledTimes(1);
   });
@@ -621,7 +623,47 @@ describe('ComposeService - deployStack', () => {
     await vi.advanceTimersByTimeAsync(3100);
 
     await expect(promise).resolves.toBeUndefined();
-    expect(mockGetContainersByStack).toHaveBeenCalledWith('my-stack');
+    expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
+  });
+
+  it('does not remove compose-managed containers before deploy (#1565)', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetLegacyOrphanContainersByStack.mockResolvedValue([]);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.deployStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
+    expect(mockRemoveContainers).not.toHaveBeenCalled();
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', 'up', '-d', '--remove-orphans'],
+      expect.any(Object),
+    );
+  });
+
+  it('removes legacy orphan containers when compose ps is empty', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetLegacyOrphanContainersByStack.mockResolvedValue([
+      { Id: 'legacy-c1' },
+      { Id: 'legacy-c2' },
+    ]);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.deployStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(mockRemoveContainers).toHaveBeenCalledWith(['legacy-c1', 'legacy-c2']);
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'docker',
+      ['compose', 'up', '-d', '--remove-orphans'],
+      expect.any(Object),
+    );
   });
 
   it('runs docker compose up -d --remove-orphans', async () => {
@@ -664,7 +706,7 @@ describe('ComposeService - deployStack', () => {
       'Atomic deployment backup failed',
     );
     expect(mockSpawn).not.toHaveBeenCalled();
-    expect(mockGetContainersByStack).not.toHaveBeenCalled();
+    expect(mockGetLegacyOrphanContainersByStack).not.toHaveBeenCalled();
   });
 
   it('throws sanitized CONTAINER_CRASHED when exited container has non-zero exit code', async () => {

@@ -31,6 +31,7 @@ vi.mock('../services/NodeRegistry', () => ({
     getInstance: () => ({
       getDocker: () => mockDocker,
       getDefaultNodeId: () => 1,
+      getComposeDir: () => '/test/compose',
     }),
   },
 }));
@@ -1565,5 +1566,46 @@ describe('DockerController - getBulkStackStatuses partial status', () => {
     expect(result['empty-stack'].status).toBe('unknown');
     expect(result['empty-stack'].running).toBeUndefined();
     expect(result['empty-stack'].total).toBeUndefined();
+  });
+});
+
+// ── getLegacyOrphanContainersByStack (#1565) ───────────────────────────
+
+describe('DockerController - getLegacyOrphanContainersByStack', () => {
+  it('returns [] when compose ps already manages containers', async () => {
+    const dc = DockerController.getInstance(1);
+    const fetchSpy = vi.spyOn(dc as unknown as { fetchComposePsContainers: (...a: unknown[]) => Promise<unknown[]> }, 'fetchComposePsContainers')
+      .mockResolvedValue([{ ID: 'managed-c1', Name: 'web-1' }]);
+    const fallbackSpy = vi.spyOn(dc as unknown as { smartFallback: (...a: unknown[]) => Promise<unknown[]> }, 'smartFallback')
+      .mockResolvedValue([{ Id: 'legacy-c1' }]);
+
+    await expect(dc.getLegacyOrphanContainersByStack('my-stack')).resolves.toEqual([]);
+    expect(fallbackSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+    fallbackSpy.mockRestore();
+  });
+
+  it('returns legacy orphan IDs when compose ps is empty', async () => {
+    const dc = DockerController.getInstance(1);
+    const fetchSpy = vi.spyOn(dc as unknown as { fetchComposePsContainers: (...a: unknown[]) => Promise<unknown[]> }, 'fetchComposePsContainers')
+      .mockResolvedValue([]);
+    const fallbackSpy = vi.spyOn(dc as unknown as { smartFallback: (...a: unknown[]) => Promise<unknown[]> }, 'smartFallback')
+      .mockResolvedValue([{ Id: 'legacy-c1' }, { Id: '' }, {}]);
+
+    await expect(dc.getLegacyOrphanContainersByStack('my-stack')).resolves.toEqual([{ Id: 'legacy-c1' }]);
+    fetchSpy.mockRestore();
+    fallbackSpy.mockRestore();
+  });
+
+  it('falls back to legacy orphan lookup when compose ps throws', async () => {
+    const dc = DockerController.getInstance(1);
+    const fetchSpy = vi.spyOn(dc as unknown as { fetchComposePsContainers: (...a: unknown[]) => Promise<unknown[]> }, 'fetchComposePsContainers')
+      .mockRejectedValue(new Error('compose ps failed'));
+    const fallbackSpy = vi.spyOn(dc as unknown as { smartFallback: (...a: unknown[]) => Promise<unknown[]> }, 'smartFallback')
+      .mockResolvedValue([{ Id: 'legacy-c2' }]);
+
+    await expect(dc.getLegacyOrphanContainersByStack('my-stack')).resolves.toEqual([{ Id: 'legacy-c2' }]);
+    fetchSpy.mockRestore();
+    fallbackSpy.mockRestore();
   });
 });
