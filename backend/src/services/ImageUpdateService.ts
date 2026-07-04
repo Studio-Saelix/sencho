@@ -165,6 +165,83 @@ export async function loadEffectiveServiceImages(nodeId: number, stackName: stri
     return extractServiceImagesFromRenderedConfig(rendered.rendered);
 }
 
+/** True when a service declares a non-empty `build:` section (string path or object). */
+function serviceHasBuild(build: unknown): boolean {
+    if (build === undefined || build === null) return false;
+    if (typeof build === 'string') return build.trim().length > 0;
+    if (typeof build === 'object') return Object.keys(build as Record<string, unknown>).length > 0;
+    return false;
+}
+
+/** Service names that declare `build:` in raw compose YAML (single-file path). */
+export function extractBuildServicesFromCompose(yamlContent: string): string[] {
+    let parsed: Record<string, unknown>;
+    try {
+        parsed = YAML.parse(yamlContent) as Record<string, unknown>;
+    } catch {
+        return [];
+    }
+    if (!parsed?.services || typeof parsed.services !== 'object') return [];
+
+    const out: string[] = [];
+    for (const [service, svc] of Object.entries(parsed.services as Record<string, unknown>)) {
+        if (!svc || typeof svc !== 'object') continue;
+        if (serviceHasBuild((svc as Record<string, unknown>).build)) {
+            out.push(service);
+        }
+    }
+    return out;
+}
+
+/**
+ * Service names with a `build:` section from a `docker compose config --format json`
+ * render (merged + interpolated; no env substitution needed).
+ */
+export function extractBuildServicesFromRenderedConfig(renderedJson: string): string[] {
+    let parsed: { services?: Record<string, { build?: unknown }> };
+    try {
+        parsed = JSON.parse(renderedJson);
+    } catch {
+        return [];
+    }
+    if (!parsed?.services || typeof parsed.services !== 'object') return [];
+    const out: string[] = [];
+    for (const [service, svc] of Object.entries(parsed.services)) {
+        if (serviceHasBuild(svc?.build)) out.push(service);
+    }
+    return out;
+}
+
+/**
+ * Service names that use `build:` for a stack. For a Git stack with an applied
+ * multi-file / context-dir spec, reads the effective merged model so override-only
+ * build services are included. Returns null for single-file stacks (and on render
+ * failure) so the caller falls back to the root-compose parse.
+ */
+export async function loadEffectiveBuildServices(nodeId: number, stackName: string): Promise<string[] | null> {
+    const spec = DatabaseService.getInstance().getGitSource(stackName)?.applied_deploy_spec;
+    if (!spec || spec.files.length === 0) return null;
+    const { ComposeService } = await import('./ComposeService');
+    const rendered = await ComposeService.getInstance(nodeId).renderConfig(stackName);
+    if (!rendered.rendered) {
+        console.warn(
+            `[ImageUpdateService] effective build render failed for "${sanitizeForLog(stackName)}" (code=${rendered.code} timedOut=${rendered.timedOut}); falling back to root-compose parse: ${sanitizeForLog(rendered.stderr)}`,
+        );
+        return null;
+    }
+    return extractBuildServicesFromRenderedConfig(rendered.rendered);
+}
+
+/** Resolved build-service names for any stack (effective model or root compose). */
+export async function loadStackBuildServices(nodeId: number, stackName: string): Promise<string[]> {
+    const effective = await loadEffectiveBuildServices(nodeId, stackName);
+    if (effective) return effective;
+
+    const fs = FileSystemService.getInstance(nodeId);
+    const composeContent = await fs.getStackContent(stackName);
+    return extractBuildServicesFromCompose(composeContent);
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export class ImageUpdateService {

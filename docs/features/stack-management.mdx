@@ -269,7 +269,9 @@ Each row maps one compose concept to the value it resolves to right now:
 
 A footer card under the rows surfaces the first published port as a clickable **EXPOSED** link, so you can jump straight to the running app.
 
-If an image update is available for the primary service, an inline banner appears below the rows with the version bump (`27.1.4 → 27.1.5`), risk classification (`safe · patch`, `minor`, or `major · review required`), and an **apply** button. Major bumps show a rose banner and require explicit review before applying.
+If an image update is available for the primary service, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows. Registry updates show the version bump (`27.1.4 → 27.1.5`), risk classification (`safe · patch`, `minor`, or `major · review required`), and an **apply** button. Build-only stacks show **Rebuild available** with a **Rebuild & Update** button instead of a version bump. Mixed stacks (registry images plus local builds) show both signals. Major bumps show a rose banner and require explicit review before applying.
+
+Rebuilds can take longer than a registry pull and depend on the local Dockerfile context, network access, and base-image availability. Atomic rollback restores compose and env files only; previously built image layers are not rolled back automatically.
 
 ### Activity
 
@@ -344,7 +346,7 @@ The stack header groups actions by frequency of use. The most common action is t
 |-----------|--------|---------|--------------|
 | Primary | **Restart** | `docker compose restart` | Restarts all containers in the stack. |
 | Secondary | **Stop** | `docker compose stop` | Stops containers without removing them. State is preserved. |
-| Secondary | **Update** | `docker compose pull` + `up -d` | Pulls the latest image tags and recreates containers. |
+| Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. |
 | Overflow | **Rollback** | Restores backup | Reverts compose and env files to the pre-deploy snapshot and redeploys. Only shown when a backup exists. |
 | Overflow | **Scan config** | Trivy config scan | Scans the compose file for misconfigurations (admin role). |
 | Overflow | **Delete** | `down --volumes` + removes files | Stops and removes containers and volumes, then deletes the stack directory. |
@@ -354,7 +356,7 @@ The stack header groups actions by frequency of use. The most common action is t
 | Placement | Button | Command | What it does |
 |-----------|--------|---------|--------------|
 | Primary | **Start** | `docker compose up -d` | Starts the stack. |
-| Secondary | **Update** | `docker compose pull` + `up -d` | Pulls the latest image tags and recreates containers. |
+| Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. |
 | Overflow | **Delete** | Removes files | Deletes the stack directory. |
 
 <Warning>

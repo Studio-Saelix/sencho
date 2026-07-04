@@ -12,6 +12,7 @@ import {
   aggregateVerdict,
   backupSlotSignal,
   buildRollbackItems,
+  buildServicesSignal,
   containersSignal,
   diskSignal,
   driftSignal,
@@ -109,6 +110,7 @@ export class UpdateGuardService {
       containersSignal(containers),
       healthchecksSignal(containers),
       updatePreviewSignal(preview === 'error' ? 'error' : preview.summary),
+      buildServicesSignal(preview === 'error' ? 'error' : preview.build_services),
       backupSlotSignal(backup, now),
       diskSignal(typeof disk === 'number' ? { usePercent: disk, limitPercent } : 'error'),
     ];

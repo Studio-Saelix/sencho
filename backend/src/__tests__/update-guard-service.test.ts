@@ -135,7 +135,7 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
 
     expect(report.stack).toBe('app');
     expect(report.signals.map(s => s.id)).toEqual([
-      'preflight', 'drift', 'containers', 'healthchecks', 'update_preview', 'backup_slot', 'disk',
+      'preflight', 'drift', 'containers', 'healthchecks', 'update_preview', 'build_services', 'backup_slot', 'disk',
     ]);
     // The container probe failure is the verdict-affecting unknown.
     expect(report.verdict).toBe('unknown');
@@ -149,9 +149,11 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
     mockGetPreview.mockResolvedValue({
       stack_name: 'app',
       images: [],
+      build_services: [],
       summary: {
         has_update: true, primary_image: 'nginx', current_tag: '1.27.0', next_tag: '1.27.1',
         semver_bump: 'patch', update_kind: 'tag', blocked: false, blocked_reason: null,
+        has_build_services: false, rebuild_available: false,
       },
       rollback_target: 'nginx:1.27.0',
       changelog: null,
@@ -168,9 +170,11 @@ describe('UpdateGuardService.computeRollbackReadiness moving-tag wiring', () => 
   const preview = (images: Array<{ current_tag: string }>) => ({
     stack_name: 'app',
     images,
+    build_services: [],
     summary: {
       has_update: false, primary_image: 'app', current_tag: images[0]?.current_tag ?? null,
       next_tag: null, semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
+      has_build_services: false, rebuild_available: false,
     },
     rollback_target: 'app:1.2.3',
     changelog: null,

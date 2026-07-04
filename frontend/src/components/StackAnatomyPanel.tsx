@@ -39,6 +39,7 @@ interface StackAnatomyPanelProps {
 }
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
+type UpdateKind = 'tag' | 'digest' | 'none';
 
 interface UpdatePreviewSummary {
   has_update: boolean;
@@ -46,12 +47,16 @@ interface UpdatePreviewSummary {
   current_tag: string | null;
   next_tag: string | null;
   semver_bump: SemverBump;
+  update_kind?: UpdateKind;
   blocked: boolean;
   blocked_reason: string | null;
+  has_build_services: boolean;
+  rebuild_available: boolean;
 }
 
 interface UpdatePreview {
   summary: UpdatePreviewSummary;
+  build_services?: string[];
   changelog: string | null;
 }
 
@@ -334,6 +339,10 @@ export default function StackAnatomyPanel({
 
   const bump = updatePreview?.summary.semver_bump ?? 'none';
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
+  const hasBuildServices = Boolean(updatePreview?.summary.has_build_services);
+  const rebuildAvailable = Boolean(updatePreview?.summary.rebuild_available);
+  const showUpdateBanner = hasUpdate || rebuildAvailable;
+  const updateKind = updatePreview?.summary.update_kind ?? 'none';
   const blocked = Boolean(updatePreview?.summary.blocked);
   const bannerSeverity: 'danger' | 'warn' | 'ok' = bump === 'major' || blocked
     ? 'danger'
@@ -351,13 +360,29 @@ export default function StackAnatomyPanel({
   const bumpLabel = bump === 'none' || bump === 'unknown' ? '' : `${bump}`;
   const bannerLeadIn = blocked
     ? 'review required'
-    : bump === 'patch'
-      ? 'safe to apply'
-      : bump === 'minor'
-        ? 'review recommended'
-        : bump === 'major'
-          ? 'breaking changes possible'
-          : '';
+    : hasUpdate && updateKind === 'digest'
+      ? 'same-tag digest rebuild'
+      : hasUpdate && hasBuildServices
+        ? 'registry update + local rebuild'
+        : rebuildAvailable && !hasUpdate
+          ? 'local build / rebuild required'
+          : bump === 'patch'
+            ? 'safe to apply'
+            : bump === 'minor'
+              ? 'review recommended'
+              : bump === 'major'
+                ? 'breaking changes possible'
+                : '';
+  const buildServiceNames = updatePreview?.build_services ?? [];
+  const buildHint = hasBuildServices
+    ? `Rebuilds ${buildServiceNames.length} local build service${buildServiceNames.length === 1 ? '' : 's'} from Dockerfile context; may take longer and needs network access for base images.`
+    : '';
+  const gitRebuildHint = hasBuildServices && activeGitSource
+    ? 'After applying Git source changes, use Rebuild & Update to deploy the updated source.'
+    : '';
+  const applyLabel = hasBuildServices
+    ? (applying ? 'rebuilding...' : 'Rebuild & Update')
+    : (applying ? 'applying...' : 'apply');
 
   return (
     <div className="flex h-full min-h-0 flex-col rounded-xl border border-muted bg-card/40">
@@ -528,13 +553,13 @@ export default function StackAnatomyPanel({
             </Row>
           </>
         )}
-        {hasUpdate && updatePreview && (
+        {showUpdateBanner && updatePreview && (
           <div data-testid="update-available-banner" className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="font-mono text-xs uppercase tracking-wide">
-                  Update available
-                  {updatePreview.summary.current_tag && updatePreview.summary.next_tag && (
+                  {hasBuildServices && !hasUpdate ? 'Rebuild available' : 'Update available'}
+                  {updatePreview.summary.current_tag && updatePreview.summary.next_tag && hasUpdate && (
                     <span className="text-foreground">
                       {' · '}
                       <span className="text-stat-subtitle">{updatePreview.summary.current_tag}</span>
@@ -547,6 +572,8 @@ export default function StackAnatomyPanel({
                   {[
                     bumpLabel,
                     bannerLeadIn,
+                    buildHint,
+                    gitRebuildHint,
                     updatePreview.changelog ? updatePreview.changelog.split(/[.\n]/)[0] : '',
                   ].filter(Boolean).join(' · ')}
                 </div>
@@ -564,7 +591,7 @@ export default function StackAnatomyPanel({
                   onClick={onApplyUpdate}
                 >
                   <Rocket className={cn('h-3 w-3', applying && 'animate-pulse')} strokeWidth={1.5} />
-                  {applying ? 'applying...' : 'apply'}
+                  {applyLabel}
                 </Button>
               )}
             </div>
