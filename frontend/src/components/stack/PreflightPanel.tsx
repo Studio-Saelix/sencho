@@ -11,6 +11,7 @@ import { useNodes } from '@/context/NodeContext';
 import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
+import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 
 type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
@@ -47,6 +48,7 @@ interface PreflightReport {
 }
 
 const LABEL_CLASS = 'font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle';
+const MODAL_FIELD_LABEL = LABEL_CLASS;
 const ACTION_CLASS =
   'inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors disabled:opacity-40';
 const CARD_CLASS = 'rounded-lg border px-3 py-2.5';
@@ -91,10 +93,16 @@ function summaryMeta(report: PreflightReport): { label: string; icon: LucideIcon
   return { label: report.activeCount === 0 ? 'acknowledged' : meta.label, icon: report.activeCount === 0 ? ShieldCheck : meta.icon, tone: report.activeCount === 0 ? 'border-muted bg-card/40 text-stat-subtitle' : meta.tone, line };
 }
 
-function expiryOptions(finding: PreflightFinding): PreflightAckExpiryMode[] {
-  const base: PreflightAckExpiryMode[] = ['forever', 'until_compose_change', 'days'];
-  if (finding.service) base.push('until_image_change');
-  return base;
+function expiryComboboxOptions(finding: PreflightFinding): ComboboxOption[] {
+  const options: ComboboxOption[] = [
+    { value: 'forever', label: EXPIRY_LABELS.forever },
+    { value: 'until_compose_change', label: EXPIRY_LABELS.until_compose_change },
+    { value: 'days', label: EXPIRY_LABELS.days },
+  ];
+  if (finding.service) {
+    options.push({ value: 'until_image_change', label: EXPIRY_LABELS.until_image_change });
+  }
+  return options;
 }
 
 function FindingRow({
@@ -196,25 +204,20 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
   const [ackExpiry, setAckExpiry] = useState<PreflightAckExpiryMode>('forever');
   const [ackSaving, setAckSaving] = useState(false);
   const [clearTarget, setClearTarget] = useState<PreflightFinding | null>(null);
+  const [clearing, setClearing] = useState(false);
   const [ackSectionOpen, setAckSectionOpen] = useState(false);
 
-  const loadReport = async () => {
-    setLoading(true);
-    setLoadError(false);
+  const refreshReport = async () => {
     try {
       const res = await apiFetch(`/stacks/${stackName}/preflight`);
       if (!res.ok) {
-        setLoadError(true);
-        toast.error('Failed to load the preflight report.');
+        toast.error('Failed to refresh the preflight report.');
         return;
       }
       setReport((await res.json()) as PreflightReport);
       setLoadError(false);
     } catch {
-      setLoadError(true);
-      toast.error('Failed to load the preflight report.');
-    } finally {
-      setLoading(false);
+      toast.error('Failed to refresh the preflight report.');
     }
   };
 
@@ -308,7 +311,7 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
       }
       setAckOpen(false);
       setAckTarget(null);
-      await loadReport();
+      await refreshReport();
       toast.success('Finding acknowledged.');
     } catch {
       toast.error('Failed to acknowledge the finding.');
@@ -319,6 +322,7 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
 
   const confirmClear = async () => {
     if (!clearTarget?.acknowledgementId) return;
+    setClearing(true);
     try {
       const res = await apiFetch(
         `/stacks/${stackName}/preflight/acknowledgements/${clearTarget.acknowledgementId}`,
@@ -329,12 +333,16 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
         return;
       }
       setClearTarget(null);
-      await loadReport();
+      await refreshReport();
       toast.success('Acknowledgement cleared.');
     } catch {
       toast.error('Failed to clear the acknowledgement.');
+    } finally {
+      setClearing(false);
     }
   };
+
+  const ackExpiryOptions = ackTarget ? expiryComboboxOptions(ackTarget) : [{ value: 'forever', label: EXPIRY_LABELS.forever }];
 
   return (
     <div data-testid="preflight-panel" className="flex-1 min-h-0 overflow-y-auto px-3 py-3 flex flex-col gap-4">
@@ -434,7 +442,7 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
                 acknowledged · {acknowledgedFindings.length}
               </button>
               {ackSectionOpen && (
-                <div className="rounded-lg border border-muted bg-card/30 px-3 py-1">
+                <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
                   {acknowledgedFindings.map((f, i) => (
                     <AcknowledgedRow
                       key={`ack-${f.acknowledgementId ?? i}`}
@@ -454,40 +462,46 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
         <ModalHeader
           kicker="COMPOSE DOCTOR · ACKNOWLEDGE"
           title="Accept this finding"
-          description="Acknowledged findings stay visible here but no longer count toward the active warning total or update readiness."
+          description="Accept a Compose Doctor finding for this stack."
         />
         <ModalBody>
           {ackTarget && (
-            <div className="rounded-md border border-muted bg-card/40 px-3 py-2 text-[12px] text-foreground/80">
+            <div className="rounded-md border border-card-border bg-card/40 px-3 py-2 font-mono text-[12px] text-foreground/80">
               {ackTarget.title}
               {ackTarget.service ? ` · ${ackTarget.service}` : ''}
             </div>
           )}
           <div className="space-y-2">
-            <Label htmlFor="preflight-ack-reason">Note (optional)</Label>
+            <Label htmlFor="preflight-ack-reason" className={MODAL_FIELD_LABEL}>Note (optional)</Label>
             <textarea
               id="preflight-ack-reason"
-              className="flex min-h-[72px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              className="flex min-h-[72px] w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-brand/50"
               placeholder="Why is this finding acceptable for this stack?"
               value={ackReason}
               onChange={(e) => setAckReason(e.target.value)}
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="preflight-ack-expiry">Show again when</Label>
-            <select
+            <Label htmlFor="preflight-ack-expiry" className={MODAL_FIELD_LABEL}>Show again when</Label>
+            <Combobox
               id="preflight-ack-expiry"
+              options={ackExpiryOptions}
               value={ackExpiry}
-              onChange={(e) => setAckExpiry(e.target.value as PreflightAckExpiryMode)}
-              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              {(ackTarget ? expiryOptions(ackTarget) : (['forever'] as const)).map((mode: PreflightAckExpiryMode) => (
-                <option key={mode} value={mode}>{EXPIRY_LABELS[mode]}</option>
-              ))}
-            </select>
+              onValueChange={(value) => setAckExpiry(value as PreflightAckExpiryMode)}
+              placeholder="Select expiry"
+              disabled={ackSaving}
+              className="w-full"
+            />
+            {ackExpiry === 'until_image_change' && (
+              <p className="text-[11px] leading-relaxed text-stat-subtitle">
+                Re-surfaces when the service image reference changes in the effective model, not on silent digest re-pulls.
+              </p>
+            )}
           </div>
         </ModalBody>
         <ModalFooter
+          hint="SHOW AGAIN"
+          hintAccent={EXPIRY_LABELS[ackExpiry]}
           secondary={(
             <Button variant="outline" size="sm" onClick={() => setAckOpen(false)} disabled={ackSaving}>
               Cancel
@@ -503,11 +517,13 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
 
       <ConfirmModal
         open={clearTarget !== null}
-        onOpenChange={(open) => !open && setClearTarget(null)}
-        variant="destructive"
-        kicker="COMPOSE DOCTOR · CLEAR ACK"
+        onOpenChange={(open) => { if (!open) setClearTarget(null); }}
+        kicker="COMPOSE DOCTOR · CLEAR"
         title="Clear acknowledgement"
+        description="Clear a Compose Doctor acknowledgement for this stack."
+        hint="RESTORES active finding"
         confirmLabel="Clear"
+        confirming={clearing}
         onConfirm={confirmClear}
       >
         <p className="text-sm text-stat-subtitle">
