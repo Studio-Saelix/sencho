@@ -435,7 +435,7 @@ export function EditorView(props: EditorViewProps) {
                             <div className="flex items-center gap-4">
                                 <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'compose' | 'env' | 'files')}>
                                     <TabsList>
-                                        <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+                                        <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                                             <TabsHighlightItem value="compose">
                                                 <TabsTrigger value="compose">compose.yaml</TabsTrigger>
                                             </TabsHighlightItem>

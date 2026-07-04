@@ -834,7 +834,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 ) : (
                 <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3">
                     <TabsList className="grid grid-cols-4 w-full md:w-[680px] h-9 gap-1 p-0">
-                        <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+                        <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                             {(['images', 'volumes', 'networks'] as const).map(tab => (
                                 <TabsHighlightItem key={tab} value={tab}>
                                     <TabsTrigger value={tab} className="capitalize text-xs">

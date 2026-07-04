@@ -157,7 +157,7 @@ export function NotificationsSection() {
         <div className="flex flex-col gap-6">
             <Tabs value={notifTab} onValueChange={(v) => setNotifTab(v as 'discord' | 'slack' | 'webhook')} className="w-full">
                 <TabsList className="w-full mb-4 grid grid-cols-3">
-                    <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+                    <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                         <TabsHighlightItem value="discord">
                             <TabsTrigger value="discord">Discord</TabsTrigger>
                         </TabsHighlightItem>

@@ -110,7 +110,7 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, fleetUpdate
                     {/* Flatten the list's own pill band so the tabs sit directly in
                         the single full-width band, not a nested second band. */}
                     <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
-                        <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+                        <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                             <TabsHighlightItem value="overview">
                                 <TabsTrigger value="overview">Overview</TabsTrigger>
                             </TabsHighlightItem>

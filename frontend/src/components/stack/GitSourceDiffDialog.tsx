@@ -101,7 +101,7 @@ export function GitSourceDiffDialog({
           {envAvailable && (
             <Tabs value={diffTab} onValueChange={(v) => setDiffTab(v as 'compose' | 'env')}>
               <TabsList>
-                <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+                <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                   <TabsHighlightItem value="compose">
                     <TabsTrigger value="compose">Compose</TabsTrigger>
                   </TabsHighlightItem>

@@ -433,7 +433,7 @@ export function NotificationRoutingSection() {
                                 <Label>Channel</Label>
                                 <Tabs value={formChannelType} onValueChange={(v) => setFormChannelType(v as 'discord' | 'slack' | 'webhook')}>
                                     <TabsList className="w-full grid grid-cols-3">
-                                        <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+                                        <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                                             <TabsHighlightItem value="discord">
                                                 <TabsTrigger value="discord">Discord</TabsTrigger>
                                             </TabsHighlightItem>
