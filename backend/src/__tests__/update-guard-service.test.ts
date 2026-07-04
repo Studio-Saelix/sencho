@@ -142,7 +142,7 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
   });
 
   it('produces a ready verdict from healthy collaborator outputs', async () => {
-    mockGetLatest.mockReturnValue({ status: 'pass' });
+    mockGetLatest.mockReturnValue({ activeStatus: 'pass' });
     mockGetOpenDriftFindings.mockReturnValue([]);
     mockListContainers.mockResolvedValue([{ Id: 'aaa', Names: ['/app-web-1'], State: 'running' }]);
     mockGetContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue(inspectResult()) });
