@@ -8,6 +8,8 @@ import {
   readEnvFileKeys,
   parseUnsetEnvVars,
   parseMissingRequiredVars,
+  parseBareDollarRefs,
+  parseIntentionalBareDollarRefs,
 } from '../helpers/envVarParse';
 
 describe('parseInterpolationRefs', () => {
@@ -33,6 +35,21 @@ describe('parseInterpolationRefs', () => {
 
   it('skips the $${ESCAPED} literal', () => {
     expect(parseInterpolationRefs('x: $${ESCAPED}').map(r => r.name)).not.toContain('ESCAPED');
+  });
+
+  it('extracts bare $VAR refs but skips $$ escapes and ${VAR} forms', () => {
+    expect(parseBareDollarRefs('host: $DB_HOST and $${LIT} and ${BRACED}')).toEqual(['DB_HOST']);
+  });
+
+  it('keeps intentional bare refs for self-refs and whole-value refs only', () => {
+    const src = [
+      '- TOKEN=$TOKEN',
+      '- FOO=$BAR',
+      '- EXAMPLE_AUTH_HASH=$2b$10$E6SDEbshpc$vCSrREDACTED',
+      'EXAMPLE_AUTH_HASH: $2b$10$E6SDEbshpc$vCSrREDACTED',
+      'command: echo $HELLO',
+    ].join('\n');
+    expect(parseIntentionalBareDollarRefs(src).sort()).toEqual(['BAR', 'HELLO', 'TOKEN']);
   });
 
   it('merges flags across repeated references of one name', () => {
