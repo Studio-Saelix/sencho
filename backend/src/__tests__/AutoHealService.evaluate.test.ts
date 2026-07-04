@@ -63,6 +63,15 @@ afterAll(() => {
     cleanupTestDb(tmpDir);
 });
 
+/** Insert a second local node via raw SQL, bypassing the addNode singleton guard. */
+function insertLegacyLocal(name: string): number {
+    const db = DatabaseService.getInstance().getDb();
+    const result = db.prepare(
+        "INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at) VALUES (?, 'local', ?, 0, 'online', ?)"
+    ).run(name, process.env.COMPOSE_DIR ?? '', Date.now());
+    return result.lastInsertRowid as number;
+}
+
 describe('AutoHealService.evaluate', () => {
     it('evaluates existing policies on the Community tier (no paid gate)', async () => {
         const db = DatabaseService.getInstance();
@@ -318,14 +327,7 @@ describe('AutoHealService.evaluate', () => {
 
     it('evaluates only policies scoped to each local node', async () => {
         const db = DatabaseService.getInstance();
-        const secondNodeId = db.addNode({
-            name: 'second-local',
-            type: 'local',
-            compose_dir: process.env.COMPOSE_DIR ?? '',
-            is_default: false,
-            api_url: '',
-            api_token: '',
-        });
+        const secondNodeId = insertLegacyLocal('second-local');
         makePolicy(db, { node_id: secondNodeId, stack_name: 'second-stack' });
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
         const getAllContainers = vi.fn().mockResolvedValue([]);
@@ -341,14 +343,7 @@ describe('AutoHealService.evaluate', () => {
 
     it('keeps restart rate-limit state isolated by node while pruning', async () => {
         const db = DatabaseService.getInstance();
-        const secondNodeId = db.addNode({
-            name: 'rate-limit-second-local',
-            type: 'local',
-            compose_dir: process.env.COMPOSE_DIR ?? '',
-            is_default: false,
-            api_url: '',
-            api_token: '',
-        });
+        const secondNodeId = insertLegacyLocal('rate-limit-second-local');
         const policy = makePolicy(db, { node_id: secondNodeId, stack_name: 'second-rate-stack' });
         vi.spyOn(DockerController, 'getInstance').mockReturnValue({
             getAllContainers: vi.fn().mockResolvedValue([]),

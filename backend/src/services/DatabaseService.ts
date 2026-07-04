@@ -1674,6 +1674,36 @@ export class DatabaseService {
                 'INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at) VALUES (?, ?, ?, ?, ?, ?)'
             ).run('Local', 'local', process.env.COMPOSE_DIR || '/app/compose', 1, 'online', Date.now());
         }
+
+        this.logLocalNodeWarnings();
+    }
+
+    /** Count nodes with type='local'. */
+    public getLocalNodeCount(): number {
+        const row = this.db.prepare("SELECT COUNT(*) as count FROM nodes WHERE type = 'local'").get() as { count: number };
+        return row.count;
+    }
+
+    /**
+     * Log warnings when the local-node count is not exactly one. Extracted as a
+     * public method so tests can drive it against known database states without
+     * re-running the full schema migration.
+     */
+    public logLocalNodeWarnings(): void {
+        const count = this.getLocalNodeCount();
+        if (count > 1) {
+            console.warn(
+                `[Startup] Found ${count} local nodes (expected 1). ` +
+                'Extra local nodes can be removed in Settings → Nodes. ' +
+                'Deleting a local node removes its schedules, labels, dossiers, ' +
+                'and other node-scoped data; containers on the host are not affected.'
+            );
+        } else if (count === 0) {
+            console.warn(
+                '[Startup] No local node found. ' +
+                'Create one in Settings → Nodes to manage this instance\'s Docker engine.'
+            );
+        }
     }
 
     private migrateAdminToUsersTable(): void {
@@ -3247,30 +3277,48 @@ export class DatabaseService {
     }
 
     public addNode(node: Omit<Node, 'id' | 'status' | 'created_at' | 'mode' | 'cordoned' | 'cordoned_at' | 'cordoned_reason'> & { mode?: NodeMode }): number {
-        if (node.is_default) {
-            this.db.prepare('UPDATE nodes SET is_default = 0').run();
+        const isLocal = node.type === 'local';
+        // Guard against duplicate local nodes before any mutation so a throw
+        // cannot leave the table in a broken state (e.g. default cleared).
+        if (isLocal && this.getLocalNodeCount() > 0) {
+            throw new Error('A local node already exists. Only one local node is allowed per instance.');
         }
-        const crypto = CryptoService.getInstance();
-        const stmt = this.db.prepare(
-            'INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at, api_url, api_token, mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        );
-        const result = stmt.run(
-            node.name,
-            node.type,
-            node.compose_dir || '/app/compose',
-            node.is_default ? 1 : 0,
-            'unknown',
-            Date.now(),
-            node.api_url || '',
-            node.api_token ? crypto.encrypt(node.api_token) : '',
-            node.mode || 'proxy'
-        );
+
+        // When creating a local node and none exists (zero-local recovery),
+        // make it the default so documentation remains accurate.
+        const shouldBeDefault = node.is_default || isLocal;
+
+        const runInsert = () => {
+            if (shouldBeDefault) {
+                this.db.prepare('UPDATE nodes SET is_default = 0').run();
+            }
+            const crypto = CryptoService.getInstance();
+            const stmt = this.db.prepare(
+                'INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at, api_url, api_token, mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            );
+            return stmt.run(
+                node.name,
+                node.type,
+                node.compose_dir || '/app/compose',
+                shouldBeDefault ? 1 : 0,
+                'unknown',
+                Date.now(),
+                node.api_url || '',
+                node.api_token ? crypto.encrypt(node.api_token) : '',
+                node.mode || 'proxy'
+            );
+        };
+        const result = this.db.transaction(runInsert)();
         return result.lastInsertRowid as number;
     }
 
     public updateNode(id: number, updates: Partial<Omit<Node, 'id' | 'created_at'>>): void {
         const node = this.getNode(id);
         if (!node) throw new Error(`Node with id ${id} not found`);
+
+        if (updates.type !== undefined && updates.type !== node.type) {
+            throw new Error('Node type cannot be changed after creation.');
+        }
 
         if (updates.is_default) {
             this.db.prepare('UPDATE nodes SET is_default = 0').run();
@@ -3301,6 +3349,10 @@ export class DatabaseService {
 
     public deleteNode(id: number): void {
         const node = this.getNode(id);
+        // Protect the last local node regardless of is_default flag.
+        if (node && node.type === 'local' && this.getLocalNodeCount() <= 1) {
+            throw new Error('Cannot delete the only local node. Each Sencho instance must retain its local identity.');
+        }
         if (node?.is_default) {
             throw new Error('Cannot delete the default node');
         }

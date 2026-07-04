@@ -275,40 +275,55 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
 
       <div className="space-y-2">
         <Label htmlFor="node-type">Type</Label>
-        <Select
-          value={formData.type}
-          onValueChange={(val) => {
-            const type = val as NodeFormData['type'];
-            const currentDefault = defaultComposeDir(formData.type, formData.mode);
-            setFormData({
-              ...formData,
-              type,
-              api_url: '',
-              api_token: '',
-              compose_dir: formData.compose_dir === currentDefault
-                ? defaultComposeDir(type, formData.mode)
-                : formData.compose_dir,
-            });
-          }}
-        >
-          <SelectTrigger id="node-type">
-            <SelectValue placeholder="Select type" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="local">
-              <div className="flex items-center gap-2">
-                <Monitor className="w-4 h-4" />
-                Local - Docker socket on this machine
-              </div>
-            </SelectItem>
-            <SelectItem value="remote">
-              <div className="flex items-center gap-2">
-                <Globe className="w-4 h-4" />
-                Remote - another Sencho instance
-              </div>
-            </SelectItem>
-          </SelectContent>
-        </Select>
+        {isEdit ? (
+          <div className="flex items-center gap-2 h-9 px-3 rounded-md border border-input bg-muted/50">
+            {formData.type === 'local' ? (
+              <><Monitor className="w-4 h-4 text-muted-foreground" /><span className="text-sm text-muted-foreground">Local</span></>
+            ) : (
+              <><Globe className="w-4 h-4 text-muted-foreground" /><span className="text-sm text-muted-foreground">Remote</span></>
+            )}
+          </div>
+        ) : (
+          <Select
+            value={formData.type}
+            onValueChange={(val) => {
+              const type = val as NodeFormData['type'];
+              const currentDefault = defaultComposeDir(formData.type, formData.mode);
+              setFormData({
+                ...formData,
+                type,
+                api_url: '',
+                api_token: '',
+                compose_dir: formData.compose_dir === currentDefault
+                  ? defaultComposeDir(type, formData.mode)
+                  : formData.compose_dir,
+              });
+            }}
+          >
+            <SelectTrigger id="node-type">
+              <SelectValue placeholder="Select type" />
+            </SelectTrigger>
+            <SelectContent>
+              {!nodes.some(n => n.type === 'local') && (
+                <SelectItem value="local">
+                  <div className="flex items-center gap-2">
+                    <Monitor className="w-4 h-4" />
+                    Local - Docker socket on this machine
+                  </div>
+                </SelectItem>
+              )}
+              <SelectItem value="remote">
+                <div className="flex items-center gap-2">
+                  <Globe className="w-4 h-4" />
+                  Remote - another Sencho instance
+                </div>
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        )}
+        {isEdit && (
+          <p className="text-xs text-muted-foreground">Node type cannot be changed after creation.</p>
+        )}
       </div>
 
       {formData.type === 'remote' && (
@@ -581,9 +596,15 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
         confirmLabel="Delete"
         onConfirm={handleDelete}
       >
-        <p className="text-sm text-stat-subtitle">
-          Removes <span className="font-medium text-stat-value">{deletingNode?.name}</span> from this console. The remote instance and its containers are not affected.
-        </p>
+        {deletingNode?.type === 'local' ? (
+          <p className="text-sm text-stat-subtitle">
+            Deleting local node <span className="font-medium text-stat-value">{deletingNode?.name}</span> removes its schedules, labels, dossiers, findings, and other node-scoped data. Containers and compose files on the host are <strong>not</strong> affected. This action cannot be undone.
+          </p>
+        ) : (
+          <p className="text-sm text-stat-subtitle">
+            Removes <span className="font-medium text-stat-value">{deletingNode?.name}</span> from this console. The remote instance and its containers are not affected.
+          </p>
+        )}
       </ConfirmModal>
     </>
   );

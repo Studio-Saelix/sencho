@@ -75,8 +75,9 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
     const { isAdmin, can } = useAuth();
     const { nodes: registryNodes } = useNodes();
     const registryNode = registryNodes.find(n => n.id === node.id);
+    const isLastLocal = registryNode?.type === 'local' && registryNodes.filter(n => n.type === 'local').length <= 1;
     const canEdit = Boolean(isAdmin && onEdit && registryNode);
-    const canDelete = Boolean(isAdmin && onDelete && registryNode && !registryNode.is_default);
+    const canDelete = Boolean(isAdmin && onDelete && registryNode && !registryNode.is_default && !isLastLocal);
     // Cordon is a paid feature AND requires node:manage, matching the backend guard
     // (requirePermission('node:manage','node',id) + requirePaid). Gating on tier
     // alone would surface the control to deployer/viewer/auditor users whose calls 403.

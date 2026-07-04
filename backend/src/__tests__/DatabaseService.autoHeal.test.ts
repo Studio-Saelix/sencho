@@ -40,6 +40,18 @@ afterAll(() => {
     cleanupTestDb(tmpDir);
 });
 
+/** Insert a second local node via raw SQL, bypassing the addNode singleton guard. */
+function insertLegacyLocal(name: string, isDefault = false): number {
+    const rawDb = db.getDb();
+    if (isDefault) {
+        rawDb.prepare('UPDATE nodes SET is_default = 0').run();
+    }
+    const result = rawDb.prepare(
+        "INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at) VALUES (?, 'local', ?, ?, 'online', ?)"
+    ).run(name, process.env.COMPOSE_DIR ?? '', isDefault ? 1 : 0, Date.now());
+    return result.lastInsertRowid as number;
+}
+
 describe('DatabaseService - auto-heal policy CRUD', () => {
     it('addAutoHealPolicy + getAutoHealPolicy round-trip preserves all fields', () => {
         const input = makePolicy({
@@ -111,14 +123,7 @@ describe('DatabaseService - auto-heal policy CRUD', () => {
 
     it('auto-heal node migration does not rewrite already-scoped node 1 policies', () => {
         const created = db.addAutoHealPolicy(makePolicy({ stack_name: 'migration-node-one', node_id: 1 }));
-        db.addNode({
-            name: 'new-default-node',
-            type: 'local',
-            compose_dir: process.env.COMPOSE_DIR ?? '',
-            is_default: true,
-            api_url: '',
-            api_token: '',
-        });
+        insertLegacyLocal('new-default-node', true);
 
         (db as any).migrateAutoHealNodeId();
 
@@ -128,14 +133,7 @@ describe('DatabaseService - auto-heal policy CRUD', () => {
     it('auto-heal node migration resumes backfill when the completion marker is missing', () => {
         db.updateGlobalSetting('migration_auto_heal_node_scope_v1', '');
         const created = db.addAutoHealPolicy(makePolicy({ stack_name: 'migration-partial', node_id: 1 }));
-        const newDefaultId = db.addNode({
-            name: 'partial-new-default-node',
-            type: 'local',
-            compose_dir: process.env.COMPOSE_DIR ?? '',
-            is_default: true,
-            api_url: '',
-            api_token: '',
-        });
+        const newDefaultId = insertLegacyLocal('partial-new-default-node', true);
 
         (db as any).migrateAutoHealNodeId();
 
