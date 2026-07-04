@@ -46,6 +46,15 @@ export interface StackMenuCtx {
   unpin: () => void;
   toggleLabel: (labelId: number) => void;
   createAndAssignLabel: (name: string, color: LabelColor) => Promise<void>;
+  canMuteNotifications: boolean;
+  muteStackAll: () => void;
+  muteStackDeploySuccess: () => void;
+  muteStackMonitor: () => void;
+  openStackMuteRules: () => void;
+  muteLabelAll: (labelId: number, labelName: string) => void;
+  muteLabelExternal: (labelId: number, labelName: string) => void;
+  muteLabelLowPriority: (labelId: number, labelName: string) => void;
+  openLabelMuteRules: (labelId: number, labelName: string) => void;
   openLabelManager: () => void;
   openScheduleTask: () => void;
 }

@@ -27,6 +27,8 @@ import {
     DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
+import { StackMuteSubmenu } from '@/components/mute/MuteMenuItems';
+import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import { Sparkline } from '../ui/sparkline';
 import { ImageSourceMenu } from '../ImageSourceMenu';
 import { cn } from '@/lib/utils';
@@ -129,6 +131,7 @@ export interface StackIdentityHeaderProps {
     rollbackStack: () => Promise<void>;
     scanStackConfig: () => Promise<void>;
     requestDeleteStack: () => void;
+    stackMuteActions?: ReturnType<typeof useStackMuteActions>;
 }
 
 // Breadcrumb + serif title + state pill + image ref + action bar. The action
@@ -154,6 +157,7 @@ export function StackIdentityHeader({
     rollbackStack,
     scanStackConfig,
     requestDeleteStack,
+    stackMuteActions,
 }: StackIdentityHeaderProps) {
     return (
         <div className="flex flex-col gap-3">
@@ -228,8 +232,9 @@ export function StackIdentityHeader({
                 const canDelete = can('stack:delete', 'stack', stackName);
                 const canRollback = canDeploy && backupInfo.exists;
                 const canScan = trivy.available && isAdmin;
+                const canMute = stackMuteActions?.canMute ?? false;
                 const hasOverflowExtras = canRollback || canScan;
-                const hasOverflow = hasOverflowExtras || canDelete;
+                const hasOverflow = hasOverflowExtras || canDelete || canMute;
                 if (!canDeploy && !hasOverflow) return null;
                 return (
                     <div className="flex items-center gap-2 flex-wrap">
@@ -287,7 +292,8 @@ export function StackIdentityHeader({
                                             {stackMisconfigScanning ? 'Scanning...' : 'Scan config'}
                                         </DropdownMenuItem>
                                     )}
-                                    {hasOverflowExtras && canDelete && <DropdownMenuSeparator />}
+                                    {stackMuteActions && <StackMuteSubmenu actions={stackMuteActions} />}
+                                    {(canRollback || canScan || stackMuteActions?.canMute) && canDelete && <DropdownMenuSeparator />}
                                     {canDelete && (
                                         <DropdownMenuItem
                                             className="text-destructive focus:text-destructive focus:bg-destructive/10"

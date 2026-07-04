@@ -12,6 +12,7 @@ import ResourcesView from '../ResourcesView';
 import HomeDashboard from '../HomeDashboard';
 import type { NotificationItem } from '../dashboard/types';
 import type { ScheduleTaskPrefill } from '../ScheduledOperationsView';
+import type { MuteRuleDraft } from '@/lib/muteRules';
 import type { ActiveView } from './hooks/useViewNavigationState';
 import type { SecurityTab, FleetTab } from '@/lib/events';
 
@@ -81,9 +82,12 @@ export interface ViewRouterProps {
     onClearScheduledOpsFilter: () => void;
     schedulePrefill: ScheduleTaskPrefill | null;
     onPrefillConsumed: () => void;
+    muteRulePrefill: MuteRuleDraft | null;
+    onMutePrefillConsumed: () => void;
     notifications: NotificationItem[];
     onNavigateToStack: (stackFile: string) => void;
     onOpenSettingsSection: (section: SectionId) => void;
+    onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
     onClearNotifications: () => void;
     securityTab: SecurityTab;
     onSecurityTabChange: (tab: SecurityTab) => void;
@@ -110,9 +114,12 @@ export function ViewRouter({
     onClearScheduledOpsFilter,
     schedulePrefill,
     onPrefillConsumed,
+    muteRulePrefill,
+    onMutePrefillConsumed,
     notifications,
     onNavigateToStack,
     onOpenSettingsSection,
+    onOpenMuteRulesWithPrefill,
     onClearNotifications,
     securityTab,
     onSecurityTabChange,
@@ -128,6 +135,9 @@ export function ViewRouter({
             <SettingsPage
                 currentSection={settingsSection}
                 onSectionChange={onSettingsSectionChange}
+                muteRulePrefill={muteRulePrefill}
+                onMutePrefillConsumed={onMutePrefillConsumed}
+                onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
             />
         );
     }
@@ -186,6 +196,7 @@ export function ViewRouter({
                         <FleetView
                       onNavigateToNode={onFleetNavigateToNode}
                       onOpenSettingsSection={onOpenSettingsSection}
+                      onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
                       fleetUpdatesIntent={fleetUpdatesIntent}
                       onFleetUpdatesIntentConsumed={onFleetUpdatesIntentConsumed}
                       fleetTab={fleetTab}

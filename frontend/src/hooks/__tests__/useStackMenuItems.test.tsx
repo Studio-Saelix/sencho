@@ -32,6 +32,15 @@ function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
     createAndAssignLabel: vi.fn(),
     openLabelManager: vi.fn(),
     openScheduleTask: vi.fn(),
+    canMuteNotifications: false,
+    muteStackAll: vi.fn(),
+    muteStackDeploySuccess: vi.fn(),
+    muteStackMonitor: vi.fn(),
+    openStackMuteRules: vi.fn(),
+    muteLabelAll: vi.fn(),
+    muteLabelExternal: vi.fn(),
+    muteLabelLowPriority: vi.fn(),
+    openLabelMuteRules: vi.fn(),
     ...overrides,
   };
 }
@@ -109,6 +118,25 @@ describe('useStackMenuItems', () => {
     const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isAdmin: false })));
     const lifecycle = result.current.find(g => g.id === 'lifecycle');
     expect(lifecycle?.items.some(i => i.id === 'schedule')).toBeFalsy();
+  });
+
+  it('includes Mute submenu in Inspect when canMuteNotifications', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ canMuteNotifications: true })));
+    const inspect = result.current.find(g => g.id === 'inspect')!;
+    const muteItem = inspect.items.find(i => i.id === 'mute');
+    expect(muteItem).toBeDefined();
+    expect(muteItem?.subItems?.map(s => s.id)).toEqual([
+      'mute-stack-all',
+      'mute-stack-deploy',
+      'mute-stack-monitor',
+      'mute-stack-manage',
+    ]);
+  });
+
+  it('hides Mute submenu when canMuteNotifications is false', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ canMuteNotifications: false })));
+    const inspect = result.current.find(g => g.id === 'inspect')!;
+    expect(inspect.items.find(i => i.id === 'mute')).toBeUndefined();
   });
 
   it('keeps label assignment available for any tier', () => {

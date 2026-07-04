@@ -80,6 +80,7 @@ The tab row always shows four tabs: **Anatomy**, **Activity**, **Dossier**, and 
 | **Dossier** | Yes | Exportable Markdown of the anatomy combined with operator notes. See [Stack Dossier](/features/stack-dossier). |
 | **Drift** | Yes | Live comparison of the declared compose against the running containers. See [Stack Drift](/features/stack-drift). |
 | **Environment** | When `env-inventory` capability is present | Variable inventory across all env files, with status for each variable. See [Environment Guardrails](/features/environment-guardrails). |
+| **Compose Labels** | When `container-label-inventory` capability is present | Declared Compose labels vs runtime container labels per service. See [Docker Label Audit](/features/docker-label-audit). |
 | **Networking** | When `compose-networking` capability is present | Port exposure summary per service with intent classification. See [Compose Networking](/features/compose-networking). |
 | **Doctor** | When `compose-doctor` capability is present | Preflight check results grouped by severity. The tab gains a red dot for blocker findings and an amber dot for high-risk findings. See [Compose Doctor](/features/compose-doctor). |
 | **Storage** | When `compose-storage` capability is present | Mount inventory with portability assessment and snapshot coverage. See [Compose Storage](/features/compose-storage). |

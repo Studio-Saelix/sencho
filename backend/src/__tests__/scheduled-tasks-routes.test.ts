@@ -594,6 +594,64 @@ describe('POST /api/scheduled-tasks - new lifecycle actions', () => {
   });
 });
 
+describe('POST /api/scheduled-tasks - container lifecycle', () => {
+  it('creates a container restart schedule', async () => {
+    const res = await request(app)
+      .post('/api/scheduled-tasks')
+      .set('Cookie', adminCookie)
+      .send({
+        name: 'daily-watchtower-restart',
+        target_type: 'container',
+        target_id: 'watchtower',
+        node_id: 1,
+        action: 'restart',
+        cron_expression: '0 3 * * *',
+        enabled: true,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.target_type).toBe('container');
+    expect(res.body.target_id).toBe('watchtower');
+    expect(res.body.action).toBe('restart');
+  });
+
+  it('rejects invalid container names', async () => {
+    const res = await request(app)
+      .post('/api/scheduled-tasks')
+      .set('Cookie', adminCookie)
+      .send({
+        name: 'bad-container',
+        target_type: 'container',
+        target_id: '../escape',
+        node_id: 1,
+        action: 'restart',
+        cron_expression: '0 3 * * *',
+        enabled: true,
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/valid container name/);
+  });
+
+  for (const action of ['auto_stop', 'auto_start'] as const) {
+    it(`creates container ${action} schedule`, async () => {
+      const res = await request(app)
+        .post('/api/scheduled-tasks')
+        .set('Cookie', adminCookie)
+        .send({
+          name: `ctr-${action}`,
+          target_type: 'container',
+          target_id: 'sidecar',
+          node_id: 1,
+          action,
+          cron_expression: '0 4 * * *',
+          enabled: true,
+        });
+      expect(res.status).toBe(201);
+      expect(res.body.target_type).toBe('container');
+      expect(res.body.action).toBe(action);
+    });
+  }
+});
+
 describe('POST /api/scheduled-tasks - available on the Community tier', () => {
   beforeEach(() => {
     tierSpy.mockReturnValue('community');

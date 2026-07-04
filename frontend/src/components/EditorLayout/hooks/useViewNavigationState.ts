@@ -12,6 +12,7 @@ import type { SenchoNavigateDetail } from '@/components/NodeManager';
 import type { SecurityTab, FleetTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { ScheduleTaskPrefill } from '@/components/ScheduledOperationsView';
+import type { MuteRuleDraft } from '@/lib/muteRules';
 
 export type ActiveView =
   | 'dashboard'
@@ -64,6 +65,7 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   const [fleetTab, setFleetTab] = useState<FleetTab | null>(null);
   const [filterNodeId, setFilterNodeId] = useState<number | null>(null);
   const [schedulePrefill, setSchedulePrefill] = useState<ScheduleTaskPrefill | null>(null);
+  const [muteRulePrefill, setMuteRulePrefill] = useState<MuteRuleDraft | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   const handleOpenSettings = useCallback((section?: SectionId) => {
@@ -73,6 +75,14 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   }, []);
 
   const handlePrefillConsumed = useCallback(() => setSchedulePrefill(null), []);
+  const handleMutePrefillConsumed = useCallback(() => setMuteRulePrefill(null), []);
+
+  const openMuteRulesWithPrefill = useCallback((draft: MuteRuleDraft) => {
+    setMuteRulePrefill(draft);
+    setSettingsSection('notification-suppression');
+    setActiveView('settings');
+    setFilterNodeId(null);
+  }, []);
 
   const handleNavigate = useCallback((value: string) => {
     if (value === activeView) return;
@@ -166,9 +176,12 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     fleetTab, setFleetTab,
     filterNodeId, setFilterNodeId,
     schedulePrefill, setSchedulePrefill,
+    muteRulePrefill, setMuteRulePrefill,
     mobileNavOpen, setMobileNavOpen,
     handleOpenSettings,
     handlePrefillConsumed,
+    handleMutePrefillConsumed,
+    openMuteRulesWithPrefill,
     handleNavigate,
     navItems,
   } as const;

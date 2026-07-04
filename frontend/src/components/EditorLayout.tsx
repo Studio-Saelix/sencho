@@ -40,6 +40,7 @@ import type { SidebarActivityAction } from '@/components/sidebar/SidebarActivity
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
 import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { useTopNavAlign } from '@/hooks/use-top-nav-align';
+import { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import { toast } from '@/components/ui/toast-store';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { MobileTabBar } from './MobileTabBar';
@@ -179,11 +180,14 @@ export default function EditorLayout() {
     fleetTab, setFleetTab,
     filterNodeId, setFilterNodeId,
     schedulePrefill,
+    muteRulePrefill,
     mobileNavOpen, setMobileNavOpen,
     handleOpenSettings,
     handlePrefillConsumed,
+    handleMutePrefillConsumed,
     handleNavigate,
     navItems,
+    openMuteRulesWithPrefill,
   } = navState;
 
   const {
@@ -284,6 +288,8 @@ export default function EditorLayout() {
 
   const loadingAction = selectedFile ? (stackActionMap[selectedFile] ?? null) : null;
   const stackName = selectedFile || '';
+  const stackDisplayName = selectedFile ? selectedFile.replace(/\.(yml|yaml)$/, '') : '';
+  const stackMuteActions = useStackMuteActions(stackDisplayName, openMuteRulesWithPrefill);
 
   const { isDarkMode } = useTheme();
 
@@ -500,6 +506,7 @@ export default function EditorLayout() {
       onMobileBack={goToMobileList}
       onCloseEditor={() => stackActions.attemptLeaveEditor(() => setEditingCompose(false))}
       hasUnsavedChanges={stackActions.hasUnsavedChanges}
+      stackMuteActions={selectedFile ? stackMuteActions : undefined}
     />
   );
 
@@ -680,6 +687,7 @@ export default function EditorLayout() {
             },
             filterChip,
             onOpenCreate: can('stack:create') ? openCreateDialog : undefined,
+            openMuteRulesWithPrefill,
           }}
           activitySummary={activitySummary}
           onActivityAction={handleActivityAction}
@@ -755,9 +763,12 @@ export default function EditorLayout() {
             onClearScheduledOpsFilter={() => setFilterNodeId(null)}
             schedulePrefill={schedulePrefill}
             onPrefillConsumed={handlePrefillConsumed}
+            muteRulePrefill={muteRulePrefill}
+            onMutePrefillConsumed={handleMutePrefillConsumed}
             notifications={notifications}
             onNavigateToStack={(stackFile) => { void stackActions.loadFile(stackFile); }}
             onOpenSettingsSection={(section) => openSettings(section)}
+            onOpenMuteRulesWithPrefill={openMuteRulesWithPrefill}
             onClearNotifications={clearAllNotifications}
             fleetUpdatesIntent={fleetUpdatesIntent}
             onFleetUpdatesIntentConsumed={handleFleetUpdatesIntentConsumed}

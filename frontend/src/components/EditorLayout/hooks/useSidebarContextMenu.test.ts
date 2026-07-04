@@ -3,6 +3,10 @@ import { renderHook } from '@testing-library/react';
 import { useSidebarContextMenu } from './useSidebarContextMenu';
 import type { Node } from '@/context/NodeContext';
 
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({ hasCapability: () => false }),
+}));
+
 // buildMenuCtx derives canOpenApp from the active node plus the stack's
 // published port; only the fields it reads need to be real, the handler
 // closures are never invoked here.

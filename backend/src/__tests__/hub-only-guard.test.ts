@@ -120,6 +120,26 @@ describe('hubOnlyGuard', () => {
     expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
   });
 
+  it('rejects /api/notification-suppression-rules with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/notification-suppression-rules/')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
+  it('rejects /api/notification-suppression-rules (no trailing slash) with 403 when nodeId targets a remote node', async () => {
+    const res = await request(app)
+      .get('/api/notification-suppression-rules')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId));
+
+    expect(res.status).toBe(403);
+    expect(res.body?.code).toBe('HUB_ONLY_ENDPOINT');
+  });
+
   // Regression for the Global Observability admin gate: the logs feed's
   // `requireAdmin` lives in the local route handler, which the proxy skips when
   // forwarding a remote nodeId. Without these prefixes the guard would let the

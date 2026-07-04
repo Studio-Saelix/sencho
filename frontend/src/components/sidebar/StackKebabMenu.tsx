@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { MoreVertical, Check, Plus } from 'lucide-react';
+import { MoreVertical, Check, Plus, BellOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
@@ -72,6 +72,42 @@ function LabelsSub({ item, ctx }: { item: MenuItem; ctx: StackMenuCtx }) {
             <DropdownMenuItem onClick={ctx.openLabelManager}>
               <span className="text-xs">Manage labels...</span>
             </DropdownMenuItem>
+            {ctx.canMuteNotifications && ctx.labels.length > 0 && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    <BellOff className="w-3.5 h-3.5 mr-2" strokeWidth={1.5} />
+                    <span className="text-xs">Mute label…</span>
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent className="min-w-[200px]">
+                    {ctx.labels.map(label => (
+                      <DropdownMenuSub key={label.id}>
+                        <DropdownMenuSubTrigger>
+                          <LabelDot color={label.color} />
+                          <span className="font-mono text-[12px] ml-2">{label.name}</span>
+                        </DropdownMenuSubTrigger>
+                        <DropdownMenuSubContent>
+                          <DropdownMenuItem onSelect={() => ctx.muteLabelAll(label.id, label.name)}>
+                            <span className="text-xs">Mute notifications for this label</span>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => ctx.muteLabelExternal(label.id, label.name)}>
+                            <span className="text-xs">Mute external alerts for this label</span>
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => ctx.muteLabelLowPriority(label.id, label.name)}>
+                            <span className="text-xs">Mute low-priority stack alerts</span>
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem onSelect={() => ctx.openLabelMuteRules(label.id, label.name)}>
+                            <span className="text-xs">Manage label mute rules</span>
+                          </DropdownMenuItem>
+                        </DropdownMenuSubContent>
+                      </DropdownMenuSub>
+                    ))}
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+              </>
+            )}
           </>
         )}
       </DropdownMenuSubContent>
@@ -79,8 +115,44 @@ function LabelsSub({ item, ctx }: { item: MenuItem; ctx: StackMenuCtx }) {
   );
 }
 
+function SimpleSub({ item, MenuSub, MenuSubTrigger, MenuSubContent, MenuItem }: {
+  item: MenuItem;
+  MenuSub: typeof DropdownMenuSub;
+  MenuSubTrigger: typeof DropdownMenuSubTrigger;
+  MenuSubContent: typeof DropdownMenuSubContent;
+  MenuItem: typeof DropdownMenuItem;
+}) {
+  return (
+    <MenuSub>
+      <MenuSubTrigger>
+        <item.icon className="h-4 w-4 mr-2" strokeWidth={1.5} />
+        {item.label}
+      </MenuSubTrigger>
+      <MenuSubContent className="min-w-[220px]">
+        {item.subItems?.map((sub) => (
+          <MenuItem key={sub.id} onSelect={() => sub.onSelect()}>
+            <span className="text-xs">{sub.label}</span>
+          </MenuItem>
+        ))}
+      </MenuSubContent>
+    </MenuSub>
+  );
+}
+
 function renderItem(item: MenuItem, ctx: StackMenuCtx) {
   if (item.id === 'labels') return <LabelsSub key={item.id} item={item} ctx={ctx} />;
+  if (item.subItems?.length) {
+    return (
+      <SimpleSub
+        key={item.id}
+        item={item}
+        MenuSub={DropdownMenuSub}
+        MenuSubTrigger={DropdownMenuSubTrigger}
+        MenuSubContent={DropdownMenuSubContent}
+        MenuItem={DropdownMenuItem}
+      />
+    );
+  }
   return (
     <DropdownMenuItem
       key={item.id}

@@ -72,6 +72,9 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'PUT /notification-routes': 'Updated notification route',
   'DELETE /notification-routes': 'Deleted notification route',
   'POST /notification-routes/*/test': 'Tested notification route',
+  'POST /notification-suppression-rules': 'Created notification suppression rule',
+  'PUT /notification-suppression-rules': 'Updated notification suppression rule',
+  'DELETE /notification-suppression-rules': 'Deleted notification suppression rule',
 
   // Webhooks
   'POST /webhooks': 'Created webhook',

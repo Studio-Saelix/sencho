@@ -2,6 +2,15 @@ import { useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { buildServiceUrl } from '@/lib/serviceUrl';
+import {
+  createMuteRuleWithToast,
+  stackMuteAllDraft,
+  stackMuteDeploySuccessDraft,
+  stackMuteMonitorDraft,
+  labelMuteAllDraft,
+  labelMuteExternalDraft,
+  labelMuteLowPriorityDraft,
+} from '@/lib/muteRules';
 import type { StackMenuCtx } from '@/components/sidebar/sidebar-types';
 import type { Label as StackLabel, LabelColor } from '../../label-types';
 import type { OverlayState } from './useOverlayState';
@@ -9,6 +18,7 @@ import type { StackActionsHook } from './useStackActions';
 import type { useStackListState } from './useStackListState';
 import type { useViewNavigationState } from './useViewNavigationState';
 import type { Node } from '@/context/NodeContext';
+import { useNodes } from '@/context/NodeContext';
 import type { PermissionAction } from '@/context/AuthContext';
 
 type StackListState = ReturnType<typeof useStackListState>;
@@ -33,6 +43,7 @@ export function useSidebarContextMenu({
   isAdmin,
   can,
 }: UseSidebarContextMenuOptions) {
+  const { hasCapability } = useNodes();
   const buildMenuCtx = useCallback((file: string): StackMenuCtx => {
     const sName = file.replace(/\.(yml|yaml)$/, '');
     const mainPort = stackListState.stackPorts[file];
@@ -40,6 +51,8 @@ export function useSidebarContextMenu({
     // lifecycle affordances; the menu's status union stays three-state.
     const rawStatus = stackListState.stackStatuses[file] ?? 'unknown';
     const stackStatus = rawStatus === 'partial' ? 'running' : rawStatus;
+    const nodeId = activeNode?.id ?? null;
+    const canMuteNotifications = isAdmin && hasCapability('notification-suppression');
     return {
       stackStatus,
       // Only offer "Open App" when a browser-reachable URL can actually be built
@@ -125,6 +138,31 @@ export function useSidebarContextMenu({
         navState.setSchedulePrefill({ stackName: sName, nodeId: activeNode?.id ?? null });
         navState.setActiveView('scheduled-ops');
       },
+      canMuteNotifications,
+      muteStackAll: () => {
+        void createMuteRuleWithToast(stackMuteAllDraft(sName, nodeId));
+      },
+      muteStackDeploySuccess: () => {
+        void createMuteRuleWithToast(stackMuteDeploySuccessDraft(sName, nodeId));
+      },
+      muteStackMonitor: () => {
+        void createMuteRuleWithToast(stackMuteMonitorDraft(sName, nodeId));
+      },
+      openStackMuteRules: () => {
+        navState.openMuteRulesWithPrefill(stackMuteAllDraft(sName, nodeId));
+      },
+      muteLabelAll: (labelId: number, labelName: string) => {
+        void createMuteRuleWithToast(labelMuteAllDraft(labelId, labelName, nodeId));
+      },
+      muteLabelExternal: (labelId: number, labelName: string) => {
+        void createMuteRuleWithToast(labelMuteExternalDraft(labelId, labelName, nodeId));
+      },
+      muteLabelLowPriority: (labelId: number, labelName: string) => {
+        void createMuteRuleWithToast(labelMuteLowPriorityDraft(labelId, labelName, nodeId));
+      },
+      openLabelMuteRules: (labelId: number, labelName: string) => {
+        navState.openMuteRulesWithPrefill(labelMuteAllDraft(labelId, labelName, nodeId));
+      },
     };
     // Handlers from useStackActions, useOverlayState, useViewNavigationState are
     // useCallback-stabilized at their owner hooks, so listing the menu surface
@@ -134,7 +172,8 @@ export function useSidebarContextMenu({
   }, [
     stackListState.stackStatuses, stackListState.stackPorts, isAdmin,
     stackListState.isPinned, stackListState.labels, stackListState.stackLabelMap,
-    stackListState.pin, stackListState.unpin, activeNode?.type, activeNode?.api_url,
+    stackListState.pin, stackListState.unpin, activeNode?.type, activeNode?.api_url, activeNode?.id,
+    hasCapability, navState.openMuteRulesWithPrefill,
   ]);
 
   return buildMenuCtx;

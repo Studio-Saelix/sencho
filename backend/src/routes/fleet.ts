@@ -10,6 +10,7 @@ import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPD
 import { NodeRegistry } from '../services/NodeRegistry';
 import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../services/network/networkingSummary';
 import DockerController from '../services/DockerController';
+import { getHostMemory } from '../helpers/hostMemory';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
@@ -46,6 +47,8 @@ import { runLocalLabelAssign, validateLabelTemplate, validateRemoteAssignResults
 import { MAX_ASSIGNMENTS } from '../helpers/constants';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
+import { buildNodeLabelInventory, VALID_LABEL_SOURCES, type NodeLabelInventory } from '../services/LabelInventoryService';
+import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
 import { PROXY_TIER_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 
@@ -222,11 +225,11 @@ async function getCompareTarget(gatewayVersion: string | null) {
 async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
   try {
     const composeDir = path.resolve(NodeRegistry.getInstance().getComposeDir(node.id));
-    const [allContainers, stacks, currentLoad, mem, fsSize] = await Promise.all([
+    const [allContainers, stacks, currentLoad, hostMem, fsSize] = await Promise.all([
       DockerController.getInstance(node.id).getAllContainers(),
       FileSystemService.getInstance(node.id).getStacks(),
       si.currentLoad(),
-      si.mem(),
+      getHostMemory(),
       si.fsSize(),
     ]);
 
@@ -255,13 +258,12 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
       systemStats: {
         cpu: { usage: currentLoad.currentLoad.toFixed(1), cores: currentLoad.cpus.length },
         memory: {
-          total: mem.total,
-          // Percentage is keyed off mem.active (the real working set), not mem.used:
-          // on Linux/BSD/macOS mem.used counts reclaimable page cache and reads ~99%
-          // on a busy host. mem.available is total - active, so used + free = total.
-          used: mem.active,
-          free: mem.available,
-          usagePercent: ((mem.active / mem.total) * 100).toFixed(1),
+          total: hostMem.total,
+          // ZFS ARC aware: reclaimable ARC is added back into available so a
+          // large ARC cache is not reported as hard-used. See helpers/hostMemory.ts.
+          used: hostMem.used,
+          free: hostMem.free,
+          usagePercent: hostMem.usagePercent.toFixed(1),
         },
         disk: mainDisk ? {
           total: mainDisk.size,
@@ -724,6 +726,169 @@ fleetRouter.get('/dependency-map', authMiddleware, async (req: Request, res: Res
   } catch (error) {
     console.error('[Fleet] Dependency map error:', error);
     res.status(500).json({ error: 'Failed to build fleet dependency map' });
+  }
+});
+
+interface FleetNodeLabelInventoryResult {
+  nodeId: number;
+  nodeName: string;
+  status: 'ok' | 'error';
+  inventory: NodeLabelInventory | null;
+  error: string | null;
+}
+
+function isStringOrNull(v: unknown): boolean {
+  return typeof v === 'string' || v === null;
+}
+
+function isLabelIndexContainerRef(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.id === 'string'
+    && typeof o.name === 'string'
+    && isStringOrNull(o.stack)
+    && isStringOrNull(o.service);
+}
+
+function isLabelValue(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.key === 'string'
+    && typeof o.value === 'string'
+    && typeof o.source === 'string'
+    && VALID_LABEL_SOURCES.has(o.source);
+}
+
+function isContainerLabelRow(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.id === 'string'
+    && typeof o.name === 'string'
+    && typeof o.state === 'string'
+    && isStringOrNull(o.stack)
+    && isStringOrNull(o.service)
+    && Array.isArray(o.labels)
+    && o.labels.every(isLabelValue);
+}
+
+function isLabelIndexRow(v: unknown): boolean {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.key === 'string'
+    && typeof o.value === 'string'
+    && typeof o.source === 'string'
+    && VALID_LABEL_SOURCES.has(o.source)
+    && Array.isArray(o.containers)
+    && o.containers.every(isLabelIndexContainerRef);
+}
+
+/**
+ * Validate a remote node's label-inventory payload deeply enough that neither the
+ * aggregation sort nor the Fleet UI ever receives a malformed row. A single bad
+ * `byLabel` or `containers` element would otherwise crash the whole fleet request (or
+ * the client) rather than degrading that node into `nodeErrors`. Only wire fields are
+ * checked; the internal `imageId` is not part of the shape sent over the wire.
+ */
+function isNodeLabelInventory(v: unknown): v is NodeLabelInventory {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return typeof o.nodeId === 'number'
+    && Array.isArray(o.containers)
+    && o.containers.every(isContainerLabelRow)
+    && Array.isArray(o.byLabel)
+    && o.byLabel.every(isLabelIndexRow);
+}
+
+/**
+ * Fleet-wide Docker label inventory. Auth + node:read (Community). Fans out to
+ * each node's /api/system/container-labels; unreachable nodes degrade gracefully.
+ */
+fleetRouter.get('/container-labels', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'node:read')) return;
+  if (!requireRevealAdmin(req, res)) return;
+  const options = labelInventoryOptionsFromRequest(req);
+  try {
+    const db = DatabaseService.getInstance();
+    const nodes = db.getNodes();
+
+    const results = await Promise.allSettled(
+      nodes.map(async (node: Node): Promise<FleetNodeLabelInventoryResult> => {
+        if (node.type === 'local') {
+          const inventory = await buildNodeLabelInventory(node.id, options);
+          return { nodeId: node.id, nodeName: node.name, status: 'ok', inventory, error: null };
+        }
+
+        const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+        if (!target) {
+          return { nodeId: node.id, nodeName: node.name, status: 'error', inventory: null, error: formatNoTargetError(node) };
+        }
+
+        const revealQs = options.revealSecrets ? '?reveal=1' : '';
+        const resp = await fetch(
+          `${target.apiUrl.replace(/\/$/, '')}/api/system/container-labels${revealQs}`,
+          {
+            headers: { ...(target.apiToken ? { Authorization: `Bearer ${target.apiToken}` } : {}) },
+            signal: AbortSignal.timeout(30000),
+          },
+        );
+        if (!resp.ok) {
+          const errBody = await resp.json().catch(() => null) as { error?: string } | null;
+          return { nodeId: node.id, nodeName: node.name, status: 'error', inventory: null, error: errBody?.error ?? `Remote returned ${resp.status}` };
+        }
+        const inventory = await resp.json().catch(() => null);
+        if (!isNodeLabelInventory(inventory)) {
+          return { nodeId: node.id, nodeName: node.name, status: 'error', inventory: null, error: 'Remote returned an unexpected label-inventory payload' };
+        }
+        return { nodeId: node.id, nodeName: node.name, status: 'ok', inventory, error: null };
+      }),
+    );
+
+    const perNode: FleetNodeLabelInventoryResult[] = results.map((result, i) => {
+      if (result.status === 'fulfilled') return result.value;
+      console.error(`[Fleet] Container labels fetch failed for node ${nodes[i].name}:`, result.reason);
+      return { nodeId: nodes[i].id, nodeName: nodes[i].name, status: 'error', inventory: null, error: getErrorMessage(result.reason, 'Failed to reach node') };
+    });
+
+    const aggregatedByLabel = new Map<string, import('../services/LabelInventoryService').LabelIndexRow>();
+    for (const nodeResult of perNode) {
+      if (nodeResult.status !== 'ok' || !nodeResult.inventory) continue;
+      for (const row of nodeResult.inventory.byLabel) {
+        const key = `${row.key}\0${row.value}\0${row.source}`;
+        const existing = aggregatedByLabel.get(key);
+        if (!existing) {
+          aggregatedByLabel.set(key, {
+            ...row,
+            containers: row.containers.map(c => ({
+              ...c,
+              nodeId: nodeResult.nodeId,
+              nodeName: nodeResult.nodeName,
+            })),
+          });
+        } else {
+          existing.containers.push(...row.containers.map(c => ({
+            ...c,
+            nodeId: nodeResult.nodeId,
+            nodeName: nodeResult.nodeName,
+          })));
+        }
+      }
+    }
+
+    const nodeErrors: Record<number, string> = {};
+    for (const n of perNode) {
+      if (n.status === 'error' && n.error) nodeErrors[n.nodeId] = n.error;
+    }
+
+    res.json({
+      nodes: perNode,
+      aggregatedByLabel: [...aggregatedByLabel.values()].sort((a, b) =>
+        a.key.localeCompare(b.key) || a.value.localeCompare(b.value) || a.source.localeCompare(b.source)),
+      nodeErrors,
+      generatedAt: Date.now(),
+    });
+  } catch (error) {
+    console.error('[Fleet] Container labels error:', error);
+    res.status(500).json({ error: 'Failed to build fleet container label inventory' });
   }
 });
 

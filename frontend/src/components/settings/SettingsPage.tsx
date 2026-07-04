@@ -24,6 +24,7 @@ import {
     scopeLabel,
 } from './index';
 import type { SectionId, SettingsItemMeta, VisibilityContext } from './index';
+import type { MuteRuleDraft } from '@/lib/muteRules';
 import { SettingsSidebar } from './SettingsSidebar';
 import { SettingsSectionContent } from './SettingsSectionContent';
 import { MastheadStatsProvider, useMastheadStatsValue } from './MastheadStatsContext';
@@ -31,6 +32,9 @@ import { MastheadStatsProvider, useMastheadStatsValue } from './MastheadStatsCon
 interface SettingsPageProps {
     currentSection: SectionId;
     onSectionChange: (section: SectionId) => void;
+    muteRulePrefill?: MuteRuleDraft | null;
+    onMutePrefillConsumed?: () => void;
+    onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
 }
 
 export function SettingsPage(props: SettingsPageProps) {
@@ -41,7 +45,13 @@ export function SettingsPage(props: SettingsPageProps) {
     );
 }
 
-function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProps) {
+function SettingsPageInner({
+    currentSection,
+    onSectionChange,
+    muteRulePrefill = null,
+    onMutePrefillConsumed,
+    onOpenMuteRulesWithPrefill,
+}: SettingsPageProps) {
     const { isAdmin } = useAuth();
     const { isPaid } = useLicense();
     const { activeNode } = useNodes();
@@ -197,6 +207,9 @@ function SettingsPageInner({ currentSection, onSectionChange }: SettingsPageProp
                                 sectionId={safeSection}
                                 onDirtyChange={handleDirtyChange}
                                 showDescription
+                                muteRulePrefill={muteRulePrefill}
+                                onMutePrefillConsumed={onMutePrefillConsumed}
+                                onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
                             />
                         </div>
                     </ScrollArea>

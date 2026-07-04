@@ -27,6 +27,8 @@ import { buildStackNetworkFacts } from '../services/network/composeNetworkInspec
 import { buildStorageInventory } from '../services/storage/inventory';
 import { buildEffectiveAnatomy } from '../services/effectiveAnatomy';
 import { buildEnvInventory } from '../services/EnvInventoryService';
+import { buildStackLabelInventory } from '../services/LabelInventoryService';
+import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
 import { EXPOSURE_INTENTS, type ExposureIntent } from '../services/network/types';
 import { UpdateGuardService } from '../services/UpdateGuardService';
 import { HealthGateService } from '../services/HealthGateService';
@@ -44,6 +46,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
+import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
 import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
@@ -1321,6 +1324,22 @@ stacksRouter.get('/:stackName/env-inventory', async (req: Request, res: Response
   }
 });
 
+// Docker/Compose label inventory: declared compose labels vs runtime container
+// labels per service. Read-only; auto-proxies to the active node.
+stacksRouter.get('/:stackName/label-inventory', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (!requireRevealAdmin(req, res)) return;
+  try {
+    res.json(await buildStackLabelInventory(req.nodeId, stackName, labelInventoryOptionsFromRequest(req)));
+  } catch (error) {
+    console.error('[Stacks] Failed to build label inventory for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to build label inventory' });
+  }
+});
+
 // Exposure intent: the user's per-stack (service '') and per-service exposure
 // classification, stored separately from generated facts so mismatches stay
 // detectable. Rows are stored independently; precedence (a service row taking
@@ -1646,7 +1665,7 @@ async function handleServiceAction(
       res.status(404).json({ error: 'No containers found for this stack.' });
       return;
     }
-    const matching = all.filter(c => c.Service === serviceName);
+    const matching = filterContainersByComposeService(all, serviceName);
     if (matching.length === 0) {
       res.status(404).json({ error: `Service '${serviceName}' not found in stack '${stackName}'.` });
       return;

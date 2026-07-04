@@ -47,6 +47,10 @@ The gauge bars (and the corresponding numeric values) pick up amber at 80% and r
 
 While the dashboard is loading the CPU tile reads `--` and the caption shows `collecting metrics…`; bars and sparklines render once the first sample arrives.
 
+<Note>
+  **ZFS hosts:** the memory tile and host RAM alerts are ZFS ARC-aware. Reclaimable ARC cache is treated as available memory rather than used, so a large ARC does not inflate the gauge or trigger false low-memory alerts. See [ZFS ARC-aware host memory](/getting-started/configuration#zfs-arc-aware-host-memory) for how to expose ARC stats to a Docker install.
+</Note>
+
 ## Stack health
 
 A mono table of every stack discovered in the active node's `COMPOSE_DIR`, sorted so the stacks demanding attention sit at the top.

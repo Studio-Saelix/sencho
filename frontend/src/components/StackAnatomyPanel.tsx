@@ -15,9 +15,12 @@ import DriftPanel from './stack/DriftPanel';
 import PreflightPanel from './stack/PreflightPanel';
 import StoragePanel from './stack/StoragePanel';
 import EnvironmentPanel from './stack/EnvironmentPanel';
+import ComposeLabelsPanel from './stack/ComposeLabelsPanel';
 import StackNetworkingPanel from './stack/StackNetworkingPanel';
 import { useNodes } from '@/context/NodeContext';
 import type { NotificationItem } from '@/components/dashboard/types';
+import { ActivityMuteKebab } from '@/components/mute/MuteMenuItems';
+import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 
 interface StackAnatomyPanelProps {
   stackName: string;
@@ -32,6 +35,7 @@ interface StackAnatomyPanelProps {
   canEdit: boolean;
   applying?: boolean;
   notifications?: NotificationItem[];
+  stackMuteActions?: ReturnType<typeof useStackMuteActions>;
 }
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
@@ -82,6 +86,7 @@ export default function StackAnatomyPanel({
   canEdit,
   applying = false,
   notifications,
+  stackMuteActions,
 }: StackAnatomyPanelProps) {
   const anatomy = useMemo(() => parseAnatomy(content), [content]);
   const envKeys = useMemo(() => parseEnvKeys(envContent), [envContent]);
@@ -97,6 +102,7 @@ export default function StackAnatomyPanel({
   const networkingEnabled = hasCapability('compose-networking');
   const storageEnabled = hasCapability('compose-storage');
   const envInventoryEnabled = hasCapability('env-inventory');
+  const composeLabelsEnabled = hasCapability('container-label-inventory');
 
   const [gitSource, setGitSource] = useState<{ stack: string; info: GitSourceInfo; multiFile: boolean } | null>(null);
   // Merged effective facts (services/ports/volumes/networks/restart) for a
@@ -366,6 +372,9 @@ export default function StackAnatomyPanel({
             {envInventoryEnabled && (
               <TabsTrigger value="environment" data-testid="environment-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Environment</TabsTrigger>
             )}
+            {composeLabelsEnabled && (
+              <TabsTrigger value="compose-labels" data-testid="compose-labels-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Compose Labels</TabsTrigger>
+            )}
             {networkingEnabled && (
               <TabsTrigger value="networking" data-testid="networking-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Networking</TabsTrigger>
             )}
@@ -409,6 +418,7 @@ export default function StackAnatomyPanel({
               edit
             </button>
           )}
+          {stackMuteActions && <ActivityMuteKebab actions={stackMuteActions} />}
         </div>
       </div>
       <TabsContent value="activity" className="flex-1 min-h-0 overflow-y-auto px-3 mt-0">
@@ -616,6 +626,11 @@ export default function StackAnatomyPanel({
       {envInventoryEnabled && (
         <TabsContent value="environment" className="flex flex-col flex-1 min-h-0 mt-0">
           <EnvironmentPanel stackName={stackName} />
+        </TabsContent>
+      )}
+      {composeLabelsEnabled && (
+        <TabsContent value="compose-labels" className="flex flex-col flex-1 min-h-0 mt-0">
+          <ComposeLabelsPanel stackName={stackName} />
         </TabsContent>
       )}
       {doctorEnabled && (

@@ -1,7 +1,7 @@
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="frontend/public/sencho-logo-dark.png">
-    <img src="frontend/public/sencho-logo-light.png" alt="Sencho" width="220">
+    <source media="(prefers-color-scheme: dark)" srcset="frontend/public/sencho-logo-dark.svg">
+    <img src="frontend/public/sencho-logo-light.svg" alt="Sencho" width="220">
   </picture>
 
   ### Self-hosted Docker Compose management for one machine or a fleet.
@@ -10,7 +10,8 @@
     <a href="https://docs.sencho.io">Docs</a> ·
     <a href="https://sencho.io">Website</a> ·
     <a href="https://github.com/studio-saelix/sencho/discussions">Discussions</a> ·
-    <a href="https://buymeacoffee.com/sencho">Sponsor</a>
+    <a href="https://github.com/sponsors/Studio-Saelix">Sponsor</a> ·
+    <a href="https://buymeacoffee.com/sencho">Buy Me a Coffee</a>
   </p>
 
   [![Latest release](https://img.shields.io/github/v/release/studio-saelix/sencho?label=release)](https://github.com/studio-saelix/sencho/releases)
