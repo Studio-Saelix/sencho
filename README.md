@@ -1,7 +1,7 @@
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="frontend/public/sencho-logo-dark.png">
-    <img src="frontend/public/sencho-logo-light.png" alt="Sencho" width="220">
+    <source media="(prefers-color-scheme: dark)" srcset="frontend/public/sencho-logo-dark.svg">
+    <img src="frontend/public/sencho-logo-light.svg" alt="Sencho" width="220">
   </picture>
 
   ### Self-hosted Docker Compose management for one machine or a fleet.

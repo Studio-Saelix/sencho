@@ -6,7 +6,7 @@ export function SidebarBrand({ isDarkMode }: SidebarBrandProps) {
   return (
     <div className="flex items-center justify-center gap-3 px-4 h-14 border-b border-glass-border">
       <img
-        src={isDarkMode ? '/sencho-logo-dark.png' : '/sencho-logo-light.png'}
+        src={isDarkMode ? '/sencho-logo-dark.svg' : '/sencho-logo-light.svg'}
         alt=""
         className="w-9 h-9 shrink-0"
       />
