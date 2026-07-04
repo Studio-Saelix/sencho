@@ -33,6 +33,7 @@ describe('PilotAgent loopback auth injection', () => {
       primaryUrl: 'http://primary.invalid',
       loopbackPort: 1,
       initialToken: 'irrelevant-for-this-test',
+      enrollToken: null,
       enrolling: false,
     });
     mintHeader = (agent as unknown as { getLoopbackAuthHeader: () => string | null }).getLoopbackAuthHeader.bind(agent);
