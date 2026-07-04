@@ -836,7 +836,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                             {(['images', 'volumes', 'networks'] as const).map(tab => (
                                 <TabsHighlightItem key={tab} value={tab}>
-                                    <TabsTrigger value={tab}
+                                    <TabsTrigger value={tab}>
                                         {tab.charAt(0).toUpperCase() + tab.slice(1)}
                                         <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">
                                             {tab === 'images' ? images.length : tab === 'volumes' ? volumes.length : networks.length}
