@@ -13,15 +13,16 @@ import { WebSocketServer } from 'ws';
 import { setupTestDb, cleanupTestDb, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { attachUpgrade } from '../websocket/upgradeHandler';
 import { PilotTunnelManager } from '../services/PilotTunnelManager';
-import {
-    readPersistedToken,
-    persistToken,
-    clearPersistedToken,
-} from '../pilot/agent';
 import { WebSocket } from 'ws';
 
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
+
+// agent.ts freezes its pilot.jwt path from DATA_DIR at module load, so it must
+// be imported only after setupTestDb() points DATA_DIR at the writable tmp dir.
+let readPersistedToken: typeof import('../pilot/agent').readPersistedToken;
+let persistToken: typeof import('../pilot/agent').persistToken;
+let clearPersistedToken: typeof import('../pilot/agent').clearPersistedToken;
 
 let server: http.Server;
 let port: number;
@@ -32,6 +33,7 @@ let nodeId: number;
 beforeAll(async () => {
     tmpDir = await setupTestDb();
     ({ DatabaseService } = await import('../services/DatabaseService'));
+    ({ readPersistedToken, persistToken, clearPersistedToken } = await import('../pilot/agent'));
 
     server = http.createServer();
     mainWss = new WebSocketServer({ noServer: true });
