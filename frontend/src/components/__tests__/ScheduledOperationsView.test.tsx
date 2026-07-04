@@ -137,7 +137,7 @@ describe('ScheduledOperationsView', () => {
     render(<ScheduledOperationsView />);
 
     await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
-    await userEvent.click(await screen.findByTitle('Edit'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     await waitFor(() => expect(screen.getAllByRole('combobox')[2]).toHaveTextContent('web'));
   });
 
@@ -584,7 +584,7 @@ describe('ScheduledOperationsView', () => {
     render(<ScheduledOperationsView />);
 
     await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
-    await userEvent.click(await screen.findByTitle('Edit'));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     await userEvent.click(screen.getAllByRole('combobox')[0]);
     await userEvent.click(await screen.findByRole('button', { name: 'Create Fleet Snapshot' }));
     await userEvent.click(screen.getByRole('button', { name: 'Update' }));
@@ -720,7 +720,7 @@ describe('ScheduledOperationsView', () => {
       render(<ScheduledOperationsView />);
 
       await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
-      await userEvent.click(await screen.findByTitle('Edit'));
+      await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
 
       expect(screen.getByRole('radio', { name: 'Simple' })).toHaveAttribute('aria-checked', 'true');
       expect(screen.getByRole('radio', { name: 'Daily' })).toHaveAttribute('aria-checked', 'true');
@@ -738,7 +738,7 @@ describe('ScheduledOperationsView', () => {
       render(<ScheduledOperationsView />);
 
       await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
-      await userEvent.click(await screen.findByTitle('Edit'));
+      await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
       await userEvent.click(screen.getByRole('button', { name: 'Update' }));
 
       await waitFor(() => {
@@ -755,7 +755,7 @@ describe('ScheduledOperationsView', () => {
       render(<ScheduledOperationsView />);
 
       await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
-      await userEvent.click(await screen.findByTitle('Edit'));
+      await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
 
       expect(screen.getByRole('radio', { name: 'Advanced' })).toHaveAttribute('aria-checked', 'true');
       expect(screen.getByDisplayValue('*/15 * * * *')).toBeInTheDocument();

@@ -790,7 +790,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                         <TooltipProvider>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Button variant="ghost" size="sm" onClick={() => handleRunNow(task)} disabled={runningTaskId === task.id}>
+                              <Button variant="ghost" size="sm" onClick={() => handleRunNow(task)} disabled={runningTaskId === task.id} aria-label="Run now">
                                 <Play className={`w-4 h-4 ${runningTaskId === task.id ? 'animate-pulse' : ''}`} strokeWidth={1.5} />
                               </Button>
                             </TooltipTrigger>
@@ -800,7 +800,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                         <TooltipProvider>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Button variant="ghost" size="sm" onClick={() => openRuns(task)}>
+                              <Button variant="ghost" size="sm" onClick={() => openRuns(task)} aria-label="Execution history">
                                 <History className="w-4 h-4" strokeWidth={1.5} />
                               </Button>
                             </TooltipTrigger>
@@ -810,7 +810,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                         <TooltipProvider>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Button variant="ghost" size="sm" onClick={() => openEdit(task)}>
+                              <Button variant="ghost" size="sm" onClick={() => openEdit(task)} aria-label="Edit">
                                 <Pencil className="w-4 h-4" strokeWidth={1.5} />
                               </Button>
                             </TooltipTrigger>
@@ -820,7 +820,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                         <TooltipProvider>
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <Button variant="ghost" size="sm" onClick={() => setDeleteTarget(task)} className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground">
+                              <Button variant="ghost" size="sm" onClick={() => setDeleteTarget(task)} className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground" aria-label="Delete">
                                 <Trash2 className="w-4 h-4" strokeWidth={1.5} />
                               </Button>
                             </TooltipTrigger>
