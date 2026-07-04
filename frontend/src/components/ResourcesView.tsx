@@ -836,7 +836,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                             {(['images', 'volumes', 'networks'] as const).map(tab => (
                                 <TabsHighlightItem key={tab} value={tab}>
-                                    <TabsTrigger value={tab} className="text-xs">
+                                    <TabsTrigger value={tab}
                                         {tab.charAt(0).toUpperCase() + tab.slice(1)}
                                         <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">
                                             {tab === 'images' ? images.length : tab === 'volumes' ? volumes.length : networks.length}
@@ -845,7 +845,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TabsHighlightItem>
                             ))}
                             <TabsHighlightItem value="unmanaged">
-                                <TabsTrigger value="unmanaged" className="relative text-xs">
+                                <TabsTrigger value="unmanaged" className="relative">
                                     Unmanaged
                                     <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{totalOrphansCount}</span>
                                     {totalOrphansCount > 0 && (
@@ -860,7 +860,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 </div>
                 )}
 
-                <ScrollArea className="flex-1 relative text-sm">
+                <ScrollArea className="flex-1 bg-background relative text-sm">
 
                     {/* Images */}
                     <TabsContent value="images" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
