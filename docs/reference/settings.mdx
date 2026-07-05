@@ -465,6 +465,16 @@ Configure how often this node polls container registries to detect available ima
 
 The section footer shows the last-checked timestamp and when the next check is scheduled.
 
+### Sidebar
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| **Show update status in sidebar** | Off | When on, the sidebar shows a pulsing dot on stacks with an available update, a warning icon when a check fails, and an Updates filter chip. The Stack Health table on the home page always shows update status regardless of this setting. Notifications are unaffected. |
+
+<Note>
+  Nodes running older versions of Sencho do not expose this setting. Upgrade the node to enable the toggle.
+</Note>
+
 ---
 
 ## Webhooks

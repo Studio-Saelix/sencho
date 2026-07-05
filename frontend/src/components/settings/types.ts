@@ -20,6 +20,7 @@ export interface PatchableSettings {
     health_gate_enabled?: '0' | '1';
     health_gate_window_seconds?: string;
     env_block_deploy_on_missing_required?: '0' | '1';
+    image_update_sidebar_indicators?: '0' | '1';
 }
 
 export const DEFAULT_SETTINGS: PatchableSettings = {
@@ -44,6 +45,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     health_gate_enabled: '1',
     health_gate_window_seconds: '90',
     env_block_deploy_on_missing_required: '0',
+    image_update_sidebar_indicators: '0',
 };
 
 export type SectionId =

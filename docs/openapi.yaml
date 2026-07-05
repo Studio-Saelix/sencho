@@ -686,6 +686,9 @@ components:
         cronExpression:
           type: ["string", "null"]
           description: 5-field cron expression when mode is 'cron', null otherwise.
+        sidebarIndicators:
+          type: boolean
+          description: Whether sidebar update-status indicators are enabled. Controlled by the `image_update_sidebar_indicators` global setting. Default is `false`.
 
   responses:
     Unauthorized:
