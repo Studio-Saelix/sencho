@@ -47,6 +47,7 @@ export interface ImageUpdateStatus {
     manualCooldownRemainingMs: number;
     mode: 'interval' | 'cron';
     cronExpression: string | null;
+    sidebarIndicators: boolean;
 }
 
 // ─── Compose file helpers ────────────────────────────────────────────────────
@@ -390,6 +391,13 @@ export class ImageUpdateService {
     }
 
     public getStatus(): ImageUpdateStatus {
+        let sidebarIndicators = false;
+        try {
+            const settings = DatabaseService.getInstance().getGlobalSettings();
+            sidebarIndicators = settings.image_update_sidebar_indicators === '1';
+        } catch (e) {
+            console.warn('[ImageUpdateService] Failed to read sidebar indicator setting:', e);
+        }
         return {
             checking: this.isRunning,
             intervalMinutes: Math.round(this.intervalMs / (60 * 1000)),
@@ -399,6 +407,7 @@ export class ImageUpdateService {
             manualCooldownRemainingMs: this.getManualCooldownRemainingMs(),
             mode: this.mode,
             cronExpression: this.cronExpression,
+            sidebarIndicators,
         };
     }
 
