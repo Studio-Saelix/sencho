@@ -57,7 +57,12 @@ interface ComposeServiceDefinition {
 
 // Typed shapes for the LinuxServer.io API response
 interface LsioPort { external?: number; internal: number; protocol?: string }
-interface LsioVolume { path: string }
+interface LsioVolume {
+    path: string;
+    host_path?: string;
+    desc?: string;
+    optional?: boolean;
+}
 interface LsioEnvVar { name: string; desc?: string; default?: string }
 interface LsioAppConfig { ports?: LsioPort[]; volumes?: LsioVolume[]; environment?: LsioEnvVar[] }
 interface LsioApp {
@@ -223,6 +228,45 @@ function getCategoriesForApp(name: string): string[] {
     return LSIO_CATEGORY_MAP[name.toLowerCase()] ?? ['Other'];
 }
 
+function lastPathSegment(path: string): string {
+    return path.split('/').filter(Boolean).pop() || 'data';
+}
+
+function parseLsioVolumePath(path: string): { container: string; readonly: boolean } {
+    const match = path.match(/:(ro|rw)$/);
+    if (match) {
+        return { container: path.slice(0, -match[0].length), readonly: match[1] === 'ro' };
+    }
+    return { container: path, readonly: false };
+}
+
+function defaultBindForLsioVolume(containerPath: string, hostPath?: string): string {
+    if (hostPath && !hostPath.startsWith('/path/to/')) {
+        return hostPath;
+    }
+    return `./${lastPathSegment(containerPath)}`;
+}
+
+function stripErroneousBindMode(bind: string): string {
+    if (/^[a-zA-Z]:/.test(bind)) {
+        return bind;
+    }
+    const match = bind.match(/^(.*):(ro|rw)$/);
+    return match ? match[1] : bind;
+}
+
+function mapLsioVolume(v: LsioVolume): TemplateVolume | null {
+    if (v.optional) {
+        return null;
+    }
+    const { container, readonly } = parseLsioVolumePath(v.path);
+    return {
+        container,
+        bind: defaultBindForLsioVolume(container, v.host_path),
+        ...(readonly ? { readonly: true } : {}),
+    };
+}
+
 export class TemplateService {
     private static readonly CACHE_KEY = 'templates:all';
     private readonly CACHE_DURATION_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -280,13 +324,9 @@ export class TemplateService {
                             source: 'linuxserver',
                             // Map configs if available, otherwise default to empty arrays
                             ports: (app.config?.ports ?? []).map((p: LsioPort) => `${p.external || p.internal}:${p.internal}/${p.protocol || 'tcp'}`),
-                            volumes: (app.config?.volumes ?? []).map((v: LsioVolume) => {
-                                const folderName = v.path.split('/').filter(Boolean).pop() || 'data';
-                                return {
-                                    container: v.path,
-                                    bind: `./${folderName}`
-                                };
-                            }),
+                            volumes: (app.config?.volumes ?? [])
+                                .map((v: LsioVolume) => mapLsioVolume(v))
+                                .filter((v): v is TemplateVolume => v !== null),
                             env: (app.config?.environment ?? []).map((e: LsioEnvVar) => ({
                                 name: e.name,
                                 label: e.desc || e.name,
@@ -343,10 +383,9 @@ export class TemplateService {
                     // handles any escaping the raw value needs.
                     volumes.push(vol);
                 } else if (vol.container) {
-                    const containerPath = vol.container;
-                    const containerFolder = containerPath.split('/').filter(Boolean).pop() || 'data';
-                    const hostPath = vol.bind ? vol.bind : `./${containerFolder}`;
-                    const options = vol.readonly ? ':ro' : '';
+                    const { container: containerPath, readonly: pathReadonly } = parseLsioVolumePath(vol.container);
+                    const hostPath = stripErroneousBindMode(vol.bind ?? defaultBindForLsioVolume(containerPath));
+                    const options = (vol.readonly === true || pathReadonly) ? ':ro' : '';
                     volumes.push(`${hostPath}:${containerPath}${options}`);
                 }
             }

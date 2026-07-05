@@ -84,6 +84,29 @@ describe('TemplateService', () => {
       expect(svc.volumes).toEqual(['./config:/config:ro']);
     });
 
+    it('generates valid compose for fail2ban-shaped template volumes', () => {
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'fail2ban',
+        description: 'Ban IPs',
+        image: 'lscr.io/linuxserver/fail2ban:latest',
+        volumes: [
+          { container: '/config', bind: './config' },
+          { container: '/var/log', bind: '/var/log', readonly: true },
+        ],
+      }, 'fail2ban'), 'fail2ban');
+      expect(svc.volumes).toEqual(['./config:/config', '/var/log:/var/log:ro']);
+    });
+
+    it('repairs stale LSIO volume paths that still embed :ro in container and bind', () => {
+      const svc = serviceOf(service.generateComposeFromTemplate({
+        title: 'fail2ban',
+        description: 'Ban IPs',
+        image: 'lscr.io/linuxserver/fail2ban:latest',
+        volumes: [{ container: '/var/log:ro', bind: './log:ro' }],
+      }, 'fail2ban'), 'fail2ban');
+      expect(svc.volumes).toEqual(['./log:/var/log:ro']);
+    });
+
     it('includes env_file only when env vars are present', () => {
       const withEnv = serviceOf(service.generateComposeFromTemplate({
         title: 'app', description: 'Test', image: 'test:latest',
