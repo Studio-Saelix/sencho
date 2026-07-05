@@ -95,7 +95,12 @@ export function UpdatesSection() {
                 }));
             }
         } catch (e) {
-            toast.error((e as Error)?.message || 'Failed to update sidebar indicator setting.');
+            // Only surface the error if the active node hasn't changed. A
+            // stale failure from node A must not toast while the user views
+            // node B.
+            if (activeNodeIdRef.current === targetNodeId) {
+                toast.error((e as Error)?.message || 'Failed to update sidebar indicator setting.');
+            }
         } finally {
             setIsSaving(false);
         }

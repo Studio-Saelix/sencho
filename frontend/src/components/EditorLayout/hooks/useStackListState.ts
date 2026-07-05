@@ -308,7 +308,7 @@ export function useStackListState() {
     if (filterChip === 'down') return filteredFiles.filter(f => isDownStatus(stackStatuses[f]));
     if (filterChip === 'updates') return filteredFiles.filter(f => sidebarStackUpdates[f]?.hasUpdate);
     return filteredFiles;
-  }, [filteredFiles, filterChip, stackStatuses, stackUpdates]);
+  }, [filteredFiles, filterChip, stackStatuses, sidebarStackUpdates]);
 
   const toggleBulkMode = useCallback(() => {
     setBulkMode(prev => {

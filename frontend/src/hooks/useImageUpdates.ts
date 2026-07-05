@@ -20,6 +20,12 @@ export function useImageUpdates(activeNodeId: number | undefined) {
   const [stackUpdates, setStackUpdates] = useState<Record<string, StackUpdateInfo>>({});
   const [sidebarIndicators, setSidebarIndicators] = useState(false);
 
+  // Track which node owns the current state. When activeNodeId changes
+  // React renders once with the old owner before the passive effect clears
+  // the data. Returning empty defaults when the IDs mismatch prevents a
+  // single-frame flash of the wrong node's data.
+  const [ownerNodeId, setOwnerNodeId] = useState<number | undefined>(activeNodeId);
+
   // Generation counter: every activeNodeId change increments it, and every
   // await is gated against it so a slow response from a previous node is
   // discarded.
@@ -93,12 +99,15 @@ export function useImageUpdates(activeNodeId: number | undefined) {
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 
-  // Poll on mount and on node change. Reset state BEFORE fetching so the
-  // old node's data is cleared before the new node's first response arrives.
+  // Poll on mount and on node change. Reset state and capture the owning
+  // node BEFORE fetching so the old node's data is cleared before the new
+  // node's first response arrives, and the guard above returns empty defaults
+  // on the render before this effect fires.
   useEffect(() => {
     genRef.current += 1;
     setStackUpdates({});          // eslint-disable-line react-hooks/set-state-in-effect
     setSidebarIndicators(false);  // eslint-disable-line react-hooks/set-state-in-effect
+    setOwnerNodeId(activeNodeId); // eslint-disable-line react-hooks/set-state-in-effect
     void refreshRef.current();
     const id = setInterval(() => { void refreshRef.current(); }, IMAGE_UPDATE_POLL_MS);
     return () => clearInterval(id);
@@ -117,5 +126,13 @@ export function useImageUpdates(activeNodeId: number | undefined) {
     return () => window.removeEventListener(SENCHO_SETTINGS_CHANGED, handler);
   }, []);
 
-  return { stackUpdates, refresh, sidebarIndicators };
+  // Return empty defaults until the owning node matches the active node.
+  // This prevents React from rendering node B with node A's update data and
+  // sidebar preference during the single frame before the passive effect fires.
+  const isOwner = activeNodeId !== undefined && activeNodeId === ownerNodeId;
+  return {
+    stackUpdates: isOwner ? stackUpdates : {} as Record<string, StackUpdateInfo>,
+    refresh,
+    sidebarIndicators: isOwner ? sidebarIndicators : false,
+  };
 }
