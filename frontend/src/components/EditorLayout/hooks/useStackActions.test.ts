@@ -56,6 +56,7 @@ function makeStackListState(over: Partial<StackListState> = {}): StackListState 
     files: ['web.yml'],
     stackStatuses: { 'web.yml': 'running' },
     stackPorts: {},
+    stackSelfFlags: {},
     setSelectedFile: vi.fn(),
     setOptimisticStatus: vi.fn(),
     setStackAction: vi.fn(),
@@ -88,6 +89,7 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
     setUpdateReadiness: vi.fn(),
     preDeployAdvisory: null,
     setPreDeployAdvisory: vi.fn(),
+    openSelfStackProtected: vi.fn(),
     setDiffPreview: vi.fn(),
     ...over,
   } as unknown as OverlayState;
@@ -875,6 +877,30 @@ describe('useStackActions.getStackMenuVisibility', () => {
     expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
       showDeploy: true, showStop: false, showRestart: false, showUpdate: false,
     });
+  });
+
+  it('hides guarded lifecycle actions for the self stack but keeps restart', () => {
+    const { result } = setup({
+      stackList: {
+        stackStatuses: { 'sencho.yml': 'running' } as never,
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    expect(result.current.getStackMenuVisibility('sencho.yml')).toEqual({
+      showDeploy: false, showStop: false, showRestart: true, showUpdate: false,
+    });
+  });
+
+  it('opens the self-stack modal instead of calling update on a protected stack', async () => {
+    const { result, overlayState, stackListState } = setup({
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.updateStack(); });
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
+    expect(stackListState.setStackAction).not.toHaveBeenCalled();
   });
 });
 

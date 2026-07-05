@@ -52,6 +52,7 @@ interface StackStatusInfo {
   mainPort?: number;
   running?: number;
   total?: number;
+  isSelf?: boolean;
 }
 
 export interface RemoteResult {
@@ -89,6 +90,7 @@ export function useStackListState() {
   const [searchQuery, setSearchQuery] = useState('');
   const [stackStatuses, setStackStatuses] = useState<StackStatus>({});
   const [stackPorts, setStackPorts] = useState<Record<string, number | undefined>>({});
+  const [stackSelfFlags, setStackSelfFlags] = useState<Record<string, boolean>>({});
   const [stackCounts, setStackCounts] = useState<StackCounts>({});
   const [labels, setLabels] = useState<StackLabel[]>([]);
   const [stackLabelMap, setStackLabelMap] = useState<Record<string, StackLabel[]>>({});
@@ -202,6 +204,7 @@ export function useStackListState() {
       if (stale()) return fileList;
       let bulkStatuses: Record<string, StackRowStatus> = {};
       const bulkPorts: Record<string, number | undefined> = {};
+      const bulkSelf: Record<string, boolean> = {};
       const bulkCounts: StackCounts = {};
 
       const raw: unknown = statusRes.ok ? await statusRes.json() : null;
@@ -209,6 +212,7 @@ export function useStackListState() {
         for (const [key, val] of Object.entries(raw as Record<string, StackStatusInfo>)) {
           bulkStatuses[key] = val.status;
           if (val.mainPort) bulkPorts[key] = val.mainPort;
+          if (val.isSelf) bulkSelf[key] = true;
           if (val.running !== undefined && val.total !== undefined) {
             bulkCounts[key] = { running: val.running, total: val.total };
           }
@@ -229,6 +233,7 @@ export function useStackListState() {
         if (keys.length === Object.keys(prev).length && keys.every(k => prev[k] === bulkPorts[k])) return prev;
         return bulkPorts;
       });
+      setStackSelfFlags(bulkSelf);
       setStackCounts(bulkCounts);
       refreshLabels();
       return fileList;
@@ -390,6 +395,7 @@ export function useStackListState() {
     searchQuery, setSearchQuery,
     stackStatuses, setStackStatuses,
     stackPorts, setStackPorts,
+    stackSelfFlags,
     stackCounts,
     labels,
     stackLabelMap,

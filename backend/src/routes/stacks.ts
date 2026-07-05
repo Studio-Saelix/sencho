@@ -52,6 +52,7 @@ import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelec
 import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
+import { getSelfStackProjectName, isSelfStack, refuseIfSelfStack, selfStackProtectedBulkResult } from '../helpers/selfStackGuard';
 
 // Authenticated users with edit permission can write arbitrarily large compose
 // files. Refuse to YAML.parse anything beyond this bound so a malformed (or
@@ -267,9 +268,19 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
       console.error('Failed to load git sources for status labels; defaulting to local:', sourceError);
     }
     const withSource: Record<string, BulkStackInfo & { source: 'local' | 'git' }> = {};
+    let selfStackProject: string | null = null;
+    try {
+      selfStackProject = await getSelfStackProjectName();
+    } catch (selfErr) {
+      console.error('Failed to resolve self stack project for status labels:', selfErr);
+    }
     for (const [stack, info] of Object.entries(result)) {
       const name = stack.replace(/\.(yml|yaml)$/, '');
-      withSource[stack] = { ...info, source: gitStackNames.has(name) ? 'git' : 'local' };
+      withSource[stack] = {
+        ...info,
+        source: gitStackNames.has(name) ? 'git' : 'local',
+        isSelf: selfStackProject !== null && selfStackProject === name,
+      };
     }
     res.json(withSource);
   } catch (error) {
@@ -393,6 +404,12 @@ async function runStackBulkOp(
     }
   } catch {
     return { stackName, ok: false, error: 'Stack not found', code: 'not_found' };
+  }
+
+  if (action === 'update' || action === 'stop') {
+    if (await isSelfStack(stackName)) {
+      return selfStackProtectedBulkResult(stackName);
+    }
   }
 
   const user = req.user?.username ?? 'system';
@@ -1014,6 +1031,7 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
 stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:delete', 'stack', stackName)) return;
+  if (await refuseIfSelfStack(req, res, stackName)) return;
   const pruneVolumes = req.query.pruneVolumes === 'true';
   const debug = isDebugEnabled();
   const sanitizedName = sanitizeForLog(stackName);
@@ -1451,6 +1469,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (await refuseIfSelfStack(req, res, stackName)) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'deploy')) return;
   const t0 = Date.now();
@@ -1504,6 +1523,7 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (await refuseIfSelfStack(req, res, stackName)) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'down')) return;
   const t0 = Date.now();
@@ -1597,6 +1617,8 @@ async function bulkContainerOp(
 ): Promise<void> {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (action === 'stop' && (await refuseIfSelfStack(req, res, stackName))) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, action)) return;
   const t0 = Date.now();
@@ -1714,6 +1736,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (await refuseIfSelfStack(req, res, stackName)) return;
   // Lock held below. All early-returns must stay inside the try so finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'update')) return;
   const t0 = Date.now();

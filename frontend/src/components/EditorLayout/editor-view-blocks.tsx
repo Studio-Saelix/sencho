@@ -131,6 +131,8 @@ export interface StackIdentityHeaderProps {
     rollbackStack: () => Promise<void>;
     scanStackConfig: () => Promise<void>;
     requestDeleteStack: () => void;
+    /** True when this stack is the running Sencho instance on the active node. */
+    isSelfStack?: boolean;
     stackMuteActions?: ReturnType<typeof useStackMuteActions>;
 }
 
@@ -157,8 +159,10 @@ export function StackIdentityHeader({
     rollbackStack,
     scanStackConfig,
     requestDeleteStack,
+    isSelfStack = false,
     stackMuteActions,
 }: StackIdentityHeaderProps) {
+    const selfProtected = isSelfStack;
     return (
         <div className="flex flex-col gap-3">
             {/* Identity block */}
@@ -246,18 +250,18 @@ export function StackIdentityHeader({
                                         {loadingAction === 'restart' ? 'Restarting...' : 'Restart'}
                                     </Button>
                                 ) : (
-                                    <Button type="button" size="sm" data-testid="stack-deploy-button" className="rounded-lg max-md:h-11 bg-brand text-brand-foreground hover:bg-brand/90" onClick={deployStack} disabled={loadingAction !== null}>
+                                    <Button type="button" size="sm" data-testid="stack-deploy-button" className="rounded-lg max-md:h-11 bg-brand text-brand-foreground hover:bg-brand/90" onClick={deployStack} disabled={loadingAction !== null || selfProtected}>
                                         <Play className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                         {loadingAction === 'deploy' ? 'Starting...' : 'Start'}
                                     </Button>
                                 )}
                                 {isRunning && (
-                                    <Button type="button" size="sm" variant="outline" className="rounded-lg max-md:h-11" onClick={stopStack} disabled={loadingAction !== null}>
+                                    <Button type="button" size="sm" variant="outline" className="rounded-lg max-md:h-11" onClick={stopStack} disabled={loadingAction !== null || selfProtected}>
                                         <Square className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                         {loadingAction === 'stop' ? 'Stopping...' : 'Stop'}
                                     </Button>
                                 )}
-                                <Button type="button" size="sm" variant="outline" className="rounded-lg max-md:h-11" onClick={updateStack} disabled={loadingAction !== null}>
+                                <Button type="button" size="sm" variant="outline" className="rounded-lg max-md:h-11" onClick={updateStack} disabled={loadingAction !== null || selfProtected}>
                                     <CloudDownload className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                     {loadingAction === 'update' ? 'Updating...' : 'Update'}
                                 </Button>
@@ -297,7 +301,7 @@ export function StackIdentityHeader({
                                     {canDelete && (
                                         <DropdownMenuItem
                                             className="text-destructive focus:text-destructive focus:bg-destructive/10"
-                                            disabled={loadingAction !== null}
+                                            disabled={loadingAction !== null || selfProtected}
                                             onClick={requestDeleteStack}
                                         >
                                             <Trash2 className="w-4 h-4 mr-2" strokeWidth={1.5} />

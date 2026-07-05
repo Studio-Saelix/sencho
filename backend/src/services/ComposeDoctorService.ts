@@ -21,6 +21,7 @@ import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { parseUnsetEnvVars, parseMissingRequiredVars } from '../helpers/envVarParse';
 import { resolveStackEnvSources } from '../helpers/envFileResolution';
+import { isSelfStack } from '../helpers/selfStackGuard';
 
 const MAX_RENDER_ERROR = 600; // chars kept from a (redacted) render error
 
@@ -178,6 +179,7 @@ export class ComposeDoctorService {
     const { nodePorts, existingNetworkNames, existingVolumeNames, existingContainers, nodeStateAvailable } = await this.nodeState(nodeId, fsSvc, stackName);
     const bindChecks = model ? await this.resolveBindChecks(model, baseDir) : [];
     const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls } = this.exposureState(nodeId, stackName);
+    const selfStack = await isSelfStack(stackName);
 
     // Required `env_file:` declarations whose file is absent. Optional
     // (required: false) and interpolated/escaping paths are excluded. Fail-soft:
@@ -213,6 +215,7 @@ export class ComposeDoctorService {
       serviceIntents,
       accessUrlPorts,
       hasAccessUrls,
+      isSelfStack: selfStack,
     };
   }
 

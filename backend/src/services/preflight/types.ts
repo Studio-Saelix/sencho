@@ -112,4 +112,6 @@ export interface PreflightContext {
   accessUrlPorts: Set<number>;
   /** Whether the dossier records any access URL (gates the port-vs-documented rule). */
   hasAccessUrls: boolean;
+  /** True when this stack is the running Sencho instance on the node. */
+  isSelfStack: boolean;
 }

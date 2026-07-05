@@ -2,6 +2,7 @@ import BashExecModal from '../BashExecModal';
 import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
 import { PreDeployScanDialog } from '../stack/PreDeployScanDialog';
 import { UpdateReadinessDialog } from '../stack/UpdateReadinessDialog';
+import { SelfStackProtectedDialog } from '../stack/SelfStackProtectedDialog';
 import { DeleteStackDialog } from './DeleteStackDialog';
 import { UnsavedChangesDialog } from './UnsavedChangesDialog';
 import { StackAlertSheet } from '../StackAlertSheet';
@@ -23,6 +24,8 @@ interface ShellOverlaysProps {
   stackName: string;
   gitSourceOpen: boolean;
   setGitSourceOpen: (open: boolean) => void;
+  canSelfUpdate: boolean;
+  onOpenFleetNodeUpdates: () => void;
 }
 
 export function ShellOverlays({
@@ -35,6 +38,8 @@ export function ShellOverlays({
   stackName,
   gitSourceOpen,
   setGitSourceOpen,
+  canSelfUpdate,
+  onOpenFleetNodeUpdates,
 }: ShellOverlaysProps) {
   const {
     deleteDialogOpen, closeDeleteDialog, stackToDelete,
@@ -45,6 +50,7 @@ export function ShellOverlays({
     policyBlock, setPolicyBlock, policyBypassing,
     updateReadiness, setUpdateReadiness,
     preDeployAdvisory,
+    selfStackProtectedOpen, setSelfStackProtectedOpen,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } = overlayState;
@@ -56,6 +62,13 @@ export function ShellOverlays({
         onOpenChange={(open) => { if (!open) closeDeleteDialog(); }}
         stackName={stackToDelete}
         onConfirm={stackActions.deleteStack}
+      />
+
+      <SelfStackProtectedDialog
+        open={selfStackProtectedOpen}
+        onOpenChange={setSelfStackProtectedOpen}
+        canOpenFleetUpdates={canSelfUpdate}
+        onOpenFleetUpdates={onOpenFleetNodeUpdates}
       />
 
       <UnsavedChangesDialog

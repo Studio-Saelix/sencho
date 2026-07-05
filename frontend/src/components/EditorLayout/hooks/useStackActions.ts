@@ -52,6 +52,18 @@ const NODE_UNREACHABLE_FAILURE: FailureClassification = {
 
 const UNREACHABLE_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
 
+const SELF_STACK_PROTECTED_CODE = 'self_stack_protected';
+
+const isSelfStackProtectedResponse = (rawBody: string, status?: number): boolean => {
+  if (status !== 409) return false;
+  try {
+    const parsed: unknown = JSON.parse(rawBody);
+    return isRecord(parsed) && parsed.code === SELF_STACK_PROTECTED_CODE;
+  } catch {
+    return false;
+  }
+};
+
 const parseFailureClassification = (value: unknown): FailureClassification | undefined => {
   if (
     isRecord(value) &&
@@ -265,12 +277,22 @@ export function useStackActions(options: UseStackActionsOptions) {
     // lifecycle actions (stop/restart/update) rather than deploy.
     const raw = stackListState.stackStatuses[file];
     const status = raw === 'partial' ? 'running' : raw;
+    const isSelf = stackListState.stackSelfFlags[file] === true;
     return {
-      showDeploy: status !== 'running',
-      showStop: status === 'running',
+      showDeploy: !isSelf && status !== 'running',
+      showStop: !isSelf && status === 'running',
       showRestart: status === 'running',
-      showUpdate: status === 'running',
+      showUpdate: !isSelf && status === 'running',
     };
+  };
+
+  const isSelfStackFile = (file: string | null | undefined): boolean =>
+    !!file && stackListState.stackSelfFlags[file] === true;
+
+  const openSelfStackProtectedIfNeeded = (file: string | null | undefined): boolean => {
+    if (!isSelfStackFile(file)) return false;
+    overlayState.openSelfStackProtected();
+    return true;
   };
 
   const openStackApp = (file: string) => {
@@ -706,6 +728,10 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(path, withDeploySession(deploySessionId ?? '', { method: 'POST', nodeId: opNodeId }));
       if (!response.ok) {
         const rawBody = await response.text();
+        if (isSelfStackProtectedResponse(rawBody, response.status)) {
+          overlayState.openSelfStackProtected();
+          return { ok: false, errorMessage: 'Sencho instance protected' };
+        }
         if (response.status === 409) {
           // Either 409 sub-case (op-in-progress or policy block) leaves the
           // stack in its prior state; undo the optimistic "running" flip once.
@@ -764,16 +790,13 @@ export function useStackActions(options: UseStackActionsOptions) {
   const deployStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
-    // deployPendingRef blocks a second deploy from the moment of the click
-    // through the async advisory phase, before setStackAction marks the stack
-    // busy. Without it, a double-click during the advisory fetch window could
-    // launch two deploys. Cleared on cancel and in the deploy's finally.
     if (
       !stackListState.selectedFile ||
       stackListState.isStackBusy(stackListState.selectedFile) ||
       deployPendingRef.current
     )
       return;
+    if (openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
     const stackFile = stackListState.selectedFile;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     // Snapshot the node once so the advisory fetch and the deploy stay bound to
@@ -996,6 +1019,10 @@ export function useStackActions(options: UseStackActionsOptions) {
           const response = await apiFetch(url, withDeploySession(ds, { method: 'POST', nodeId: opNodeId }));
           if (!response.ok) {
             const errText = await response.text();
+            if (isSelfStackProtectedResponse(errText, response.status)) {
+              overlayState.openSelfStackProtected();
+              return { ok: false as const, errorMessage: 'Sencho instance protected' };
+            }
             if (response.status === 409) {
               const inProgress = parseStackOpInProgress(errText);
               if (inProgress) {
@@ -1056,6 +1083,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     e?.preventDefault();
     e?.stopPropagation();
     if (!stackListState.selectedFile) return;
+    if (openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
     await runStackAction(stackListState.selectedFile, 'stop', 'stop', 'exited', 'Stack stopped successfully!');
   };
 
@@ -1122,6 +1150,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     e?.preventDefault();
     e?.stopPropagation();
     if (!stackListState.selectedFile) return;
+    if (openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
     await requestStackUpdate(stackListState.selectedFile);
   };
 
@@ -1141,6 +1170,11 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(url, { method: 'DELETE' });
       if (!response.ok) {
         const errText = await response.text();
+        if (isSelfStackProtectedResponse(errText, response.status)) {
+          overlayState.openSelfStackProtected();
+          overlayState.closeDeleteDialog();
+          return;
+        }
         throw new Error(errText || 'Failed to delete stack');
       }
       toast.success('Stack deleted successfully!');
@@ -1202,6 +1236,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const requestDeleteStack = () => {
+    if (openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
     overlayState.openDeleteDialog(stackListState.selectedFile ?? '');
   };
 
@@ -1211,6 +1246,12 @@ export function useStackActions(options: UseStackActionsOptions) {
     endpoint: string,
   ) => {
     if (stackListState.isStackBusy(stackFile)) return;
+    if (
+      (action === 'deploy' || action === 'update' || action === 'stop' || action === 'delete') &&
+      openSelfStackProtectedIfNeeded(stackFile)
+    ) {
+      return;
+    }
     // Updates route through the shared update path so the sidebar gets the
     // readiness dialog, the deploy-feedback modal, and the same failure
     // handling as the toolbar.
@@ -1235,6 +1276,10 @@ export function useStackActions(options: UseStackActionsOptions) {
       const response = await apiFetch(`/stacks/${stackName}/${endpoint}`, { method: 'POST', nodeId: opNodeId });
       if (!response.ok) {
         const errText = await response.text();
+        if (isSelfStackProtectedResponse(errText, response.status)) {
+          overlayState.openSelfStackProtected();
+          return;
+        }
         if (response.status === 409) {
           const inProgress = parseStackOpInProgress(errText);
           if (inProgress) {
@@ -1371,6 +1416,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     closeBashModal,
     openLogViewer,
     closeLogViewer,
+    isSelfStackFile,
+    openSelfStackProtectedIfNeeded,
   };
 }
 

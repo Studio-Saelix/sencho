@@ -70,6 +70,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         setGitSourceOpen,
         setCopiedDigest,
         requestDeleteStack,
+        isSelfStack = false,
         onMobileBack,
         onCloseEditor,
         hasUnsavedChanges,
@@ -153,6 +154,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                         rollbackStack={rollbackStack}
                         scanStackConfig={scanStackConfig}
                         requestDeleteStack={requestDeleteStack}
+                        isSelfStack={isSelfStack}
                         stackMuteActions={stackMuteActions}
                     />
                 </div>

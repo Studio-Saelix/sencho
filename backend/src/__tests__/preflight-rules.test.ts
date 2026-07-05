@@ -30,7 +30,8 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
     sourceServiceNames: m ? m.services.map(s => s.name) : [], sourceReadable: true,
     nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(),
     existingContainers: [], nodeStateAvailable: true, bindChecks: [],
-    stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false, ...over,
+    stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
+    isSelfStack: false, ...over,
   };
 }
 
@@ -404,6 +405,17 @@ describe('node-state availability', () => {
   });
 });
 
+describe('self-managed-stack', () => {
+  it('fires a warning when the stack is the running Sencho instance', () => {
+    const f = ids(runRules(ctx({ isSelfStack: true })), 'self-managed-stack');
+    expect(f).toHaveLength(1);
+    expect(f[0].severity).toBe('warning');
+  });
+  it('stays silent for ordinary stacks', () => {
+    expect(ids(runRules(ctx({ isSelfStack: false })), 'self-managed-stack')).toHaveLength(0);
+  });
+});
+
 describe('rule registry completeness', () => {
   // The canonical rule set. Adding or removing a rule must update this list,
   // which forces a deliberate pass over the docs and the frontend severity map.
@@ -415,7 +427,7 @@ describe('rule registry completeness', () => {
     'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume', 'anonymous-volume',
     'container-name-internal-dup', 'container-name-collision',
     'exposure-internal-published', 'sensitive-service-broad-exposure', 'exposure-unclassified',
-    'exposure-port-vs-dossier', 'reverse-proxy-undocumented', 'effective-model-expanded',
+    'exposure-port-vs-dossier', 'reverse-proxy-undocumented', 'effective-model-expanded', 'self-managed-stack',
   ];
   it('the registry contains exactly the expected rules', () => {
     expect([...RULE_IDS].sort()).toEqual([...EXPECTED_RULE_IDS].sort());
