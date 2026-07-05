@@ -420,6 +420,7 @@ export function EditorView(props: EditorViewProps) {
                                     openLogViewer={openLogViewer}
                                     openBashModal={openBashModal}
                                     serviceAction={serviceAction}
+                                    key={`${activeNode?.id ?? 'local'}:${stackName}`}
                                 />
                             </ScrollArea>
                         </CardContent>
@@ -434,6 +435,7 @@ export function EditorView(props: EditorViewProps) {
                                 openLogViewer={openLogViewer}
                                 openBashModal={openBashModal}
                                 serviceAction={serviceAction}
+                                key={`${activeNode?.id ?? 'local'}:${stackName}`}
                             />
                         </CardContent>
                         )}

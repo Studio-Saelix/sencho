@@ -173,4 +173,47 @@ describe('density toggle and summary strip', () => {
     // View logs button still present
     expect(screen.getAllByRole('button', { name: 'View logs' })).toHaveLength(2);
   });
+
+  it('renders empty state for zero containers without summary strip', () => {
+    renderMany([]);
+    expect(screen.getByText(/no containers running/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Compact view' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Detailed view' })).toBeNull();
+  });
+
+  it('resets density to detailed on remount (key change)', () => {
+    const { rerender, unmount } = render(
+      <ContainersHealth
+        safeContainers={[makeContainer({ Id: 'a' }), makeContainer({ Id: 'b' })]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+      />,
+    );
+    // Switch to compact
+    fireEvent.click(screen.getByRole('button', { name: 'Compact view' }));
+    expect(screen.queryByText('cpu')).toBeNull();
+
+    // Simulate navigating to a single-container stack (new key)
+    unmount();
+    render(
+      <ContainersHealth
+        safeContainers={[makeContainer({ Id: 'x' })]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+      />,
+    );
+    // Density reset; single container shows sparklines
+    expect(screen.getByText('cpu')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Compact view' })).toBeNull();
+  });
 });
