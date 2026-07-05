@@ -19,11 +19,12 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { mockReadFileSync, mockWriteFileSync, mockExistsSync, mockMkdirSync } = vi.hoisted(() => ({
+const { mockReadFileSync, mockWriteFileSync, mockExistsSync, mockMkdirSync, mockUnlinkSync } = vi.hoisted(() => ({
     mockReadFileSync: vi.fn(),
     mockWriteFileSync: vi.fn(),
     mockExistsSync: vi.fn(),
     mockMkdirSync: vi.fn(),
+    mockUnlinkSync: vi.fn(),
 }));
 
 vi.mock('fs', () => {
@@ -32,13 +33,14 @@ vi.mock('fs', () => {
         writeFileSync: mockWriteFileSync,
         existsSync: mockExistsSync,
         mkdirSync: mockMkdirSync,
+        unlinkSync: mockUnlinkSync,
     };
     return { ...mock, default: mock };
 });
 
 // agent.ts is imported AFTER vi.mock so the mock is in place when the
 // module's top-level fs import resolves.
-import { readPersistedToken, persistToken } from '../pilot/agent';
+import { readPersistedToken, persistToken, clearPersistedToken } from '../pilot/agent';
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
 let warnSpy: ReturnType<typeof vi.spyOn>;
@@ -165,5 +167,27 @@ describe('persistToken', () => {
     it('does not throw, so the in-memory token stays usable for the current session', () => {
         mockWriteFileSync.mockImplementationOnce(() => { throw fsError('EIO', 'i/o error'); });
         expect(() => persistToken('test-token')).not.toThrow();
+    });
+});
+
+describe('clearPersistedToken', () => {
+    it('unlinks the token file on the happy path', () => {
+        clearPersistedToken();
+        expect(mockUnlinkSync).toHaveBeenCalledWith(expect.stringContaining('pilot.jwt'));
+        expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not warn on ENOENT (file already absent)', () => {
+        mockUnlinkSync.mockImplementationOnce(() => { throw fsError('ENOENT', 'no such file'); });
+        clearPersistedToken();
+        expect(warnSpy).not.toHaveBeenCalled();
+    });
+
+    it('warns on EACCES (read-only volume)', () => {
+        mockUnlinkSync.mockImplementationOnce(() => { throw fsError('EACCES', 'permission denied'); });
+        clearPersistedToken();
+        expect(warnSpy).toHaveBeenCalledOnce();
+        expect(String(warnSpy.mock.calls[0][0])).toContain('Failed to remove persisted tunnel token');
+        expect(String(warnSpy.mock.calls[0][0])).toContain('EACCES');
     });
 });
