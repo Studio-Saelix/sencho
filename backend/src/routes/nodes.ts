@@ -245,6 +245,9 @@ nodesRouter.post('/', enrollmentLimiter, async (req: Request, res: Response) => 
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : '';
+    if (message.includes('A local node already exists')) {
+      return res.status(409).json({ error: message });
+    }
     if (message.includes('UNIQUE constraint')) {
       return res.status(409).json({ error: 'A node with that name already exists' });
     }
@@ -308,6 +311,10 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
       updates.compose_dir = composeDir;
     }
 
+    if (updates.type !== undefined && !['local', 'remote'].includes(updates.type)) {
+      return res.status(400).json({ error: 'Node type must be "local" or "remote"' });
+    }
+
     if (updates.api_url !== undefined && updates.api_url !== '') {
       const urlCheck = isValidRemoteUrl(updates.api_url);
       if (!urlCheck.valid) {
@@ -348,9 +355,12 @@ nodesRouter.put('/:id', async (req: Request, res: Response) => {
       })
     });
   } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '';
+    if (message.includes('Node type cannot be changed')) {
+      return res.status(400).json({ error: message });
+    }
     console.error('Failed to update node:', error);
-    const message = error instanceof Error ? error.message : 'Failed to update node';
-    res.status(500).json({ error: message });
+    res.status(500).json({ error: message || 'Failed to update node' });
   }
 });
 
@@ -384,8 +394,12 @@ nodesRouter.delete('/:id', async (req: Request, res: Response) => {
     console.log(`[Nodes] Deleted node ${id} ("${sanitizeForLog(existing.name)}")`);
     res.json({ success: true });
   } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '';
+    if (message.includes('Cannot delete the only local node')) {
+      return res.status(400).json({ error: message });
+    }
     console.error('Failed to delete node:', error);
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to delete node' });
+    res.status(500).json({ error: message || 'Failed to delete node' });
   }
 });
 

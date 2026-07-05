@@ -76,6 +76,18 @@ afterAll(() => {
     cleanupTestDb(tmpDir);
 });
 
+/** Insert a second local node via raw SQL, bypassing the addNode singleton guard. */
+function insertLegacyLocal(name: string, isDefault = false): number {
+    const db = DatabaseService.getInstance().getDb();
+    if (isDefault) {
+        db.prepare('UPDATE nodes SET is_default = 0').run();
+    }
+    const result = db.prepare(
+        "INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at) VALUES (?, 'local', ?, ?, 'online', ?)"
+    ).run(name, process.env.COMPOSE_DIR ?? '', isDefault ? 1 : 0, Date.now());
+    return result.lastInsertRowid as number;
+}
+
 describe('/api/auto-heal routes', () => {
     it('allows Community tier access', async () => {
         vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
@@ -135,14 +147,7 @@ describe('/api/auto-heal routes', () => {
 
     it('lists only policies for the active node', async () => {
         const defaultNodeId = DatabaseService.getInstance().getDefaultNode()?.id ?? 1;
-        const secondNodeId = DatabaseService.getInstance().addNode({
-            name: 'route-second-local',
-            type: 'local',
-            compose_dir: process.env.COMPOSE_DIR ?? '',
-            is_default: false,
-            api_url: '',
-            api_token: '',
-        });
+        const secondNodeId = insertLegacyLocal('route-second-local');
         makePolicy(defaultNodeId, 'same-stack');
         makePolicy(secondNodeId, 'same-stack');
 
@@ -163,14 +168,7 @@ describe('/api/auto-heal routes', () => {
     });
 
     it('rejects history access for a policy owned by a different node', async () => {
-        const secondNodeId = DatabaseService.getInstance().addNode({
-            name: 'history-second-local',
-            type: 'local',
-            compose_dir: process.env.COMPOSE_DIR ?? '',
-            is_default: false,
-            api_url: '',
-            api_token: '',
-        });
+        const secondNodeId = insertLegacyLocal('history-second-local');
         const policy = makePolicy(secondNodeId, 'history-stack');
 
         const res = await request(app)
