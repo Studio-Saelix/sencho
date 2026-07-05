@@ -27,13 +27,13 @@ const formatAge = (timestamp: number, now: number): string => {
 };
 
 export function preflightSignal(
-  input: { status: PreflightStatus } | Errored,
+  input: { activeStatus: PreflightStatus } | Errored,
 ): ReadinessSignal {
   const base = { id: 'preflight' as const, title: 'Compose Doctor' };
   if (input === 'error') {
     return { ...base, status: 'unknown', affectsVerdict: false, detail: 'The stored preflight report could not be read.' };
   }
-  switch (input.status) {
+  switch (input.activeStatus) {
     case 'never-run':
       return { ...base, status: 'unknown', affectsVerdict: false, detail: 'Compose Doctor has not been run for this stack yet. Run it for a deeper pre-update check.' };
     case 'blocker':

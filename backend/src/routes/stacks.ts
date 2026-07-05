@@ -23,6 +23,9 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
+import { RULE_IDS } from '../services/preflight/rules';
+import { parseServiceImages, isPreflightAckActive } from '../utils/preflight-ack-filter';
+import type { PreflightAckExpiryMode } from '../services/DatabaseService';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
 import { buildStorageInventory } from '../services/storage/inventory';
 import { buildEffectiveAnatomy } from '../services/effectiveAnatomy';
@@ -1246,6 +1249,143 @@ stacksRouter.post('/:stackName/preflight/run', async (req: Request, res: Respons
     console.error('[Stacks] Failed to run preflight for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to run preflight' });
+  }
+});
+
+const PREFLIGHT_ACK_EXPIRY_MODES = new Set<PreflightAckExpiryMode>([
+  'forever', 'until_compose_change', 'days', 'until_image_change',
+]);
+const PREFLIGHT_RULE_ID_SET = new Set(RULE_IDS);
+
+stacksRouter.get('/:stackName/preflight/acknowledgements', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const run = DatabaseService.getInstance().getLatestPreflightRun(req.nodeId, stackName);
+    const ctx = {
+      renderedHash: run?.rendered_hash ?? null,
+      serviceImages: parseServiceImages(run?.service_images ?? null),
+    };
+    const now = Date.now();
+    const rows = DatabaseService.getInstance().getPreflightAcknowledgements(req.nodeId, stackName).map((ack) => ({
+      ...ack,
+      active: isPreflightAckActive(ack, ctx, now),
+    }));
+    res.json(rows);
+  } catch (error) {
+    console.error('[Stacks] Failed to list preflight acknowledgements for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to load preflight acknowledgements' });
+  }
+});
+
+stacksRouter.post('/:stackName/preflight/acknowledgements', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  const body = req.body ?? {};
+  const ruleId = typeof body.ruleId === 'string' ? body.ruleId.trim() : '';
+  if (!PREFLIGHT_RULE_ID_SET.has(ruleId)) {
+    res.status(400).json({ error: 'ruleId must be a known Compose Doctor rule id' });
+    return;
+  }
+  const serviceRaw = body.service == null || body.service === ''
+    ? null
+    : String(body.service).trim();
+  if (serviceRaw !== null && !isValidServiceName(serviceRaw)) {
+    res.status(400).json({ error: 'service must be a valid service name' });
+    return;
+  }
+  const expiryMode = typeof body.expiryMode === 'string' ? body.expiryMode.trim() : 'forever';
+  if (!PREFLIGHT_ACK_EXPIRY_MODES.has(expiryMode as PreflightAckExpiryMode)) {
+    res.status(400).json({ error: 'expiryMode must be forever, until_compose_change, days, or until_image_change' });
+    return;
+  }
+  if (expiryMode === 'until_image_change' && !serviceRaw) {
+    res.status(400).json({ error: 'until_image_change requires a specific service' });
+    return;
+  }
+  const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
+  if (reason.length > 2000) {
+    res.status(400).json({ error: 'reason is too long' });
+    return;
+  }
+  let expiresAt: number | null = null;
+  if (expiryMode === 'days') {
+    const days = Number(body.expiresInDays ?? 30);
+    if (!Number.isFinite(days) || days <= 0 || days > 3650) {
+      res.status(400).json({ error: 'expiresInDays must be between 1 and 3650' });
+      return;
+    }
+    expiresAt = Date.now() + Math.round(days * 86_400_000);
+  }
+  const run = DatabaseService.getInstance().getLatestPreflightRun(req.nodeId, stackName);
+  if (!run) {
+    res.status(400).json({ error: 'Run Compose Doctor before acknowledging a finding' });
+    return;
+  }
+  const serviceImages = parseServiceImages(run.service_images);
+  let anchorRenderedHash: string | null = null;
+  let anchorImageRef: string | null = null;
+  if (expiryMode === 'until_compose_change') {
+    if (!run.rendered_hash) {
+      res.status(400).json({ error: 'The latest preflight run has no compose fingerprint to anchor against' });
+      return;
+    }
+    anchorRenderedHash = run.rendered_hash;
+  }
+  if (expiryMode === 'until_image_change') {
+    const imageRef = serviceImages[serviceRaw!] ?? null;
+    if (!imageRef) {
+      res.status(400).json({ error: 'The latest preflight run has no image reference for that service' });
+      return;
+    }
+    anchorImageRef = imageRef;
+  }
+  try {
+    const ack = DatabaseService.getInstance().upsertPreflightAcknowledgement({
+      node_id: req.nodeId,
+      stack_name: stackName,
+      rule_id: ruleId,
+      service: serviceRaw,
+      reason,
+      expiry_mode: expiryMode as PreflightAckExpiryMode,
+      expires_at: expiresAt,
+      anchor_rendered_hash: anchorRenderedHash,
+      anchor_image_ref: anchorImageRef,
+      created_by: req.user?.username ?? 'unknown',
+      created_at: Date.now(),
+    });
+    res.status(201).json(ack);
+  } catch (error) {
+    console.error('[Stacks] Failed to create preflight acknowledgement for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to create preflight acknowledgement' });
+  }
+});
+
+stacksRouter.delete('/:stackName/preflight/acknowledgements/:id', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:edit', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid acknowledgement id' });
+    return;
+  }
+  const existing = DatabaseService.getInstance().getPreflightAcknowledgement(id);
+  if (!existing || existing.node_id !== req.nodeId || existing.stack_name !== stackName) {
+    res.status(404).json({ error: 'Acknowledgement not found' });
+    return;
+  }
+  try {
+    DatabaseService.getInstance().deletePreflightAcknowledgement(id);
+    res.status(204).end();
+  } catch (error) {
+    console.error('[Stacks] Failed to delete preflight acknowledgement for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to delete preflight acknowledgement' });
   }
 });
 

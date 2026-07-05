@@ -204,6 +204,23 @@ Running preflight before updating gives the readiness check the most accurate si
 
 Preflight runs against the **active node**, so selecting a remote node checks the stack against that machine's live Docker state. On mobile, the same report appears under the **Compose** section of the stack detail view.
 
+## Acknowledging findings
+
+When a finding is valid in general but intentional for your stack, you can acknowledge it so it no longer counts toward the active warning total, the Doctor tab badge, or the update readiness check.
+
+1. Open the **Doctor** tab and run preflight if you have not already.
+2. On any active finding row, click **acknowledge**.
+3. Optionally add a note explaining why the finding is acceptable.
+4. Choose when Sencho should show the finding again:
+   - **Forever** until you clear the acknowledgement manually.
+   - **Until Compose changes** when the stack's compose fingerprint changes (for example after you edit `compose.yaml`).
+   - **30 days** on a rolling timer.
+   - **Until image changes** for a specific service when that service's image reference in the effective model changes. This tracks tag or reference changes, not silent digest re-pulls of the same tag.
+
+Acknowledged findings move to a collapsible **Acknowledged** section at the bottom of the report. You can clear an acknowledgement there to restore the finding to the active list immediately.
+
+Acknowledgements are stored per node, stack, rule, and service. They do not sync across nodes in a fleet. Clearing an acknowledgement or letting an expiry mode lapse restores the finding on the next preflight read without re-running checks.
+
 <Frame>
   <img
     src="/images/compose-doctor/compose-doctor-findings.png"
