@@ -182,7 +182,7 @@ describe('density toggle and summary strip', () => {
   });
 
   it('resets density to detailed on remount (key change)', () => {
-    const { rerender, unmount } = render(
+    const { unmount } = render(
       <ContainersHealth
         safeContainers={[makeContainer({ Id: 'a' }), makeContainer({ Id: 'b' })]}
         containerStats={{}}
