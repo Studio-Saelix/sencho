@@ -79,7 +79,7 @@ describe('PilotAgent auth fallback (stub WebSocket)', () => {
         (agent as unknown as { connect: () => void }).connect();
 
         const firstWs = wsInstances[0]!;
-        firstWs.emit('unexpected-response', {}, { statusCode: 401 });
+        // Real ws (no unexpected-response listener): abortHandshake emits error then close.
         firstWs.emit('error', new Error('Unexpected server response: 401'));
         firstWs.emit('close', 1006, Buffer.from(''));
 

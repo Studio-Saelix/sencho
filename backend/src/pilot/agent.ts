@@ -199,11 +199,10 @@ export class PilotAgent {
         let opened = false;
         let lastHandshakeError: string | null = null;
 
-        ws.on('unexpected-response', (_req, res) => {
-            if (res.statusCode === 401 || res.statusCode === 404) {
-                this.upgradeRejected = true;
-            }
-        });
+        // Do NOT register an 'unexpected-response' listener here. The ws library
+        // skips abortHandshake (and therefore never emits 'error' or 'close')
+        // when a listener exists for that event. Auth rejection is detected via
+        // the error message abortHandshake emits: "Unexpected server response: N".
         ws.on('error', (err) => {
             console.warn('[Pilot] Tunnel error:', err.message);
             lastHandshakeError = err.message;
