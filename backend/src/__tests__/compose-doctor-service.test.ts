@@ -85,7 +85,7 @@ describe('runPreflight', () => {
     expect(report.renderable).toBe(true);
     expect(report.status).toBe('high'); // env-unset + 0.0.0.0 exposure are high
     expect(report.highestSeverity).toBe('high');
-    expect(report.findings.map(f => f.ruleId)).toEqual(expect.arrayContaining(['env-unset', 'port-exposed-all-interfaces', 'image-latest', 'no-healthcheck']));
+    expect(report.findings.map(f => f.ruleId)).toEqual(expect.arrayContaining(['env-literal-dollar', 'port-exposed-all-interfaces', 'image-latest', 'no-healthcheck']));
     expect(report.ranBy).toBe('tester');
     expect(report.sourceHash).toBeTruthy();
 
@@ -126,6 +126,40 @@ describe('runPreflight', () => {
     expect(runs).not.toContain(SECRET);
     expect(findings).not.toContain(SECRET);
     expect(JSON.stringify(report)).not.toContain(SECRET);
+  });
+
+  it('does not expose hash fragments as unset variable names (#1550)', async () => {
+    const stack = 'hashfrag';
+    const dir = path.join(process.env.COMPOSE_DIR as string, stack);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'compose.yaml'),
+      [
+        'services:',
+        '  demo:',
+        '    image: alpine:3',
+        '    environment:',
+        '      - EXAMPLE_AUTH_HASH=$2b$10$E6SDEbshpc$vCSrREDACTED',
+      ].join('\n'),
+    );
+    try {
+      stubDocker(
+        { name: stack, services: { demo: { image: 'alpine:3', environment: { EXAMPLE_AUTH_HASH: '' } } }, networks: {}, volumes: {} },
+        'WARN The "E6SDEbshpc" variable is not set. Defaulting to a blank string.\n'
+          + 'WARN The "vCSr" variable is not set. Defaulting to a blank string.\n',
+      );
+      const report = await doctor().runPreflight(nodeId, stack, 'tester');
+      const literal = report.findings.filter(f => f.ruleId === 'env-literal-dollar');
+      const unset = report.findings.filter(f => f.ruleId === 'env-unset');
+      expect(literal.length).toBeGreaterThan(0);
+      expect(unset.some(f => f.title.includes('E6SDEbshpc') || f.title.includes('vCSr'))).toBe(false);
+      const persisted = JSON.stringify(db().getPreflightFindings(db().getLatestPreflightRun(nodeId, stack)!.id));
+      expect(persisted).not.toContain('E6SDEbshpc');
+      expect(persisted).not.toContain('vCSr');
+      expect(literal[0].title).toContain('likely secret');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('replaces the prior run rather than accumulating', async () => {
@@ -248,11 +282,45 @@ describe('getLatest', () => {
   });
 });
 
+describe('preflight acknowledgements', () => {
+  const STACK = 'doctorack';
+  beforeEach(() => { writeStack(STACK); });
+  afterEach(() => { fs.rmSync(path.join(process.env.COMPOSE_DIR as string, STACK), { recursive: true, force: true }); });
+
+  it('lowers activeStatus when a finding is acknowledged', async () => {
+    stubDocker(
+      { name: STACK, services: { web: { image: 'nginx:latest', ports: [{ target: 80, published: '8080', protocol: 'tcp' }] } }, networks: {}, volumes: {} },
+    );
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.status).toBe('high');
+    const target = report.findings.find(f => f.ruleId === 'port-exposed-all-interfaces');
+    expect(target).toBeTruthy();
+    db().upsertPreflightAcknowledgement({
+      node_id: nodeId,
+      stack_name: STACK,
+      rule_id: target!.ruleId,
+      service: target!.service ?? null,
+      reason: 'intentional',
+      expiry_mode: 'forever',
+      expires_at: null,
+      anchor_rendered_hash: null,
+      anchor_image_ref: null,
+      created_by: 'tester',
+      created_at: Date.now(),
+    });
+    const latest = doctor().getLatest(nodeId, STACK);
+    expect(latest.acknowledgedCount).toBe(1);
+    expect(latest.activeCount).toBe(latest.findings.length - 1);
+    expect(latest.status).toBe('high');
+    expect(latest.activeStatus).not.toBe('high');
+  });
+});
+
 describe('node deletion cleanup', () => {
   it('removes preflight runs and findings for a deleted node', () => {
     const ghostNode = 987654;
     db().replacePreflightRun(
-      { id: 'run-x', node_id: ghostNode, stack_name: 's', source_hash: null, rendered_hash: null, status: 'pass', highest_severity: null, created_at: 1, created_by: null },
+      { id: 'run-x', node_id: ghostNode, stack_name: 's', source_hash: null, rendered_hash: null, service_images: null, status: 'pass', highest_severity: null, created_at: 1, created_by: null },
       [{ id: 'find-x', run_id: 'run-x', rule_id: 'privileged', severity: 'high', title: 't', message: 'm', source_path: null, remediation: null, service: 's', created_at: 1 }],
     );
     expect(db().getLatestPreflightRun(ghostNode, 's')).toBeDefined();

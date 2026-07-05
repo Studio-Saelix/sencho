@@ -26,6 +26,7 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
   const m = over.model !== undefined ? over.model : model([]);
   return {
     stackName: 'proj', platform: 'linux', model: m, renderable: true, renderError: null, unsetEnvVars: [],
+    literalDollarWarnings: [],
     missingEnvFiles: [],
     sourceServiceNames: m ? m.services.map(s => s.name) : [], sourceReadable: true,
     nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(),
@@ -54,6 +55,34 @@ describe('env-unset', () => {
     expect(f).toHaveLength(2);
     expect(f[0].severity).toBe('high');
     expect(f.map(x => x.sourcePath)).toEqual(['FOO', 'BAR']);
+  });
+  it('mentions literal-dollar escapes in remediation', () => {
+    const f = ids(runRules(ctx({ unsetEnvVars: ['FOO'] })), 'env-unset');
+    expect(f[0].remediation).toContain('$$');
+    expect(f[0].remediation).toContain('single-quote');
+  });
+});
+
+describe('env-literal-dollar', () => {
+  it('emits a safe finding for likely-secret literal dollar warnings', () => {
+    const f = ids(runRules(ctx({
+      literalDollarWarnings: [{ envKey: 'EXAMPLE_AUTH_HASH', likelySecret: true, service: 'demo' }],
+    })), 'env-literal-dollar');
+    expect(f).toHaveLength(1);
+    expect(f[0].severity).toBe('high');
+    expect(f[0].title).toContain('likely secret');
+    expect(f[0].sourcePath).toBe('EXAMPLE_AUTH_HASH');
+    expect(f[0].service).toBe('demo');
+    expect(f[0].title).not.toContain('E6SDEbshpc');
+    expect(f[0].remediation).toContain('$$');
+  });
+  it('omits fragment names from generic literal-dollar findings', () => {
+    const f = ids(runRules(ctx({
+      literalDollarWarnings: [{ likelySecret: false }],
+    })), 'env-literal-dollar');
+    expect(f).toHaveLength(1);
+    expect(f[0].sourcePath).toBeUndefined();
+    expect(f[0].title).toContain('environment value');
   });
 });
 
@@ -408,7 +437,7 @@ describe('rule registry completeness', () => {
   // The canonical rule set. Adding or removing a rule must update this list,
   // which forces a deliberate pass over the docs and the frontend severity map.
   const EXPECTED_RULE_IDS = [
-    'render-failed', 'env-unset', 'env-file-missing', 'port-conflict-node', 'port-conflict-internal', 'port-exposed-all-interfaces',
+    'render-failed', 'env-unset', 'env-literal-dollar', 'env-file-missing', 'port-conflict-node', 'port-conflict-internal', 'port-exposed-all-interfaces',
     'bind-path-missing', 'bind-path-permission', 'docker-socket-mount', 'privileged', 'network-mode-host',
     'uid-gid-risk', 'image-latest', 'no-restart-policy', 'no-healthcheck', 'deploy-swarm-only',
     'node-state-unavailable',

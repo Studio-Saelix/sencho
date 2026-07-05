@@ -24,6 +24,7 @@ import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/au
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { pathsMatch, resolveHostBindPath } from '../utils/composePathMapping';
+import { loadStackBuildServices } from './ImageUpdateService';
 
 export class ComposeRollbackError extends Error {
   public readonly rollbackAttempted: boolean;
@@ -674,9 +675,20 @@ export class ComposeService {
         console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
       }
 
+      const buildServices = await loadStackBuildServices(this.nodeId, stackName);
+      const buildAware = buildServices.length > 0;
+
       await this.withRegistryAuth(async (env) => {
-        sendOutput('=== Pulling latest images ===\n');
-        await this.execute('docker', await this.authoredComposeArgs(stackName, ['pull']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+        if (buildAware) {
+          sendOutput('=== Building images ===\n');
+          await this.execute('docker', await this.authoredComposeArgs(stackName, ['build', '--pull']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+
+          sendOutput('=== Pulling registry images ===\n');
+          await this.execute('docker', await this.authoredComposeArgs(stackName, ['pull', '--ignore-buildable']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+        } else {
+          sendOutput('=== Pulling latest images ===\n');
+          await this.execute('docker', await this.authoredComposeArgs(stackName, ['pull']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+        }
 
         sendOutput('=== Recreating containers ===\n');
         await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());

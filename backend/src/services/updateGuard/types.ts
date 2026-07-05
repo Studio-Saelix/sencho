@@ -6,7 +6,7 @@ export type SignalStatus = 'ok' | 'warning' | 'attention' | 'blocked' | 'unknown
 
 /** One input to the readiness verdict (preflight, drift, containers, ...). */
 export interface ReadinessSignal {
-  id: 'preflight' | 'drift' | 'containers' | 'healthchecks' | 'update_preview' | 'backup_slot' | 'disk';
+  id: 'preflight' | 'drift' | 'containers' | 'healthchecks' | 'update_preview' | 'build_services' | 'backup_slot' | 'disk';
   status: SignalStatus;
   /** Short headline ("Compose Doctor", "Running containers"). */
   title: string;

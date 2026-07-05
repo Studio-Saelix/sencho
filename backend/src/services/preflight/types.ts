@@ -1,5 +1,6 @@
 import type { EffectiveModel } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
+import type { LiteralDollarWarning } from '../../helpers/unsetEnvClassification';
 
 /** Graded severity of a single preflight finding. */
 export type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
@@ -25,6 +26,11 @@ export interface PreflightFinding {
   remediation?: string;
   /** Service the finding is scoped to, when applicable. */
   service?: string;
+  /** True when an active acknowledgement covers this finding. */
+  acknowledged?: boolean;
+  acknowledgementId?: number;
+  acknowledgementReason?: string;
+  acknowledgementExpiry?: 'forever' | 'until_compose_change' | 'days' | 'until_image_change';
 }
 
 /** The full report returned by both the GET (latest) and POST (run) routes. */
@@ -41,6 +47,11 @@ export interface PreflightReport {
   sourceHash: string | null;
   renderedHash: string | null;
   findings: PreflightFinding[];
+  /** Severity/status after filtering acknowledged findings. */
+  activeStatus: PreflightStatus;
+  activeHighestSeverity: PreflightSeverity | null;
+  activeCount: number;
+  acknowledgedCount: number;
 }
 
 /** A declared `env_file:` that is required and absent on disk (names only). */
@@ -87,8 +98,10 @@ export interface PreflightContext {
   renderable: boolean;
   /** Redacted + truncated render error, or null. */
   renderError: string | null;
-  /** Variable names Compose reported as unset (defaulted to empty string). */
+  /** Variable names Compose reported as unset (intentional references only). */
   unsetEnvVars: string[];
+  /** Literal `$` sequences misread as variables; never includes fragment names. */
+  literalDollarWarnings: LiteralDollarWarning[];
   /** Declared `env_file:` paths that are required but absent on disk (names only). */
   missingEnvFiles: MissingEnvFile[];
   /** Service names parsed from the literal source file (pre-render). */

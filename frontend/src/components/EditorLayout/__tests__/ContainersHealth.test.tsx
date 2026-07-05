@@ -80,3 +80,140 @@ describe('ContainersHealth published port link', () => {
     expect(screen.getByText(/8080 → 80\/tcp/)).toBeInTheDocument();
   });
 });
+
+describe('density toggle and summary strip', () => {
+  function makeContainer(overrides: Partial<ContainerInfo> = {}): ContainerInfo {
+    return {
+      Id: overrides.Id || 'abc',
+      Names: overrides.Names || ['/app'],
+      State: overrides.State || 'running',
+      Status: overrides.Status || 'Up 1 hour',
+      Image: overrides.Image || 'nginx',
+      ...overrides,
+    } as unknown as ContainerInfo;
+  }
+
+  function renderMany(containers: ContainerInfo[]) {
+    return render(
+      <ContainersHealth
+        safeContainers={containers}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+      />,
+    );
+  }
+
+  it('does not render summary strip or density toggle for a single container', () => {
+    renderMany([makeContainer()]);
+    expect(screen.queryByText(/container/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Compact view' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Detailed view' })).toBeNull();
+  });
+
+  it('renders summary counts for multiple containers', () => {
+    renderMany([
+      makeContainer({ Id: 'a', State: 'running' }),
+      makeContainer({ Id: 'b', State: 'running' }),
+      makeContainer({ Id: 'c', State: 'paused' }),
+    ]);
+    expect(screen.getByText(/3 containers/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 up/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 paused/i)).toBeInTheDocument();
+  });
+
+  it('shows unhealthy count in summary', () => {
+    renderMany([
+      makeContainer({ Id: 'a', State: 'running', healthStatus: 'healthy' }),
+      makeContainer({ Id: 'b', State: 'running', healthStatus: 'unhealthy' }),
+    ]);
+    expect(screen.getByText(/1 unhealthy/i)).toBeInTheDocument();
+  });
+
+  it('renders density toggle buttons for multiple containers', () => {
+    renderMany([makeContainer({ Id: 'a' }), makeContainer({ Id: 'b' })]);
+    expect(screen.getByRole('button', { name: 'Compact view' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Detailed view' })).toBeInTheDocument();
+  });
+
+  it('detailed mode is the default', () => {
+    renderMany([makeContainer({ Id: 'a' }), makeContainer({ Id: 'b' })]);
+    const detailed = screen.getByRole('button', { name: 'Detailed view' });
+    expect(detailed).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('hides sparkline grids in compact mode', () => {
+    renderMany([makeContainer({ Id: 'a' }), makeContainer({ Id: 'b' })]);
+    // Sparklines visible by default in detailed mode (two containers, two cpu labels)
+    expect(screen.getAllByText('cpu')).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Compact view' }));
+    // Sparkline labels hidden in compact mode
+    expect(screen.queryByText('cpu')).toBeNull();
+  });
+
+  it('shows sparkline grids again when switching back to detailed', () => {
+    renderMany([makeContainer({ Id: 'a' }), makeContainer({ Id: 'b' })]);
+    fireEvent.click(screen.getByRole('button', { name: 'Compact view' }));
+    expect(screen.queryByText('cpu')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Detailed view' }));
+    expect(screen.getAllByText('cpu')).toHaveLength(2);
+  });
+
+  it('keeps header row actions visible in compact mode', () => {
+    renderMany([
+      makeContainer({ Id: 'a', State: 'running', Service: 'web' }),
+      makeContainer({ Id: 'b', State: 'running' }),
+    ]);
+    fireEvent.click(screen.getByRole('button', { name: 'Compact view' }));
+    // View logs button still present
+    expect(screen.getAllByRole('button', { name: 'View logs' })).toHaveLength(2);
+  });
+
+  it('renders empty state for zero containers without summary strip', () => {
+    renderMany([]);
+    expect(screen.getByText(/no containers running/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Compact view' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Detailed view' })).toBeNull();
+  });
+
+  it('resets density to detailed on remount (key change)', () => {
+    const { unmount } = render(
+      <ContainersHealth
+        safeContainers={[makeContainer({ Id: 'a' }), makeContainer({ Id: 'b' })]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+      />,
+    );
+    // Switch to compact
+    fireEvent.click(screen.getByRole('button', { name: 'Compact view' }));
+    expect(screen.queryByText('cpu')).toBeNull();
+
+    // Simulate navigating to a single-container stack (new key)
+    unmount();
+    render(
+      <ContainersHealth
+        safeContainers={[makeContainer({ Id: 'x' })]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+      />,
+    );
+    // Density reset; single container shows sparklines
+    expect(screen.getByText('cpu')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Compact view' })).toBeNull();
+  });
+});

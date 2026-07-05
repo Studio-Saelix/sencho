@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import axios from 'axios';
+import YAML from 'yaml';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 
 vi.mock('axios', () => ({
@@ -102,5 +103,81 @@ describe('TemplateService.getTemplates registry size cap', () => {
     expect(plex!.volumes).toEqual([{ container: '/config', bind: './config' }]);
     expect(plex!.env).toEqual([{ name: 'PUID', label: 'User ID', default: '1000' }]);
     expect(plex!.categories).toEqual(['Media']);
+  });
+
+  it('maps LSIO :ro volume paths and skips optional volumes (fail2ban)', async () => {
+    const service = new TemplateService();
+    service.clearCache();
+    mockedGet.mockResolvedValueOnce({
+      data: {
+        data: {
+          repositories: {
+            linuxserver: {
+              fail2ban: {
+                name: 'fail2ban',
+                description: 'Ban IPs',
+                config: {
+                  volumes: [
+                    { path: '/config', host_path: '/path/to/fail2ban/config', optional: false },
+                    { path: '/var/log:ro', host_path: '/var/log', optional: false },
+                    {
+                      path: '/remotelogs/nginx:ro',
+                      host_path: '/path/to/nginx/log',
+                      optional: true,
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const templates = await service.getTemplates();
+    const fail2ban = templates.find(t => t.title === 'fail2ban')!;
+    expect(fail2ban.volumes).toEqual([
+      { container: '/config', bind: './config' },
+      { container: '/var/log', bind: '/var/log', readonly: true },
+    ]);
+
+    const yaml = service.generateComposeFromTemplate(fail2ban, 'fail2ban');
+    const parsed = YAML.parse(yaml) as { services: { fail2ban: { volumes: string[] } } };
+    expect(parsed.services.fail2ban.volumes).toEqual([
+      './config:/config',
+      '/var/log:/var/log:ro',
+    ]);
+  });
+
+  it('maps LSIO :ro volume with placeholder host_path (mame)', async () => {
+    const service = new TemplateService();
+    service.clearCache();
+    mockedGet.mockResolvedValueOnce({
+      data: {
+        data: {
+          repositories: {
+            linuxserver: {
+              mame: {
+                name: 'mame',
+                description: 'MAME',
+                config: {
+                  volumes: [
+                    { path: '/config', host_path: '/path/to/config', optional: false },
+                    { path: '/mame:ro', host_path: '/path/to/mame/assets', optional: false },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const templates = await service.getTemplates();
+    const mame = templates.find(t => t.title === 'mame');
+    expect(mame!.volumes).toEqual([
+      { container: '/config', bind: './config' },
+      { container: '/mame', bind: './mame', readonly: true },
+    ]);
   });
 });

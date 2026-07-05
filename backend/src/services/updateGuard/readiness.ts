@@ -27,13 +27,13 @@ const formatAge = (timestamp: number, now: number): string => {
 };
 
 export function preflightSignal(
-  input: { status: PreflightStatus } | Errored,
+  input: { activeStatus: PreflightStatus } | Errored,
 ): ReadinessSignal {
   const base = { id: 'preflight' as const, title: 'Compose Doctor' };
   if (input === 'error') {
     return { ...base, status: 'unknown', affectsVerdict: false, detail: 'The stored preflight report could not be read.' };
   }
-  switch (input.status) {
+  switch (input.activeStatus) {
     case 'never-run':
       return { ...base, status: 'unknown', affectsVerdict: false, detail: 'Compose Doctor has not been run for this stack yet. Run it for a deeper pre-update check.' };
     case 'blocker':
@@ -128,9 +128,38 @@ export function updatePreviewSignal(input: UpdatePreviewSummary | Errored): Read
   }
   if (input.has_update) {
     const kind = input.update_kind === 'digest' ? 'a same-tag image refresh' : `a ${input.semver_bump} update`;
-    return { ...base, status: 'ok', affectsVerdict: true, detail: `Pending: ${kind}.` };
+    const buildNote = input.has_build_services
+      ? ' Local build services will also be rebuilt from source.'
+      : '';
+    return { ...base, status: 'ok', affectsVerdict: true, detail: `Pending: ${kind}.${buildNote}` };
+  }
+  if (input.rebuild_available) {
+    const n = input.has_build_services ? 'Local build service(s)' : 'Build';
+    return {
+      ...base,
+      status: 'warning',
+      affectsVerdict: true,
+      detail: `${n} require a rebuild from source; the update rebuilds images and recreates containers.`,
+    };
   }
   return { ...base, status: 'ok', affectsVerdict: true, detail: 'No pending image update detected; the update re-pulls and recreates with current tags.' };
+}
+
+export function buildServicesSignal(buildServices: string[] | Errored): ReadinessSignal {
+  const base = { id: 'build_services' as const, title: 'Local build services', affectsVerdict: false };
+  if (buildServices === 'error') {
+    return { ...base, status: 'unknown', detail: 'Build services could not be detected from the compose model.' };
+  }
+  if (buildServices.length === 0) {
+    return { ...base, status: 'ok', detail: 'No services declare a local build; the update pulls registry images only.' };
+  }
+  const plural = buildServices.length === 1 ? 'service' : 'services';
+  const names = buildServices.join(', ');
+  return {
+    ...base,
+    status: 'warning',
+    detail: `${buildServices.length} ${plural} (${names}) rebuild from source. This may take longer and depends on the local Dockerfile context, network access, and base-image availability.`,
+  };
 }
 
 export function backupSlotSignal(

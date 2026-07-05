@@ -237,7 +237,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         group: 'automation',
         label: 'Image update checks',
         description: 'How often this node polls registries to detect available image updates and raise notifications.',
-        keywords: ['image', 'update', 'registry', 'check', 'interval', 'cadence', 'poll', 'auto-update', 'detection', 'recheck'],
+        keywords: ['image', 'update', 'registry', 'check', 'interval', 'cadence', 'poll', 'auto-update', 'detection', 'recheck', 'sidebar', 'badge', 'dot', 'indicator', 'status'],
         tier: null,
         scope: 'node',
     },

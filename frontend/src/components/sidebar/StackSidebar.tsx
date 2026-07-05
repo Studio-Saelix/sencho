@@ -33,6 +33,7 @@ export interface StackSidebarProps {
   onToggleSelect: (file: string) => void;
   onClearSelection: () => void;
   onBulkAction: (action: BulkAction) => void;
+  showUpdatesChip?: boolean;
 }
 
 export function StackSidebar(props: StackSidebarProps) {
@@ -41,6 +42,7 @@ export function StackSidebar(props: StackSidebarProps) {
     searchQuery, onSearchChange, filterChip, filterCounts, onFilterChipChange,
     list, activitySummary, onActivityAction,
     bulkMode, selectedFiles, onToggleBulkMode, onToggleSelect, onClearSelection, onBulkAction,
+    showUpdatesChip = true,
   } = props;
 
   const [filtersVisible, setFiltersVisible] = useState(() => {
@@ -84,6 +86,7 @@ export function StackSidebar(props: StackSidebarProps) {
           onChange={onFilterChipChange}
           visible={filtersVisible}
           onToggle={handleToggleFilters}
+          showUpdatesChip={showUpdatesChip}
         />
         {selectedFiles.size > 0 && (
           <SidebarBulkBar
@@ -92,7 +95,7 @@ export function StackSidebar(props: StackSidebarProps) {
             onClear={onClearSelection}
           />
         )}
-        <ScrollArea className="flex-1 px-2 pb-2">
+        <ScrollArea block className="flex-1 px-2 pb-2">
           <div data-stacks-loaded={list.isLoading ? 'false' : 'true'}>
             <StackList {...list} bulkMode={bulkMode} selectedFiles={selectedFiles} onToggleSelect={onToggleSelect} />
           </div>

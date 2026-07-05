@@ -288,7 +288,7 @@ export function NodeManager() {
                       {resettingAnchor === nodeId ? 'Resetting...' : 'Reset anchor on peer'}
                     </Button>
                   )}
-                  {node && !node.is_default && (isAdmin || can('node:manage', 'node', String(nodeId))) && (
+                  {node && !node.is_default && nodes.filter(n => n.type === 'local').length > 1 && (isAdmin || can('node:manage', 'node', String(nodeId))) && (
                     <Button
                       size="sm"
                       variant="outline"
@@ -324,6 +324,7 @@ export function NodeManager() {
           <TableBody>
             {nodes.map((node) => {
               const canManageThis = isAdmin || can('node:manage', 'node', String(node.id));
+              const isLastLocal = node.type === 'local' && nodes.filter(n => n.type === 'local').length <= 1;
               return (
               <TableRow key={node.id}>
                 <TableCell>
@@ -493,7 +494,7 @@ export function NodeManager() {
                       </TooltipProvider>
                     )}
 
-                    {!node.is_default && canManageThis && (
+                    {!node.is_default && !isLastLocal && canManageThis && (
                       <TooltipProvider>
                         <Tooltip>
                           <TooltipTrigger asChild>
