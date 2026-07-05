@@ -97,7 +97,7 @@ The Anatomy tab lists:
 - **network** and its driver
 - **source** with `git · <host>/<repo>#<branch>` when the stack is linked to a Git repository, or `local` when it is not. Clicking the row opens the Git source dialog. A pulsing brand-color dot means an upstream change is queued.
 
-When an image update is available, an inline banner appears at the top of the panel. Its tone follows the version-bump severity: `safe to apply` (patch), `review recommended` (minor), `breaking changes possible` (major), or `review required` when the bump cannot be classified. The banner has an inline **apply** button that runs the same operation as the action bar's **Update**; it is hidden for roles that lack the `stack:edit` permission and when the bump is flagged as blocked.
+When an image update is available, or the stack declares services with a local `build:` section, an inline banner appears at the top of the panel. Registry updates follow version-bump severity: `safe to apply` (patch), `review recommended` (minor), `breaking changes possible` (major), or `review required` when the bump cannot be classified. Build-only stacks show **Rebuild available** with a **Rebuild & Update** button. The banner runs the same operation as the action bar's **Update**; it is hidden for roles that lack the `stack:edit` permission and when the bump is flagged as blocked.
 
 ## Editor mode
 

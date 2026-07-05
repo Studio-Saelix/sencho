@@ -407,7 +407,6 @@ nodesRouter.post('/:id/cordon', (req: Request, res: Response) => {
   if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
   const nodeIdParam = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
-  if (!requirePaid(req, res)) return;
   if (!/^[1-9]\d*$/.test(nodeIdParam)) {
     res.status(400).json({ error: 'Invalid node id' });
     return;
@@ -446,7 +445,6 @@ nodesRouter.post('/:id/uncordon', (req: Request, res: Response) => {
   if (rejectApiTokenScope(req, res, NODE_SCOPE_MESSAGE)) return;
   const nodeIdParam = req.params.id as string;
   if (!requirePermission(req, res, 'node:manage', 'node', nodeIdParam)) return;
-  if (!requirePaid(req, res)) return;
   if (!/^[1-9]\d*$/.test(nodeIdParam)) {
     res.status(400).json({ error: 'Invalid node id' });
     return;

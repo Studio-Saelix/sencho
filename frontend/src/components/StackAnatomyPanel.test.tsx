@@ -23,16 +23,21 @@ import StackAnatomyPanel from './StackAnatomyPanel';
 
 const COMPOSE = 'services:\n  web:\n    image: nginx:1.25\n';
 
-function previewBody(hasUpdate: boolean) {
+function previewBody(hasUpdate: boolean, buildServices: string[] = []) {
+  const hasBuild = buildServices.length > 0;
   return {
+    build_services: buildServices,
     summary: {
       has_update: hasUpdate,
       primary_image: 'nginx',
       current_tag: '1.25',
       next_tag: '1.26',
       semver_bump: 'minor',
+      update_kind: hasUpdate ? 'tag' : 'none',
       blocked: false,
       blocked_reason: null,
+      has_build_services: hasBuild,
+      rebuild_available: hasBuild,
     },
     changelog: null,
   };
@@ -84,6 +89,21 @@ describe('StackAnatomyPanel update banner', () => {
     expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'apply' }));
     expect(onApply).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows Rebuild & Update for build-only stacks', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) return jsonRes(previewBody(false, ['app']));
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+
+    render(panel(false));
+
+    expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
+    expect(screen.getByText(/Rebuild available/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Rebuild & Update' })).toBeInTheDocument();
   });
 
   it('disables the apply button and shows progress while applying', async () => {

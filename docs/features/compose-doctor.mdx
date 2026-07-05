@@ -5,7 +5,7 @@ description: Run a preflight check on a stack before you deploy. Compose Doctor 
 
 The **Doctor** tab in the right-hand **Anatomy** panel answers one question before you apply a change: *what will Docker actually run, and is it safe on this node?* Compose Doctor renders the effective Compose model (the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied) and then runs a set of deterministic checks against it and the live Docker state on the node it would deploy to.
 
-The check is advisory. It never blocks a deploy and never changes a stack. It runs on demand: press **run preflight** and Sencho renders the model, runs all 30 checks, and stores the result so the tab still shows it the next time you open the stack.
+The check is advisory. It never blocks a deploy and never changes a stack. It runs on demand: press **run preflight** and Sencho renders the model, runs all 31 checks, and stores the result so the tab still shows it the next time you open the stack.
 
 ## Where to find it
 
@@ -24,7 +24,7 @@ Every preflight run follows three steps:
 
 1. **Render** the effective model. Sencho calls `docker compose config` on the stack, which resolves all variable interpolation, `include` directives, profile overrides, and `env_file` references into a single, normalized model.
 2. **Snapshot** live Docker state. Sencho reads which host ports are in use, which containers are running, and which named networks and volumes exist on the target node.
-3. **Run 30 deterministic rules** against the combination. Each rule is pure and produces zero or more findings with a severity, a message, and a suggested fix.
+3. **Run 31 deterministic rules** against the combination. Each rule is pure and produces zero or more findings with a severity, a message, and a suggested fix.
 
 Sencho stores exactly one run per stack per node, so a new run immediately overwrites the previous one; there is no history.
 
@@ -72,7 +72,7 @@ A small colored dot appears on the **Doctor** tab label when the last run found 
 
 ## What it checks
 
-All 30 rules are listed below, organized by topic.
+All 31 rules are listed below, organized by topic.
 
 ### Model rendering
 
@@ -84,7 +84,8 @@ All 30 rules are listed below, organized by topic.
 
 | Rule | Severity | What it detects |
 |------|----------|----------------|
-| Unset variable | High | A variable referenced by the model has no value in the environment or any consulted env file. Compose silently substitutes an empty string, which often breaks the container without a clear error. |
+| Unset variable | High | An intentional `${VAR}` or `$VAR` reference has no value in the environment or any consulted env file. Compose silently substitutes an empty string, which often breaks the container without a clear error. |
+| Literal dollar in value | High | A literal `$` inside an environment value (common in bcrypt hashes and other secrets) was treated as Compose interpolation. Sencho reports the env key when it can identify one, never a fragment of the value. |
 | Missing env file | High | A path listed under `env_file:` does not exist in the stack directory. Compose fails to start the stack when a required env file is absent. |
 
 ### Port conflicts
@@ -203,6 +204,23 @@ Running preflight before updating gives the readiness check the most accurate si
 
 Preflight runs against the **active node**, so selecting a remote node checks the stack against that machine's live Docker state. On mobile, the same report appears under the **Compose** section of the stack detail view.
 
+## Acknowledging findings
+
+When a finding is valid in general but intentional for your stack, you can acknowledge it so it no longer counts toward the active warning total, the Doctor tab badge, or the update readiness check.
+
+1. Open the **Doctor** tab and run preflight if you have not already.
+2. On any active finding row, click **acknowledge**.
+3. Optionally add a note explaining why the finding is acceptable.
+4. Choose when Sencho should show the finding again:
+   - **Forever** until you clear the acknowledgement manually.
+   - **Until Compose changes** when the stack's compose fingerprint changes (for example after you edit `compose.yaml`).
+   - **30 days** on a rolling timer.
+   - **Until image changes** for a specific service when that service's image reference in the effective model changes. This tracks tag or reference changes, not silent digest re-pulls of the same tag.
+
+Acknowledged findings move to a collapsible **Acknowledged** section at the bottom of the report. You can clear an acknowledgement there to restore the finding to the active list immediately.
+
+Acknowledgements are stored per node, stack, rule, and service. They do not sync across nodes in a fleet. Clearing an acknowledgement or letting an expiry mode lapse restores the finding on the next preflight read without re-running checks.
+
 <Frame>
   <img
     src="/images/compose-doctor/compose-doctor-findings.png"
@@ -249,6 +267,9 @@ There is no tier gate: Compose Doctor is available on all plans.
   </Accordion>
   <Accordion title="Exposure intent rules are firing unexpectedly">
     The five exposure intent rules activate when the stack publishes at least one host port. The "unclassified" warning clears as soon as you set an exposure intent in the Networking tab. The "port not in dossier" warning clears once you add a matching access URL in the Stack Dossier. If an intent is already set and the finding still fires, check that the intent is configured on the correct node and for the correct service.
+  </Accordion>
+  <Accordion title="Doctor warns about literal dollar signs in a hash or secret">
+    Compose treats unescaped `$` in environment values as variable references. Bcrypt hashes and other secrets often contain `$` characters, so an unquoted value in Compose YAML or a double-quoted `.env` line can be partially blanked out at runtime. Doctor flags this as **Literal dollar in value** and names the env key when it can, without showing part of the secret. Fix it by escaping each literal `$` as `$$` in Compose YAML, or by single-quoting the value in an env file.
   </Accordion>
   <Accordion title="I want to see who ran preflight last">
     The summary card shows the username and relative time: "ran 5 minutes ago by admin". This reflects the most recent run stored for this stack on the currently active node.

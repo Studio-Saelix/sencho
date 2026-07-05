@@ -20,6 +20,7 @@ const {
   mockMkdtempSync, mockWriteFileSync, mockUnlinkSync, mockRmdirSync,
   mockGetGlobalSettings, mockPruneDanglingImages, mockGetBindMounts,
   mockGetStackContent, mockGetEnvContent,
+  mockLoadStackBuildServices,
 } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
@@ -43,6 +44,7 @@ const {
   mockGetBindMounts: vi.fn().mockResolvedValue(null),
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockResolvedValue(''),
+  mockLoadStackBuildServices: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
@@ -138,6 +140,11 @@ vi.mock('../services/SelfIdentityService', () => ({
   },
 }));
 
+vi.mock('../services/ImageUpdateService', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../services/ImageUpdateService')>()),
+  loadStackBuildServices: (...args: unknown[]) => mockLoadStackBuildServices(...args),
+}));
+
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
 import { DriftLedgerService } from '../services/DriftLedgerService';
 
@@ -211,6 +218,7 @@ beforeEach(() => {
   mockGetOverrideFilename.mockResolvedValue(null);
   mockEnsureStackOverride.mockResolvedValue(null);
   mockGetBindMounts.mockResolvedValue(null);
+  mockLoadStackBuildServices.mockResolvedValue([]);
   delete process.env.SENCHO_MODE;
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
@@ -746,6 +754,62 @@ describe('ComposeService - deployStack', () => {
     expect(error).not.toBeNull();
     expect(error!.message).toContain('CONTAINER_CRASHED');
     expect(mockRestoreStackFiles).not.toHaveBeenCalled();
+  });
+});
+
+// ── updateStack: build-aware ───────────────────────────────────────────
+
+describe('ComposeService - updateStack build-aware', () => {
+  it('runs build --pull, pull --ignore-buildable, and up when build services exist', async () => {
+    mockLoadStackBuildServices.mockResolvedValueOnce(['app']);
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.updateStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
+    expect(spawnArgs.some(args => args.includes('build') && args.includes('--pull'))).toBe(true);
+    expect(spawnArgs.some(args => args.includes('pull') && args.includes('--ignore-buildable'))).toBe(true);
+    expect(spawnArgs.some(args => args.includes('up') && args.includes('-d'))).toBe(true);
+  });
+
+  it('runs plain pull + up when no build services exist', async () => {
+    mockLoadStackBuildServices.mockResolvedValueOnce([]);
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.updateStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
+    expect(spawnArgs.some(args => args.includes('build'))).toBe(false);
+    expect(spawnArgs.some(args => args.includes('pull') && !args.includes('--ignore-buildable'))).toBe(true);
+  });
+
+  it('rolls back compose files when a build step fails during atomic update', async () => {
+    mockLoadStackBuildServices.mockResolvedValueOnce(['app']);
+    let spawnCount = 0;
+    mockSpawn.mockImplementation(() => {
+      spawnCount += 1;
+      const proc = createMockProcess();
+      Promise.resolve().then(() => proc.emit('close', spawnCount === 1 ? 1 : 0));
+      return proc;
+    });
+    mockListContainers.mockResolvedValue([]);
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.updateStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+    await vi.advanceTimersByTimeAsync(3100);
+    const error = await result;
+
+    expect(error).not.toBeNull();
+    expect(mockRestoreStackFiles).toHaveBeenCalled();
+    expect(getComposeRollbackInfo(error)?.attempted).toBe(true);
   });
 });
 

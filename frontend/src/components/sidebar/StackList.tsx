@@ -205,7 +205,7 @@ export function StackList(props: StackListProps & StackListBulkProps) {
                 <CommandItem
                   value={file}
                   onSelect={() => onSelectFile(file)}
-                  className="p-0 data-[selected=true]:bg-transparent"
+                  className="min-w-0 w-full p-0 data-[selected=true]:bg-transparent"
                 >
                   <StackRow
                     file={file}

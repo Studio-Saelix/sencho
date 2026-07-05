@@ -25,7 +25,7 @@ beforeEach(() => {
   vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes('/preflight')) {
-      return jsonRes({ stack: 'web', ranAt: 1, ranBy: 'x', renderable: true, renderError: null, status: 'high', highestSeverity: badgeSeverity, findings: [] });
+      return jsonRes({ stack: 'web', ranAt: 1, ranBy: 'x', renderable: true, renderError: null, status: 'high', highestSeverity: badgeSeverity, activeStatus: badgeSeverity === 'warning' ? 'warning' : 'high', activeHighestSeverity: badgeSeverity, activeCount: 0, acknowledgedCount: 0, findings: [] });
     }
     return jsonRes(null, false); // git-source, update-preview, scan-status
   });

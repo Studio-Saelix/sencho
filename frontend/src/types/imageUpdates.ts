@@ -22,6 +22,8 @@ export interface ImageUpdateStatus {
     mode: 'interval' | 'cron';
     /** 5-field cron expression when mode is 'cron', null otherwise. */
     cronExpression: string | null;
+    /** Whether sidebar update-status indicators are enabled. Optional for older-node compatibility. */
+    sidebarIndicators?: boolean;
 }
 
 /**
