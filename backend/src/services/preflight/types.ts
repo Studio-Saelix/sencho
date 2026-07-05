@@ -1,5 +1,6 @@
 import type { EffectiveModel } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
+import type { LiteralDollarWarning } from '../../helpers/unsetEnvClassification';
 
 /** Graded severity of a single preflight finding. */
 export type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
@@ -87,8 +88,10 @@ export interface PreflightContext {
   renderable: boolean;
   /** Redacted + truncated render error, or null. */
   renderError: string | null;
-  /** Variable names Compose reported as unset (defaulted to empty string). */
+  /** Variable names Compose reported as unset (intentional references only). */
   unsetEnvVars: string[];
+  /** Literal `$` sequences misread as variables; never includes fragment names. */
+  literalDollarWarnings: LiteralDollarWarning[];
   /** Declared `env_file:` paths that are required but absent on disk (names only). */
   missingEnvFiles: MissingEnvFile[];
   /** Service names parsed from the literal source file (pre-render). */

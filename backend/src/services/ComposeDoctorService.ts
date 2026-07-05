@@ -19,8 +19,9 @@ import type {
 import { isPathWithinBase } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
-import { parseUnsetEnvVars, parseMissingRequiredVars } from '../helpers/envVarParse';
+import { parseUnsetEnvVars, parseMissingRequiredVars, readEnvFileKeys } from '../helpers/envVarParse';
 import { resolveStackEnvSources } from '../helpers/envFileResolution';
+import { classifyUnsetEnvVars, type LiteralDollarWarning } from '../helpers/unsetEnvClassification';
 
 const MAX_RENDER_ERROR = 600; // chars kept from a (redacted) render error
 
@@ -142,13 +143,43 @@ export class ComposeDoctorService {
     let renderError: string | null = null;
     let model: EffectiveModel | null = null;
     let unsetEnvVars: string[] = [];
+    let literalDollarWarnings: LiteralDollarWarning[] = [];
+    let missingEnvFiles: MissingEnvFile[] = [];
+
+    let envSources: Awaited<ReturnType<typeof resolveStackEnvSources>> | null = null;
+    try {
+      envSources = await resolveStackEnvSources(nodeId, stackName);
+      missingEnvFiles = envSources.envFiles
+        .filter(f => f.isInjectionSource && f.required && f.existence === 'missing')
+        .map(f => ({ rawPath: f.rawPaths[0], services: f.declaringServices }));
+    } catch (err) {
+      console.warn('[ComposeDoctor] env-file resolution failed for %s:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
+    }
+
     try {
       const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
       if (result.rendered !== null) {
         // Unset-variable warnings come from stderr and do not depend on the
         // model parsing, so capture them before attempting the parse, so a parse
         // failure does not also suppress the env-unset findings.
-        unsetEnvVars = parseUnsetEnvVars(result.stderr);
+        const rawUnset = parseUnsetEnvVars(result.stderr);
+        if (envSources) {
+          const envFileKeys: string[] = [];
+          for (const file of envSources.envFiles) {
+            if (!file.resolvedPath || file.existence !== 'present') continue;
+            const { keys, unverifiable } = await readEnvFileKeys(file.resolvedPath, baseDir);
+            if (!unverifiable) envFileKeys.push(...keys);
+          }
+          const classified = classifyUnsetEnvVars(rawUnset, envSources, envFileKeys);
+          unsetEnvVars = classified.intentional;
+          literalDollarWarnings = classified.literalDollar;
+        } else {
+          // Without authored env context, never surface raw stderr names as unset
+          // variables; they may be literal-dollar fragments from secret values.
+          unsetEnvVars = [];
+          literalDollarWarnings = rawUnset.length > 0 ? [{ likelySecret: false }] : [];
+        }
         try {
           model = parseEffectiveModel(JSON.parse(result.rendered), stackName);
           renderable = true;
@@ -179,20 +210,6 @@ export class ComposeDoctorService {
     const bindChecks = model ? await this.resolveBindChecks(model, baseDir) : [];
     const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls } = this.exposureState(nodeId, stackName);
 
-    // Required `env_file:` declarations whose file is absent. Optional
-    // (required: false) and interpolated/escaping paths are excluded. Fail-soft:
-    // a resolution error simply yields no env-file findings.
-    let missingEnvFiles: MissingEnvFile[] = [];
-    try {
-      const envSources = await resolveStackEnvSources(nodeId, stackName);
-      missingEnvFiles = envSources.envFiles
-        .filter(f => f.isInjectionSource && f.required && f.existence === 'missing')
-        .map(f => ({ rawPath: f.rawPaths[0], services: f.declaringServices }));
-    } catch (err) {
-      console.warn('[ComposeDoctor] env-file resolution failed for %s:',
-        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
-    }
-
     return {
       stackName,
       platform: process.platform,
@@ -200,6 +217,7 @@ export class ComposeDoctorService {
       renderable,
       renderError,
       unsetEnvVars,
+      literalDollarWarnings,
       missingEnvFiles,
       sourceServiceNames,
       sourceReadable,

@@ -20,6 +20,7 @@ import { ComposeService } from './ComposeService';
 import { parseEffectiveModel } from './preflight/effectiveModel';
 import { resolveStackEnvSources, type EnvFileExistence } from '../helpers/envFileResolution';
 import { parseUnsetEnvVars, parseMissingRequiredVars, readEnvFileKeys } from '../helpers/envVarParse';
+import { classifyUnsetEnvVars } from '../helpers/unsetEnvClassification';
 import { isLikelySecretKey } from '../helpers/secretClassification';
 
 export type EnvSource = 'compose-inline' | 'env-file' | 'dotenv' | 'process-env' | 'compose-ref';
@@ -78,7 +79,14 @@ export async function buildEnvInventory(nodeId: number, stackName: string): Prom
   const effectiveKeys = new Set<string>();
   const effectiveKeysByService = new Map<string, Set<string>>();
   if (result.rendered !== null) {
-    unsetVars = new Set(parseUnsetEnvVars(result.stderr));
+    const rawUnset = parseUnsetEnvVars(result.stderr);
+    const envFileKeys: string[] = [];
+    for (const file of sources.envFiles) {
+      if (!file.resolvedPath || file.existence !== 'present') continue;
+      const { keys, unverifiable } = await readEnvFileKeys(file.resolvedPath, sources.baseDir);
+      if (!unverifiable) envFileKeys.push(...keys);
+    }
+    unsetVars = new Set(classifyUnsetEnvVars(rawUnset, sources, envFileKeys).intentional);
     try {
       const model = parseEffectiveModel(JSON.parse(result.rendered), stackName);
       for (const svc of model.services) {
