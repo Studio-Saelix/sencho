@@ -45,7 +45,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     health_gate_enabled: '1',
     health_gate_window_seconds: '90',
     env_block_deploy_on_missing_required: '0',
-    image_update_sidebar_indicators: '0',
+    image_update_sidebar_indicators: '1',
 };
 
 export type SectionId =
