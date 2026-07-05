@@ -95,7 +95,7 @@ export function StackSidebar(props: StackSidebarProps) {
             onClear={onClearSelection}
           />
         )}
-        <ScrollArea className="flex-1 px-2 pb-2">
+        <ScrollArea block className="flex-1 px-2 pb-2">
           <div data-stacks-loaded={list.isLoading ? 'false' : 'true'}>
             <StackList {...list} bulkMode={bulkMode} selectedFiles={selectedFiles} onToggleSelect={onToggleSelect} />
           </div>
