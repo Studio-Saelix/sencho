@@ -16,13 +16,11 @@ import { BlueprintEmptyState } from './BlueprintEmptyState';
 import { FleetTabHeading, FleetEmptyState } from '../fleet/FleetEmptyState';
 import { BlueprintDetail } from './BlueprintDetail';
 import { BlueprintEditor } from './BlueprintEditor';
-import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 
 export function DeploymentsTab() {
-    const { isPaid } = useLicense();
     const { isAdmin } = useAuth();
-    const canEdit = isPaid && isAdmin;
+    const canEdit = isAdmin;
     const [blueprints, setBlueprints] = useState<BlueprintListItem[]>([]);
     const [distinctLabels, setDistinctLabels] = useState<string[]>([]);
     const [loading, setLoading] = useState(true);

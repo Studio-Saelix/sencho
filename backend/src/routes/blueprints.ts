@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin, requireBody } from '../middleware/tierGates';
+import { requireAdmin, requireBody } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
 import {
     DatabaseService,
@@ -114,7 +114,6 @@ function summarizeBlueprint(blueprintId: number) {
 }
 
 blueprintsRouter.get('/', (req: Request, res: Response): void => {
-    if (!requirePaid(req, res)) return;
     try {
         const blueprints = DatabaseService.getInstance().listBlueprints();
         const summaries = blueprints.map(b => {
@@ -131,7 +130,6 @@ blueprintsRouter.get('/', (req: Request, res: Response): void => {
 });
 
 blueprintsRouter.post('/', (req: Request, res: Response): void => {
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     const body = req.body as BlueprintBody;
@@ -171,7 +169,6 @@ blueprintsRouter.post('/', (req: Request, res: Response): void => {
 });
 
 blueprintsRouter.get('/:id', (req: Request, res: Response): void => {
-    if (!requirePaid(req, res)) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
     try {
@@ -185,7 +182,6 @@ blueprintsRouter.get('/:id', (req: Request, res: Response): void => {
 });
 
 blueprintsRouter.put('/:id', (req: Request, res: Response): void => {
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     const id = parseIntParam(req, res, 'id');
@@ -258,7 +254,6 @@ blueprintsRouter.put('/:id', (req: Request, res: Response): void => {
 });
 
 blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<void> => {
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
@@ -314,11 +309,10 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
 // Node-to-node atomic blueprint apply. A hub posts here on the node that owns
 // the stack so the create / write compose+marker / deploy runs under that node's
 // per-stack lock (a remote node's lock is process-local and cannot be held by
-// the hub over separate HTTP calls). Gated by paid tier plus per-stack stack:edit
+// the hub over separate HTTP calls). Gated by per-stack stack:edit
 // and stack:deploy, the same permissions as the PUT-compose + deploy it bundles;
 // the node token the hub presents satisfies them.
 blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promise<void> => {
-    if (!requirePaid(req, res)) return;
     const body = (req.body ?? {}) as { stackName?: unknown; composeContent?: unknown; markerContent?: unknown };
     if (typeof body.stackName !== 'string' || !isValidStackName(body.stackName)) {
         res.status(400).json({ error: 'Invalid stack name' });
@@ -359,7 +353,6 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
 });
 
 blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise<void> => {
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
@@ -379,7 +372,6 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
 });
 
 blueprintsRouter.post('/:id/withdraw/:nodeId', async (req: Request, res: Response): Promise<void> => {
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
@@ -457,7 +449,6 @@ blueprintsRouter.post('/:id/withdraw/:nodeId', async (req: Request, res: Respons
 });
 
 blueprintsRouter.post('/:id/accept/:nodeId', async (req: Request, res: Response): Promise<void> => {
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
@@ -487,7 +478,6 @@ blueprintsRouter.post('/:id/accept/:nodeId', async (req: Request, res: Response)
 });
 
 blueprintsRouter.get('/:id/preview', (req: Request, res: Response): void => {
-    if (!requirePaid(req, res)) return;
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
     try {
@@ -517,7 +507,6 @@ blueprintsRouter.get('/:id/preview', (req: Request, res: Response): void => {
 });
 
 blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<void> => {
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     const id = parseIntParam(req, res, 'id');
@@ -558,7 +547,6 @@ blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<vo
 });
 
 blueprintsRouter.post('/analyze', (req: Request, res: Response): void => {
-    if (!requirePaid(req, res)) return;
     if (!requireBody(req, res)) return;
     const composeContent = typeof req.body?.compose_content === 'string' ? req.body.compose_content : '';
     if (!composeContent.trim()) {

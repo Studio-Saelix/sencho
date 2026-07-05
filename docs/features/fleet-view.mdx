@@ -38,7 +38,7 @@ A single rail summarises the state of every registered node so you can read the 
 
 ### Tabs
 
-The Fleet view is a tab strip. Five tab triggers are visible to every tier; the Deployments, Routing, Federation, and Secrets triggers only render when the active license unlocks them. A vertical separator after **Status** divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
+The Fleet view is a tab strip. Every tier sees Overview, Status, Map, Deployments, and Actions. Snapshots appears for admins. Deployments is available on Community. Routing and Secrets render when the active license unlocks them. Federation is available on every tier. A vertical separator after **Status** divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
 
 | Tab | Tier | What it does |
 |-----|------|--------------|
@@ -46,9 +46,9 @@ The Fleet view is a tab strip. Five tab triggers are visible to every tier; the 
 | **Snapshots** | Community | Snapshot every compose file across the fleet. See [Fleet-Wide Backups](/features/fleet-backups). |
 | **Status** | Community | One card per node summarising which automations and security features are configured. Covered below. |
 | **Map** | Community | A read-only map of how stacks, services, networks, volumes, and ports relate across the fleet, with anomaly flags. Covered below. |
-| **Deployments** | Admiral | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
+| **Deployments** | Community | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
 | **Routing** | Admiral | Cross-node service routing via Sencho Mesh. See [Sencho Mesh](/features/sencho-mesh). |
-| **Federation** | Admiral | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
+| **Federation** | Community | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
 | **Actions** | Community (admin role) | Fleet-wide bulk operations: stop stacks by label, bulk-assign labels, prune Docker resources. See [Fleet Actions](/features/fleet-actions). |
 | **Secrets** | Admiral | Encrypted env-var bundles you push to labeled nodes. See [Fleet Secrets](/features/fleet-secrets). |
 
@@ -90,7 +90,7 @@ Every node renders as a card. The local node is pinned at the top of the grid wi
 | **Version badge** | The node's Sencho version in mono tabular numerals (e.g. `v0.76.3`). Hidden if the node cannot report a version. |
 | **Update available** badge | Warning pill shown when a newer Sencho release is published for this node. |
 | **Critical** badge | Destructive pill with a triangle icon, surfaced when the online node is above 90% CPU or 90% disk. |
-| **Cordoned** badge | Warning pill with a Ban icon, surfaced when an Admiral has cordoned the node. The badge tooltip carries the cordon reason or the default *Unschedulable: new blueprint deployments skip this node*. See [Fleet Federation](/features/fleet-federation) for the full cordon and pin flow. |
+| **Cordoned** badge | Warning pill with a Ban icon, surfaced when the node is cordoned. The badge tooltip carries the cordon reason or the default *Unschedulable: new blueprint deployments skip this node*. See [Fleet Federation](/features/fleet-federation) for the full cordon and pin flow. |
 | **Updating / Updated / Failed** badge | Update progress indicator, shown only while or just after an update flows through. Failed states surface inline retry and dismiss buttons and a cursor-following error tooltip. |
 | **Container stats grid** | Three cells: **Running** (active containers), **Stopped** (exited containers), **Stacks** (count, or `-` if the node has not reported). Hidden on offline nodes. |
 | **CPU / RAM / Disk bars** | Each row shows the metric icon, the percent (CPU) or `used / total` (RAM, Disk), and a horizontal bar that tints amber at 60%, destructive at 80% (CPU/RAM), or amber at 75% / destructive at 90% (Disk). Hidden on offline nodes. |
@@ -107,9 +107,9 @@ Every card carries a three-dot **Node actions** kebab in the top-right corner. T
 |--------|-------|
 | **Edit node** | Opens the Edit dialog prefilled with the node's connection details. For proxy-mode remotes, saving with a changed API URL or token re-runs the connection test automatically. |
 | **Delete node** | Opens a destructive confirmation. The local (default) node has no Delete option. Deleting a remote only removes it from this console; the remote instance and its containers are untouched. |
-| **Cordon node** / **Uncordon node** | Marks the node unschedulable so new blueprint deployments skip it (Admiral). Existing deployments keep running. |
+| **Cordon node** / **Uncordon node** | Marks the node unschedulable so new blueprint deployments skip it. Existing deployments keep running. Requires the `node:manage` permission (admin, or node-admin when scoped to that node). |
 
-The menu is admin-only. Non-admin users see no kebab on the card.
+Edit and delete remain admin-only. Users without `node:manage` and without edit/delete affordances see no kebab on the card.
 
 ### Topology view
 

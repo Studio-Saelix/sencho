@@ -90,7 +90,7 @@ See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the current limitation list
 - [Auto-update policies](https://docs.sencho.io/features/auto-update-policies) for image rollouts
 - [Scheduled operations](https://docs.sencho.io/features/scheduled-operations) on cron
 - [Webhooks](https://docs.sencho.io/features/webhooks) on stack lifecycle events
-- [Blueprints](https://docs.sencho.io/features/blueprint-model): declarative fleet templates with drift detection **(Admiral)**
+- [Blueprints](https://docs.sencho.io/features/blueprint-model): declarative fleet templates with drift detection
 - Encrypted [Fleet Secrets](https://docs.sencho.io/features/fleet-secrets) pushed to labeled nodes **(Admiral)**
 
 ### Security
