@@ -1,7 +1,7 @@
 /**
  * Unit tests for the spatial drift engine: per-finding and per-status diff
  * behaviour of assembleStackDrift, image-reference normalization, and the
- * fail-soft boundaries of buildStackDriftReport (compose read failure → drifted,
+ * fail-soft boundaries of buildStackDriftReport (render failure → drifted,
  * Docker failure → unreachable).
  */
 import { describe, it, expect, vi } from 'vitest';
@@ -13,7 +13,11 @@ import {
 import DockerController from '../services/DockerController';
 import type { DependencyContainer, DependencyNetwork, DependencySnapshot } from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
+import { ComposeService } from '../services/ComposeService';
+import { declaredFromEffectiveModel } from '../helpers/effectiveToDeclaredCompose';
 import type { DeclaredCompose, DeclaredService, DeclaredPort } from '../helpers/composeDependencyParse';
+import type { EffectiveModel, EffService } from '../services/preflight/effectiveModel';
+import { fromDeclaredCompose, fromEffectiveModel } from '../services/network/normalize';
 
 // ── builders ────────────────────────────────────────────────────────────
 
@@ -37,6 +41,37 @@ function container(p: Partial<DependencyContainer> & { id: string }): Dependency
 }
 
 const findingKinds = (r: { findings: { kind: string }[] }): string[] => r.findings.map((f) => f.kind).sort();
+
+function effSvc(over: Partial<EffService> = {}): EffService {
+  return {
+    name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [], storageMounts: [],
+    privileged: false, hasHealthcheck: true, restart: 'unless-stopped', envKeys: [],
+    networks: [], extraHosts: [], labelKeys: [], ...over,
+  };
+}
+
+function stubDockerRender(
+  rendered: object | null,
+  stderr = '',
+) {
+  vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+    renderConfig: vi.fn().mockResolvedValue({
+      rendered: rendered === null ? null : JSON.stringify(rendered),
+      stderr,
+      code: rendered === null ? 1 : 0,
+      timedOut: false,
+    }),
+  } as unknown as ComposeService);
+}
+
+function stubFsAndSnapshot(snapshot: DependencySnapshot) {
+  vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({
+    getStacks: vi.fn().mockResolvedValue(['app']),
+  } as unknown as FileSystemService);
+  vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+    getDependencySnapshot: vi.fn().mockResolvedValue(snapshot),
+  } as unknown as DockerController);
+}
 
 // ── assembleStackDrift: statuses ──────────────────────────────────────────
 
@@ -138,6 +173,17 @@ describe('assembleStackDrift - findings', () => {
       stack: 'app',
       declared: declared([service({ name: 'web', image: 'nginx' })]),
       containers: [container({ id: 'c1', service: 'web', image: 'docker.io/library/nginx:latest' })],
+    });
+    expect(report.status).toBe('in-sync');
+    expect(report.findings).toEqual([]);
+  });
+
+  it('reports in-sync when declared image matches a resolved default tag (#1572)', () => {
+    const image = 'ghcr.io/karakeep-app/karakeep:release';
+    const report = assembleStackDrift({
+      stack: 'karakeep',
+      declared: declared([service({ name: 'karakeep', image })]),
+      containers: [container({ id: 'c1', service: 'karakeep', image })],
     });
     expect(report.status).toBe('in-sync');
     expect(report.findings).toEqual([]);
@@ -366,6 +412,40 @@ describe('assembleStackDrift - network drift', () => {
   });
 });
 
+// ── declaredFromEffectiveModel ─────────────────────────────────────────────
+
+describe('declaredFromEffectiveModel', () => {
+  it('maps resolved images and ports from the effective model', () => {
+    const model: EffectiveModel = {
+      projectName: 'app',
+      services: [effSvc({
+        name: 'karakeep',
+        image: 'ghcr.io/karakeep-app/karakeep:release',
+        ports: [{ startPort: 8080, endPort: 8082, hostIp: '127.0.0.1', protocol: 'tcp' }],
+      })],
+      networks: { default: { name: 'app_default', external: false, internal: false } },
+      volumes: {},
+    };
+    const converted = declaredFromEffectiveModel(model);
+    expect(converted.projectName).toBe('app');
+    expect(converted.services[0].image).toBe('ghcr.io/karakeep-app/karakeep:release');
+    expect(converted.services[0].ports).toEqual([{ hostIp: '127.0.0.1', publishedPort: 8080, protocol: 'tcp' }]);
+  });
+
+  it('normalizes networks so drift matches the rendered model', () => {
+    const model: EffectiveModel = {
+      projectName: 'myapp',
+      services: [effSvc({ name: 'web', networks: [{ key: 'backend', aliases: [] }, { key: 'shared', aliases: [] }] })],
+      networks: {
+        backend: { name: 'myapp_backend', external: false, internal: false },
+        shared: { name: 'shared_net', external: true, internal: false },
+      },
+      volumes: {},
+    };
+    expect(fromDeclaredCompose(declaredFromEffectiveModel(model), 'myapp')).toEqual(fromEffectiveModel(model));
+  });
+});
+
 // ── normalizeImageRef ─────────────────────────────────────────────────────
 
 describe('normalizeImageRef', () => {
@@ -391,8 +471,8 @@ describe('normalizeImageRef', () => {
 
 describe('buildStackDriftReport - boundaries', () => {
   it('reports unreachable when the Docker snapshot fails', async () => {
+    stubDockerRender({ name: 'app', services: { web: { image: 'nginx:1.25' } } });
     vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({
-      getStackContent: vi.fn().mockResolvedValue('services:\n  web:\n    image: nginx:1.25\n'),
       getStacks: vi.fn().mockResolvedValue(['app']),
     } as unknown as FileSystemService);
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
@@ -401,20 +481,29 @@ describe('buildStackDriftReport - boundaries', () => {
 
     const report = await buildStackDriftReport(0, 'app');
     expect(report.status).toBe('unreachable');
+    expect(report.hasComposeFile).toBe(true);
     expect(report.findings).toEqual([]);
     vi.restoreAllMocks();
   });
 
-  it('reports drifted with a parseError when the compose file cannot be read', async () => {
-    vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({
-      getStackContent: vi.fn().mockRejectedValue(new Error('ENOENT')),
-      getStacks: vi.fn().mockResolvedValue(['app']),
-    } as unknown as FileSystemService);
+  it('reports drifted with a parseError when the effective model cannot be rendered', async () => {
+    stubDockerRender(null, 'invalid compose');
 
     const report = await buildStackDriftReport(0, 'app');
     expect(report.status).toBe('drifted');
     expect(report.hasComposeFile).toBe(false);
-    expect(report.parseError).toBe('ENOENT');
+    expect(report.parseError).toContain('could not render');
+    expect(report.findings).toEqual([]);
+    vi.restoreAllMocks();
+  });
+
+  it('names missing required variables when render fails for unset interpolation', async () => {
+    stubDockerRender(null, 'required variable REQ is missing a value: must be provided');
+
+    const report = await buildStackDriftReport(0, 'app');
+    expect(report.status).toBe('drifted');
+    expect(report.parseError).toContain('REQ');
+    expect(report.parseError).toContain('no value');
     vi.restoreAllMocks();
   });
 
@@ -424,17 +513,28 @@ describe('buildStackDriftReport - boundaries', () => {
       networks: [],
       volumes: [],
     };
-    vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({
-      getStackContent: vi.fn().mockResolvedValue('services:\n  web:\n    image: nginx:1.25\n'),
-      getStacks: vi.fn().mockResolvedValue(['app']),
-    } as unknown as FileSystemService);
-    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
-      getDependencySnapshot: vi.fn().mockResolvedValue(snapshot),
-    } as unknown as DockerController);
+    stubDockerRender({ name: 'app', services: { web: { image: 'nginx:1.25' } } });
+    stubFsAndSnapshot(snapshot);
 
     const report = await buildStackDriftReport(0, 'app');
     expect(report.status).toBe('drifted');
     expect(findingKinds(report)).toEqual(['image-mismatch']);
+    vi.restoreAllMocks();
+  });
+
+  it('reports in-sync when render resolves a default image tag (#1572)', async () => {
+    const image = 'ghcr.io/karakeep-app/karakeep:release';
+    const snapshot: DependencySnapshot = {
+      containers: [container({ id: 'c1', service: 'karakeep', stack: 'app', image })],
+      networks: [],
+      volumes: [],
+    };
+    stubDockerRender({ name: 'app', services: { karakeep: { image } } });
+    stubFsAndSnapshot(snapshot);
+
+    const report = await buildStackDriftReport(0, 'app');
+    expect(report.status).toBe('in-sync');
+    expect(report.findings).toEqual([]);
     vi.restoreAllMocks();
   });
 
@@ -444,13 +544,12 @@ describe('buildStackDriftReport - boundaries', () => {
       networks: [depNet('app_rogue')],
       volumes: [],
     };
-    vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({
-      getStackContent: vi.fn().mockResolvedValue('services:\n  web:\n    image: nginx:1.25\n'),
-      getStacks: vi.fn().mockResolvedValue(['app']),
-    } as unknown as FileSystemService);
-    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
-      getDependencySnapshot: vi.fn().mockResolvedValue(snapshot),
-    } as unknown as DockerController);
+    stubDockerRender({
+      name: 'app',
+      services: { web: { image: 'nginx:1.25', networks: ['default'] } },
+      networks: { default: { name: 'app_default' } },
+    });
+    stubFsAndSnapshot(snapshot);
 
     const report = await buildStackDriftReport(0, 'app');
     expect(findingKinds(report)).toContain('network-undeclared');

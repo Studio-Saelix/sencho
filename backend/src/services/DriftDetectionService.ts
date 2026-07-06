@@ -1,16 +1,20 @@
 import DockerController from './DockerController';
 import type { DependencyContainer, DependencyNetwork } from './DockerController';
 import { FileSystemService } from './FileSystemService';
-import { parseComposeDependencies } from '../helpers/composeDependencyParse';
+import { declaredFromEffectiveModel } from '../helpers/effectiveToDeclaredCompose';
 import type { DeclaredCompose, DeclaredService } from '../helpers/composeDependencyParse';
+import { parseMissingRequiredVars } from '../helpers/envVarParse';
+import { parseEffectiveModel } from './preflight/effectiveModel';
 import { compareStackNetworks, fromDeclaredCompose } from './network/normalize';
-import { sanitizeForLog } from '../utils/safeLog';
+import { sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 
+const MAX_RENDER_ERROR = 600;
+
 /**
- * Spatial drift engine: compares a stack's on-disk compose model against the
- * live Docker runtime and reports where the two diverge. Read-only and
- * stateless. It does NOT persist findings, track change-over-time, or compare
+ * Spatial drift engine: compares a stack's effective compose model (from
+ * `docker compose config`) against the live Docker runtime and reports where
+ * the two diverge. Read-only and stateless. It does NOT persist findings, track change-over-time, or compare
  * against a last-applied hash: temporal drift ("the file changed since you
  * deployed"), env-key/value comparison, the cross-fleet rollup, and
  * unknown-source (orphan containers with no on-disk stack) belong to the
@@ -113,7 +117,10 @@ export interface AssembleStackDriftInput {
 /** Add a network to a service's accumulated undeclared-attachment set. */
 function addNetwork(map: Map<string, Set<string>>, service: string, network: string): void {
   let set = map.get(service);
-  if (!set) { set = new Set(); map.set(service, set); }
+  if (!set) {
+    set = new Set();
+    map.set(service, set);
+  }
   set.add(network);
 }
 
@@ -276,31 +283,69 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
   return { stack, status, hasComposeFile: true, hasContainers, findings };
 }
 
+type RenderDeclaredResult =
+  | { ok: true; declared: DeclaredCompose }
+  | { ok: false; parseError: string };
+
+async function renderDeclaredCompose(nodeId: number, stackName: string): Promise<RenderDeclaredResult> {
+  try {
+    const { ComposeService } = await import('./ComposeService');
+    const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
+    if (result.rendered === null) {
+      const missing = parseMissingRequiredVars(result.stderr);
+      return {
+        ok: false,
+        parseError: missing.length
+          ? `Required variable${missing.length > 1 ? 's' : ''} ${missing.join(', ')} ${missing.length > 1 ? 'have' : 'has'} no value, so the effective model cannot be rendered.`
+          : 'Sencho could not render the effective Compose model. Check the compose and env files for a YAML syntax error, an unresolved include or merge, or a required variable with no value.',
+      };
+    }
+    try {
+      const model = parseEffectiveModel(JSON.parse(result.rendered), stackName);
+      return { ok: true, declared: declaredFromEffectiveModel(model) };
+    } catch (parseErr) {
+      console.warn('[Drift] Effective model parse failed for %s:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(parseErr, 'unknown')));
+      return { ok: false, parseError: 'Sencho could not parse the rendered Compose model.' };
+    }
+  } catch (err) {
+    console.error('[Drift] Effective model render failed for stack %s:',
+      sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'render failed')));
+    const message = redactSensitiveText(getErrorMessage(err, 'docker compose could not be started.'))
+      .slice(0, MAX_RENDER_ERROR)
+      .trim();
+    return { ok: false, parseError: message || 'Sencho could not run docker compose on this node.' };
+  }
+}
+
 /**
- * Builds the drift report for one stack on one node: reads the compose file,
- * takes a Docker snapshot, and diffs them. Fails closed at each boundary: a
- * compose read failure is reported as a parse error (drifted, never in-sync),
- * and a Docker failure is reported as 'unreachable' rather than crashing.
+ * Builds the drift report for one stack on one node: renders the effective
+ * compose model, takes a Docker snapshot, and diffs them. Fails closed at each
+ * boundary: a render failure is reported as a parse error (drifted, never
+ * in-sync), and a Docker failure is reported as 'unreachable' rather than crashing.
  */
 export async function buildStackDriftReport(nodeId: number, stackName: string): Promise<StackDriftReport> {
   const fs = FileSystemService.getInstance(nodeId);
+  const render = await renderDeclaredCompose(nodeId, stackName);
 
-  let content: string;
-  try {
-    content = await fs.getStackContent(stackName);
-  } catch (error) {
-    console.error('[Drift] Failed to read compose for stack %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'read failed')));
+  if (!render.ok) {
+    let hasContainers = false;
+    try {
+      const stacks = await fs.getStacks();
+      const snapshot = await DockerController.getInstance(nodeId).getDependencySnapshot(stacks);
+      hasContainers = snapshot.containers.some((c) => c.stack === stackName && RUNNING_STATES.has(c.state));
+    } catch {
+      // Docker unreachable: hasContainers stays false; render error is still the headline.
+    }
     return {
       stack: stackName,
       status: 'drifted',
       hasComposeFile: false,
-      hasContainers: false,
+      hasContainers,
       findings: [],
-      parseError: getErrorMessage(error, 'Failed to read compose file'),
+      parseError: render.parseError,
     };
   }
-
-  const declared = parseComposeDependencies(content);
 
   let containers: DependencyContainer[];
   let networks: DependencyNetwork[] = [];
@@ -313,18 +358,15 @@ export async function buildStackDriftReport(nodeId: number, stackName: string): 
     containers = snapshot.containers.filter((c) => c.stack === stackName);
     networks = snapshot.networks;
   } catch (error) {
-    // Docker is unreachable, so runtime drift cannot be assessed. The headline
-    // failure is reachability; a separate parse error (if any) surfaces as
-    // drifted once Docker is back, keeping the parseError-implies-drifted invariant.
     console.error('[Drift] Docker snapshot failed for stack %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'snapshot failed')));
     return {
       stack: stackName,
       status: 'unreachable',
-      hasComposeFile: !declared.parseError,
+      hasComposeFile: true,
       hasContainers: false,
       findings: [],
     };
   }
 
-  return assembleStackDrift({ stack: stackName, declared, containers, networks, parseError: declared.parseError });
+  return assembleStackDrift({ stack: stackName, declared: render.declared, containers, networks });
 }
