@@ -196,30 +196,37 @@ export function StackIdentityHeader({
                                 <>
                                     <span className="text-muted-foreground/60">·</span>
                                     <span>digest <span className="text-foreground/90">{digest}</span></span>
-                                    <button
-                                        type="button"
-                                        aria-label={copiedDigest === first.ImageID ? 'Copied' : 'Copy digest'}
-                                        onClick={() => {
-                                            const id = first.ImageID as string;
-                                            void copyToClipboard(id).then(() => {
-                                                setCopiedDigest(id);
-                                                if (copiedDigestTimerRef.current !== null) {
-                                                    window.clearTimeout(copiedDigestTimerRef.current);
-                                                }
-                                                copiedDigestTimerRef.current = window.setTimeout(() => {
-                                                    setCopiedDigest(prev => (prev === id ? null : prev));
-                                                    copiedDigestTimerRef.current = null;
-                                                }, 1500);
-                                            }).catch(() => { /* clipboard unavailable */ });
-                                        }}
-                                        className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors"
-                                    >
-                                        {copiedDigest === first.ImageID ? (
-                                            <Check className="h-3 w-3" strokeWidth={2} />
-                                        ) : (
-                                            <Copy className="h-3 w-3" strokeWidth={1.5} />
-                                        )}
-                                    </button>
+                                    <TooltipProvider>
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <button
+                                            type="button"
+                                            aria-label={copiedDigest === first.ImageID ? 'Copied' : 'Copy digest'}
+                                            onClick={() => {
+                                                const id = first.ImageID as string;
+                                                void copyToClipboard(id).then(() => {
+                                                    setCopiedDigest(id);
+                                                    if (copiedDigestTimerRef.current !== null) {
+                                                        window.clearTimeout(copiedDigestTimerRef.current);
+                                                    }
+                                                    copiedDigestTimerRef.current = window.setTimeout(() => {
+                                                        setCopiedDigest(prev => (prev === id ? null : prev));
+                                                        copiedDigestTimerRef.current = null;
+                                                    }, 1500);
+                                                }).catch(() => { /* clipboard unavailable */ });
+                                            }}
+                                            className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors"
+                                          >
+                                            {copiedDigest === first.ImageID ? (
+                                                <Check className="h-3 w-3" strokeWidth={2} />
+                                            ) : (
+                                                <Copy className="h-3 w-3" strokeWidth={1.5} />
+                                            )}
+                                          </button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>Copy digest</TooltipContent>
+                                      </Tooltip>
+                                    </TooltipProvider>
                                 </>
                             )}
                             <ImageSourceMenu imageRef={first.Image} imageId={first.ImageID} />
