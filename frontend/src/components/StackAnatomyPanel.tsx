@@ -447,7 +447,6 @@ export default function StackAnatomyPanel({
               edit
             </button>
           )}
-          {stackMuteActions && <ActivityMuteKebab actions={stackMuteActions} />}
         </div>
       </div>
       <TabsContent value="activity" className="flex-1 min-h-0 overflow-y-auto px-3 mt-0">
