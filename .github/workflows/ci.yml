@@ -218,3 +218,31 @@ jobs:
             test-results/
             ci-logs/
           retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Changelog Credit Script (PRs only, skipped for release-please PRs)
+  # ---------------------------------------------------------------------------
+  changelog-script:
+    name: Changelog credit script
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      github.event_name == 'pull_request'
+      && github.head_ref != 'release-please--branches--main--components--sencho'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: '.node-version'
+
+      - name: Validate workflows
+        uses: docker://rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 # v1.7.12
+        with:
+          args: .github/workflows/release-please.yml .github/workflows/ci.yml
+
+      - name: Syntax check
+        run: node --check scripts/credit-changelog-contributors.mjs
+
+      - name: Unit tests
+        run: node --test scripts/credit-changelog-contributors.test.mjs
