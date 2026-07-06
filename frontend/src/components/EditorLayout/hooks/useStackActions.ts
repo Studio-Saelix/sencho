@@ -891,6 +891,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (!stackListState.selectedFile || stackListState.isStackBusy(stackListState.selectedFile))
       return;
     const stackFile = stackListState.selectedFile;
+    if (openSelfStackProtectedIfNeeded(stackFile)) return;
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     const startedAt = Date.now();
     stackListState.setStackAction(stackFile, 'rollback');
@@ -902,6 +903,10 @@ export function useStackActions(options: UseStackActionsOptions) {
       const res = await apiFetch(path, { method: 'POST', nodeId: opNodeId });
       if (!res.ok) {
         const rawBody = await res.text();
+        if (isSelfStackProtectedResponse(rawBody, res.status)) {
+          overlayState.openSelfStackProtected();
+          return;
+        }
         if (res.status === 409) {
           const inProgress = parseStackOpInProgress(rawBody);
           if (inProgress) {
@@ -1099,13 +1104,21 @@ export function useStackActions(options: UseStackActionsOptions) {
     serviceName: string,
   ) => {
     if (!stackListState.selectedFile) return;
+    if (action === 'stop' && openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
     const stackName = stackListState.selectedFile.replace(/\.(yml|yaml)$/, '');
     try {
       const r = await apiFetch(
         `/stacks/${stackName}/services/${encodeURIComponent(serviceName)}/${action}`,
         { method: 'POST' },
       );
-      if (!r.ok) throw new Error((await r.text()) || `${action} failed`);
+      if (!r.ok) {
+        const rawBody = await r.text();
+        if (isSelfStackProtectedResponse(rawBody, r.status)) {
+          overlayState.openSelfStackProtected();
+          return;
+        }
+        throw new Error(rawBody || `${action} failed`);
+      }
       const label =
         action === 'restart' ? 'restarted' : action === 'stop' ? 'stopped' : 'started';
       toast.success(`Service "${serviceName}" ${label}`);
@@ -1247,7 +1260,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   ) => {
     if (stackListState.isStackBusy(stackFile)) return;
     if (
-      (action === 'deploy' || action === 'update' || action === 'stop' || action === 'delete') &&
+      (action === 'deploy' || action === 'update' || action === 'stop' || action === 'delete' || action === 'rollback') &&
       openSelfStackProtectedIfNeeded(stackFile)
     ) {
       return;

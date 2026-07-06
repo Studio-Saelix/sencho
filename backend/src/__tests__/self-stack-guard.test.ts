@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import SelfIdentityService from '../services/SelfIdentityService';
+import DockerController from '../services/DockerController';
 import {
   isSelfStack,
   getSelfStackProjectName,
@@ -24,6 +25,7 @@ function stubComposeProject(name: string | null) {
 afterEach(() => {
   vi.restoreAllMocks();
   SelfIdentityService.getInstance().resetForTesting();
+  delete process.env.HOSTNAME;
 });
 
 describe('isSelfStack', () => {
@@ -40,6 +42,47 @@ describe('isSelfStack', () => {
   it('returns false when self identity is unavailable', async () => {
     stubComposeProject(null);
     expect(await isSelfStack('sencho')).toBe(false);
+  });
+
+  it('falls back to matching the running container against compose labels', async () => {
+    const runtimeId = 'a'.repeat(64);
+    process.env.HOSTNAME = runtimeId.slice(0, 12);
+    stubComposeProject(null);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDocker: () => ({
+        listContainers: vi.fn().mockResolvedValue([
+          {
+            Id: runtimeId,
+            Labels: {
+              'com.docker.compose.project': 'renamed-project',
+              'com.docker.compose.project.working_dir': '/app/compose/sencho',
+            },
+          },
+        ]),
+      }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    expect(await isSelfStack('sencho')).toBe(true);
+  });
+
+  it('falls back to the running container compose project label', async () => {
+    const runtimeId = 'b'.repeat(64);
+    process.env.HOSTNAME = runtimeId.slice(0, 12);
+    stubComposeProject(null);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDocker: () => ({
+        listContainers: vi.fn().mockResolvedValue([
+          {
+            Id: runtimeId,
+            Labels: {
+              'com.docker.compose.project': 'sencho',
+            },
+          },
+        ]),
+      }),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    expect(await isSelfStack('sencho')).toBe(true);
   });
 });
 

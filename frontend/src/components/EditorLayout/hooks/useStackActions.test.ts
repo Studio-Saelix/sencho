@@ -902,6 +902,48 @@ describe('useStackActions.getStackMenuVisibility', () => {
     expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
     expect(stackListState.setStackAction).not.toHaveBeenCalled();
   });
+
+  it('opens the self-stack modal instead of calling rollback on a protected stack', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result, overlayState, stackListState } = setup({
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.rollbackStack(); });
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
+    expect(stackListState.setStackAction).not.toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('opens the self-stack modal for rollback 409 fallback', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({ code: 'self_stack_protected' }), { status: 409 }));
+    const { result, overlayState, stackListState } = setup();
+    await act(async () => { await result.current.rollbackStack(); });
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
+    expect(stackListState.recordActionFailure).not.toHaveBeenCalled();
+  });
+
+  it('opens the self-stack modal instead of calling service stop on a protected stack', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result, overlayState } = setup({
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.serviceAction('stop', 'web'); });
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('opens the self-stack modal for service stop 409 fallback', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(JSON.stringify({ code: 'self_stack_protected' }), { status: 409 }));
+    const { result, overlayState } = setup();
+    await act(async () => { await result.current.serviceAction('stop', 'web'); });
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
+  });
 });
 
 describe('useStackActions.openStackApp', () => {

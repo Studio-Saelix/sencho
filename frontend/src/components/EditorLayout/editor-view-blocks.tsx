@@ -276,7 +276,7 @@ export function StackIdentityHeader({
                                 </DropdownMenuTrigger>
                                 <DropdownMenuContent align="end" className="w-48">
                                     {canRollback && (
-                                        <DropdownMenuItem onClick={rollbackStack} disabled={loadingAction !== null}>
+                                        <DropdownMenuItem onClick={rollbackStack} disabled={loadingAction !== null || selfProtected}>
                                             <Undo2 className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                             <div className="flex flex-col gap-0.5">
                                                 <span>{loadingAction === 'rollback' ? 'Rolling back...' : 'Rollback'}</span>

@@ -131,6 +131,8 @@ describe('self stack lifecycle refusal', () => {
     ['POST', '/api/stacks/sencho/update'],
     ['POST', '/api/stacks/sencho/down'],
     ['POST', '/api/stacks/sencho/stop'],
+    ['POST', '/api/stacks/sencho/rollback'],
+    ['POST', '/api/stacks/sencho/services/web/stop'],
     ['DELETE', '/api/stacks/sencho'],
   ] as const;
 

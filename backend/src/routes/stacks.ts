@@ -52,7 +52,7 @@ import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelec
 import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
-import { getSelfStackProjectName, isSelfStack, refuseIfSelfStack, selfStackProtectedBulkResult } from '../helpers/selfStackGuard';
+import { isSelfStack, refuseIfSelfStack, selfStackProtectedBulkResult } from '../helpers/selfStackGuard';
 
 // Authenticated users with edit permission can write arbitrarily large compose
 // files. Refuse to YAML.parse anything beyond this bound so a malformed (or
@@ -268,18 +268,14 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
       console.error('Failed to load git sources for status labels; defaulting to local:', sourceError);
     }
     const withSource: Record<string, BulkStackInfo & { source: 'local' | 'git' }> = {};
-    let selfStackProject: string | null = null;
-    try {
-      selfStackProject = await getSelfStackProjectName();
-    } catch (selfErr) {
-      console.error('Failed to resolve self stack project for status labels:', selfErr);
-    }
+    const composeDir = FileSystemService.getInstance(req.nodeId).getBaseDir();
     for (const [stack, info] of Object.entries(result)) {
       const name = stack.replace(/\.(yml|yaml)$/, '');
+      const isSelf = await isSelfStack(name, composeDir);
       withSource[stack] = {
         ...info,
         source: gitStackNames.has(name) ? 'git' : 'local',
-        isSelf: selfStackProject !== null && selfStackProject === name,
+        isSelf,
       };
     }
     res.json(withSource);
@@ -407,7 +403,7 @@ async function runStackBulkOp(
   }
 
   if (action === 'update' || action === 'stop') {
-    if (await isSelfStack(stackName)) {
+      if (await isSelfStack(stackName, fsSvc.getBaseDir())) {
       return selfStackProtectedBulkResult(stackName);
     }
   }
@@ -1676,6 +1672,7 @@ async function handleServiceAction(
   const stackName = req.params.stackName as string;
   const serviceName = req.params.serviceName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (action === 'stop' && await refuseIfSelfStack(req, res, stackName)) return;
   if (!isValidServiceName(serviceName)) {
     res.status(400).json({ error: 'Invalid service name' });
     return;
@@ -1798,6 +1795,8 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
 stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (await refuseIfSelfStack(req, res, stackName)) return;
   // Rollback restores files and re-deploys, so it must hold the same per-stack
   // lock deploy/update use. Without it a rollback racing an in-flight deploy
   // would mutate the compose files and run a second `docker compose up` against
