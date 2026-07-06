@@ -6,6 +6,7 @@ import {
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useNodes } from '@/context/NodeContext';
 import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
@@ -387,16 +388,22 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
           {summary && SummaryIcon && !dismissed && (
             <div data-testid="preflight-status" data-status={report.activeStatus} className={cn(CARD_CLASS, summary.tone, 'relative')}>
               {hasActiveFindings && (
-                <button
-                  type="button"
-                  onClick={dismiss}
-                  data-testid="preflight-dismiss-btn"
-                  aria-label="Dismiss until findings change"
-                  title="Dismiss until findings change"
-                  className="absolute right-2 top-2 inline-flex h-5 w-5 items-center justify-center rounded text-current/70 hover:bg-current/10 hover:text-current"
-                >
-                  <X className="h-3.5 w-3.5" strokeWidth={1.5} />
-                </button>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        onClick={dismiss}
+                        data-testid="preflight-dismiss-btn"
+                        aria-label="Dismiss until findings change"
+                        className="absolute right-2 top-2 inline-flex h-5 w-5 items-center justify-center rounded text-current/70 hover:bg-current/10 hover:text-current"
+                      >
+                        <X className="h-3.5 w-3.5" strokeWidth={1.5} />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Dismiss until findings change</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               )}
               <div className="flex items-center gap-2 pr-6">
                 <SummaryIcon className="h-4 w-4 shrink-0" strokeWidth={1.5} />

@@ -35,6 +35,7 @@ import { Sparkline } from '../ui/sparkline';
 import { ImageSourceMenu } from '../ImageSourceMenu';
 import { cn } from '@/lib/utils';
 import { copyToClipboard } from '@/lib/clipboard';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { buildServiceUrl } from '@/lib/serviceUrl';
 import ErrorBoundary from '../ErrorBoundary';
 import TerminalComponent from '../Terminal';
@@ -362,12 +363,16 @@ export function ContainersHealth({
         <div>
             {containerStatsError && safeContainers.length > 0 && (
                 <div className="mb-3 flex items-center justify-end">
-                    <span
-                        className="text-[10px] uppercase tracking-wider font-mono text-warning-foreground bg-warning/10 border border-warning/30 rounded-md px-2 py-0.5"
-                        title={containerStatsError}
-                    >
-                        Stats unavailable
-                    </span>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="text-[10px] uppercase tracking-wider font-mono text-warning-foreground bg-warning/10 border border-warning/30 rounded-md px-2 py-0.5">
+                            Stats unavailable
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>{containerStatsError}</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                 </div>
             )}
             {safeContainers.length === 0 ? (
@@ -479,19 +484,25 @@ export function ContainersHealth({
                                                                 >
                                                                     {portLabel} <ArrowUpRight className="h-3 w-3" strokeWidth={1.5} />
                                                                 </a>
-                                                                <button
-                                                                    type="button"
-                                                                    aria-label={copiedUrlId === container?.Id ? 'Copied' : 'Copy service URL'}
-                                                                    title="Copy service URL"
-                                                                    onClick={() => copyServiceUrl(container?.Id, serviceUrl)}
-                                                                    className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors"
-                                                                >
+                                                                <TooltipProvider>
+                                                                  <Tooltip>
+                                                                    <TooltipTrigger asChild>
+                                                                      <button
+                                                                        type="button"
+                                                                        aria-label={copiedUrlId === container?.Id ? 'Copied' : 'Copy service URL'}
+                                                                        onClick={() => copyServiceUrl(container?.Id, serviceUrl)}
+                                                                        className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors"
+                                                                      >
                                                                     {copiedUrlId === container?.Id ? (
                                                                         <Check className="h-3 w-3" strokeWidth={2} />
                                                                     ) : (
                                                                         <Copy className="h-3 w-3" strokeWidth={1.5} />
                                                                     )}
                                                                 </button>
+                                                                    </TooltipTrigger>
+                                                                    <TooltipContent>Copy service URL</TooltipContent>
+                                                                  </Tooltip>
+                                                                </TooltipProvider>
                                                             </>
                                                         ) : (
                                                             <span>{portLabel}</span>
