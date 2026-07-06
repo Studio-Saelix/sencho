@@ -361,7 +361,7 @@ export function ContainersHealth({
     const copiedUrlTimerRef = useRef<number | null>(null);
     // Compact mode hides sparkline grids across all containers for a denser
     // list. Detailed mode (default) shows CPU / Mem / Net per container.
-    const [density, setDensity] = useState<'compact' | 'detailed'>('detailed');
+    const [density, setDensity] = useState<'compact' | 'detailed'>('compact');
     useEffect(() => () => {
         if (copiedUrlTimerRef.current !== null) window.clearTimeout(copiedUrlTimerRef.current);
     }, []);
