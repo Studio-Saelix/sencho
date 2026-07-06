@@ -13,34 +13,17 @@ import type { SecurityTab, FleetTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { ScheduleTaskPrefill } from '@/components/ScheduledOperationsView';
 import type { MuteRuleDraft } from '@/lib/muteRules';
+import type { ActiveView } from '@/lib/router/routeTypes';
+import { HUB_ONLY_VIEWS } from '@/lib/router/routeTypes';
+import {
+  authzReady,
+  isViewHidden,
+  normalizeHiddenView,
+  type ReachabilityContext,
+} from '@/lib/routing/reachability';
 
-export type ActiveView =
-  | 'dashboard'
-  | 'editor'
-  | 'host-console'
-  | 'resources'
-  | 'templates'
-  | 'global-observability'
-  | 'fleet'
-  | 'security'
-  | 'audit-log'
-  | 'scheduled-ops'
-  | 'auto-updates'
-  | 'settings';
-
-// Views that operate on hub-owned state (node registry, fleet schedules,
-// centralized audit, fleet-wide log aggregation, fleet-wide update preview).
-// Hidden from the nav strip and force-redirect to dashboard when the active
-// node is remote, since proxying them would surface that remote's own
-// disconnected state instead of the hub's. Settings sub-sections use the
-// parallel `hiddenOnRemote` registry (see settings/registry.ts).
-export const HUB_ONLY_VIEWS: ReadonlySet<ActiveView> = new Set([
-  'fleet',
-  'scheduled-ops',
-  'audit-log',
-  'global-observability',
-  'auto-updates',
-]);
+export type { ActiveView };
+export { HUB_ONLY_VIEWS };
 
 export interface NavItem {
   value: ActiveView;
@@ -50,23 +33,36 @@ export interface NavItem {
 
 interface UseViewNavigationStateOptions {
   onNavigateToDashboard?: () => void;
+  hasFleetCapability?: boolean;
+  containerLabelsEnabled?: boolean;
 }
 
 export function useViewNavigationState(options?: UseViewNavigationStateOptions) {
-  const { onNavigateToDashboard } = options ?? {};
-  const { isAdmin, can } = useAuth();
-  const { isPaid } = useLicense();
+  const { onNavigateToDashboard, hasFleetCapability = false, containerLabelsEnabled = false } = options ?? {};
+  const { isAdmin, can, permissionsStatus } = useAuth();
+  const { isPaid, licenseStatus } = useLicense();
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
 
   const [activeView, setActiveView] = useState<ActiveView>('dashboard');
   const [settingsSection, setSettingsSection] = useState<SectionId>('appearance');
   const [securityTab, setSecurityTab] = useState<SecurityTab>('overview');
-  const [fleetTab, setFleetTab] = useState<FleetTab | null>(null);
+  const [fleetActiveTab, setFleetActiveTab] = useState<FleetTab>('overview');
   const [filterNodeId, setFilterNodeId] = useState<number | null>(null);
   const [schedulePrefill, setSchedulePrefill] = useState<ScheduleTaskPrefill | null>(null);
   const [muteRulePrefill, setMuteRulePrefill] = useState<MuteRuleDraft | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  const reachCtx: ReachabilityContext = useMemo(() => ({
+    isAdmin,
+    isPaid,
+    can: (action: string) => can(action as Parameters<typeof can>[0]),
+    isRemote,
+    hasFleetCapability,
+    containerLabelsEnabled,
+    permissionsStatus,
+    licenseStatus,
+  }), [isAdmin, isPaid, can, isRemote, hasFleetCapability, containerLabelsEnabled, permissionsStatus, licenseStatus]);
 
   const handleOpenSettings = useCallback((section?: SectionId) => {
     if (section) setSettingsSection(section);
@@ -86,6 +82,9 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
 
   const handleNavigate = useCallback((value: string) => {
     if (value === activeView) return;
+    if (value === 'fleet') {
+      setFleetActiveTab('overview');
+    }
     if (value === 'dashboard') {
       onNavigateToDashboard?.();
       setActiveView('dashboard');
@@ -100,17 +99,13 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
       const detail = (e as CustomEvent<SenchoNavigateDetail & { view: string }>).detail;
       if (!detail?.view) return;
       if (detail.view === 'security') {
-        // Set the target tab before switching the view so the controlled
-        // SecurityView lands on it deterministically (no mount race).
         setSecurityTab(detail.tab ?? 'overview');
         setActiveView('security');
         setFilterNodeId(detail.nodeId ?? null);
         return;
       }
       if (detail.view === 'fleet') {
-        // Set the target sub-tab before switching so the controlled FleetView
-        // lands on it (e.g. Snapshots from the stack storage warning).
-        if (detail.fleetTab) setFleetTab(detail.fleetTab);
+        if (detail.fleetTab) setFleetActiveTab(detail.fleetTab);
         setActiveView('fleet');
         setFilterNodeId(detail.nodeId ?? null);
         return;
@@ -126,54 +121,47 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     const items: NavItem[] = [
       { value: 'dashboard', label: 'Home', icon: Home },
     ];
-    // Fleet surfaces node topology and host stats, so it is gated on node:read
-    // (held by every role except deployer), matching the backend guard on the
-    // fleet overview / configuration / dependency / networking reads.
-    if (can('node:read')) items.push({ value: 'fleet', label: 'Fleet', icon: Radar });
+    if (!isViewHidden('fleet', reachCtx)) {
+      items.push({ value: 'fleet', label: 'Fleet', icon: Radar });
+    }
     items.push(
       { value: 'resources', label: 'Resources', icon: HardDrive },
-      // Security is a Community, node-scoped review surface (not hub-only), so
-      // it shows for every authenticated user and on remote nodes too.
       { value: 'security', label: 'Security', icon: ShieldCheck },
       { value: 'templates', label: 'App Store', icon: CloudDownload },
     );
-    // The aggregated Logs feed crosses every managed stack, so it is an
-    // admin-only operator view (the backend gates the same routes on admin).
-    if (isAdmin) items.push({ value: 'global-observability', label: 'Logs', icon: Activity });
-    if (isAdmin) {
+    if (!isViewHidden('global-observability', reachCtx)) {
+      items.push({ value: 'global-observability', label: 'Logs', icon: Activity });
+    }
+    if (!isViewHidden('auto-updates', reachCtx)) {
       items.push({ value: 'auto-updates', label: 'Update', icon: RefreshCw });
+    }
+    if (!isViewHidden('scheduled-ops', reachCtx)) {
       items.push({ value: 'scheduled-ops', label: 'Schedules', icon: Clock });
     }
-    if (isPaid) {
-      if (isAdmin) items.push({ value: 'host-console', label: 'Console', icon: Terminal });
-      if (can('system:audit')) items.push({ value: 'audit-log', label: 'Audit', icon: ScrollText });
+    if (!isViewHidden('host-console', reachCtx)) {
+      items.push({ value: 'host-console', label: 'Console', icon: Terminal });
     }
-    return isRemote
-      ? items.filter(i => !HUB_ONLY_VIEWS.has(i.value))
-      : items;
-  }, [isAdmin, isPaid, can, isRemote]);
+    if (!isViewHidden('audit-log', reachCtx)) {
+      items.push({ value: 'audit-log', label: 'Audit', icon: ScrollText });
+    }
+    return items;
+  }, [reachCtx]);
 
   useEffect(() => {
-    // Redirect off a view the active context can't reach: a hub-only view while
-    // a remote node is active, the admin-only Logs view as a non-admin, or the
-    // Fleet view without node:read (e.g. arrived via a deep-link event rather
-    // than the now-hidden nav item).
-    const blockedByRemote = isRemote && HUB_ONLY_VIEWS.has(activeView);
-    const blockedByRole =
-      (!isAdmin && activeView === 'global-observability')
-      || (!can('node:read') && activeView === 'fleet');
-    if (blockedByRemote || blockedByRole) {
+    if (!authzReady(reachCtx)) return;
+    const normalized = normalizeHiddenView(activeView, reachCtx);
+    if (normalized !== activeView) {
       onNavigateToDashboard?.();
-      setActiveView('dashboard');
+      setActiveView(normalized);
       setFilterNodeId(null);
     }
-  }, [isRemote, isAdmin, can, activeView, onNavigateToDashboard]);
+  }, [reachCtx, activeView, onNavigateToDashboard]);
 
   return {
     activeView, setActiveView,
     settingsSection, setSettingsSection,
     securityTab, setSecurityTab,
-    fleetTab, setFleetTab,
+    fleetActiveTab, setFleetActiveTab,
     filterNodeId, setFilterNodeId,
     schedulePrefill, setSchedulePrefill,
     muteRulePrefill, setMuteRulePrefill,
@@ -184,5 +172,6 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     openMuteRulesWithPrefill,
     handleNavigate,
     navItems,
+    reachCtx,
   } as const;
 }

@@ -47,14 +47,7 @@ export interface FleetDossierInput {
   nodes: FleetDossierNode[];
 }
 
-/** Slugify a node or stack name into a safe, lowercase filename segment. */
-function slugify(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^[-.]+|[-.]+$/g, '') || 'unnamed';
-}
-
+import { slugify } from '@/lib/slugify';
 // Escape a value for a Markdown table cell: backslash first (so it cannot defeat
 // the pipe escaping), then pipes, then collapse line breaks onto one line.
 function cell(value: string): string {

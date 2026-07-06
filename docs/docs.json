@@ -132,8 +132,9 @@
                 "group": "Observability",
                 "expanded": true,
                 "pages": [
-                  "features/dashboard",
-                  "features/global-search",
+              "features/dashboard",
+              "features/deep-links",
+              "features/global-search",
                   "features/global-observability",
                   "features/alerts-notifications",
                   "features/audit-log"

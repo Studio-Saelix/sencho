@@ -64,6 +64,8 @@ export interface RemoteResult {
 
 const EMPTY_UPDATES: Record<string, StackUpdateInfo> = {};
 
+export type StacksLoadStatus = 'idle' | 'loading' | 'success' | 'error';
+
 export function useStackListState() {
   const { nodes, activeNode } = useNodes();
 
@@ -100,6 +102,10 @@ export function useStackListState() {
   const [filterChip, setFilterChip] = useState<FilterChip>('all');
   const [bulkMode, setBulkMode] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+  const [stacksLoadStatus, setStacksLoadStatus] = useState<StacksLoadStatus>('idle');
+  const [stacksLoadError, setStacksLoadError] = useState<string | null>(null);
+  const [stacksLoadNodeId, setStacksLoadNodeId] = useState<number | null>(null);
+  const hadSuccessfulListRef = useRef(false);
 
   const { stackUpdates, refresh: fetchImageUpdates, sidebarIndicators } = useImageUpdates(activeNode?.id);
   const sidebarStackUpdates = sidebarIndicators ? stackUpdates : EMPTY_UPDATES;
@@ -116,6 +122,12 @@ export function useStackListState() {
   useEffect(() => {
     if (evictedOldest) toast.info('Pinned. Unpinned oldest (max 10).');
   }, [evictedOldest]);
+
+  useEffect(() => {
+    hadSuccessfulListRef.current = false;
+    setStacksLoadStatus('idle');
+    setStacksLoadError(null);
+  }, [activeNode?.id]);
 
   // Ref is updated synchronously alongside the state setter so any code that
   // runs right after (e.g. `refreshStacks(true)` in an action's finally block)
@@ -180,25 +192,39 @@ export function useStackListState() {
   }, [refreshLabels]);
 
   const refreshStacks = async (background = false): Promise<string[]> => {
-    if (!background) setIsLoading(true);
-    // Snapshot the node this fetch targets and a sequence token so a superseded
-    // or out-of-order resolution (from a rapid node switch) cannot overwrite a
-    // newer node's list, keeping `files` and `filesNodeId` consistent.
     const fetchNodeId = activeNode?.id ?? null;
     const mySeq = ++fetchSeqRef.current;
     const stale = () => fetchSeqRef.current !== mySeq;
+
+    if (!background) setIsLoading(true);
+    setStacksLoadNodeId(fetchNodeId);
+    if (!background || !hadSuccessfulListRef.current) {
+      setStacksLoadStatus('loading');
+      setStacksLoadError(null);
+    }
+
     try {
       const res = await apiFetch('/stacks');
       if (stale()) return [];
       if (!res.ok) {
+        const message = `Could not load stacks (${res.status})`;
+        if (background && hadSuccessfulListRef.current) {
+          setStacksLoadError(message);
+          return files;
+        }
         setFiles([]);
         setFilesNodeId(fetchNodeId);
+        setStacksLoadStatus('error');
+        setStacksLoadError(message);
         return [];
       }
       const data = await res.json();
       const fileList: string[] = Array.isArray(data) ? data : [];
       setFiles(fileList);
       setFilesNodeId(fetchNodeId);
+      hadSuccessfulListRef.current = true;
+      setStacksLoadStatus('success');
+      setStacksLoadError(null);
 
       // Fetch all stack statuses in a single bulk call. Only the current object
       // format can express `partial`; a node lacking the endpoint or returning
@@ -244,8 +270,15 @@ export function useStackListState() {
     } catch (error) {
       if (stale()) return [];
       console.error('Failed to refresh stacks:', error);
+      const message = error instanceof Error ? error.message : 'Failed to load stacks';
+      if (background && hadSuccessfulListRef.current) {
+        setStacksLoadError(message);
+        return files;
+      }
       setFiles([]);
       setFilesNodeId(fetchNodeId);
+      setStacksLoadStatus('error');
+      setStacksLoadError(message);
       return [];
     } finally {
       setIsLoading(false);
@@ -434,5 +467,8 @@ export function useStackListState() {
     isCollapsed, toggleCollapse,
     remoteSearchLoading,
     remoteSearchFailedNodes,
+    stacksLoadStatus,
+    stacksLoadError,
+    stacksLoadNodeId,
   } as const;
 }

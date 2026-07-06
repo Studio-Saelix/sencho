@@ -8,6 +8,7 @@ import type { useViewNavigationState } from './useViewNavigationState';
 import type { OverlayState } from './useOverlayState';
 import type { Node } from '@/context/NodeContext';
 import type { RunWithLogParams } from '@/context/DeployFeedbackContext';
+import { parsePath } from '@/lib/router/senchoRoute';
 import type { StackAction, RecoverableAction, FailureClassification } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
@@ -271,6 +272,9 @@ export function useStackActions(options: UseStackActionsOptions) {
   const hasUnsavedChanges = () =>
     editorState.content !== editorState.originalContent ||
     editorState.envContent !== editorState.originalEnvContent;
+
+  const isComposeDirty = () => editorState.content !== editorState.originalContent;
+  const isEnvDirty = () => editorState.envContent !== editorState.originalEnvContent;
 
   const getStackMenuVisibility = (file: string) => {
     // A partial stack has running containers, so it shows the running-stack
@@ -1209,18 +1213,48 @@ export function useStackActions(options: UseStackActionsOptions) {
   // destination. When the editor is dirty the navigation is stashed and the
   // unsaved-changes dialog opens; discardAndLoadPending runs it on confirm.
   // When clean it runs immediately.
-  const attemptLeaveEditor = (perform: () => void) => {
+  const attemptLeaveEditor = (perform: () => void, onCancel?: () => void) => {
     if (stackListState.selectedFile && hasUnsavedChanges()) {
-      overlayState.setPendingLeaveAction({ run: perform });
+      overlayState.setPendingLeaveAction({ run: perform, onCancel });
       return;
     }
     perform();
   };
 
+  const wouldDiscardOnPopstate = (): boolean => {
+    if (!stackListState.selectedFile) return false;
+    const parsed = parsePath(window.location.pathname, window.location.search);
+    const targetStack = parsed.stackName;
+    const targetView = parsed.view;
+
+    if (targetView !== 'editor' || !targetStack || targetStack !== stackListState.selectedFile) {
+      return isComposeDirty() || isEnvDirty();
+    }
+    if (
+      parsed.editorTab === 'env'
+      && editorState.activeTab === 'env'
+      && parsed.envFile
+      && parsed.envFile !== editorState.selectedEnvFile
+    ) {
+      return isEnvDirty();
+    }
+    return false;
+  };
+
+  const attemptPopstateNavigation = (apply: () => void, onCancel: () => void) => {
+    if (wouldDiscardOnPopstate()) {
+      overlayState.setPendingLeaveAction({ run: apply, onCancel });
+      return;
+    }
+    apply();
+  };
+
   const cancelPendingUnsavedLoad = () => {
+    const cancel = overlayState.pendingLeaveAction?.onCancel;
     overlayState.setPendingUnsavedLoad(null);
     overlayState.setPendingUnsavedNode(null);
     overlayState.setPendingLeaveAction(null);
+    cancel?.();
   };
 
   const discardAndLoadPending = () => {
@@ -1419,6 +1453,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     requestStackUpdate,
     deleteStack,
     attemptLeaveEditor,
+    attemptPopstateNavigation,
     cancelPendingUnsavedLoad,
     discardAndLoadPending,
     requestDeleteStack,

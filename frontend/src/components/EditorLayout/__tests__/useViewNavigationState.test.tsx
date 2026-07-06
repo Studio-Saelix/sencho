@@ -22,9 +22,11 @@ function mockCommunityUser() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     isAdmin: false,
     can: (p: string) => p === 'node:read',
+    permissionsStatus: 'ready',
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
     isPaid: false,
+    licenseStatus: 'ready',
   } as unknown as ReturnType<typeof LicenseContext.useLicense>);
 }
 
@@ -33,9 +35,11 @@ function mockDeployer() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     isAdmin: false,
     can: (p: string) => p === 'stack:read' || p === 'stack:deploy',
+    permissionsStatus: 'ready',
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
     isPaid: false,
+    licenseStatus: 'ready',
   } as unknown as ReturnType<typeof LicenseContext.useLicense>);
 }
 
@@ -43,9 +47,11 @@ function mockPaidAdmin() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     isAdmin: true,
     can: (p: string) => p === 'system:audit' || p === 'node:read',
+    permissionsStatus: 'ready',
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
     isPaid: true,
+    licenseStatus: 'ready',
   } as unknown as ReturnType<typeof LicenseContext.useLicense>);
 }
 
@@ -53,9 +59,11 @@ function mockCommunityAdmin() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     isAdmin: true,
     can: (p: string) => p === 'node:read',
+    permissionsStatus: 'ready',
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
     isPaid: false,
+    licenseStatus: 'ready',
   } as unknown as ReturnType<typeof LicenseContext.useLicense>);
 }
 
@@ -176,7 +184,7 @@ describe('useViewNavigationState', () => {
       );
     });
     expect(result.current.activeView).toBe('fleet');
-    expect(result.current.fleetTab).toBe('snapshots');
+    expect(result.current.fleetActiveTab).toBe('snapshots');
   });
 
   it('SENCHO_NAVIGATE_EVENT with no nodeId sets filterNodeId to null', () => {
