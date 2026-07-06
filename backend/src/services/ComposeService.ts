@@ -472,10 +472,10 @@ export class ComposeService {
     try {
       try {
         const dockerController = DockerController.getInstance(this.nodeId);
-        const legacyContainers = await dockerController.getContainersByStack(stackName);
-        if (legacyContainers && legacyContainers.length > 0) {
-          sendOutput(`=== Cleaning up existing containers for clean deployment ===\n`);
-          await dockerController.removeContainers(legacyContainers.map((c: any) => c.Id));
+        const legacyOrphans = await dockerController.getLegacyOrphanContainersByStack(stackName);
+        if (legacyOrphans.length > 0) {
+          sendOutput(`=== Cleaning up legacy orphan containers before deployment ===\n`);
+          await dockerController.removeContainers(legacyOrphans.map((c) => c.Id));
         }
       } catch (e) {
         console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
