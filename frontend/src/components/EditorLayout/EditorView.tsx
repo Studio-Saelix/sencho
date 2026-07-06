@@ -654,7 +654,6 @@ export function EditorView(props: EditorViewProps) {
                         applying={loadingAction === 'update'}
                         canEdit={can('stack:edit', 'stack', stackName)}
                         notifications={notifications}
-                        stackMuteActions={stackMuteActions}
                     />
                 )}
             </div>

@@ -246,7 +246,6 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 applying={loadingAction === 'update'}
                                 canEdit={canEditStack}
                                 notifications={notifications}
-                                stackMuteActions={stackMuteActions}
                             />
                         </div>
                     )}
