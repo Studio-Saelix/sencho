@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { cn } from '@/lib/utils';
-import { CursorProvider, CursorContainer, Cursor, CursorFollow } from '@/components/animate-ui/primitives/animate/cursor';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { SEVERITY_BADGE_CLASSES, SEVERITY_DOT_CLASSES, getSeverityKey } from '@/lib/severityStyles';
 import type { ScanSummary } from '@/types/security';
 
@@ -50,13 +50,10 @@ export function SeverityBadge({ summary, onClick, tooltip = true }: { summary: S
     if (!tooltip) return pill;
 
     return (
-        <CursorProvider>
-            <CursorContainer className="inline-flex">{pill}</CursorContainer>
-            <Cursor>
-                <div className="h-2 w-2 rounded-full bg-brand" />
-            </Cursor>
-            <CursorFollow side="bottom" align="end" sideOffset={8}>
-                <div className="bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] border border-card-border shadow-md rounded-md px-3 py-2">
+        <TooltipProvider delayDuration={300}>
+            <Tooltip>
+                <TooltipTrigger asChild>{pill}</TooltipTrigger>
+                <TooltipContent side="bottom" align="end" sideOffset={8}>
                     <div className="font-mono tabular-nums text-xs space-y-1">
                         <div className="text-stat-subtitle uppercase tracking-wide">Last scanned</div>
                         <div className="text-stat-value">{relative}</div>
@@ -78,8 +75,8 @@ export function SeverityBadge({ summary, onClick, tooltip = true }: { summary: S
                             <div className="text-success">No findings</div>
                         )}
                     </div>
-                </div>
-            </CursorFollow>
-        </CursorProvider>
+                </TooltipContent>
+            </Tooltip>
+        </TooltipProvider>
     );
 }
