@@ -185,7 +185,7 @@ describe('density toggle and summary strip', () => {
     expect(screen.queryByRole('button', { name: 'Detailed view' })).toBeNull();
   });
 
-  it('resets density to compact on remount (key change)', () => {
+  it('resets density to detailed on remount (key change)', () => {
     const { unmount } = render(
       <ContainersHealth
         safeContainers={[makeContainer({ Id: 'a' }), makeContainer({ Id: 'b' })]}
@@ -216,9 +216,8 @@ describe('density toggle and summary strip', () => {
         serviceAction={vi.fn()}
       />,
     );
-    // Density reset to compact; single container hides sparklines,
-    // no density toggle for a single container
-    expect(screen.queryByText('cpu')).toBeNull();
+    // Density reset; single container shows sparklines
+    expect(screen.getByText('cpu')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Compact view' })).toBeNull();
   });
 });
