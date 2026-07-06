@@ -18,6 +18,8 @@ import {
     CloudDownload,
     Layers,
     List,
+    Maximize2,
+    Minimize2,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/button';
@@ -337,6 +339,8 @@ export interface ContainersHealthProps {
     openLogViewer: (containerId: string, containerName: string) => void;
     openBashModal: (containerId: string, containerName: string) => void;
     serviceAction: (action: 'start' | 'stop' | 'restart', serviceName: string) => Promise<void>;
+    containersExpanded?: boolean;
+    onToggleContainersExpand?: () => void;
 }
 
 // Per-container health strip: status badge, uptime, ports, and CPU/Mem/Net
@@ -350,6 +354,8 @@ export function ContainersHealth({
     openLogViewer,
     openBashModal,
     serviceAction,
+    containersExpanded,
+    onToggleContainersExpand,
 }: ContainersHealthProps) {
     const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
     const copiedUrlTimerRef = useRef<number | null>(null);
@@ -405,39 +411,61 @@ export function ContainersHealth({
                                     {paused > 0 && <span className="text-warning/80">{paused} paused</span>}
                                     {unhealthy > 0 && <span className="text-destructive/80">{unhealthy} unhealthy</span>}
                                 </div>
-                                <div className="inline-flex rounded-md border border-muted bg-muted/30 p-0.5">
-                                    <TooltipProvider>
-                                      <Tooltip>
-                                        <TooltipTrigger asChild>
-                                          <button
-                                            type="button"
-                                            onClick={() => setDensity('compact')}
-                                            className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'compact' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
-                                            aria-pressed={density === 'compact'}
-                                            aria-label="Compact view"
-                                          >
-                                            <List className="h-3 w-3" strokeWidth={1.5} />
-                                          </button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>Compact view</TooltipContent>
-                                      </Tooltip>
-                                    </TooltipProvider>
-                                    <TooltipProvider>
-                                      <Tooltip>
-                                        <TooltipTrigger asChild>
-                                          <button
-                                            type="button"
-                                            onClick={() => setDensity('detailed')}
-                                            className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'detailed' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
-                                            aria-pressed={density === 'detailed'}
-                                            aria-label="Detailed view"
-                                          >
-                                            <Layers className="h-3 w-3" strokeWidth={1.5} />
-                                          </button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>Detailed view</TooltipContent>
-                                      </Tooltip>
-                                    </TooltipProvider>
+                                <div className="flex items-center gap-1">
+                                    <div className="inline-flex rounded-md border border-muted bg-muted/30 p-0.5">
+                                        <TooltipProvider>
+                                          <Tooltip>
+                                            <TooltipTrigger asChild>
+                                              <button
+                                                type="button"
+                                                onClick={() => setDensity('compact')}
+                                                className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'compact' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
+                                                aria-pressed={density === 'compact'}
+                                                aria-label="Compact view"
+                                              >
+                                                <List className="h-3 w-3" strokeWidth={1.5} />
+                                              </button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>Compact view</TooltipContent>
+                                          </Tooltip>
+                                        </TooltipProvider>
+                                        <TooltipProvider>
+                                          <Tooltip>
+                                            <TooltipTrigger asChild>
+                                              <button
+                                                type="button"
+                                                onClick={() => setDensity('detailed')}
+                                                className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'detailed' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
+                                                aria-pressed={density === 'detailed'}
+                                                aria-label="Detailed view"
+                                              >
+                                                <Layers className="h-3 w-3" strokeWidth={1.5} />
+                                              </button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>Detailed view</TooltipContent>
+                                          </Tooltip>
+                                        </TooltipProvider>
+                                        {onToggleContainersExpand && (
+                                            <TooltipProvider>
+                                              <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                  <button
+                                                    type="button"
+                                                    onClick={onToggleContainersExpand}
+                                                    className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${containersExpanded ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
+                                                    aria-pressed={containersExpanded}
+                                                    aria-label={containersExpanded ? 'Collapse containers' : 'Expand containers'}
+                                                  >
+                                                    {containersExpanded
+                                                      ? <Minimize2 className="h-3 w-3" strokeWidth={1.5} />
+                                                      : <Maximize2 className="h-3 w-3" strokeWidth={1.5} />}
+                                                  </button>
+                                                </TooltipTrigger>
+                                                <TooltipContent>{containersExpanded ? 'Collapse containers' : 'Expand containers'}</TooltipContent>
+                                              </Tooltip>
+                                            </TooltipProvider>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
                         );
