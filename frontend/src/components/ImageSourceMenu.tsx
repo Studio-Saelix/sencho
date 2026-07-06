@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 import { Link2, ExternalLink, Copy, Check } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -98,19 +99,25 @@ export function ImageSourceMenu({ imageRef, imageId, className = 'h-4 w-4' }: Im
 
   return (
     <DropdownMenu open={open} onOpenChange={handleOpenChange}>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          aria-label="Image source links"
-          title="Image source links"
-          className={cn(
-            'inline-flex items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors',
-            className,
-          )}
-        >
-          <Link2 className="h-3.5 w-3.5" strokeWidth={1.5} />
-        </button>
-      </DropdownMenuTrigger>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                aria-label="Image source links"
+                className={cn(
+                  'inline-flex items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors',
+                  className,
+                )}
+              >
+                <Link2 className="h-3.5 w-3.5" strokeWidth={1.5} />
+              </button>
+            </DropdownMenuTrigger>
+          </TooltipTrigger>
+          <TooltipContent>Image source links</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
       <DropdownMenuContent align="end" className="w-60">
         <DropdownMenuLabel className="font-mono text-[11px] font-normal text-stat-subtitle truncate">
           {trimmedRef}
