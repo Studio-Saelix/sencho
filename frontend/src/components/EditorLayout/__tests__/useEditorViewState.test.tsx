@@ -35,12 +35,6 @@ describe('useEditorViewState', () => {
       expect(result.current.gitSourcePendingMap).toEqual({});
     });
 
-    it('defaults nullable fields to null', () => {
-      const { result } = renderHook(() => useEditorViewState());
-      expect(result.current.copiedDigest).toBeNull();
-      expect(result.current.copiedDigestTimerRef.current).toBeNull();
-    });
-
     it('defaults activeTab to compose', () => {
       const { result } = renderHook(() => useEditorViewState());
       expect(result.current.activeTab).toBe('compose');
@@ -101,23 +95,6 @@ describe('useEditorViewState', () => {
       const { result } = renderHook(() => useEditorViewState());
       act(() => result.current.setLogsMode('raw'));
       expect(window.localStorage.getItem(LOGS_MODE_STORAGE_KEY)).toBe('raw');
-    });
-  });
-
-  describe('copiedDigestTimerRef cleanup', () => {
-    it('clears a pending timer on unmount', () => {
-      const clearSpy = vi.spyOn(window, 'clearTimeout');
-      const { result, unmount } = renderHook(() => useEditorViewState());
-      result.current.copiedDigestTimerRef.current = 4242;
-      unmount();
-      expect(clearSpy).toHaveBeenCalledWith(4242);
-    });
-
-    it('does nothing on unmount when no timer is pending', () => {
-      const clearSpy = vi.spyOn(window, 'clearTimeout');
-      const { unmount } = renderHook(() => useEditorViewState());
-      unmount();
-      expect(clearSpy).not.toHaveBeenCalled();
     });
   });
 });

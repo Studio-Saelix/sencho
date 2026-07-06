@@ -39,7 +39,6 @@ export function MobileStackDetail(props: EditorViewProps) {
         isFileLoading,
         gitSourcePendingMap,
         notifications,
-        copiedDigest,
         loadingAction,
         stackMisconfigScanning,
         can,
@@ -49,7 +48,6 @@ export function MobileStackDetail(props: EditorViewProps) {
         logsMode,
         activeTab,
         editingCompose,
-        copiedDigestTimerRef,
         deployStack,
         restartStack,
         stopStack,
@@ -68,7 +66,6 @@ export function MobileStackDetail(props: EditorViewProps) {
         setActiveTab,
         setEditingCompose,
         setGitSourceOpen,
-        setCopiedDigest,
         requestDeleteStack,
         isSelfStack = false,
         onMobileBack,
@@ -138,9 +135,6 @@ export function MobileStackDetail(props: EditorViewProps) {
                         activeNode={activeNode}
                         safeContainers={safeContainers}
                         isRunning={isRunning}
-                        copiedDigest={copiedDigest}
-                        setCopiedDigest={setCopiedDigest}
-                        copiedDigestTimerRef={copiedDigestTimerRef}
                         can={can}
                         isAdmin={isAdmin}
                         trivy={trivy}

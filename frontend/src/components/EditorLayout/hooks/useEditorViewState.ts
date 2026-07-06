@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ContainerInfo } from '../EditorView';
 
 export const LOGS_MODE_STORAGE_KEY = 'sencho.stackView.logsMode';
@@ -19,15 +19,6 @@ function readLogsMode(): LogsMode {
 
 export function useEditorViewState() {
   const [stackMisconfigScanning, setStackMisconfigScanning] = useState(false);
-  const [copiedDigest, setCopiedDigest] = useState<string | null>(null);
-  const copiedDigestTimerRef = useRef<number | null>(null);
-  useEffect(() => {
-    return () => {
-      if (copiedDigestTimerRef.current !== null) {
-        window.clearTimeout(copiedDigestTimerRef.current);
-      }
-    };
-  }, []);
 
   const [content, setContent] = useState<string>('');
   const [originalContent, setOriginalContent] = useState<string>('');
@@ -55,8 +46,6 @@ export function useEditorViewState() {
 
   return {
     stackMisconfigScanning, setStackMisconfigScanning,
-    copiedDigest, setCopiedDigest,
-    copiedDigestTimerRef,
     content, setContent,
     originalContent, setOriginalContent,
     composeEtag, setComposeEtag,

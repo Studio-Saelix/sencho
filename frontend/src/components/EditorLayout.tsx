@@ -87,8 +87,6 @@ export default function EditorLayout() {
   const editorState = useEditorViewState();
   const {
     stackMisconfigScanning,
-    copiedDigest, setCopiedDigest,
-    copiedDigestTimerRef,
     content, setContent,
     envContent, setEnvContent,
     envExists,
@@ -465,14 +463,12 @@ export default function EditorLayout() {
       isEditing={isEditing}
       editingCompose={editingCompose}
       logsMode={logsMode}
-      copiedDigest={copiedDigest}
       loadingAction={loadingAction}
       stackMisconfigScanning={stackMisconfigScanning}
       can={can}
       isAdmin={isAdmin}
       trivy={trivy}
       activeNode={activeNode}
-      copiedDigestTimerRef={copiedDigestTimerRef}
       deployStack={stackActions.deployStack}
       restartStack={stackActions.restartStack}
       stopStack={stackActions.stopStack}
@@ -493,7 +489,6 @@ export default function EditorLayout() {
       setLogsMode={setLogsMode}
       setEditingCompose={setEditingCompose}
       setGitSourceOpen={setGitSourceOpen}
-      setCopiedDigest={setCopiedDigest}
       requestDeleteStack={stackActions.requestDeleteStack}
       isSelfStack={selectedFile ? stackSelfFlags[selectedFile] === true : false}
       recoveryResult={selectedFile ? lastActionResult[selectedFile] : undefined}

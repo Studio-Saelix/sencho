@@ -120,9 +120,6 @@ export interface StackIdentityHeaderProps {
     activeNode: Node | null;
     safeContainers: ContainerInfo[];
     isRunning: boolean;
-    copiedDigest: string | null;
-    setCopiedDigest: React.Dispatch<React.SetStateAction<string | null>>;
-    copiedDigestTimerRef: React.MutableRefObject<number | null>;
     can: ReturnType<typeof useAuth>['can'];
     isAdmin: boolean;
     trivy: { available: boolean };
@@ -141,16 +138,13 @@ export interface StackIdentityHeaderProps {
     stackMuteActions?: ReturnType<typeof useStackMuteActions>;
 }
 
-// Breadcrumb + serif title + state pill + image ref + action bar. The action
-// buttons grow to a 44px touch target below md without changing desktop.
+// Breadcrumb + serif title + state pill + action bar. The action buttons grow
+// to a 44px touch target below md without changing desktop.
 export function StackIdentityHeader({
     stackName,
     activeNode,
     safeContainers,
     isRunning,
-    copiedDigest,
-    setCopiedDigest,
-    copiedDigestTimerRef,
     can,
     isAdmin,
     trivy,
@@ -191,54 +185,6 @@ export function StackIdentityHeader({
                         );
                     })()}
                 </div>
-                {(() => {
-                    const first = safeContainers[0];
-                    if (!first?.Image) return null;
-                    const digest = first.ImageID ? first.ImageID.replace(/^sha256:/, '').slice(0, 12) : '';
-                    return (
-                        <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle">
-                            <span>image <span className="text-muted-foreground/60">·</span> <span className="text-foreground/90">{first.Image}</span></span>
-                            {digest && first.ImageID && (
-                                <>
-                                    <span className="text-muted-foreground/60">·</span>
-                                    <span>digest <span className="text-foreground/90">{digest}</span></span>
-                                    <TooltipProvider>
-                                      <Tooltip>
-                                        <TooltipTrigger asChild>
-                                          <button
-                                            type="button"
-                                            aria-label={copiedDigest === first.ImageID ? 'Copied' : 'Copy digest'}
-                                            onClick={() => {
-                                                const id = first.ImageID as string;
-                                                void copyToClipboard(id).then(() => {
-                                                    setCopiedDigest(id);
-                                                    if (copiedDigestTimerRef.current !== null) {
-                                                        window.clearTimeout(copiedDigestTimerRef.current);
-                                                    }
-                                                    copiedDigestTimerRef.current = window.setTimeout(() => {
-                                                        setCopiedDigest(prev => (prev === id ? null : prev));
-                                                        copiedDigestTimerRef.current = null;
-                                                    }, 1500);
-                                                }).catch(() => { /* clipboard unavailable */ });
-                                            }}
-                                            className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors"
-                                          >
-                                            {copiedDigest === first.ImageID ? (
-                                                <Check className="h-3 w-3" strokeWidth={2} />
-                                            ) : (
-                                                <Copy className="h-3 w-3" strokeWidth={1.5} />
-                                            )}
-                                          </button>
-                                        </TooltipTrigger>
-                                        <TooltipContent>Copy digest</TooltipContent>
-                                      </Tooltip>
-                                    </TooltipProvider>
-                                </>
-                            )}
-                            <ImageSourceMenu imageRef={first.Image} imageId={first.ImageID} />
-                        </div>
-                    );
-                })()}
             </div>
             {/* Action Bar: deploy and delete affordances render against their own
                 backend permissions so a delete-only or deploy-only persona sees
