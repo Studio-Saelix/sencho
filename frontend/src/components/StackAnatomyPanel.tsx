@@ -70,7 +70,7 @@ interface EffectiveAnatomyFacts {
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="grid grid-cols-[72px_1fr] gap-3 border-t border-muted py-2 first:border-t-0">
-      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle pt-0.5">{label}</span>
+      <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-stat-subtitle pt-0.5">{label}</span>
       <div className="min-w-0 text-xs text-foreground/90">{children}</div>
     </div>
   );
@@ -390,21 +390,21 @@ export default function StackAnatomyPanel({
       <div className="flex items-center justify-between border-b border-muted px-3 py-1.5 gap-2">
         <ScrollableTabRow surface="card" wrapperClassName="min-w-0 flex-1">
           <TabsList className="h-7 w-max gap-0.5 bg-transparent border-none p-0">
-            <TabsTrigger value="anatomy" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
-            <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Activity</TabsTrigger>
-            <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Dossier</TabsTrigger>
-            <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Drift</TabsTrigger>
+            <TabsTrigger value="anatomy" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
+            <TabsTrigger value="activity" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
+            <TabsTrigger value="dossier" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
+            <TabsTrigger value="drift" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
             {envInventoryEnabled && (
-              <TabsTrigger value="environment" data-testid="environment-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Environment</TabsTrigger>
+              <TabsTrigger value="environment" data-testid="environment-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Environment</TabsTrigger>
             )}
             {composeLabelsEnabled && (
-              <TabsTrigger value="compose-labels" data-testid="compose-labels-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Compose Labels</TabsTrigger>
+              <TabsTrigger value="compose-labels" data-testid="compose-labels-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Compose Labels</TabsTrigger>
             )}
             {networkingEnabled && (
-              <TabsTrigger value="networking" data-testid="networking-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Networking</TabsTrigger>
+              <TabsTrigger value="networking" data-testid="networking-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Networking</TabsTrigger>
             )}
             {doctorEnabled && (
-              <TabsTrigger value="doctor" data-testid="doctor-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">
+              <TabsTrigger value="doctor" data-testid="doctor-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">
                 <span className="inline-flex items-center gap-1">
                   Doctor
                   {(preflightSeverity === 'blocker' || preflightSeverity === 'high') && !doctorDismissed && (
@@ -417,7 +417,7 @@ export default function StackAnatomyPanel({
               </TabsTrigger>
             )}
             {storageEnabled && (
-              <TabsTrigger value="storage" data-testid="storage-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Storage</TabsTrigger>
+              <TabsTrigger value="storage" data-testid="storage-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Storage</TabsTrigger>
             )}
           </TabsList>
         </ScrollableTabRow>
@@ -427,7 +427,7 @@ export default function StackAnatomyPanel({
               type="button"
               data-testid="anatomy-files-btn"
               onClick={onOpenFiles}
-              className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors"
+              className="inline-flex items-center gap-1 font-mono text-xs uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors"
             >
               <FolderOpen className="h-3 w-3" strokeWidth={1.5} />
               files
@@ -437,7 +437,7 @@ export default function StackAnatomyPanel({
             <button
               type="button"
               onClick={onEditCompose}
-              className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors"
+              className="inline-flex items-center gap-1 font-mono text-xs uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors"
             >
               <Pencil className="h-3 w-3" strokeWidth={1.5} />
               edit

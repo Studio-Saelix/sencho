@@ -98,7 +98,7 @@ export function ScrollableTabRow({ children, surface = 'card', className, wrappe
           onClick={() => scrollBy(1)}
           className={cn('absolute inset-y-0 right-0 flex w-7 items-center justify-end bg-gradient-to-l text-stat-subtitle transition-colors hover:text-brand', fade.right)}
         >
-          <ChevronRight className="h-4 w-4" strokeWidth={1.5} />
+          <ChevronRight className="h-4 w-4 animate-pulse" strokeWidth={1.5} />
         </button>
       )}
     </div>

@@ -441,6 +441,9 @@
 [data-effects="reduced"] {
   --card-bevel: none;
 }
+[data-effects="reduced"] .animate-pulse {
+  animation: none;
+}
 
 /* Heading utility: every operational title routes through this. Base sets only
    family + style (Signature parity); the Calm-only descendant rule lifts weight
