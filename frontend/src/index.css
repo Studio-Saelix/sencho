@@ -441,6 +441,9 @@
 [data-effects="reduced"] {
   --card-bevel: none;
 }
+[data-effects="reduced"] .animate-pulse {
+  animation: none;
+}
 
 /* Heading utility: every operational title routes through this. Base sets only
    family + style (Signature parity); the Calm-only descendant rule lifts weight
@@ -717,8 +720,8 @@ body {
   100% { transform: translateY(200%); }
 }
 @keyframes masthead-rail-glow {
-  0%, 100% { opacity: 0.55; box-shadow: inset 0 0 0 0 transparent; }
-  50%      { opacity: 1; box-shadow: inset 0 0 10px 0 oklch(1 0 0 / 0.12); }
+  0%, 100% { opacity: 0.15; }
+  50%      { opacity: 0.55; }
 }
 
 /* ─────────────────────────────────────────────────────────────
@@ -743,10 +746,10 @@ body {
   animation: shimmer 4.5s ease-in-out infinite alternate;
 }
 .masthead-rail-shimmer {
-  animation: shimmer 11s ease-in-out infinite alternate;
+  animation: shimmer 5s ease-in-out infinite alternate;
 }
 .masthead-rail-glow {
-  animation: masthead-rail-glow 5.5s ease-in-out infinite alternate;
+  animation: masthead-rail-glow 4s ease-in-out infinite alternate;
 }
 
 /* Stagger delay helpers */

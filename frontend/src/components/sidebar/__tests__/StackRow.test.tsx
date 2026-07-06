@@ -43,17 +43,15 @@ describe('StackRow', () => {
   });
 
   it('wraps the partial pill in a hover tooltip', () => {
-    // jsdom does not mount the cursor-follow label, so assert the PT trigger is
-    // wrapped in the RowTooltip cursor-container; the visible "3/5 running"
-    // tooltip text is verified in the Playwright drive.
-    const { container } = render(<StackRow {...base({ status: 'partial', running: 3, total: 5 })} />);
-    expect(screen.getByText('PT').closest('[data-slot="cursor-container"]')).not.toBeNull();
-    expect(container.querySelector('[data-slot="cursor-container"]')).not.toBeNull();
+    render(<StackRow {...base({ status: 'partial', running: 3, total: 5 })} />);
+    const trigger = screen.getByText('PT');
+    // Radix TooltipTrigger adds data-state to the wrapped element.
+    expect(trigger.getAttribute('data-state')).toBe('closed');
   });
 
   it('does not wrap a non-partial pill in a tooltip', () => {
     render(<StackRow {...base({ status: 'running' })} />);
-    expect(screen.getByText('UP').closest('[data-slot="cursor-container"]')).toBeNull();
+    expect(screen.getByText('UP').getAttribute('data-state')).toBeNull();
   });
 
   it('renders cyan rail only when active', () => {
@@ -103,12 +101,12 @@ describe('StackRow', () => {
   });
 
   // ── Image-update check status indicator ────────────────────────────────
-  // status='running' renders the pill as plain text (no tooltip), so the only
-  // cursor-container in these rows is the trailing update/check indicator.
 
   it('shows a muted check-failed indicator when the last check failed and there is no update', () => {
     const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: false, checkStatus: 'failed', lastError: 'Registry unreachable' })} />);
-    expect(container.querySelector('[data-slot="cursor-container"]')).not.toBeNull();
+    // The trailing slot renders a tooltip-wrapped AlertCircle icon (an SVG).
+    const trailingSlot = container.querySelector('[data-state="closed"]');
+    expect(trailingSlot).not.toBeNull();
     // It is not the update dot.
     expect(container.querySelector('.bg-update')).toBeNull();
   });
@@ -120,7 +118,7 @@ describe('StackRow', () => {
 
   it('shows no trailing indicator for a clean ok check with no update', () => {
     const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: false, checkStatus: 'ok' })} />);
-    expect(container.querySelector('[data-slot="cursor-container"]')).toBeNull();
+    expect(container.querySelector('.lucide-alert-circle')).toBeNull();
     expect(container.querySelector('.bg-update')).toBeNull();
   });
 

@@ -18,6 +18,8 @@ import {
     CloudDownload,
     Layers,
     List,
+    Maximize2,
+    Minimize2,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/button';
@@ -35,6 +37,7 @@ import { Sparkline } from '../ui/sparkline';
 import { ImageSourceMenu } from '../ImageSourceMenu';
 import { cn } from '@/lib/utils';
 import { copyToClipboard } from '@/lib/clipboard';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { buildServiceUrl } from '@/lib/serviceUrl';
 import ErrorBoundary from '../ErrorBoundary';
 import TerminalComponent from '../Terminal';
@@ -199,30 +202,37 @@ export function StackIdentityHeader({
                                 <>
                                     <span className="text-muted-foreground/60">·</span>
                                     <span>digest <span className="text-foreground/90">{digest}</span></span>
-                                    <button
-                                        type="button"
-                                        aria-label={copiedDigest === first.ImageID ? 'Copied' : 'Copy digest'}
-                                        onClick={() => {
-                                            const id = first.ImageID as string;
-                                            void copyToClipboard(id).then(() => {
-                                                setCopiedDigest(id);
-                                                if (copiedDigestTimerRef.current !== null) {
-                                                    window.clearTimeout(copiedDigestTimerRef.current);
-                                                }
-                                                copiedDigestTimerRef.current = window.setTimeout(() => {
-                                                    setCopiedDigest(prev => (prev === id ? null : prev));
-                                                    copiedDigestTimerRef.current = null;
-                                                }, 1500);
-                                            }).catch(() => { /* clipboard unavailable */ });
-                                        }}
-                                        className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors"
-                                    >
-                                        {copiedDigest === first.ImageID ? (
-                                            <Check className="h-3 w-3" strokeWidth={2} />
-                                        ) : (
-                                            <Copy className="h-3 w-3" strokeWidth={1.5} />
-                                        )}
-                                    </button>
+                                    <TooltipProvider>
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <button
+                                            type="button"
+                                            aria-label={copiedDigest === first.ImageID ? 'Copied' : 'Copy digest'}
+                                            onClick={() => {
+                                                const id = first.ImageID as string;
+                                                void copyToClipboard(id).then(() => {
+                                                    setCopiedDigest(id);
+                                                    if (copiedDigestTimerRef.current !== null) {
+                                                        window.clearTimeout(copiedDigestTimerRef.current);
+                                                    }
+                                                    copiedDigestTimerRef.current = window.setTimeout(() => {
+                                                        setCopiedDigest(prev => (prev === id ? null : prev));
+                                                        copiedDigestTimerRef.current = null;
+                                                    }, 1500);
+                                                }).catch(() => { /* clipboard unavailable */ });
+                                            }}
+                                            className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors"
+                                          >
+                                            {copiedDigest === first.ImageID ? (
+                                                <Check className="h-3 w-3" strokeWidth={2} />
+                                            ) : (
+                                                <Copy className="h-3 w-3" strokeWidth={1.5} />
+                                            )}
+                                          </button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>Copy digest</TooltipContent>
+                                      </Tooltip>
+                                    </TooltipProvider>
                                 </>
                             )}
                             <ImageSourceMenu imageRef={first.Image} imageId={first.ImageID} />
@@ -329,6 +339,8 @@ export interface ContainersHealthProps {
     openLogViewer: (containerId: string, containerName: string) => void;
     openBashModal: (containerId: string, containerName: string) => void;
     serviceAction: (action: 'start' | 'stop' | 'restart', serviceName: string) => Promise<void>;
+    containersExpanded?: boolean;
+    onToggleContainersExpand?: () => void;
 }
 
 // Per-container health strip: status badge, uptime, ports, and CPU/Mem/Net
@@ -342,12 +354,14 @@ export function ContainersHealth({
     openLogViewer,
     openBashModal,
     serviceAction,
+    containersExpanded,
+    onToggleContainersExpand,
 }: ContainersHealthProps) {
     const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
     const copiedUrlTimerRef = useRef<number | null>(null);
     // Compact mode hides sparkline grids across all containers for a denser
     // list. Detailed mode (default) shows CPU / Mem / Net per container.
-    const [density, setDensity] = useState<'compact' | 'detailed'>('detailed');
+    const [density, setDensity] = useState<'compact' | 'detailed'>('compact');
     useEffect(() => () => {
         if (copiedUrlTimerRef.current !== null) window.clearTimeout(copiedUrlTimerRef.current);
     }, []);
@@ -366,12 +380,16 @@ export function ContainersHealth({
         <div>
             {containerStatsError && safeContainers.length > 0 && (
                 <div className="mb-3 flex items-center justify-end">
-                    <span
-                        className="text-[10px] uppercase tracking-wider font-mono text-warning-foreground bg-warning/10 border border-warning/30 rounded-md px-2 py-0.5"
-                        title={containerStatsError}
-                    >
-                        Stats unavailable
-                    </span>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="text-[10px] uppercase tracking-wider font-mono text-warning-foreground bg-warning/10 border border-warning/30 rounded-md px-2 py-0.5">
+                            Stats unavailable
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>{containerStatsError}</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                 </div>
             )}
             {safeContainers.length === 0 ? (
@@ -393,25 +411,61 @@ export function ContainersHealth({
                                     {paused > 0 && <span className="text-warning/80">{paused} paused</span>}
                                     {unhealthy > 0 && <span className="text-destructive/80">{unhealthy} unhealthy</span>}
                                 </div>
-                                <div className="inline-flex rounded-md border border-muted bg-muted/30 p-0.5">
-                                    <button
-                                        type="button"
-                                        onClick={() => setDensity('compact')}
-                                        className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'compact' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
-                                        aria-pressed={density === 'compact'}
-                                        aria-label="Compact view"
-                                    >
-                                        <List className="h-3 w-3" strokeWidth={1.5} />
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => setDensity('detailed')}
-                                        className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'detailed' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
-                                        aria-pressed={density === 'detailed'}
-                                        aria-label="Detailed view"
-                                    >
-                                        <Layers className="h-3 w-3" strokeWidth={1.5} />
-                                    </button>
+                                <div className="flex items-center gap-1">
+                                    <div className="inline-flex rounded-md border border-muted bg-muted/30 p-0.5">
+                                        <TooltipProvider>
+                                          <Tooltip>
+                                            <TooltipTrigger asChild>
+                                              <button
+                                                type="button"
+                                                onClick={() => setDensity('compact')}
+                                                className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'compact' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
+                                                aria-pressed={density === 'compact'}
+                                                aria-label="Compact view"
+                                              >
+                                                <List className="h-3 w-3" strokeWidth={1.5} />
+                                              </button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>Compact view</TooltipContent>
+                                          </Tooltip>
+                                        </TooltipProvider>
+                                        <TooltipProvider>
+                                          <Tooltip>
+                                            <TooltipTrigger asChild>
+                                              <button
+                                                type="button"
+                                                onClick={() => setDensity('detailed')}
+                                                className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'detailed' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
+                                                aria-pressed={density === 'detailed'}
+                                                aria-label="Detailed view"
+                                              >
+                                                <Layers className="h-3 w-3" strokeWidth={1.5} />
+                                              </button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>Detailed view</TooltipContent>
+                                          </Tooltip>
+                                        </TooltipProvider>
+                                        {onToggleContainersExpand && (
+                                            <TooltipProvider>
+                                              <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                  <button
+                                                    type="button"
+                                                    onClick={onToggleContainersExpand}
+                                                    className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${containersExpanded ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
+                                                    aria-pressed={containersExpanded}
+                                                    aria-label={containersExpanded ? 'Collapse containers' : 'Expand containers'}
+                                                  >
+                                                    {containersExpanded
+                                                      ? <Minimize2 className="h-3 w-3" strokeWidth={1.5} />
+                                                      : <Maximize2 className="h-3 w-3" strokeWidth={1.5} />}
+                                                  </button>
+                                                </TooltipTrigger>
+                                                <TooltipContent>{containersExpanded ? 'Collapse containers' : 'Expand containers'}</TooltipContent>
+                                              </Tooltip>
+                                            </TooltipProvider>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
                         );
@@ -483,19 +537,25 @@ export function ContainersHealth({
                                                                 >
                                                                     {portLabel} <ArrowUpRight className="h-3 w-3" strokeWidth={1.5} />
                                                                 </a>
-                                                                <button
-                                                                    type="button"
-                                                                    aria-label={copiedUrlId === container?.Id ? 'Copied' : 'Copy service URL'}
-                                                                    title="Copy service URL"
-                                                                    onClick={() => copyServiceUrl(container?.Id, serviceUrl)}
-                                                                    className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors"
-                                                                >
+                                                                <TooltipProvider>
+                                                                  <Tooltip>
+                                                                    <TooltipTrigger asChild>
+                                                                      <button
+                                                                        type="button"
+                                                                        aria-label={copiedUrlId === container?.Id ? 'Copied' : 'Copy service URL'}
+                                                                        onClick={() => copyServiceUrl(container?.Id, serviceUrl)}
+                                                                        className="inline-flex h-4 w-4 items-center justify-center rounded text-stat-subtitle hover:text-foreground hover:bg-muted/60 transition-colors"
+                                                                      >
                                                                     {copiedUrlId === container?.Id ? (
                                                                         <Check className="h-3 w-3" strokeWidth={2} />
                                                                     ) : (
                                                                         <Copy className="h-3 w-3" strokeWidth={1.5} />
                                                                     )}
                                                                 </button>
+                                                                    </TooltipTrigger>
+                                                                    <TooltipContent>Copy service URL</TooltipContent>
+                                                                  </Tooltip>
+                                                                </TooltipProvider>
                                                             </>
                                                         ) : (
                                                             <span>{portLabel}</span>
@@ -511,27 +571,41 @@ export function ContainersHealth({
                                             imageId={container.ImageID}
                                             className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
                                         />
-                                        <Button
-                                            size="icon"
-                                            variant="ghost"
-                                            className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
-                                            onClick={() => openLogViewer(container?.Id, containerName)}
-                                            disabled={!isActive}
-                                            aria-label="View logs"
-                                        >
-                                            <ScrollText className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                        </Button>
-                                        {isAdmin && (
-                                            <Button
+                                        <TooltipProvider>
+                                          <Tooltip>
+                                            <TooltipTrigger asChild>
+                                              <Button
                                                 size="icon"
                                                 variant="ghost"
                                                 className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
-                                                onClick={() => openBashModal(container?.Id, containerName)}
+                                                onClick={() => openLogViewer(container?.Id, containerName)}
                                                 disabled={!isActive}
-                                                aria-label="Open bash shell"
-                                            >
-                                                <Terminal className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                            </Button>
+                                                aria-label="View logs"
+                                              >
+                                                <ScrollText className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                              </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>View logs</TooltipContent>
+                                          </Tooltip>
+                                        </TooltipProvider>
+                                        {isAdmin && (
+                                          <TooltipProvider>
+                                            <Tooltip>
+                                              <TooltipTrigger asChild>
+                                                <Button
+                                                  size="icon"
+                                                  variant="ghost"
+                                                  className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
+                                                  onClick={() => openBashModal(container?.Id, containerName)}
+                                                  disabled={!isActive}
+                                                  aria-label="Open bash shell"
+                                                >
+                                                  <Terminal className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                                </Button>
+                                              </TooltipTrigger>
+                                              <TooltipContent>Open bash shell</TooltipContent>
+                                            </Tooltip>
+                                          </TooltipProvider>
                                         )}
                                         {container.Service && (
                                             <DropdownMenu>
@@ -627,7 +701,7 @@ export function StackLogsSection({ stackName, logsMode, setLogsMode, logsExpande
                         type="button"
                         onClick={() => setLogsMode('structured')}
                         className={cn(
-                            'rounded px-2 py-0.5 font-mono text-xs uppercase tracking-wide transition-colors',
+                            'rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors',
                             logsMode === 'structured' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground',
                         )}
                     >
@@ -637,7 +711,7 @@ export function StackLogsSection({ stackName, logsMode, setLogsMode, logsExpande
                         type="button"
                         onClick={() => setLogsMode('raw')}
                         className={cn(
-                            'rounded px-2 py-0.5 font-mono text-xs uppercase tracking-wide transition-colors',
+                            'rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors',
                             logsMode === 'raw' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground',
                         )}
                     >

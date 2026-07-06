@@ -81,7 +81,7 @@ describe('settings registry', () => {
     it('applies the renamed section labels', () => {
         const byId = new Map(SETTINGS_ITEMS.map(i => [i.id, i]));
         expect(byId.get('notifications')?.label).toBe('Channels');
-        expect(byId.get('notification-routing')?.label).toBe('Notification Routing');
+        expect(byId.get('notification-routing')?.label).toBe('Routing');
         expect(byId.get('notification-suppression')?.label).toBe('Mute Rules');
     });
 

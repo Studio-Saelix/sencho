@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from './ui/button';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { Download, RefreshCw, Maximize2, Minimize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useLogChipColorMode } from '@/hooks/use-log-chip-color-mode';
@@ -285,23 +286,36 @@ export default function StructuredLogViewer({ stackName, expanded, onToggleExpan
           ))}
           <div className="mx-1 h-4 w-px bg-muted" />
           {onToggleExpand && (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              className="h-7 w-7 p-0"
-              onClick={onToggleExpand}
-              aria-label={expanded ? 'Collapse logs' : 'Expand logs'}
-              title={expanded ? 'Collapse logs' : 'Expand logs'}
-            >
-              {expanded
-                ? <Minimize2 className="h-3.5 w-3.5" strokeWidth={1.5} />
-                : <Maximize2 className="h-3.5 w-3.5" strokeWidth={1.5} />}
-            </Button>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 w-7 p-0"
+                    onClick={onToggleExpand}
+                    aria-label={expanded ? 'Collapse logs' : 'Expand logs'}
+                  >
+                    {expanded
+                      ? <Minimize2 className="h-3.5 w-3.5" strokeWidth={1.5} />
+                      : <Maximize2 className="h-3.5 w-3.5" strokeWidth={1.5} />}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{expanded ? 'Collapse logs' : 'Expand logs'}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           )}
-          <Button type="button" size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={downloadLogs} aria-label="Download logs">
-            <Download className="h-3.5 w-3.5" strokeWidth={1.5} />
-          </Button>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button type="button" size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={downloadLogs} aria-label="Download logs">
+                  <Download className="h-3.5 w-3.5" strokeWidth={1.5} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Download logs</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
       </div>
       <div

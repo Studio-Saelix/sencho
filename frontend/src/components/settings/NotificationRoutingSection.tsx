@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { springs } from '@/lib/motion';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
 import { useNodes } from '@/context/NodeContext';
 import { CapabilityGate } from '@/components/CapabilityGate';
@@ -297,7 +298,7 @@ export function NotificationRoutingSection() {
     );
 
     return (
-        <CapabilityGate capability="notification-routing" featureName="Notification Routing">
+        <CapabilityGate capability="notification-routing" featureName="Routing">
             <div className="space-y-6">
                 <div className="flex justify-end">
                     <SettingsPrimaryButton size="sm" onClick={() => { resetForm(); setShowForm(true); }}>
@@ -432,7 +433,7 @@ export function NotificationRoutingSection() {
                                 <Label>Channel</Label>
                                 <Tabs value={formChannelType} onValueChange={(v) => setFormChannelType(v as 'discord' | 'slack' | 'webhook')}>
                                     <TabsList className="w-full grid grid-cols-3">
-                                        <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+                                        <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                                             <TabsHighlightItem value="discord">
                                                 <TabsTrigger value="discord">Discord</TabsTrigger>
                                             </TabsHighlightItem>
@@ -528,31 +529,50 @@ export function NotificationRoutingSection() {
                                     onChange={() => handleToggleEnabled(route)}
                                     className="scale-75"
                                 />
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => handleTest(route.id)}
-                                    disabled={testingId === route.id}
-                                    title="Send test notification"
-                                >
-                                    {testingId === route.id ? (
-                                        <RefreshCw className="w-4 h-4 animate-spin" />
-                                    ) : (
-                                        <Zap className="w-4 h-4" strokeWidth={1.5} />
-                                    )}
-                                </Button>
-                                <Button variant="ghost" size="sm" onClick={() => startEdit(route)} title="Edit">
-                                    <Pencil className="w-4 h-4" strokeWidth={1.5} />
-                                </Button>
-                                <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
-                                    title="Delete"
-                                    onClick={() => setDeleteRouteId(route.id)}
-                                >
-                                    <Trash2 className="w-4 h-4" strokeWidth={1.5} />
-                                </Button>
+                                <TooltipProvider>
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                onClick={() => handleTest(route.id)}
+                                                disabled={testingId === route.id}
+                                            >
+                                                {testingId === route.id ? (
+                                                    <RefreshCw className="w-4 h-4 animate-spin" />
+                                                ) : (
+                                                    <Zap className="w-4 h-4" strokeWidth={1.5} />
+                                                )}
+                                            </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>Send test notification</TooltipContent>
+                                    </Tooltip>
+                                </TooltipProvider>
+                                <TooltipProvider>
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <Button variant="ghost" size="sm" onClick={() => startEdit(route)}>
+                                                <Pencil className="w-4 h-4" strokeWidth={1.5} />
+                                            </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>Edit</TooltipContent>
+                                    </Tooltip>
+                                </TooltipProvider>
+                                <TooltipProvider>
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+                                                onClick={() => setDeleteRouteId(route.id)}
+                                            >
+                                                <Trash2 className="w-4 h-4" strokeWidth={1.5} />
+                                            </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>Delete</TooltipContent>
+                                    </Tooltip>
+                                </TooltipProvider>
                             </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">

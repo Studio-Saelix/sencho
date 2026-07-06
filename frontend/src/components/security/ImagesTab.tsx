@@ -7,6 +7,7 @@ import { Combobox } from '@/components/ui/combobox';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { SeverityBadge } from '@/components/ui/SeverityBadge';
 import { getSeverityKey, type SeverityKey, type ImageFilterValue } from '@/lib/severityStyles';
 import { formatTimeAgo } from '@/lib/relativeTime';
@@ -255,20 +256,26 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
                   {canScan && (
                     <TableCell className="text-right">
                       <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
-                            disabled={scanningRef === s.image_ref}
-                            title="Scan image"
-                            aria-label={`Scan ${s.image_ref}`}
-                          >
-                            {scanningRef === s.image_ref
-                              ? <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
-                              : <ShieldCheck className="w-3.5 h-3.5" strokeWidth={1.5} />}
-                          </Button>
-                        </DropdownMenuTrigger>
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <DropdownMenuTrigger asChild>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
+                                  disabled={scanningRef === s.image_ref}
+                                  aria-label={`Scan ${s.image_ref}`}
+                                >
+                                  {scanningRef === s.image_ref
+                                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
+                                    : <ShieldCheck className="w-3.5 h-3.5" strokeWidth={1.5} />}
+                                </Button>
+                              </DropdownMenuTrigger>
+                            </TooltipTrigger>
+                            <TooltipContent>Scan image</TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
                         <DropdownMenuContent align="end">
                           <DropdownMenuItem onClick={() => onScan(s.image_ref, ['vuln'])}>
                             Scan (vulnerabilities)

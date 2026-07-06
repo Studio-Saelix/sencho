@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { GitHubIcon } from '@/components/ui/GitHubIcon';
 import {
     Settings,
     LogOut,
@@ -6,7 +7,6 @@ import {
     User,
     Loader2,
     BookOpen,
-    MessageSquare,
     CreditCard,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -150,9 +150,9 @@ export function UserProfileDropdown({ onOpenSettings }: UserProfileDropdownProps
                         onClick={closeMenu}
                     />
                     <MenuRow
-                        icon={MessageSquare}
-                        label="Feedback"
-                        href="https://github.com/studio-saelix/sencho/issues"
+                        icon={GitHubIcon}
+                        label="Open New Issue"
+                        href="https://github.com/Studio-Saelix/sencho/issues/new/choose"
                         external
                         onClick={closeMenu}
                     />
@@ -175,7 +175,7 @@ export function UserProfileDropdown({ onOpenSettings }: UserProfileDropdownProps
 }
 
 interface MenuRowProps {
-    icon: LucideIcon;
+    icon: React.ComponentType<{ className?: string; strokeWidth?: number }>;
     label: string;
     onClick?: () => void;
     href?: string;

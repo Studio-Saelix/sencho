@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Combobox } from '@/components/ui/combobox';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { MultiSelectCombobox } from '@/components/ui/multi-select-combobox';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { SegmentedControl, type SegmentedControlOption } from '@/components/ui/segmented-control';
 import { LabelDot } from '../LabelPill';
 import type { LabelColor } from '../label-types';
@@ -110,16 +111,22 @@ export function OverviewToolbar({
                             />
                         </div>
                     ) : (
-                        <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-9 w-9 p-0 shrink-0"
-                            onClick={() => setSearchExpanded(true)}
-                            title="Search nodes or stacks"
-                            aria-label="Search nodes or stacks"
-                        >
-                            <Search className="w-4 h-4" />
-                        </Button>
+                        <TooltipProvider>
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
+                                        className="h-9 w-9 p-0 shrink-0"
+                                        onClick={() => setSearchExpanded(true)}
+                                        aria-label="Search nodes or stacks"
+                                    >
+                                        <Search className="w-4 h-4" />
+                                    </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>Search nodes or stacks</TooltipContent>
+                            </Tooltip>
+                        </TooltipProvider>
                     )}
                     <div className="w-40">
                         <Combobox
@@ -130,15 +137,21 @@ export function OverviewToolbar({
                             className="[&>button]:!bg-background"
                         />
                     </div>
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-9 w-9 p-0 shrink-0"
-                        onClick={() => onPrefsChange({ sortDir: prefs.sortDir === 'asc' ? 'desc' : 'asc' })}
-                        title={prefs.sortDir === 'asc' ? 'Switch to descending' : 'Switch to ascending'}
-                    >
-                        <ArrowUpDown className={`w-4 h-4 ${prefs.sortDir === 'desc' ? 'rotate-180' : ''} transition-transform`} />
-                    </Button>
+                    <TooltipProvider>
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-9 w-9 p-0 shrink-0"
+                                    onClick={() => onPrefsChange({ sortDir: prefs.sortDir === 'asc' ? 'desc' : 'asc' })}
+                                >
+                                    <ArrowUpDown className={`w-4 h-4 ${prefs.sortDir === 'desc' ? 'rotate-180' : ''} transition-transform`} />
+                                </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>{prefs.sortDir === 'asc' ? 'Switch to descending' : 'Switch to ascending'}</TooltipContent>
+                        </Tooltip>
+                    </TooltipProvider>
                     <Popover>
                         <PopoverTrigger asChild>
                             <Button
@@ -256,31 +269,43 @@ export function OverviewToolbar({
             />
 
             {onCheckUpdates && (
-                <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-9 gap-2 shrink-0"
-                    onClick={onCheckUpdates}
-                    disabled={checkingUpdates}
-                    title="Check for node updates"
-                    aria-label="Check for node updates"
-                >
-                    <RefreshCcwDot className={`w-4 h-4 ${checkingUpdates ? 'animate-spin' : ''}`} />
-                    Node Update
-                </Button>
+                <TooltipProvider>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-9 gap-2 shrink-0"
+                                onClick={onCheckUpdates}
+                                disabled={checkingUpdates}
+                                aria-label="Check for node updates"
+                            >
+                                <RefreshCcwDot className={`w-4 h-4 ${checkingUpdates ? 'animate-spin' : ''}`} />
+                                Node Update
+                            </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Check for node updates</TooltipContent>
+                    </Tooltip>
+                </TooltipProvider>
             )}
 
             {onAddNode && (
-                <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-9 w-9 p-0 shrink-0"
-                    onClick={onAddNode}
-                    title="Manage nodes"
-                    aria-label="Manage nodes"
-                >
-                    <ChartNetwork className="w-4 h-4" strokeWidth={1.5} />
-                </Button>
+                <TooltipProvider>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-9 w-9 p-0 shrink-0"
+                                onClick={onAddNode}
+                                aria-label="Manage nodes"
+                            >
+                                <ChartNetwork className="w-4 h-4" strokeWidth={1.5} />
+                            </Button>
+                        </TooltipTrigger>
+                        <TooltipContent>Manage nodes</TooltipContent>
+                    </Tooltip>
+                </TooltipProvider>
             )}
         </div>
     );

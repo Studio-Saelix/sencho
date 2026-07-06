@@ -11,17 +11,17 @@ interface ConfigurationStatusProps {
 
 function StatusBadge({ value }: { value: string }) {
   const lower = value.toLowerCase();
-  if (lower === 'on' || lower === 'enabled') {
+  if (lower === 'on' || lower === 'enabled' || lower === 'installed') {
     return (
       <span className="inline-flex items-center rounded-sm border border-success/30 bg-success/10 px-1.5 py-0.5 text-[10px] font-mono tracking-wide uppercase text-success">
-        ON
+        {lower === 'installed' ? 'INSTALLED' : 'ON'}
       </span>
     );
   }
-  if (lower === 'off' || lower === 'disabled') {
+  if (lower === 'off' || lower === 'disabled' || lower === 'not installed') {
     return (
       <span className="inline-flex items-center rounded-sm border border-card-border bg-card px-1.5 py-0.5 text-[10px] font-mono tracking-wide uppercase text-stat-subtitle">
-        OFF
+        {lower === 'not installed' ? 'NOT INSTALLED' : 'OFF'}
       </span>
     );
   }
@@ -141,7 +141,7 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
       <CardContent className="pt-0">
         <div className="space-y-0">
           <SectionHeader icon={Bell} label="Notifications" />
-          <Row label="Notification agents" value={agentSummary} onClick={open('notifications')} />
+          <Row label="Channels" value={agentSummary} onClick={open('notifications')} />
           <Row
             label="Alert rules"
             value={formatCount(notifications.alertRules, 'rule')}
@@ -149,11 +149,16 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
           />
           {!notifications.routingRules.locked && (
             <Row
-              label="Notification routing"
+              label="Routing"
               value={formatCount(notifications.routingRules.enabledCount, 'route')}
               onClick={open('notification-routing')}
             />
           )}
+          <Row
+            label="Mute Rules"
+            value={formatCount(notifications.suppressionRules.enabledCount, 'rule')}
+            onClick={open('notification-suppression')}
+          />
 
           <SectionHeader icon={Zap} label="Automation" />
           <Row
@@ -188,9 +193,16 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
             onClick={open('account')}
           />
           <Row label="SSO" value={ssoLabel} onClick={open('sso')} />
+          <Row
+            label="Trivy installed"
+            value={security.trivyInstalled ? 'Installed' : 'Not installed'}
+            onClick={() => window.dispatchEvent(
+              new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, { detail: { view: 'security', tab: 'scanner' } }),
+            )}
+          />
           {!security.scanPolicies.locked && (
             <Row
-              label="Vulnerability scanning"
+              label="Scan policies"
               value={formatCount(security.scanPolicies.enabled, 'policy')}
               onClick={() => window.dispatchEvent(
                 new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, { detail: { view: 'security', tab: 'policies' } }),

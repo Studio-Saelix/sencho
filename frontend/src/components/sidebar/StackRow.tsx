@@ -1,10 +1,10 @@
 import type { ReactNode } from 'react';
 import { GitBranch, Loader2, AlertCircle } from 'lucide-react';
 import type { CheckStatus } from '@/types/imageUpdates';
-import { Cursor, CursorContainer, CursorFollow, CursorProvider } from '@/components/animate-ui/primitives/animate/cursor';
 import { Checkbox } from '@/components/ui/checkbox';
 import type { Label } from '@/components/label-types';
 import { cn } from '@/lib/utils';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { sidebarRowActive, sidebarRowBase, sidebarRowCheckboxSlot } from './sidebar-styles';
 import { statusText, statusColor } from './stack-status-utils';
 import type { StackRowStatus } from './stack-status-utils';
@@ -34,15 +34,14 @@ interface StackRowProps {
 
 function RowTooltip({ trigger, label }: { trigger: ReactNode; label: string }) {
   return (
-    <CursorProvider>
-      <CursorContainer className="inline-flex items-center shrink-0">{trigger}</CursorContainer>
-      <Cursor><div className="h-2 w-2 rounded-full bg-brand" /></Cursor>
-      <CursorFollow side="bottom" sideOffset={4} align="center" transition={{ stiffness: 400, damping: 40, bounce: 0 }}>
-        <div className="rounded-md border border-card-border bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] px-2.5 py-1.5 shadow-md">
-          <span className="font-mono text-xs tabular-nums text-stat-value">{label}</span>
-        </div>
-      </CursorFollow>
-    </CursorProvider>
+    <TooltipProvider delayDuration={300}>
+      <Tooltip>
+        <TooltipTrigger asChild>{trigger}</TooltipTrigger>
+        <TooltipContent side="bottom" sideOffset={4} align="center">
+          {label}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
@@ -118,24 +117,12 @@ export function StackRow(props: StackRowProps) {
           />
         ) : checkStatus === 'failed' ? (
           <RowTooltip
-            trigger={(
-              <AlertCircle
-                className="w-3 h-3 text-muted-foreground/70"
-                strokeWidth={1.5}
-                data-testid="stack-trailing-check-failed"
-              />
-            )}
+            trigger={<span data-testid="stack-trailing-check-failed"><AlertCircle className="w-3 h-3 text-muted-foreground/70" strokeWidth={1.5} /></span>}
             label={lastError ? `Update check failed: ${lastError}` : 'Update check failed'}
           />
         ) : hasGitPending ? (
           <RowTooltip
-            trigger={(
-              <GitBranch
-                className="w-3 h-3 text-brand"
-                strokeWidth={1.5}
-                data-testid="stack-trailing-git-pending"
-              />
-            )}
+            trigger={<span data-testid="stack-trailing-git-pending"><GitBranch className="w-3 h-3 text-brand" strokeWidth={1.5} /></span>}
             label="Git source update pending"
           />
         ) : null}

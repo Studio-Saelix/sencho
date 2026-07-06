@@ -9,8 +9,10 @@ import { SystemSheet, SheetSection } from '@/components/ui/system-sheet';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Clock, Plus, Pencil, Trash2, History, RefreshCw, Play, ChevronLeft, ChevronRight, Download, CalendarClock, Table2 } from 'lucide-react';
+import { Clock, Plus, Pencil, Trash2, History, RefreshCw, Play, ChevronLeft, ChevronRight, Download, CalendarClock, Table2, Copy } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
+import { copyToClipboard } from '@/lib/clipboard';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { excludeLikelySenchoContainers } from '@/lib/senchoContainerFilter';
 import { Combobox } from '@/components/ui/combobox';
@@ -537,26 +539,14 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
               <CardTitle>Scheduled Operations</CardTitle>
             </div>
             <div className="flex items-center gap-2">
-              <div className="inline-flex items-center rounded-md border border-card-border bg-card p-0.5 shadow-btn-glow">
-                <Button
-                  variant={view === 'timeline' ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-7 px-2.5 gap-1.5"
-                  onClick={() => setView('timeline')}
-                >
-                  <CalendarClock className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  <span className="text-xs">Timeline</span>
-                </Button>
-                <Button
-                  variant={view === 'table' ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-7 px-2.5 gap-1.5"
-                  onClick={() => setView('table')}
-                >
-                  <Table2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                  <span className="text-xs">All tasks</span>
-                </Button>
-              </div>
+              <SegmentedControl<'timeline' | 'table'>
+                value={view}
+                options={[
+                  { value: 'timeline', label: 'Timeline', icon: CalendarClock },
+                  { value: 'table', label: 'All tasks', icon: Table2 },
+                ]}
+                onChange={(v) => setView(v)}
+              />
               <Button variant="outline" size="sm" onClick={fetchTasks} disabled={loading}>
                 <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} strokeWidth={1.5} />
                 Refresh
@@ -797,18 +787,46 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">
-                        <Button variant="ghost" size="sm" onClick={() => handleRunNow(task)} title="Run now" disabled={runningTaskId === task.id}>
-                          <Play className={`w-4 h-4 ${runningTaskId === task.id ? 'animate-pulse' : ''}`} strokeWidth={1.5} />
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={() => openRuns(task)} title="Execution history">
-                          <History className="w-4 h-4" strokeWidth={1.5} />
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={() => openEdit(task)} title="Edit">
-                          <Pencil className="w-4 h-4" strokeWidth={1.5} />
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={() => setDeleteTarget(task)} title="Delete" className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground">
-                          <Trash2 className="w-4 h-4" strokeWidth={1.5} />
-                        </Button>
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button variant="ghost" size="sm" onClick={() => handleRunNow(task)} disabled={runningTaskId === task.id} aria-label="Run now">
+                                <Play className={`w-4 h-4 ${runningTaskId === task.id ? 'animate-pulse' : ''}`} strokeWidth={1.5} />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Run now</TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button variant="ghost" size="sm" onClick={() => openRuns(task)} aria-label="Execution history">
+                                <History className="w-4 h-4" strokeWidth={1.5} />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Execution history</TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button variant="ghost" size="sm" onClick={() => openEdit(task)} aria-label="Edit">
+                                <Pencil className="w-4 h-4" strokeWidth={1.5} />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Edit</TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button variant="ghost" size="sm" onClick={() => setDeleteTarget(task)} className="text-destructive/60 hover:bg-destructive hover:text-destructive-foreground" aria-label="Delete">
+                                <Trash2 className="w-4 h-4" strokeWidth={1.5} />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Delete</TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -1135,8 +1153,32 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                           )}
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">{duration}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground max-w-[200px] truncate" title={run.output || run.error || ''}>
-                          {run.error || run.output || '-'}
+                        <TableCell className="text-xs text-muted-foreground max-w-[200px]">
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate" title={run.output || run.error || ''}>
+                              {run.error || run.output || '-'}
+                            </span>
+                            {(run.output || run.error) ? (
+                              <TooltipProvider>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+                                      onClick={() => {
+                                        copyToClipboard(run.output || run.error || '');
+                                        toast.info('Copied to clipboard');
+                                      }}
+                                    >
+                                      <Copy className="w-3 h-3" strokeWidth={1.5} />
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Copy details</TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            ) : null}
+                          </div>
                         </TableCell>
                       </TableRow>
                     );

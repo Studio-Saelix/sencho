@@ -8,6 +8,7 @@ import { CapabilityGate } from '@/components/CapabilityGate';
 import { deriveMasthead, SCANNER_DETECTIONS_NOTE } from './security/securityMasthead';
 import { springs } from '@/lib/motion';
 import { apiFetch } from '@/lib/api';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
@@ -237,13 +238,16 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       <span>
         {overview.scannedImages} {overview.scannedImages === 1 ? 'image' : 'images'} scanned · scanner {overview.scanner.available ? 'ready' : 'not installed'}
       </span>
-      <span
-        className="inline-flex shrink-0 cursor-help text-stat-subtitle/70 hover:text-stat-subtitle"
-        title={SCANNER_DETECTIONS_NOTE}
-        aria-label={SCANNER_DETECTIONS_NOTE}
-      >
-        <Info className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
-      </span>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-flex shrink-0 cursor-help text-stat-subtitle/70 hover:text-stat-subtitle">
+              <Info className="h-3 w-3" strokeWidth={1.5} aria-hidden="true" />
+            </span>
+          </TooltipTrigger>
+          <TooltipContent className="max-w-[260px]">{SCANNER_DETECTIONS_NOTE}</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
     </span>
   ) : undefined;
 
@@ -400,7 +404,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
             is flattened so the tabs sit directly in this single band. */}
         <div className="flex items-center gap-3 mb-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
           <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
-            <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+            <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
             <TabsHighlightItem value="overview">
               <TabsTrigger value="overview"><LayoutDashboard className="w-4 h-4 mr-1.5" />Overview</TabsTrigger>
             </TabsHighlightItem>

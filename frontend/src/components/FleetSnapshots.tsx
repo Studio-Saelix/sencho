@@ -18,6 +18,7 @@ import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
 import { toast } from '@/components/ui/toast-store';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { FleetTabHeading, FleetEmptyState, FleetEmptyCard } from './fleet/FleetEmptyState';
 
 // --- Types ---
@@ -839,20 +840,26 @@ export default function FleetSnapshots() {
                                                     View
                                                 </Button>
                                                 {isAdmin && cloudEnabled && !cloudSnapshotIds.has(snapshot.id) && (
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        className="h-7 px-2 text-xs"
-                                                        title="Upload to cloud"
-                                                        disabled={uploadingId === snapshot.id}
-                                                        onClick={() => handleCloudUpload(snapshot.id)}
-                                                    >
-                                                        {uploadingId === snapshot.id ? (
-                                                            <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
-                                                        ) : (
-                                                            <CloudUpload className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                        )}
-                                                    </Button>
+                                                    <TooltipProvider>
+                                                        <Tooltip>
+                                                            <TooltipTrigger asChild>
+                                                                <Button
+                                                                    variant="ghost"
+                                                                    size="sm"
+                                                                    className="h-7 px-2 text-xs"
+                                                                    disabled={uploadingId === snapshot.id}
+                                                                    onClick={() => handleCloudUpload(snapshot.id)}
+                                                                >
+                                                                    {uploadingId === snapshot.id ? (
+                                                                        <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
+                                                                    ) : (
+                                                                        <CloudUpload className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                                    )}
+                                                                </Button>
+                                                            </TooltipTrigger>
+                                                            <TooltipContent>Upload to cloud</TooltipContent>
+                                                        </Tooltip>
+                                                    </TooltipProvider>
                                                 )}
                                                 {isAdmin && (
                                                     <Button

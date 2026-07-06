@@ -77,7 +77,7 @@ describe('ScheduledOperationsView', () => {
     tasksFixture = [makeTask({ id: 7, name: 'nightly-prune' })];
     render(<ScheduledOperationsView />);
 
-    await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
     expect(await screen.findByText('nightly-prune')).toBeInTheDocument();
   });
 
@@ -88,7 +88,7 @@ describe('ScheduledOperationsView', () => {
     ];
     render(<ScheduledOperationsView />);
 
-    await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
     await screen.findByText('recurring-task');
 
     // A single One-shot chip, scoped to the one-shot row.
@@ -107,7 +107,7 @@ describe('ScheduledOperationsView', () => {
     tasksFixture = [makeTask({ id: 1, name: 'failed-one-shot', delete_after_run: 1, last_status: 'failure' })];
     render(<ScheduledOperationsView />);
 
-    await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
     const chip = await screen.findByText('One-shot');
     expect(chip).toHaveAttribute('title', expect.stringContaining('kept after a failed run'));
   });
@@ -136,8 +136,8 @@ describe('ScheduledOperationsView', () => {
     })];
     render(<ScheduledOperationsView />);
 
-    await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
-    await userEvent.click(await screen.findByTitle('Edit'));
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     await waitFor(() => expect(screen.getAllByRole('combobox')[2]).toHaveTextContent('web'));
   });
 
@@ -168,7 +168,7 @@ describe('ScheduledOperationsView', () => {
     const onClearFilter = vi.fn();
     render(<ScheduledOperationsView filterNodeId={2} onClearFilter={onClearFilter} />);
 
-    await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
     expect(await screen.findByText('edge-task')).toBeInTheDocument();
     expect(screen.queryByText('hub-task')).not.toBeInTheDocument();
 
@@ -583,8 +583,8 @@ describe('ScheduledOperationsView', () => {
     })];
     render(<ScheduledOperationsView />);
 
-    await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
-    await userEvent.click(await screen.findByTitle('Edit'));
+    await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     await userEvent.click(screen.getAllByRole('combobox')[0]);
     await userEvent.click(await screen.findByRole('button', { name: 'Create Fleet Snapshot' }));
     await userEvent.click(screen.getByRole('button', { name: 'Update' }));
@@ -719,8 +719,8 @@ describe('ScheduledOperationsView', () => {
       tasksFixture = [makeTask({ id: 5, name: 'daily-prune', cron_expression: '0 3 * * *', delete_after_run: 0 })];
       render(<ScheduledOperationsView />);
 
-      await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
-      await userEvent.click(await screen.findByTitle('Edit'));
+      await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+      await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
 
       expect(screen.getByRole('radio', { name: 'Simple' })).toHaveAttribute('aria-checked', 'true');
       expect(screen.getByRole('radio', { name: 'Daily' })).toHaveAttribute('aria-checked', 'true');
@@ -737,8 +737,8 @@ describe('ScheduledOperationsView', () => {
       })];
       render(<ScheduledOperationsView />);
 
-      await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
-      await userEvent.click(await screen.findByTitle('Edit'));
+      await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+      await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
       await userEvent.click(screen.getByRole('button', { name: 'Update' }));
 
       await waitFor(() => {
@@ -754,8 +754,8 @@ describe('ScheduledOperationsView', () => {
       tasksFixture = [makeTask({ id: 6, name: 'every-15', cron_expression: '*/15 * * * *' })];
       render(<ScheduledOperationsView />);
 
-      await userEvent.click(await screen.findByRole('button', { name: /All tasks/ }));
-      await userEvent.click(await screen.findByTitle('Edit'));
+      await userEvent.click(await screen.findByRole('radio', { name: /All tasks/ }));
+      await userEvent.click(await screen.findByRole('button', { name: 'Edit' }));
 
       expect(screen.getByRole('radio', { name: 'Advanced' })).toHaveAttribute('aria-checked', 'true');
       expect(screen.getByDisplayValue('*/15 * * * *')).toBeInTheDocument();

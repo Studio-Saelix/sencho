@@ -7,6 +7,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Combobox } from '@/components/ui/combobox';
 import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
 import { useAuth, type UserRole } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
@@ -454,14 +455,20 @@ export function UsersSection() {
                                                         <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
                                                     </Button>
                                                     {u.mfaEnabled && (
-                                                        <Button
-                                                            variant="ghost"
-                                                            size="sm"
-                                                            title="Reset 2FA"
-                                                            onClick={() => setResetMfaTarget(u)}
-                                                        >
-                                                            <ShieldOff className="w-3.5 h-3.5 text-warning" strokeWidth={1.5} />
-                                                        </Button>
+                                                        <TooltipProvider>
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <Button
+                                                                        variant="ghost"
+                                                                        size="sm"
+                                                                        onClick={() => setResetMfaTarget(u)}
+                                                                    >
+                                                                        <ShieldOff className="w-3.5 h-3.5 text-warning" strokeWidth={1.5} />
+                                                                    </Button>
+                                                                </TooltipTrigger>
+                                                                <TooltipContent>Reset 2FA</TooltipContent>
+                                                            </Tooltip>
+                                                        </TooltipProvider>
                                                     )}
                                                     <Button
                                                         variant="ghost"

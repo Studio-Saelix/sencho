@@ -341,6 +341,23 @@ export function EditorView(props: EditorViewProps) {
         if (logsMode === 'raw') setLogsExpanded(false);
     }, [logsMode]);
 
+    // Expand containers to fill the column, hiding logs. Toggled from the
+    // density toggle row in ContainersHealth (multi-container stacks only).
+    const [containersExpanded, setContainersExpanded] = useState(false);
+    // Mutually exclusive: expanding one collapses the other.
+    const toggleContainersExpand = () => {
+        setContainersExpanded((prev) => {
+            if (!prev) setLogsExpanded(false);
+            return !prev;
+        });
+    };
+    const toggleLogsExpand = () => {
+        setLogsExpanded((prev) => {
+            if (!prev) setContainersExpanded(false);
+            return !prev;
+        });
+    };
+
     // Below md, render the segmented full-screen mobile detail instead of the
     // desktop two-pane grid. All hooks above run unconditionally before this
     // branch so hook order stays stable across breakpoints.
@@ -359,7 +376,7 @@ export function EditorView(props: EditorViewProps) {
                     {/* Command Center Card (identity + health strip). Hidden when
                         the logs are expanded so the logs pane fills the column. */}
                     {!logsExpanded && (
-                    <Card className={`rounded-xl border-muted bg-card ${safeContainers.length > 1 ? 'flex flex-col min-h-0 max-h-[42%]' : 'shrink-0'}`}>
+                    <Card className={`rounded-xl border-muted bg-card ${safeContainers.length > 1 && !containersExpanded ? 'flex flex-col min-h-0 max-h-[42%]' : safeContainers.length > 1 && containersExpanded ? 'flex flex-col flex-1 min-h-0' : 'shrink-0'}`}>
                         <CardHeader className="p-4 pb-2">
                             <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0 flex-1">
@@ -424,6 +441,8 @@ export function EditorView(props: EditorViewProps) {
                                     openLogViewer={openLogViewer}
                                     openBashModal={openBashModal}
                                     serviceAction={serviceAction}
+                                    containersExpanded={containersExpanded}
+                                    onToggleContainersExpand={toggleContainersExpand}
                                     key={`${activeNode?.id ?? 'local'}:${stackName}`}
                                 />
                             </ScrollArea>
@@ -447,15 +466,16 @@ export function EditorView(props: EditorViewProps) {
                     )}
 
                     {/* Logs Section (fills remaining left-column height). On multi-
-                        container stacks a min-h guarantees logs are never hidden. */}
-                    {safeContainers.length > 1 ? (
+                        container stacks a min-h guarantees logs are never hidden.
+                        Hidden when containers are expanded to fill the column. */}
+                    {!containersExpanded && (safeContainers.length > 1 ? (
                     <div className="flex-1 min-h-[180px] flex flex-col">
                     <StackLogsSection
                         stackName={stackName}
                         logsMode={logsMode}
                         setLogsMode={setLogsMode}
                         logsExpanded={logsExpanded}
-                        onToggleLogsExpand={() => setLogsExpanded((v) => !v)}
+                        onToggleLogsExpand={toggleLogsExpand}
                     />
                     </div>
                     ) : (
@@ -464,9 +484,9 @@ export function EditorView(props: EditorViewProps) {
                         logsMode={logsMode}
                         setLogsMode={setLogsMode}
                         logsExpanded={logsExpanded}
-                        onToggleLogsExpand={() => setLogsExpanded((v) => !v)}
+                        onToggleLogsExpand={toggleLogsExpand}
                     />
-                    )}
+                    ))}
                 </div>
                 )}
 
@@ -477,7 +497,7 @@ export function EditorView(props: EditorViewProps) {
                             <div className="flex items-center gap-4">
                                 <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as 'compose' | 'env' | 'files')}>
                                     <TabsList>
-                                        <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+                                        <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                                             <TabsHighlightItem value="compose">
                                                 <TabsTrigger value="compose">compose.yaml</TabsTrigger>
                                             </TabsHighlightItem>
@@ -658,7 +678,6 @@ export function EditorView(props: EditorViewProps) {
                         applying={loadingAction === 'update'}
                         canEdit={can('stack:edit', 'stack', stackName)}
                         notifications={notifications}
-                        stackMuteActions={stackMuteActions}
                     />
                 )}
             </div>

@@ -378,8 +378,8 @@ describe('env_block_deploy_on_missing_required setting', () => {
 });
 
 describe('host_alerts_enabled toggle', () => {
-  it('seeds to "1" (on) in a fresh database', () => {
-    expect(DatabaseService.getInstance().getGlobalSettings().host_alerts_enabled).toBe('1');
+  it('seeds to "0" (off) in a fresh database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().host_alerts_enabled).toBe('0');
   });
 
   it('is exposed through the settings GET projection', async () => {

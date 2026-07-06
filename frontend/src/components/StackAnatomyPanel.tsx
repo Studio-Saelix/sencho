@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen } from 'lucide-react';
+import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen, X } from 'lucide-react';
 import { Button } from './ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { ScrollableTabRow } from './ui/ScrollableTabRow';
@@ -7,6 +7,7 @@ import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
 import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
+import { useScanBannerDismiss } from '@/hooks/useScanBannerDismiss';
 import { parseAnatomy, parseEnvKeys, formatGitSource, imageName, primaryPublishedHostPort, type GitSourceInfo } from '@/lib/anatomy';
 import { buildServiceUrl } from '@/lib/serviceUrl';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
@@ -19,8 +20,6 @@ import ComposeLabelsPanel from './stack/ComposeLabelsPanel';
 import StackNetworkingPanel from './stack/StackNetworkingPanel';
 import { useNodes } from '@/context/NodeContext';
 import type { NotificationItem } from '@/components/dashboard/types';
-import { ActivityMuteKebab } from '@/components/mute/MuteMenuItems';
-import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 
 interface StackAnatomyPanelProps {
   stackName: string;
@@ -35,7 +34,6 @@ interface StackAnatomyPanelProps {
   canEdit: boolean;
   applying?: boolean;
   notifications?: NotificationItem[];
-  stackMuteActions?: ReturnType<typeof useStackMuteActions>;
 }
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
@@ -82,7 +80,7 @@ interface EffectiveAnatomyFacts {
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="grid grid-cols-[72px_1fr] gap-3 border-t border-muted py-2 first:border-t-0">
-      <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle pt-0.5">{label}</span>
+      <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-stat-subtitle pt-0.5">{label}</span>
       <div className="min-w-0 text-xs text-foreground/90">{children}</div>
     </div>
   );
@@ -101,7 +99,6 @@ export default function StackAnatomyPanel({
   canEdit,
   applying = false,
   notifications,
-  stackMuteActions,
 }: StackAnatomyPanelProps) {
   const anatomy = useMemo(() => parseAnatomy(content), [content]);
   const envKeys = useMemo(() => parseEnvKeys(envContent), [envContent]);
@@ -141,6 +138,8 @@ export default function StackAnatomyPanel({
     attemptedAt?: number;
     errorMessage?: string | null;
   } | null>(null);
+  const { dismissed: scanBannerDismissed, dismiss: dismissScanBanner } =
+    useScanBannerDismiss(stackName, activeNode?.id, scanStatus);
 
   // Best-effort badge: read the last stored preflight severity to dot the tab.
   // Skipped when the active node does not advertise the capability.
@@ -402,21 +401,21 @@ export default function StackAnatomyPanel({
       <div className="flex items-center justify-between border-b border-muted px-3 py-1.5 gap-2">
         <ScrollableTabRow surface="card" wrapperClassName="min-w-0 flex-1">
           <TabsList className="h-7 w-max gap-0.5 bg-transparent border-none p-0">
-            <TabsTrigger value="anatomy" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
-            <TabsTrigger value="activity" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Activity</TabsTrigger>
-            <TabsTrigger value="dossier" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Dossier</TabsTrigger>
-            <TabsTrigger value="drift" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Drift</TabsTrigger>
+            <TabsTrigger value="anatomy" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
+            <TabsTrigger value="activity" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
+            <TabsTrigger value="dossier" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
+            <TabsTrigger value="drift" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
             {envInventoryEnabled && (
-              <TabsTrigger value="environment" data-testid="environment-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Environment</TabsTrigger>
+              <TabsTrigger value="environment" data-testid="environment-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Environment</TabsTrigger>
             )}
             {composeLabelsEnabled && (
-              <TabsTrigger value="compose-labels" data-testid="compose-labels-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Compose Labels</TabsTrigger>
+              <TabsTrigger value="compose-labels" data-testid="compose-labels-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Compose Labels</TabsTrigger>
             )}
             {networkingEnabled && (
-              <TabsTrigger value="networking" data-testid="networking-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Networking</TabsTrigger>
+              <TabsTrigger value="networking" data-testid="networking-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Networking</TabsTrigger>
             )}
             {doctorEnabled && (
-              <TabsTrigger value="doctor" data-testid="doctor-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">
+              <TabsTrigger value="doctor" data-testid="doctor-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">
                 <span className="inline-flex items-center gap-1">
                   Doctor
                   {(preflightSeverity === 'blocker' || preflightSeverity === 'high') && !doctorDismissed && (
@@ -429,7 +428,7 @@ export default function StackAnatomyPanel({
               </TabsTrigger>
             )}
             {storageEnabled && (
-              <TabsTrigger value="storage" data-testid="storage-tab" className="h-6 px-2.5 font-mono text-xs uppercase tracking-[0.18em]">Storage</TabsTrigger>
+              <TabsTrigger value="storage" data-testid="storage-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Storage</TabsTrigger>
             )}
           </TabsList>
         </ScrollableTabRow>
@@ -439,7 +438,7 @@ export default function StackAnatomyPanel({
               type="button"
               data-testid="anatomy-files-btn"
               onClick={onOpenFiles}
-              className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors"
+              className="inline-flex items-center gap-1 font-mono text-xs uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors"
             >
               <FolderOpen className="h-3 w-3" strokeWidth={1.5} />
               files
@@ -449,13 +448,12 @@ export default function StackAnatomyPanel({
             <button
               type="button"
               onClick={onEditCompose}
-              className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors"
+              className="inline-flex items-center gap-1 font-mono text-xs uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors"
             >
               <Pencil className="h-3 w-3" strokeWidth={1.5} />
               edit
             </button>
           )}
-          {stackMuteActions && <ActivityMuteKebab actions={stackMuteActions} />}
         </div>
       </div>
       <TabsContent value="activity" className="flex-1 min-h-0 overflow-y-auto px-3 mt-0">
@@ -621,7 +619,7 @@ export default function StackAnatomyPanel({
             </div>
           </div>
         )}
-        {scanStatus && scanStatus.status && scanStatus.status !== 'ok' && (
+        {scanStatus && scanStatus.status && scanStatus.status !== 'ok' && !scanBannerDismissed && (
           <div
             className="mx-3 my-2 flex items-start gap-2 rounded-md border border-warning/40 bg-warning/[0.06] px-2 py-1.5 text-xs text-warning"
             role="status"
@@ -634,6 +632,14 @@ export default function StackAnatomyPanel({
               {scanStatus.status === 'skipped' && 'Post-deploy scan did not run.'}
               {scanStatus.errorMessage ? ` ${scanStatus.errorMessage}` : ''}
             </span>
+            <button
+              type="button"
+              className="shrink-0 ml-2 p-0.5 rounded hover:bg-warning/10 transition-colors"
+              onClick={dismissScanBanner}
+              aria-label="Dismiss"
+            >
+              <X className="h-3.5 w-3.5" strokeWidth={1.5} />
+            </button>
           </div>
         )}
       </div>

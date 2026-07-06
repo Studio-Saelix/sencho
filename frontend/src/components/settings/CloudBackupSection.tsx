@@ -7,6 +7,7 @@ import { Combobox } from '@/components/ui/combobox';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { useLicense } from '@/context/LicenseContext';
@@ -496,41 +497,53 @@ export function CloudBackupSection() {
                                         </div>
                                     </div>
                                     <div className="flex items-center gap-1 shrink-0">
-                                        <Button
-                                            size="icon"
-                                            variant="ghost"
-                                            className="h-7 w-7"
-                                            onClick={async () => {
-                                                const encoded = btoa(s.objectKey).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-                                                try {
-                                                    const res = await apiFetch(`/cloud-backup/object/${encoded}/download`);
-                                                    if (!res.ok) {
-                                                        const err = await res.json().catch(() => ({}));
-                                                        throw new Error(err?.error || `Download failed (${res.status})`);
-                                                    }
-                                                    const blob = await res.blob();
-                                                    const link = document.createElement('a');
-                                                    link.href = URL.createObjectURL(blob);
-                                                    link.download = s.objectKey.split('/').pop() || 'snapshot.tar.gz';
-                                                    link.click();
-                                                    URL.revokeObjectURL(link.href);
-                                                } catch (err) {
-                                                    toast.error((err as Error)?.message || 'Download failed.');
-                                                }
-                                            }}
-                                            title="Download"
-                                        >
-                                            <Download className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                        </Button>
-                                        <Button
-                                            size="icon"
-                                            variant="ghost"
-                                            className="h-7 w-7"
-                                            onClick={() => setDeleteKey(s.objectKey)}
-                                            title="Delete"
-                                        >
-                                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                        </Button>
+                                        <TooltipProvider>
+                                            <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                    <Button
+                                                        size="icon"
+                                                        variant="ghost"
+                                                        className="h-7 w-7"
+                                                        onClick={async () => {
+                                                            const encoded = btoa(s.objectKey).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+                                                            try {
+                                                                const res = await apiFetch(`/cloud-backup/object/${encoded}/download`);
+                                                                if (!res.ok) {
+                                                                    const err = await res.json().catch(() => ({}));
+                                                                    throw new Error(err?.error || `Download failed (${res.status})`);
+                                                                }
+                                                                const blob = await res.blob();
+                                                                const link = document.createElement('a');
+                                                                link.href = URL.createObjectURL(blob);
+                                                                link.download = s.objectKey.split('/').pop() || 'snapshot.tar.gz';
+                                                                link.click();
+                                                                URL.revokeObjectURL(link.href);
+                                                            } catch (err) {
+                                                                toast.error((err as Error)?.message || 'Download failed.');
+                                                            }
+                                                        }}
+                                                    >
+                                                        <Download className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                    </Button>
+                                                </TooltipTrigger>
+                                                <TooltipContent>Download</TooltipContent>
+                                            </Tooltip>
+                                        </TooltipProvider>
+                                        <TooltipProvider>
+                                            <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                    <Button
+                                                        size="icon"
+                                                        variant="ghost"
+                                                        className="h-7 w-7"
+                                                        onClick={() => setDeleteKey(s.objectKey)}
+                                                    >
+                                                        <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                    </Button>
+                                                </TooltipTrigger>
+                                                <TooltipContent>Delete</TooltipContent>
+                                            </Tooltip>
+                                        </TooltipProvider>
                                     </div>
                                 </li>
                             ))}

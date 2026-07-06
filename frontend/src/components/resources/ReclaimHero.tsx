@@ -51,7 +51,7 @@ export function ReclaimHero({
           <span className="font-mono text-[11px] uppercase tracking-[0.22em] text-warning">
             You can reclaim
           </span>
-          <span className="font-display italic text-4xl leading-none tracking-tight text-stat-value">
+          <span className="font-heading text-4xl leading-none tracking-tight text-stat-value">
             {formatBytes(bytes)}
           </span>
           {composition ? (

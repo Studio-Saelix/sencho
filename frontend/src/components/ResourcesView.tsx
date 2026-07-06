@@ -13,7 +13,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
-import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Loader2, History, FolderOpen } from 'lucide-react';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Loader2, History, FolderOpen, Search } from 'lucide-react';
+import { Input } from '@/components/ui/input';
 import { SeverityBadge } from '@/components/ui/SeverityBadge';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
@@ -143,29 +145,19 @@ function FilterToggle({ value, onChange, counts }: FilterToggleProps) {
     ];
 
     return (
-        <div className="flex items-center gap-1 px-3 py-2.5 border-b bg-muted/10">
-            <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
-                {options.map(({ key, label, count }) => (
-                    <button
-                        key={key}
-                        onClick={() => onChange(key)}
-                        className={cn(
-                            'flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium transition-all duration-200',
-                            value === key
-                                ? 'bg-background text-foreground shadow-sm'
-                                : 'text-muted-foreground hover:text-foreground',
-                        )}
-                    >
-                        {label}
-                        <span className={cn(
-                            'inline-flex items-center justify-center h-4 min-w-4 px-1 rounded-sm text-[10px] font-mono transition-colors duration-200',
-                            value === key ? 'bg-muted text-foreground' : 'text-stat-subtitle',
-                        )}>
-                            {count}
-                        </span>
-                    </button>
-                ))}
-            </div>
+        <div className="flex items-center gap-1">
+            {options.map(({ key, label, count }) => (
+                <Button
+                    key={key}
+                    variant={value === key ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-7 text-xs px-2.5 gap-1.5"
+                    onClick={() => onChange(key)}
+                >
+                    {label}
+                    <span className="font-mono tabular-nums text-[10px] opacity-70">{count}</span>
+                </Button>
+            ))}
         </div>
     );
 }
@@ -183,9 +175,16 @@ function ManagedBadge({ status, managedBy, onOpenStack }: {
         const inner = (<><span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />{managedBy}</>);
         if (onOpenStack && managedBy) {
             return (
-                <button type="button" className={`${cls} hover:bg-success/15 transition-colors`} title={`Open stack ${managedBy}`} onClick={() => onOpenStack(managedBy)}>
-                    {inner}
-                </button>
+                <TooltipProvider>
+                    <Tooltip>
+                        <TooltipTrigger asChild>
+                            <button type="button" className={`${cls} hover:bg-success/15 transition-colors`} onClick={() => onOpenStack(managedBy)}>
+                                {inner}
+                            </button>
+                        </TooltipTrigger>
+                        <TooltipContent>Open stack {managedBy}</TooltipContent>
+                    </Tooltip>
+                </TooltipProvider>
             );
         }
         return <span className={cls}>{inner}</span>;
@@ -213,13 +212,17 @@ function ManagedBadge({ status, managedBy, onOpenStack }: {
 
 function SenchoBadge() {
     return (
-        <span
-            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-brand/25 bg-brand/8 text-brand text-[10px] font-medium"
-            title="Protected · running Sencho instance"
-        >
-            <span className="w-1.5 h-1.5 rounded-full bg-brand shrink-0" />
-            Sencho
-        </span>
+        <TooltipProvider>
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-brand/25 bg-brand/8 text-brand text-[10px] font-medium">
+                        <span className="w-1.5 h-1.5 rounded-full bg-brand shrink-0" />
+                        Sencho
+                    </span>
+                </TooltipTrigger>
+                <TooltipContent>Protected · running Sencho instance</TooltipContent>
+            </Tooltip>
+        </TooltipProvider>
     );
 }
 
@@ -339,6 +342,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [imageFilter, setImageFilter] = useState<ResourceFilter>('all');
     const [volumeFilter, setVolumeFilter] = useState<ResourceFilter>('all');
     const [networkFilter, setNetworkFilter] = useState<ResourceFilter>('all');
+
+    // Search state
+    const [imageSearch, setImageSearch] = useState('');
+    const [volumeSearch, setVolumeSearch] = useState('');
+    const [networkSearch, setNetworkSearch] = useState('');
 
     // Modal states
     const [confirmPrune, setConfirmPrune] = useState<{ target: PruneTarget; scope: PruneScope } | null>(null);
@@ -617,16 +625,19 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
     // Derived filtered lists
     const filteredImages = images.filter(img =>
-        imageFilter === 'managed' ? img.managedStatus === 'managed' :
-            imageFilter === 'unmanaged' ? img.managedStatus !== 'managed' : true
+        (imageFilter === 'managed' ? img.managedStatus === 'managed' :
+            imageFilter === 'unmanaged' ? img.managedStatus !== 'managed' : true) &&
+        (imageSearch === '' || (img.RepoTags?.[0] || '').toLowerCase().includes(imageSearch.toLowerCase()))
     );
     const filteredVolumes = volumes.filter(vol =>
-        volumeFilter === 'managed' ? vol.managedStatus === 'managed' :
-            volumeFilter === 'unmanaged' ? vol.managedStatus !== 'managed' : true
+        (volumeFilter === 'managed' ? vol.managedStatus === 'managed' :
+            volumeFilter === 'unmanaged' ? vol.managedStatus !== 'managed' : true) &&
+        (volumeSearch === '' || vol.Name.toLowerCase().includes(volumeSearch.toLowerCase()))
     );
     const filteredNetworks = networks.filter(net =>
-        networkFilter === 'managed' ? net.managedStatus === 'managed' :
-            networkFilter === 'unmanaged' ? net.managedStatus !== 'managed' : true
+        (networkFilter === 'managed' ? net.managedStatus === 'managed' :
+            networkFilter === 'unmanaged' ? net.managedStatus !== 'managed' : true) &&
+        (networkSearch === '' || net.Name.toLowerCase().includes(networkSearch.toLowerCase()))
     );
 
     // Sortable tables (standard sort behavior across the resource tables).
@@ -805,7 +816,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             <Tabs
                 value={resourceTab}
                 onValueChange={(v) => setResourceTab(v as typeof resourceTab)}
-                className="flex-1 flex flex-col w-full rounded-lg border bg-card shadow-card-bevel overflow-hidden min-h-[400px] animate-in fade-in-0 slide-in-from-bottom-2 duration-300 delay-150"
+                className="flex-1 flex flex-col w-full min-h-[400px]"
             >
                 {isMobile ? (
                     <MobileSubTabs
@@ -820,19 +831,23 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         ]}
                     />
                 ) : (
-                <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3">
-                    <TabsList className="grid grid-cols-4 w-full md:w-[680px] h-9 gap-1 p-0">
-                        <TabsHighlight className="rounded-md bg-glass-highlight" transition={springs.snappy}>
+                <div className="flex items-center gap-3 mb-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
+                    <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
+                        <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                             {(['images', 'volumes', 'networks'] as const).map(tab => (
                                 <TabsHighlightItem key={tab} value={tab}>
-                                    <TabsTrigger value={tab} className="capitalize text-xs">
-                                        {tab}
+                                    <TabsTrigger value={tab}>
+                                        {tab.charAt(0).toUpperCase() + tab.slice(1)}
+                                        <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">
+                                            {tab === 'images' ? images.length : tab === 'volumes' ? volumes.length : networks.length}
+                                        </span>
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             ))}
                             <TabsHighlightItem value="unmanaged">
-                                <TabsTrigger value="unmanaged" className="relative text-xs">
+                                <TabsTrigger value="unmanaged" className="relative">
                                     Unmanaged
+                                    <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{totalOrphansCount}</span>
                                     {totalOrphansCount > 0 && (
                                         <span className="absolute -top-1.5 -right-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-warning text-[9px] text-warning-foreground font-medium animate-in zoom-in-75 duration-200">
                                             {totalOrphansCount}
@@ -849,7 +864,16 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
                     {/* Images */}
                     <TabsContent value="images" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
-                        <div className="flex items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-2 mb-4">
+                            <div className="relative flex-1 min-w-[200px] max-w-sm">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                                <Input
+                                    placeholder="Search images..."
+                                    value={imageSearch}
+                                    onChange={(e) => setImageSearch(e.target.value)}
+                                    className="pl-9 h-9"
+                                />
+                            </div>
                             <FilterToggle
                                 value={imageFilter}
                                 onChange={setImageFilter}
@@ -859,24 +883,25 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                     unmanaged: images.filter(i => i.managedStatus !== 'managed').length,
                                 }}
                             />
+                            <div className="flex-1" />
                             {trivy.available && (
                                 <Button
                                     variant="outline"
                                     size="sm"
-                                    className="h-7 text-xs gap-1.5 mr-3 shrink-0"
+                                    className="h-9 gap-2 shrink-0"
                                     onClick={() => {
                                         window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
                                             detail: { view: 'security', tab: 'history' },
                                         }));
                                     }}
-                                    title="View completed vulnerability scans and compare them"
                                     aria-label="Open scan history"
                                 >
-                                    <History className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                    <History className="w-4 h-4" strokeWidth={1.5} />
                                     Scan history
                                 </Button>
                             )}
                         </div>
+                        <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
@@ -917,33 +942,45 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                             </TableCell>
                                             <TableCell className="text-right">
                                                 <div className="flex items-center justify-end gap-1">
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
-                                                        onClick={() => setInspectImageId(img.Id)}
-                                                        title="Inspect image"
-                                                        aria-label={`Inspect ${img.RepoTags?.[0] || 'image'}`}
-                                                    >
-                                                        <Eye className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                    </Button>
-                                                    {trivy.available && isAdmin && img.RepoTags?.[0] && img.RepoTags[0] !== '<none>:<none>' && (
-                                                        <DropdownMenu>
-                                                            <DropdownMenuTrigger asChild>
+                                                    <TooltipProvider>
+                                                        <Tooltip>
+                                                            <TooltipTrigger asChild>
                                                                 <Button
                                                                     variant="ghost"
                                                                     size="icon"
                                                                     className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
-                                                                    disabled={scanningImageRef === img.RepoTags[0]}
-                                                                    title="Scan for vulnerabilities"
+                                                                    onClick={() => setInspectImageId(img.Id)}
+                                                                    aria-label={`Inspect ${img.RepoTags?.[0] || 'image'}`}
                                                                 >
-                                                                    {scanningImageRef === img.RepoTags[0] ? (
-                                                                        <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
-                                                                    ) : (
-                                                                        <ShieldCheck className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                                    )}
+                                                                    <Eye className="w-3.5 h-3.5" strokeWidth={1.5} />
                                                                 </Button>
-                                                            </DropdownMenuTrigger>
+                                                            </TooltipTrigger>
+                                                            <TooltipContent>Inspect image</TooltipContent>
+                                                        </Tooltip>
+                                                    </TooltipProvider>
+                                                    {trivy.available && isAdmin && img.RepoTags?.[0] && img.RepoTags[0] !== '<none>:<none>' && (
+                                                        <DropdownMenu>
+                                                            <TooltipProvider>
+                                                                <Tooltip>
+                                                                    <TooltipTrigger asChild>
+                                                                        <DropdownMenuTrigger asChild>
+                                                                            <Button
+                                                                                variant="ghost"
+                                                                                size="icon"
+                                                                                className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
+                                                                                disabled={scanningImageRef === img.RepoTags[0]}
+                                                                            >
+                                                                                {scanningImageRef === img.RepoTags[0] ? (
+                                                                                    <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} />
+                                                                                ) : (
+                                                                                    <ShieldCheck className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                                                )}
+                                                                            </Button>
+                                                                        </DropdownMenuTrigger>
+                                                                    </TooltipTrigger>
+                                                                    <TooltipContent>Scan for vulnerabilities</TooltipContent>
+                                                                </Tooltip>
+                                                            </TooltipProvider>
                                                             <DropdownMenuContent align="end">
                                                                 <DropdownMenuItem
                                                                     onClick={() => handleScanImage(img.RepoTags![0], { scanners: ['vuln'] })}
@@ -958,16 +995,26 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                             </DropdownMenuContent>
                                                         </DropdownMenu>
                                                     )}
-                                                    {isAdmin && <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
-                                                        disabled={img.isSencho}
-                                                        title={img.isSencho ? 'Protected · running Sencho instance' : undefined}
-                                                        onClick={() => setConfirmDelete({ type: 'images', id: img.Id, name: img.RepoTags?.[0] })}
-                                                    >
-                                                        <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                    </Button>}
+                                                    {isAdmin && (
+                                                        <TooltipProvider>
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <span className={img.isSencho ? 'cursor-not-allowed' : undefined}>
+                                                                        <Button
+                                                                            variant="ghost"
+                                                                            size="icon"
+                                                                            className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
+                                                                            disabled={img.isSencho}
+                                                                            onClick={() => setConfirmDelete({ type: 'images', id: img.Id, name: img.RepoTags?.[0] })}
+                                                                        >
+                                                                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                                        </Button>
+                                                                    </span>
+                                                                </TooltipTrigger>
+                                                                {img.isSencho && <TooltipContent>Protected · running Sencho instance</TooltipContent>}
+                                                            </Tooltip>
+                                                        </TooltipProvider>
+                                                    )}
                                                 </div>
                                             </TableCell>
                                         </TableRow>
@@ -975,19 +1022,32 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableBody>
                             )}
                         </Table>
+                        </div>
                     </TabsContent>
 
                     {/* Volumes */}
                     <TabsContent value="volumes" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
-                        <FilterToggle
-                            value={volumeFilter}
-                            onChange={setVolumeFilter}
-                            counts={{
-                                all: volumes.length,
-                                managed: volumes.filter(v => v.managedStatus === 'managed').length,
-                                unmanaged: volumes.filter(v => v.managedStatus !== 'managed').length,
-                            }}
-                        />
+                        <div className="flex flex-wrap items-center gap-2 mb-4">
+                            <div className="relative flex-1 min-w-[200px] max-w-sm">
+                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                                <Input
+                                    placeholder="Search volumes..."
+                                    value={volumeSearch}
+                                    onChange={(e) => setVolumeSearch(e.target.value)}
+                                    className="pl-9 h-9"
+                                />
+                            </div>
+                            <FilterToggle
+                                value={volumeFilter}
+                                onChange={setVolumeFilter}
+                                counts={{
+                                    all: volumes.length,
+                                    managed: volumes.filter(v => v.managedStatus === 'managed').length,
+                                    unmanaged: volumes.filter(v => v.managedStatus !== 'managed').length,
+                                }}
+                            />
+                        </div>
+                        <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
@@ -1020,27 +1080,43 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                             <TableCell className="text-right">
                                                 <div className="flex items-center justify-end gap-1">
                                                     {isAdmin && (
-                                                        <Button
-                                                            variant="ghost"
-                                                            size="icon"
-                                                            className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
-                                                            onClick={() => setBrowseVolume(vol.Name)}
-                                                            title="Browse volume contents"
-                                                            aria-label={`Browse ${vol.Name}`}
-                                                        >
-                                                            <FolderOpen className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                        </Button>
+                                                        <TooltipProvider>
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <Button
+                                                                        variant="ghost"
+                                                                        size="icon"
+                                                                        className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
+                                                                        onClick={() => setBrowseVolume(vol.Name)}
+                                                                        aria-label={`Browse ${vol.Name}`}
+                                                                    >
+                                                                        <FolderOpen className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                                    </Button>
+                                                                </TooltipTrigger>
+                                                                <TooltipContent>Browse volume contents</TooltipContent>
+                                                            </Tooltip>
+                                                        </TooltipProvider>
                                                     )}
-                                                    {isAdmin && <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
-                                                        disabled={vol.isSencho}
-                                                        title={vol.isSencho ? 'Protected · running Sencho instance' : undefined}
-                                                        onClick={() => setConfirmDelete({ type: 'volumes', id: vol.Name, name: vol.Name })}
-                                                    >
-                                                        <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                    </Button>}
+                                                    {isAdmin && (
+                                                        <TooltipProvider>
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <span className={vol.isSencho ? 'cursor-not-allowed' : undefined}>
+                                                                        <Button
+                                                                            variant="ghost"
+                                                                            size="icon"
+                                                                            className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
+                                                                            disabled={vol.isSencho}
+                                                                            onClick={() => setConfirmDelete({ type: 'volumes', id: vol.Name, name: vol.Name })}
+                                                                        >
+                                                                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                                        </Button>
+                                                                    </span>
+                                                                </TooltipTrigger>
+                                                                {vol.isSencho && <TooltipContent>Protected · running Sencho instance</TooltipContent>}
+                                                            </Tooltip>
+                                                        </TooltipProvider>
+                                                    )}
                                                 </div>
                                             </TableCell>
                                         </TableRow>
@@ -1048,27 +1124,38 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableBody>
                             )}
                         </Table>
+                        </div>
                     </TabsContent>
 
                     {/* Networks */}
                     <TabsContent value="networks" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
-                        <div className="flex items-center justify-between">
+                        <div className="flex flex-wrap items-center gap-2 mb-4">
                             {networkViewMode === 'list' ? (
-                                <FilterToggle
-                                    value={networkFilter}
-                                    onChange={setNetworkFilter}
-                                    counts={{
-                                        all: networks.length,
-                                        managed: networks.filter(n => n.managedStatus === 'managed').length,
-                                        unmanaged: networks.filter(n => n.managedStatus !== 'managed').length,
-                                    }}
-                                />
+                                <>
+                                    <div className="relative flex-1 min-w-[200px] max-w-sm">
+                                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                                        <Input
+                                            placeholder="Search networks..."
+                                            value={networkSearch}
+                                            onChange={(e) => setNetworkSearch(e.target.value)}
+                                            className="pl-9 h-9"
+                                        />
+                                    </div>
+                                    <FilterToggle
+                                        value={networkFilter}
+                                        onChange={setNetworkFilter}
+                                        counts={{
+                                            all: networks.length,
+                                            managed: networks.filter(n => n.managedStatus === 'managed').length,
+                                            unmanaged: networks.filter(n => n.managedStatus !== 'managed').length,
+                                        }}
+                                    />
+                                </>
                             ) : (
-                                // Keep a left spacer so justify-between holds the toggle +
-                                // Create Network group anchored on the right in topology mode.
                                 <span aria-hidden="true" />
                             )}
-                            <div className="flex items-center gap-2 pr-3">
+                            <div className="flex-1" />
+                            <div className="flex items-center gap-2">
                                 <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
                                     <button
                                         onClick={() => setNetworkViewMode('list')}
@@ -1125,6 +1212,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </CapabilityGate>
                             </div>
                         ) : (
+                        <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
@@ -1173,16 +1261,26 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                     >
                                                         {inspectLoadingId === net.Id ? <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} /> : <Eye className="w-3.5 h-3.5" strokeWidth={1.5} />}
                                                     </Button>
-                                                    {isAdmin && <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
-                                                        disabled={net.managedStatus === 'system' || net.isSencho}
-                                                        title={net.isSencho ? 'Protected · running Sencho instance' : undefined}
-                                                        onClick={() => setConfirmDelete({ type: 'networks', id: net.Id, name: net.Name })}
-                                                    >
-                                                        <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                    </Button>}
+                                                    {isAdmin && (
+                                                        <TooltipProvider>
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <span className={net.isSencho ? 'cursor-not-allowed' : undefined}>
+                                                                        <Button
+                                                                            variant="ghost"
+                                                                            size="icon"
+                                                                            className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
+                                                                            disabled={net.managedStatus === 'system' || net.isSencho}
+                                                                            onClick={() => setConfirmDelete({ type: 'networks', id: net.Id, name: net.Name })}
+                                                                        >
+                                                                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                                        </Button>
+                                                                    </span>
+                                                                </TooltipTrigger>
+                                                                {net.isSencho && <TooltipContent>Protected · running Sencho instance</TooltipContent>}
+                                                            </Tooltip>
+                                                        </TooltipProvider>
+                                                    )}
                                                 </div>
                                             </TableCell>
                                         </TableRow>
@@ -1190,11 +1288,13 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableBody>
                             )}
                         </Table>
+                        </div>
                         )}
                     </TabsContent>
 
                     {/* Unmanaged Containers */}
                     <TabsContent value="unmanaged" className="m-0 border-0 p-0 h-full flex flex-col animate-in fade-in-0 duration-200">
+                        <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
                         <div className="flex justify-between items-center px-4 py-2.5 border-b bg-muted/10 sticky top-0 z-10">
                             <div className="flex items-center gap-2.5">
                                 <input
@@ -1275,6 +1375,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 ))}
                             </div>
                         )}
+                        </div>
                     </TabsContent>
                 </ScrollArea>
             </Tabs>

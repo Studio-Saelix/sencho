@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService, type StackRestartSummary } from '../services/DatabaseService';
 import { CloudBackupService } from '../services/CloudBackupService';
+import TrivyService from '../services/TrivyService';
 import { effectiveTier } from '../middleware/tierGates';
 import { isDebugEnabled } from '../utils/debug';
 import type { LicenseTier } from '../services/license-types';
@@ -18,6 +19,7 @@ export interface ConfigurationStatus {
     agents: { discord: AgentStatus; slack: AgentStatus; webhook: AgentStatus };
     alertRules: number;
     routingRules: { count: number; enabledCount: number; locked: boolean };
+    suppressionRules: { total: number; enabledCount: number };
   };
   automation: {
     autoHeal: { total: number; enabled: number };
@@ -29,6 +31,7 @@ export interface ConfigurationStatus {
     mfaEnabled: boolean | null;
     ssoEnabled: boolean;
     ssoProvider: string | null;
+    trivyInstalled: boolean;
     scanPolicies: { total: number; enabled: number; locked: boolean };
   };
   thresholds: {
@@ -101,6 +104,10 @@ export function buildLocalConfigurationStatus(
         enabledCount: notifRoutes.filter(r => r.enabled).length,
         locked: false,
       },
+      suppressionRules: (() => {
+        const rules = db.getNotificationSuppressionRules();
+        return { total: rules.length, enabledCount: rules.filter(r => r.enabled).length };
+      })(),
     },
     automation: {
       autoHeal: {
@@ -128,6 +135,7 @@ export function buildLocalConfigurationStatus(
       mfaEnabled: mfaRow ? mfaRow.enabled === 1 : null,
       ssoEnabled: !!enabledSso,
       ssoProvider: enabledSso?.provider ?? null,
+      trivyInstalled: TrivyService.getInstance().getSource() !== 'none',
       // Scan policies are available on every tier.
       scanPolicies: {
         total: scanPolicies.length,

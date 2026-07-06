@@ -3,6 +3,7 @@ import { Lock, Copy, Info, TriangleAlert, ShieldAlert, X, ChevronUp, ChevronDown
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { copyToClipboard } from '@/lib/clipboard';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
@@ -63,13 +64,19 @@ function ItemRow({ item }: { item: EnvInventoryItem }) {
       <div className="flex flex-wrap items-center gap-2">
         <span className="font-mono text-[12px] font-medium text-foreground/90">{item.key}</span>
         {item.likelySecret && (
-          <span
-            data-testid="env-secret-badge"
-            title="Likely a secret. Its value is never read or shown."
-            className="inline-flex items-center gap-1 rounded border border-muted bg-card/40 px-1.5 py-0.5 font-mono text-[10px] text-stat-subtitle"
-          >
-            <Lock className="h-2.5 w-2.5" strokeWidth={1.5} /> secret
-          </span>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span
+                  data-testid="env-secret-badge"
+                  className="inline-flex items-center gap-1 rounded border border-muted bg-card/40 px-1.5 py-0.5 font-mono text-[10px] text-stat-subtitle"
+                >
+                  <Lock className="h-2.5 w-2.5" strokeWidth={1.5} /> secret
+                </span>
+              </TooltipTrigger>
+              <TooltipContent>Likely a secret. Its value is never read or shown.</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         )}
         {item.required && (
           <span className="rounded border border-muted px-1.5 py-0.5 font-mono text-[10px] text-stat-subtitle">required</span>
@@ -251,33 +258,51 @@ export default function EnvironmentPanel({ stackName }: { stackName: string }) {
                     <span className="font-mono text-[12px] text-foreground/90 flex-1">{file}</span>
                     {canEdit && (
                       <>
-                        <button
-                          type="button"
-                          onClick={() => moveProjectEnvFile(idx, -1)}
-                          disabled={idx === 0 || savingProjectEnv}
-                          className="p-0.5 text-stat-subtitle hover:text-brand disabled:opacity-30"
-                          title="Move up"
-                        >
-                          <ChevronUp className="h-3 w-3" strokeWidth={1.5} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => moveProjectEnvFile(idx, 1)}
-                          disabled={idx === projectEnvFiles.length - 1 || savingProjectEnv}
-                          className="p-0.5 text-stat-subtitle hover:text-brand disabled:opacity-30"
-                          title="Move down"
-                        >
-                          <ChevronDown className="h-3 w-3" strokeWidth={1.5} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => removeProjectEnvFile(idx)}
-                          disabled={savingProjectEnv}
-                          className="p-0.5 text-stat-subtitle hover:text-destructive disabled:opacity-30"
-                          title="Remove"
-                        >
-                          <X className="h-3 w-3" strokeWidth={1.5} />
-                        </button>
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                onClick={() => moveProjectEnvFile(idx, -1)}
+                                disabled={idx === 0 || savingProjectEnv}
+                                className="p-0.5 text-stat-subtitle hover:text-brand disabled:opacity-30"
+                              >
+                                <ChevronUp className="h-3 w-3" strokeWidth={1.5} />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent>Move up</TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                onClick={() => moveProjectEnvFile(idx, 1)}
+                                disabled={idx === projectEnvFiles.length - 1 || savingProjectEnv}
+                                className="p-0.5 text-stat-subtitle hover:text-brand disabled:opacity-30"
+                              >
+                                <ChevronDown className="h-3 w-3" strokeWidth={1.5} />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent>Move down</TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                type="button"
+                                onClick={() => removeProjectEnvFile(idx)}
+                                disabled={savingProjectEnv}
+                                className="p-0.5 text-stat-subtitle hover:text-destructive disabled:opacity-30"
+                              >
+                                <X className="h-3 w-3" strokeWidth={1.5} />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent>Remove</TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
                       </>
                     )}
                   </div>
