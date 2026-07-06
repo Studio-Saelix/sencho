@@ -3,6 +3,7 @@ import { GitHubIcon } from '@/components/ui/GitHubIcon';
 import {
     Settings,
     LogOut,
+    ExternalLink,
     User,
     Loader2,
     BookOpen,
