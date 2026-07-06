@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { assembleAnatomyInput, parseAnatomy, parseEnvKeys, formatGitSource, primaryPublishedHostPort } from './anatomy';
+import { assembleAnatomyInput, parseAnatomy, parseEnvKeys, formatGitSource, imageName, primaryPublishedHostPort } from './anatomy';
 
 const COMPOSE = `services:
   plex:
@@ -70,6 +70,24 @@ describe('parseAnatomy', () => {
   it('marks container-only short-form ports as not published', () => {
     const a = parseAnatomy('services:\n  web:\n    image: x\n    ports:\n      - "80"\n')!;
     expect(a.ports.web).toEqual([{ host: '80', container: '80', proto: 'tcp', published: false }]);
+  });
+});
+
+describe('imageName', () => {
+  it('strips a plain image tag', () => {
+    expect(imageName('nginx:1.25')).toBe('nginx');
+  });
+
+  it('keeps registry host and repository path', () => {
+    expect(imageName('ghcr.io/karakeep-app/karakeep:release')).toBe('ghcr.io/karakeep-app/karakeep');
+  });
+
+  it('treats only the colon after the last slash as a tag separator', () => {
+    expect(imageName('registry:5000/app:1.2')).toBe('registry:5000/app');
+  });
+
+  it('strips a digest suffix', () => {
+    expect(imageName('nginx:1.25@sha256:abc123')).toBe('nginx');
   });
 });
 

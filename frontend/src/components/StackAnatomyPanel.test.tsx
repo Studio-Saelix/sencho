@@ -27,6 +27,16 @@ function previewBody(hasUpdate: boolean, buildServices: string[] = []) {
   const hasBuild = buildServices.length > 0;
   return {
     build_services: buildServices,
+    images: [
+      {
+        service: 'web',
+        image: 'nginx:1.25',
+        current_tag: '1.25',
+        next_tag: hasUpdate ? '1.26' : null,
+        has_update: hasUpdate,
+        semver_bump: hasUpdate ? 'minor' : 'none',
+      },
+    ],
     summary: {
       has_update: hasUpdate,
       primary_image: 'nginx',
@@ -87,8 +97,47 @@ describe('StackAnatomyPanel update banner', () => {
     render(panel(false, onApply));
 
     expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
+    expect(screen.getByText('nginx')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'apply' }));
     expect(onApply).toHaveBeenCalledTimes(1);
+  });
+
+  it('names each updated image on multi-service stacks', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes({
+          build_services: [],
+          images: [
+            { service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.26', has_update: true, semver_bump: 'minor' },
+            { service: 'cache', image: 'redis:7.2', current_tag: '7.2', next_tag: '7.4', has_update: true, semver_bump: 'minor' },
+            { service: 'db', image: 'postgres:16', current_tag: '16', next_tag: null, has_update: false, semver_bump: 'none' },
+          ],
+          summary: {
+            has_update: true,
+            primary_image: 'nginx:1.25',
+            current_tag: '1.25',
+            next_tag: '1.26',
+            semver_bump: 'minor',
+            update_kind: 'tag',
+            blocked: false,
+            blocked_reason: null,
+            has_build_services: false,
+            rebuild_available: false,
+          },
+          changelog: null,
+        });
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+
+    render(panel(false));
+
+    expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
+    expect(screen.getByText('nginx')).toBeInTheDocument();
+    expect(screen.getByText('redis')).toBeInTheDocument();
+    expect(screen.queryByText('postgres')).not.toBeInTheDocument();
   });
 
   it('shows Rebuild & Update for build-only stacks', async () => {
