@@ -6,7 +6,6 @@ import {
     User,
     Loader2,
     BookOpen,
-    MessageSquare,
     CreditCard,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
@@ -150,9 +149,9 @@ export function UserProfileDropdown({ onOpenSettings }: UserProfileDropdownProps
                         onClick={closeMenu}
                     />
                     <MenuRow
-                        icon={MessageSquare}
-                        label="Feedback"
-                        href="https://github.com/studio-saelix/sencho/issues"
+                        icon={ExternalLink}
+                        label="Open New Issue"
+                        href="https://github.com/Studio-Saelix/sencho/issues/new/choose"
                         external
                         onClick={closeMenu}
                     />
