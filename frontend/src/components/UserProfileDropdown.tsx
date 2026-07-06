@@ -1,8 +1,8 @@
 import { useState } from 'react';
+import { GitHubIcon } from '@/components/ui/GitHubIcon';
 import {
     Settings,
     LogOut,
-    ExternalLink,
     User,
     Loader2,
     BookOpen,
@@ -149,7 +149,7 @@ export function UserProfileDropdown({ onOpenSettings }: UserProfileDropdownProps
                         onClick={closeMenu}
                     />
                     <MenuRow
-                        icon={ExternalLink}
+                        icon={GitHubIcon}
                         label="Open New Issue"
                         href="https://github.com/Studio-Saelix/sencho/issues/new/choose"
                         external
