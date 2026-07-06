@@ -608,6 +608,20 @@ const effectiveModelExpanded: PreflightRule = {
   },
 };
 
+const selfManagedStack: PreflightRule = {
+  id: 'self-managed-stack',
+  run(ctx) {
+    if (!ctx.isSelfStack) return [];
+    return [{
+      ruleId: 'self-managed-stack',
+      severity: 'warning',
+      title: 'This stack is the running Sencho instance',
+      message: 'Sencho discovered its own compose project as a managed stack. Generic deploy, update, stop, down, and delete actions are blocked here because they would recreate or remove the dashboard you are using.',
+      remediation: 'Update Sencho via Fleet -> Node Update. To manage it as a normal stack, move its compose project outside COMPOSE_DIR.',
+    }];
+  },
+};
+
 // ----- exposure-intent rules ------------------------------------------------
 // These read the user's stored exposure classification (resolved per service)
 // and the dossier's documented access URLs from the context, plus a sensitivity
@@ -785,6 +799,7 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   exposurePortVsDossier,
   reverseProxyUndocumented,
   effectiveModelExpanded,
+  selfManagedStack,
 ];
 
 export const RULE_IDS: readonly string[] = PREFLIGHT_RULES.map(r => r.id);

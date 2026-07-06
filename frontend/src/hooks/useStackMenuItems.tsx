@@ -19,7 +19,7 @@ import type { MenuGroup, MenuItem, StackMenuCtx } from '@/components/sidebar/sid
 
 export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[] {
   const {
-    stackStatus, canOpenApp, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
+    stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
     deploy, stop, restart, update, remove, pin, unpin, toggleLabel,
     menuVisibility, openScheduleTask,
@@ -88,13 +88,21 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
     if (canDelete) {
       groups.push({
         id: 'destructive',
-        items: [{ id: 'delete', label: 'Delete', icon: Trash2, shortcut: '⌘⌫', destructive: true, onSelect: remove }],
+        items: [{
+          id: 'delete',
+          label: 'Delete',
+          icon: Trash2,
+          shortcut: '⌘⌫',
+          destructive: true,
+          disabled: isSelfStack,
+          onSelect: remove,
+        }],
       });
     }
 
     return groups;
   }, [
-    stackStatus, canOpenApp, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
+    stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
     showDeploy, showStop, showRestart, showUpdate,
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
     deploy, stop, restart, update, remove, pin, unpin, toggleLabel, openScheduleTask,

@@ -104,6 +104,8 @@ export interface BulkStackInfo {
   running?: number;
   /** Total container count for the stack; paired with `running` for the sidebar tooltip. */
   total?: number;
+  /** True when this stack is the running Sencho instance (compose project matches stack name). */
+  isSelf?: boolean;
 }
 
 export interface ClassifiedImage {

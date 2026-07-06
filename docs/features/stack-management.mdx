@@ -191,6 +191,8 @@ The header answers three questions at a glance:
 
 The action row to the right of the header keeps everyday lifecycle controls visible. The **More actions** overflow holds Rollback, Scan config, and Delete; the next sections cover both surfaces.
 
+If Sencho discovers its own compose project as a stack (because the deployment directory lives inside `COMPOSE_DIR`), that stack is treated as the running Sencho instance: deploy, update, stop, down, and delete are disabled in the UI and refused by the API. Use **Fleet → Node Update** to upgrade Sencho. Compose Doctor flags the condition during preflight.
+
 ### Image source links
 
 Next to the image line is a links button that turns the image reference into somewhere useful to go. It opens a small menu with:

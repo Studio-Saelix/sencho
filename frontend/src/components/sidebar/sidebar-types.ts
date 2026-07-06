@@ -23,6 +23,8 @@ export type StackLifecycleStatus = 'running' | 'exited' | 'unknown';
 
 export interface StackMenuCtx {
   stackStatus: StackLifecycleStatus;
+  /** True when this stack is the running Sencho instance on the active node. */
+  isSelfStack: boolean;
   canOpenApp: boolean;
   isBusy: boolean;
   isAdmin: boolean;

@@ -12,7 +12,7 @@ import { SettingsActions, SettingsSecondaryButton } from './SettingsActions';
 // reads checks, so `remediation` stays optional here even though the backend
 // models it as required on every warn / fail row.
 type CheckStatus = 'pass' | 'warn' | 'fail';
-type CheckId = 'docker_socket' | 'docker_compose' | 'compose_dir' | 'path_mapping' | 'tls' | 'disk_space';
+type CheckId = 'docker_socket' | 'docker_compose' | 'compose_dir' | 'self_stack_location' | 'path_mapping' | 'tls' | 'disk_space';
 
 interface EnvironmentCheck {
     id: CheckId;
@@ -71,14 +71,14 @@ function CheckRow({ check }: { check: EnvironmentCheck }) {
 function ChecksSkeleton() {
     return (
         <div className="flex flex-col gap-2" aria-busy="true">
-            {[0, 1, 2, 3, 4, 5].map(i => <Skeleton key={i} className="h-14 w-full" />)}
+            {[0, 1, 2, 3, 4, 5, 6].map(i => <Skeleton key={i} className="h-14 w-full" />)}
         </div>
     );
 }
 
 /**
- * Preflight environment checks (Docker engine + Compose, the compose directory
- * and its host path mapping, TLS, disk headroom) with inline remediation.
+ * Preflight environment checks (Docker engine + Compose, the compose directory,
+ * Sencho compose location, host path mapping, TLS, disk headroom) with inline remediation.
  * Layout-neutral so it renders both inside the Recovery settings tab and as the
  * final step of the setup wizard. Self-contained: fetches on mount and exposes
  * a Re-run control. It never blocks; the caller decides what continue action,

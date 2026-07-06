@@ -81,7 +81,7 @@ describe('GET /api/diagnostics/environment', () => {
         expect(res.status).toBe(200);
         expect(Array.isArray(res.body.checks)).toBe(true);
         const ids = (res.body.checks as Array<{ id: string }>).map(c => c.id);
-        expect(ids).toEqual(['docker_socket', 'docker_compose', 'compose_dir', 'path_mapping', 'tls', 'disk_space']);
+        expect(ids).toEqual(['docker_socket', 'docker_compose', 'compose_dir', 'self_stack_location', 'path_mapping', 'tls', 'disk_space']);
         for (const c of res.body.checks as Array<{ status: string; detail: string }>) {
             expect(['pass', 'warn', 'fail']).toContain(c.status);
             expect(typeof c.detail).toBe('string');

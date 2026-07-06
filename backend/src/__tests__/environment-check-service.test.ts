@@ -21,6 +21,7 @@ function baseProbes(overrides: Partial<EnvironmentProbes> = {}): EnvironmentProb
         composeVersion: async () => 'v2.29.0',
         accessDir: async () => ({ exists: true, isDir: true, writable: true }),
         bindMounts: async () => [{ source: '/app/compose', destination: '/app/compose' }],
+        selfStackDirectoryName: async () => null,
         diskUsage: async () => ({ usePercent: 40, freeBytes: 50 * 1024 ** 3 }),
         ...overrides,
     };
@@ -42,7 +43,7 @@ describe('collectEnvironmentReport', () => {
     it('passes every check on a healthy environment', async () => {
         const { checks } = await collectEnvironmentReport(baseProbes());
         expect(checks.map(c => c.id)).toEqual([
-            'docker_socket', 'docker_compose', 'compose_dir', 'path_mapping', 'tls', 'disk_space',
+            'docker_socket', 'docker_compose', 'compose_dir', 'self_stack_location', 'path_mapping', 'tls', 'disk_space',
         ]);
         expect(checks.every(c => c.status === 'pass')).toBe(true);
     });
@@ -59,6 +60,45 @@ describe('collectEnvironmentReport', () => {
         for (const c of checks) {
             if (c.status !== 'pass') expect(c.remediation, `${c.id} needs remediation`).toBeTruthy();
         }
+    });
+
+    describe('self_stack_location', () => {
+        it('warns when Sencho compose project is inside COMPOSE_DIR', async () => {
+            const { checks } = await collectEnvironmentReport(baseProbes({
+                selfStackDirectoryName: async () => 'sencho',
+                accessDir: async (dir) => ({
+                    exists: dir.replace(/\\/g, '/').endsWith('/app/compose') || dir.replace(/\\/g, '/').endsWith('/app/compose/sencho'),
+                    isDir: true,
+                    writable: true,
+                }),
+            }));
+            const c = byId(checks, 'self_stack_location');
+            expect(c.status).toBe('warn');
+            expect(c.detail).toMatch(/inside COMPOSE_DIR/i);
+            expect(remediationOf(c)).toMatch(/Fleet -> Node Update/i);
+        });
+
+        it('passes when the running project is not a managed stack directory', async () => {
+            const { checks } = await collectEnvironmentReport(baseProbes({
+                selfStackDirectoryName: async () => 'sencho',
+                accessDir: async (dir) => ({
+                    exists: dir.replace(/\\/g, '/').endsWith('/app/compose'),
+                    isDir: true,
+                    writable: true,
+                }),
+            }));
+            const c = byId(checks, 'self_stack_location');
+            expect(c.status).toBe('pass');
+        });
+
+        it('warns when self-stack location cannot be verified', async () => {
+            const { checks } = await collectEnvironmentReport(baseProbes({
+                selfStackDirectoryName: async () => { throw new Error('inspect failed'); },
+            }));
+            const c = byId(checks, 'self_stack_location');
+            expect(c.status).toBe('warn');
+            expect(c.detail).toMatch(/Could not verify/i);
+        });
     });
 
     describe('docker_socket', () => {
