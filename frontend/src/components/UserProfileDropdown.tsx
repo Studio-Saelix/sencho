@@ -175,7 +175,7 @@ export function UserProfileDropdown({ onOpenSettings }: UserProfileDropdownProps
 }
 
 interface MenuRowProps {
-    icon: LucideIcon;
+    icon: React.ComponentType<{ className?: string; strokeWidth?: number }>;
     label: string;
     onClick?: () => void;
     href?: string;

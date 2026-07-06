@@ -1,5 +1,6 @@
 interface GitHubIconProps {
   className?: string;
+  strokeWidth?: number;
 }
 
 export function GitHubIcon({ className }: GitHubIconProps) {
