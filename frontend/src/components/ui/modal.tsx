@@ -88,12 +88,15 @@ function HeaderShell({
 }: HeaderShellProps) {
   const v = HEADER_VARIANT[variant];
   return (
-    <div className="relative border-b border-card-border/60 px-6 pt-6 pb-4 pr-12">
+    <div className="relative shrink-0 border-b border-card-border/60 px-6 pt-6 pb-4 pr-12">
       <span aria-hidden className={cn('absolute inset-y-0 left-0 w-[3px]', v.rail)} />
-      <div className={cn(KICKER_CLASS, 'whitespace-nowrap', v.kicker)}>
+      <div className={cn(KICKER_CLASS, 'truncate', v.kicker)} title={kicker}>
         {kicker}
       </div>
-      <TitleComponent className="mt-1 font-heading text-[1.75rem] leading-tight text-stat-value">
+      <TitleComponent
+        className="mt-1 font-heading text-[1.75rem] leading-tight text-stat-value break-all line-clamp-3"
+        title={typeof title === 'string' ? title : undefined}
+      >
         {title}
       </TitleComponent>
       <DescriptionComponent className="sr-only">
@@ -147,8 +150,22 @@ function ConfirmDestructiveHeader(props: ModalHeaderBaseProps) {
   );
 }
 
-export function ModalBody({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div className={cn('px-6 py-5 space-y-4 max-h-[calc(85vh-12rem)] overflow-y-auto', className)} {...props} />;
+interface ModalBodyProps extends React.HTMLAttributes<HTMLDivElement> {
+  /** Grow within a flex-column confirm shell; body scrolls instead of stretching the dialog. */
+  fill?: boolean;
+}
+
+export function ModalBody({ className, fill, ...props }: ModalBodyProps) {
+  return (
+    <div
+      className={cn(
+        'px-6 py-5 space-y-4 overflow-y-auto',
+        fill ? 'min-h-0 flex-1' : 'max-h-[calc(85vh-12rem)]',
+        className,
+      )}
+      {...props}
+    />
+  );
 }
 
 interface ModalFooterProps {
@@ -160,7 +177,7 @@ interface ModalFooterProps {
 
 export function ModalFooter({ primary, secondary, hint, hintAccent }: ModalFooterProps) {
   return (
-    <div className="flex items-center justify-between gap-4 border-t border-card-border/60 px-6 py-4">
+    <div className="flex shrink-0 items-center justify-between gap-4 border-t border-card-border/60 px-6 py-4">
       <div className={cn(KICKER_CLASS, 'text-stat-subtitle')}>
         {hint}
         {hintAccent !== undefined && (
@@ -221,9 +238,9 @@ export function ConfirmModal({
 
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
-      <AlertDialogContent className={cn('p-0 gap-0 overflow-hidden border-card-border/60', SIZE_CLASS[size])}>
+      <AlertDialogContent className={cn('flex max-h-[85dvh] flex-col p-0 gap-0 overflow-hidden border-card-border/60', SIZE_CLASS[size])}>
         <Header kicker={kicker} title={title} description={description} />
-        {children !== undefined && <ModalBody>{children}</ModalBody>}
+        {children !== undefined && <ModalBody fill>{children}</ModalBody>}
         <ModalFooter
           hint={hint}
           secondary={

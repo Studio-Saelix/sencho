@@ -22,11 +22,18 @@ export function DeleteStackDialog({ open, onOpenChange, stackName, onConfirm }: 
             open={open}
             onOpenChange={handleOpenChange}
             variant="destructive"
-            kicker={`${(stackName ?? 'STACK').toUpperCase()} · REMOVE · IRREVERSIBLE`}
+            kicker="REMOVE · IRREVERSIBLE"
             title={
                 stackName ? (
                     <>
-                        Delete <em className="font-display italic text-destructive">{stackName}</em>?
+                        Delete{' '}
+                        <em
+                            className="font-display italic text-destructive break-all"
+                            title={stackName}
+                        >
+                            {stackName}
+                        </em>
+                        ?
                     </>
                 ) : (
                     'Delete stack?'
