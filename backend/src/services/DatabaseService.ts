@@ -122,6 +122,8 @@ export interface PreflightRunRow {
     stack_name: string;
     source_hash: string | null;
     rendered_hash: string | null;
+    /** JSON map of service name to image ref at run time (for until_image_change acks). */
+    service_images: string | null;
     status: string;
     highest_severity: string | null;
     created_at: number;
@@ -165,6 +167,24 @@ export interface PreflightFindingRow {
     source_path: string | null;
     remediation: string | null;
     service: string | null;
+    created_at: number;
+}
+
+export type PreflightAckExpiryMode = 'forever' | 'until_compose_change' | 'days' | 'until_image_change';
+
+/** Operator acknowledgement of a specific Compose Doctor finding on a stack. */
+export interface PreflightAcknowledgement {
+    id: number;
+    node_id: number;
+    stack_name: string;
+    rule_id: string;
+    service: string | null;
+    reason: string;
+    expiry_mode: PreflightAckExpiryMode;
+    expires_at: number | null;
+    anchor_rendered_hash: string | null;
+    anchor_image_ref: string | null;
+    created_by: string;
     created_at: number;
 }
 
@@ -1470,6 +1490,26 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_preflight_findings_run
         ON preflight_findings(run_id);
 
+      CREATE TABLE IF NOT EXISTS preflight_acknowledgements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        rule_id TEXT NOT NULL,
+        service TEXT,
+        reason TEXT NOT NULL DEFAULT '',
+        expiry_mode TEXT NOT NULL DEFAULT 'forever'
+          CHECK (expiry_mode IN ('forever','until_compose_change','days','until_image_change')),
+        expires_at INTEGER,
+        anchor_rendered_hash TEXT,
+        anchor_image_ref TEXT,
+        created_by TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_preflight_ack_unique
+        ON preflight_acknowledgements(node_id, stack_name, rule_id, COALESCE(service,''));
+      CREATE INDEX IF NOT EXISTS idx_preflight_ack_stack
+        ON preflight_acknowledgements(node_id, stack_name);
+
       CREATE TABLE IF NOT EXISTS stack_exposure (
         node_id INTEGER NOT NULL DEFAULT 0,
         stack_name TEXT NOT NULL,
@@ -1583,6 +1623,8 @@ export class DatabaseService {
         maybeAddCol('cve_suppressions', 'status', "TEXT NOT NULL DEFAULT 'accepted'");
         maybeAddCol('cve_suppressions', 'justification', 'TEXT');
 
+        maybeAddCol('preflight_runs', 'service_images', 'TEXT');
+
         // Scheduled operations migrations
         maybeAddCol('scheduled_task_runs', 'triggered_by', "TEXT NOT NULL DEFAULT 'scheduler'");
         maybeAddCol('scheduled_tasks', 'prune_targets', 'TEXT DEFAULT NULL');
@@ -1665,6 +1707,7 @@ export class DatabaseService {
         stmt.run('image_update_check_interval_minutes', '120');
         stmt.run('image_update_check_mode', 'interval');
         stmt.run('image_update_check_cron', '');
+        stmt.run('image_update_sidebar_indicators', '1');
         stmt.run('env_block_deploy_on_missing_required', '0');
 
         // Seed the default local node if none exists
@@ -1673,6 +1716,36 @@ export class DatabaseService {
             this.db.prepare(
                 'INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at) VALUES (?, ?, ?, ?, ?, ?)'
             ).run('Local', 'local', process.env.COMPOSE_DIR || '/app/compose', 1, 'online', Date.now());
+        }
+
+        this.logLocalNodeWarnings();
+    }
+
+    /** Count nodes with type='local'. */
+    public getLocalNodeCount(): number {
+        const row = this.db.prepare("SELECT COUNT(*) as count FROM nodes WHERE type = 'local'").get() as { count: number };
+        return row.count;
+    }
+
+    /**
+     * Log warnings when the local-node count is not exactly one. Extracted as a
+     * public method so tests can drive it against known database states without
+     * re-running the full schema migration.
+     */
+    public logLocalNodeWarnings(): void {
+        const count = this.getLocalNodeCount();
+        if (count > 1) {
+            console.warn(
+                `[Startup] Found ${count} local nodes (expected 1). ` +
+                'Extra local nodes can be removed in Settings → Nodes. ' +
+                'Deleting a local node removes its schedules, labels, dossiers, ' +
+                'and other node-scoped data; containers on the host are not affected.'
+            );
+        } else if (count === 0) {
+            console.warn(
+                '[Startup] No local node found. ' +
+                'Create one in Settings → Nodes to manage this instance\'s Docker engine.'
+            );
         }
     }
 
@@ -2883,9 +2956,12 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ? AND stack_name = ?').run(run.node_id, run.stack_name);
             this.db.prepare(
                 `INSERT INTO preflight_runs
-                    (id, node_id, stack_name, source_hash, rendered_hash, status, highest_severity, created_at, created_by)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-            ).run(run.id, run.node_id, run.stack_name, run.source_hash, run.rendered_hash, run.status, run.highest_severity, run.created_at, run.created_by);
+                    (id, node_id, stack_name, source_hash, rendered_hash, service_images, status, highest_severity, created_at, created_by)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).run(
+                run.id, run.node_id, run.stack_name, run.source_hash, run.rendered_hash,
+                run.service_images ?? null, run.status, run.highest_severity, run.created_at, run.created_by,
+            );
             const insert = this.db.prepare(
                 `INSERT INTO preflight_findings
                     (id, run_id, rule_id, severity, title, message, source_path, remediation, service, created_at)
@@ -2909,6 +2985,55 @@ export class DatabaseService {
         return this.db.prepare(
             'SELECT * FROM preflight_findings WHERE run_id = ? ORDER BY rowid ASC'
         ).all(runId) as PreflightFindingRow[];
+    }
+
+    public getPreflightAcknowledgements(nodeId: number, stackName: string): PreflightAcknowledgement[] {
+        return this.db.prepare(
+            'SELECT * FROM preflight_acknowledgements WHERE node_id = ? AND stack_name = ? ORDER BY created_at DESC, id DESC',
+        ).all(nodeId, stackName) as PreflightAcknowledgement[];
+    }
+
+    public getPreflightAcknowledgement(id: number): PreflightAcknowledgement | null {
+        return (
+            (this.db.prepare('SELECT * FROM preflight_acknowledgements WHERE id = ?')
+                .get(id) as PreflightAcknowledgement | undefined) ?? null
+        );
+    }
+
+    public upsertPreflightAcknowledgement(
+        ack: Omit<PreflightAcknowledgement, 'id'>,
+    ): PreflightAcknowledgement {
+        const existing = this.db.prepare(
+            `SELECT id FROM preflight_acknowledgements
+             WHERE node_id = ? AND stack_name = ? AND rule_id = ? AND COALESCE(service, '') = COALESCE(?, '')`,
+        ).get(ack.node_id, ack.stack_name, ack.rule_id, ack.service) as { id: number } | undefined;
+        if (existing) {
+            this.db.prepare(
+                `UPDATE preflight_acknowledgements
+                 SET reason = ?, expiry_mode = ?, expires_at = ?, anchor_rendered_hash = ?,
+                     anchor_image_ref = ?, created_by = ?, created_at = ?
+                 WHERE id = ?`,
+            ).run(
+                ack.reason, ack.expiry_mode, ack.expires_at, ack.anchor_rendered_hash,
+                ack.anchor_image_ref, ack.created_by, ack.created_at, existing.id,
+            );
+            return this.getPreflightAcknowledgement(existing.id)!;
+        }
+        const result = this.db.prepare(
+            `INSERT INTO preflight_acknowledgements
+                (node_id, stack_name, rule_id, service, reason, expiry_mode, expires_at,
+                 anchor_rendered_hash, anchor_image_ref, created_by, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+            ack.node_id, ack.stack_name, ack.rule_id, ack.service, ack.reason, ack.expiry_mode,
+            ack.expires_at, ack.anchor_rendered_hash, ack.anchor_image_ref, ack.created_by, ack.created_at,
+        );
+        return { ...ack, id: result.lastInsertRowid as number };
+    }
+
+    public deletePreflightAcknowledgement(id: number): boolean {
+        const result = this.db.prepare('DELETE FROM preflight_acknowledgements WHERE id = ?').run(id);
+        return result.changes > 0;
     }
 
     // --- Health Gate Runs ---
@@ -3247,30 +3372,48 @@ export class DatabaseService {
     }
 
     public addNode(node: Omit<Node, 'id' | 'status' | 'created_at' | 'mode' | 'cordoned' | 'cordoned_at' | 'cordoned_reason'> & { mode?: NodeMode }): number {
-        if (node.is_default) {
-            this.db.prepare('UPDATE nodes SET is_default = 0').run();
+        const isLocal = node.type === 'local';
+        // Guard against duplicate local nodes before any mutation so a throw
+        // cannot leave the table in a broken state (e.g. default cleared).
+        if (isLocal && this.getLocalNodeCount() > 0) {
+            throw new Error('A local node already exists. Only one local node is allowed per instance.');
         }
-        const crypto = CryptoService.getInstance();
-        const stmt = this.db.prepare(
-            'INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at, api_url, api_token, mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        );
-        const result = stmt.run(
-            node.name,
-            node.type,
-            node.compose_dir || '/app/compose',
-            node.is_default ? 1 : 0,
-            'unknown',
-            Date.now(),
-            node.api_url || '',
-            node.api_token ? crypto.encrypt(node.api_token) : '',
-            node.mode || 'proxy'
-        );
+
+        // When creating a local node and none exists (zero-local recovery),
+        // make it the default so documentation remains accurate.
+        const shouldBeDefault = node.is_default || isLocal;
+
+        const runInsert = () => {
+            if (shouldBeDefault) {
+                this.db.prepare('UPDATE nodes SET is_default = 0').run();
+            }
+            const crypto = CryptoService.getInstance();
+            const stmt = this.db.prepare(
+                'INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at, api_url, api_token, mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            );
+            return stmt.run(
+                node.name,
+                node.type,
+                node.compose_dir || '/app/compose',
+                shouldBeDefault ? 1 : 0,
+                'unknown',
+                Date.now(),
+                node.api_url || '',
+                node.api_token ? crypto.encrypt(node.api_token) : '',
+                node.mode || 'proxy'
+            );
+        };
+        const result = this.db.transaction(runInsert)();
         return result.lastInsertRowid as number;
     }
 
     public updateNode(id: number, updates: Partial<Omit<Node, 'id' | 'created_at'>>): void {
         const node = this.getNode(id);
         if (!node) throw new Error(`Node with id ${id} not found`);
+
+        if (updates.type !== undefined && updates.type !== node.type) {
+            throw new Error('Node type cannot be changed after creation.');
+        }
 
         if (updates.is_default) {
             this.db.prepare('UPDATE nodes SET is_default = 0').run();
@@ -3301,6 +3444,10 @@ export class DatabaseService {
 
     public deleteNode(id: number): void {
         const node = this.getNode(id);
+        // Protect the last local node regardless of is_default flag.
+        if (node && node.type === 'local' && this.getLocalNodeCount() <= 1) {
+            throw new Error('Cannot delete the only local node. Each Sencho instance must retain its local identity.');
+        }
         if (node?.is_default) {
             throw new Error('Cannot delete the default node');
         }
@@ -3315,6 +3462,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM stack_exposure_intent WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM preflight_findings WHERE run_id IN (SELECT id FROM preflight_runs WHERE node_id = ?)').run(id);
             this.db.prepare('DELETE FROM preflight_runs WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_exposure WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM health_gate_runs WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);

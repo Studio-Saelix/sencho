@@ -22,6 +22,7 @@ interface Finding {
   sourcePath?: string;
   remediation?: string;
   service?: string;
+  acknowledged?: boolean;
 }
 interface Report {
   stack: string;
@@ -31,11 +32,30 @@ interface Report {
   renderError: string | null;
   status: string;
   highestSeverity: string | null;
+  activeStatus: string;
+  activeHighestSeverity: string | null;
+  activeCount: number;
+  acknowledgedCount: number;
   findings: Finding[];
 }
 
 function report(partial: Partial<Report>): Report {
-  return { stack: 'web', ranAt: 1000, ranBy: 'admin', renderable: true, renderError: null, status: 'pass', highestSeverity: null, findings: [], ...partial };
+  const base: Report = {
+    stack: 'web', ranAt: 1000, ranBy: 'admin',
+    renderable: true, renderError: null,
+    status: 'pass', highestSeverity: null,
+    activeStatus: 'pass', activeHighestSeverity: null,
+    activeCount: 0, acknowledgedCount: 0,
+    findings: [],
+  };
+  const merged = { ...base, ...partial };
+  // Derive activeStatus/activeHighestSeverity/activeCount from the old
+  // fields when the caller only set those (so existing tests work without
+  // every call site listing the new field names).
+  if (partial.status !== undefined && partial.activeStatus === undefined) merged.activeStatus = merged.status;
+  if (partial.highestSeverity !== undefined && partial.activeHighestSeverity === undefined) merged.activeHighestSeverity = merged.highestSeverity;
+  if (partial.findings !== undefined && partial.activeCount === undefined) merged.activeCount = merged.findings.filter(f => !f.acknowledged).length;
+  return merged;
 }
 
 function jsonRes(body: unknown, ok = true) {

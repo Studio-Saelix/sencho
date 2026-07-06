@@ -121,4 +121,11 @@ describe('StackRow', () => {
     expect(container.querySelector('.lucide-alert-circle')).toBeNull();
     expect(container.querySelector('.bg-update')).toBeNull();
   });
+
+  it('constrains long stack names so trailing indicators stay in the row', () => {
+    const longName = 'tick-grafana-docker-observability-stack';
+    render(<StackRow {...base({ displayName: longName })} />);
+    expect(screen.getByTestId('stack-row')).toHaveClass('min-w-0');
+    expect(screen.getByText(longName)).toHaveClass('truncate');
+  });
 });

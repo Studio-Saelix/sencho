@@ -61,6 +61,7 @@ export function startPilotAgent(loopbackPort: number): void {
         primaryUrl,
         loopbackPort,
         initialToken: persistedToken || enrollToken!,
+        enrollToken: enrollToken ?? null,
         enrolling: !persistedToken,
     });
     // Register the agent as MeshService's reverse dialer so outbound
@@ -80,13 +81,18 @@ interface AgentOptions {
     primaryUrl: string;
     loopbackPort: number;
     initialToken: string;
+    enrollToken: string | null;
     enrolling: boolean;
 }
 
 export class PilotAgent {
     private readonly options: AgentOptions;
     private token: string;
+    /** Fallback credential from SENCHO_ENROLL_TOKEN when the persisted token is rejected. */
+    private readonly enrollToken: string | null;
     private backoff = RECONNECT_MIN_MS;
+    /** Set when the WS upgrade is rejected with 401 or 404 before the handshake completes. */
+    private upgradeRejected = false;
     private ws: WebSocket | null = null;
     private pingTimer?: NodeJS.Timeout;
     private reconnectTimer?: NodeJS.Timeout;
@@ -113,6 +119,7 @@ export class PilotAgent {
     constructor(options: AgentOptions) {
         this.options = options;
         this.token = options.initialToken;
+        this.enrollToken = options.enrollToken;
         this.agentVersion = getSenchoVersion() || '0.0.0';
         this.customCa = readPilotCaBundle();
     }
@@ -170,6 +177,8 @@ export class PilotAgent {
     private connect(): void {
         if (this.shuttingDown) return;
 
+        this.upgradeRejected = false;
+
         const wsUrl = httpUrlToWs(this.options.primaryUrl) + '/api/pilot/tunnel';
         const ws = new WebSocket(wsUrl, {
             headers: {
@@ -187,6 +196,22 @@ export class PilotAgent {
             ...(this.customCa ? { ca: this.customCa } : {}),
         });
         this.ws = ws;
+        let opened = false;
+        let lastHandshakeError: string | null = null;
+
+        // Do NOT register an 'unexpected-response' listener here. The ws library
+        // skips abortHandshake (and therefore never emits 'error' or 'close')
+        // when a listener exists for that event. Auth rejection is detected via
+        // the error message abortHandshake emits: "Unexpected server response: N".
+        ws.on('error', (err) => {
+            console.warn('[Pilot] Tunnel error:', err.message);
+            lastHandshakeError = err.message;
+            if (/Unexpected server response: (401|404)/.test(err.message)) {
+                this.upgradeRejected = true;
+            }
+            // 'close' will follow; reconnect is scheduled there.
+        });
+
         this.switchboard = attachTcpStreamSwitchboard({
             ws,
             resolveTarget: resolveByComposeLabels,
@@ -195,6 +220,7 @@ export class PilotAgent {
         });
 
         ws.on('open', () => {
+            opened = true;
             // Backoff intentionally NOT reset here: a TCP-level connect that
             // immediately fails the protocol handshake (incompatible version,
             // bad token consumed at upgrade) would otherwise reset the
@@ -222,11 +248,18 @@ export class PilotAgent {
         ws.on('close', (code, reason) => {
             console.log('[Pilot] Tunnel closed:', code, reason?.toString?.() ?? '');
             this.cleanupAfterDisconnect();
+
+            const authRejected = this.upgradeRejected
+                || (!opened && lastHandshakeError != null && /Unexpected server response: (401|404)/.test(lastHandshakeError));
+            if (authRejected && this.enrollToken && this.token !== this.enrollToken) {
+                clearPersistedToken();
+                console.log('[Pilot] Persisted token rejected; falling back to enroll token');
+                this.token = this.enrollToken;
+                this.backoff = RECONNECT_MIN_MS;
+            }
+            this.upgradeRejected = false;
+
             this.scheduleReconnect();
-        });
-        ws.on('error', (err) => {
-            console.warn('[Pilot] Tunnel error:', err.message);
-            // 'close' will follow; reconnect is scheduled there.
         });
     }
 
@@ -608,6 +641,26 @@ export function persistToken(token: string): void {
         const code = (err as NodeJS.ErrnoException).code;
         console.error(
             `[Pilot] Failed to persist tunnel token at ${sanitizeForLog(TOKEN_PATH)} (${sanitizeForLog(code ?? 'unknown')}: ${sanitizeForLog((err as Error).message)}). Continuing with the in-memory token; the next agent restart will require re-enrollment until the volume is writable.`,
+        );
+    }
+}
+
+/**
+ * Remove the persisted long-lived tunnel token from disk. Used when the
+ * control instance rejects the stored credential at upgrade so the agent
+ * can fall back to SENCHO_ENROLL_TOKEN without re-poisoning on restart.
+ * ENOENT is normal when no file was written yet.
+ *
+ * Exposed for unit tests.
+ */
+export function clearPersistedToken(): void {
+    try {
+        fs.unlinkSync(TOKEN_PATH);
+    } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') return;
+        console.warn(
+            `[Pilot] Failed to remove persisted tunnel token at ${sanitizeForLog(TOKEN_PATH)} (${sanitizeForLog(code ?? 'unknown')}: ${sanitizeForLog((err as Error).message)})`,
         );
     }
 }

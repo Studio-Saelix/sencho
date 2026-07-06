@@ -104,11 +104,11 @@ export function StackRow(props: StackRowProps) {
       <span className="flex-1 truncate font-mono text-sm min-w-0">{displayName}</span>
 
       {/* Fixed trailing icon slot: update dot > check-failed > git pending */}
-      <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
+      <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0" data-testid="stack-row-trailing">
         {hasUpdate ? (
           <RowTooltip
             trigger={(
-              <span className="relative inline-flex w-2 h-2">
+              <span className="relative inline-flex w-2 h-2" data-testid="stack-trailing-update">
                 <span className="absolute inset-0 rounded-full bg-update opacity-75 animate-ping" />
                 <span className="relative w-2 h-2 rounded-full bg-update" />
               </span>
@@ -117,12 +117,12 @@ export function StackRow(props: StackRowProps) {
           />
         ) : checkStatus === 'failed' ? (
           <RowTooltip
-            trigger={<span><AlertCircle className="w-3 h-3 text-muted-foreground/70" strokeWidth={1.5} /></span>}
+            trigger={<span data-testid="stack-trailing-check-failed"><AlertCircle className="w-3 h-3 text-muted-foreground/70" strokeWidth={1.5} /></span>}
             label={lastError ? `Update check failed: ${lastError}` : 'Update check failed'}
           />
         ) : hasGitPending ? (
           <RowTooltip
-            trigger={<span><GitBranch className="w-3 h-3 text-brand" strokeWidth={1.5} /></span>}
+            trigger={<span data-testid="stack-trailing-git-pending"><GitBranch className="w-3 h-3 text-brand" strokeWidth={1.5} /></span>}
             label="Git source update pending"
           />
         ) : null}

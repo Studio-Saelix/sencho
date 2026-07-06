@@ -14,6 +14,7 @@ import type { NotificationItem } from '../dashboard/types';
 import type { ScheduleTaskPrefill } from '../ScheduledOperationsView';
 import type { MuteRuleDraft } from '@/lib/muteRules';
 import type { ActiveView } from './hooks/useViewNavigationState';
+import type { StackUpdateInfo } from '@/types/imageUpdates';
 import type { SecurityTab, FleetTab } from '@/lib/events';
 
 // Paid-tier views are loaded on demand. Their internal PaidGate /
@@ -99,6 +100,7 @@ export interface ViewRouterProps {
     // (large) editor JSX is only allocated when activeView === 'editor',
     // not on every parent render that lands on a different view.
     renderEditor: () => ReactNode;
+    stackUpdates: Record<string, StackUpdateInfo>;
 }
 
 export function ViewRouter({
@@ -128,6 +130,7 @@ export function ViewRouter({
     fleetTab,
     onFleetTabConsumed,
     renderEditor,
+    stackUpdates,
 }: ViewRouterProps): ReactNode {
     const { can } = useAuth();
     if (activeView === 'settings') {
@@ -251,6 +254,7 @@ export function ViewRouter({
             onOpenSettingsSection={onOpenSettingsSection}
             notifications={notifications}
             onClearNotifications={onClearNotifications}
+            stackUpdates={stackUpdates}
         />
     );
 }

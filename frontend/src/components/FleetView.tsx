@@ -145,13 +145,11 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
                                 </TabsHighlightItem>
                             )}
                             <span aria-hidden className="self-center mx-1 h-4 w-px bg-border" />
-                            {isPaid && (
-                                <TabsHighlightItem value="deployments">
+                            <TabsHighlightItem value="deployments">
                                     <TabsTrigger value="deployments">
                                         <Send className="w-4 h-4 mr-1.5" />Deployments
                                     </TabsTrigger>
                                 </TabsHighlightItem>
-                            )}
                             {isPaid && (
                                 <TabsHighlightItem value="routing">
                                     <TabsTrigger value="routing">
@@ -159,13 +157,11 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
                                     </TabsTrigger>
                                 </TabsHighlightItem>
                             )}
-                            {isPaid && (
-                                <TabsHighlightItem value="federation">
+                            <TabsHighlightItem value="federation">
                                     <TabsTrigger value="federation">
                                         <Network className="w-4 h-4 mr-1.5" />Federation
                                     </TabsTrigger>
                                 </TabsHighlightItem>
-                            )}
                             <TabsHighlightItem value="actions">
                                 <TabsTrigger value="actions">
                                     <Wrench className="w-4 h-4 mr-1.5" />Actions
@@ -274,11 +270,9 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
                         <ContainerLabelsTab onNavigateToNode={onNavigateToNode} />
                     </TabsContent>
                 )}
-                {isPaid && (
-                    <TabsContent value="deployments">
+                <TabsContent value="deployments">
                         <DeploymentsTab />
                     </TabsContent>
-                )}
                 {isPaid && (
                     <TabsContent value="routing">
                         <PaidGate>
@@ -286,13 +280,9 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
                         </PaidGate>
                     </TabsContent>
                 )}
-                {isPaid && (
-                    <TabsContent value="federation">
-                        <PaidGate>
-                            <FederationTab canManage={isAdmin} />
-                        </PaidGate>
-                    </TabsContent>
-                )}
+                <TabsContent value="federation">
+                    <FederationTab canManage={isAdmin} />
+                </TabsContent>
                 <TabsContent value="actions">
                     {/* Fleet Actions runs against the whole fleet, so it takes the
                         unfiltered node list rather than the overview-filtered view. */}

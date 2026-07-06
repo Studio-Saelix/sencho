@@ -686,6 +686,9 @@ components:
         cronExpression:
           type: ["string", "null"]
           description: 5-field cron expression when mode is 'cron', null otherwise.
+        sidebarIndicators:
+          type: boolean
+          description: Whether sidebar update-status indicators are enabled. Controlled by the `image_update_sidebar_indicators` global setting. Default is `false`.
 
   responses:
     Unauthorized:
@@ -2271,9 +2274,11 @@ paths:
       tags: [Nodes]
       summary: Register a new node
       description: |
-        Adds a new local or remote node. Remote nodes require an API URL pointing to
-        another Sencho instance and an API token for authentication.
-        Requires `node:manage` permission.
+        Adds a new local or remote node. Only one local node is allowed per instance;
+        attempting to create a second local node returns 409. Remote nodes require
+        an API URL pointing to another Sencho instance and an API token for
+        authentication.
+        Requires `node:manage` permission. Node type is immutable after creation.
 
         **Note:** API tokens cannot manage nodes.
       requestBody:
@@ -2329,7 +2334,7 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "409":
-          description: Node name already exists.
+          description: Node name already exists, or a local node already exists.
           content:
             application/json:
               schema:
@@ -2359,7 +2364,7 @@ paths:
       operationId: updateNode
       tags: [Nodes]
       summary: Update node
-      description: Updates node configuration. Requires `node:manage` permission.
+      description: Updates node configuration. Node type is immutable after creation. Requires `node:manage` permission.
       parameters:
         - $ref: "#/components/parameters/idPath"
       requestBody:
@@ -2406,7 +2411,7 @@ paths:
       operationId: deleteNode
       tags: [Nodes]
       summary: Delete node
-      description: Removes a node from the fleet. Requires `node:manage` permission.
+      description: Removes a node from the fleet. The last local node cannot be deleted. Requires `node:manage` permission.
       parameters:
         - $ref: "#/components/parameters/idPath"
       responses:
@@ -2416,6 +2421,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SuccessBoolean"
+        "400":
+          description: Cannot delete the only local node (or the default node).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":

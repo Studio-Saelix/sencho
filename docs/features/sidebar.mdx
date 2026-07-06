@@ -28,7 +28,7 @@ Four chips sit below the search box. Each shows a live count to the right of its
 - **All**: every stack on the node.
 - **Up**: stacks that are running with nothing crashed. A stack whose only stopped container finished cleanly (an init job that exited without error) still counts as up.
 - **Down**: stacks that need attention, whether fully stopped or running with at least one crashed container (the `PT` state described below).
-- **Updates**: stacks with at least one image update available. The chip renders in orange when the count is non-zero so you can spot pending updates at a glance.
+- **Updates**: stacks with at least one image update available. The chip renders in orange when the count is non-zero so you can spot pending updates at a glance. The Updates chip and the trailing update indicators on stack rows are controlled by the Image Update Checks [sidebar setting](/reference/settings#image-update-checks---sidebar). When the setting is off, the chip and indicators are hidden.
 
 <Frame>
   <img src="/images/sidebar/sidebar-filter-chips.png" alt="Filter chip row showing ALL (15), Up (15), Down (0), and Updates (1) with the Updates chip highlighted in orange and a collapse toggle icon on the right" />

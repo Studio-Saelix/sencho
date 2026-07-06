@@ -285,3 +285,298 @@ describe('DELETE /api/nodes/:id default-node guard (M-4)', () => {
     expect(res.body.error).toMatch(/default node/i);
   });
 });
+
+// ---- helpers for singleton tests ----
+
+function getLocalNodeId(): number {
+  return DatabaseService.getInstance().getNodes().find(n => n.type === 'local')!.id;
+}
+
+async function makeRemoteDefault(token: string): Promise<{ remoteId: number; originalDefaultId: number }> {
+  const list = await request(app).get('/api/nodes').set('Authorization', token);
+  const originalDefault = (list.body as Array<{ id: number; is_default: boolean }>).find(n => n.is_default)!;
+  const remoteId = await createRemoteNode(token);
+  await request(app)
+    .put(`/api/nodes/${remoteId}`)
+    .set('Authorization', token)
+    .send({ is_default: true });
+  return { remoteId, originalDefaultId: originalDefault.id };
+}
+
+async function restoreDefault(token: string, defaultId: number): Promise<void> {
+  await request(app)
+    .put(`/api/nodes/${defaultId}`)
+    .set('Authorization', token)
+    .send({ is_default: true });
+}
+
+/** Insert a second local node via raw SQL, bypassing the addNode singleton guard. */
+function insertLegacyLocal(name: string, isDefault = false): number {
+  const db = DatabaseService.getInstance().getDb();
+  if (isDefault) {
+    db.prepare('UPDATE nodes SET is_default = 0').run();
+  }
+  const result = db.prepare(
+    "INSERT INTO nodes (name, type, compose_dir, is_default, status, created_at) VALUES (?, 'local', ?, ?, 'online', ?)"
+  ).run(name, process.env.COMPOSE_DIR ?? '', isDefault ? 1 : 0, Date.now());
+  return result.lastInsertRowid as number;
+}
+
+// ---- singleton enforcement (HTTP layer) ----
+
+describe('Local node singleton enforcement', () => {
+  it('POST rejects a second local node with 409', async () => {
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Authorization', authHeader)
+      .send({ name: 'second-local', type: 'local', compose_dir: '/app/compose' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/a local node already exists/i);
+  });
+
+  it('POST local with is_default:true does not clear the existing default when rejected', async () => {
+    const listBefore = await request(app).get('/api/nodes').set('Authorization', authHeader);
+    const defBefore = (listBefore.body as Array<{ id: number; is_default: boolean }>).find(n => n.is_default)!;
+
+    const res = await request(app)
+      .post('/api/nodes')
+      .set('Authorization', authHeader)
+      .send({ name: 'rejected-local', type: 'local', is_default: true, compose_dir: '/app/compose' });
+    expect(res.status).toBe(409);
+
+    const listAfter = await request(app).get('/api/nodes').set('Authorization', authHeader);
+    const defAfter = (listAfter.body as Array<{ id: number; is_default: boolean }>).find(n => n.is_default)!;
+    expect(defAfter.id).toBe(defBefore.id);
+  });
+
+  it('PUT rejects type change from local to remote with 400', async () => {
+    const localId = getLocalNodeId();
+    const res = await request(app)
+      .put(`/api/nodes/${localId}`)
+      .set('Authorization', authHeader)
+      .send({ type: 'remote' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/cannot be changed/i);
+  });
+
+  it('PUT rejects type change from remote to local with 400', async () => {
+    const remoteId = await createRemoteNode(authHeader);
+    const res = await request(app)
+      .put(`/api/nodes/${remoteId}`)
+      .set('Authorization', authHeader)
+      .send({ type: 'local' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/cannot be changed/i);
+  });
+
+  it('PUT rejects invalid type value with 400', async () => {
+    const localId = getLocalNodeId();
+    const res = await request(app)
+      .put(`/api/nodes/${localId}`)
+      .set('Authorization', authHeader)
+      .send({ type: 'invalid' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/must be "local" or "remote"/i);
+  });
+
+  it('PUT allows renaming the local node', async () => {
+    const localId = getLocalNodeId();
+    const originalName = DatabaseService.getInstance().getNode(localId)!.name;
+    try {
+      const res = await request(app)
+        .put(`/api/nodes/${localId}`)
+        .set('Authorization', authHeader)
+        .send({ name: 'Renamed Local' });
+      expect(res.status).toBe(200);
+      expect(DatabaseService.getInstance().getNode(localId)!.name).toBe('Renamed Local');
+    } finally {
+      DatabaseService.getInstance().updateNode(localId, { name: originalName });
+    }
+  });
+
+  it('PUT allows changing compose_dir on the local node', async () => {
+    const localId = getLocalNodeId();
+    const originalDir = DatabaseService.getInstance().getNode(localId)!.compose_dir;
+    try {
+      const res = await request(app)
+        .put(`/api/nodes/${localId}`)
+        .set('Authorization', authHeader)
+        .send({ compose_dir: '/tmp/test-compose' });
+      expect(res.status).toBe(200);
+      expect(DatabaseService.getInstance().getNode(localId)!.compose_dir).toBe('/tmp/test-compose');
+    } finally {
+      DatabaseService.getInstance().updateNode(localId, { compose_dir: originalDir });
+    }
+  });
+
+  it('DELETE rejects the last local node with 400', async () => {
+    const { remoteId, originalDefaultId } = await makeRemoteDefault(authHeader);
+    try {
+      const res = await request(app)
+        .delete(`/api/nodes/${originalDefaultId}`)
+        .set('Authorization', authHeader);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/only local node/i);
+    } finally {
+      await restoreDefault(authHeader, originalDefaultId);
+      const db = DatabaseService.getInstance();
+      if (db.getNode(remoteId)) db.deleteNode(remoteId);
+    }
+  });
+
+  it('DELETE allows removing an extra local when more than one exists', async () => {
+    const extraId = insertLegacyLocal('legacy-extra-local');
+    try {
+      const remoteId = await createRemoteNode(authHeader);
+      await request(app)
+        .put(`/api/nodes/${remoteId}`)
+        .set('Authorization', authHeader)
+        .send({ is_default: true });
+      try {
+        const res = await request(app)
+          .delete(`/api/nodes/${extraId}`)
+          .set('Authorization', authHeader);
+        expect(res.status).toBe(200);
+        expect(DatabaseService.getInstance().getLocalNodeCount()).toBe(1);
+      } finally {
+        await restoreDefault(authHeader, getLocalNodeId());
+        const db = DatabaseService.getInstance();
+        if (db.getNode(remoteId)) db.deleteNode(remoteId);
+      }
+    } finally {
+      const db = DatabaseService.getInstance();
+      if (db.getNode(extraId)) db.deleteNode(extraId);
+    }
+  });
+});
+
+// ---- DatabaseService direct enforcement ----
+
+describe('DatabaseService direct local-node enforcement', () => {
+  it('addNode throws when a second local is inserted directly', () => {
+    const db = DatabaseService.getInstance();
+    expect(() => db.addNode({
+      name: 'direct-second-local',
+      type: 'local',
+      compose_dir: '/app/compose',
+      is_default: false,
+      api_url: '',
+      api_token: '',
+    })).toThrow(/a local node already exists/i);
+  });
+
+  it('addNode with is_default:true does not clear existing default when it throws', () => {
+    const db = DatabaseService.getInstance();
+    const defaultBefore = db.getDefaultNode()!.id;
+    expect(() => db.addNode({
+      name: 'direct-rejected-local',
+      type: 'local',
+      compose_dir: '/app/compose',
+      is_default: true,
+      api_url: '',
+      api_token: '',
+    })).toThrow(/a local node already exists/i);
+    expect(db.getDefaultNode()!.id).toBe(defaultBefore);
+  });
+
+  it('updateNode throws when type is changed', () => {
+    const db = DatabaseService.getInstance();
+    const localId = getLocalNodeId();
+    expect(() => db.updateNode(localId, { type: 'remote' as any })).toThrow(/cannot be changed/i);
+  });
+
+  it('deleteNode throws when the last local is deleted directly', () => {
+    const db = DatabaseService.getInstance();
+    const localId = getLocalNodeId();
+    const remoteId = db.addNode({
+      name: `direct-remote-${Date.now()}`,
+      type: 'remote',
+      mode: 'proxy',
+      compose_dir: '/app/compose',
+      is_default: true,
+      api_url: 'http://192.168.1.77:1852',
+      api_token: 'tok',
+    });
+    try {
+      expect(() => db.deleteNode(localId)).toThrow(/only local node/i);
+    } finally {
+      db.updateNode(localId, { is_default: true });
+      db.deleteNode(remoteId);
+    }
+  });
+
+  it('addNode auto-assigns is_default when creating a local during zero-local recovery', () => {
+    const db = DatabaseService.getInstance();
+    const localId = getLocalNodeId();
+    const originalType = db.getNode(localId)!.type;
+    // Temporarily remove the only local by flipping its type, simulating a
+    // legacy DB with remotes only.
+    db.getDb().prepare("UPDATE nodes SET type = 'remote' WHERE id = ?").run(localId);
+    let newId: number | undefined;
+    try {
+      newId = db.addNode({
+        name: 'recovery-local',
+        type: 'local',
+        compose_dir: '/app/compose',
+        is_default: false,
+        api_url: '',
+        api_token: '',
+      });
+      expect(db.getNode(newId)!.is_default).toBe(true);
+    } finally {
+      // Restore the original local identity. The recovery node was made
+      // default; re-assign to the original before cleanup.
+      db.getDb().prepare("UPDATE nodes SET type = ? WHERE id = ?").run(originalType, localId);
+      if (newId !== undefined && db.getNode(newId)) {
+        db.updateNode(localId, { is_default: true });
+        db.deleteNode(newId);
+      }
+    }
+  });
+});
+
+// ---- startup warnings ----
+
+describe('logLocalNodeWarnings', () => {
+  it('warns when there are zero local nodes', () => {
+    const db = DatabaseService.getInstance();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const localId = getLocalNodeId();
+      const originalType = db.getNode(localId)!.type;
+      db.getDb().prepare("UPDATE nodes SET type = 'remote' WHERE id = ?").run(localId);
+      try {
+        db.logLocalNodeWarnings();
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('No local node found'));
+      } finally {
+        db.getDb().prepare('UPDATE nodes SET type = ? WHERE id = ?').run(originalType, localId);
+      }
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('warns when there are multiple local nodes', () => {
+    const db = DatabaseService.getInstance();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const extraId = insertLegacyLocal('warn-extra-local');
+    try {
+      db.logLocalNodeWarnings();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Found 2 local nodes'));
+    } finally {
+      warnSpy.mockRestore();
+      if (db.getNode(extraId)) db.deleteNode(extraId);
+    }
+  });
+
+  it('does not warn when exactly one local node exists', () => {
+    const db = DatabaseService.getInstance();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      db.logLocalNodeWarnings();
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});

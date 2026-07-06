@@ -55,6 +55,8 @@ export interface StackEnvSources {
   inlineEnvKeysByService: Record<string, string[]>;
   /** `${}` references found across the authored compose source. */
   interpolationRefs: InterpolationRef[];
+  /** Concatenated authored compose file text (in-memory classification only). */
+  authoredComposeText: string;
 }
 
 interface EnvFileEntry {
@@ -281,6 +283,7 @@ export async function resolveStackEnvSources(nodeId: number, stackName: string):
     envFiles: [...byPath.values(), ...unresolved],
     inlineEnvKeysByService,
     interpolationRefs: parseInterpolationRefs(authoredText),
+    authoredComposeText: authoredText,
   };
 }
 
