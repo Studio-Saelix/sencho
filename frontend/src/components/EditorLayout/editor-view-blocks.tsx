@@ -518,27 +518,41 @@ export function ContainersHealth({
                                             imageId={container.ImageID}
                                             className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
                                         />
-                                        <Button
-                                            size="icon"
-                                            variant="ghost"
-                                            className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
-                                            onClick={() => openLogViewer(container?.Id, containerName)}
-                                            disabled={!isActive}
-                                            aria-label="View logs"
-                                        >
-                                            <ScrollText className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                        </Button>
-                                        {isAdmin && (
-                                            <Button
+                                        <TooltipProvider>
+                                          <Tooltip>
+                                            <TooltipTrigger asChild>
+                                              <Button
                                                 size="icon"
                                                 variant="ghost"
                                                 className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
-                                                onClick={() => openBashModal(container?.Id, containerName)}
+                                                onClick={() => openLogViewer(container?.Id, containerName)}
                                                 disabled={!isActive}
-                                                aria-label="Open bash shell"
-                                            >
-                                                <Terminal className="h-3.5 w-3.5" strokeWidth={1.5} />
-                                            </Button>
+                                                aria-label="View logs"
+                                              >
+                                                <ScrollText className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                              </Button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>View logs</TooltipContent>
+                                          </Tooltip>
+                                        </TooltipProvider>
+                                        {isAdmin && (
+                                          <TooltipProvider>
+                                            <Tooltip>
+                                              <TooltipTrigger asChild>
+                                                <Button
+                                                  size="icon"
+                                                  variant="ghost"
+                                                  className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
+                                                  onClick={() => openBashModal(container?.Id, containerName)}
+                                                  disabled={!isActive}
+                                                  aria-label="Open bash shell"
+                                                >
+                                                  <Terminal className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                                </Button>
+                                              </TooltipTrigger>
+                                              <TooltipContent>Open bash shell</TooltipContent>
+                                            </Tooltip>
+                                          </TooltipProvider>
                                         )}
                                         {container.Service && (
                                             <DropdownMenu>
