@@ -269,7 +269,7 @@ Each row maps one compose concept to the value it resolves to right now:
 
 A footer card under the rows surfaces the first published port as a clickable **EXPOSED** link, so you can jump straight to the running app.
 
-If an image update is available for the primary service, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows. Registry updates show the version bump (`27.1.4 → 27.1.5`), risk classification (`safe · patch`, `minor`, or `major · review required`), and an **apply** button. Build-only stacks show **Rebuild available** with a **Rebuild & Update** button instead of a version bump. Mixed stacks (registry images plus local builds) show both signals. Major bumps show a rose banner and require explicit review before applying.
+If an image update is available, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows. Registry updates name each image with a pending update and show its version transition (`27.1.4 → 27.1.5`), risk classification (`safe · patch`, `minor`, or `major · review required`), and an **apply** button. Build-only stacks show **Rebuild available** with a **Rebuild & Update** button instead of a version bump. Mixed stacks (registry images plus local builds) show both signals. Major bumps show a rose banner and require explicit review before applying.
 
 Rebuilds can take longer than a registry pull and depend on the local Dockerfile context, network access, and base-image availability. Atomic rollback restores compose and env files only; previously built image layers are not rolled back automatically.
 
