@@ -701,7 +701,7 @@ export function StackLogsSection({ stackName, logsMode, setLogsMode, logsExpande
                         type="button"
                         onClick={() => setLogsMode('structured')}
                         className={cn(
-                            'rounded px-2 py-0.5 font-mono text-xs uppercase tracking-wide transition-colors',
+                            'rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors',
                             logsMode === 'structured' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground',
                         )}
                     >
@@ -711,7 +711,7 @@ export function StackLogsSection({ stackName, logsMode, setLogsMode, logsExpande
                         type="button"
                         onClick={() => setLogsMode('raw')}
                         className={cn(
-                            'rounded px-2 py-0.5 font-mono text-xs uppercase tracking-wide transition-colors',
+                            'rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors',
                             logsMode === 'raw' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground',
                         )}
                     >
