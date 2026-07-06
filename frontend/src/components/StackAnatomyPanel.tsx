@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen } from 'lucide-react';
+import { GitBranch, Pencil, ExternalLink, Rocket, FolderOpen, X } from 'lucide-react';
 import { Button } from './ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { ScrollableTabRow } from './ui/ScrollableTabRow';
@@ -7,6 +7,7 @@ import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
 import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
+import { useScanBannerDismiss } from '@/hooks/useScanBannerDismiss';
 import { parseAnatomy, parseEnvKeys, formatGitSource, primaryPublishedHostPort, type GitSourceInfo } from '@/lib/anatomy';
 import { buildServiceUrl } from '@/lib/serviceUrl';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
@@ -126,6 +127,8 @@ export default function StackAnatomyPanel({
     attemptedAt?: number;
     errorMessage?: string | null;
   } | null>(null);
+  const { dismissed: scanBannerDismissed, dismiss: dismissScanBanner } =
+    useScanBannerDismiss(stackName, activeNode?.id, scanStatus);
 
   // Best-effort badge: read the last stored preflight severity to dot the tab.
   // Skipped when the active node does not advertise the capability.
@@ -570,7 +573,7 @@ export default function StackAnatomyPanel({
             </div>
           </div>
         )}
-        {scanStatus && scanStatus.status && scanStatus.status !== 'ok' && (
+        {scanStatus && scanStatus.status && scanStatus.status !== 'ok' && !scanBannerDismissed && (
           <div
             className="mx-3 my-2 flex items-start gap-2 rounded-md border border-warning/40 bg-warning/[0.06] px-2 py-1.5 text-xs text-warning"
             role="status"
@@ -583,6 +586,14 @@ export default function StackAnatomyPanel({
               {scanStatus.status === 'skipped' && 'Post-deploy scan did not run.'}
               {scanStatus.errorMessage ? ` ${scanStatus.errorMessage}` : ''}
             </span>
+            <button
+              type="button"
+              className="shrink-0 ml-2 p-0.5 rounded hover:bg-warning/10 transition-colors"
+              onClick={dismissScanBanner}
+              aria-label="Dismiss"
+            >
+              <X className="h-3.5 w-3.5" strokeWidth={1.5} />
+            </button>
           </div>
         )}
       </div>
