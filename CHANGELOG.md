@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.94.0](https://github.com/Studio-Saelix/sencho/compare/v0.93.4...v0.94.0) (2026-07-06)
+
+
+### Added
+
+* acknowledge Compose Doctor preflight findings per stack ([#1560](https://github.com/Studio-Saelix/sencho/issues/1560)) ([4077546](https://github.com/Studio-Saelix/sencho/commit/4077546492885b3f94806ee024366e4eb0906707))
+* add build-aware compose stack updates ([#1561](https://github.com/Studio-Saelix/sencho/issues/1561)) ([f2b5c68](https://github.com/Studio-Saelix/sencho/commit/f2b5c68d84c9c5bfa766fe2986a67664e0da1751))
+* add Docker label audit across Fleet and Stack views ([#1531](https://github.com/Studio-Saelix/sencho/issues/1531)) ([4a350e7](https://github.com/Studio-Saelix/sencho/commit/4a350e7a0ae2f27492f3f526fc3b59a9549f2ba0))
+* add notification suppression rules ([#1525](https://github.com/Studio-Saelix/sencho/issues/1525)) ([b65daf6](https://github.com/Studio-Saelix/sencho/commit/b65daf6845cbb4836638f0800a1f6b26a01ec50e))
+* add sidebar update indicator toggle and Stack Health badge ([#1570](https://github.com/Studio-Saelix/sencho/issues/1570)) ([bb35c1b](https://github.com/Studio-Saelix/sencho/commit/bb35c1bc928862b6bd18a199dd478426b097a271))
+* block self-stack lifecycle ops with UI and preflight guardrails ([#1569](https://github.com/Studio-Saelix/sencho/issues/1569)) ([0f9925e](https://github.com/Studio-Saelix/sencho/commit/0f9925e04f93341137ebd50f8e4aa2c8cb15f04e))
+* bound container health pane so logs stay visible on large stacks ([#1556](https://github.com/Studio-Saelix/sencho/issues/1556)) ([fbe9867](https://github.com/Studio-Saelix/sencho/commit/fbe98676cb8a0d0021873cfa768adaf8c1455946))
+* enforce singleton local node per instance ([#1567](https://github.com/Studio-Saelix/sencho/issues/1567)) ([a7e856f](https://github.com/Studio-Saelix/sencho/commit/a7e856f44752a7e67263a7fbe0eb6dfc34a0f4df))
+* move Blueprint orchestration and Federation placement to Community tier ([#1555](https://github.com/Studio-Saelix/sencho/issues/1555)) ([fdbc1b1](https://github.com/Studio-Saelix/sencho/commit/fdbc1b1ebb7ce95b415f6edf8a40518cf28d44e8))
+* **scheduler:** schedule container restart, stop, and start ([#1526](https://github.com/Studio-Saelix/sencho/issues/1526)) ([10fb93d](https://github.com/Studio-Saelix/sencho/commit/10fb93dcb1697376f8add20ee80451f9345419ab))
+
+
+### Fixed
+
+* **anatomy:** name each image with a pending update in the update banner ([#1575](https://github.com/Studio-Saelix/sencho/issues/1575)) ([f30a65e](https://github.com/Studio-Saelix/sencho/commit/f30a65ee08a0fc1b65bb46cd8315c135f9395c15))
+* **deploy:** selective compose recreate on Save and Deploy ([#1565](https://github.com/Studio-Saelix/sencho/issues/1565)) ([#1568](https://github.com/Studio-Saelix/sencho/issues/1568)) ([b3bc223](https://github.com/Studio-Saelix/sencho/commit/b3bc223c45b9e8c22194e4ca2cb0109bb2aba264))
+* **drift:** resolve image tags via effective compose model ([#1574](https://github.com/Studio-Saelix/sencho/issues/1574)) ([04f3a55](https://github.com/Studio-Saelix/sencho/commit/04f3a55e5aa5e549268b18539d91c6dc217dd9d4)), closes [#1572](https://github.com/Studio-Saelix/sencho/issues/1572)
+* fall back to enroll token when pilot tunnel JWT is rejected ([#1566](https://github.com/Studio-Saelix/sencho/issues/1566)) ([c677b8b](https://github.com/Studio-Saelix/sencho/commit/c677b8bb661e48d3f5ebdfd89112416a6ad3e2ac))
+* parse LSIO volume :ro suffixes for App Store deploys ([#1557](https://github.com/Studio-Saelix/sencho/issues/1557)) ([ecd7572](https://github.com/Studio-Saelix/sencho/commit/ecd757270fd6d5970925496c1c7d6bf499adb080)), closes [#1554](https://github.com/Studio-Saelix/sencho/issues/1554)
+* stop Doctor exposing hash fragments as unset variables ([#1558](https://github.com/Studio-Saelix/sencho/issues/1558)) ([122c1b8](https://github.com/Studio-Saelix/sencho/commit/122c1b80732292628dace7344bee31e584cf6bdb))
+* truncate long sidebar stack names before trailing indicators clip ([#1562](https://github.com/Studio-Saelix/sencho/issues/1562)) ([3323108](https://github.com/Studio-Saelix/sencho/commit/33231089c35ff2ca12eb361bb3091e02a9bf83b8))
+* UI polish - tooltips, masthead, tabs, settings, and layout consistency ([#1563](https://github.com/Studio-Saelix/sencho/issues/1563)) ([bbcc4b5](https://github.com/Studio-Saelix/sencho/commit/bbcc4b59e45b72f8e2af1c07c8ed2c1740faa12d))
+* update NodeCard cordon tests for paid-tier gate parity ([#1571](https://github.com/Studio-Saelix/sencho/issues/1571)) ([adcc27e](https://github.com/Studio-Saelix/sencho/commit/adcc27e2cf9e3440e60f4c3400a45e7156c5f90c))
+
 ## [0.93.4](https://github.com/Studio-Saelix/sencho/compare/v0.93.3...v0.93.4) (2026-07-02)
 
 
