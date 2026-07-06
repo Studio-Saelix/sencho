@@ -306,9 +306,16 @@ export default function StructuredLogViewer({ stackName, expanded, onToggleExpan
               </Tooltip>
             </TooltipProvider>
           )}
-          <Button type="button" size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={downloadLogs} aria-label="Download logs">
-            <Download className="h-3.5 w-3.5" strokeWidth={1.5} />
-          </Button>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button type="button" size="sm" variant="ghost" className="h-7 w-7 p-0" onClick={downloadLogs} aria-label="Download logs">
+                  <Download className="h-3.5 w-3.5" strokeWidth={1.5} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Download logs</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
       </div>
       <div
