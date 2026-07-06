@@ -20,6 +20,7 @@ function makePayload(overrides: Partial<ConfigurationStatusPayload> = {}): Confi
       },
       alertRules: 0,
       routingRules: { count: 0, enabledCount: 0, locked: true },
+      suppressionRules: { total: 0, enabledCount: 0 },
     },
     automation: {
       autoHeal: { total: 0, enabled: 0 },
@@ -31,6 +32,7 @@ function makePayload(overrides: Partial<ConfigurationStatusPayload> = {}): Confi
       mfaEnabled: null,
       ssoEnabled: false,
       ssoProvider: null,
+      trivyInstalled: false,
       scanPolicies: { total: 0, enabled: 0, locked: false },
     },
     thresholds: { cpuLimit: 90, ramLimit: 90, diskLimit: 90, dockerJanitorGb: 5, globalCrash: false, hostAlertsEnabled: true },
@@ -68,11 +70,11 @@ describe('ConfigurationStatus row visibility', () => {
     expect(screen.getByText('Auto-heal policies')).toBeDefined();
     expect(screen.getByText('Auto-update schedules')).toBeDefined();
     // Rows whose payload reports locked stay hidden.
-    expect(screen.queryByText('Notification routing')).toBeNull();
+    expect(screen.queryByText('Routing')).toBeNull();
     expect(screen.queryByText('Webhooks')).toBeNull();
     expect(screen.queryByText('Scheduled tasks')).toBeNull();
-    // Scan policies are free, so the Vulnerability scanning row renders.
-    expect(screen.getByText('Vulnerability scanning')).toBeDefined();
+    // Scan policies are free, so the row renders.
+    expect(screen.getByText('Scan policies')).toBeDefined();
     // Cloud Backup row is universal (Custom S3 is open to every tier).
     expect(screen.getByText('Cloud Backup')).toBeDefined();
   });
@@ -89,6 +91,7 @@ describe('ConfigurationStatus row visibility', () => {
           },
           alertRules: 2,
           routingRules: { count: 1, enabledCount: 1, locked: false },
+          suppressionRules: { total: 0, enabledCount: 0 },
         },
         automation: {
           autoHeal: { total: 3, enabled: 2 },
@@ -100,6 +103,7 @@ describe('ConfigurationStatus row visibility', () => {
           mfaEnabled: true,
           ssoEnabled: true,
           ssoProvider: 'oidc_google',
+          trivyInstalled: true,
           scanPolicies: { total: 2, enabled: 2, locked: false },
         },
       }),
@@ -110,10 +114,10 @@ describe('ConfigurationStatus row visibility', () => {
     expect(screen.getByText('Automation')).toBeDefined();
     expect(screen.getByText('Auto-heal policies')).toBeDefined();
     expect(screen.getByText('Auto-update schedules')).toBeDefined();
-    expect(screen.getByText('Notification routing')).toBeDefined();
+    expect(screen.getByText('Routing')).toBeDefined();
     expect(screen.getByText('Webhooks')).toBeDefined();
     expect(screen.getByText('Scheduled tasks')).toBeDefined();
-    expect(screen.getByText('Vulnerability scanning')).toBeDefined();
+    expect(screen.getByText('Scan policies')).toBeDefined();
     expect(screen.getByText('Cloud Backup')).toBeDefined();
     // SSO label maps the provider to a friendly name.
     expect(screen.getByText('Google')).toBeDefined();

@@ -18,6 +18,7 @@ export interface ConfigurationStatus {
     agents: { discord: AgentStatus; slack: AgentStatus; webhook: AgentStatus };
     alertRules: number;
     routingRules: { count: number; enabledCount: number; locked: boolean };
+    suppressionRules: { total: number; enabledCount: number };
   };
   automation: {
     autoHeal: { total: number; enabled: number };
@@ -29,6 +30,7 @@ export interface ConfigurationStatus {
     mfaEnabled: boolean | null;
     ssoEnabled: boolean;
     ssoProvider: string | null;
+    trivyInstalled: boolean;
     scanPolicies: { total: number; enabled: number; locked: boolean };
   };
   thresholds: {
