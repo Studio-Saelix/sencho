@@ -7,6 +7,7 @@ import type { StackMenuCtx } from '@/components/sidebar/sidebar-types';
 function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
   return {
     stackStatus: 'running',
+    isSelfStack: false,
     canOpenApp: true,
     isBusy: false,
     isAdmin: true,
@@ -178,5 +179,11 @@ describe('useStackMenuItems', () => {
     expect(actionItems.every(i => i.disabled === true)).toBe(true);
     const scheduleItem = lifecycle.items.find(i => i.id === 'schedule')!;
     expect(scheduleItem.disabled).toBeFalsy();
+  });
+
+  it('disables delete for the self stack', () => {
+    const { result } = renderHook(() => useStackMenuItems('sencho.yml', makeCtx({ isSelfStack: true })));
+    const destructive = result.current.find(g => g.id === 'destructive')!;
+    expect(destructive.items[0].disabled).toBe(true);
   });
 });

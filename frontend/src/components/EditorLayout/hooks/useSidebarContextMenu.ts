@@ -55,6 +55,7 @@ export function useSidebarContextMenu({
     const canMuteNotifications = isAdmin && hasCapability('notification-suppression');
     return {
       stackStatus,
+      isSelfStack: stackListState.stackSelfFlags[file] === true,
       // Only offer "Open App" when a browser-reachable URL can actually be built
       // (a remote node with no API host, e.g. a pilot agent, yields none).
       canOpenApp: mainPort !== undefined && buildServiceUrl({ node: activeNode, publicPort: mainPort }) !== null,
@@ -78,7 +79,13 @@ export function useSidebarContextMenu({
       stop: () => stackActions.executeStackActionByFile(file, 'stop', 'stop'),
       restart: () => stackActions.executeStackActionByFile(file, 'restart', 'restart'),
       update: () => stackActions.executeStackActionByFile(file, 'update', 'update'),
-      remove: () => overlayState.openDeleteDialog(sName),
+      remove: () => {
+        if (stackListState.stackSelfFlags[file]) {
+          overlayState.openSelfStackProtected();
+          return;
+        }
+        overlayState.openDeleteDialog(sName);
+      },
       pin: () => stackListState.pin(file),
       unpin: () => stackListState.unpin(file),
       toggleLabel: async (labelId: number) => {
@@ -170,7 +177,7 @@ export function useSidebarContextMenu({
     // deps would force a rebuild on every parent render and defeat the memo.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    stackListState.stackStatuses, stackListState.stackPorts, isAdmin,
+    stackListState.stackStatuses, stackListState.stackPorts, stackListState.stackSelfFlags, isAdmin,
     stackListState.isPinned, stackListState.labels, stackListState.stackLabelMap,
     stackListState.pin, stackListState.unpin, activeNode?.type, activeNode?.api_url, activeNode?.id,
     hasCapability, navState.openMuteRulesWithPrefill,

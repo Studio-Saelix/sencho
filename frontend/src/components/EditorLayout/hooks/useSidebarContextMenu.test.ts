@@ -18,6 +18,7 @@ function makeOptions(
   const stackListState = {
     stackStatuses,
     stackPorts,
+    stackSelfFlags: {},
     isStackBusy: () => false,
     isPinned: () => false,
     labels: [],

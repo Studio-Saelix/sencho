@@ -113,6 +113,7 @@ export default function EditorLayout() {
     isScanning,
     searchQuery, setSearchQuery,
     stackStatuses,
+    stackSelfFlags,
     stackCounts,
     stackLabelMap,
     filterChip, setFilterChip,
@@ -494,6 +495,7 @@ export default function EditorLayout() {
       setGitSourceOpen={setGitSourceOpen}
       setCopiedDigest={setCopiedDigest}
       requestDeleteStack={stackActions.requestDeleteStack}
+      isSelfStack={selectedFile ? stackSelfFlags[selectedFile] === true : false}
       recoveryResult={selectedFile ? lastActionResult[selectedFile] : undefined}
       onRefreshState={async () => {
         if (!selectedFile) return;
@@ -796,6 +798,15 @@ export default function EditorLayout() {
           stackName={stackName}
           gitSourceOpen={gitSourceOpen}
           setGitSourceOpen={setGitSourceOpen}
+          canSelfUpdate={hasCapability('self-update')}
+          onOpenFleetNodeUpdates={() => {
+            if (isMobile) {
+              navigateMobileAware('fleet');
+            } else {
+              setFleetUpdatesIntent({ tab: 'nodes' });
+              handleNavigate('fleet');
+            }
+          }}
         />
       );
 

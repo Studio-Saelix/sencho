@@ -191,6 +191,8 @@ The header answers three questions at a glance:
 
 The action row to the right of the header keeps everyday lifecycle controls visible. The **More actions** overflow holds Rollback, Scan config, and Delete; the next sections cover both surfaces.
 
+If Sencho discovers its own compose project as a stack (because the deployment directory lives inside `COMPOSE_DIR`), that stack is treated as the running Sencho instance: deploy, update, stop, down, and delete are disabled in the UI and refused by the API. Use **Fleet → Node Update** to upgrade Sencho. Compose Doctor flags the condition during preflight.
+
 ### Image source links
 
 Next to the image line is a links button that turns the image reference into somewhere useful to go. It opens a small menu with:
@@ -269,7 +271,7 @@ Each row maps one compose concept to the value it resolves to right now:
 
 A footer card under the rows surfaces the first published port as a clickable **EXPOSED** link, so you can jump straight to the running app.
 
-If an image update is available for the primary service, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows. Registry updates show the version bump (`27.1.4 → 27.1.5`), risk classification (`safe · patch`, `minor`, or `major · review required`), and an **apply** button. Build-only stacks show **Rebuild available** with a **Rebuild & Update** button instead of a version bump. Mixed stacks (registry images plus local builds) show both signals. Major bumps show a rose banner and require explicit review before applying.
+If an image update is available, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows. Registry updates name each image with a pending update and show its version transition (`27.1.4 → 27.1.5`), risk classification (`safe · patch`, `minor`, or `major · review required`), and an **apply** button. Build-only stacks show **Rebuild available** with a **Rebuild & Update** button instead of a version bump. Mixed stacks (registry images plus local builds) show both signals. Major bumps show a rose banner and require explicit review before applying.
 
 Rebuilds can take longer than a registry pull and depend on the local Dockerfile context, network access, and base-image availability. Atomic rollback restores compose and env files only; previously built image layers are not rolled back automatically.
 

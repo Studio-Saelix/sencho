@@ -189,6 +189,8 @@ export interface EditorViewProps {
 
     // Composed action: wraps setStackToDelete + setDeleteDialogOpen
     requestDeleteStack: () => void;
+    /** True when this stack is the running Sencho instance on the active node. */
+    isSelfStack?: boolean;
 
     // Recovery surface for a failed/stalled operation on this stack (undefined
     // when the last op succeeded or none has run). onRefreshState re-syncs
@@ -270,6 +272,7 @@ export function EditorView(props: EditorViewProps) {
         setGitSourceOpen,
         setCopiedDigest,
         requestDeleteStack,
+        isSelfStack,
         recoveryResult,
         onRefreshState,
         onDismissRecovery,
@@ -381,6 +384,7 @@ export function EditorView(props: EditorViewProps) {
                                         rollbackStack={rollbackStack}
                                         scanStackConfig={scanStackConfig}
                                         requestDeleteStack={requestDeleteStack}
+                                        isSelfStack={isSelfStack}
                                         stackMuteActions={stackMuteActions}
                                     />
                                 </div>

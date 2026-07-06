@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils';
 import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
 import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
 import { useScanBannerDismiss } from '@/hooks/useScanBannerDismiss';
-import { parseAnatomy, parseEnvKeys, formatGitSource, primaryPublishedHostPort, type GitSourceInfo } from '@/lib/anatomy';
+import { parseAnatomy, parseEnvKeys, formatGitSource, imageName, primaryPublishedHostPort, type GitSourceInfo } from '@/lib/anatomy';
 import { buildServiceUrl } from '@/lib/serviceUrl';
 import { StackActivityTimeline } from './stack/StackActivityTimeline';
 import StackDossierPanel from './stack/StackDossierPanel';
@@ -39,6 +39,15 @@ interface StackAnatomyPanelProps {
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
 type UpdateKind = 'tag' | 'digest' | 'none';
 
+interface UpdatePreviewImage {
+  service: string;
+  image: string;
+  current_tag: string;
+  next_tag: string | null;
+  has_update: boolean;
+  semver_bump: SemverBump;
+}
+
 interface UpdatePreviewSummary {
   has_update: boolean;
   primary_image: string | null;
@@ -54,6 +63,7 @@ interface UpdatePreviewSummary {
 
 interface UpdatePreview {
   summary: UpdatePreviewSummary;
+  images: UpdatePreviewImage[];
   build_services?: string[];
   changelog: string | null;
 }
@@ -344,6 +354,7 @@ export default function StackAnatomyPanel({
   const showUpdateBanner = hasUpdate || rebuildAvailable;
   const updateKind = updatePreview?.summary.update_kind ?? 'none';
   const blocked = Boolean(updatePreview?.summary.blocked);
+  const updatedImages = (updatePreview?.images ?? []).filter((img) => img.has_update);
   const bannerSeverity: 'danger' | 'warn' | 'ok' = bump === 'major' || blocked
     ? 'danger'
     : bump === 'minor' ? 'warn' : 'ok';
@@ -558,15 +569,27 @@ export default function StackAnatomyPanel({
               <div className="min-w-0">
                 <div className="font-mono text-xs uppercase tracking-wide">
                   {hasBuildServices && !hasUpdate ? 'Rebuild available' : 'Update available'}
-                  {updatePreview.summary.current_tag && updatePreview.summary.next_tag && hasUpdate && (
-                    <span className="text-foreground">
-                      {' · '}
-                      <span className="text-stat-subtitle">{updatePreview.summary.current_tag}</span>
-                      {' -> '}
-                      <span className="text-foreground font-semibold">{updatePreview.summary.next_tag}</span>
-                    </span>
-                  )}
                 </div>
+                {updatedImages.length > 0 && (
+                  <ul className="mt-1 space-y-0.5">
+                    {updatedImages.map((img) => (
+                      <li key={img.service} className="flex min-w-0 items-baseline gap-2 font-mono text-xs text-foreground">
+                        <span className="min-w-0 truncate text-foreground/90">{imageName(img.image)}</span>
+                        {img.current_tag && (
+                          <span className="shrink-0 text-foreground/80">
+                            <span className="text-stat-subtitle">{img.current_tag}</span>
+                            {img.next_tag && img.next_tag !== img.current_tag && (
+                              <>
+                                {' -> '}
+                                <span className="font-semibold">{img.next_tag}</span>
+                              </>
+                            )}
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 <div className="mt-1 font-mono text-xs text-foreground/80 leading-relaxed">
                   {[
                     bumpLabel,

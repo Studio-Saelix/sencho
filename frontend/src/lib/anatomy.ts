@@ -185,6 +185,17 @@ export function parseEnvKeys(envText: string): Set<string> {
   return keys;
 }
 
+/**
+ * Strip the tag and any digest suffix from a container image reference,
+ * leaving the repository path. Only a colon after the last slash is treated as a
+ * tag separator so registry hosts with ports stay intact.
+ */
+export function imageName(ref: string): string {
+  const base = ref.split('@')[0];
+  const tagSep = base.indexOf(':', base.lastIndexOf('/') + 1);
+  return tagSep === -1 ? base : base.slice(0, tagSep);
+}
+
 export function formatGitSource(src: GitSourceInfo): string {
   try {
     const url = new URL(src.repo_url);

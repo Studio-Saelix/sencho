@@ -1,11 +1,11 @@
 ---
 title: Drift Detection
-description: See at a glance whether a stack's running containers still match the Compose file on disk, with specific, actionable reasons when they have diverged.
+description: See at a glance whether a stack's running containers still match the effective Compose model, with specific, actionable reasons when they have diverged.
 ---
 
-The **Drift** tab answers the core day-two operations question: does what is actually running still match the Compose file on disk?
+The **Drift** tab answers the core day-two operations question: does what is actually running still match what Compose would deploy?
 
-Sencho treats your Compose file as the source of truth. Every time you open the Drift tab, it compares the live Docker runtime against the file and tells you exactly where the two differ. If you have deployed through Sencho, it also compares the current file against the baseline it recorded at deploy time, so you know whether the file has already changed for the next deploy.
+Sencho treats your Compose file as the source of truth. Every time you open the Drift tab, it renders the effective model (variable substitution, multi-file merge, active profiles) and compares the live Docker runtime against that result. If you have deployed through Sencho, it also compares the current file against the baseline it recorded at deploy time, so you know whether the file has already changed for the next deploy.
 
 The check is always read-only. It reports drift; it never fixes it on its own.
 
@@ -18,18 +18,18 @@ The check is always read-only. It reports drift; it never fixes it on its own.
 
 Drift detection is split into two layers that work together.
 
-**The spatial engine** performs a stateless diff between the Compose file on disk and the containers currently running in Docker, then returns a report. It never writes anything to the database, so opening the tab is always side-effect-free.
+**The spatial engine** performs a stateless diff between the effective Compose model and the containers currently running in Docker, then returns a report. It never writes anything to the database, so opening the tab is always side-effect-free.
 
 **The drift ledger** sits on top of the spatial engine and provides persistence. When you click re-check, or when Sencho automatically reconciles after a deploy, it records new findings with timestamps, marks resolved findings as cleared, and writes events to the stack's Activity timeline. This turns a point-in-time snapshot into a short history of when drift appeared and when it cleared.
 
 ## Status
 
-The status badge at the top of the tab summarizes the comparison between the Compose file and the running containers.
+The status badge at the top of the tab summarizes the comparison between the effective Compose model and the running containers.
 
 | Status | Meaning |
 |--------|---------|
-| **In sync** | Running containers match the Compose file: same services, images, and published ports. |
-| **Drifted** | Something running differs from the file. Specific findings are listed below the badge. |
+| **In sync** | Running containers match the effective model: same services, images, and published ports. |
+| **Drifted** | Something running differs from the model. Specific findings are listed below the badge. |
 | **Not running** | The stack has no running containers. The file is present but nothing is up. |
 | **Unreachable** | Docker could not be reached on the active node, so drift cannot be assessed. |
 
@@ -68,6 +68,8 @@ When a stack is drifted, each reason is listed in the **Findings** section again
 | **Network missing** | A network declared in the Compose file is not used by any running service or is absent from the runtime. |
 
 ### Image comparison
+
+Drift compares running images against the **effective** compose model: the same resolved result Docker produces at deploy time, including variable substitution (for example `${VAR:-default}`), multi-file merge, and active profiles.
 
 Image references are normalized before comparison, so equivalent forms do not produce false positives. `nginx`, `docker.io/nginx`, and `docker.io/library/nginx:latest` all resolve to the same reference.
 

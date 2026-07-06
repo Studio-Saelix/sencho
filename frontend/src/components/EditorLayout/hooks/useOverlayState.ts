@@ -115,6 +115,10 @@ export function useOverlayState() {
     cancel: () => void;
   } | null>(null);
 
+  const [selfStackProtectedOpen, setSelfStackProtectedOpen] = useState(false);
+  const openSelfStackProtected = useCallback(() => setSelfStackProtectedOpen(true), []);
+  const closeSelfStackProtected = useCallback(() => setSelfStackProtectedOpen(false), []);
+
   const [stackMisconfigScanId, setStackMisconfigScanId] = useState<number | null>(null);
 
   const [diffPreview, setDiffPreview] = useState<DiffPreview | null>(null);
@@ -132,6 +136,7 @@ export function useOverlayState() {
     policyBlock, setPolicyBlock, policyBypassing, setPolicyBypassing,
     updateReadiness, setUpdateReadiness,
     preDeployAdvisory, setPreDeployAdvisory,
+    selfStackProtectedOpen, setSelfStackProtectedOpen, openSelfStackProtected, closeSelfStackProtected,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } as const;

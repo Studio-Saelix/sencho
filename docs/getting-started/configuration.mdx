@@ -21,6 +21,10 @@ Operational settings (host alerts, data retention, image-update automation, mesh
 
 When you point `COMPOSE_DIR` at a directory, Sencho expects each stack to live in its own subdirectory. If you create a stack through the UI, Sencho automatically creates a subfolder and places a blank `compose.yaml` inside it. Sencho does not move or "capture" existing files; it simply treats every subdirectory as a separate stack.
 
+<Warning>
+  **Do not place Sencho's own compose project inside `COMPOSE_DIR`.** Every subdirectory under the managed stack root is discovered as a stack. If Sencho's deployment directory lives there, the dashboard will list itself and generic stack lifecycle actions (deploy, update, stop, down, delete) are blocked for that stack because they would recreate or remove the instance you are using. Keep Sencho's compose project outside `COMPOSE_DIR`, mount `COMPOSE_DIR` read-write for the stacks you manage, and update Sencho through **Fleet → Node Update**.
+</Warning>
+
 ## Optional environment variables
 
 | Variable | Default | Description |

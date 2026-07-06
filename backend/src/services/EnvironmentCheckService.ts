@@ -3,9 +3,10 @@
  * step and the admin Recovery settings tab. Where DiagnosticsService answers
  * "is my install broken" (and runs without Docker), this answers "can my
  * install actually run Docker deploys": is the Docker socket reachable and
- * permitted, is `docker compose` v2 present, is the compose directory writable
- * and mounted at the same path on host and container, is the dashboard behind
- * TLS, and is there disk headroom.
+ * permitted, is `docker compose` v2 present, is the compose directory writable,
+ * is Sencho's own compose project outside that managed directory, is the path
+ * mounted at the same path on host and container, is the dashboard behind TLS,
+ * and is there disk headroom.
  *
  * The mapping from raw probe results to check rows is kept pure and the IO is
  * injected (see `EnvironmentProbes` / `buildRealProbes`), so the verdict logic
@@ -20,11 +21,13 @@
 import fs from 'fs/promises';
 import { constants as fsConstants } from 'fs';
 import { execFile } from 'child_process';
+import path from 'path';
 import { promisify } from 'util';
 import si from 'systeminformation';
 import DockerController from './DockerController';
 import { NodeRegistry } from './NodeRegistry';
 import SelfIdentityService from './SelfIdentityService';
+import { getSelfStackDirectoryName } from '../helpers/selfStackGuard';
 import { withTimeout } from '../utils/withTimeout';
 import { pathsMatch, resolveHostBindPath } from '../utils/composePathMapping';
 
@@ -41,6 +44,7 @@ export type CheckId =
     | 'docker_socket'
     | 'docker_compose'
     | 'compose_dir'
+    | 'self_stack_location'
     | 'path_mapping'
     | 'tls'
     | 'disk_space';
@@ -74,6 +78,8 @@ export interface DiskUsage {
     freeBytes: number;
 }
 
+type SelfStackDirectory = string | null | 'unknown';
+
 /**
  * Injected IO for the checks. The route wires `buildRealProbes`; tests pass
  * stubs. `proto` / `host` come from the request so the TLS check reflects how
@@ -94,6 +100,8 @@ export interface EnvironmentProbes {
      * unverified path-mapping warn rather than a false pass.
      */
     bindMounts: () => Promise<Array<{ source: string; destination: string }> | null>;
+    /** Directory name of the running Sencho compose project under COMPOSE_DIR. */
+    selfStackDirectoryName: () => Promise<SelfStackDirectory>;
     /** Disk usage of the filesystem backing the compose dir, or null when unknown. */
     diskUsage: (dir: string) => Promise<DiskUsage | null>;
 }
@@ -199,6 +207,58 @@ function checkComposeDir(dir: string, access: DirAccess): EnvironmentCheck {
     return { ...base, status: 'pass', detail: `${dir} is present and writable.` };
 }
 
+async function checkSelfStackLocation(
+    composeDir: string,
+    directoryName: SelfStackDirectory,
+    accessDir: EnvironmentProbes['accessDir'],
+): Promise<EnvironmentCheck> {
+    const base = { id: 'self_stack_location' as const, label: 'Sencho compose location' };
+    if (directoryName === 'unknown') {
+        return {
+            ...base,
+            status: 'warn',
+            detail: 'Could not verify whether Sencho is managed inside COMPOSE_DIR.',
+            remediation:
+                'Confirm Sencho\'s own compose project is outside COMPOSE_DIR. Use Fleet -> Node Update for Sencho updates.',
+        };
+    }
+    if (!directoryName) {
+        return { ...base, status: 'pass', detail: 'Sencho is not detected as a managed stack inside COMPOSE_DIR.' };
+    }
+    if (directoryName.includes('/') || directoryName.includes('\\') || directoryName === '.' || directoryName === '..') {
+        return { ...base, status: 'pass', detail: 'Sencho is not detected as a managed stack inside COMPOSE_DIR.' };
+    }
+    const resolvedComposeDir = path.resolve(composeDir);
+    const stackDir = path.resolve(resolvedComposeDir, directoryName);
+    const insideComposeDir = stackDir === resolvedComposeDir || stackDir.startsWith(resolvedComposeDir + path.sep);
+    if (!insideComposeDir) {
+        return { ...base, status: 'pass', detail: 'Sencho is not detected as a managed stack inside COMPOSE_DIR.' };
+    }
+
+    try {
+        const access = await accessDir(stackDir);
+        if (access.exists && access.isDir) {
+            return {
+                ...base,
+                status: 'warn',
+                detail: `Sencho's own compose project appears at ${stackDir}, inside COMPOSE_DIR.`,
+                remediation:
+                    'Move Sencho\'s compose project outside COMPOSE_DIR and use Fleet -> Node Update for Sencho updates.',
+            };
+        }
+    } catch {
+        return {
+            ...base,
+            status: 'warn',
+            detail: 'Could not verify whether Sencho is managed inside COMPOSE_DIR.',
+            remediation:
+                'Confirm Sencho\'s own compose project is outside COMPOSE_DIR. Use Fleet -> Node Update for Sencho updates.',
+        };
+    }
+
+    return { ...base, status: 'pass', detail: 'Sencho is not detected as a managed stack inside COMPOSE_DIR.' };
+}
+
 // Bind mounts on the Sencho container: an array when containerized, `null` when
 // confirmed not containerized, `'unknown'` when containerized but the mounts
 // could not be read (so the verdict is an unverified warn, not a false pass).
@@ -297,7 +357,7 @@ export async function collectEnvironmentReport(probes: EnvironmentProbes): Promi
     const logProbeFailure = (label: string) => (e: unknown) => {
         console.warn(`[env-check] ${label} probe failed: ${(e as Error)?.message ?? String(e)}`);
     };
-    const [socket, compose, access, mounts, disk] = await Promise.all([
+    const [socket, compose, access, mounts, selfStackDirectory, disk] = await Promise.all([
         checkDockerSocket(probes.pingDocker),
         checkDockerCompose(probes.composeVersion),
         probes.accessDir(probes.composeDir).then(
@@ -308,13 +368,16 @@ export async function collectEnvironmentReport(probes: EnvironmentProbes): Promi
             (m): BindMounts => m,
             (e): BindMounts => { logProbeFailure('bindMounts')(e); return 'unknown'; },
         ),
+        probes.selfStackDirectoryName().then(directory => directory, (e): SelfStackDirectory => { logProbeFailure('selfStackDirectoryName')(e); return 'unknown'; }),
         probes.diskUsage(probes.composeDir).then(d => d, (e) => { logProbeFailure('diskUsage')(e); return null; }),
     ]);
+    const selfStackLocation = await checkSelfStackLocation(probes.composeDir, selfStackDirectory, probes.accessDir);
 
     const checks: EnvironmentCheck[] = [
         socket,
         compose,
         checkComposeDir(probes.composeDir, access),
+        selfStackLocation,
         checkPathMapping(probes.composeDir, mounts),
         checkTls(probes.proto, probes.host),
         checkDisk(probes.composeDir, disk),
@@ -385,6 +448,7 @@ export function buildRealProbes(opts: { proto: string; host: string }): Environm
         },
         accessDir: realAccessDir,
         bindMounts: () => SelfIdentityService.getInstance().getBindMounts(),
+        selfStackDirectoryName: () => getSelfStackDirectoryName(composeDir),
         diskUsage: realDiskUsage,
     };
 }
