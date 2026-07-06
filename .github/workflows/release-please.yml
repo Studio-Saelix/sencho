@@ -1,5 +1,9 @@
 name: Release Please
 
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     branches:
@@ -37,9 +41,43 @@ jobs:
           repositories: Sencho
           permission-contents: write
           permission-pull-requests: write
+          permission-issues: read
 
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: '.node-version'
+
+      - id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      - name: Credit external contributors in changelog
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RELEASE_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          MAINTAINER_LOGINS: ""
+        run: |
+          if [ -z "$RELEASE_BRANCH" ]; then
+            echo "RELEASE_BRANCH is empty; aborting."
+            exit 1
+          fi
+          cp scripts/credit-changelog-contributors.mjs "$RUNNER_TEMP/"
+          git fetch origin "$RELEASE_BRANCH"
+          git checkout "$RELEASE_BRANCH"
+          node "$RUNNER_TEMP/credit-changelog-contributors.mjs"
+          if [ -n "$(git status --porcelain CHANGELOG.md)" ]; then
+            git config user.name "sencho-quartermaster[bot]"
+            git config user.email "275163604+sencho-quartermaster[bot]@users.noreply.github.com"
+            git add CHANGELOG.md
+            git commit -m "chore: credit external contributors in changelog"
+            git push origin "HEAD:$RELEASE_BRANCH"
+          fi
