@@ -15,13 +15,15 @@ import { runRules, SEVERITY_RANK, RULE_IDS, RENDER_FAILED_RULE_ID } from './pref
 import type {
   BindCheck, NodePortBinding, PreflightContext, PreflightFinding, PreflightReport, PreflightSeverity, PreflightStatus, MissingEnvFile,
 } from './preflight/types';
+import { applyPreflightAcknowledgements, parseServiceImages } from '../utils/preflight-ack-filter';
 
 import { isPathWithinBase } from '../utils/validation';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
-import { parseUnsetEnvVars, parseMissingRequiredVars } from '../helpers/envVarParse';
+import { parseUnsetEnvVars, parseMissingRequiredVars, readEnvFileKeys } from '../helpers/envVarParse';
 import { resolveStackEnvSources } from '../helpers/envFileResolution';
 import { isSelfStack } from '../helpers/selfStackGuard';
+import { classifyUnsetEnvVars, type LiteralDollarWarning } from '../helpers/unsetEnvClassification';
 
 const MAX_RENDER_ERROR = 600; // chars kept from a (redacted) render error
 
@@ -39,6 +41,55 @@ function highestOf(findings: PreflightFinding[]): PreflightSeverity | null {
     if (best === null || SEVERITY_RANK[f.severity] > SEVERITY_RANK[best]) best = f.severity;
   }
   return best;
+}
+
+function activeFields(
+  renderable: boolean,
+  findings: PreflightFinding[],
+): Pick<PreflightReport, 'activeStatus' | 'activeHighestSeverity' | 'activeCount' | 'acknowledgedCount'> {
+  const active = findings.filter(f => !f.acknowledged);
+  const acknowledgedCount = findings.length - active.length;
+  const activeHighestSeverity = highestOf(active);
+  const activeStatus: PreflightStatus = !renderable
+    ? 'unrenderable'
+    : (activeHighestSeverity ?? 'pass');
+  return {
+    activeStatus,
+    activeHighestSeverity,
+    activeCount: active.length,
+    acknowledgedCount,
+  };
+}
+
+function buildServiceImages(model: EffectiveModel | null): string | null {
+  if (!model) return null;
+  const map: Record<string, string> = {};
+  for (const svc of model.services) {
+    if (svc.image) map[svc.name] = svc.image;
+  }
+  return Object.keys(map).length > 0 ? JSON.stringify(map) : null;
+}
+
+function enrichReport(
+  nodeId: number,
+  stackName: string,
+  report: Omit<PreflightReport, 'activeStatus' | 'activeHighestSeverity' | 'activeCount' | 'acknowledgedCount'>,
+): PreflightReport {
+  const db = DatabaseService.getInstance();
+  const acks = db.getPreflightAcknowledgements(nodeId, stackName);
+  const serviceImages = parseServiceImages(
+    db.getLatestPreflightRun(nodeId, stackName)?.service_images ?? null,
+  );
+  const findings = applyPreflightAcknowledgements(
+    report.findings,
+    { renderedHash: report.renderedHash, serviceImages },
+    acks,
+  );
+  return {
+    ...report,
+    findings,
+    ...activeFields(report.renderable, findings),
+  };
 }
 
 /**
@@ -82,6 +133,7 @@ export class ComposeDoctorService {
     const findings = sortFindings(runRules(ctx));
     const highestSeverity = highestOf(findings);
     const status: PreflightStatus = !ctx.renderable ? 'unrenderable' : (highestSeverity ?? 'pass');
+    const serviceImages = buildServiceImages(ctx.model);
 
     const report: PreflightReport = {
       stack: stackName,
@@ -94,9 +146,13 @@ export class ComposeDoctorService {
       sourceHash: hashes.sourceHash,
       renderedHash: hashes.renderedHash,
       findings,
+      activeStatus: status,
+      activeHighestSeverity: highestSeverity,
+      activeCount: findings.length,
+      acknowledgedCount: 0,
     };
-    this.persist(nodeId, report);
-    return report;
+    this.persist(nodeId, report, serviceImages);
+    return enrichReport(nodeId, stackName, report);
   }
 
   /** Read the last stored run for a stack, mapped to the report shape. */
@@ -107,6 +163,7 @@ export class ComposeDoctorService {
       return {
         stack: stackName, ranAt: null, ranBy: null, renderable: true, renderError: null,
         status: 'never-run', highestSeverity: null, sourceHash: null, renderedHash: null, findings: [],
+        activeStatus: 'never-run', activeHighestSeverity: null, activeCount: 0, acknowledgedCount: 0,
       };
     }
     const findings = sortFindings(db.getPreflightFindings(run.id).map(r => ({
@@ -121,7 +178,7 @@ export class ComposeDoctorService {
     const renderable = run.status !== 'unrenderable';
     // The render error is carried by the render-failed finding, not a column.
     const renderError = renderable ? null : (findings.find(f => f.ruleId === RENDER_FAILED_RULE_ID)?.message ?? null);
-    return {
+    const base: Omit<PreflightReport, 'activeStatus' | 'activeHighestSeverity' | 'activeCount' | 'acknowledgedCount'> = {
       stack: stackName,
       ranAt: run.created_at,
       ranBy: run.created_by,
@@ -133,6 +190,7 @@ export class ComposeDoctorService {
       renderedHash: run.rendered_hash,
       findings,
     };
+    return enrichReport(nodeId, stackName, base);
   }
 
   private async buildContext(nodeId: number, stackName: string, sourceServiceNames: string[], sourceReadable: boolean): Promise<PreflightContext> {
@@ -143,13 +201,43 @@ export class ComposeDoctorService {
     let renderError: string | null = null;
     let model: EffectiveModel | null = null;
     let unsetEnvVars: string[] = [];
+    let literalDollarWarnings: LiteralDollarWarning[] = [];
+    let missingEnvFiles: MissingEnvFile[] = [];
+
+    let envSources: Awaited<ReturnType<typeof resolveStackEnvSources>> | null = null;
+    try {
+      envSources = await resolveStackEnvSources(nodeId, stackName);
+      missingEnvFiles = envSources.envFiles
+        .filter(f => f.isInjectionSource && f.required && f.existence === 'missing')
+        .map(f => ({ rawPath: f.rawPaths[0], services: f.declaringServices }));
+    } catch (err) {
+      console.warn('[ComposeDoctor] env-file resolution failed for %s:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
+    }
+
     try {
       const result = await ComposeService.getInstance(nodeId).renderConfig(stackName);
       if (result.rendered !== null) {
         // Unset-variable warnings come from stderr and do not depend on the
         // model parsing, so capture them before attempting the parse, so a parse
         // failure does not also suppress the env-unset findings.
-        unsetEnvVars = parseUnsetEnvVars(result.stderr);
+        const rawUnset = parseUnsetEnvVars(result.stderr);
+        if (envSources) {
+          const envFileKeys: string[] = [];
+          for (const file of envSources.envFiles) {
+            if (!file.resolvedPath || file.existence !== 'present') continue;
+            const { keys, unverifiable } = await readEnvFileKeys(file.resolvedPath, baseDir);
+            if (!unverifiable) envFileKeys.push(...keys);
+          }
+          const classified = classifyUnsetEnvVars(rawUnset, envSources, envFileKeys);
+          unsetEnvVars = classified.intentional;
+          literalDollarWarnings = classified.literalDollar;
+        } else {
+          // Without authored env context, never surface raw stderr names as unset
+          // variables; they may be literal-dollar fragments from secret values.
+          unsetEnvVars = [];
+          literalDollarWarnings = rawUnset.length > 0 ? [{ likelySecret: false }] : [];
+        }
         try {
           model = parseEffectiveModel(JSON.parse(result.rendered), stackName);
           renderable = true;
@@ -181,20 +269,6 @@ export class ComposeDoctorService {
     const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls } = this.exposureState(nodeId, stackName);
     const selfStack = await isSelfStack(stackName);
 
-    // Required `env_file:` declarations whose file is absent. Optional
-    // (required: false) and interpolated/escaping paths are excluded. Fail-soft:
-    // a resolution error simply yields no env-file findings.
-    let missingEnvFiles: MissingEnvFile[] = [];
-    try {
-      const envSources = await resolveStackEnvSources(nodeId, stackName);
-      missingEnvFiles = envSources.envFiles
-        .filter(f => f.isInjectionSource && f.required && f.existence === 'missing')
-        .map(f => ({ rawPath: f.rawPaths[0], services: f.declaringServices }));
-    } catch (err) {
-      console.warn('[ComposeDoctor] env-file resolution failed for %s:',
-        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
-    }
-
     return {
       stackName,
       platform: process.platform,
@@ -202,6 +276,7 @@ export class ComposeDoctorService {
       renderable,
       renderError,
       unsetEnvVars,
+      literalDollarWarnings,
       missingEnvFiles,
       sourceServiceNames,
       sourceReadable,
@@ -308,7 +383,7 @@ export class ComposeDoctorService {
   }
 
   /** Persist the run, replacing any prior run for this stack. Best-effort. */
-  private persist(nodeId: number, report: PreflightReport): void {
+  private persist(nodeId: number, report: PreflightReport, serviceImages: string | null): void {
     if (report.ranAt === null) return;
     try {
       const runId = randomUUID();
@@ -319,6 +394,7 @@ export class ComposeDoctorService {
           stack_name: report.stack,
           source_hash: report.sourceHash,
           rendered_hash: report.renderedHash,
+          service_images: serviceImages,
           status: report.status,
           highest_severity: report.highestSeverity,
           created_at: report.ranAt,

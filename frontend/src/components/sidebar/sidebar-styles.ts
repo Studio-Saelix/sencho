@@ -1,7 +1,7 @@
 import { cn } from '@/lib/utils';
 
 export const sidebarRowBase = cn(
-  'relative flex items-center gap-2 w-full px-2 py-1.5 rounded-md mb-0.5',
+  'relative flex items-center gap-2 w-full min-w-0 px-2 py-1.5 rounded-md mb-0.5',
   // 44px tap target on touch viewports without changing desktop density.
   'max-md:min-h-11 max-md:py-2.5',
   'font-mono text-[13px] text-muted-foreground',

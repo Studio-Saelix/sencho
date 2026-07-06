@@ -16,6 +16,8 @@ import {
     ArrowUpRight,
     Copy,
     CloudDownload,
+    Layers,
+    List,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/button';
@@ -343,6 +345,9 @@ export function ContainersHealth({
 }: ContainersHealthProps) {
     const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
     const copiedUrlTimerRef = useRef<number | null>(null);
+    // Compact mode hides sparkline grids across all containers for a denser
+    // list. Detailed mode (default) shows CPU / Mem / Net per container.
+    const [density, setDensity] = useState<'compact' | 'detailed'>('detailed');
     useEffect(() => () => {
         if (copiedUrlTimerRef.current !== null) window.clearTimeout(copiedUrlTimerRef.current);
     }, []);
@@ -372,7 +377,46 @@ export function ContainersHealth({
             {safeContainers.length === 0 ? (
                 <div className="text-muted-foreground text-sm">No containers running for this stack.</div>
             ) : (
-                <div className="flex flex-col gap-2">
+                <>
+                    {/* Summary strip + density toggle appear only for multi-container
+                        stacks; single-container stacks keep the original layout. */}
+                    {safeContainers.length > 1 && (() => {
+                        const total = safeContainers.length;
+                        const running = safeContainers.filter(c => c.State === 'running').length;
+                        const unhealthy = safeContainers.filter(c => c.healthStatus === 'unhealthy').length;
+                        const paused = safeContainers.filter(c => c.State === 'paused').length;
+                        return (
+                            <div className="flex items-center justify-between mb-1 px-1">
+                                <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
+                                    <span>{total} container{total !== 1 ? 's' : ''}</span>
+                                    <span className="text-success/80">{running} up</span>
+                                    {paused > 0 && <span className="text-warning/80">{paused} paused</span>}
+                                    {unhealthy > 0 && <span className="text-destructive/80">{unhealthy} unhealthy</span>}
+                                </div>
+                                <div className="inline-flex rounded-md border border-muted bg-muted/30 p-0.5">
+                                    <button
+                                        type="button"
+                                        onClick={() => setDensity('compact')}
+                                        className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'compact' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
+                                        aria-pressed={density === 'compact'}
+                                        aria-label="Compact view"
+                                    >
+                                        <List className="h-3 w-3" strokeWidth={1.5} />
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => setDensity('detailed')}
+                                        className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'detailed' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
+                                        aria-pressed={density === 'detailed'}
+                                        aria-label="Detailed view"
+                                    >
+                                        <Layers className="h-3 w-3" strokeWidth={1.5} />
+                                    </button>
+                                </div>
+                            </div>
+                        );
+                    })()}
+                    <div className="flex flex-col gap-2">
                     {safeContainers.map(container => {
                         let mainPort: number | undefined;
                         let mainPortPrivate: number | undefined;
@@ -521,7 +565,7 @@ export function ContainersHealth({
                                         )}
                                     </div>
                                 </div>
-                                {isActive ? (
+                                {isActive && density === 'detailed' ? (
                                     <div className="mt-2 grid grid-cols-3 gap-2">
                                         <div className="flex items-center gap-2 rounded-md bg-background/60 px-2 py-1.5">
                                             <div className="flex flex-col">
@@ -556,6 +600,7 @@ export function ContainersHealth({
                         );
                     })}
                 </div>
+                </>
             )}
         </div>
     );

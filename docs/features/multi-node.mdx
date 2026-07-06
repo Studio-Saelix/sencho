@@ -21,7 +21,9 @@ Remote nodes connect in one of two modes. Pick the one that matches your network
 
 ## The local node
 
-Your control Sencho instance is always listed as **Local**. It is the default node, marked with a star icon, and cannot be deleted. All operations on the local node run directly against the host's Docker socket.
+Only one local node can exist per Sencho instance. The local node cannot be deleted because each instance must retain its own Docker engine identity. All operations on the local node run directly against the host's Docker socket.
+
+If multiple local nodes exist from an older version, the extra rows show a Delete action so you can clean them up. Deleting a local node removes its schedules, labels, dossiers, findings, and other node-scoped data; containers and compose files on the host are not affected. The last remaining local row hides Delete because it cannot be removed.
 
 ## Choose a remote mode
 
@@ -172,7 +174,7 @@ The Nodes table surfaces routing, status, and per-node automation at a glance fo
 | **Labels** | Per-node label palette. The cell shows the label picker; an empty cell reads `No labels` with an Add label control. |
 | **Schedules** | Number of active scheduled tasks targeting this node, plus a `next X` countdown to the next run. Click the count or the calendar icon in the Actions column to filter the Schedules view to that node. |
 | **Updates** | `Auto` if at least one enabled `Auto-update Stack` or `Auto-update All Stacks on Node` schedule targets the node; `Off` otherwise. A pulsing dot and count appear when stacks have pending image updates. |
-| **Actions** | **View Schedules**, **Test Connection**, **Edit Node**, and **Delete Node** icon buttons. The local row hides Delete because the local node cannot be removed. |
+| **Actions** | **View Schedules**, **Test Connection**, **Edit Node**, and **Delete Node** icon buttons. The last local row hides Delete because the local node cannot be removed. When multiple local nodes exist from an older version, the extra rows show Delete so you can clean them up. |
 
 Clicking the schedules-link icon opens the Schedules view filtered to the selected node. From there you can create, edit, or manage scheduled tasks scoped to that node. The filter bar shows which node you are viewing, with a Clear filter control to return to the full list.
 
@@ -218,7 +220,7 @@ This means:
 
 Click the pencil icon on any row to edit its name, URL, token, or compose directory. The API Token field opens blank for security: leave it blank to keep the current token, or paste a new one to rotate it. For a Pilot Agent row, the Edit modal also surfaces the **Regenerate enrollment token** card described earlier.
 
-Click the trash icon to remove a remote node. The local row hides this icon because the default node cannot be deleted. Removing a node only deletes the routing entry on the control instance; the remote Sencho instance and its containers are not touched.
+Click the trash icon to remove a remote node. The local row hides this icon when it is the only local node. When multiple local nodes exist from an older version, the extra rows expose Delete so you can clean them up. Deleting a local node removes its schedules, labels, dossiers, findings, and other node-scoped data; containers and compose files on the host are not affected.
 
 ## Security
 

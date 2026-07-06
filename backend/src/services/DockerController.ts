@@ -16,6 +16,16 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
 
+/** Parsed row from `docker compose ps --format json`. */
+interface ComposePsContainer {
+  ID?: string;
+  Name?: string;
+  Service?: string;
+  State?: string;
+  Status?: string;
+  Publishers?: { URL?: string; TargetPort?: number; PublishedPort?: number; Protocol?: string }[];
+}
+
 const execFileAsync = promisify(execFile);
 const COMPOSE_DIR = process.env.COMPOSE_DIR || '/app/compose';
 
@@ -1462,6 +1472,70 @@ class DockerController {
     return result;
   }
 
+  /**
+   * Containers visible to `docker compose ps` for this stack. Empty when Compose
+   * does not manage any containers (including first deploy or mislabeled legacy).
+   */
+  private async fetchComposePsContainers(stackName: string, stackDir: string): Promise<ComposePsContainer[]> {
+    const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
+    const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
+    const { stdout, stderr } = await execFileAsync(
+      'docker',
+      ['compose', ...filePrefix, ...envFileArgs, 'ps', '--format', 'json', '-a'],
+      {
+        cwd: stackDir,
+        env: {
+          ...process.env,
+          PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+        }
+      }
+    );
+
+    let containers: ComposePsContainer[] = [];
+    if (stdout && stdout.trim() !== '') {
+      try {
+        const parsed = JSON.parse(stdout);
+        containers = Array.isArray(parsed) ? parsed : [parsed];
+      } catch (parseError) {
+        try {
+          const lines = stdout.trim().split('\n').filter(line => line.trim() !== '');
+          containers = lines.map(line => JSON.parse(line) as ComposePsContainer);
+        } catch (innerError) {
+          console.error('Docker Compose JSON Parse Error for %s:', sanitizeForLog(stackName), sanitizeForLog(stderr || (parseError as Error).message));
+        }
+      }
+    }
+    return containers;
+  }
+
+  /**
+   * Legacy orphan containers that Compose ps cannot see but would block a deploy
+   * (wrong project labels). When Compose already manages the stack, returns [] so
+   * deploy can rely on selective `compose up` recreation.
+   */
+  public async getLegacyOrphanContainersByStack(stackName: string): Promise<Array<{ Id: string }>> {
+    const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
+    const toIds = (list: Array<{ Id?: string }>) =>
+      list.filter((c): c is { Id: string } => typeof c.Id === 'string' && c.Id.length > 0)
+        .map((c) => ({ Id: c.Id }));
+
+    try {
+      const composeContainers = await this.fetchComposePsContainers(stackName, stackDir);
+      if (composeContainers.length > 0) return [];
+      return toIds(await this.smartFallback(stackName, stackDir));
+    } catch (error) {
+      const execError = error as NodeJS.ErrnoException & { stderr?: string };
+      const mapped = describeSpawnError(execError, { command: 'docker compose ps' });
+      const detail = execError.stderr || mapped.message;
+      console.error('Docker Compose Error for %s:', sanitizeForLog(stackName), sanitizeForLog(detail));
+      try {
+        return toIds(await this.smartFallback(stackName, stackDir));
+      } catch {
+        return [];
+      }
+    }
+  }
+
   public async getContainersByStack(stackName: string) {
     // Resolve the compose dir and the authored prefix for THIS controller's node,
     // not the process default, so a non-default local node sees its own stack dir
@@ -1469,55 +1543,7 @@ class DockerController {
     const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
 
     try {
-      // Splice the authored multi-file prefix (-f files + -p + --project-directory)
-      // so a Git stack's override-only services are listed; single-file stacks get an
-      // empty prefix and behave exactly as before. execFile avoids shell quoting on
-      // the absolute --project-directory path.
-      const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
-      const envFileArgs = await authoredComposeEnvFileArgs(stackName, this.nodeId);
-      const { stdout, stderr } = await execFileAsync(
-        'docker',
-        ['compose', ...filePrefix, ...envFileArgs, 'ps', '--format', 'json', '-a'],
-        {
-          cwd: stackDir,
-          env: {
-            ...process.env,
-            PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
-          }
-        }
-      );
-
-      // Robust JSON parsing - handle both JSON array and newline-separated JSON objects
-      // Docker Compose v2 may return either format depending on version
-      interface ComposeContainer {
-        ID?: string;
-        Name?: string;
-        Service?: string;
-        State?: string;
-        Status?: string;
-        Publishers?: { URL?: string, TargetPort?: number, PublishedPort?: number, Protocol?: string }[];
-      }
-
-      let containers: ComposeContainer[] = [];
-
-      // Only parse if stdout has content
-      if (stdout && stdout.trim() !== '') {
-        try {
-          // Try parsing as a standard JSON array
-          const parsed = JSON.parse(stdout);
-          containers = Array.isArray(parsed) ? parsed : [parsed];
-        } catch (parseError) {
-          // Fallback: parse newline-separated JSON objects, filtering out empty lines
-          try {
-            const lines = stdout.trim().split('\n').filter(line => line.trim() !== '');
-            containers = lines.map(line => JSON.parse(line) as ComposeContainer);
-          } catch (innerError) {
-            // Log parsing failure with stderr for debugging
-            console.error('Docker Compose JSON Parse Error for %s:', sanitizeForLog(stackName), sanitizeForLog(stderr || (parseError as Error).message));
-            // Don't return empty - trigger smart fallback below
-          }
-        }
-      }
+      const containers = await this.fetchComposePsContainers(stackName, stackDir);
 
       // If containers found via docker compose ps, return them
       if (containers.length > 0) {

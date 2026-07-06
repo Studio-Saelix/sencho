@@ -38,6 +38,7 @@ import ErrorBoundary from '../ErrorBoundary';
 import StackAnatomyPanel from '../StackAnatomyPanel';
 import { StackFileExplorer } from '@/components/files/StackFileExplorer';
 import { useIsMobile } from '@/hooks/use-is-mobile';
+import { ScrollArea } from '../ui/scroll-area';
 import { StackIdentityHeader, ContainersHealth, StackLogsSection } from './editor-view-blocks';
 import { MobileStackDetail } from './MobileStackDetail';
 import { RecoveryChip } from './RecoveryChip';
@@ -358,7 +359,7 @@ export function EditorView(props: EditorViewProps) {
                     {/* Command Center Card (identity + health strip). Hidden when
                         the logs are expanded so the logs pane fills the column. */}
                     {!logsExpanded && (
-                    <Card className="rounded-xl border-muted bg-card shrink-0">
+                    <Card className={`rounded-xl border-muted bg-card ${safeContainers.length > 1 ? 'flex flex-col min-h-0 max-h-[42%]' : 'shrink-0'}`}>
                         <CardHeader className="p-4 pb-2">
                             <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0 flex-1">
@@ -411,6 +412,23 @@ export function EditorView(props: EditorViewProps) {
                             panelStartedAt={panelStartedAt}
                             variant="band"
                         />
+                        {safeContainers.length > 1 ? (
+                        <CardContent className="p-4 pt-2 flex-1 min-h-0">
+                            <ScrollArea className="h-full">
+                                <ContainersHealth
+                                    safeContainers={safeContainers}
+                                    containerStats={containerStats}
+                                    containerStatsError={containerStatsError}
+                                    isAdmin={isAdmin}
+                                    activeNode={activeNode}
+                                    openLogViewer={openLogViewer}
+                                    openBashModal={openBashModal}
+                                    serviceAction={serviceAction}
+                                    key={`${activeNode?.id ?? 'local'}:${stackName}`}
+                                />
+                            </ScrollArea>
+                        </CardContent>
+                        ) : (
                         <CardContent className="p-4 pt-2">
                             <ContainersHealth
                                 safeContainers={safeContainers}
@@ -421,12 +439,17 @@ export function EditorView(props: EditorViewProps) {
                                 openLogViewer={openLogViewer}
                                 openBashModal={openBashModal}
                                 serviceAction={serviceAction}
+                                key={`${activeNode?.id ?? 'local'}:${stackName}`}
                             />
                         </CardContent>
+                        )}
                     </Card>
                     )}
 
-                    {/* Logs Section (fills remaining left-column height) */}
+                    {/* Logs Section (fills remaining left-column height). On multi-
+                        container stacks a min-h guarantees logs are never hidden. */}
+                    {safeContainers.length > 1 ? (
+                    <div className="flex-1 min-h-[180px] flex flex-col">
                     <StackLogsSection
                         stackName={stackName}
                         logsMode={logsMode}
@@ -434,6 +457,16 @@ export function EditorView(props: EditorViewProps) {
                         logsExpanded={logsExpanded}
                         onToggleLogsExpand={() => setLogsExpanded((v) => !v)}
                     />
+                    </div>
+                    ) : (
+                    <StackLogsSection
+                        stackName={stackName}
+                        logsMode={logsMode}
+                        setLogsMode={setLogsMode}
+                        logsExpanded={logsExpanded}
+                        onToggleLogsExpand={() => setLogsExpanded((v) => !v)}
+                    />
+                    )}
                 </div>
                 )}
 

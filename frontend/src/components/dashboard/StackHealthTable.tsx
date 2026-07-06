@@ -4,6 +4,7 @@ import { Sparkline } from '@/components/ui/sparkline';
 import { ArrowUp, ArrowDown, ChevronLeft, ChevronRight, Layers } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { StackStatusEntry, MetricPoint, StackCpuSeries } from './types';
+import type { StackUpdateInfo } from '@/types/imageUpdates';
 import { aggregateCurrentUsage } from './aggregateCurrentUsage';
 import { classifyRow, type RowState } from './classifyRow';
 
@@ -12,6 +13,7 @@ interface StackHealthTableProps {
   metrics: MetricPoint[];
   stackCpuSeries: Record<string, StackCpuSeries>;
   onNavigateToStack: (stackFile: string) => void;
+  stackUpdates?: Record<string, StackUpdateInfo>;
 }
 
 type SortKey = 'stack' | 'up' | 'cpu' | 'mem';
@@ -90,6 +92,7 @@ export function StackHealthTable({
   metrics,
   stackCpuSeries,
   onNavigateToStack,
+  stackUpdates = {},
 }: StackHealthTableProps) {
   const [page, setPage] = useState(0);
   // null = the default health-state ordering (worst first); a SortKey switches
@@ -127,9 +130,10 @@ export function StackHealthTable({
         runningSince: entry.runningSince ?? null,
         source: entry.source ?? 'local',
         mainPort: entry.mainPort ?? null,
+        hasUpdate: stackUpdates[file]?.hasUpdate ?? false,
       };
     });
-  }, [stackStatuses, stackAggregates, stackCpuSeries]);
+  }, [stackStatuses, stackAggregates, stackCpuSeries, stackUpdates]);
 
   const rows = useMemo(() => {
     const list = [...baseRows];
@@ -246,7 +250,14 @@ export function StackHealthTable({
             className={`grid ${GRID_TEMPLATE} cursor-pointer items-center gap-4 px-[var(--density-row-x)] py-[var(--density-row-y)] transition-colors hover:bg-accent/5 ${rowTint[row.state]}`}
           >
             <span className={`h-1.5 w-1.5 rounded-full justify-self-center ${stateDot[row.state]}`} aria-hidden="true" />
-            <span className="truncate font-mono text-sm text-stat-value">{row.name}</span>
+            <span className="flex items-center gap-2 min-w-0">
+              <span className="flex-1 min-w-0 truncate font-mono text-sm text-stat-value">{row.name}</span>
+              {row.hasUpdate && (
+                <span className="shrink-0 rounded-full bg-update/15 px-2 py-0.5 font-mono text-[10px] leading-none text-update tracking-wide">
+                  Update available
+                </span>
+              )}
+            </span>
             <span className="truncate font-mono text-[11px] uppercase tracking-wide text-stat-subtitle">
               {row.source === 'git' ? 'Git' : 'Local'}
             </span>

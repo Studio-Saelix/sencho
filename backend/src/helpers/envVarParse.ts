@@ -49,6 +49,57 @@ export function parseInterpolationRefs(source: string): InterpolationRef[] {
   return [...byName.values()];
 }
 
+// Bare $VAR (no braces). The leading (?<!\$) skips Compose's $$ literal escape.
+const BARE_DOLLAR_RE = /(?<!\$)\$([A-Za-z_][A-Za-z0-9_]*)/g;
+
+/** Extract distinct bare `$VAR` references from authored compose text (not `${VAR}`). */
+export function parseBareDollarRefs(source: string): string[] {
+  const names = new Set<string>();
+  for (const m of source.matchAll(BARE_DOLLAR_RE)) names.add(m[1]);
+  return [...names];
+}
+
+/** True when a key name follows env-var naming (UPPER_SNAKE), not compose fields like `command`. */
+function looksLikeEnvKey(key: string): boolean {
+  return key === key.toUpperCase() && /[A-Z]/.test(key);
+}
+
+/** Parse an inline environment key/value assignment from a compose source line. */
+function parseEnvAssignment(line: string): { keyName: string; valuePart: string } | null {
+  const trimmed = line.trim();
+  const listEq = trimmed.match(/^-\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+  if (listEq) return { keyName: listEq[1], valuePart: listEq[2].trim() };
+  const listColon = trimmed.match(/^-\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s+(.*)$/);
+  if (listColon) return { keyName: listColon[1], valuePart: listColon[2].trim() };
+  const mapEq = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+  if (mapEq && looksLikeEnvKey(mapEq[1])) return { keyName: mapEq[1], valuePart: mapEq[2].trim() };
+  const mapColon = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*:\s+(.*)$/);
+  if (mapColon && looksLikeEnvKey(mapColon[1])) return { keyName: mapColon[1], valuePart: mapColon[2].trim() };
+  return null;
+}
+
+/**
+ * Bare `$VAR` references Compose is meant to interpolate: self-references
+ * (`TOKEN=$TOKEN`), whole-value refs (`FOO=$BAR`), and refs outside env values.
+ * Fragments embedded inside a literal value (e.g. bcrypt hashes) are excluded.
+ */
+export function parseIntentionalBareDollarRefs(source: string): string[] {
+  const names = new Set<string>();
+  for (const line of source.split(/\r?\n/)) {
+    const assignment = parseEnvAssignment(line);
+    if (assignment) {
+      const { keyName, valuePart } = assignment;
+      for (const m of valuePart.matchAll(BARE_DOLLAR_RE)) {
+        const name = m[1];
+        if (keyName === name || valuePart === `$${name}`) names.add(name);
+      }
+    } else {
+      for (const m of line.matchAll(BARE_DOLLAR_RE)) names.add(m[1]);
+    }
+  }
+  return [...names];
+}
+
 /**
  * Pull the KEY name from a single env-file line, or null for a blank/comment line.
  * Handles `KEY=value`, `export KEY=value`, and a bare `KEY` (value sourced from the

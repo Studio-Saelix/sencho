@@ -25,7 +25,7 @@ export function totpNow(secret: string): string {
 }
 
 /** Selector for the dashboard - only present in EditorLayout, not on login/setup pages */
-const DASHBOARD_INDICATOR = 'img[src*="sencho-logo"]';
+const DASHBOARD_INDICATOR = 'img[src*="sencho-logo"], button:has-text("Create Stack")';
 
 /** Returns true if the current page is the first-run setup screen */
 async function isSetupPage(page: Page): Promise<boolean> {
@@ -39,7 +39,8 @@ async function isLoginPage(page: Page): Promise<boolean> {
 
 /** Returns true if the dashboard (EditorLayout) is loaded */
 export async function isDashboard(page: Page): Promise<boolean> {
-  return page.locator(DASHBOARD_INDICATOR).isVisible().catch(() => false);
+  const indicator = page.locator(DASHBOARD_INDICATOR).first();
+  return indicator.isVisible().catch(() => false);
 }
 
 /**
@@ -74,7 +75,7 @@ export async function loginAs(page: Page, username = TEST_USERNAME, password = T
     const enterButton = page.getByRole('button', { name: /enter sencho/i });
     await expect(enterButton).toBeVisible({ timeout: 10_000 });
     await enterButton.click();
-    await expect(page.locator(DASHBOARD_INDICATOR)).toBeVisible({ timeout: 10_000 });
+    await waitForStacksLoaded(page);
     return;
   }
 
@@ -93,7 +94,7 @@ export async function loginAs(page: Page, username = TEST_USERNAME, password = T
       await usernameField.fill(username);
       await page.locator('#password').fill(password);
       await page.locator('button:has-text("Login"), button:has-text("Sign in")').first().click();
-      await expect(page.locator(DASHBOARD_INDICATOR)).toBeVisible({ timeout: 10_000 });
+      await waitForStacksLoaded(page);
       return;
     }
     // Fall through to the dashboard check below.
@@ -102,6 +103,14 @@ export async function loginAs(page: Page, username = TEST_USERNAME, password = T
   // ── Already on the dashboard ──────────────────────────────────────────────
   if (await isDashboard(page)) {
     return;
+  }
+
+  // Cookie session may still be restoring after a hard reload.
+  try {
+    await waitForStacksLoaded(page);
+    return;
+  } catch {
+    // fall through
   }
 
   throw new Error(

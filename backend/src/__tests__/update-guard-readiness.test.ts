@@ -8,6 +8,7 @@ import {
   healthchecksSignal,
   preflightSignal,
   updatePreviewSignal,
+  buildServicesSignal,
 } from '../services/updateGuard/readiness';
 import type { ContainerProbe, ReadinessSignal } from '../services/updateGuard/types';
 import type { UpdatePreviewSummary } from '../services/UpdatePreviewService';
@@ -34,22 +35,24 @@ const summary = (over: Partial<UpdatePreviewSummary> = {}): UpdatePreviewSummary
   update_kind: 'none',
   blocked: false,
   blocked_reason: null,
+  has_build_services: false,
+  rebuild_available: false,
   ...over,
 });
 
 describe('preflightSignal', () => {
   const cases = [
-    { status: 'never-run', expected: 'unknown', affects: false },
-    { status: 'blocker', expected: 'blocked', affects: true },
-    { status: 'unrenderable', expected: 'attention', affects: true },
-    { status: 'high', expected: 'attention', affects: true },
-    { status: 'warning', expected: 'warning', affects: true },
-    { status: 'pass', expected: 'ok', affects: true },
-    { status: 'info', expected: 'ok', affects: true },
+    { activeStatus: 'never-run', expected: 'unknown', affects: false },
+    { activeStatus: 'blocker', expected: 'blocked', affects: true },
+    { activeStatus: 'unrenderable', expected: 'attention', affects: true },
+    { activeStatus: 'high', expected: 'attention', affects: true },
+    { activeStatus: 'warning', expected: 'warning', affects: true },
+    { activeStatus: 'pass', expected: 'ok', affects: true },
+    { activeStatus: 'info', expected: 'ok', affects: true },
   ] as const;
 
-  it.each(cases)('maps preflight status $status to $expected', ({ status, expected, affects }) => {
-    const signal = preflightSignal({ status });
+  it.each(cases)('maps preflight activeStatus $activeStatus to $expected', ({ activeStatus, expected, affects }) => {
+    const signal = preflightSignal({ activeStatus });
     expect(signal.status).toBe(expected);
     expect(signal.affectsVerdict).toBe(affects);
   });
@@ -135,8 +138,41 @@ describe('updatePreviewSignal', () => {
     expect(updatePreviewSignal(summary()).status).toBe('ok');
   });
 
+  it('warns when only local build services need a rebuild', () => {
+    const signal = updatePreviewSignal(summary({ rebuild_available: true, has_build_services: true }));
+    expect(signal.status).toBe('warning');
+    expect(signal.detail).toContain('rebuild');
+  });
+
+  it('notes build services on a pending registry update', () => {
+    const signal = updatePreviewSignal(summary({
+      has_update: true,
+      semver_bump: 'patch',
+      update_kind: 'tag',
+      has_build_services: true,
+    }));
+    expect(signal.detail).toContain('Local build services');
+  });
+
   it('degrades a preview failure to a non-verdict-affecting unknown', () => {
     expect(updatePreviewSignal('error')).toMatchObject({ status: 'unknown', affectsVerdict: false });
+  });
+});
+
+describe('buildServicesSignal', () => {
+  it('is ok when no build services are declared', () => {
+    expect(buildServicesSignal([]).status).toBe('ok');
+  });
+
+  it('warns with service names when build services exist', () => {
+    const signal = buildServicesSignal(['app', 'worker']);
+    expect(signal.status).toBe('warning');
+    expect(signal.affectsVerdict).toBe(false);
+    expect(signal.detail).toContain('app, worker');
+  });
+
+  it('degrades read failures to unknown', () => {
+    expect(buildServicesSignal('error')).toMatchObject({ status: 'unknown', affectsVerdict: false });
   });
 });
 
@@ -182,10 +218,10 @@ describe('aggregateVerdict', () => {
   });
 
   it('reaches every verdict from realistic signal sets', () => {
-    expect(aggregateVerdict([preflightSignal({ status: 'blocker' }), driftSignal(0)])).toBe('blocked');
-    expect(aggregateVerdict([preflightSignal({ status: 'high' }), driftSignal(0)])).toBe('review_required');
+    expect(aggregateVerdict([preflightSignal({ activeStatus: 'blocker' }), driftSignal(0)])).toBe('blocked');
+    expect(aggregateVerdict([preflightSignal({ activeStatus: 'high' }), driftSignal(0)])).toBe('review_required');
     expect(aggregateVerdict([containersSignal('error'), driftSignal(0)])).toBe('unknown');
-    expect(aggregateVerdict([driftSignal(1), preflightSignal({ status: 'pass' })])).toBe('ready_with_warnings');
-    expect(aggregateVerdict([driftSignal(0), preflightSignal({ status: 'pass' }), healthchecksSignal([probe()])])).toBe('ready');
+    expect(aggregateVerdict([driftSignal(1), preflightSignal({ activeStatus: 'pass' })])).toBe('ready_with_warnings');
+    expect(aggregateVerdict([driftSignal(0), preflightSignal({ activeStatus: 'pass' }), healthchecksSignal([probe()])])).toBe('ready');
   });
 });

@@ -129,6 +129,8 @@ export default function EditorLayout() {
     toggleBulkMode, toggleSelect, clearSelection, handleBulkAction,
     stackUpdates,
     fetchImageUpdates,
+    sidebarIndicators,
+    sidebarStackUpdates,
     pinned,
     isCollapsed, toggleCollapse,
     remoteSearchLoading,
@@ -671,7 +673,7 @@ export default function EditorLayout() {
             stackLabelMap,
             stackStatuses: stackStatuses as Record<string, StackRowStatus | undefined>,
             stackCounts,
-            stackUpdates,
+            stackUpdates: sidebarStackUpdates,
             gitSourcePendingMap,
             pinnedFiles: pinned,
             isCollapsed,
@@ -699,6 +701,7 @@ export default function EditorLayout() {
           onToggleSelect={toggleSelect}
           onClearSelection={clearSelection}
           onBulkAction={handleBulkAction}
+          showUpdatesChip={sidebarIndicators}
         />
       );
 
@@ -779,6 +782,7 @@ export default function EditorLayout() {
             fleetTab={fleetTab}
             onFleetTabConsumed={() => setFleetTab(null)}
             renderEditor={renderEditor}
+            stackUpdates={stackUpdates}
           />
         </div>
       );

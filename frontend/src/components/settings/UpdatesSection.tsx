@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Input } from '@/components/ui/input';
+import { TogglePill } from '@/components/ui/toggle-pill';
 import {
     Select,
     SelectContent,
@@ -12,6 +13,7 @@ import { SegmentedControl } from '@/components/ui/segmented-control';
 import { SettingsPrimaryButton } from './SettingsActions';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
+import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 import { formatTimeAgo, formatTimeUntil } from '@/lib/relativeTime';
@@ -61,6 +63,49 @@ export function UpdatesSection() {
 
     const intervalMinutes = status?.intervalMinutes ?? null;
 
+    // Mirror activeNode.id in a ref so the PATCH handler can detect a node
+    // switch mid-flight and discard a stale write.
+    const activeNodeIdRef = useRef(activeNode?.id ?? null);
+    activeNodeIdRef.current = activeNode?.id ?? null;
+
+    // Derive toggle state from the current status. When the field is missing
+    // (older remote node) the toggle is disabled with a helpful message.
+    const sidebarIndicators = status?.sidebarIndicators ?? false;
+    const nodeSupportsSidebarSetting = status !== null && status.sidebarIndicators !== undefined;
+
+    const handleSidebarIndicatorsChange = useCallback(async (next: boolean) => {
+        const targetNodeId = activeNodeIdRef.current;
+        setIsSaving(true);
+        try {
+            const res = await apiFetch('/settings', {
+                method: 'PATCH',
+                nodeId: targetNodeId ?? null,
+                body: JSON.stringify({ image_update_sidebar_indicators: next ? '1' : '0' }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err?.error || 'Failed to update setting');
+            }
+            // Guard: if the active node changed while the PATCH was in flight,
+            // discard the response — it belongs to a different node.
+            if (activeNodeIdRef.current === targetNodeId) {
+                setStatus(prev => prev ? { ...prev, sidebarIndicators: next } : prev);
+                window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED, {
+                    detail: { changedKeys: ['image_update_sidebar_indicators'] },
+                }));
+            }
+        } catch (e) {
+            // Only surface the error if the active node hasn't changed. A
+            // stale failure from node A must not toast while the user views
+            // node B.
+            if (activeNodeIdRef.current === targetNodeId) {
+                toast.error((e as Error)?.message || 'Failed to update sidebar indicator setting.');
+            }
+        } finally {
+            setIsSaving(false);
+        }
+    }, []);
+
     useMastheadStats(
         isLoading || intervalMinutes == null
             ? null
@@ -70,6 +115,7 @@ export function UpdatesSection() {
     useEffect(() => {
         let cancelled = false;
         const fetchStatus = async () => {
+            setStatus(null);
             setIsLoading(true);
             try {
                 const res = await apiFetch('/image-updates/status');
@@ -278,6 +324,25 @@ export function UpdatesSection() {
                             Last checked {lastChecked} · Next check {nextCheck}
                         </p>
                     </div>
+                </SettingsField>
+            </SettingsSection>
+
+            <SettingsSection title="Sidebar" kicker="node-scoped">
+                <SettingsField
+                    label="Show update status in sidebar"
+                    helper={
+                        status !== null && status.sidebarIndicators === undefined
+                            ? "This node is running an older version of Sencho that does not support this setting. Upgrade the node to enable it."
+                            : "Show a pulsing dot when a stack has an available update and a warning icon when the check fails. The Stack Health table on the home page always shows update status regardless of this setting. Notifications are unaffected."
+                    }
+                    htmlFor="sidebar-indicators-toggle"
+                >
+                    <TogglePill
+                        id="sidebar-indicators-toggle"
+                        checked={sidebarIndicators}
+                        onChange={handleSidebarIndicatorsChange}
+                        disabled={status === null || !nodeSupportsSidebarSetting || readOnly || isSaving}
+                    />
                 </SettingsField>
             </SettingsSection>
         </fieldset>

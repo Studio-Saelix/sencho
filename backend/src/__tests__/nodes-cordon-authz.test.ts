@@ -4,10 +4,10 @@
  *
  * These guard the same boundary the NodeCard cordon control renders against, so
  * a UI gate and a route guard cannot silently drift apart. Cordon/uncordon
- * require the paid tier AND the node:manage permission (held by admin and
+ * require the node:manage permission on every tier (held by admin and
  * node-admin roles). The guard order is:
  *   rejectApiTokenScope (SCOPE_DENIED) -> requirePermission (PERMISSION_DENIED)
- *   -> requirePaid (PAID_REQUIRED) -> invalid-id 400
+ *   -> invalid-id 400
  *   -> reason 400 (cordon only) -> 404.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
@@ -115,15 +115,15 @@ describe('POST /api/nodes/:id/cordon authorization', () => {
         },
     );
 
-    it('rejects an admin on a Community license with PAID_REQUIRED', async () => {
+    it('lets a Community admin cordon a node', async () => {
         setLicense('community');
         const node = seedNode();
         const res = await request(app)
             .post(`/api/nodes/${node.id}/cordon`)
             .set('Cookie', adminCookie)
             .send({});
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('PAID_REQUIRED');
+        expect(res.status).toBe(200);
+        expect(res.body.cordoned).toBe(true);
     });
 
     it('rejects a full-admin API token with SCOPE_DENIED (API tokens cannot manage nodes)', async () => {
@@ -190,7 +190,7 @@ describe('POST /api/nodes/:id/cordon authorization', () => {
         expect(res.body.cordoned_reason).toBeNull();
     });
 
-    it('checks node:manage before the tier gate (Community viewer gets PERMISSION_DENIED, not PAID_REQUIRED)', async () => {
+    it('checks node:manage before route validation (Community viewer gets PERMISSION_DENIED, not PAID_REQUIRED)', async () => {
         setLicense('community');
         const node = seedNode();
         const res = await request(app)
@@ -243,15 +243,15 @@ describe('POST /api/nodes/:id/uncordon authorization', () => {
         },
     );
 
-    it('rejects an admin on a Community license with PAID_REQUIRED', async () => {
+    it('lets a Community admin uncordon a node', async () => {
         setLicense('community');
         const node = seedCordonedNode();
         const res = await request(app)
             .post(`/api/nodes/${node.id}/uncordon`)
             .set('Cookie', adminCookie)
             .send({});
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('PAID_REQUIRED');
+        expect(res.status).toBe(200);
+        expect(res.body.cordoned).toBe(false);
     });
 
     it('rejects a full-admin API token with SCOPE_DENIED', async () => {

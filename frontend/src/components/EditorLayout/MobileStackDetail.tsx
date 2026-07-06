@@ -227,6 +227,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 openLogViewer={openLogViewer}
                                 openBashModal={openBashModal}
                                 serviceAction={serviceAction}
+                                key={`${activeNode?.id ?? 'local'}:${stackName}`}
                             />
                         </div>
                     )}

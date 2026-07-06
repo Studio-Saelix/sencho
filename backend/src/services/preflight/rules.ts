@@ -82,8 +82,34 @@ const envUnset: PreflightRule = {
       title: `Unset variable ${name}`,
       message: `"${name}" is referenced by the Compose model but is not set in the environment or any consulted env file. Compose substitutes an empty string, which often breaks the container silently.`,
       sourcePath: name,
-      remediation: `Define ${name} in a .env or env_file, or give it a default with \${${name}:-value}.`,
+      remediation: `Define ${name} in a .env or env_file, or give it a default with \${${name}:-value}. If the value is a literal secret or hash containing \`$\`, escape \`$\` as \`$$\` in Compose YAML or single-quote the value in an env file.`,
     }));
+  },
+};
+
+const LITERAL_DOLLAR_REMEDIATION =
+  'If this was intended as a Compose variable, define it in the project environment or give it a default. '
+  + 'If it is part of a literal secret or hash, escape literal dollar signs as `$$` in Compose YAML or single-quote the value in an env file.';
+
+const envLiteralDollar: PreflightRule = {
+  id: 'env-literal-dollar',
+  run(ctx) {
+    return ctx.literalDollarWarnings.map(w => {
+      const likelySecret = w.likelySecret;
+      const title = likelySecret
+        ? 'Literal dollar sign in likely secret value may be interpolated'
+        : 'Literal dollar sign in environment value may be interpolated';
+      const keyHint = w.envKey ? ` for "${w.envKey}"` : '';
+      return {
+        ruleId: 'env-literal-dollar',
+        severity: 'high' as const,
+        title,
+        message: `Compose treated a literal $ sequence inside an environment value${keyHint} as variable interpolation and may substitute an empty string for part of the value.`,
+        sourcePath: w.envKey,
+        remediation: LITERAL_DOLLAR_REMEDIATION,
+        service: w.service,
+      };
+    });
   },
 };
 
@@ -744,6 +770,7 @@ const sensitiveServiceBroadExposure: PreflightRule = {
 export const PREFLIGHT_RULES: PreflightRule[] = [
   renderFailed,
   envUnset,
+  envLiteralDollar,
   envFileMissing,
   portConflictNode,
   portConflictInternal,

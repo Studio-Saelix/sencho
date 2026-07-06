@@ -12,7 +12,7 @@ Federation lives under **Fleet → Federation**.
 </Frame>
 
 <Note>
-Federation is an Admiral feature. Cordon and pin actions require an admin user role.
+Federation placement controls (cordon, uncordon, pin, and unpin) are available on every tier. Cordon and pin mutations require an admin user role, or the node-admin role for cordon when scoped to that node.
 </Note>
 
 ## Placement control, not placement automation
@@ -32,7 +32,7 @@ In practice, Federation hands you four operator decisions:
 
 ### Cordon a node
 
-Cordon marks a node as unschedulable. From the moment a node is cordoned, the reconciler skips it for new placements; existing stacks keep running, drift checks keep running, and revision bumps still redeploy in place. The cordon is visible to every tier (the read-only `Cordoned` pill on the node card) so non-Admiral operators understand why a node is not picking up new work. Uncordon to lift the restriction.
+Cordon marks a node as unschedulable. From the moment a node is cordoned, the reconciler skips it for new placements; existing stacks keep running, drift checks keep running, and revision bumps still redeploy in place. The cordon is visible to every tier (the read-only `Cordoned` pill on the node card) so operators can see why a node is not picking up new work. Uncordon to lift the restriction.
 
 The cordon reason is free-form text (up to 256 characters). It surfaces in the Federation tab summary, in the cordon pill's tooltip on the node card, and on the audit log row for the action.
 
@@ -50,8 +50,8 @@ Cordon, uncordon, and pin actions all flow through Sencho's standard audit log. 
 
 | Requirement | Why it matters |
 |-------------|----------------|
-| **Admiral license active on the control instance** | Federation enforcement, the tab itself, and the cordon and pin controls all gate on the control instance's tier. Remote nodes inherit Admiral through the [proxy's tier assertion](/features/multi-node#license-enforcement-across-nodes), so a paid control plane covers the whole fleet. |
-| **Admin role for the active user** | Operator and viewer roles can read cordon state but cannot toggle it. Pin policy edits are also admin-only. |
+| **Community or Admiral on the control instance** | Federation placement is part of the Compose-first control plane. Remote nodes inherit the control instance tier through the [proxy tier assertion](/features/multi-node#license-enforcement-across-nodes). |
+| **Admin or node-admin role** | Pin policy edits require admin. Cordon and uncordon require `node:manage` (admin, or node-admin when scoped to that node). Operator and viewer roles can read cordon state but cannot toggle it. |
 | **At least one Blueprint defined** | The Pin policy table is empty until you create a blueprint under **Fleet → Deployments**. Cordon does not require any blueprints; it only suppresses *new* placements from blueprints that exist later. |
 | **Active connection to each remote node** | Cordon state is written to the control instance's local database, but it only takes effect once the reconciler runs against the fleet's current node set. A remote node that is `Offline` still carries its cordon flag and resumes honouring it as soon as it comes back. |
 
@@ -117,7 +117,7 @@ The **Effective** column in the Pin policy table is computed live each time the 
 
 ## Security and audit
 
-Federation actions require both an Admiral license and an admin user role. The `Cordoned` pill on the node card stays visible at every tier as a read-only signal, so a non-Admiral operator can still understand why a node is skipping new work.
+Federation mutations require an admin user role, or the node-admin role for cordon when scoped to that node. The `Cordoned` pill on the node card stays visible at every tier as a read-only signal, so operators without placement permissions can still see why a node is skipping new work.
 
 Every cordon, uncordon, and pin action is captured in the audit log. Each row carries the actor, the action (`node.cordon`, `node.uncordon`, `blueprint.pin`), the affected resource, and the cordon reason where applicable. Filter the **Audit** view by these action names for the full history.
 
@@ -176,7 +176,7 @@ Pinning a stateful blueprint that is currently deployed on multiple nodes shrink
     The Fleet Overview grid polls every 30 seconds, so the `Cordoned` pill can lag the action by up to that long. The Federation tab summary and the audit log update immediately; if the audit log shows the cordon action but the badge is still missing, click **Refresh** on the Fleet page to force an immediate re-fetch.
   </Accordion>
   <Accordion title="The Federation tab is not visible">
-    Federation requires an Admiral license. The rest of the blueprint surface (catalog, deployments, drift) is available on lower tiers, and the read-only `Cordoned` pill on a node card is visible everywhere. If Federation is missing on an Admiral license, sign in as an admin user; cordon and pin actions are admin-only.
+    Federation is available on every tier under **Fleet → Federation**. Cordon and pin mutations require an admin user (or node-admin for cordon on nodes they manage). If the tab is missing, refresh the Fleet page; if controls are read-only, sign in as an admin.
   </Accordion>
   <Accordion title="The Pin policy table is empty even though I created blueprints">
     Federation reads from the same Blueprints registry that powers **Fleet → Deployments**. If the Deployments tab shows blueprints but Federation does not, refresh the Fleet page (the Pin policy table caches its source list when the tab mounts). If Deployments is also empty, no blueprint has been saved yet; create one there first.
@@ -199,6 +199,6 @@ Federation is one tab in a larger Fleet view, and it focuses on a narrow slice o
 | [Fleet Actions](/features/fleet-actions) | Bulk operations across labelled nodes (restart, stop). | Fleet Actions runs imperative operations on existing deployments; Federation steers declarative placement decisions. |
 | [Fleet Sync](/features/fleet-sync) | Push-only replication of security policies (scan policies, CVE suppressions) from a control instance to replica instances. | Fleet Sync replicates *security state*, not placement; the two features do not interact. |
 | [Blueprints](/features/blueprint-model) | The declarative deployment model whose reconciler Federation steers. | Required reading: without Blueprints, Federation has nothing to do. |
-| [Licensing](/features/licensing) | The full tier matrix and what each tier unlocks. | The single source of truth for the Admiral requirement called out at the top of this page. |
+| [Licensing](/features/licensing) | The full tier matrix and what each tier unlocks. | The single source of truth for which fleet capabilities require Admiral. |
 
 Federation is not Fleet Sync, not Mesh, and not the remote-node proxy. The cordon flag affects only declarative blueprint deployments, not manually deployed stacks. If you are looking for a way to take an entire node fully out of service (existing deployments included), see the deployment table's withdraw flow on each affected blueprint; cordon by itself is intentionally non-destructive.

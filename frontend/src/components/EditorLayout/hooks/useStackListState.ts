@@ -8,6 +8,7 @@ import { useSidebarGroupCollapse } from '@/hooks/useSidebarGroupCollapse';
 import { useBulkStackActions, type BulkAction } from '@/hooks/useBulkStackActions';
 import { useCrossNodeStackSearch } from '@/hooks/useCrossNodeStackSearch';
 import { SENCHO_LABELS_CHANGED } from '@/lib/events';
+import type { StackUpdateInfo } from '@/types/imageUpdates';
 import { isInputFocused, isPaletteOpen } from '@/lib/keyboard-guards';
 import type { StackAction, StackActionResult } from '../EditorView';
 import type { Label as StackLabel } from '../../label-types';
@@ -61,6 +62,8 @@ export interface RemoteResult {
   files: Array<{ file: string; status: StackRowStatus }>;
 }
 
+const EMPTY_UPDATES: Record<string, StackUpdateInfo> = {};
+
 export function useStackListState() {
   const { nodes, activeNode } = useNodes();
 
@@ -98,7 +101,8 @@ export function useStackListState() {
   const [bulkMode, setBulkMode] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
 
-  const { stackUpdates, refresh: fetchImageUpdates } = useImageUpdates(activeNode?.id);
+  const { stackUpdates, refresh: fetchImageUpdates, sidebarIndicators } = useImageUpdates(activeNode?.id);
+  const sidebarStackUpdates = sidebarIndicators ? stackUpdates : EMPTY_UPDATES;
   const { pinned, pin, unpin, isPinned, evictedOldest } = usePinnedStacks(activeNode?.id);
   const { isCollapsed, toggle: toggleCollapse } = useSidebarGroupCollapse(activeNode?.id);
   const { runBulk } = useBulkStackActions();
@@ -300,16 +304,16 @@ export function useStackListState() {
     all: filteredFiles.length,
     up: filteredFiles.filter(f => stackStatuses[f] === 'running').length,
     down: filteredFiles.filter(f => isDownStatus(stackStatuses[f])).length,
-    updates: filteredFiles.filter(f => stackUpdates[f]?.hasUpdate).length,
-  }), [filteredFiles, stackStatuses, stackUpdates]);
+    updates: filteredFiles.filter(f => sidebarStackUpdates[f]?.hasUpdate).length,
+  }), [filteredFiles, stackStatuses, sidebarStackUpdates]);
 
   const chipFilteredFiles = useMemo(() => {
     if (filterChip === 'all') return filteredFiles;
     if (filterChip === 'up') return filteredFiles.filter(f => stackStatuses[f] === 'running');
     if (filterChip === 'down') return filteredFiles.filter(f => isDownStatus(stackStatuses[f]));
-    if (filterChip === 'updates') return filteredFiles.filter(f => stackUpdates[f]?.hasUpdate);
+    if (filterChip === 'updates') return filteredFiles.filter(f => sidebarStackUpdates[f]?.hasUpdate);
     return filteredFiles;
-  }, [filteredFiles, filterChip, stackStatuses, stackUpdates]);
+  }, [filteredFiles, filterChip, stackStatuses, sidebarStackUpdates]);
 
   const toggleBulkMode = useCallback(() => {
     setBulkMode(prev => {
@@ -386,6 +390,15 @@ export function useStackListState() {
     });
   }, [remoteStackResults, nodes]);
 
+  // When the sidebar indicator toggle is turned off, reset an active Updates
+  // filter to 'all' so the user is not stuck in a filter that shows nothing.
+  useEffect(() => {
+    if (!sidebarIndicators && filterChip === 'updates') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setFilterChip('all');
+    }
+  }, [sidebarIndicators, filterChip]);
+
   return {
     files, setFiles, filesNodeId,
     selectedFile, setSelectedFile,
@@ -416,6 +429,7 @@ export function useStackListState() {
     scheduleStateInvalidateRefresh,
     toggleBulkMode, toggleSelect, clearSelection, handleBulkAction,
     stackUpdates, fetchImageUpdates,
+    sidebarIndicators, sidebarStackUpdates,
     pinned, pin, unpin, isPinned,
     isCollapsed, toggleCollapse,
     remoteSearchLoading,

@@ -189,6 +189,26 @@ describe('buildSummary', () => {
         expect(preview.summary.has_update).toBe(false);
         expect(preview.summary.primary_image).toBeNull();
         expect(preview.rollback_target).toBeNull();
+        expect(preview.summary.has_build_services).toBe(false);
+        expect(preview.summary.rebuild_available).toBe(false);
+    });
+
+    it('flags rebuild_available for build-only stacks', () => {
+        const preview = buildSummary('build-stack', [], ['app']);
+        expect(preview.build_services).toEqual(['app']);
+        expect(preview.summary.has_update).toBe(false);
+        expect(preview.summary.has_build_services).toBe(true);
+        expect(preview.summary.rebuild_available).toBe(true);
+    });
+
+    it('supports mixed image and build services', () => {
+        const images = [
+            baseImage({ service: 'web', has_update: true, semver_bump: 'patch', next_tag: '1.0.1', current_tag: '1.0.0' }),
+        ];
+        const preview = buildSummary('mixed', images, ['worker']);
+        expect(preview.summary.has_update).toBe(true);
+        expect(preview.summary.has_build_services).toBe(true);
+        expect(preview.summary.rebuild_available).toBe(true);
     });
 
     it('computes rollback target from current tag of primary', () => {

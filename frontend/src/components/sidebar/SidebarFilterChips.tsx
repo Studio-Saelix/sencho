@@ -15,6 +15,7 @@ interface SidebarFilterChipsProps {
   onChange: (chip: FilterChip) => void;
   visible: boolean;
   onToggle: () => void;
+  showUpdatesChip?: boolean;
 }
 
 const chips: { id: FilterChip; label: string }[] = [
@@ -24,12 +25,13 @@ const chips: { id: FilterChip; label: string }[] = [
   { id: 'updates', label: 'Updates' },
 ];
 
-export function SidebarFilterChips({ active, counts, onChange, visible, onToggle }: SidebarFilterChipsProps) {
+export function SidebarFilterChips({ active, counts, onChange, visible, onToggle, showUpdatesChip = true }: SidebarFilterChipsProps) {
+  const visibleChips = showUpdatesChip ? chips : chips.filter(c => c.id !== 'updates');
   return (
     <div className="flex items-center pb-1.5 pt-0.5 pl-2">
       {visible ? (
         <div className="flex items-center gap-0.5 flex-1 min-w-0 overflow-hidden">
-          {chips.map(({ id, label }) => {
+          {visibleChips.map(({ id, label }) => {
             const count = counts[id];
             const displayCount = count > 99 ? '99+' : count;
             const isActive = active === id;

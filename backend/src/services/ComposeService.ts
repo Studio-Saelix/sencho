@@ -24,6 +24,7 @@ import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/au
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { pathsMatch, resolveHostBindPath } from '../utils/composePathMapping';
+import { loadStackBuildServices } from './ImageUpdateService';
 
 export class ComposeRollbackError extends Error {
   public readonly rollbackAttempted: boolean;
@@ -471,10 +472,10 @@ export class ComposeService {
     try {
       try {
         const dockerController = DockerController.getInstance(this.nodeId);
-        const legacyContainers = await dockerController.getContainersByStack(stackName);
-        if (legacyContainers && legacyContainers.length > 0) {
-          sendOutput(`=== Cleaning up existing containers for clean deployment ===\n`);
-          await dockerController.removeContainers(legacyContainers.map((c: any) => c.Id));
+        const legacyOrphans = await dockerController.getLegacyOrphanContainersByStack(stackName);
+        if (legacyOrphans.length > 0) {
+          sendOutput(`=== Cleaning up legacy orphan containers before deployment ===\n`);
+          await dockerController.removeContainers(legacyOrphans.map((c) => c.Id));
         }
       } catch (e) {
         console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
@@ -674,9 +675,20 @@ export class ComposeService {
         console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
       }
 
+      const buildServices = await loadStackBuildServices(this.nodeId, stackName);
+      const buildAware = buildServices.length > 0;
+
       await this.withRegistryAuth(async (env) => {
-        sendOutput('=== Pulling latest images ===\n');
-        await this.execute('docker', await this.authoredComposeArgs(stackName, ['pull']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+        if (buildAware) {
+          sendOutput('=== Building images ===\n');
+          await this.execute('docker', await this.authoredComposeArgs(stackName, ['build', '--pull']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+
+          sendOutput('=== Pulling registry images ===\n');
+          await this.execute('docker', await this.authoredComposeArgs(stackName, ['pull', '--ignore-buildable']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+        } else {
+          sendOutput('=== Pulling latest images ===\n');
+          await this.execute('docker', await this.authoredComposeArgs(stackName, ['pull']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+        }
 
         sendOutput('=== Recreating containers ===\n');
         await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
