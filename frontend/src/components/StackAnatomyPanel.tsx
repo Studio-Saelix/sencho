@@ -20,6 +20,8 @@ import ComposeLabelsPanel from './stack/ComposeLabelsPanel';
 import StackNetworkingPanel from './stack/StackNetworkingPanel';
 import { useNodes } from '@/context/NodeContext';
 import type { NotificationItem } from '@/components/dashboard/types';
+import { ActivityMuteKebab } from '@/components/mute/MuteMenuItems';
+import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 
 interface StackAnatomyPanelProps {
   stackName: string;
@@ -34,6 +36,7 @@ interface StackAnatomyPanelProps {
   canEdit: boolean;
   applying?: boolean;
   notifications?: NotificationItem[];
+  stackMuteActions?: ReturnType<typeof useStackMuteActions>;
 }
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
@@ -89,6 +92,7 @@ export default function StackAnatomyPanel({
   canEdit,
   applying = false,
   notifications,
+  stackMuteActions,
 }: StackAnatomyPanelProps) {
   const anatomy = useMemo(() => parseAnatomy(content), [content]);
   const envKeys = useMemo(() => parseEnvKeys(envContent), [envContent]);
@@ -443,6 +447,7 @@ export default function StackAnatomyPanel({
               edit
             </button>
           )}
+          {stackMuteActions && <ActivityMuteKebab actions={stackMuteActions} />}
         </div>
       </div>
       <TabsContent value="activity" className="flex-1 min-h-0 overflow-y-auto px-3 mt-0">
