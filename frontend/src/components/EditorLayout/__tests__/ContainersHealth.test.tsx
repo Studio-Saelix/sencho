@@ -140,19 +140,23 @@ describe('density toggle and summary strip', () => {
     expect(screen.getByRole('button', { name: 'Detailed view' })).toBeInTheDocument();
   });
 
-  it('detailed mode is the default', () => {
+  it('compact mode is the default', () => {
     renderMany([makeContainer({ Id: 'a' }), makeContainer({ Id: 'b' })]);
-    const detailed = screen.getByRole('button', { name: 'Detailed view' });
-    expect(detailed).toHaveAttribute('aria-pressed', 'true');
+    const compact = screen.getByRole('button', { name: 'Compact view' });
+    expect(compact).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('hides sparkline grids in compact mode', () => {
     renderMany([makeContainer({ Id: 'a' }), makeContainer({ Id: 'b' })]);
-    // Sparklines visible by default in detailed mode (two containers, two cpu labels)
+    // Sparklines hidden by default (compact is the default)
+    expect(screen.queryByText('cpu')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Detailed view' }));
+    // Sparklines visible after switching to detailed
     expect(screen.getAllByText('cpu')).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: 'Compact view' }));
-    // Sparkline labels hidden in compact mode
+    // Sparkline labels hidden again in compact mode
     expect(screen.queryByText('cpu')).toBeNull();
   });
 
@@ -181,7 +185,7 @@ describe('density toggle and summary strip', () => {
     expect(screen.queryByRole('button', { name: 'Detailed view' })).toBeNull();
   });
 
-  it('resets density to detailed on remount (key change)', () => {
+  it('resets density to compact on remount (key change)', () => {
     const { unmount } = render(
       <ContainersHealth
         safeContainers={[makeContainer({ Id: 'a' }), makeContainer({ Id: 'b' })]}
@@ -194,9 +198,9 @@ describe('density toggle and summary strip', () => {
         serviceAction={vi.fn()}
       />,
     );
-    // Switch to compact
-    fireEvent.click(screen.getByRole('button', { name: 'Compact view' }));
-    expect(screen.queryByText('cpu')).toBeNull();
+    // Switch to detailed
+    fireEvent.click(screen.getByRole('button', { name: 'Detailed view' }));
+    expect(screen.getAllByText('cpu')).toHaveLength(2);
 
     // Simulate navigating to a single-container stack (new key)
     unmount();
@@ -212,8 +216,9 @@ describe('density toggle and summary strip', () => {
         serviceAction={vi.fn()}
       />,
     );
-    // Density reset; single container shows sparklines
-    expect(screen.getByText('cpu')).toBeInTheDocument();
+    // Density reset to compact; single container hides sparklines,
+    // no density toggle for a single container
+    expect(screen.queryByText('cpu')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Compact view' })).toBeNull();
   });
 });
