@@ -396,6 +396,30 @@ describe('assembleStackDrift - network drift', () => {
     expect(report.findings.filter(f => f.kind.startsWith('network-'))).toEqual([]);
   });
 
+  it('does not false-flag explicit network names equal to compose keys (regression: #1581)', () => {
+    const report = assembleStackDrift({
+      stack: 'network',
+      declared: {
+        services: [service({ name: 'tsbridge', networks: ['tailscale'] })],
+        networks: {
+          tailscale: { external: false, name: 'tailscale' },
+        },
+        volumes: {},
+        projectName: 'network',
+      },
+      containers: [container({
+        id: 'c1',
+        service: 'tsbridge',
+        stack: 'network',
+        networks: [{ name: 'tailscale', id: 't', ip: '' }, { name: 'network_default', id: 'd', ip: '' }],
+      })],
+      networks: [depNet('tailscale'), depNet('network_default')],
+    });
+    expect(report.findings.filter(f => f.kind === 'network-undeclared')).toEqual([]);
+    expect(report.findings.filter(f => f.kind === 'network-missing')).toEqual([]);
+    expect(report.status).toBe('in-sync');
+  });
+
   it('does not flag an attachment to a declared external network (regression: shared arr-net)', () => {
     // arr-net is declared `external: true` with no name override, so Docker attaches
     // the container to the pre-existing network named "arr-net" (no project prefix).
@@ -443,6 +467,20 @@ describe('declaredFromEffectiveModel', () => {
       volumes: {},
     };
     expect(fromDeclaredCompose(declaredFromEffectiveModel(model), 'myapp')).toEqual(fromEffectiveModel(model));
+  });
+
+  it('round-trips explicit network names equal to compose keys (regression: #1581)', () => {
+    const model: EffectiveModel = {
+      projectName: 'network',
+      services: [effSvc({ name: 'tsbridge', networks: [{ key: 'tailscale', aliases: [] }] })],
+      networks: {
+        proxy: { name: 'proxy', external: false, internal: false },
+        tailscale: { name: 'tailscale', external: false, internal: false },
+        vlan: { name: 'vlan', external: false, internal: false },
+      },
+      volumes: {},
+    };
+    expect(fromDeclaredCompose(declaredFromEffectiveModel(model), 'network')).toEqual(fromEffectiveModel(model));
   });
 });
 

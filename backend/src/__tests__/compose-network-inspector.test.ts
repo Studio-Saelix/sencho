@@ -127,8 +127,14 @@ describe('assembleStackNetworkFacts', () => {
 describe('runtimeResourceName', () => {
   it('uses a name override, else the project prefix', () => {
     expect(runtimeResourceName('myapp', 'backend', undefined)).toBe('myapp_backend');
-    expect(runtimeResourceName('myapp', 'backend', 'backend')).toBe('myapp_backend'); // name == key is not an override
+    expect(runtimeResourceName('myapp', 'backend', 'myapp_backend')).toBe('myapp_backend');
+    expect(runtimeResourceName('myapp', 'backend', 'backend')).toBe('backend');
     expect(runtimeResourceName('myapp', 'shared', 'shared_net')).toBe('shared_net');
+  });
+
+  it('resolves explicit name equal to the compose key (regression: #1581)', () => {
+    expect(runtimeResourceName('network', 'tailscale', 'tailscale')).toBe('tailscale');
+    expect(runtimeResourceName('network', 'proxy', 'proxy')).toBe('proxy');
   });
 
   it('never project-prefixes an external resource (runtime name is the key, or a name override)', () => {

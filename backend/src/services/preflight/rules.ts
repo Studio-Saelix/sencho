@@ -1,7 +1,7 @@
 import type { PreflightContext, PreflightFinding, PreflightSeverity, NodePortBinding } from './types';
 import type { EffService, EffPortSpec } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
-import { isLoopback } from '../network/normalize';
+import { isLoopback, runtimeResourceName } from '../network/normalize';
 
 /** Higher number = more severe. Used to derive a run's overall status. */
 export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warning: 1, high: 2, blocker: 3 };
@@ -50,11 +50,6 @@ function usesLatestTag(image: string): boolean {
 const UID_GID_KEYS = new Set(['PUID', 'PGID', 'UID', 'GID']);
 function hasUidGidSignal(svc: EffService): boolean {
   return svc.user !== undefined || svc.envKeys.some(k => UID_GID_KEYS.has(k));
-}
-
-/** Resolved runtime name of a top-level network/volume (compose prefixes the project). */
-function runtimeResourceName(projectName: string, key: string, declaredName: string): string {
-  return declaredName !== key ? declaredName : `${projectName}_${key}`;
 }
 
 // ----- rules ----------------------------------------------------------------

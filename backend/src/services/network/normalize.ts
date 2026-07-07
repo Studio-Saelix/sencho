@@ -36,8 +36,9 @@ export function isHostNetwork(mode: string | undefined): boolean {
  *  by its real name (the key, or a `name:` override), so prefixing it would invent
  *  a `<project>_<key>` that no runtime resource matches and read as foreign drift. */
 export function runtimeResourceName(projectName: string, key: string, declaredName: string | undefined, external = false): string {
-  if (declaredName && declaredName !== key) return declaredName;
-  return external ? key : `${projectName}_${key}`;
+  const defaultName = external ? key : `${projectName}_${key}`;
+  if (declaredName && declaredName !== defaultName) return declaredName;
+  return defaultName;
 }
 
 /** Extract host port numbers referenced by free-text access URLs, for the
