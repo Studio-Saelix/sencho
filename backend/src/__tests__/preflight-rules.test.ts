@@ -234,11 +234,37 @@ describe('network / volume rules', () => {
     const f = runRules(ctx({ model: m, existingNetworkNames: new Set(['shared']) }));
     expect(ids(f, 'external-network-missing')).toHaveLength(0);
   });
-  it('reports a new network/volume as info when absent on the node', () => {
-    const m = model([svc()], { networks: { backend: { name: 'backend', external: false, internal: false } }, volumes: { data: { name: 'data', external: false, internal: false } } });
+  it('reports a new network/volume as info when absent on the node (implicit default names)', () => {
+    const m = model([svc()], {
+      networks: { backend: { name: 'proj_backend', external: false, internal: false } },
+      volumes: { data: { name: 'proj_data', external: false, internal: false } },
+    });
     const f = runRules(ctx({ model: m }));
     expect(ids(f, 'new-network')[0].severity).toBe('info');
+    expect(ids(f, 'new-network')[0].message).toContain('proj_backend');
     expect(ids(f, 'new-volume')[0].message).toContain('proj_data');
+  });
+  it('uses explicit name equal to the compose key for new-network/new-volume (regression: #1581)', () => {
+    const m = model([svc()], {
+      projectName: 'proj',
+      networks: { backend: { name: 'backend', external: false, internal: false } },
+      volumes: { data: { name: 'data', external: false, internal: false } },
+    });
+    const f = runRules(ctx({ model: m }));
+    expect(ids(f, 'new-network')[0].message).toContain('"backend"');
+    expect(ids(f, 'new-network')[0].message).not.toContain('proj_backend');
+    expect(ids(f, 'new-volume')[0].message).toContain('"data"');
+    expect(ids(f, 'new-volume')[0].message).not.toContain('proj_data');
+  });
+  it('reports new-network with the true explicit name when project and key collide (regression: #1581)', () => {
+    const m = model([svc()], {
+      projectName: 'network',
+      networks: { tailscale: { name: 'tailscale', external: false, internal: false } },
+    });
+    const f = runRules(ctx({ model: m }));
+    const finding = ids(f, 'new-network')[0];
+    expect(finding.message).toContain('tailscale');
+    expect(finding.message).not.toContain('network_tailscale');
   });
   it('flags an anonymous volume as info and stays silent without one', () => {
     const anon = model([svc({ storageMounts: [{ type: 'anonymous', target: '/data', readOnly: false }] })]);
