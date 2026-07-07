@@ -485,18 +485,16 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const loadFile = async (filename: string) => {
-    if (!filename) return;
+  const loadFileCore = async (filename: string): Promise<boolean> => {
+    if (!filename) return false;
     if (
       stackListState.selectedFile &&
       filename !== stackListState.selectedFile &&
       hasUnsavedChanges()
     ) {
       overlayState.setPendingUnsavedLoad(filename);
-      return;
+      return false;
     }
-    // Cancel any in-flight load before starting a new one. A late response
-    // from the previous stack must not overwrite the freshly-loaded one.
     loadFileAbortRef.current?.abort();
     const controller = new AbortController();
     loadFileAbortRef.current = controller;
@@ -508,9 +506,12 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setActiveTab('compose');
     try {
       const res = await apiFetch(`/stacks/${filename}`, { signal });
-      if (signal.aborted) return;
+      if (signal.aborted) return false;
       const text = await res.text();
-      if (signal.aborted) return;
+      if (signal.aborted) return false;
+      if (!res.ok) {
+        throw new Error(`Failed to load stack: ${res.status}`);
+      }
       stackListState.setSelectedFile(filename);
       navState.setActiveView('editor');
       editorState.setContent(text || '');
@@ -519,12 +520,10 @@ export function useStackActions(options: UseStackActionsOptions) {
       await loadEnvState(filename, signal);
       await loadContainerState(filename, signal);
       await loadBackupState(filename, signal);
+      return true;
     } catch (error) {
-      if (isAbortError(error) || signal.aborted) return;
+      if (isAbortError(error) || signal.aborted) return false;
       console.error('Failed to load file:', error);
-      // Surface the failure so a tap that cannot load (offline, dead remote
-      // node, 5xx) is not a silent no-op, especially on mobile where the row
-      // tap optimistically opens the detail surface.
       toast.error(`Could not open "${filename.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);
       stackListState.setSelectedFile(null);
       editorState.setContent('');
@@ -534,11 +533,20 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setOriginalEnvContent('');
       editorState.setEnvEtag(null);
       editorState.setContainers([]);
+      return false;
     } finally {
       if (!signal.aborted) {
         editorState.setIsFileLoading(false);
       }
     }
+  };
+
+  const loadFile = async (filename: string) => {
+    await loadFileCore(filename);
+  };
+
+  const loadFileForRoute = async (filename: string): Promise<boolean> => {
+    return loadFileCore(filename);
   };
 
   // Keep ref in sync so loadFileOnNode always calls the latest loadFile closure
@@ -1432,6 +1440,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     refreshSelectedContainers,
     refreshGitSourcePending,
     loadFile,
+    loadFileForRoute,
     loadFileOnNode,
     navigateToNotification,
     changeEnvFile,

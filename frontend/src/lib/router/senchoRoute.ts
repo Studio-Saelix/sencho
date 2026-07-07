@@ -147,7 +147,7 @@ export function buildPath(state: RouteState): string {
     return url.pathname + url.search;
   }
 
-  if (state.isMobile && state.activeView === 'dashboard' && state.mobileSurface === 'list') {
+  if (state.isMobile && state.mobileSurface === 'list') {
     url.pathname = `${base}/stacks`;
     return url.pathname;
   }

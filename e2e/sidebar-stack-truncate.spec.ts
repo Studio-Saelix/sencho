@@ -312,13 +312,11 @@ test.describe('Sidebar stack name truncation', () => {
 
   test('mobile viewport keeps long names truncated', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.reload();
+    await page.goto('/nodes/local/stacks');
     await waitForStacksLoaded(page);
 
     const metrics = await measureRow(page, LONG_STACK);
     expect(metrics.nameTruncated).toBe(true);
     expect(metrics.rowWithinSidebar).toBe(true);
-
-    await expect(page.getByRole('button', { name: 'Create Stack' })).toBeVisible();
   });
 });

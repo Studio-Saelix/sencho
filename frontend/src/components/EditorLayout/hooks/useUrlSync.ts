@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import type { Node } from '@/context/NodeContext';
 import type { FleetTab, SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
@@ -59,7 +59,7 @@ export interface UseUrlSyncOptions {
   setActiveTab: (tab: EditorTab) => void;
   selectedEnvFile: string;
   envFiles: string[];
-  loadFile: (filename: string) => Promise<void>;
+  loadFileForRoute: (filename: string) => Promise<boolean>;
   changeEnvFile: (file: string) => Promise<void>;
   refreshStacks: (background?: boolean) => Promise<string[]>;
   reachCtx: ReachabilityContext;
@@ -68,6 +68,7 @@ export interface UseUrlSyncOptions {
   setMobileSurface: (surface: MobileRouteSurface) => void;
   mobileSettingsSection: SectionId | null;
   setMobileSettingsSection: (section: SectionId | null) => void;
+  setPendingDetailStack: (stack: string | null) => void;
   attemptPopstateNavigation: (apply: () => void, onCancel: () => void) => void;
 }
 
@@ -86,6 +87,9 @@ function readIdx(state: unknown): number | null {
 export function useUrlSync(options: UseUrlSyncOptions) {
   const optsRef = useRef(options);
   optsRef.current = options;
+
+  const [routeDetailError, setRouteDetailError] = useState<string | null>(null);
+  const [urlHydratingStack, setUrlHydratingStack] = useState<string | null>(null);
 
   const phaseRef = useRef<RoutePhase>('initial');
   const historyIdxRef = useRef(0);
@@ -149,7 +153,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     } else {
       o.setActiveView(view);
       if (o.isMobile && view !== 'editor') {
-        o.setMobileSurface(view === 'dashboard' ? 'list' : 'content');
+        o.setMobileSurface('content');
       }
     }
 
@@ -165,7 +169,13 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       pendingStackRef.current = pending.stackName;
       pendingEnvRef.current = pending.envFile;
       pendingTabRef.current = pending.editorTab;
+      setUrlHydratingStack(pending.stackName);
+      if (o.isMobile) {
+        o.setPendingDetailStack(pending.stackName);
+      }
     } else {
+      setUrlHydratingStack(null);
+      setRouteDetailError(null);
       pendingRouteRef.current = null;
       appliedViewRef.current = view;
       phaseRef.current = 'applying';
@@ -192,12 +202,24 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       routeReplaceRef.current = true;
       pendingStackRef.current = null;
       pendingRouteRef.current = null;
+      setUrlHydratingStack(null);
+      setRouteDetailError(null);
+      if (o.isMobile) o.setPendingDetailStack(null);
       o.setActiveView('dashboard');
       phaseRef.current = 'settled';
       return;
     }
 
-    await o.loadFile(match);
+    const attempted = match;
+    const loaded = await o.loadFileForRoute(match);
+    if (pendingStackRef.current !== attempted) return;
+
+    if (!loaded) {
+      phaseRef.current = 'frozen';
+      pendingRouteRef.current = null;
+      setRouteDetailError(`Could not open "${attempted.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);
+      return;
+    }
 
     const env = pendingEnvRef.current;
     const tab = pendingTabRef.current ?? 'compose';
@@ -210,6 +232,8 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     pendingEnvRef.current = null;
     pendingTabRef.current = null;
     pendingRouteRef.current = null;
+    setUrlHydratingStack(null);
+    setRouteDetailError(null);
     phaseRef.current = 'settled';
   }, []);
 
@@ -379,6 +403,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       };
 
       const cancel = () => {
+        if (delta === 0) return;
         suppressNextPopstateRef.current = true;
         window.history.go(-delta);
       };
@@ -399,11 +424,12 @@ export function useUrlSync(options: UseUrlSyncOptions) {
   }, [options.isMobile]);
 
   const retryFrozenRoute = useCallback(() => {
+    setRouteDetailError(null);
     phaseRef.current = 'applying';
     void optsRef.current.refreshStacks(false).then(() => {
       void resolvePendingStack();
     });
   }, [resolvePendingStack]);
 
-  return { retryFrozenRoute };
+  return { retryFrozenRoute, urlHydratingStack, routeDetailError };
 }

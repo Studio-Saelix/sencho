@@ -57,7 +57,7 @@ function makeOpts(over: Partial<UseUrlSyncOptions> = {}): UseUrlSyncOptions {
     setActiveTab: vi.fn(),
     selectedEnvFile: '',
     envFiles: [],
-    loadFile: vi.fn().mockResolvedValue(undefined),
+    loadFileForRoute: vi.fn().mockResolvedValue(true),
     changeEnvFile: vi.fn().mockResolvedValue(undefined),
     refreshStacks: vi.fn().mockResolvedValue(['radarr']),
     reachCtx: makeReachCtx(),
@@ -66,6 +66,7 @@ function makeOpts(over: Partial<UseUrlSyncOptions> = {}): UseUrlSyncOptions {
     setMobileSurface: vi.fn(),
     mobileSettingsSection: null,
     setMobileSettingsSection: vi.fn(),
+    setPendingDetailStack: vi.fn(),
     attemptPopstateNavigation: (apply) => { apply(); },
     ...over,
   };
@@ -197,7 +198,7 @@ describe('useUrlSync', () => {
     expect(refreshStacks).toHaveBeenCalledWith(false);
   });
 
-  it('keeps mobile dashboard on the list surface so the sidebar renders', () => {
+  it('hydrates mobile dashboard to the content surface', () => {
     window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/dashboard');
     const setMobileSurface = vi.fn();
 
@@ -214,6 +215,87 @@ describe('useUrlSync', () => {
       );
     });
 
-    expect(setMobileSurface).toHaveBeenCalledWith('list');
+    expect(setMobileSurface).toHaveBeenCalledWith('content');
+  });
+
+  it('sets pending detail stack on mobile stack URL hydrate', () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/compose');
+    const setPendingDetailStack = vi.fn();
+
+    act(() => {
+      renderHook(
+        (props) => useUrlSync(props),
+        {
+          initialProps: makeOpts({
+            isMobile: true,
+            setPendingDetailStack,
+          }),
+        },
+      );
+    });
+
+    expect(setPendingDetailStack).toHaveBeenCalledWith('radarr');
+  });
+
+  it('freezes route and sets routeDetailError when compose load fails', async () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/compose');
+    const loadFileForRoute = vi.fn().mockResolvedValue(false);
+    const setPendingDetailStack = vi.fn();
+
+    const { result } = renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          isMobile: true,
+          setPendingDetailStack,
+          loadFileForRoute,
+          activeView: 'editor',
+        }),
+      },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(loadFileForRoute).toHaveBeenCalledWith('radarr');
+    expect(result.current.routeDetailError).toContain('Could not open');
+    expect(window.location.pathname).toBe('/nodes/local/stacks/radarr/compose');
+  });
+
+  it('clears routeDetailError after a successful retry', async () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/compose');
+    const loadFileForRoute = vi.fn()
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+
+    const { result, rerender } = renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          isMobile: true,
+          loadFileForRoute,
+          activeView: 'editor',
+        }),
+      },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(result.current.routeDetailError).not.toBeNull();
+
+    rerender(makeOpts({
+      isMobile: true,
+      loadFileForRoute,
+      activeView: 'editor',
+      selectedFile: 'radarr',
+    }));
+
+    await act(async () => {
+      await result.current.retryFrozenRoute();
+    });
+
+    expect(result.current.routeDetailError).toBeNull();
   });
 });

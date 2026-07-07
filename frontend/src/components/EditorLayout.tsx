@@ -13,6 +13,7 @@ import { useEditorViewState } from './EditorLayout/hooks/useEditorViewState';
 import { useStackListState } from './EditorLayout/hooks/useStackListState';
 import { useViewNavigationState } from './EditorLayout/hooks/useViewNavigationState';
 import { useUrlSync } from './EditorLayout/hooks/useUrlSync';
+import { shouldClearPendingDetailStack } from './EditorLayout/mobile-pending-detail';
 import { useOverlayState } from './EditorLayout/hooks/useOverlayState';
 import { useStackActions, NODE_SWITCH_PENDING_TOKEN } from './EditorLayout/hooks/useStackActions';
 import { useTheme } from '@/hooks/use-theme';
@@ -318,11 +319,6 @@ export default function EditorLayout() {
   const [pendingDetailStack, setPendingDetailStack] = useState<string | null>(null);
   const [fleetUpdatesIntent, setFleetUpdatesIntent] = useState<{ tab: 'nodes' | 'changelog' } | null>(null);
 
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (!isFileLoading && pendingDetailStack) setPendingDetailStack(null);
-  }, [isFileLoading, pendingDetailStack]);
-
   const handleFleetUpdatesIntentConsumed = useCallback(() => setFleetUpdatesIntent(null), []);
 
   const { surface: mobileSurface, detailReady, detailOpen } = deriveMobileSurface({
@@ -332,7 +328,7 @@ export default function EditorLayout() {
     pendingDetailStack,
   });
 
-  const { retryFrozenRoute } = useUrlSync({
+  const { retryFrozenRoute, urlHydratingStack, routeDetailError } = useUrlSync({
     nodes,
     nodesLoaded: !nodesLoading,
     activeNode,
@@ -357,7 +353,7 @@ export default function EditorLayout() {
     setActiveTab,
     selectedEnvFile,
     envFiles,
-    loadFile: stackActions.loadFile,
+    loadFileForRoute: stackActions.loadFileForRoute,
     changeEnvFile: stackActions.changeEnvFile,
     refreshStacks,
     reachCtx,
@@ -369,8 +365,23 @@ export default function EditorLayout() {
     },
     mobileSettingsSection,
     setMobileSettingsSection,
+    setPendingDetailStack,
     attemptPopstateNavigation: stackActions.attemptPopstateNavigation,
   });
+
+  useEffect(() => {
+    if (shouldClearPendingDetailStack({
+      pendingDetailStack,
+      detailReady,
+      isFileLoading,
+      stacksLoadStatus,
+      urlHydratingStack,
+      routeDetailError,
+    })) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPendingDetailStack(null);
+    }
+  }, [pendingDetailStack, detailReady, isFileLoading, stacksLoadStatus, urlHydratingStack, routeDetailError]);
 
   // A phone shows one surface at a time, so every mobile navigation tears down
   // the current detail and switches surfaces, guarding a dirty editor first.
@@ -1024,10 +1035,13 @@ export default function EditorLayout() {
               {mobileSurface === 'detail' && (
                 detailReady ? (
                   <div className="flex-1 min-h-0 overflow-hidden flex flex-col">{renderEditor(mobileMastheadActions)}</div>
-                ) : stacksLoadStatus === 'error' && stacksLoadNodeId === activeNode?.id && pendingDetailStack ? (
+                ) : (
+                  (stacksLoadStatus === 'error' && stacksLoadNodeId === activeNode?.id && pendingDetailStack)
+                  || (routeDetailError && pendingDetailStack)
+                ) ? (
                   <MobileDetailError
                     name={pendingDetailStack}
-                    message={stacksLoadError ?? 'Could not load stacks for this node.'}
+                    message={routeDetailError ?? stacksLoadError ?? 'Could not load stacks for this node.'}
                     onBack={goToMobileList}
                     onRetry={() => { void retryFrozenRoute(); }}
                     headerActions={mobileMastheadActions}

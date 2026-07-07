@@ -100,3 +100,93 @@ test.describe('URL routing', () => {
     await expect(page).toHaveURL(/\/nodes\/[^/]+\/dashboard/);
   });
 });
+
+test.describe('URL routing (mobile)', () => {
+  test.beforeEach(async ({ page }) => {
+    await loginAs(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+  });
+
+  test('cold load of stack deep link opens mobile detail', async ({ page }) => {
+    const stackName = await page.evaluate(async () => {
+      const res = await fetch('/api/stacks', { credentials: 'include' });
+      const stacks = await res.json() as string[];
+      return stacks[0] ?? null;
+    });
+    test.skip(!stackName, 'No stacks available to open');
+
+    const slug = stackName!.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
+    await page.goto(`/nodes/local/stacks/${encodeURIComponent(slug)}/compose`);
+    await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/compose`));
+    await expect(page.getByRole('tablist', { name: 'Stack detail sections' })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('tab', { name: 'Health' })).toBeVisible();
+  });
+
+  test('reload preserves mobile stack deep link', async ({ page }) => {
+    const stackName = await page.evaluate(async () => {
+      const res = await fetch('/api/stacks', { credentials: 'include' });
+      const stacks = await res.json() as string[];
+      return stacks[0] ?? null;
+    });
+    test.skip(!stackName, 'No stacks available to open');
+
+    const slug = stackName!.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
+    await page.goto(`/nodes/local/stacks/${encodeURIComponent(slug)}/compose`);
+    await expect(page.getByRole('tablist', { name: 'Stack detail sections' })).toBeVisible({ timeout: 15_000 });
+    await page.reload();
+    await expect(page).toHaveURL(/\/nodes\/local\/stacks\//);
+    await expect(page.getByRole('tab', { name: 'Health' })).toBeVisible({ timeout: 15_000 });
+  });
+
+  test('stack list API failure shows retryable mobile error and preserves URL', async ({ page }) => {
+    const stackName = await page.evaluate(async () => {
+      const res = await fetch('/api/stacks', { credentials: 'include' });
+      const stacks = await res.json() as string[];
+      return stacks[0] ?? null;
+    });
+    test.skip(!stackName, 'No stacks available to open');
+
+    const slug = stackName!.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
+    await page.route('**/api/stacks', async (route) => {
+      if (route.request().method() === 'GET' && !route.request().url().includes(`/api/stacks/${encodeURIComponent(stackName!)}`)) {
+        await route.fulfill({ status: 500, body: 'list failure' });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto(`/nodes/local/stacks/${encodeURIComponent(slug)}/compose`);
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({ timeout: 15_000 });
+    await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/compose`));
+  });
+
+  test('compose API failure shows retryable mobile error and preserves URL', async ({ page }) => {
+    const stackName = await page.evaluate(async () => {
+      const res = await fetch('/api/stacks', { credentials: 'include' });
+      const stacks = await res.json() as string[];
+      return stacks[0] ?? null;
+    });
+    test.skip(!stackName, 'No stacks available to open');
+
+    const slug = stackName!.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
+    await page.route(`**/api/stacks/${encodeURIComponent(stackName!)}`, async (route) => {
+      if (route.request().method() === 'GET') {
+        await route.fulfill({ status: 500, body: 'compose failure' });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.goto(`/nodes/local/stacks/${encodeURIComponent(slug)}/compose`);
+    await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible({ timeout: 15_000 });
+    await expect(page).not.toHaveURL(/\/dashboard/);
+    await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/compose`));
+  });
+
+  test('Stacks tab from Fleet updates URL to stack list', async ({ page }) => {
+    await page.goto('/nodes/local/fleet');
+    await expect(page).toHaveURL(/\/nodes\/local\/fleet/);
+    await page.getByRole('button', { name: 'Stacks', exact: true }).click();
+    await expect(page).toHaveURL(/\/nodes\/local\/stacks$/);
+  });
+});

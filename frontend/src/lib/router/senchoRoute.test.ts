@@ -57,6 +57,17 @@ describe('senchoRoute', () => {
     expect(parsed.view).toBe('dashboard');
   });
 
+  it('maps mobile list surface to /stacks regardless of activeView', () => {
+    const path = buildPath({
+      ...base,
+      isMobile: true,
+      mobileSurface: 'list',
+      activeView: 'fleet',
+      fleetActiveTab: 'snapshots',
+    });
+    expect(path).toBe('/nodes/local/stacks');
+  });
+
   it('parses fleet and settings sections', () => {
     const fleet = parsePath('/nodes/local/fleet/snapshots', '');
     expect(fleet.view).toBe('fleet');
