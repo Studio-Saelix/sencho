@@ -59,9 +59,11 @@ Updating the gateway is special because the dashboard is hosted by the very cont
 After **Update & restart** is confirmed:
 
 1. The browser captures the gateway's current boot timestamp from `/api/health`.
-2. The server pulls the latest image and spawns a short-lived helper container that runs `docker compose up -d --force-recreate` against the host's compose working directory.
+2. The server classifies the compose image pin. For semver pins it pulls the target release, stages a rewritten compose file, and spawns a short-lived helper container that copies the file onto the host and runs `docker compose up -d --force-recreate`.
 3. A full-screen **Updating Sencho...** overlay takes over the browser tab. The overlay polls `/api/health` every 3 seconds and keeps the page from reloading until a *new* boot timestamp comes back, even if the API briefly responds during the pull.
 4. Once a fresh boot timestamp is reported, the overlay reloads the page on the new version.
+
+If the pull or compose rewrite fails before the container restarts, the overlay dismisses within a few seconds and surfaces the error in a toast instead of waiting for the full reconnect timeout.
 
 If the new container does not come up within 5 minutes, the overlay surfaces an **Update timed out** message with a *Try Reloading* button so the page is never left waiting indefinitely. If the gateway can detect that the update did not even start (for example, the image pull failed before the helper container could spawn) it surfaces a **Failed** badge with the underlying error on the Local card. The badge appears as soon as the helper writes its error file, or by the 3-minute mark at the latest, instead of waiting for the full 5-minute timeout.
 
@@ -69,11 +71,17 @@ If the new container does not come up within 5 minutes, the overlay surfaces an 
   The self-update helper container inherits all bind mounts from the main Sencho container 1:1. If your `docker-compose.yml` references `env_file`, `configs`, or `secrets` outside the compose working directory, those host paths must be mounted into the Sencho container at the *same container path* as on the host. See [Troubleshooting](/operations/troubleshooting#local-self-update-fails-with-env-file-not-found) if you encounter `env file not found` errors during a local update.
 </Note>
 
+
+## Pinned image tags
+
+Fleet self-update respects how each node compose file declares the Sencho image. Semver pins are rewritten to the target release before recreate. Floating tags such as latest are pulled without changing the compose file. Digest pins and unresolved interpolated values block automatic updates; those rows show a **Pinned** badge instead of an **Update** button.
+
+The image pull always runs before any compose rewrite, so a failed pull never leaves the compose file half-updated.
 ## What happens during an update
 
 For both local and remote nodes, an update goes through the same three steps:
 
-1. **Pull** the latest `saelix/sencho` image from the registry.
+1. **Pull** the target Sencho image from the registry (the compose-declared reference for floating tags, or the repinned semver tag for version pins).
 2. **Recreate** the container with the new image via `docker compose up -d --force-recreate`.
 3. **Restart** the Sencho process. The node is briefly offline during the swap.
 

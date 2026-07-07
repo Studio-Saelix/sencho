@@ -73,7 +73,7 @@ export function ReconnectingOverlay({ preUpdateStartedAt }: ReconnectingOverlayP
                         <Loader2 className="w-10 h-10 text-muted-foreground animate-spin mx-auto" strokeWidth={1.5} />
                         <h2 className="text-lg font-medium">Updating Sencho...</h2>
                         <p className="text-sm text-muted-foreground max-w-sm">
-                            The server is pulling the latest image and restarting. This page will reload automatically.
+                            The server is pulling the update and restarting. This page will reload automatically.
                         </p>
                         <p className="text-xs text-muted-foreground tabular-nums">{elapsed}s elapsed</p>
                     </>

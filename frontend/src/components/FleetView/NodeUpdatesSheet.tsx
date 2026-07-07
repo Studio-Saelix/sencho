@@ -13,6 +13,7 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatVersion, isValidVersion } from '@/lib/version';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
+import { PinnedUpdateBadge } from './PinnedUpdateBadge';
 import type { NodeUpdateStatus } from './types';
 
 interface NodeUpdatesSheetProps {
@@ -434,7 +435,13 @@ export function NodeUpdatesSheet({
                                                 Unskip
                                             </Button>
                                         )}
-                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && isAdmin && (
+                                        {s.updateBlocked && s.updateAvailable && !s.updateStatus && !s.skipActive && (
+                                            <PinnedUpdateBadge
+                                                reason={s.updateBlockedReason}
+                                                className="text-[10px] px-1.5 py-0 h-5 bg-muted text-muted-foreground border-card-border/40"
+                                            />
+                                        )}
+                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && !s.updateBlocked && isAdmin && (
                                             <Button
                                                 variant="outline"
                                                 size="sm"
@@ -460,7 +467,7 @@ export function NodeUpdatesSheet({
                                                 Skip
                                             </Button>
                                         )}
-                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && !isAdmin && (
+                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && !s.updateBlocked && !isAdmin && (
                                             <Badge className="text-[10px] px-1.5 py-0 h-5 bg-warning/15 text-warning border-warning/30">
                                                 <CircleAlert className="w-2.5 h-2.5 mr-0.5" /> Available
                                             </Badge>

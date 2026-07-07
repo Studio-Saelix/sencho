@@ -4,6 +4,16 @@ import fs from 'fs';
 import semver from 'semver';
 import { SENCHO_VERSION } from '../generated/version';
 import { isDebugEnabled } from '../utils/debug';
+import type { ImagePinKind } from '../helpers/selfUpdateCompose';
+
+const IMAGE_PIN_KINDS: readonly ImagePinKind[] = ['floating', 'semver', 'digest', 'unknown'];
+
+/** Coerce an untrusted /api/meta value to a known pin kind, or null. */
+function parseImagePinKind(value: unknown): ImagePinKind | null {
+  return typeof value === 'string' && (IMAGE_PIN_KINDS as readonly string[]).includes(value)
+    ? (value as ImagePinKind)
+    : null;
+}
 
 /**
  * Static registry of capabilities supported by THIS Sencho instance.
@@ -96,6 +106,14 @@ export interface RemoteMeta {
   updateError: string | null;
   /** True when the /api/meta request succeeded (node is reachable). */
   online: boolean;
+  /**
+   * How the remote pins its Sencho image, when it advertises it. Null for an
+   * older remote that predates this field or one that could not classify its
+   * pin. The hub uses only this safe subset (no full image ref) for remote rows.
+   */
+  imagePinKind: ImagePinKind | null;
+  /** True when the remote reports its update is blocked (digest/unknown pin). */
+  updateBlocked: boolean;
 }
 
 // Runtime capability overrides; services call disableCapability() during init.
@@ -142,6 +160,8 @@ export const OFFLINE_META: RemoteMeta = {
   startedAt: null,
   updateError: null,
   online: false,
+  imagePinKind: null,
+  updateBlocked: false,
 };
 
 /** Strip any `user:pass@` userinfo from a URL so credentials never reach the logs. */
@@ -164,6 +184,8 @@ export async function fetchRemoteMeta(baseUrl: string, apiToken: string): Promis
       startedAt: typeof res.data.startedAt === 'number' ? res.data.startedAt : null,
       updateError: typeof res.data.updateError === 'string' ? res.data.updateError : null,
       online: true,
+      imagePinKind: parseImagePinKind(res.data.imagePinKind),
+      updateBlocked: res.data.updateBlocked === true,
     };
     if (isDebugEnabled()) {
       // Diagnostic aid for "why is this feature gated?": log the resolved version

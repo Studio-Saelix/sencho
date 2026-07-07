@@ -5,6 +5,15 @@ import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { disableCapability } from './CapabilityRegistry';
 import { isDebugEnabled } from '../utils/debug';
+import {
+  buildTargetImageRef,
+  isRepinBlocked,
+  isValidImageRef,
+  patchComposeServiceImage,
+  resolveServiceImageFromContents,
+  type ImagePinKind,
+  type ResolvedComposeImage,
+} from '../helpers/selfUpdateCompose';
 
 const execFileAsync = promisify(execFile);
 
@@ -12,6 +21,23 @@ const execFileAsync = promisify(execFile);
 // Must live under /app/data so both the helper (via host-path bind mount) and
 // the NEW gateway process (which always mounts /app/data) can reach it.
 const UPDATE_ERROR_FILE = '/app/data/.sencho-update-error';
+
+// Rewritten compose file the main process stages under /app/data for the helper
+// to copy onto the host compose file. Uses the same /app/data handoff as the
+// error file because the main process cannot reach the compose working dir.
+const STAGED_PATCH_FILE = '/app/data/.sencho-compose-patch';
+
+// Cap how long a cached pin classification is served to status/meta callers.
+// Update DECISIONS always read fresh (fresh: true), so this only bounds how
+// stale a displayed pin kind can be after a live compose edit.
+const PIN_CACHE_TTL_MS = 5 * 60 * 1000;
+
+// Operator-facing block reasons. Deliberately generic: no host paths, compose
+// contents, or registry/repository names (this text can reach the UI).
+const UPDATE_BLOCKED_REASON =
+  'This install pins the Sencho image to a digest or a value Fleet cannot resolve, so it cannot repin automatically. Change the image tag in your compose file, then update again.';
+const UPDATE_READ_FAILED_REASON =
+  'Could not read the Sencho compose file to determine how its image is pinned. Confirm the update helper can reach the compose directory, then try again.';
 
 interface HostMount {
   source: string;
@@ -24,6 +50,22 @@ export type DockerMount = {
   Source: string;
   Destination: string;
 };
+
+/** Pin classification exposed to callers (status/meta), without file contents. */
+export interface PinInfo {
+  pinKind: ImagePinKind;
+  composeImageRef: string;
+  filePath: string;
+}
+
+/** Outcome of the pre-update check the route layer runs before responding. */
+export type SelfUpdatePreflight = { ok: true } | { ok: false; reason: string };
+
+/** A staged compose rewrite the helper copies onto the host before recreate. */
+export interface ComposeCopy {
+  stagedPath: string;
+  targetPath: string;
+}
 
 /**
  * Find the host-side path Docker resolved for /app/data, regardless of whether
@@ -49,14 +91,35 @@ export function shQuote(value: string): string {
 }
 
 /**
+ * Build the argv for a one-shot helper that reads a single compose config file
+ * from the host. The main process cannot open the compose working dir, so it
+ * mounts it read-only into a throwaway container and cats the file out. Pure and
+ * exported for unit testing. The path is a discrete argv element handed to
+ * execFile (no shell), so a path with shell metacharacters stays inert.
+ */
+export function buildComposeReadArgs(workingDir: string, imageName: string, configFilePath: string): string[] {
+  return [
+    'run', '--rm',
+    '--user', 'root',
+    '--entrypoint', 'cat',
+    '-v', `${workingDir}:${workingDir}:ro`,
+    '-w', workingDir,
+    imageName,
+    configFilePath,
+  ];
+}
+
+/**
  * Build the shell command the helper container runs to recreate Sencho. Kept as
- * a pure, exported function so the prune-on-update branch is unit-testable.
+ * a pure, exported function so the prune-on-update and repin-copy branches are
+ * unit-testable.
  *
- * Label-derived inputs (serviceName, the fFlags config paths) are shell-quoted
- * so they cannot alter the command structure. The recreate writes the error
- * file only on failure; the optional dangling prune runs only on success, so
- * the two branches never overlap. The prune suppresses its own output and
- * `|| true`, so it can never alter $ec or be mistaken for an update error.
+ * Label-derived inputs (serviceName, the fFlags config paths) and the repin copy
+ * paths are shell-quoted so they cannot alter the command structure. When a
+ * composeCopy is present the rewritten compose file is copied onto the host
+ * BEFORE the recreate; a failed copy aborts before recreate so a half-applied
+ * update never runs. The recreate writes the error file only on failure; the
+ * optional dangling prune runs only on success, so the branches never overlap.
  */
 export function buildSelfUpdateComposeCmd(
   fFlags: string[],
@@ -64,10 +127,15 @@ export function buildSelfUpdateComposeCmd(
   stderrTmp: string,
   errorFile: string,
   pruneOnUpdate: boolean,
+  composeCopy?: ComposeCopy,
 ): string {
   const recreate = ['docker compose', ...fFlags.map(shQuote), 'up -d --force-recreate', shQuote(serviceName), `2>${stderrTmp}`].join(' ');
+  const copyStep = composeCopy
+    ? [`cp ${shQuote(composeCopy.stagedPath)} ${shQuote(composeCopy.targetPath)} 2>${stderrTmp} || { { echo "exit=1"; echo "Failed to write the updated compose file"; cat ${stderrTmp}; } > ${errorFile} 2>/dev/null; exit 1; }`]
+    : [];
   return [
     'sleep 3',
+    ...copyStep,
     recreate,
     'ec=$?',
     `if [ $ec -ne 0 ]; then { echo "exit=$ec"; cat ${stderrTmp}; } > ${errorFile} 2>/dev/null; fi`,
@@ -97,15 +165,19 @@ interface ComposeContext {
  * paths (compose labels / container mounts). They are placed as discrete argv
  * elements and handed to execFile, which spawns docker with no shell, so a path
  * carrying shell metacharacters stays inert data and never reaches a shell.
+ *
+ * workingDir is mounted read-only unless `repinWritable` is set, which happens
+ * only for a semver repin that must copy the rewritten compose file onto the
+ * host. Limiting :rw to that case keeps the helper's host write scope minimal.
  */
 export function buildSelfUpdateRunArgs(
-  ctx: Pick<ComposeContext, 'workingDir' | 'imageName' | 'dataDirHost' | 'hostBindMounts'>,
+  ctx: Pick<ComposeContext, 'workingDir' | 'imageName' | 'dataDirHost' | 'hostBindMounts'> & { repinWritable?: boolean },
   composeCmd: string,
 ): string[] {
-  const { workingDir, imageName, dataDirHost, hostBindMounts } = ctx;
+  const { workingDir, imageName, dataDirHost, hostBindMounts, repinWritable } = ctx;
   const mountArgs: string[] = [
     '-v', '/var/run/docker.sock:/var/run/docker.sock',
-    '-v', `${workingDir}:${workingDir}:ro`,
+    '-v', `${workingDir}:${workingDir}:${repinWritable ? 'rw' : 'ro'}`,
   ];
   if (dataDirHost) {
     mountArgs.push('-v', `${dataDirHost}:/app/data:rw`);
@@ -133,6 +205,7 @@ class SelfUpdateService {
   private canSelfUpdate = false;
   private composeContext: ComposeContext | null = null;
   private lastUpdateError: string | null = null;
+  private pinCache: { info: ResolvedComposeImage | null; at: number } | null = null;
 
   public static getInstance(): SelfUpdateService {
     if (!SelfUpdateService.instance) {
@@ -177,7 +250,10 @@ class SelfUpdateService {
         return;
       }
 
-      // Read the container's own image name for direct docker pull
+      // Read the container's own image name for the legacy (no target) pull and
+      // as a fallback ref. It is captured once here and can go stale if the
+      // compose file is edited later, so update decisions resolve the compose
+      // image fresh instead of trusting this value.
       const imageName = info.Config?.Image;
       if (!imageName) {
         console.log('[SelfUpdate] Could not determine container image name');
@@ -195,12 +271,21 @@ class SelfUpdateService {
 
       const dataDirHost = findDataDirHost(rawMounts);
       if (!dataDirHost) {
-        console.log('[SelfUpdate] /app/data mount not found - update error recovery will be unavailable');
+        console.log('[SelfUpdate] /app/data mount not found - update error recovery and compose repin will be unavailable');
       }
 
       this.composeContext = { workingDir, configFiles, serviceName, imageName, dataDirHost, hostBindMounts };
       this.canSelfUpdate = true;
       console.log(`[SelfUpdate] Ready - service="${serviceName}" image="${imageName}" in ${workingDir}`);
+
+      // Warm the pin-info cache in the background for diagnostics and the first
+      // status/meta read. This is never a source of truth for an update
+      // decision, which always resolves fresh.
+      void this.resolveComposeImage(true)
+        .then(resolved => {
+          if (resolved) console.log(`[SelfUpdate] Compose image pin: ${resolved.imageRef} (${resolved.pinKind})`);
+        })
+        .catch(() => { /* diagnostic only */ });
 
       // Surface any error from a previous failed update attempt (persisted by
       // the helper container) so the new process can report it to the user.
@@ -225,6 +310,73 @@ class SelfUpdateService {
     this.lastUpdateError = null;
   }
 
+  /**
+   * Classify how this instance's compose image is pinned. Serves a short-lived
+   * cache to frequent status/meta callers; pass `{ fresh: true }` for update
+   * decisions so a live compose edit is always reflected. Returns null when
+   * self-update is unavailable or the compose file could not be read.
+   */
+  async getPinInfo(opts?: { fresh?: boolean; cacheOnly?: boolean }): Promise<PinInfo | null> {
+    const resolved = await this.resolveComposeImage(opts?.fresh ?? false, opts?.cacheOnly ?? false);
+    if (!resolved) return null;
+    return { pinKind: resolved.pinKind, composeImageRef: resolved.imageRef, filePath: resolved.filePath };
+  }
+
+  /**
+   * Preflight the route layer runs before responding, so a blocked update fails
+   * fast with a 409 instead of returning 202 and stalling the reconnect overlay.
+   * A missing target version is the legacy pull-current path and makes no repin
+   * decision. A digest/unknown pin (or an unreadable compose file) is blocked.
+   */
+  async canSelfUpdateTarget(targetVersion?: string): Promise<SelfUpdatePreflight> {
+    if (!this.canSelfUpdate) {
+      return { ok: false, reason: 'Self-update is unavailable on this instance.' };
+    }
+    if (!targetVersion) return { ok: true };
+    const info = await this.getPinInfo({ fresh: true });
+    if (!info) return { ok: false, reason: UPDATE_READ_FAILED_REASON };
+    if (isRepinBlocked(info.pinKind)) {
+      return { ok: false, reason: UPDATE_BLOCKED_REASON };
+    }
+    return { ok: true };
+  }
+
+  /** Resolve the compose-declared service image fresh from the host, or from a
+   *  short-lived cache. Reads each config file via a throwaway cat container. */
+  private async resolveComposeImage(fresh: boolean, cacheOnly = false): Promise<ResolvedComposeImage | null> {
+    if (!this.composeContext) return null;
+    const now = Date.now();
+    if (!fresh && this.pinCache && now - this.pinCache.at < PIN_CACHE_TTL_MS) {
+      return this.pinCache.info;
+    }
+    if (cacheOnly) return null;
+    const { workingDir, configFiles, serviceName, imageName } = this.composeContext;
+    const env = this.buildEnv();
+    const debug = isDebugEnabled();
+    const files: { filePath: string; content: string }[] = [];
+    for (const raw of configFiles.split(',')) {
+      const filePath = raw.trim();
+      if (!filePath) continue;
+      try {
+        const { stdout } = await execFileAsync('docker', buildComposeReadArgs(workingDir, imageName, filePath), {
+          env,
+          timeout: 30_000,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+        files.push({ filePath, content: stdout });
+      } catch (error) {
+        if (debug) console.debug('[SelfUpdate:debug] Could not read compose file', filePath, (error as Error).message);
+      }
+    }
+    const info = resolveServiceImageFromContents(files, serviceName);
+    this.pinCache = { info, at: now };
+    return info;
+  }
+
+  private buildEnv(): NodeJS.ProcessEnv {
+    return { ...process.env, PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' };
+  }
+
   /** Surfaces any error the helper container persisted before the previous
    *  gateway process died, then deletes the file. */
   private recoverPreviousError(): void {
@@ -242,25 +394,63 @@ class SelfUpdateService {
     }
   }
 
-  async triggerUpdate(): Promise<void> {
+  /**
+   * Pull the target image, then (for a semver pin) rewrite the compose tag and
+   * recreate. Pull happens BEFORE any compose mutation, so a failed pull leaves
+   * the compose file untouched. `targetVersion` comes from the Fleet compare
+   * target; when omitted this keeps the legacy behavior of pulling the running
+   * image and recreating from the on-disk compose.
+   */
+  async triggerUpdate(options?: { targetVersion?: string }): Promise<void> {
     if (!this.composeContext) return;
-    const { workingDir, configFiles, serviceName, imageName, dataDirHost, hostBindMounts } = this.composeContext;
-    const env = { ...process.env, PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' };
+    const env = this.buildEnv();
     this.lastUpdateError = null;
 
     try { fs.unlinkSync(UPDATE_ERROR_FILE); } catch { /* absent is the steady state */ }
+    try { fs.unlinkSync(STAGED_PATCH_FILE); } catch { /* absent is the steady state */ }
 
-    // Async pull: a sync execFileSync blocks the event loop, which lets the frontend
-    // overlay see a false "online" response between the pull finishing and the restart.
+    const { imageName, serviceName, dataDirHost } = this.composeContext;
+    const targetVersion = options?.targetVersion;
+
+    let pullRef = imageName;
+    let repin: { resolved: ResolvedComposeImage; ref: string } | null = null;
+
+    if (targetVersion) {
+      const resolved = await this.resolveComposeImage(true);
+      const pinKind = resolved?.pinKind ?? 'unknown';
+      // Defense in depth: the route preflight already rejected these, but the
+      // compose file could change between preflight and this last-breath call.
+      if (!resolved || isRepinBlocked(pinKind)) {
+        this.lastUpdateError = resolved ? UPDATE_BLOCKED_REASON : UPDATE_READ_FAILED_REASON;
+        console.error('[SelfUpdate] Update blocked:', this.lastUpdateError);
+        return;
+      }
+      pullRef = pinKind === 'semver' ? buildTargetImageRef(resolved.imageRef, targetVersion) : resolved.imageRef;
+      if (!isValidImageRef(pullRef)) {
+        this.lastUpdateError = 'Aborting update: the computed image reference is invalid.';
+        console.error('[SelfUpdate] Update blocked:', this.lastUpdateError, pullRef);
+        return;
+      }
+      if (pinKind === 'semver') {
+        if (!dataDirHost) {
+          this.lastUpdateError =
+            'Cannot rewrite the pinned compose image: the data directory needed for the update handoff is not mounted. Change the image tag manually and update again.';
+          console.error('[SelfUpdate] Repin blocked:', this.lastUpdateError);
+          return;
+        }
+        repin = { resolved, ref: pullRef };
+      }
+    }
+
+    // Pull FIRST so the compose file is never mutated for an image we could not
+    // fetch. A sync execFileSync would block the event loop and let the overlay
+    // see a false "online" between the pull finishing and the restart.
     const debug = isDebugEnabled();
     const pullStart = Date.now();
-    console.log(`[SelfUpdate] Pulling latest image: ${imageName}...`);
-    if (debug) console.debug('[SelfUpdate:debug] Pull context:', { workingDir, configFiles, serviceName, dataDirHost, mountCount: hostBindMounts.length });
+    console.log(`[SelfUpdate] Pulling image: ${pullRef}...`);
+    if (debug) console.debug('[SelfUpdate:debug] Pull context:', { targetVersion: targetVersion ?? null, repin: !!repin });
     try {
-      await execFileAsync('docker', ['pull', imageName], {
-        env,
-        timeout: 300_000, // 5 min max for pull
-      });
+      await execFileAsync('docker', ['pull', pullRef], { env, timeout: 300_000 });
       if (debug) console.debug('[SelfUpdate:debug] Pull completed in', Math.round((Date.now() - pullStart) / 1000) + 's');
     } catch (error) {
       const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
@@ -269,11 +459,39 @@ class SelfUpdateService {
       return;
     }
 
-    // The main container cannot access the compose file at its host path,
-    // so the helper bind-mounts the compose working directory from the host.
-    // Run attached (no -d): if compose recreate fails before it kills us,
-    // execFile's callback receives the helper's exit code + stderr directly.
-    console.log(`[SelfUpdate] Spawning updater container... (last breath)`);
+    // Rewrite the pinned tag only after a confirmed pull (semver only). The
+    // rewrite is staged under /app/data; the helper copies it onto the host
+    // compose file just before recreate.
+    let composeCopy: ComposeCopy | undefined;
+    if (repin) {
+      try {
+        const patched = patchComposeServiceImage(repin.resolved.fileContent, serviceName, repin.ref);
+        fs.writeFileSync(STAGED_PATCH_FILE, patched, 'utf8');
+        composeCopy = { stagedPath: STAGED_PATCH_FILE, targetPath: repin.resolved.filePath };
+        console.log(`[SelfUpdate] Repinning "${serviceName}" image to ${repin.ref}`);
+      } catch (error) {
+        this.lastUpdateError =
+          `Pulled ${repin.ref} but could not rewrite the compose image tag (${(error as Error).message}). Change the tag manually and update again.`;
+        console.error('[SelfUpdate] Repin failed:', this.lastUpdateError);
+        return;
+      }
+    }
+
+    this.spawnHelper(env, composeCopy);
+  }
+
+  /**
+   * Spawn the "last breath" helper container that recreates Sencho (and, when a
+   * repin is staged, copies the rewritten compose file onto the host first).
+   * Runs attached (no -d): if the recreate fails before it kills us, execFile's
+   * callback receives the helper's exit code and stderr directly.
+   */
+  private spawnHelper(env: NodeJS.ProcessEnv, composeCopy?: ComposeCopy): void {
+    if (!this.composeContext) return;
+    const { workingDir, configFiles, serviceName, imageName, dataDirHost, hostBindMounts } = this.composeContext;
+
+    console.log('[SelfUpdate] Spawning updater container... (last breath)');
+    if (isDebugEnabled()) console.debug('[SelfUpdate:debug] Helper context:', { workingDir, serviceName, dataDirHost, repin: !!composeCopy, mountCount: hostBindMounts.length });
     const fFlags = configFiles.split(',').flatMap(f => ['-f', f.trim()]);
 
     // On failure, persist exit code + stderr to UPDATE_ERROR_FILE (host-mounted)
@@ -283,8 +501,8 @@ class SelfUpdateService {
     const stderrTmp = '/tmp/_sencho_err';
     const pruneOnUpdate =
       DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1';
-    const composeCmd = buildSelfUpdateComposeCmd(fFlags, serviceName, stderrTmp, UPDATE_ERROR_FILE, pruneOnUpdate);
-    const args = buildSelfUpdateRunArgs({ workingDir, imageName, dataDirHost, hostBindMounts }, composeCmd);
+    const composeCmd = buildSelfUpdateComposeCmd(fFlags, serviceName, stderrTmp, UPDATE_ERROR_FILE, pruneOnUpdate, composeCopy);
+    const args = buildSelfUpdateRunArgs({ workingDir, imageName, dataDirHost, hostBindMounts, repinWritable: !!composeCopy }, composeCmd);
 
     // Callback may never fire on success (we die mid-call during recreate);
     // that is fine because the restart itself is the success signal.

@@ -233,9 +233,11 @@ describe('GET /api/fleet/update-status (pilot-agent)', () => {
           startedAt: 1700000000,
           updateError: null,
           online: true,
+          imagePinKind: null,
+          updateBlocked: false,
         };
       }
-      return { version: null, capabilities: [], startedAt: null, updateError: null, online: false };
+      return { version: null, capabilities: [], startedAt: null, updateError: null, online: false, imagePinKind: null, updateBlocked: false };
     });
 
     const res = await request(app).get('/api/fleet/update-status').set('Authorization', authHeader);
@@ -254,6 +256,8 @@ describe('GET /api/fleet/update-status (pilot-agent)', () => {
       startedAt: null,
       updateError: null,
       online: false,
+      imagePinKind: null,
+      updateBlocked: false,
     });
 
     const res = await request(app).get('/api/fleet/update-status').set('Authorization', authHeader);
