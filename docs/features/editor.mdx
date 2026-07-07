@@ -14,7 +14,7 @@ Selecting a stack in the sidebar opens the editor cockpit, a two-column workspac
 The top card on the left holds the stack's identity and primary controls.
 
 <Frame>
-  <img src="/images/editor/command-center.png" alt="Command Center card with breadcrumb, stack title, running status pill, image and digest, action bar, and the plex container row with live stats" />
+  <img src="/images/editor/command-center.png" alt="Command Center card with breadcrumb, stack title, running status pill, action bar, and the plex container row with live stats" />
 </Frame>
 
 | Element | What it shows |
@@ -22,7 +22,6 @@ The top card on the left holds the stack's identity and primary controls.
 | **Breadcrumb** | `<node> › stacks › <stack>` rendered in caps. Confirms which node the stack lives on. |
 | **Stack title** | The stack name in display italic. |
 | **Status pill** | Aggregate state: `running · healthy`, `running · starting`, `running · unhealthy`, plain `running` (no healthcheck defined), or `exited` (any non-running state, including stopped, created, and paused). The dot pulses while the stack is running. |
-| **Image and digest** | First container's image and the leading 12 characters of its image digest, with a copy button for the full SHA. |
 
 ### Stack action bar
 
@@ -56,7 +55,7 @@ Below the action bar, the **CONTAINERS** section lists every container the stack
 | **Uptime / state** | `up 2h 15m` for running containers, the raw state for everything else. |
 | **Healthcheck label** | `healthcheck passing`, `healthcheck failing`, or `healthcheck starting`, only when a healthcheck is defined. |
 | **Port mapping** | The first detected web-UI port, formatted `host → container/proto`. The mapping itself is a link that opens the service in a new tab, with a **Copy URL** button beside it. The address uses the active node's host and switches to `https` for port 443. |
-| **Action buttons** | **View logs**, **Open bash shell** (admin only), **Service actions**. |
+| **Action buttons** | **Image source links**, **View logs**, **Open bash shell** (admin only), **Service actions**. Per-container image references and registry links live here, not in the header. |
 | **Live stats** | CPU, memory, and net I/O with rolling sparklines. Only rendered while the container is running. Stats refresh on the same 1500 ms cadence as the dashboard. |
 
 ### Service actions

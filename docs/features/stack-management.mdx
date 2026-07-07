@@ -175,10 +175,10 @@ Click any group header to collapse or expand it. The group's stack count appears
 Opening a stack puts identity and state front and center.
 
 <Frame>
-  <img src="/images/stack-view/identity-header.png" alt="Stack identity header showing breadcrumb, title, state pill, image and digest, and action row" />
+  <img src="/images/stack-view/identity-header.png" alt="Stack identity header showing breadcrumb, title, state pill, and action row" />
 </Frame>
 
-The header answers three questions at a glance:
+The header answers two questions at a glance:
 
 - **What is this?** A breadcrumb (`LOCAL · STACKS · NAME`) and the stack name as the title.
 - **Is it healthy?** A state pill to the right of the title reports the live state:
@@ -187,21 +187,20 @@ The header answers three questions at a glance:
   - `running · starting` (amber) during the Docker healthcheck start period.
   - `running` (green) when no healthcheck is defined.
   - `exited` (red) when no containers are up.
-- **What does it ship?** A mono line under the title shows the primary image tag and the short image digest, with a copy button to grab the full digest.
 
-The action row to the right of the header keeps everyday lifecycle controls visible. The **More actions** overflow holds Rollback, Scan config, and Delete; the next sections cover both surfaces.
+The action row below the title keeps everyday lifecycle controls visible. The **More actions** overflow holds Rollback, Scan config, and Delete; the next sections cover both surfaces.
 
 If Sencho discovers its own compose project as a stack (because the deployment directory lives inside `COMPOSE_DIR`), that stack is treated as the running Sencho instance: deploy, update, stop, down, and delete are disabled in the UI and refused by the API. Use **Fleet → Node Update** to upgrade Sencho. Compose Doctor flags the condition during preflight.
 
 ### Image source links
 
-Next to the image line is a links button that turns the image reference into somewhere useful to go. It opens a small menu with:
+Each container row includes a links button that turns the image reference into somewhere useful to go. It opens a small menu with:
 
 - **Open on the registry.** Docker Hub images link to their Docker Hub page; GitHub Container Registry (`ghcr.io`) images link to the owner on GitHub. Images from a private or unrecognized registry show the registry host instead of a link, so you never land on a broken guessed URL.
 - **Copy image reference.** Grabs the full reference for use elsewhere.
 - **Source, homepage, documentation, and revision links** when the image declares them. These come from the image's own [OCI labels](https://github.com/opencontainers/image-spec/blob/main/annotations.md) (`org.opencontainers.image.source`, `.url`, `.documentation`, `.revision`, `.version`) and are read locally from the image, so they need no internet access and appear only when the image ships them. A revision links to its commit when the source is a GitHub repository; the version is shown as plain text.
 
-The same links button appears on each container row and on the update cards in [Auto-Update Policies](/features/auto-update-policies), so you can review what an image ships and where it comes from before approving an update.
+The same links button appears on update cards in [Auto-Update Policies](/features/auto-update-policies), so you can review what an image ships and where it comes from before approving an update.
 
 ## Container health strip
 

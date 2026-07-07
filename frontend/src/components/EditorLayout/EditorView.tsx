@@ -142,7 +142,6 @@ export interface EditorViewProps {
     isEditing: boolean;
     editingCompose: boolean;
     logsMode: 'structured' | 'raw';
-    copiedDigest: string | null;
     loadingAction: StackAction | null;
     stackMisconfigScanning: boolean;
 
@@ -151,9 +150,6 @@ export interface EditorViewProps {
     isAdmin: boolean;
     trivy: { available: boolean };
     activeNode: Node | null;
-
-    // Refs
-    copiedDigestTimerRef: React.MutableRefObject<number | null>;
 
     // Stack actions
     deployStack: (e: React.MouseEvent) => Promise<void>;
@@ -185,7 +181,6 @@ export interface EditorViewProps {
     setLogsMode: (mode: 'structured' | 'raw') => void;
     setEditingCompose: (open: boolean) => void;
     setGitSourceOpen: (open: boolean) => void;
-    setCopiedDigest: React.Dispatch<React.SetStateAction<string | null>>;
 
     // Composed action: wraps setStackToDelete + setDeleteDialogOpen
     requestDeleteStack: () => void;
@@ -242,14 +237,12 @@ export function EditorView(props: EditorViewProps) {
         isEditing,
         editingCompose,
         logsMode,
-        copiedDigest,
         loadingAction,
         stackMisconfigScanning,
         can,
         isAdmin,
         trivy,
         activeNode,
-        copiedDigestTimerRef,
         deployStack,
         restartStack,
         stopStack,
@@ -270,7 +263,6 @@ export function EditorView(props: EditorViewProps) {
         setLogsMode,
         setEditingCompose,
         setGitSourceOpen,
-        setCopiedDigest,
         requestDeleteStack,
         isSelfStack,
         recoveryResult,
@@ -385,9 +377,6 @@ export function EditorView(props: EditorViewProps) {
                                         activeNode={activeNode}
                                         safeContainers={safeContainers}
                                         isRunning={isRunning}
-                                        copiedDigest={copiedDigest}
-                                        setCopiedDigest={setCopiedDigest}
-                                        copiedDigestTimerRef={copiedDigestTimerRef}
                                         can={can}
                                         isAdmin={isAdmin}
                                         trivy={trivy}
