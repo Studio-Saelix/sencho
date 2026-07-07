@@ -24,6 +24,11 @@ const STATUSES: NodeUpdateStatus[] = [
   { nodeId: 2, name: 'Edge', type: 'remote', version: '1.0.0', latestVersion: '1.1.0', updateAvailable: true, updateStatus: null },
 ];
 
+const BLOCKED_STATUS: NodeUpdateStatus = {
+  nodeId: 3, name: 'Pinned', type: 'remote', version: '1.0.0', latestVersion: '1.1.0',
+  updateAvailable: true, updateStatus: null, updateBlocked: true, updateBlockedReason: 'Digest pin blocks update.',
+};
+
 beforeEach(() => {
   apiFetchMock.mockReset();
   toastSuccess.mockReset();
@@ -140,6 +145,78 @@ describe('useFleetUpdateStatus', () => {
 
     expect(apiFetchMock).toHaveBeenCalledWith('/fleet/update-all', expect.objectContaining({ method: 'POST' }));
     expect(toastSuccess).toHaveBeenCalledWith(expect.stringContaining('2 nodes'));
+  });
+
+  it('triggerNodeUpdate on a blocked node toasts and does not POST', async () => {
+    apiFetchMock.mockResolvedValue(okJson({ nodes: [...STATUSES, BLOCKED_STATUS] }));
+    const { result } = renderHook(() => useFleetUpdateStatus());
+    await act(async () => { await result.current.fetchUpdateStatus(); });
+    apiFetchMock.mockClear();
+
+    await act(async () => { await result.current.triggerNodeUpdate(3); });
+
+    expect(toastError).toHaveBeenCalledWith('Digest pin blocks update.');
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it('confirmLocalUpdate forwards targetVersion when latestVersion is valid', async () => {
+    apiFetchMock.mockResolvedValue(okJson({ nodes: STATUSES }));
+    const { result } = renderHook(() => useFleetUpdateStatus());
+    await act(async () => { await result.current.fetchUpdateStatus(); });
+
+    await act(async () => { await result.current.triggerNodeUpdate(1); });
+    expect(result.current.localUpdateConfirm).toBe(1);
+
+    apiFetchMock.mockResolvedValue(okJson({ message: 'ok' }));
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(
+      new Response(JSON.stringify({ startedAt: 1000 }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )));
+
+    await act(async () => { await result.current.confirmLocalUpdate(); });
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/fleet/nodes/1/update',
+      expect.objectContaining({
+        method: 'POST',
+        localOnly: true,
+        body: JSON.stringify({ targetVersion: '1.1.0' }),
+      }),
+    );
+    expect(result.current.reconnecting).toBe(true);
+    vi.unstubAllGlobals();
+  });
+
+  it('dismisses the reconnecting overlay when the local update resolves failed', async () => {
+    apiFetchMock.mockResolvedValue(okJson({ nodes: STATUSES }));
+    const { result } = renderHook(() => useFleetUpdateStatus());
+    await act(async () => { await result.current.fetchUpdateStatus(); });
+
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(
+        new Response(JSON.stringify({ startedAt: 1000 }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      )));
+      apiFetchMock.mockResolvedValueOnce(okJson({ message: 'ok' }));
+
+      await act(async () => { await result.current.triggerNodeUpdate(1); });
+      await act(async () => { await result.current.confirmLocalUpdate(); });
+      expect(result.current.reconnecting).toBe(true);
+
+      const failedLocal = {
+        ...STATUSES[0],
+        updateStatus: 'failed' as const,
+        error: 'Pull failed',
+      };
+      apiFetchMock.mockResolvedValue(okJson({ nodes: [failedLocal, STATUSES[1]] }));
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+
+      expect(result.current.reconnecting).toBe(false);
+      expect(toastError).toHaveBeenCalledWith('Pull failed');
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 
   it('checkUpdates opens the modal and toggles the checking flag', async () => {

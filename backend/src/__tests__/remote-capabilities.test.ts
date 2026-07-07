@@ -25,7 +25,7 @@ afterAll(() => cleanupTestDb(tmpDir));
 
 afterEach(() => vi.restoreAllMocks());
 
-const ONLINE = { startedAt: null, updateError: null, online: true } as const;
+const ONLINE = { startedAt: null, updateError: null, online: true, imagePinKind: null, updateBlocked: false } as const;
 const capable: RemoteMeta = { version: '0.93.0', capabilities: ['fleet', 'cross-node-rbac'], ...ONLINE };
 const incapable: RemoteMeta = { version: '0.92.0', capabilities: ['fleet', 'labels'], ...ONLINE };
 
@@ -42,7 +42,7 @@ describe('remoteSupportsCrossNodeRbac', () => {
 
   it('fails closed when the remote is offline (empty capabilities)', async () => {
     vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode')
-      .mockResolvedValue({ version: null, capabilities: [], startedAt: null, updateError: null, online: false });
+      .mockResolvedValue({ version: null, capabilities: [], startedAt: null, updateError: null, online: false, imagePinKind: null, updateBlocked: false });
     expect(await remoteSupportsCrossNodeRbac(NODE_ID)).toBe(false);
   });
 
@@ -50,7 +50,7 @@ describe('remoteSupportsCrossNodeRbac', () => {
     // A 0.0.0-dev image reports version null (non-semver) but is reachable and
     // genuinely advertises the capability; it must not be wrongly denied.
     vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode')
-      .mockResolvedValue({ version: null, capabilities: ['fleet', 'cross-node-rbac'], startedAt: null, updateError: null, online: true });
+      .mockResolvedValue({ version: null, capabilities: ['fleet', 'cross-node-rbac'], startedAt: null, updateError: null, online: true, imagePinKind: null, updateBlocked: false });
     expect(await remoteSupportsCrossNodeRbac(NODE_ID)).toBe(true);
   });
 

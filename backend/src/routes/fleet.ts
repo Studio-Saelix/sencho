@@ -14,12 +14,12 @@ import { getHostMemory } from '../helpers/hostMemory';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
-import SelfUpdateService from '../services/SelfUpdateService';
+import SelfUpdateService, { type PinInfo } from '../services/SelfUpdateService';
 import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin, requireNodeProxy } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
-import { scheduleLocalUpdate } from './license';
+import { respondSelfUpdatePreflight, scheduleLocalUpdate } from './license';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
@@ -28,6 +28,8 @@ import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
+import { parseRequestedTargetVersion, pickCompareTarget } from '../utils/targetVersion';
+import { buildTargetImageRef, isRepinBlocked, type ImagePinKind } from '../helpers/selfUpdateCompose';
 import { withTimeout, TimeoutError } from '../utils/withTimeout';
 
 // Mirror the system-maintenance route timeout so fleet's local-node prune
@@ -54,6 +56,39 @@ import { LicenseService } from '../services/LicenseService';
 
 const updateTracker = FleetUpdateTrackerService.getInstance();
 const EARLY_FAIL_MS = 180 * 1000; // 3 minutes before declaring a probable pull failure
+// Shown in the Node Updates UI when a node's image is pinned in a way Fleet
+// cannot repin (digest or an unresolved value). Node-neutral so it reads the
+// same for the local node and a remote row.
+const REPIN_BLOCKED_REASON =
+  'This node pins its Sencho image to a digest or a value Fleet cannot resolve, so it cannot update automatically. Change the image tag in its compose file, then update.';
+
+const EMPTY_PIN_STATUS = {
+  imagePinKind: null,
+  composeImageRef: null,
+  targetImageRef: null,
+  updateBlocked: false,
+  updateBlockedReason: null,
+} as const;
+
+function localPinStatusFields(
+  pin: PinInfo,
+  compareVersion: string | null,
+  compareValid: boolean,
+  blockedReason: string,
+) {
+  const updateBlocked = isRepinBlocked(pin.pinKind);
+  const compareTarget = pickCompareTarget(compareVersion, compareValid);
+  return {
+    imagePinKind: pin.pinKind,
+    composeImageRef: pin.composeImageRef,
+    targetImageRef:
+      pin.pinKind === 'semver' && compareTarget
+        ? buildTargetImageRef(pin.composeImageRef, compareTarget)
+        : null,
+    updateBlocked,
+    updateBlockedReason: updateBlocked ? blockedReason : null,
+  };
+}
 // Throttle the forced latest-version refresh so a caller cannot loop the recheck
 // endpoint to hammer GitHub / Docker Hub. The 30-minute cache still serves reads
 // between forced refreshes; this only bounds how often we bypass it.
@@ -220,6 +255,12 @@ async function getCompareTarget(gatewayVersion: string | null) {
     console.debug('[Fleet:debug] Compare target resolved:', { gatewayVersion, latestVersion, using: result.compareVersion, valid: result.compareValid });
   }
   return result;
+}
+
+async function resolveUpdateTarget(requested?: string): Promise<string | undefined> {
+  if (requested !== undefined) return requested;
+  const { compareVersion, compareValid } = await getCompareTarget(getSenchoVersion());
+  return pickCompareTarget(compareVersion, compareValid);
 }
 
 async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
@@ -1073,6 +1114,8 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         let remoteStartedAt: number | null = null;
         let remoteUpdateError: string | null = null;
         let remoteOnline = false;
+        let remoteImagePinKind: ImagePinKind | null = null;
+        let remoteUpdateBlocked = false;
         if (node.type === 'local') {
           version = gatewayVersion;
         } else {
@@ -1081,6 +1124,8 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           remoteStartedAt = meta.startedAt;
           remoteUpdateError = meta.updateError;
           remoteOnline = meta.online;
+          remoteImagePinKind = meta.imagePinKind;
+          remoteUpdateBlocked = meta.updateBlocked;
         }
 
         if (tracker?.status === 'updating') {
@@ -1202,6 +1247,27 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           skippedVersion = skipRow.skippedVersion;
         }
 
+        // Image-pin metadata. The local row gets full detail (this route is
+        // hub-only and authenticated); remote rows get only the safe subset
+        // (pinKind + blocked flag) carried on the remote's /api/meta. A full
+        // remote composeImageRef would need a new authenticated remote endpoint
+        // and is deliberately out of scope.
+        let imagePinKind: ImagePinKind | null = null;
+        let composeImageRef: string | null = null;
+        let targetImageRef: string | null = null;
+        let updateBlocked = false;
+        let updateBlockedReason: string | null = null;
+        if (node.type === 'local') {
+          const pin = await SelfUpdateService.getInstance().getPinInfo();
+          if (pin) {
+            ({ imagePinKind, composeImageRef, targetImageRef, updateBlocked, updateBlockedReason } =
+              localPinStatusFields(pin, compareVersion, compareValid, REPIN_BLOCKED_REASON));
+          }
+        } else {
+          imagePinKind = remoteImagePinKind;
+          updateBlocked = remoteUpdateBlocked;
+        }
+
         return {
           nodeId: node.id,
           name: node.name,
@@ -1213,6 +1279,11 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           error: currentTracker?.error ?? null,
           skipActive,
           skippedVersion,
+          imagePinKind,
+          composeImageRef,
+          targetImageRef,
+          updateBlocked,
+          updateBlockedReason,
         };
       }),
     );
@@ -1231,6 +1302,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         error: null,
         skipActive: false,
         skippedVersion: null,
+        ...EMPTY_PIN_STATUS,
       };
     });
 
@@ -1266,12 +1338,18 @@ fleetRouter.get('/update-status/release-notes', authMiddleware, async (req: Requ
 // Pilot loopback targets carry an empty apiToken because the tunnel bridge
 // re-injects admin auth; sending a malformed `Bearer ` header would 401 on
 // the pilot's local Express. Omit the header in that case.
-function postSystemUpdate(target: { apiUrl: string; apiToken: string }) {
+//
+// targetVersion is forwarded only when it is a valid semver so the remote can
+// repin a semver-pinned compose to that release. It is omitted otherwise (never
+// sent as null/invalid), and an older remote that predates this field simply
+// ignores the extra body key and behaves as before.
+function postSystemUpdate(target: { apiUrl: string; apiToken: string }, targetVersion?: string) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
   return fetch(`${target.apiUrl.replace(/\/$/, '')}/api/system/update`, {
     method: 'POST',
     headers,
+    body: JSON.stringify(targetVersion ? { targetVersion } : {}),
     signal: AbortSignal.timeout(10000),
   });
 }
@@ -1339,6 +1417,9 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       return;
     }
 
+    const requestedTarget = parseRequestedTargetVersion(req, res);
+    if (requestedTarget === null) return; // invalid supplied value; 400 already sent
+
     const existing = updateTracker.get(nodeId);
     if (existing?.status === 'updating') {
       if (Date.now() - existing.startedAt > UPDATE_TIMEOUT_MS) {
@@ -1359,12 +1440,15 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
     }
 
     if (node.type === 'local') {
-      if (!SelfUpdateService.getInstance().isAvailable()) {
+      const selfUpdate = SelfUpdateService.getInstance();
+      if (!selfUpdate.isAvailable()) {
         res.status(503).json({ error: 'Self-update unavailable on the local node.' });
         return;
       }
+      const resolvedTarget = await resolveUpdateTarget(requestedTarget);
+      if (!respondSelfUpdatePreflight(res, await selfUpdate.canSelfUpdateTarget(resolvedTarget))) return;
       updateTracker.set(nodeId, updateTracker.create('updating', getSenchoVersion(), null));
-      scheduleLocalUpdate(res, 'Update initiated on local node. The server will restart shortly.');
+      scheduleLocalUpdate(res, 'Update initiated on local node. The server will restart shortly.', resolvedTarget);
       return;
     }
 
@@ -1386,8 +1470,13 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       res.status(503).json({ error: 'Remote node does not support self-update. It may need to be updated manually first.' });
       return;
     }
+    if (meta.updateBlocked) {
+      res.status(409).json({ error: REPIN_BLOCKED_REASON, code: 'update_blocked' });
+      return;
+    }
 
-    const response = await postSystemUpdate(target);
+    const resolvedTarget = await resolveUpdateTarget(requestedTarget);
+    const response = await postSystemUpdate(target, resolvedTarget);
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
@@ -1417,6 +1506,9 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
     const nodes = db.getNodes();
     const gatewayVersion = getSenchoVersion();
     const { compareVersion, compareValid } = await getCompareTarget(gatewayVersion);
+    // Forward the compare target so each remote repins a semver pin to it; omit
+    // when there is no valid target so a remote falls back to legacy behavior.
+    const updateAllTarget = pickCompareTarget(compareVersion, compareValid);
 
     const debug = isDebugEnabled();
     console.log('[Fleet] Update-all triggered,', nodes.length, 'nodes registered');
@@ -1451,10 +1543,13 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
       if (!meta.capabilities.includes('self-update')) {
         return { name: node.name, triggered: false };
       }
+      if (meta.updateBlocked) {
+        return { name: node.name, triggered: false };
+      }
       if (isValidVersion(meta.version) && compareValid && !semver.lt(meta.version, compareVersion!)) {
         return { name: node.name, triggered: false };
       }
-      const response = await postSystemUpdate(target);
+      const response = await postSystemUpdate(target, updateAllTarget);
       if (response.ok) {
         updateTracker.set(node.id, updateTracker.create('updating', meta.version, meta.startedAt));
         return { name: node.name, triggered: true };

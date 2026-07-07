@@ -39,6 +39,8 @@ const ONLINE = (over: Partial<RemoteMeta> = {}): RemoteMeta => ({
   startedAt: 1,
   updateError: null,
   online: true,
+  imagePinKind: null,
+  updateBlocked: false,
   ...over,
 });
 

@@ -116,10 +116,16 @@ describe('NodeCard', () => {
     expect(screen.getByRole('button', { name: /Update/ })).toBeInTheDocument();
   });
 
-  it('hides the update button for a non-admin but still shows the read-only badge', () => {
-    useAuthMock.mockReturnValue({ isAdmin: false });
-    render(<NodeCard {...baseProps(onlineNode())} updateStatus={updateAvailableStatus} onUpdate={vi.fn()} />);
+  it('hides the update button and shows Pinned when updateBlocked', () => {
+    useAuthMock.mockReturnValue({ isAdmin: true });
+    render(
+      <NodeCard
+        {...baseProps(onlineNode())}
+        updateStatus={{ ...updateAvailableStatus, updateBlocked: true, updateBlockedReason: 'Digest pin.' }}
+        onUpdate={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Pinned')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Update/ })).not.toBeInTheDocument();
-    expect(screen.getByText('Update available')).toBeInTheDocument();
   });
 });

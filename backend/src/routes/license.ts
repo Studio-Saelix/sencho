@@ -3,6 +3,8 @@ import { LicenseService } from '../services/LicenseService';
 import SelfUpdateService from '../services/SelfUpdateService';
 import { requireAdmin } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
+import { parseRequestedTargetVersion } from '../utils/targetVersion';
+import type { SelfUpdatePreflight } from '../services/SelfUpdateService';
 
 const LICENSE_SCOPE_MESSAGE = 'API tokens cannot manage licenses.';
 
@@ -83,15 +85,29 @@ licenseRouter.get('/billing-portal', async (_req: Request, res: Response): Promi
  * Respond 202, then trigger the "last breath" self-update after flush.
  * Exported because the fleet "update this node" route reuses the same
  * response shape + post-flush trigger for local-node self-updates.
+ *
+ * `targetVersion` (the Fleet compare target) drives the pinned-image repin;
+ * when omitted, triggerUpdate keeps the legacy behavior of pulling the running
+ * image and recreating from the on-disk compose.
  */
-export function scheduleLocalUpdate(res: Response, message: string): void {
+/** Send 409 when preflight fails; returns false so the route can early-return. */
+export function respondSelfUpdatePreflight(
+  res: Response,
+  preflight: SelfUpdatePreflight,
+): preflight is { ok: true } {
+  if (preflight.ok) return true;
+  res.status(409).json({ error: preflight.reason, code: 'update_blocked' });
+  return false;
+}
+
+export function scheduleLocalUpdate(res: Response, message: string, targetVersion?: string): void {
   res.status(202).json({ message });
   res.on('finish', () => {
     setTimeout(() => {
       // Defense in depth: triggerUpdate records its own errors into
       // lastUpdateError; guard against an unexpected throw becoming an
       // unhandled rejection.
-      SelfUpdateService.getInstance().triggerUpdate().catch((err) => {
+      SelfUpdateService.getInstance().triggerUpdate({ targetVersion }).catch((err) => {
         console.error('[SelfUpdate] Unexpected error during triggerUpdate:', err);
       });
     }, 500);
@@ -100,11 +116,17 @@ export function scheduleLocalUpdate(res: Response, message: string): void {
 
 export const systemUpdateRouter = Router();
 
-systemUpdateRouter.post('/update', (req: Request, res: Response): void => {
+systemUpdateRouter.post('/update', async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
-  if (!SelfUpdateService.getInstance().isAvailable()) {
+  const selfUpdate = SelfUpdateService.getInstance();
+  if (!selfUpdate.isAvailable()) {
     res.status(503).json({ error: 'Self-update unavailable. Sencho must be deployed via Docker Compose.' });
     return;
   }
-  scheduleLocalUpdate(res, 'Update initiated. The server will restart shortly.');
+  const targetVersion = parseRequestedTargetVersion(req, res);
+  if (targetVersion === null) return; // invalid supplied value; 400 already sent
+  // Fail fast on a pin we cannot repin (digest/unknown) so the caller gets a
+  // 409 instead of a 202 that would later fail after the reconnect overlay.
+  if (!respondSelfUpdatePreflight(res, await selfUpdate.canSelfUpdateTarget(targetVersion))) return;
+  scheduleLocalUpdate(res, 'Update initiated. The server will restart shortly.', targetVersion);
 });

@@ -429,6 +429,16 @@ After adding the missing volume mount, restart Sencho and retry the update.
 
 ---
 
+## Fleet shows Pinned and will not update the node
+
+**Symptom:** A node row in **Node updates** shows a **Pinned** badge instead of an **Update** button, or an update attempt returns an error about the image pin.
+
+**Cause:** The node's compose file pins Sencho by digest or uses a variable for the image value. Fleet cannot rewrite those automatically.
+
+**Fix:** Edit the compose file to use a semver tag (for example `saelix/sencho:0.94.0`) or a floating tag such as `latest`, redeploy once if needed, then retry the update from the Node updates sheet.
+
+---
+
 ## First remote update always times out on old nodes
 
 **Symptom:** After triggering a remote update on a node running a very old Sencho version (pre-v0.39.3), the node successfully restarts with the new version, but the dashboard shows **Timed out** or **Failed** instead of **Updated**.

@@ -58,6 +58,10 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
     const overview = useFleetOverview({ prefs, updatePrefs, updateStatuses: updateStatus.updateStatuses });
+    // The local node's status backs the confirm dialog copy (pin + target ref).
+    const localUpdateConfirmStatus = updateStatus.localUpdateConfirm !== null
+        ? updateStatus.updateStatuses.find(s => s.nodeId === updateStatus.localUpdateConfirm)
+        : undefined;
     const topology = useTopologyPreferences();
     const { exporting, exportDossier } = useFleetDossierExport();
 
@@ -318,6 +322,10 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
                 open={updateStatus.localUpdateConfirm !== null}
                 onOpenChange={(open) => { if (!open) updateStatus.setLocalUpdateConfirm(null); }}
                 onConfirm={updateStatus.confirmLocalUpdate}
+                imagePinKind={localUpdateConfirmStatus?.imagePinKind}
+                composeImageRef={localUpdateConfirmStatus?.composeImageRef}
+                targetImageRef={localUpdateConfirmStatus?.targetImageRef}
+                targetVersion={localUpdateConfirmStatus?.latestVersion}
             />
 
             {NodeActionModals}

@@ -31,6 +31,12 @@ export interface FleetNode {
     pilot_last_seen?: number | null;
 }
 
+export type ImagePinKind = 'floating' | 'semver' | 'digest' | 'unknown';
+
+/** Shown when the backend omits a node-specific block reason. */
+export const PINNED_UPDATE_BLOCKED_FALLBACK =
+    'This node cannot be updated automatically while its image is pinned this way.';
+
 export interface NodeUpdateStatus {
     nodeId: number;
     name: string;
@@ -42,6 +48,17 @@ export interface NodeUpdateStatus {
     error?: string | null;
     skipActive?: boolean;
     skippedVersion?: string | null;
+    /** How this node's Sencho image is pinned. Present for the local node and,
+     *  as the safe subset, for remotes that advertise it; null/absent otherwise. */
+    imagePinKind?: ImagePinKind | null;
+    /** The compose-declared image ref. Local node only (authenticated route). */
+    composeImageRef?: string | null;
+    /** The ref a semver pin will be rewritten to. Local node only. */
+    targetImageRef?: string | null;
+    /** True when the pin (digest/unknown) cannot be updated automatically. */
+    updateBlocked?: boolean;
+    /** Human-readable block reason. Local node only. */
+    updateBlockedReason?: string | null;
 }
 
 export type ViewMode = 'grid' | 'topology';

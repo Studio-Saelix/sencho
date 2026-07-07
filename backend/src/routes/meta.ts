@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { getActiveCapabilities, getSenchoVersion } from '../services/CapabilityRegistry';
+import { isRepinBlocked } from '../helpers/selfUpdateCompose';
 import { MeshService } from '../services/MeshService';
 import SelfUpdateService from '../services/SelfUpdateService';
 
@@ -28,13 +29,23 @@ metaRouter.get('/health', (_req: Request, res: Response): void => {
 // Public meta endpoint. Returns this instance's version and supported
 // capabilities. No auth required (like /health). Used by remote nodes during
 // connection tests.
-metaRouter.get('/meta', (_req: Request, res: Response): void => {
-  const updateError = SelfUpdateService.getInstance().getLastError();
+//
+// Image-pin fields are intentionally limited to the non-sensitive subset:
+// `imagePinKind` (a bounded enum) and `updateBlocked` (a boolean). The full
+// composeImageRef is NEVER exposed here because this endpoint is public and the
+// ref can carry a private registry/repository name.
+metaRouter.get('/meta', async (_req: Request, res: Response): Promise<void> => {
+  const selfUpdate = SelfUpdateService.getInstance();
+  const updateError = selfUpdate.getLastError();
+  const pin = await selfUpdate.getPinInfo({ cacheOnly: true });
+  const updateBlocked = pin ? isRepinBlocked(pin.pinKind) : false;
   res.json({
     version: getSenchoVersion(),
     capabilities: getActiveCapabilities(),
     startedAt: processStartedAt,
     experimental: process.env.SENCHO_EXPERIMENTAL === 'true',
+    ...(pin ? { imagePinKind: pin.pinKind } : {}),
+    updateBlocked,
     ...(updateError ? { updateError } : {}),
   });
 });

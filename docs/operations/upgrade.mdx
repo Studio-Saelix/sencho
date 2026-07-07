@@ -69,6 +69,10 @@ If you prefer to control exactly which version you run, pin the image tag in you
 image: saelix/sencho:0.38.0
 ```
 
+
+
+Fleet can update semver pins directly from the Node updates sheet: it rewrites the tag to the selected release before recreating the container. Digest pins and compose values that use variable interpolation must be changed manually before Fleet can update the node.
+
 Check [GitHub Releases](https://github.com/studio-saelix/sencho/releases) for available versions and changelogs.
 
 ---

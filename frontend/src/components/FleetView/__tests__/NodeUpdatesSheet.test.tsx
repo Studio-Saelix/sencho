@@ -336,6 +336,17 @@ describe('NodeUpdatesSheet', () => {
     expect(toast.info).not.toHaveBeenCalled();
   });
 
+  it('hides the Update button and shows a Pinned badge when updateBlocked', () => {
+    const blocked: NodeUpdateStatus = {
+      ...STATUSES[1],
+      updateBlocked: true,
+      updateBlockedReason: 'Digest pin blocks automatic update.',
+    };
+    render(<NodeUpdatesSheet {...baseProps({ updateStatuses: [STATUSES[0], blocked, STATUSES[2]] })} />);
+    expect(screen.getByText('Pinned')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Update$/ })).not.toBeInTheDocument();
+  });
+
   it('hides every mutating affordance for a non-admin but keeps the read-only table', () => {
     render(<NodeUpdatesSheet {...baseProps({ isAdmin: false })} />);
     // Read-only status remains visible

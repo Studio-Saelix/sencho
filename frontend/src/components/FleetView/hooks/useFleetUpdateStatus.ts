@@ -1,7 +1,30 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
-import type { NodeUpdateStatus } from '../types';
+import { isValidVersion } from '@/lib/version';
+import { PINNED_UPDATE_BLOCKED_FALLBACK, type NodeUpdateStatus } from '../types';
+
+/** POST body for an update trigger: forward the target release when it is a
+ *  valid version so the receiving node can repin a semver pin to it; omit
+ *  otherwise so the backend falls back to its compare target. */
+function updateRequestInit(status: NodeUpdateStatus | undefined): RequestInit & { localOnly: true } {
+    const base = { method: 'POST', localOnly: true } as const;
+    return isValidVersion(status?.latestVersion)
+        ? { ...base, body: JSON.stringify({ targetVersion: status!.latestVersion }) }
+        : base;
+}
+
+function parseUpdateError(err: Record<string, unknown>, fallback: string): string {
+    const nested = err?.data as Record<string, unknown> | undefined;
+    const message = err?.message ?? err?.error ?? nested?.error;
+    return typeof message === 'string' && message ? message : fallback;
+}
+
+function toastIfUpdateBlocked(status: NodeUpdateStatus | undefined): boolean {
+    if (!status?.updateBlocked) return false;
+    toast.error(status.updateBlockedReason ?? PINNED_UPDATE_BLOCKED_FALLBACK);
+    return true;
+}
 
 export function useFleetUpdateStatus() {
     const [updateStatuses, setUpdateStatuses] = useState<NodeUpdateStatus[]>([]);
@@ -42,6 +65,9 @@ export function useFleetUpdateStatus() {
 
     const triggerNodeUpdate = useCallback(async (nodeId: number) => {
         const status = updateStatusesRef.current.find(s => s.nodeId === nodeId);
+        // A pin we cannot repin (digest/unknown) has no update action; the button
+        // is disabled upstream, but guard here so a stale click cannot POST.
+        if (toastIfUpdateBlocked(status)) return;
         if (status?.type === 'local') {
             setLocalUpdateConfirm(nodeId);
             return;
@@ -49,13 +75,13 @@ export function useFleetUpdateStatus() {
 
         setUpdatingNodeId(nodeId);
         try {
-            const res = await apiFetch(`/fleet/nodes/${nodeId}/update`, { method: 'POST', localOnly: true });
+            const res = await apiFetch(`/fleet/nodes/${nodeId}/update`, updateRequestInit(status));
             if (res.ok) {
                 toast.success(`Update initiated on ${status?.name ?? 'node'}.`);
                 fetchUpdateStatus();
             } else {
                 const err = await res.json().catch(() => ({}));
-                toast.error(err?.message || err?.error || err?.data?.error || 'Failed to trigger update.');
+                toast.error(parseUpdateError(err, 'Failed to trigger update.'));
             }
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');
@@ -68,6 +94,8 @@ export function useFleetUpdateStatus() {
         const nodeId = localUpdateConfirm;
         setLocalUpdateConfirm(null);
         if (!nodeId) return;
+        const status = updateStatusesRef.current.find(s => s.nodeId === nodeId);
+        if (toastIfUpdateBlocked(status)) return;
 
         setUpdatingNodeId(nodeId);
         try {
@@ -82,13 +110,15 @@ export function useFleetUpdateStatus() {
                 }
             } catch { /* fall back to offline-then-online detection */ }
 
-            const res = await apiFetch(`/fleet/nodes/${nodeId}/update`, { method: 'POST', localOnly: true });
+            const res = await apiFetch(`/fleet/nodes/${nodeId}/update`, updateRequestInit(status));
             if (res.ok) {
                 setPreUpdateStartedAt(bootBefore);
                 setReconnecting(true);
             } else {
+                // A blocked pin returns 409 fast (before any 202), so the overlay
+                // never starts here; surface the reason through the toast path.
                 const err = await res.json().catch(() => ({}));
-                toast.error(err?.message || err?.error || err?.data?.error || 'Failed to trigger local update.');
+                toast.error(parseUpdateError(err, 'Failed to trigger local update.'));
             }
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');
@@ -110,7 +140,7 @@ export function useFleetUpdateStatus() {
                 fetchUpdateStatus();
             } else {
                 const err = await res.json().catch(() => ({}));
-                toast.error(err?.message || err?.error || err?.data?.error || 'Failed to trigger fleet update.');
+                toast.error(parseUpdateError(err, 'Failed to trigger fleet update.'));
             }
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');
@@ -136,6 +166,37 @@ export function useFleetUpdateStatus() {
         await fetchUpdateStatus();
         setCheckingUpdates(false);
     }, [fetchUpdateStatus]);
+
+    // While the reconnect overlay is up, poll the local node's update status.
+    // A pull/patch failure leaves the old gateway alive (no restart), so the
+    // overlay's health poll would sit for the full 5-minute timeout. Detecting
+    // the resolved `failed` status here dismisses the overlay fast and surfaces
+    // the error, instead of leaving the operator on the spinner. A genuine
+    // restart makes this endpoint unreachable (caught, keeps polling) and the
+    // overlay's own health poll reloads the page on success.
+    useEffect(() => {
+        if (!reconnecting) return;
+        const poll = setInterval(async () => {
+            try {
+                const res = await apiFetch('/fleet/update-status', { localOnly: true });
+                if (!res.ok) return;
+                const data = await res.json();
+                const nodes: NodeUpdateStatus[] = data.nodes ?? [];
+                setUpdateStatuses(prev => JSON.stringify(prev) === JSON.stringify(nodes) ? prev : nodes);
+                const local = nodes.find(s => s.type === 'local');
+                if (local && (local.updateStatus === 'failed' || local.updateStatus === 'timeout')) {
+                    setReconnecting(false);
+                    setPreUpdateStartedAt(null);
+                    toast.error(local.error || 'Local update failed. The server did not restart.');
+                }
+            } catch (error) {
+                // Expected while the process restarts; the overlay's health poll
+                // drives the reload on success.
+                console.warn('[Fleet] Reconnect status poll failed:', error);
+            }
+        }, 3000);
+        return () => clearInterval(poll);
+    }, [reconnecting]);
 
     return {
         updateStatuses,

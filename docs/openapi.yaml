@@ -772,6 +772,17 @@ paths:
                     items:
                       type: string
                     example: ["stacks", "containers", "fleet", "auto-updates", "host-console"]
+                  imagePinKind:
+                    type: string
+                    nullable: true
+                    enum: [floating, semver, digest, unknown]
+                    description: How the Sencho service image is pinned in the operator's compose file. Omitted when self-update is unavailable or the compose file could not be read.
+                  updateBlocked:
+                    type: boolean
+                    description: True when the image is pinned in a way Fleet cannot repin automatically (digest or unresolved value).
+                  updateError:
+                    type: string
+                    description: Error from the last failed self-update attempt, when present.
 
   /api/system/update:
     post:
@@ -779,9 +790,21 @@ paths:
       tags: [Health]
       summary: Trigger self-update
       description: |
-        Instructs this Sencho instance to pull the latest Docker image and recreate its own container.
+        Instructs this Sencho instance to pull the update image and recreate its own container.
+        An optional release version in the request body drives semver repinning; floating tags are pulled without rewriting the compose file.
+        Digest and unresolved pins are rejected with 409 before any pull runs.
         Returns 202 immediately; the actual update happens asynchronously after the response is sent.
         Requires the instance to be deployed via Docker Compose with the Docker socket mounted.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                targetVersion:
+                  type: string
+                  description: Release version to update to (valid semver).
       responses:
         "202":
           description: Update initiated.
@@ -795,6 +818,23 @@ paths:
                     example: "Update initiated. The server will restart shortly."
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "400":
+          description: Invalid release version in request body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Update blocked because the compose image cannot be repinned automatically.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
         "503":
           description: Self-update not available (not running in Docker Compose).
           content:
@@ -2594,7 +2634,7 @@ paths:
       operationId: getFleetUpdateStatus
       tags: [Fleet]
       summary: Fleet update status
-      description: Returns version comparison and active update status for all nodes. Compares each node's version against the gateway's version.
+      description: Returns version comparison and active update status for all nodes. Compares each node's version against the gateway's version. Local rows include compose pin details; remote rows expose only the safe pin kind and blocked flag from each node's public meta.
       responses:
         "200":
           description: Update status for all nodes.
@@ -2629,6 +2669,20 @@ paths:
                         skipActive:
                           type: boolean
                         skippedVersion:
+                          type: string
+                          nullable: true
+                        imagePinKind:
+                          type: string
+                          nullable: true
+                        composeImageRef:
+                          type: string
+                          nullable: true
+                        targetImageRef:
+                          type: string
+                          nullable: true
+                        updateBlocked:
+                          type: boolean
+                        updateBlockedReason:
                           type: string
                           nullable: true
         "401":
@@ -2766,7 +2820,7 @@ paths:
       operationId: triggerFleetUpdateAll
       tags: [Fleet]
       summary: Update all outdated nodes
-      description: Triggers self-update on all remote nodes running an older version than the gateway. Local nodes are excluded from bulk updates.
+      description: Triggers self-update on all remote nodes running an older version than the gateway. Forwards the hub compare target as `targetVersion` so semver-pinned remotes can repin before recreate. Local nodes are excluded from bulk updates.
       responses:
         "202":
           description: Bulk update initiated.
