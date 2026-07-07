@@ -149,7 +149,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     } else {
       o.setActiveView(view);
       if (o.isMobile && view !== 'editor') {
-        o.setMobileSurface('content');
+        o.setMobileSurface(view === 'dashboard' ? 'list' : 'content');
       }
     }
 

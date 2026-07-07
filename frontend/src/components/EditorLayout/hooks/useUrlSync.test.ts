@@ -196,4 +196,24 @@ describe('useUrlSync', () => {
     });
     expect(refreshStacks).toHaveBeenCalledWith(false);
   });
+
+  it('keeps mobile dashboard on the list surface so the sidebar renders', () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/dashboard');
+    const setMobileSurface = vi.fn();
+
+    act(() => {
+      renderHook(
+        (props) => useUrlSync(props),
+        {
+          initialProps: makeOpts({
+            isMobile: true,
+            mobileSurface: null,
+            setMobileSurface,
+          }),
+        },
+      );
+    });
+
+    expect(setMobileSurface).toHaveBeenCalledWith('list');
+  });
 });
