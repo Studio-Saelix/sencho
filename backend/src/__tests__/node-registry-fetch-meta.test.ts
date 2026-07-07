@@ -54,6 +54,8 @@ describe('NodeRegistry.fetchMetaForNode', () => {
       startedAt: null,
       updateError: null,
       online: false,
+      imagePinKind: null,
+      updateBlocked: false,
     });
     expect(axiosSpy).not.toHaveBeenCalled();
     db.deleteNode(nodeId);
