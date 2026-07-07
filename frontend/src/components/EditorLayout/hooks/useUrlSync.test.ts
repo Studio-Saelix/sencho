@@ -304,9 +304,7 @@ describe('useUrlSync', () => {
 
   it('clears routeDetailError after a successful retry', async () => {
     window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/compose');
-    const loadFileForRoute = vi.fn()
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true);
+    const loadFileForRoute = vi.fn().mockResolvedValue(false);
 
     const { result, rerender } = renderHook(
       (props) => useUrlSync(props),
@@ -323,6 +321,8 @@ describe('useUrlSync', () => {
       await Promise.resolve();
     });
     expect(result.current.routeDetailError).not.toBeNull();
+
+    loadFileForRoute.mockResolvedValue(true);
 
     rerender(makeOpts({
       isMobile: true,

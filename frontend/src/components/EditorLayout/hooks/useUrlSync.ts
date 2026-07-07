@@ -102,6 +102,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
   const initialHydratedRef = useRef(false);
   const routeReplaceRef = useRef(false);
   const appliedViewRef = useRef<ActiveView | null>(null);
+  const resolvingRef = useRef(false);
 
   const writeHistory = useCallback((path: string, intent: RouteIntent) => {
     const prev = window.history.state as HistoryState | null;
@@ -189,6 +190,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
   }, []);
 
   const resolvePendingStack = useCallback(async () => {
+    if (resolvingRef.current) return;
     const o = optsRef.current;
     const stack = pendingStackRef.current;
     if (!stack || !o.activeNode) return;
@@ -216,14 +218,37 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       return;
     }
 
+    // If the file is already loaded, apply route state without reloading
+    // to avoid unmounting the editor (loadFileCore clears selectedFile on
+    // failure, which would hide the recovery chip during a deploy).
+    if (o.selectedFile === match) {
+      const env = pendingEnvRef.current;
+      const tab = pendingTabRef.current ?? 'compose';
+      if (env && o.envFiles.includes(env) && env !== o.envFiles[0]) {
+        await o.changeEnvFile(env);
+      }
+      o.setActiveTab(tab);
+      o.applyEditorRouteState(tab);
+      pendingStackRef.current = null;
+      pendingEnvRef.current = null;
+      pendingTabRef.current = null;
+      pendingRouteRef.current = null;
+      setUrlHydratingStack(null);
+      setRouteDetailError(null);
+      phaseRef.current = 'settled';
+      return;
+    }
+
+    resolvingRef.current = true;
     const attempted = match;
     const loaded = await o.loadFileForRoute(match);
-    if (pendingStackRef.current !== attempted) return;
+    if (pendingStackRef.current !== attempted) { resolvingRef.current = false; return; }
 
     if (!loaded) {
       phaseRef.current = 'frozen';
       pendingRouteRef.current = null;
       setRouteDetailError(`Could not open "${attempted.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);
+      resolvingRef.current = false;
       return;
     }
 
@@ -242,6 +267,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     setUrlHydratingStack(null);
     setRouteDetailError(null);
     phaseRef.current = 'settled';
+    resolvingRef.current = false;
   }, []);
 
   const hydrateFromUrl = useCallback((pathname: string, search: string) => {
@@ -358,6 +384,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     options.selectedFile,
     options.isFileLoading,
     options.envFiles,
+    urlHydratingStack,
   ]);
 
   useEffect(() => {
