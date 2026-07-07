@@ -15,6 +15,7 @@ import type { ScheduleTaskPrefill } from '@/components/ScheduledOperationsView';
 import type { MuteRuleDraft } from '@/lib/muteRules';
 import type { ActiveView } from '@/lib/router/routeTypes';
 import { HUB_ONLY_VIEWS } from '@/lib/router/routeTypes';
+import { readUrlRouteState } from '@/lib/router/readUrlRouteState';
 import {
   authzReady,
   isViewHidden,
@@ -44,11 +45,13 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
 
-  const [activeView, setActiveView] = useState<ActiveView>('dashboard');
-  const [settingsSection, setSettingsSection] = useState<SectionId>('appearance');
-  const [securityTab, setSecurityTab] = useState<SecurityTab>('overview');
-  const [fleetActiveTab, setFleetActiveTab] = useState<FleetTab>('overview');
-  const [filterNodeId, setFilterNodeId] = useState<number | null>(null);
+  const initialRoute = readUrlRouteState();
+
+  const [activeView, setActiveView] = useState<ActiveView>(initialRoute.activeView);
+  const [settingsSection, setSettingsSection] = useState<SectionId>(initialRoute.settingsSection);
+  const [securityTab, setSecurityTab] = useState<SecurityTab>(initialRoute.securityTab);
+  const [fleetActiveTab, setFleetActiveTab] = useState<FleetTab>(initialRoute.fleetActiveTab);
+  const [filterNodeId, setFilterNodeId] = useState<number | null>(initialRoute.filterNodeId);
   const [schedulePrefill, setSchedulePrefill] = useState<ScheduleTaskPrefill | null>(null);
   const [muteRulePrefill, setMuteRulePrefill] = useState<MuteRuleDraft | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);

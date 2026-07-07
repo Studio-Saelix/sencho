@@ -25,18 +25,21 @@ test.describe('URL routing', () => {
     await expect(page.getByRole('button', { name: 'Create Stack' })).toBeVisible();
   });
 
-  test('cold load of shell views preserves the URL', async ({ page }) => {
+  test('cold load of shell views preserves the URL and mounts the view', async ({ page }) => {
     await page.goto('/nodes/local/fleet');
     await waitForStacksLoaded(page);
     await expect(page).toHaveURL(/\/nodes\/local\/fleet/);
+    await expect(page.getByRole('tab', { name: 'Overview' })).toBeVisible({ timeout: 15_000 });
 
     await page.goto('/nodes/local/security/images');
     await waitForStacksLoaded(page);
     await expect(page).toHaveURL(/\/nodes\/local\/security\/images/);
+    await expect(page.getByRole('tab', { name: 'Images' })).toBeVisible();
 
-    await page.goto('/nodes/local/settings/appearance');
+    await page.goto('/nodes/local/resources');
     await waitForStacksLoaded(page);
-    await expect(page).toHaveURL(/\/nodes\/local\/settings\/appearance/);
+    await expect(page).toHaveURL(/\/nodes\/local\/resources/);
+    await expect(page.getByRole('tab', { name: 'Images' })).toBeVisible();
   });
 
   test('top-level navigation updates the address bar', async ({ page }) => {

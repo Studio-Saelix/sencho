@@ -61,6 +61,7 @@ export interface UseUrlSyncOptions {
   envFiles: string[];
   loadFileForRoute: (filename: string) => Promise<boolean>;
   changeEnvFile: (file: string) => Promise<void>;
+  applyEditorRouteState: (tab: EditorTab) => void;
   refreshStacks: (background?: boolean) => Promise<string[]>;
   reachCtx: ReachabilityContext;
   isMobile: boolean;
@@ -177,8 +178,13 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       setUrlHydratingStack(null);
       setRouteDetailError(null);
       pendingRouteRef.current = null;
-      appliedViewRef.current = view;
-      phaseRef.current = 'applying';
+      if (o.activeView === view) {
+        appliedViewRef.current = null;
+        phaseRef.current = 'settled';
+      } else {
+        appliedViewRef.current = view;
+        phaseRef.current = 'applying';
+      }
     }
   }, []);
 
@@ -227,6 +233,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       await o.changeEnvFile(env);
     }
     o.setActiveTab(tab);
+    o.applyEditorRouteState(tab);
 
     pendingStackRef.current = null;
     pendingEnvRef.current = null;
@@ -266,6 +273,15 @@ export function useUrlSync(options: UseUrlSyncOptions) {
 
     const node = o.nodes.find(n => n.id === nodeId);
     if (!node) return;
+
+    if (parsed.nodeSlug && parsed.view == null && !parsed.isStackList) {
+      routeReplaceRef.current = true;
+      const slug = nodeIdToSlug(node.id, o.nodes);
+      if (slug) writeHistory(`/nodes/${slug}/dashboard`, 'replace');
+      phaseRef.current = 'settled';
+      if (o.activeView !== 'dashboard') o.setActiveView('dashboard');
+      return;
+    }
 
     let view = parsed.view ?? 'dashboard';
     let fleetTab = parsed.fleetTab ?? 'overview';

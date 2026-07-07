@@ -355,6 +355,7 @@ export default function EditorLayout() {
     envFiles,
     loadFileForRoute: stackActions.loadFileForRoute,
     changeEnvFile: stackActions.changeEnvFile,
+    applyEditorRouteState: stackActions.applyEditorRouteState,
     refreshStacks,
     reachCtx,
     isMobile,

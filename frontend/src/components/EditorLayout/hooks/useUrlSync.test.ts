@@ -59,6 +59,7 @@ function makeOpts(over: Partial<UseUrlSyncOptions> = {}): UseUrlSyncOptions {
     envFiles: [],
     loadFileForRoute: vi.fn().mockResolvedValue(true),
     changeEnvFile: vi.fn().mockResolvedValue(undefined),
+    applyEditorRouteState: vi.fn(),
     refreshStacks: vi.fn().mockResolvedValue(['radarr']),
     reachCtx: makeReachCtx(),
     isMobile: false,
@@ -196,6 +197,44 @@ describe('useUrlSync', () => {
       await result.current.retryFrozenRoute();
     });
     expect(refreshStacks).toHaveBeenCalledWith(false);
+  });
+
+  it('hydrates fleet view from URL', () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/fleet');
+    const setActiveView = vi.fn();
+
+    act(() => {
+      renderHook(
+        (props) => useUrlSync(props),
+        {
+          initialProps: makeOpts({
+            activeView: 'fleet',
+            setActiveView,
+          }),
+        },
+      );
+    });
+
+    expect(setActiveView).toHaveBeenCalledWith('fleet');
+  });
+
+  it('normalizes unknown view segments to dashboard', () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/not-a-view');
+    const setActiveView = vi.fn();
+
+    act(() => {
+      renderHook(
+        (props) => useUrlSync(props),
+        {
+          initialProps: makeOpts({
+            activeView: 'dashboard',
+            setActiveView,
+          }),
+        },
+      );
+    });
+
+    expect(window.location.pathname).toBe('/nodes/local/dashboard');
   });
 
   it('hydrates mobile dashboard to the content surface', () => {

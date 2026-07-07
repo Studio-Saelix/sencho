@@ -9,6 +9,7 @@ import type { OverlayState } from './useOverlayState';
 import type { Node } from '@/context/NodeContext';
 import type { RunWithLogParams } from '@/context/DeployFeedbackContext';
 import { parsePath } from '@/lib/router/senchoRoute';
+import type { EditorTab } from '@/lib/router/routeTypes';
 import type { StackAction, RecoverableAction, FailureClassification } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
@@ -483,6 +484,12 @@ export function useStackActions(options: UseStackActionsOptions) {
       if (isAbortError(err)) return;
       editorState.setBackupInfo({ exists: false, timestamp: null });
     }
+  };
+
+  const applyEditorRouteState = (tab: EditorTab) => {
+    editorState.setActiveTab(tab);
+    editorState.setEditingCompose(true);
+    editorState.setIsEditing(false);
   };
 
   const loadFileCore = async (filename: string): Promise<boolean> => {
@@ -1442,6 +1449,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     loadFile,
     loadFileForRoute,
     loadFileOnNode,
+    applyEditorRouteState,
     navigateToNotification,
     changeEnvFile,
     saveFile,
