@@ -96,6 +96,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
   const pendingTabRef = useRef<EditorTab | null>(null);
   const initialHydratedRef = useRef(false);
   const routeReplaceRef = useRef(false);
+  const appliedViewRef = useRef<ActiveView | null>(null);
 
   const writeHistory = useCallback((path: string, intent: RouteIntent) => {
     const prev = window.history.state as HistoryState | null;
@@ -166,7 +167,8 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       pendingTabRef.current = pending.editorTab;
     } else {
       pendingRouteRef.current = null;
-      phaseRef.current = 'settled';
+      appliedViewRef.current = view;
+      phaseRef.current = 'applying';
     }
   }, []);
 
@@ -317,6 +319,16 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     options.isFileLoading,
     options.envFiles,
   ]);
+
+  useEffect(() => {
+    if (phaseRef.current !== 'applying') return;
+    if (pendingStackRef.current) return;
+    const applied = appliedViewRef.current;
+    if (applied == null) return;
+    if (options.activeView !== applied) return;
+    appliedViewRef.current = null;
+    phaseRef.current = 'settled';
+  }, [options.activeView]);
 
   useEffect(() => {
     if (phaseRef.current !== 'settled') return;

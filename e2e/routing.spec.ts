@@ -25,6 +25,20 @@ test.describe('URL routing', () => {
     await expect(page.getByRole('button', { name: 'Create Stack' })).toBeVisible();
   });
 
+  test('cold load of shell views preserves the URL', async ({ page }) => {
+    await page.goto('/nodes/local/fleet');
+    await waitForStacksLoaded(page);
+    await expect(page).toHaveURL(/\/nodes\/local\/fleet/);
+
+    await page.goto('/nodes/local/security/images');
+    await waitForStacksLoaded(page);
+    await expect(page).toHaveURL(/\/nodes\/local\/security\/images/);
+
+    await page.goto('/nodes/local/settings/appearance');
+    await waitForStacksLoaded(page);
+    await expect(page).toHaveURL(/\/nodes\/local\/settings\/appearance/);
+  });
+
   test('top-level navigation updates the address bar', async ({ page }) => {
     await page.getByRole('button', { name: 'Resources', exact: true }).click();
     await expect(page).toHaveURL(/\/nodes\/local\/resources/);
@@ -49,9 +63,26 @@ test.describe('URL routing', () => {
     await page.goto(`/nodes/local/stacks/${encodeURIComponent(slug)}/compose`);
     await waitForStacksLoaded(page);
     await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${slug}|${stackName}`));
+    await expect(page.getByRole('tab', { name: 'Anatomy' })).toBeVisible();
     await page.reload();
     await waitForStacksLoaded(page);
     await expect(page).toHaveURL(/\/nodes\/local\/stacks\//);
+    await expect(page.getByRole('tab', { name: 'Anatomy' })).toBeVisible();
+  });
+
+  test('compose editor env tab updates the URL', async ({ page }) => {
+    const stackName = await firstStackName(page);
+    test.skip(!stackName, 'No stacks available to open');
+
+    const slug = stackName!.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
+    await page.locator('[role="listbox"]').getByText(stackName!, { exact: true }).click();
+    await expect(page).toHaveURL(/\/compose/);
+
+    await page.getByRole('button', { name: 'edit', exact: true }).click();
+    const envTab = page.getByRole('tab', { name: '.env' });
+    test.skip(!(await envTab.isEnabled()), 'Stack has no .env file');
+    await envTab.click();
+    await expect(page).toHaveURL(/\/env/);
   });
 
   test('browser Back returns to the prior view', async ({ page }) => {

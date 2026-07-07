@@ -627,7 +627,7 @@ export default function EditorLayout() {
 
     if (pendingStack) {
       void stackActions.loadFile(pendingStack);
-    } else {
+    } else if (isRealSwitch) {
       setActiveView('dashboard');
     }
 
