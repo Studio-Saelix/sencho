@@ -14,6 +14,7 @@ import type {
 const DEFAULT_STATS: Stats = { active: 0, managed: 0, unmanaged: 0, exited: 0, total: 0 };
 const SPARK_BUCKETS = 20;
 const SPARK_WINDOW_MS = 10 * 60 * 1000;
+const BYTES_PER_MB = 1024 * 1024;
 // Trailing-edge debounce window for live state-invalidate refetches. Matches
 // useNextAutoUpdateRun so dashboard surfaces feel "live" without amplifying a
 // container-event burst into one HTTP request per event.
@@ -43,6 +44,42 @@ function bucketCpu(points: MetricPoint[], windowMs: number, buckets: number): nu
     else last = out[i];
   }
   return out;
+}
+
+// Historical rows from /metrics/historical carry net_rx_mb / net_tx_mb as MB/s rates
+// (legacy field names), not cumulative megabytes. Aggregate per timestamp, bucket,
+// and emit bytes/s so the sparkline matches the live NETWORK headline units.
+export function buildNetHistory(
+  metrics: MetricPoint[],
+  historyEndAt: number | null,
+  windowMs: number,
+  buckets: number,
+): number[] {
+  if (metrics.length === 0 || historyEndAt === null) return Array(buckets).fill(0);
+
+  const start = historyEndAt - windowMs;
+  const bucketMs = windowMs / buckets;
+  const bucketSum = Array<number>(buckets).fill(0);
+  const bucketTimestamps = Array.from({ length: buckets }, () => new Set<number>());
+
+  for (const p of metrics) {
+    if (p.timestamp < start) continue;
+    const idx = Math.min(buckets - 1, Math.max(0, Math.floor((p.timestamp - start) / bucketMs)));
+    bucketSum[idx] += (p.net_rx_mb + p.net_tx_mb) * BYTES_PER_MB;
+    bucketTimestamps[idx].add(p.timestamp);
+  }
+
+  let last = 0;
+  for (let i = 0; i < buckets; i += 1) {
+    const tsCount = bucketTimestamps[i].size;
+    if (tsCount > 0) {
+      bucketSum[i] /= tsCount;
+      last = bucketSum[i];
+    } else {
+      bucketSum[i] = last;
+    }
+  }
+  return bucketSum;
 }
 
 // After three consecutive failures of the live metrics endpoints, surface a
@@ -290,36 +327,10 @@ export function useDashboardData(): DashboardData {
     return out;
   }, [metrics, cores, historyEndAt]);
 
-  // Network throughput over time: compute per-container deltas between
-  // consecutive samples, assign each delta to the bucket of the later sample,
-  // and sum across containers. This is robust to container churn because each
-  // delta is paired within a single container's lifeline. Negative deltas
-  // (counter reset after a restart) clamp to zero.
-  const netHistory = useMemo<number[]>(() => {
-    if (metrics.length === 0 || historyEndAt === null) return Array(SPARK_BUCKETS).fill(0);
-    const start = historyEndAt - SPARK_WINDOW_MS;
-    const bucketMs = SPARK_WINDOW_MS / SPARK_BUCKETS;
-    const byContainer = new Map<string, MetricPoint[]>();
-    for (const p of metrics) {
-      const bucket = byContainer.get(p.container_id) ?? [];
-      bucket.push(p);
-      byContainer.set(p.container_id, bucket);
-    }
-    const out = Array<number>(SPARK_BUCKETS).fill(0);
-    for (const samples of byContainer.values()) {
-      samples.sort((a, b) => a.timestamp - b.timestamp);
-      for (let i = 1; i < samples.length; i += 1) {
-        const curr = samples[i];
-        if (curr.timestamp < start) continue;
-        const prev = samples[i - 1];
-        const delta = (curr.net_rx_mb + curr.net_tx_mb) - (prev.net_rx_mb + prev.net_tx_mb);
-        if (delta <= 0) continue;
-        const idx = Math.min(SPARK_BUCKETS - 1, Math.max(0, Math.floor((curr.timestamp - start) / bucketMs)));
-        out[idx] += delta;
-      }
-    }
-    return out;
-  }, [metrics, historyEndAt]);
+  const netHistory = useMemo(
+    () => buildNetHistory(metrics, historyEndAt, SPARK_WINDOW_MS, SPARK_BUCKETS),
+    [metrics, historyEndAt],
+  );
 
   return {
     stats,
