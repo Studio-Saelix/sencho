@@ -347,6 +347,17 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [imageSearch, setImageSearch] = useState('');
     const [volumeSearch, setVolumeSearch] = useState('');
     const [networkSearch, setNetworkSearch] = useState('');
+    // Collapsible search: icon-only until clicked, stays open while query is active.
+    const [imageSearchExpanded, setImageSearchExpanded] = useState(false);
+    const [volumeSearchExpanded, setVolumeSearchExpanded] = useState(false);
+    const [networkSearchExpanded, setNetworkSearchExpanded] = useState(false);
+    const imageSearchRef = useRef<HTMLInputElement>(null);
+    const volumeSearchRef = useRef<HTMLInputElement>(null);
+    const networkSearchRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => { if (imageSearchExpanded) imageSearchRef.current?.focus(); }, [imageSearchExpanded]);
+    useEffect(() => { if (volumeSearchExpanded) volumeSearchRef.current?.focus(); }, [volumeSearchExpanded]);
+    useEffect(() => { if (networkSearchExpanded) networkSearchRef.current?.focus(); }, [networkSearchExpanded]);
 
     // Modal states
     const [confirmPrune, setConfirmPrune] = useState<{ target: PruneTarget; scope: PruneScope } | null>(null);
@@ -865,15 +876,30 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                     {/* Images */}
                     <TabsContent value="images" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
                         <div className="flex flex-wrap items-center gap-2 mb-4">
-                            <div className="relative flex-1 min-w-[200px] max-w-sm">
-                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                                <Input
-                                    placeholder="Search images..."
-                                    value={imageSearch}
-                                    onChange={(e) => setImageSearch(e.target.value)}
-                                    className="pl-9 h-9"
-                                />
-                            </div>
+                            {imageSearch !== '' || imageSearchExpanded ? (
+                                <div className="relative flex-1 min-w-[200px] max-w-sm">
+                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                                    <Input
+                                        ref={imageSearchRef}
+                                        placeholder="Search images..."
+                                        value={imageSearch}
+                                        onChange={(e) => setImageSearch(e.target.value)}
+                                        onBlur={() => { if (imageSearch === '') setImageSearchExpanded(false); }}
+                                        className="pl-9 h-9"
+                                    />
+                                </div>
+                            ) : (
+                                <TooltipProvider>
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <Button variant="outline" size="sm" className="h-9 w-9 p-0 shrink-0" onClick={() => setImageSearchExpanded(true)} aria-label="Search images">
+                                                <Search className="w-4 h-4" />
+                                            </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>Search images</TooltipContent>
+                                    </Tooltip>
+                                </TooltipProvider>
+                            )}
                             <FilterToggle
                                 value={imageFilter}
                                 onChange={setImageFilter}
@@ -1030,15 +1056,30 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                     {/* Volumes */}
                     <TabsContent value="volumes" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
                         <div className="flex flex-wrap items-center gap-2 mb-4">
-                            <div className="relative flex-1 min-w-[200px] max-w-sm">
-                                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                                <Input
-                                    placeholder="Search volumes..."
-                                    value={volumeSearch}
-                                    onChange={(e) => setVolumeSearch(e.target.value)}
-                                    className="pl-9 h-9"
-                                />
-                            </div>
+                            {volumeSearch !== '' || volumeSearchExpanded ? (
+                                <div className="relative flex-1 min-w-[200px] max-w-sm">
+                                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                                    <Input
+                                        ref={volumeSearchRef}
+                                        placeholder="Search volumes..."
+                                        value={volumeSearch}
+                                        onChange={(e) => setVolumeSearch(e.target.value)}
+                                        onBlur={() => { if (volumeSearch === '') setVolumeSearchExpanded(false); }}
+                                        className="pl-9 h-9"
+                                    />
+                                </div>
+                            ) : (
+                                <TooltipProvider>
+                                    <Tooltip>
+                                        <TooltipTrigger asChild>
+                                            <Button variant="outline" size="sm" className="h-9 w-9 p-0 shrink-0" onClick={() => setVolumeSearchExpanded(true)} aria-label="Search volumes">
+                                                <Search className="w-4 h-4" />
+                                            </Button>
+                                        </TooltipTrigger>
+                                        <TooltipContent>Search volumes</TooltipContent>
+                                    </Tooltip>
+                                </TooltipProvider>
+                            )}
                             <FilterToggle
                                 value={volumeFilter}
                                 onChange={setVolumeFilter}
@@ -1136,15 +1177,30 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         <div className="flex flex-wrap items-center gap-2 mb-4">
                             {networkViewMode === 'list' ? (
                                 <>
-                                    <div className="relative flex-1 min-w-[200px] max-w-sm">
-                                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                                        <Input
-                                            placeholder="Search networks..."
-                                            value={networkSearch}
-                                            onChange={(e) => setNetworkSearch(e.target.value)}
-                                            className="pl-9 h-9"
-                                        />
-                                    </div>
+                                    {networkSearch !== '' || networkSearchExpanded ? (
+                                        <div className="relative flex-1 min-w-[200px] max-w-sm">
+                                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+                                            <Input
+                                                ref={networkSearchRef}
+                                                placeholder="Search networks..."
+                                                value={networkSearch}
+                                                onChange={(e) => setNetworkSearch(e.target.value)}
+                                                onBlur={() => { if (networkSearch === '') setNetworkSearchExpanded(false); }}
+                                                className="pl-9 h-9"
+                                            />
+                                        </div>
+                                    ) : (
+                                        <TooltipProvider>
+                                            <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                    <Button variant="outline" size="sm" className="h-9 w-9 p-0 shrink-0" onClick={() => setNetworkSearchExpanded(true)} aria-label="Search networks">
+                                                        <Search className="w-4 h-4" />
+                                                    </Button>
+                                                </TooltipTrigger>
+                                                <TooltipContent>Search networks</TooltipContent>
+                                            </Tooltip>
+                                        </TooltipProvider>
+                                    )}
                                     <FilterToggle
                                         value={networkFilter}
                                         onChange={setNetworkFilter}
