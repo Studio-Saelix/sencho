@@ -92,6 +92,7 @@ it('narrows the list with the search box', async () => {
       )}
     />,
   );
+  await userEvent.click(screen.getByLabelText('Search images'));
   await userEvent.type(screen.getByPlaceholderText('Search images...'), 'redis');
   expect(screen.getByText('redis:7')).toBeInTheDocument();
   expect(screen.queryByText('nginx:1')).not.toBeInTheDocument();
