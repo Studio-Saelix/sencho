@@ -859,11 +859,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 <TabsTrigger value="unmanaged" className="relative">
                                     Unmanaged
                                     <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">{totalOrphansCount}</span>
-                                    {totalOrphansCount > 0 && (
-                                        <span className="absolute -top-1.5 -right-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-warning text-[9px] text-warning-foreground font-medium animate-in zoom-in-75 duration-200">
-                                            {totalOrphansCount}
-                                        </span>
-                                    )}
                                 </TabsTrigger>
                             </TabsHighlightItem>
                         </TabsHighlight>
