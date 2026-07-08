@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ConfirmModal } from '../ui/modal';
 import { Checkbox } from '../ui/checkbox';
 
@@ -19,15 +19,16 @@ export function TakeDownStackDialog({
 }: TakeDownStackDialogProps) {
     const [removeVolumes, setRemoveVolumes] = useState(false);
 
-    const handleOpenChange = (next: boolean) => {
-        if (!next) setRemoveVolumes(false);
-        onOpenChange(next);
-    };
+    // Parent closes via overlay state (not always through handleOpenChange); reset so
+    // a prior volume opt-in cannot leak into the next dialog session.
+    useEffect(() => {
+        if (!open) setRemoveVolumes(false);
+    }, [open]);
 
     return (
         <ConfirmModal
             open={open}
-            onOpenChange={handleOpenChange}
+            onOpenChange={onOpenChange}
             variant="destructive"
             data-testid="take-down-dialog"
             kicker={`${(stackName ?? 'STACK').toUpperCase()} · TAKE DOWN${removeVolumes ? '' : ' · REVERSIBLE'}`}
