@@ -44,12 +44,20 @@ interface FleetViewProps {
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
     fleetUpdatesIntent?: { tab: 'nodes' | 'changelog' } | null;
     onFleetUpdatesIntentConsumed?: () => void;
-    /** Deep-link target tab (e.g. 'snapshots' from the stack storage warning). */
-    fleetTab?: FleetTab | null;
-    onFleetTabConsumed?: () => void;
+    /** Controlled fleet sub-tab (shell-owned for URL sync). */
+    fleetActiveTab?: FleetTab;
+    onFleetActiveTabChange?: (tab: FleetTab) => void;
 }
 
-export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteRulesWithPrefill, fleetUpdatesIntent, onFleetUpdatesIntentConsumed, fleetTab, onFleetTabConsumed }: FleetViewProps) {
+export function FleetView({
+    onNavigateToNode,
+    onOpenSettingsSection,
+    onOpenMuteRulesWithPrefill,
+    fleetUpdatesIntent,
+    onFleetUpdatesIntentConsumed,
+    fleetActiveTab: controlledTab,
+    onFleetActiveTabChange,
+}: FleetViewProps) {
     const { isPaid } = useLicense();
     const { isAdmin } = useAuth();
     const { hasCapability } = useNodes();
@@ -73,9 +81,12 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
 
     const [initialUpdatesTab, setInitialUpdatesTab] = useState<'nodes' | 'changelog'>('nodes');
 
-    // Controlled tab value so a deep-link (e.g. Snapshots from the stack storage
-    // warning) can land on the right tab.
-    const [activeTab, setActiveTab] = useState<FleetTab>('overview');
+    const [internalTab, setInternalTab] = useState<FleetTab>('overview');
+    const activeTab = controlledTab ?? internalTab;
+    const setActiveTab = (tab: FleetTab) => {
+        onFleetActiveTabChange?.(tab);
+        if (controlledTab === undefined) setInternalTab(tab);
+    };
 
     useEffect(() => {
         if (fleetUpdatesIntent) {
@@ -85,13 +96,6 @@ export function FleetView({ onNavigateToNode, onOpenSettingsSection, onOpenMuteR
             onFleetUpdatesIntentConsumed?.();
         }
     }, [fleetUpdatesIntent, updateStatus, onFleetUpdatesIntentConsumed]);
-
-    useEffect(() => {
-        if (fleetTab) {
-            setActiveTab(fleetTab);
-            onFleetTabConsumed?.();
-        }
-    }, [fleetTab, onFleetTabConsumed]);
 
     const { mastheadStats, lastSyncAt, loading, refreshing } = overview;
 

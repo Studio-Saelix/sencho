@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { ArrowUpRight, Loader2, AlertCircle, ChevronDown, ChevronRight } from 'lucide-react';
+import { ArrowUpRight, Loader2, AlertCircle, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
 import { useStackKeyboardShortcuts } from '@/hooks/useStackKeyboardShortcuts';
 import { CommandItem, CommandList } from '@/components/ui/command';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -14,8 +14,10 @@ import { StackKebabMenu } from './StackKebabMenu';
 import { EmptyStackState } from './EmptyStackState';
 import type { StackMenuCtx, FilterChip } from './sidebar-types';
 import type { MuteRuleDraft } from '@/lib/muteRules';
-import { LabelGroupMuteKebab } from '@/components/mute/MuteMenuItems';
+import type { StacksLoadStatus } from '@/components/EditorLayout/hooks/useStackListState';
+import { Button } from '@/components/ui/button';
 import { useLabelMuteActions } from '@/hooks/useMuteRuleActions';
+import { LabelGroupMuteKebab } from '@/components/mute/MuteMenuItems';
 
 interface RemoteNodeResult {
   nodeId: number;
@@ -58,6 +60,9 @@ export interface StackListProps {
   // create stacks; drives the zero-stacks empty state.
   onOpenCreate?: (mode: 'import' | 'empty') => void;
   openMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
+  stacksLoadStatus?: StacksLoadStatus;
+  stacksLoadError?: string | null;
+  onRetryStacksLoad?: () => void;
 }
 
 interface BuiltGroup {
@@ -147,6 +152,9 @@ export function StackList(props: StackListProps & StackListBulkProps) {
     remoteResults, remoteLoading, remoteFailedNodes, onSelectRemoteFile,
     filterChip, onOpenCreate,
     openMuteRulesWithPrefill,
+    stacksLoadStatus,
+    stacksLoadError,
+    onRetryStacksLoad,
   } = props;
 
   const [failedNodesExpanded, setFailedNodesExpanded] = useState(false);
@@ -164,6 +172,23 @@ export function StackList(props: StackListProps & StackListBulkProps) {
         <Skeleton className="h-8 w-full" />
         <Skeleton className="h-8 w-full" />
         <Skeleton className="h-8 w-full" />
+      </div>
+    );
+  }
+
+  if (stacksLoadStatus === 'error' && files.length === 0) {
+    return (
+      <div className="mx-2 mt-4 rounded-lg border border-card-border bg-card/40 p-4 text-center">
+        <AlertCircle className="mx-auto mb-2 h-8 w-8 text-muted-foreground" aria-hidden />
+        <p className="text-sm text-muted-foreground mb-3">
+          {stacksLoadError ?? 'Could not load stacks for this node.'}
+        </p>
+        {onRetryStacksLoad && (
+          <Button type="button" variant="outline" size="sm" onClick={onRetryStacksLoad}>
+            <RefreshCw className="w-4 h-4" />
+            Retry
+          </Button>
+        )}
       </div>
     );
   }

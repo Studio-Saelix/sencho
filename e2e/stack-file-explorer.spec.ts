@@ -366,19 +366,16 @@ test.describe('Stack file explorer: symlink semantics', () => {
 test.describe('Stack file explorer: UI lifecycle', () => {
   test.setTimeout(90_000);
 
-  /** Open the Files tab on the seeded stack. Mirrors openFilesTab in stack-files.spec.ts. */
+  function stackSlug(stackName: string): string {
+    return stackName.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
+  }
+
+  /** Open the Files tab via the routable stack editor URL. */
   async function openFilesTab(page: Page): Promise<void> {
+    const slug = stackSlug(STACK);
+    await page.goto(`/nodes/local/stacks/${encodeURIComponent(slug)}/files`);
     await waitForStacksLoaded(page);
-    const stackInSidebar = page.getByText(STACK, { exact: true }).first();
-    if (!await stackInSidebar.isVisible().catch(() => false)) {
-      await page.reload();
-      await loginAs(page);
-      await waitForStacksLoaded(page);
-    }
-    await page.getByText(STACK, { exact: true }).first().click();
-    const filesBtn = page.getByTestId('anatomy-files-btn');
-    await expect(filesBtn).toBeVisible({ timeout: 8_000 });
-    await filesBtn.click();
+    await expect(page.getByRole('button', { name: 'New file' })).toBeVisible({ timeout: 10_000 });
     await expect(page.locator('span.font-mono').first()).toBeVisible({ timeout: 10_000 });
   }
 
@@ -409,7 +406,6 @@ test.describe('Stack file explorer: UI lifecycle', () => {
     );
     expect(renameRes.status()).toBe(204);
 
-    await page.reload();
     await openFilesTab(page);
     await expect(
       page.locator('span.font-mono').filter({ hasText: /^lifecycle-rename-dst\.txt$/ }).first(),
@@ -424,7 +420,6 @@ test.describe('Stack file explorer: UI lifecycle', () => {
     );
     expect(res.status()).toBe(204);
 
-    await page.reload();
     await openFilesTab(page);
     await expect(
       page.locator('span.font-mono').filter({ hasText: /^lifecycle-new-folder$/ }).first(),
@@ -442,10 +437,21 @@ test.describe('Stack file explorer: UI lifecycle', () => {
     ).toBeVisible({ timeout: 8_000 });
   });
 
-  test('creating a duplicate name is blocked and does not overwrite the existing file', async ({ page }) => {
-    await fs.writeFile(nodePath.join(stackDir(), 'dup-guard.txt'), 'original\n');
-    await page.reload();
+  test('creating a duplicate name is blocked and does not overwrite the existing file', async ({ page, request }) => {
+    const cookie = await cookieHeader(page);
+    const seedRes = await request.put(
+      `/api/stacks/${encodeURIComponent(STACK)}/files/content?path=${encodeURIComponent('dup-guard.txt')}`,
+      {
+        headers: { cookie, 'Content-Type': 'application/json' },
+        data: { content: 'original\n' },
+      },
+    );
+    expect(seedRes.ok()).toBeTruthy();
+
     await openFilesTab(page);
+    await expect(
+      page.locator('span.font-mono').filter({ hasText: /^dup-guard\.txt$/ }).first(),
+    ).toBeVisible({ timeout: 8_000 });
 
     await page.getByRole('button', { name: 'New file' }).click();
     await page.getByLabel('File name').fill('dup-guard.txt');
@@ -453,7 +459,13 @@ test.describe('Stack file explorer: UI lifecycle', () => {
 
     await expect(page.getByText(/a file with that name already exists/i)).toBeVisible({ timeout: 8_000 });
     // The server rejected the create, so the existing contents are intact.
-    expect(await fs.readFile(nodePath.join(stackDir(), 'dup-guard.txt'), 'utf-8')).toBe('original\n');
+    const verifyRes = await request.get(
+      `/api/stacks/${encodeURIComponent(STACK)}/files/content?path=${encodeURIComponent('dup-guard.txt')}`,
+      { headers: { cookie } },
+    );
+    expect(verifyRes.ok()).toBeTruthy();
+    const payload = await verifyRes.json() as { content?: string };
+    expect(payload.content).toBe('original\n');
   });
 
   test('right-clicking away from the filename still opens the Sencho context menu', async ({ page }) => {

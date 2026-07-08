@@ -4,6 +4,8 @@ type AppStatus = 'loading' | 'needsSetup' | 'notAuthenticated' | 'mfaChallenge' 
 
 export type UserRole = 'admin' | 'viewer' | 'deployer' | 'node-admin' | 'auditor';
 
+export type PermissionsStatus = 'loading' | 'ready' | 'error';
+
 export type PermissionAction =
   | 'stack:read' | 'stack:edit' | 'stack:deploy' | 'stack:create' | 'stack:delete'
   | 'node:read' | 'node:manage'
@@ -28,6 +30,8 @@ interface AuthContextType {
   user: UserInfo | null;
   isAdmin: boolean;
   permissions: PermissionsData | null;
+  permissionsStatus: PermissionsStatus;
+  permissionsReady: boolean;
   can: (action: PermissionAction, resourceType?: string, resourceId?: string) => boolean;
   login: (username: string, password: string) => Promise<{ success: boolean; error?: string; mfaRequired?: boolean }>;
   ssoLdapLogin: (username: string, password: string) => Promise<{ success: boolean; error?: string; mfaRequired?: boolean }>;
@@ -44,10 +48,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [appStatus, setAppStatus] = useState<AppStatus>('loading');
   const [user, setUser] = useState<UserInfo | null>(null);
   const [permissions, setPermissions] = useState<PermissionsData | null>(null);
+  const [permissionsStatus, setPermissionsStatus] = useState<PermissionsStatus>('loading');
+
+  const resetPermissions = useCallback(() => {
+    setPermissions(null);
+    setPermissionsStatus('loading');
+  }, []);
 
   const checkAuth = async () => {
+    resetPermissions();
     try {
-      // First check if setup is needed
       const statusResponse = await fetch('/api/auth/status', {
         credentials: 'include',
       });
@@ -56,28 +66,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (statusData.needsSetup) {
         setAppStatus('needsSetup');
         setUser(null);
-        setPermissions(null);
+        resetPermissions();
         return;
       }
 
-      // If a partial-auth (mfa_pending) cookie is active, route to the
-      // challenge screen. This handles reloads in the middle of the flow,
-      // including post-OIDC redirects.
       if (statusData.mfaPending) {
         setUser(null);
-        setPermissions(null);
+        resetPermissions();
         setAppStatus('mfaChallenge');
         return;
       }
 
-      // Auth check and permissions fetch are independent for an authenticated
-      // session, so fire both on the wire at the same time. Await only the
-      // auth check before committing app state — otherwise a slow
-      // /permissions/me delays setAppStatus('authenticated') and races
-      // post-reload UI that expects the dashboard to commit promptly. The
-      // permissions promise updates state in the background when it resolves.
       const authPromise = fetch('/api/auth/check', { credentials: 'include' });
-      const permsPromise = fetch('/api/permissions/me', { credentials: 'include' }).catch(() => null);
+      const permsPromise = fetch('/api/permissions/me', { credentials: 'include' });
 
       const authResponse = await authPromise;
       if (authResponse.ok) {
@@ -85,30 +86,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(data.user ?? null);
         setAppStatus('authenticated');
 
-        void permsPromise.then(async (res) => {
-          if (res?.ok) {
-            try {
-              setPermissions(await res.json());
-            } catch {
-              // Permissions fetch is non-critical — fallback to global role only
-            }
+        try {
+          const res = await permsPromise;
+          if (res.ok) {
+            setPermissions(await res.json());
+            setPermissionsStatus('ready');
+          } else {
+            setPermissionsStatus('error');
           }
-        });
+        } catch {
+          setPermissionsStatus('error');
+        }
       } else {
         setUser(null);
-        setPermissions(null);
+        resetPermissions();
         setAppStatus('notAuthenticated');
       }
     } catch {
       setUser(null);
-      setPermissions(null);
+      resetPermissions();
       setAppStatus('notAuthenticated');
     }
   };
 
   useEffect(() => {
     checkAuth();
-    const handleUnauthorized = () => setAppStatus('notAuthenticated');
+    const handleUnauthorized = () => {
+      setUser(null);
+      resetPermissions();
+      setAppStatus('notAuthenticated');
+    };
     window.addEventListener('sencho-unauthorized', handleUnauthorized);
     return () => window.removeEventListener('sencho-unauthorized', handleUnauthorized);
   }, []);
@@ -116,13 +123,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const can = useCallback((action: PermissionAction, resourceType?: string, resourceId?: string): boolean => {
     if (!permissions) return false;
 
-    // Admins always have full access
     if (permissions.globalRole === 'admin') return true;
 
-    // Check global role permissions
     if (permissions.globalPermissions.includes(action)) return true;
 
-    // Check scoped permissions
     if (resourceType && resourceId) {
       const key = `${resourceType}:${resourceId}`;
       return permissions.scopedPermissions[key]?.includes(action) ?? false;
@@ -146,13 +150,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (response.ok && data.success) {
         if (data.mfaRequired) {
-          // Password was accepted but a second factor is required. Pull the
-          // updated /auth/status so the app routes to the challenge screen.
           await checkAuth();
           return { success: true, mfaRequired: true };
         }
         setAppStatus('authenticated');
-        // Fetch user info (role, username) so isAdmin is correct immediately
         await checkAuth();
         return { success: true };
       } else {
@@ -220,7 +221,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.error('Cancel MFA error:', error);
     } finally {
       setUser(null);
-      setPermissions(null);
+      resetPermissions();
       setAppStatus('notAuthenticated');
     }
   };
@@ -235,13 +236,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.error('Logout error:', error);
     } finally {
       setUser(null);
-      setPermissions(null);
+      resetPermissions();
       setAppStatus('notAuthenticated');
     }
   };
 
   const completeSetup = () => {
-    // Fetch user info so isAdmin is correct after setup
     checkAuth();
   };
 
@@ -253,6 +253,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       user,
       isAdmin: user?.role === 'admin',
       permissions,
+      permissionsStatus,
+      permissionsReady: permissionsStatus !== 'loading',
       can,
       login,
       ssoLdapLogin,

@@ -4,6 +4,8 @@ import { apiFetch } from '@/lib/api';
 export type LicenseTier = 'community' | 'paid';
 export type LicenseStatus = 'community' | 'trial' | 'active' | 'expired' | 'disabled';
 
+export type LicenseFetchStatus = 'loading' | 'ready' | 'error';
+
 export interface LicenseInfo {
     tier: LicenseTier;
     status: LicenseStatus;
@@ -21,6 +23,8 @@ interface LicenseContextType {
     license: LicenseInfo | null;
     isPaid: boolean;
     loading: boolean;
+    licenseStatus: LicenseFetchStatus;
+    licenseReady: boolean;
     refresh: () => Promise<void>;
     activate: (licenseKey: string) => Promise<{ success: boolean; error?: string }>;
     deactivate: () => Promise<{ success: boolean; error?: string }>;
@@ -31,16 +35,22 @@ const LicenseContext = createContext<LicenseContextType | undefined>(undefined);
 export function LicenseProvider({ children }: { children: ReactNode }) {
     const [license, setLicense] = useState<LicenseInfo | null>(null);
     const [loading, setLoading] = useState(true);
+    const [licenseStatus, setLicenseStatus] = useState<LicenseFetchStatus>('loading');
 
     const refresh = useCallback(async () => {
+        setLoading(true);
+        setLicenseStatus('loading');
         try {
             const res = await apiFetch('/license', { localOnly: true });
             if (res.ok) {
                 const data = await res.json();
                 setLicense(data);
+                setLicenseStatus('ready');
+            } else {
+                setLicenseStatus('error');
             }
         } catch {
-            // Silently fail - license info is non-critical
+            setLicenseStatus('error');
         } finally {
             setLoading(false);
         }
@@ -60,6 +70,7 @@ export function LicenseProvider({ children }: { children: ReactNode }) {
             const data = await res.json();
             if (res.ok && data.success) {
                 setLicense(data.license);
+                setLicenseStatus('ready');
                 return { success: true };
             }
             return { success: false, error: data.error || 'Activation failed' };
@@ -77,6 +88,7 @@ export function LicenseProvider({ children }: { children: ReactNode }) {
             const data = await res.json();
             if (res.ok && data.success) {
                 setLicense(data.license);
+                setLicenseStatus('ready');
                 return { success: true };
             }
             return { success: false, error: data.error || 'Deactivation failed' };
@@ -88,7 +100,16 @@ export function LicenseProvider({ children }: { children: ReactNode }) {
     const isPaid = license?.tier === 'paid';
 
     return (
-        <LicenseContext.Provider value={{ license, isPaid, loading, refresh, activate, deactivate }}>
+        <LicenseContext.Provider value={{
+            license,
+            isPaid,
+            loading,
+            licenseStatus,
+            licenseReady: licenseStatus !== 'loading',
+            refresh,
+            activate,
+            deactivate,
+        }}>
             {children}
         </LicenseContext.Provider>
     );
