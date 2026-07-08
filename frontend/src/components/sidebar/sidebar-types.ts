@@ -29,12 +29,13 @@ export interface StackMenuCtx {
   isBusy: boolean;
   isAdmin: boolean;
   canDelete: boolean;
+  canDeploy: boolean;
   canEditLabels: boolean;
   canCreateLabels: boolean;
   isPinned: boolean;
   labels: Label[];
   assignedLabelIds: number[];
-  menuVisibility: { showDeploy: boolean; showStop: boolean; showRestart: boolean; showUpdate: boolean };
+  menuVisibility: { showDeploy: boolean; showStop: boolean; showRestart: boolean; showUpdate: boolean; showTakeDown: boolean };
   openAlertSheet: () => void;
   openAutoHeal: () => void;
   checkUpdates: () => void;
@@ -43,6 +44,7 @@ export interface StackMenuCtx {
   stop: () => void;
   restart: () => void;
   update: () => void;
+  takeDown: () => void;
   remove: () => void;
   pin: () => void;
   unpin: () => void;

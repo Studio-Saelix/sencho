@@ -17,6 +17,7 @@ import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTes
 const {
   mockDeployStack,
   mockRunCommand,
+  mockRunDown,
   mockUpdateStack,
   mockGetContainersByStack,
   mockRestartContainer,
@@ -25,6 +26,7 @@ const {
 } = vi.hoisted(() => ({
   mockDeployStack: vi.fn(),
   mockRunCommand: vi.fn(),
+  mockRunDown: vi.fn(),
   mockUpdateStack: vi.fn(),
   mockGetContainersByStack: vi.fn(),
   mockRestartContainer: vi.fn(),
@@ -43,6 +45,7 @@ vi.mock('../services/ComposeService', async () => {
       getInstance: () => ({
         deployStack: mockDeployStack,
         runCommand: mockRunCommand,
+        runDown: mockRunDown,
         updateStack: mockUpdateStack,
       }),
     },
@@ -97,6 +100,7 @@ afterAll(() => {
 beforeEach(async () => {
   mockDeployStack.mockReset();
   mockRunCommand.mockReset();
+  mockRunDown.mockReset();
   mockUpdateStack.mockReset();
   mockGetContainersByStack.mockReset();
   mockRestartContainer.mockReset();
@@ -233,13 +237,13 @@ describe('Stack lifecycle mutex', () => {
 
   it('blocks update while down is in flight', async () => {
     const gate = deferred<void>();
-    mockRunCommand.mockImplementationOnce(() => gate.promise);
+    mockRunDown.mockImplementationOnce(() => gate.promise);
 
     const down = request(app)
       .post('/api/stacks/web/down')
       .set('Cookie', authCookie)
       .then(r => r);
-    await vi.waitFor(() => expect(mockRunCommand).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mockRunDown).toHaveBeenCalled());
 
     const update = await request(app)
       .post('/api/stacks/web/update')

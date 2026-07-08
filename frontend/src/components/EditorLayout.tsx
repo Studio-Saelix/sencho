@@ -30,6 +30,7 @@ import {
 import { SENCHO_OPEN_LOGS_EVENT, SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
 import type { SenchoOpenLogsDetail, SenchoOpenStackDetail } from '@/lib/events';
 import { useNodes } from '@/context/NodeContext';
+import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY } from '@/lib/capabilities';
 import { useAuth } from '@/context/AuthContext';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
@@ -145,7 +146,9 @@ export default function EditorLayout() {
     stacksLoadNodeId,
   } = stackListState;
 
-  const { nodes, activeNode, setActiveNode, hasCapability, isLoading: nodesLoading } = useNodes();
+  const { nodes, activeNode, setActiveNode, hasCapability, activeNodeMeta, isLoading: nodesLoading } = useNodes();
+  const canOfferVolumeRemoval =
+    activeNodeMeta?.capabilities.includes(STACK_DOWN_REMOVE_VOLUMES_CAPABILITY) === true;
 
   // Mirror activeNode.id in a ref so async handlers (e.g. CreateStackDialog's
   // post-create handoff) can detect a node switch that happened mid-flight.
@@ -230,6 +233,7 @@ export default function EditorLayout() {
     getLastDeployOutputLine,
     diffPreviewEnabled,
     hasUpdateGuard: hasCapability('update-guard'),
+    canOfferVolumeRemoval,
   });
 
   // Wire the ref now that stackActions is available
@@ -552,6 +556,8 @@ export default function EditorLayout() {
       setEditingCompose={setEditingCompose}
       setGitSourceOpen={setGitSourceOpen}
       requestDeleteStack={stackActions.requestDeleteStack}
+      requestTakeDownStack={stackActions.requestTakeDownStack}
+      showTakeDown={selectedFile ? stackActions.getStackMenuVisibility(selectedFile).showTakeDown : false}
       isSelfStack={selectedFile ? stackSelfFlags[selectedFile] === true : false}
       recoveryResult={selectedFile ? lastActionResult[selectedFile] : undefined}
       onRefreshState={async () => {
@@ -859,6 +865,7 @@ export default function EditorLayout() {
           gitSourceOpen={gitSourceOpen}
           setGitSourceOpen={setGitSourceOpen}
           canSelfUpdate={hasCapability('self-update')}
+          canOfferVolumeRemoval={canOfferVolumeRemoval}
           onOpenFleetNodeUpdates={() => {
             if (isMobile) {
               navigateMobileAware('fleet');

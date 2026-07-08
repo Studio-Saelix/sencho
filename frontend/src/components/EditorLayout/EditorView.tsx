@@ -67,7 +67,8 @@ export type StackAction =
     | 'restart'
     | 'update'
     | 'delete'
-    | 'rollback';
+    | 'rollback'
+    | 'down';
 
 /**
  * Stack operations the recovery panel can offer safe next steps for. A failed
@@ -184,6 +185,8 @@ export interface EditorViewProps {
 
     // Composed action: wraps setStackToDelete + setDeleteDialogOpen
     requestDeleteStack: () => void;
+    requestTakeDownStack: (stackName: string) => void;
+    showTakeDown: boolean;
     /** True when this stack is the running Sencho instance on the active node. */
     isSelfStack?: boolean;
 
@@ -264,6 +267,8 @@ export function EditorView(props: EditorViewProps) {
         setEditingCompose,
         setGitSourceOpen,
         requestDeleteStack,
+        requestTakeDownStack,
+        showTakeDown,
         isSelfStack,
         recoveryResult,
         onRefreshState,
@@ -390,6 +395,8 @@ export function EditorView(props: EditorViewProps) {
                                         rollbackStack={rollbackStack}
                                         scanStackConfig={scanStackConfig}
                                         requestDeleteStack={requestDeleteStack}
+                                        requestTakeDownStack={requestTakeDownStack}
+                                        showTakeDown={showTakeDown}
                                         isSelfStack={isSelfStack}
                                         stackMuteActions={stackMuteActions}
                                     />

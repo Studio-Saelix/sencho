@@ -18,10 +18,12 @@ import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTes
 const {
   mockDeployStack,
   mockRunCommand,
+  mockRunDown,
   mockUpdateStack,
 } = vi.hoisted(() => ({
   mockDeployStack: vi.fn(),
   mockRunCommand: vi.fn(),
+  mockRunDown: vi.fn(),
   mockUpdateStack: vi.fn(),
 }));
 
@@ -36,6 +38,7 @@ vi.mock('../services/ComposeService', async () => {
       getInstance: () => ({
         deployStack: mockDeployStack,
         runCommand: mockRunCommand,
+        runDown: mockRunDown,
         updateStack: mockUpdateStack,
       }),
     },
@@ -72,8 +75,8 @@ describe('POST /api/stacks/:stackName/deploy on a nonexistent stack', () => {
 });
 
 describe('POST /api/stacks/:stackName/down on a nonexistent stack', () => {
-  it('returns 404 with "Stack not found" and never enters ComposeService.runCommand', async () => {
-    mockRunCommand.mockClear();
+  it('returns 404 with "Stack not found" and never enters ComposeService.runDown', async () => {
+    mockRunDown.mockClear();
 
     const res = await request(app)
       .post('/api/stacks/does-not-exist-f7/down')
@@ -81,7 +84,7 @@ describe('POST /api/stacks/:stackName/down on a nonexistent stack', () => {
 
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'Stack not found' });
-    expect(mockRunCommand).not.toHaveBeenCalled();
+    expect(mockRunDown).not.toHaveBeenCalled();
   });
 });
 

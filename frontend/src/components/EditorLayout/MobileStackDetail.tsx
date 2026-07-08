@@ -67,6 +67,8 @@ export function MobileStackDetail(props: EditorViewProps) {
         setEditingCompose,
         setGitSourceOpen,
         requestDeleteStack,
+        requestTakeDownStack,
+        showTakeDown,
         isSelfStack = false,
         onMobileBack,
         onCloseEditor,
@@ -148,6 +150,8 @@ export function MobileStackDetail(props: EditorViewProps) {
                         rollbackStack={rollbackStack}
                         scanStackConfig={scanStackConfig}
                         requestDeleteStack={requestDeleteStack}
+                        requestTakeDownStack={requestTakeDownStack}
+                        showTakeDown={showTakeDown}
                         isSelfStack={isSelfStack}
                         stackMuteActions={stackMuteActions}
                     />

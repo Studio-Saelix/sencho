@@ -19,6 +19,7 @@ import * as policyGate from '../helpers/policyGate';
 const {
   mockDeployStack,
   mockRunCommand,
+  mockRunDown,
   mockUpdateStack,
   mockGetContainersByStack,
   mockRestartContainer,
@@ -33,6 +34,7 @@ const {
 } = vi.hoisted(() => ({
   mockDeployStack: vi.fn(),
   mockRunCommand: vi.fn(),
+  mockRunDown: vi.fn(),
   mockUpdateStack: vi.fn(),
   mockGetContainersByStack: vi.fn(),
   mockRestartContainer: vi.fn(),
@@ -57,6 +59,7 @@ vi.mock('../services/ComposeService', async () => {
       getInstance: () => ({
         deployStack: mockDeployStack,
         runCommand: mockRunCommand,
+        runDown: mockRunDown,
         updateStack: mockUpdateStack,
       }),
     },
@@ -140,6 +143,7 @@ afterAll(() => {
 beforeEach(() => {
   mockDeployStack.mockReset();
   mockRunCommand.mockReset();
+  mockRunDown.mockReset();
   mockUpdateStack.mockReset();
   mockGetContainersByStack.mockReset();
   mockRestartContainer.mockReset();
@@ -388,8 +392,8 @@ describe('post-deploy scan opt-out', () => {
 });
 
 describe('deploy_failure notification on /down error', () => {
-  it('dispatches deploy_failure alert when runCommand (down) throws', async () => {
-    mockRunCommand.mockRejectedValue(new Error('container removal error'));
+  it('dispatches deploy_failure alert when runDown throws', async () => {
+    mockRunDown.mockRejectedValue(new Error('container removal error'));
 
     const res = await request(app)
       .post('/api/stacks/myapp/down')

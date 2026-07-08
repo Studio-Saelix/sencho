@@ -30,16 +30,16 @@ export function useStackKeyboardShortcuts(
       const { showDeploy, showStop, showRestart, showUpdate } = ctx.menuVisibility;
 
       if (cmdOrCtrl) {
-        if (key === 'enter' && showDeploy && !ctx.isBusy) {
+        if (key === 'enter' && ctx.canDeploy && showDeploy && !ctx.isBusy) {
           e.preventDefault();
           ctx.deploy();
-        } else if (key === '.' && showStop && !ctx.isBusy) {
+        } else if (key === '.' && ctx.canDeploy && showStop && !ctx.isBusy) {
           e.preventDefault();
           ctx.stop();
-        } else if (key === 'r' && showRestart && !ctx.isBusy) {
+        } else if (key === 'r' && ctx.canDeploy && showRestart && !ctx.isBusy) {
           e.preventDefault();
           ctx.restart();
-        } else if (key === 'arrowup' && showUpdate && !ctx.isBusy) {
+        } else if (key === 'arrowup' && ctx.canDeploy && showUpdate && !ctx.isBusy) {
           e.preventDefault();
           ctx.update();
         } else if (key === 'backspace' && ctx.canDelete && !ctx.isBusy) {

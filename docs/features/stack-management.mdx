@@ -347,6 +347,7 @@ The stack header groups actions by frequency of use. The most common action is t
 |-----------|--------|---------|--------------|
 | Primary | **Restart** | `docker compose restart` | Restarts all containers in the stack. |
 | Secondary | **Stop** | `docker compose stop` | Stops containers without removing them. State is preserved. |
+| Secondary | **Take down** | `docker compose down` | Removes containers and compose-created networks. The stack definition stays on disk so you can deploy again later. Optional volume removal is available in the confirmation dialog. |
 | Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. |
 | Overflow | **Rollback** | Restores backup | Reverts compose and env files to the pre-deploy snapshot and redeploys. Only shown when a backup exists. |
 | Overflow | **Scan config** | Trivy config scan | Scans the compose file for misconfigurations (admin role). |
@@ -358,10 +359,13 @@ The stack header groups actions by frequency of use. The most common action is t
 |-----------|--------|---------|--------------|
 | Primary | **Start** | `docker compose up -d` | Starts the stack. |
 | Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. |
+| Overflow | **Take down** | `docker compose down` | Removes containers and networks while keeping the stack directory. Optional volume removal is available in the confirmation dialog. |
 | Overflow | **Delete** | Removes files | Deletes the stack directory. |
 
 <Warning>
   **Delete** is irreversible. It removes the stack directory, including `compose.yaml`, `.env`, and any bind-mounted files stored there. Back up important files before deleting.
+
+  **Take down** keeps your compose files on disk. It removes running containers and compose-created networks. When you opt in to volume removal, named and anonymous compose volumes are removed as well. Use **Stop** when you want containers to stay in place for a quick resume.
 </Warning>
 
 <Note>
@@ -426,6 +430,7 @@ Click the kebab on a stack row in the sidebar to open its context menu. The menu
 **lifecycle**
 
 - **Stop** (`⌘.`): shown when running.
+- **Take down**: shown when the stack has been deployed (running, partial, or exited). Opens a confirmation dialog; optional volume removal is offered when the active node supports it.
 - **Restart** (`⌘R`): shown when running.
 - **Update** (`⌘↑`): pulls the latest image tags and redeploys.
 - **Schedule task**: open the scheduler pre-filled for this stack; pick **Auto-update Stack** to set up unattended image updates on your own cadence. See [Scheduled Operations](/features/scheduled-operations) and [Auto-Update Policies](/features/auto-update-policies).

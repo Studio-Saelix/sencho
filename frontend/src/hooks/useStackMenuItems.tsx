@@ -14,18 +14,19 @@ import {
   Square,
   Tag,
   Trash2,
+  ArrowDownToLine,
 } from 'lucide-react';
 import type { MenuGroup, MenuItem, StackMenuCtx } from '@/components/sidebar/sidebar-types';
 
 export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[] {
   const {
-    stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
+    stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canDeploy, canEditLabels, isPinned, labels,
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
-    deploy, stop, restart, update, remove, pin, unpin, toggleLabel,
+    deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel,
     menuVisibility, openScheduleTask,
     canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
   } = ctx;
-  const { showDeploy, showStop, showRestart, showUpdate } = menuVisibility;
+  const { showDeploy, showStop, showRestart, showUpdate, showTakeDown } = menuVisibility;
 
   return useMemo(() => {
     const groups: MenuGroup[] = [];
@@ -78,10 +79,13 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
     groups.push({ id: 'organize', items: organize });
 
     const lifecycle: MenuItem[] = [];
-    if (showDeploy) lifecycle.push({ id: 'deploy', label: 'Deploy', icon: Play, shortcut: '⌘↵', onSelect: deploy, disabled: isBusy });
-    if (showStop) lifecycle.push({ id: 'stop', label: 'Stop', icon: Square, shortcut: '⌘.', onSelect: stop, disabled: isBusy });
-    if (showRestart) lifecycle.push({ id: 'restart', label: 'Restart', icon: RotateCw, shortcut: '⌘R', onSelect: restart, disabled: isBusy });
-    if (showUpdate) lifecycle.push({ id: 'update', label: 'Update', icon: Download, shortcut: '⌘↑', onSelect: update, disabled: isBusy });
+    if (canDeploy) {
+      if (showDeploy) lifecycle.push({ id: 'deploy', label: 'Deploy', icon: Play, shortcut: '⌘↵', onSelect: deploy, disabled: isBusy });
+      if (showStop) lifecycle.push({ id: 'stop', label: 'Stop', icon: Square, shortcut: '⌘.', onSelect: stop, disabled: isBusy });
+      if (showRestart) lifecycle.push({ id: 'restart', label: 'Restart', icon: RotateCw, shortcut: '⌘R', onSelect: restart, disabled: isBusy });
+      if (showUpdate) lifecycle.push({ id: 'update', label: 'Update', icon: Download, shortcut: '⌘↑', onSelect: update, disabled: isBusy });
+      if (showTakeDown) lifecycle.push({ id: 'take-down', label: 'Take down', icon: ArrowDownToLine, onSelect: takeDown, disabled: isBusy || isSelfStack });
+    }
     if (isAdmin) lifecycle.push({ id: 'schedule', label: 'Schedule task', icon: CalendarClock, onSelect: openScheduleTask });
     if (lifecycle.length > 0) groups.push({ id: 'lifecycle', items: lifecycle });
 
@@ -102,10 +106,10 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
 
     return groups;
   }, [
-    stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canEditLabels, isPinned, labels,
-    showDeploy, showStop, showRestart, showUpdate,
+    stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canDeploy, canEditLabels, isPinned, labels,
+    showDeploy, showStop, showRestart, showUpdate, showTakeDown,
     openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
-    deploy, stop, restart, update, remove, pin, unpin, toggleLabel, openScheduleTask,
+    deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel, openScheduleTask,
     canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
   ]);
 }

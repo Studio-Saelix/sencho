@@ -16,6 +16,7 @@ import {
     ArrowUpRight,
     Copy,
     CloudDownload,
+    ArrowDownToLine,
     Layers,
     List,
     Maximize2,
@@ -133,6 +134,8 @@ export interface StackIdentityHeaderProps {
     rollbackStack: () => Promise<void>;
     scanStackConfig: () => Promise<void>;
     requestDeleteStack: () => void;
+    requestTakeDownStack: (stackName: string) => void;
+    showTakeDown: boolean;
     /** True when this stack is the running Sencho instance on the active node. */
     isSelfStack?: boolean;
     stackMuteActions?: ReturnType<typeof useStackMuteActions>;
@@ -158,6 +161,8 @@ export function StackIdentityHeader({
     rollbackStack,
     scanStackConfig,
     requestDeleteStack,
+    requestTakeDownStack,
+    showTakeDown,
     isSelfStack = false,
     stackMuteActions,
 }: StackIdentityHeaderProps) {
@@ -195,7 +200,8 @@ export function StackIdentityHeader({
                 const canRollback = canDeploy && backupInfo.exists;
                 const canScan = trivy.available && isAdmin;
                 const canMute = stackMuteActions?.canMute ?? false;
-                const hasOverflowExtras = canRollback || canScan;
+                const showTakeDownOverflow = !isRunning && showTakeDown && canDeploy;
+                const hasOverflowExtras = canRollback || canScan || showTakeDownOverflow;
                 const hasOverflow = hasOverflowExtras || canDelete || canMute;
                 if (!canDeploy && !hasOverflow) return null;
                 return (
@@ -217,6 +223,20 @@ export function StackIdentityHeader({
                                     <Button type="button" size="sm" variant="outline" className="rounded-lg max-md:h-11" onClick={stopStack} disabled={loadingAction !== null || selfProtected}>
                                         <Square className="w-4 h-4 mr-2" strokeWidth={1.5} />
                                         {loadingAction === 'stop' ? 'Stopping...' : 'Stop'}
+                                    </Button>
+                                )}
+                                {isRunning && showTakeDown && (
+                                    <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        data-testid="stack-take-down-button"
+                                        className="rounded-lg max-md:h-11 border-warning/40 text-warning hover:bg-warning/10"
+                                        onClick={() => requestTakeDownStack(stackName)}
+                                        disabled={loadingAction !== null || selfProtected}
+                                    >
+                                        <ArrowDownToLine className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                        {loadingAction === 'down' ? 'Taking down...' : 'Take down'}
                                     </Button>
                                 )}
                                 <Button type="button" size="sm" variant="outline" className="rounded-lg max-md:h-11" onClick={updateStack} disabled={loadingAction !== null || selfProtected}>
@@ -254,8 +274,18 @@ export function StackIdentityHeader({
                                             {stackMisconfigScanning ? 'Scanning...' : 'Scan config'}
                                         </DropdownMenuItem>
                                     )}
+                                    {!isRunning && showTakeDownOverflow && (
+                                        <DropdownMenuItem
+                                            className="text-warning focus:text-warning focus:bg-warning/10"
+                                            disabled={loadingAction !== null || selfProtected}
+                                            onClick={() => requestTakeDownStack(stackName)}
+                                        >
+                                            <ArrowDownToLine className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                            {loadingAction === 'down' ? 'Taking down...' : 'Take down'}
+                                        </DropdownMenuItem>
+                                    )}
                                     {stackMuteActions && <StackMuteSubmenu actions={stackMuteActions} />}
-                                    {(canRollback || canScan || stackMuteActions?.canMute) && canDelete && <DropdownMenuSeparator />}
+                                    {(canRollback || canScan || stackMuteActions?.canMute || showTakeDownOverflow) && canDelete && <DropdownMenuSeparator />}
                                     {canDelete && (
                                         <DropdownMenuItem
                                             className="text-destructive focus:text-destructive focus:bg-destructive/10"

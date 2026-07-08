@@ -12,12 +12,13 @@ function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
     isBusy: false,
     isAdmin: true,
     canDelete: true,
+    canDeploy: true,
     canEditLabels: true,
     canCreateLabels: true,
     isPinned: false,
     labels: [],
     assignedLabelIds: [],
-    menuVisibility: { showDeploy: false, showStop: true, showRestart: true, showUpdate: false },
+    menuVisibility: { showDeploy: false, showStop: true, showRestart: true, showUpdate: false, showTakeDown: true },
     openAlertSheet: vi.fn(),
     openAutoHeal: vi.fn(),
     checkUpdates: vi.fn(),
@@ -26,6 +27,7 @@ function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
     stop: vi.fn(),
     restart: vi.fn(),
     update: vi.fn(),
+    takeDown: vi.fn(),
     remove: vi.fn(),
     pin: vi.fn(),
     unpin: vi.fn(),
@@ -162,17 +164,51 @@ describe('useStackMenuItems', () => {
 
   it('lifecycle items follow menuVisibility flags', () => {
     const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({
-      menuVisibility: { showDeploy: true, showStop: false, showRestart: false, showUpdate: true },
+      menuVisibility: { showDeploy: true, showStop: false, showRestart: false, showUpdate: true, showTakeDown: false },
     })));
     const lifecycle = result.current.find(g => g.id === 'lifecycle')!;
     const ids = lifecycle.items.map(i => i.id);
     expect(ids).toEqual(['deploy', 'update', 'schedule']);
   });
 
+  it('shows Take down in lifecycle when showTakeDown and canDeploy', () => {
+    const takeDown = vi.fn();
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({
+      takeDown,
+      menuVisibility: { showDeploy: false, showStop: true, showRestart: true, showUpdate: false, showTakeDown: true },
+    })));
+    const lifecycle = result.current.find(g => g.id === 'lifecycle')!;
+    const item = lifecycle.items.find(i => i.id === 'take-down');
+    expect(item?.label).toBe('Take down');
+    item?.onSelect();
+    expect(takeDown).toHaveBeenCalled();
+  });
+
+  it('hides deploy lifecycle items when canDeploy is false', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({
+      canDeploy: false,
+      menuVisibility: { showDeploy: true, showStop: true, showRestart: true, showUpdate: true, showTakeDown: true },
+    })));
+    const lifecycle = result.current.find(g => g.id === 'lifecycle')!;
+    const ids = lifecycle.items.map(i => i.id);
+    expect(ids).not.toContain('deploy');
+    expect(ids).not.toContain('take-down');
+    expect(ids).toEqual(['schedule']);
+  });
+
+  it('disables take down for the self stack', () => {
+    const { result } = renderHook(() => useStackMenuItems('sencho.yml', makeCtx({
+      isSelfStack: true,
+      menuVisibility: { showDeploy: false, showStop: true, showRestart: true, showUpdate: false, showTakeDown: true },
+    })));
+    const lifecycle = result.current.find(g => g.id === 'lifecycle')!;
+    expect(lifecycle.items.find(i => i.id === 'take-down')?.disabled).toBe(true);
+  });
+
   it('disables action lifecycle items when isBusy but leaves schedule enabled', () => {
     const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({
       isBusy: true,
-      menuVisibility: { showDeploy: true, showStop: true, showRestart: true, showUpdate: true },
+      menuVisibility: { showDeploy: true, showStop: true, showRestart: true, showUpdate: true, showTakeDown: false },
     })));
     const lifecycle = result.current.find(g => g.id === 'lifecycle')!;
     const actionItems = lifecycle.items.filter(i => i.id !== 'schedule');

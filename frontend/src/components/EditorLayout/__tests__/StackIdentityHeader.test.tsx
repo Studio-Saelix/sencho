@@ -50,6 +50,8 @@ function renderHeader(over: Partial<ComponentProps<typeof StackIdentityHeader>> 
       rollbackStack={vi.fn()}
       scanStackConfig={vi.fn()}
       requestDeleteStack={vi.fn()}
+      requestTakeDownStack={vi.fn()}
+      showTakeDown={false}
       {...over}
     />,
   );

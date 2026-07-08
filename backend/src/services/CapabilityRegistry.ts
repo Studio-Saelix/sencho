@@ -54,6 +54,7 @@ export const CAPABILITIES = [
   'project-env-files',
   'compose-storage',
   'cross-node-rbac',
+  'stack-down-remove-volumes',
 ] as const;
 
 /**
@@ -66,6 +67,9 @@ export const CAPABILITIES = [
 export const CROSS_NODE_RBAC_CAPABILITY = 'cross-node-rbac';
 
 export type Capability = (typeof CAPABILITIES)[number];
+
+/** Capability for optional `?removeVolumes=true` on POST /stacks/:name/down. */
+export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' as const satisfies Capability;
 
 /** Returns true when the string is a usable semver version. */
 export function isValidVersion(v: string | null | undefined): v is string {
