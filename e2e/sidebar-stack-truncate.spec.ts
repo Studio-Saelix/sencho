@@ -263,8 +263,12 @@ test.describe('Sidebar stack name truncation', () => {
 
   test('active row with a long name still truncates', async ({ page }) => {
     const row = page.locator('[data-testid="stack-row"]').filter({ hasText: LONG_STACK });
-    await row.click();
-    await expect(row).toHaveClass(/bg-accent/);
+    const slug = LONG_STACK.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
+    await Promise.all([
+      page.waitForURL(new RegExp(`/nodes/local/stacks/${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`)),
+      row.click(),
+    ]);
+    await expect(row).toHaveClass(/bg-accent/, { timeout: 10_000 });
     await assertRowLayout(page, LONG_STACK, { expectTruncated: true });
   });
 
