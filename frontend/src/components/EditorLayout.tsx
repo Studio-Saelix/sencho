@@ -220,6 +220,10 @@ export default function EditorLayout() {
     getLastDeployOutputLine,
     diffPreviewEnabled,
     hasUpdateGuard: hasCapability('update-guard'),
+    canEditStack: (stackNameOrFilename) => {
+      const stackName = stackNameOrFilename.replace(/\.(ya?ml)$/, '');
+      return can('stack:edit', 'stack', stackName);
+    },
   });
 
   // Wire the ref now that stackActions is available
@@ -475,7 +479,8 @@ export default function EditorLayout() {
       updateStack={stackActions.updateStack}
       rollbackStack={stackActions.rollbackStack}
       scanStackConfig={stackActions.scanStackConfig}
-      enterEditMode={stackActions.enterEditMode}
+      openComposeEditor={stackActions.openComposeEditor}
+      closeComposeEditor={stackActions.closeComposeEditor}
       requestSave={stackActions.requestSave}
       requestSaveAndDeploy={stackActions.requestSaveAndDeploy}
       discardChanges={stackActions.discardChanges}
@@ -503,7 +508,7 @@ export default function EditorLayout() {
       onDismissRecovery={() => { if (selectedFile) dismissActionResult(selectedFile); }}
       panelStartedAt={panelStartedAt}
       onMobileBack={goToMobileList}
-      onCloseEditor={() => stackActions.attemptLeaveEditor(() => setEditingCompose(false))}
+      onCloseEditor={() => stackActions.attemptLeaveEditor(() => stackActions.closeComposeEditor())}
       hasUnsavedChanges={stackActions.hasUnsavedChanges}
       stackMuteActions={selectedFile ? stackMuteActions : undefined}
     />
@@ -549,6 +554,7 @@ export default function EditorLayout() {
         // effect fire a no-op so dirty content survives.
         overlayState.setPendingUnsavedNode(activeNode);
         overlayState.setPendingUnsavedLoad(NODE_SWITCH_PENDING_TOKEN);
+        overlayState.setPendingLoadOptions(null);
         revertingNodeSwitchRef.current = true;
         setActiveNode(previousNode);
         return;
@@ -615,7 +621,7 @@ export default function EditorLayout() {
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
         initialMode={createDialogInitialMode}
-        onStackCreated={async (sName, sourceNodeId) => {
+        onStackCreated={async (sName, sourceNodeId, meta) => {
           await refreshStacks();
           // loadFile keeps its own unsaved-changes overlay (intentional safety,
           // shared with every other "switch to a different stack" code path).
@@ -625,7 +631,12 @@ export default function EditorLayout() {
             toast.info(`Stack "${sName}" created on the previous node.`);
             return;
           }
-          await stackActions.loadFile(sName);
+          // Empty creates land in an editable compose workspace. Other modes
+          // (git, docker-run, import) stay browse-first on Anatomy.
+          await stackActions.loadFile(
+            sName,
+            meta?.mode === 'empty' ? { startInComposeEdit: true } : undefined,
+          );
         }}
         onStacksChanged={async () => { await refreshStacks(); }}
       />

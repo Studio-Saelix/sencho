@@ -62,8 +62,11 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
         updateStack: vi.fn(),
         rollbackStack: vi.fn(),
         scanStackConfig: vi.fn(),
+        openComposeEditor: vi.fn(),
+        closeComposeEditor: vi.fn(),
         requestSave: vi.fn(),
         requestSaveAndDeploy: vi.fn(),
+        discardChanges: vi.fn(),
         setContent: vi.fn(),
         setEnvContent: vi.fn(),
         changeEnvFile: vi.fn(),
@@ -78,6 +81,11 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
         onMobileBack: vi.fn(),
         onCloseEditor: vi.fn(),
         hasUnsavedChanges: () => false,
+        isEditing: false,
+        isDarkMode: false,
+        copiedDigest: null,
+        copiedDigestTimerRef: { current: null },
+        setCopiedDigest: vi.fn(),
         ...over,
     } as unknown as EditorViewProps;
 }
@@ -95,6 +103,10 @@ function ControlledDetail({ over = {} }: { over?: Partial<EditorViewProps> }) {
                 setEditingCompose,
                 activeTab,
                 setActiveTab,
+                openComposeEditor: () => {
+                    setActiveTab('compose');
+                    setEditingCompose(true);
+                },
             })}
         />
     );

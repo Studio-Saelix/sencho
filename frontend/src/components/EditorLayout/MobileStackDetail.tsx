@@ -64,7 +64,6 @@ export function MobileStackDetail(props: EditorViewProps) {
         serviceAction,
         setLogsMode,
         setActiveTab,
-        setEditingCompose,
         setGitSourceOpen,
         requestDeleteStack,
         isSelfStack = false,
@@ -77,6 +76,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         onDismissRecovery,
         panelStartedAt,
         stackMuteActions,
+        openComposeEditor,
     } = props;
 
     const [segment, setSegment] = useState<Segment>('logs');
@@ -236,7 +236,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 envContent={envContent}
                                 selectedEnvFile={selectedEnvFile}
                                 gitSourcePending={Boolean(gitSourcePendingMap[stackName])}
-                                onEditCompose={() => { setActiveTab('compose'); setEditingCompose(true); }}
+                                onEditCompose={openComposeEditor}
                                 onOpenGitSource={() => setGitSourceOpen(true)}
                                 onApplyUpdate={() => { void updateStack(); }}
                                 applying={loadingAction === 'update'}

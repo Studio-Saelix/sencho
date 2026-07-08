@@ -2,7 +2,6 @@ import { Suspense, useRef, useEffect, useState } from 'react';
 import { Editor } from '@/lib/monacoLoader';
 import {
     Save,
-    Pencil,
     X,
     Rocket,
     ChevronDown,
@@ -160,7 +159,8 @@ export interface EditorViewProps {
     scanStackConfig: () => Promise<void>;
 
     // Edit lifecycle
-    enterEditMode: () => void;
+    openComposeEditor: () => void;
+    closeComposeEditor: () => void;
     requestSave: () => void;
     requestSaveAndDeploy: (e: React.MouseEvent) => void;
     discardChanges: () => void;
@@ -234,7 +234,6 @@ export function EditorView(props: EditorViewProps) {
         gitSourcePendingMap,
         notifications,
         activeTab,
-        isEditing,
         editingCompose,
         logsMode,
         loadingAction,
@@ -249,7 +248,8 @@ export function EditorView(props: EditorViewProps) {
         updateStack,
         rollbackStack,
         scanStackConfig,
-        enterEditMode,
+        openComposeEditor,
+        closeComposeEditor,
         requestSave,
         requestSaveAndDeploy,
         discardChanges,
@@ -270,8 +270,10 @@ export function EditorView(props: EditorViewProps) {
         onDismissRecovery,
         panelStartedAt,
         stackMuteActions,
+        hasUnsavedChanges,
     } = props;
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
+    const canEditCompose = can('stack:edit', 'stack', stackName);
 
     // Dispose the underlying Monaco model when EditorView unmounts. The
     // @monaco-editor/react wrapper reuses a single model per editor instance
@@ -303,6 +305,16 @@ export function EditorView(props: EditorViewProps) {
         });
         return () => cancelAnimationFrame(id);
     }, [activeTab]);
+
+    // Focus Monaco when entering the editable compose workspace. Lazy Monaco
+    // can mount after this effect, so onMount also focuses (dual strategy).
+    useEffect(() => {
+        if (!editingCompose || activeTab !== 'compose' || !canEditCompose) return;
+        const id = requestAnimationFrame(() => {
+            monacoEditorRef.current?.focus();
+        });
+        return () => cancelAnimationFrame(id);
+    }, [editingCompose, activeTab, canEditCompose]);
 
     const safeContainers = containers || [];
     const safeContent = content || '';
@@ -506,7 +518,7 @@ export function EditorView(props: EditorViewProps) {
                                 </Tabs>
 
                                 {activeTab === 'env' && envFiles.length > 1 && (
-                                    <Select value={selectedEnvFile} onValueChange={changeEnvFile} disabled={isEditing || isFileLoading}>
+                                    <Select value={selectedEnvFile} onValueChange={changeEnvFile} disabled={hasUnsavedChanges() || isFileLoading}>
                                         <SelectTrigger className="h-9 text-xs bg-muted border-none min-w-[200px]">
                                             <SelectValue placeholder="Select environment file" />
                                         </SelectTrigger>
@@ -521,7 +533,7 @@ export function EditorView(props: EditorViewProps) {
                                 )}
                             </div>
                             <div className="flex items-center gap-2">
-                                {activeTab !== 'files' && can('stack:edit', 'stack', stackName) && (
+                                {activeTab !== 'files' && canEditCompose && (
                                     <>
                                         <Button
                                             size="sm"
@@ -535,36 +547,29 @@ export function EditorView(props: EditorViewProps) {
                                                 <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-brand animate-pulse" />
                                             )}
                                         </Button>
-                                        {!isEditing ? (
-                                            <Button size="sm" variant="default" className="rounded-lg" onClick={enterEditMode}>
-                                                <Pencil className="w-4 h-4 mr-2" />
-                                                Edit
+                                        <div className="flex items-center">
+                                            <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={loadingAction === 'deploy'}>
+                                                <Rocket className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                                Save & Deploy
                                             </Button>
-                                        ) : (
-                                            <div className="flex items-center">
-                                                <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={loadingAction === 'deploy'}>
-                                                    <Rocket className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                                    Save & Deploy
-                                                </Button>
-                                                <DropdownMenu modal={false}>
-                                                    <DropdownMenuTrigger asChild>
-                                                        <Button size="sm" variant="default" className="rounded-r-lg rounded-l-none border-l border-primary-foreground/20 px-1.5" disabled={loadingAction === 'deploy'}>
-                                                            <ChevronDown className="w-3.5 h-3.5" />
-                                                        </Button>
-                                                    </DropdownMenuTrigger>
-                                                    <DropdownMenuContent align="end">
-                                                        <DropdownMenuItem onClick={requestSave}>
-                                                            <Save className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                                            Save Only
-                                                        </DropdownMenuItem>
-                                                        <DropdownMenuItem onClick={discardChanges} className="text-destructive/80 focus:text-destructive">
-                                                            <X className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                                            Discard Changes
-                                                        </DropdownMenuItem>
-                                                    </DropdownMenuContent>
-                                                </DropdownMenu>
-                                            </div>
-                                        )}
+                                            <DropdownMenu modal={false}>
+                                                <DropdownMenuTrigger asChild>
+                                                    <Button size="sm" variant="default" className="rounded-r-lg rounded-l-none border-l border-primary-foreground/20 px-1.5" disabled={loadingAction === 'deploy'}>
+                                                        <ChevronDown className="w-3.5 h-3.5" />
+                                                    </Button>
+                                                </DropdownMenuTrigger>
+                                                <DropdownMenuContent align="end">
+                                                    <DropdownMenuItem onClick={requestSave}>
+                                                        <Save className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                                        Save Only
+                                                    </DropdownMenuItem>
+                                                    <DropdownMenuItem onClick={discardChanges} className="text-destructive/80 focus:text-destructive">
+                                                        <X className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                                        Discard Changes
+                                                    </DropdownMenuItem>
+                                                </DropdownMenuContent>
+                                            </DropdownMenu>
+                                        </div>
                                     </>
                                 )}
                                 {activeTab === 'files' && (
@@ -585,12 +590,7 @@ export function EditorView(props: EditorViewProps) {
                                     size="sm"
                                     variant="ghost"
                                     className="rounded-lg h-8 w-8 p-0"
-                                    onClick={() => {
-                                        if (isEditing) {
-                                            discardChanges();
-                                        }
-                                        setEditingCompose(false);
-                                    }}
+                                    onClick={closeComposeEditor}
                                     aria-label="Close editor"
                                 >
                                     <X className="w-4 h-4" strokeWidth={1.5} />
@@ -623,9 +623,14 @@ export function EditorView(props: EditorViewProps) {
                                                     language={activeTab === 'compose' ? 'yaml' : 'ini'}
                                                     theme={isDarkMode ? 'vs-dark' : 'vs'}
                                                     value={activeTab === 'compose' ? safeContent : safeEnvContent}
-                                                    onMount={(editor) => { monacoEditorRef.current = editor; }}
+                                                    onMount={(editor) => {
+                                                        monacoEditorRef.current = editor;
+                                                        if (editingCompose && activeTab === 'compose' && canEditCompose) {
+                                                            editor.focus();
+                                                        }
+                                                    }}
                                                     onChange={(value) => {
-                                                        if (!isEditing) return; // Prevent changes in view mode
+                                                        if (!canEditCompose) return;
                                                         if (activeTab === 'compose') {
                                                             setContent(value || '');
                                                         } else {
@@ -638,7 +643,7 @@ export function EditorView(props: EditorViewProps) {
                                                         fontSize: 14,
                                                         padding: { top: 10 },
                                                         scrollBeyondLastLine: false,
-                                                        readOnly: !isEditing || !can('stack:edit', 'stack', stackName),
+                                                        readOnly: !canEditCompose,
                                                     }}
                                                 />
                                             </Suspense>
@@ -660,7 +665,7 @@ export function EditorView(props: EditorViewProps) {
                         envContent={envContent}
                         selectedEnvFile={selectedEnvFile}
                         gitSourcePending={Boolean(gitSourcePendingMap[stackName])}
-                        onEditCompose={() => { setEditingCompose(true); setActiveTab('compose'); }}
+                        onEditCompose={openComposeEditor}
                         onOpenFiles={canRead ? () => { setEditingCompose(true); setActiveTab('files'); } : undefined}
                         onOpenGitSource={() => setGitSourceOpen(true)}
                         onApplyUpdate={() => { void updateStack(); }}

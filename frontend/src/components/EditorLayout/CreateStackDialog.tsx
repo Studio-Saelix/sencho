@@ -20,7 +20,11 @@ export interface CreateStackDialogProps {
     // sourceNodeId is the active node ID captured at the moment the user clicked
     // Create. Parent compares against the current active node before navigating
     // so a mid-flight node switch does not land the user on a 404.
-    onStackCreated: (stackName: string, sourceNodeId: number | null | undefined) => void | Promise<void>;
+    onStackCreated: (
+        stackName: string,
+        sourceNodeId: number | null | undefined,
+        meta?: { mode: CreateMode },
+    ) => void | Promise<void>;
     onStacksChanged: () => void | Promise<void>;
     // Mode the dialog opens on. The empty-state entry opens directly on 'import';
     // the toolbar Create button opens on 'empty'.
@@ -153,7 +157,7 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             setNewStackName('');
             setCreateMode('empty');
             toast.success(`Stack "${stackName}" created.`);
-            await onStackCreated(stackName, sourceNodeId);
+            await onStackCreated(stackName, sourceNodeId, { mode: 'empty' });
         } catch (error) {
             console.error('Failed to create stack:', error);
             toast.error((error as Error).message || 'Failed to create stack.');

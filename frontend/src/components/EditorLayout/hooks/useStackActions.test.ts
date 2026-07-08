@@ -32,6 +32,8 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     originalEnvContent: '',
     activeTab: 'compose' as const,
     selectedEnvFile: '',
+    composeEtag: null as string | null,
+    envEtag: null as string | null,
     setContent: vi.fn(),
     setOriginalContent: vi.fn(),
     setEnvContent: vi.fn(),
@@ -46,6 +48,8 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     setBackupInfo: vi.fn(),
     setIsFileLoading: vi.fn(),
     setGitSourcePendingMap: vi.fn(),
+    setComposeEtag: vi.fn(),
+    setEnvEtag: vi.fn(),
   };
   return { ...base, ...over } as unknown as EditorState;
 }
@@ -77,9 +81,11 @@ function makeStackListState(over: Partial<StackListState> = {}): StackListState 
 function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
   return {
     setPendingUnsavedLoad: vi.fn(),
+    setPendingLoadOptions: vi.fn(),
     setPendingUnsavedNode: vi.fn(),
     setPendingLeaveAction: vi.fn(),
     pendingUnsavedLoad: null,
+    pendingLoadOptions: null,
     pendingUnsavedNode: null,
     pendingLeaveAction: null,
     policyBlock: null,
@@ -107,12 +113,15 @@ function setup(over: {
   stackList?: Partial<StackListState>;
   getLastDeployOutputLine?: (stackName: string) => string | undefined;
   hasUpdateGuard?: boolean;
+  canEditStack?: (stackNameOrFilename: string) => boolean;
   activeNode?: Parameters<typeof useStackActions>[0]['activeNode'];
+  setActiveNode?: Parameters<typeof useStackActions>[0]['setActiveNode'];
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
   const navState = { setActiveView: vi.fn() } as unknown as NavState;
   const overlayState = makeOverlay(over.overlay);
+  const setActiveNode = over.setActiveNode ?? vi.fn();
 
   const { result } = renderHook(() =>
     useStackActions({
@@ -121,15 +130,16 @@ function setup(over: {
       navState,
       overlayState,
       activeNode: over.activeNode ?? ({ id: 1, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode']),
-      setActiveNode: vi.fn(),
+      setActiveNode,
       nodes: [],
       runWithLog,
       getLastDeployOutputLine: over.getLastDeployOutputLine ?? (() => undefined),
       diffPreviewEnabled: false,
       hasUpdateGuard: over.hasUpdateGuard ?? false,
+      canEditStack: over.canEditStack ?? (() => true),
     }),
   );
-  return { result, editorState, stackListState, overlayState };
+  return { result, editorState, stackListState, overlayState, setActiveNode };
 }
 
 describe('useStackActions.saveFile', () => {
@@ -145,6 +155,8 @@ describe('useStackActions.saveFile', () => {
     const ok = await result.current.saveFile();
     expect(ok).toBe(true);
     expect(editorState.setOriginalContent).toHaveBeenCalledWith('new');
+    // Stay editable after save (no re-gate into read-only Monaco).
+    expect(editorState.setIsEditing).not.toHaveBeenCalledWith(false);
   });
 
   it('returns false and leaves dirty state intact when the PUT fails', async () => {
@@ -173,6 +185,7 @@ describe('useStackActions.saveFile', () => {
         runWithLog,
         getLastDeployOutputLine: () => undefined,
         diffPreviewEnabled: false,
+        canEditStack: () => true,
       }),
     );
     const ok = await result.current.saveFile();
@@ -581,6 +594,174 @@ describe('useStackActions.attemptLeaveEditor (mobile back / nav guard)', () => {
     const { result, overlayState } = setup({ overlay: { pendingLeaveAction: { run: vi.fn() } } });
     result.current.cancelPendingUnsavedLoad();
     expect(overlayState.setPendingLeaveAction).toHaveBeenCalledWith(null);
+    expect(overlayState.setPendingLoadOptions).toHaveBeenCalledWith(null);
+  });
+});
+
+describe('useStackActions open/close compose editor', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('openComposeEditor sets editingCompose, compose tab, and isEditing when permitted', () => {
+    const { result, editorState } = setup();
+    result.current.openComposeEditor();
+    expect(editorState.setEditingCompose).toHaveBeenCalledWith(true);
+    expect(editorState.setActiveTab).toHaveBeenCalledWith('compose');
+    expect(editorState.setIsEditing).toHaveBeenCalledWith(true);
+  });
+
+  it('openComposeEditor is a no-op when canEditStack returns false', () => {
+    const { result, editorState } = setup({ canEditStack: () => false });
+    result.current.openComposeEditor();
+    expect(editorState.setEditingCompose).not.toHaveBeenCalled();
+  });
+
+  it('closeComposeEditor reverts both buffers when .env is dirty and compose tab is active', () => {
+    const { result, editorState } = setup({
+      editorState: {
+        activeTab: 'compose',
+        content: 'compose-clean',
+        originalContent: 'compose-clean',
+        envContent: 'env-dirty',
+        originalEnvContent: 'env-clean',
+      },
+    });
+    result.current.closeComposeEditor();
+    expect(editorState.setContent).toHaveBeenCalledWith('compose-clean');
+    expect(editorState.setEnvContent).toHaveBeenCalledWith('env-clean');
+    expect(editorState.setEditingCompose).toHaveBeenCalledWith(false);
+  });
+
+  it('closeComposeEditor reverts both buffers when compose is dirty and files tab is active', () => {
+    const { result, editorState } = setup({
+      editorState: {
+        activeTab: 'files',
+        content: 'compose-dirty',
+        originalContent: 'compose-clean',
+        envContent: 'env-clean',
+        originalEnvContent: 'env-clean',
+      },
+    });
+    result.current.closeComposeEditor();
+    expect(editorState.setContent).toHaveBeenCalledWith('compose-clean');
+    expect(editorState.setEnvContent).toHaveBeenCalledWith('env-clean');
+    expect(editorState.setEditingCompose).toHaveBeenCalledWith(false);
+  });
+});
+
+describe('useStackActions loadFile startInComposeEdit + pending options', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('defers a dirty load and stores pendingLoadOptions', async () => {
+    const { result, overlayState } = setup({
+      editorState: { content: 'dirty', originalContent: 'clean' },
+      stackList: { selectedFile: 'web.yml' },
+    });
+    await result.current.loadFile('new.yml', { startInComposeEdit: true });
+    expect(overlayState.setPendingUnsavedLoad).toHaveBeenCalledWith('new.yml');
+    expect(overlayState.setPendingLoadOptions).toHaveBeenCalledWith({ startInComposeEdit: true });
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('opens compose edit after load when startInComposeEdit and canEditStack(target) both pass', async () => {
+    const canEditStack = vi.fn((id: string) => id === 'target.yml' || id === 'target');
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u === '/stacks/target.yml') return Promise.resolve(new Response('services: {}', { status: 200 }));
+      if (u.includes('/envs')) return Promise.resolve(new Response(JSON.stringify({ envFiles: [] }), { status: 200 }));
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      if (u.includes('/backup')) return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    const { result, editorState } = setup({
+      editorState: { content: 'same', originalContent: 'same' },
+      stackList: { selectedFile: null },
+      canEditStack,
+    });
+    await result.current.loadFile('target.yml', { startInComposeEdit: true });
+    expect(canEditStack).toHaveBeenCalledWith('target.yml');
+    expect(editorState.setEditingCompose).toHaveBeenCalledWith(true);
+    expect(editorState.setIsEditing).toHaveBeenCalledWith(true);
+  });
+
+  it('does not auto-edit when canEditStack rejects the loaded target', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u === '/stacks/target.yml') return Promise.resolve(new Response('services: {}', { status: 200 }));
+      if (u.includes('/envs')) return Promise.resolve(new Response(JSON.stringify({ envFiles: [] }), { status: 200 }));
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      if (u.includes('/backup')) return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    const { result, editorState } = setup({
+      editorState: { content: 'same', originalContent: 'same' },
+      stackList: { selectedFile: null },
+      canEditStack: () => false,
+    });
+    await result.current.loadFile('target.yml', { startInComposeEdit: true });
+    // loadFile always clears editingCompose at start; never re-opens.
+    expect(editorState.setEditingCompose).toHaveBeenCalledWith(false);
+    expect(editorState.setEditingCompose).not.toHaveBeenCalledWith(true);
+  });
+
+  it('forwards pendingLoadOptions through discardAndLoadPending for a dirty stack', async () => {
+    vi.mocked(apiFetch).mockImplementation((url: string) => {
+      const u = String(url);
+      if (u === '/stacks/other.yml') return Promise.resolve(new Response('services: {}', { status: 200 }));
+      if (u.includes('/envs')) return Promise.resolve(new Response(JSON.stringify({ envFiles: [] }), { status: 200 }));
+      if (u.includes('/containers')) return Promise.resolve(new Response('[]', { status: 200 }));
+      if (u.includes('/backup')) return Promise.resolve(new Response(JSON.stringify({ exists: false }), { status: 200 }));
+      return Promise.resolve(new Response('', { status: 404 }));
+    });
+    // Buffers stay dirty in the mock (setContent does not update content), so
+    // discardAndLoadPending must resume with skipUnsavedCheck or loadFile
+    // would re-defer.
+    const { result, editorState, overlayState } = setup({
+      editorState: { content: 'dirty', originalContent: 'clean', envContent: '', originalEnvContent: '' },
+      overlay: {
+        pendingUnsavedLoad: 'other.yml',
+        pendingLoadOptions: { startInComposeEdit: true },
+      },
+      stackList: { selectedFile: 'web.yml' },
+    });
+    result.current.discardAndLoadPending();
+    await vi.waitFor(() => {
+      expect(editorState.setEditingCompose).toHaveBeenCalledWith(true);
+    });
+    // Must not re-stash the pending load.
+    expect(overlayState.setPendingUnsavedLoad).toHaveBeenCalledWith(null);
+    expect(overlayState.setPendingUnsavedLoad).not.toHaveBeenCalledWith('other.yml');
+  });
+
+  it('node-switch pending load sets active node and never calls loadFile with the token', async () => {
+    const setActiveNode = vi.fn();
+    const targetNode = { id: 9, type: 'remote' } as Parameters<typeof useStackActions>[0]['activeNode'];
+    const { result } = setup({
+      overlay: {
+        pendingUnsavedLoad: '__node-switch-pending__',
+        pendingUnsavedNode: targetNode as never,
+        pendingLoadOptions: { startInComposeEdit: true },
+      },
+      setActiveNode,
+    });
+    result.current.discardAndLoadPending();
+    expect(setActiveNode).toHaveBeenCalledWith(targetNode);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('loadFileOnNode defers with options when dirty', async () => {
+    const node = { id: 2, type: 'remote' } as Parameters<typeof useStackActions>[0]['activeNode'];
+    const { result, overlayState } = setup({
+      editorState: { content: 'dirty', originalContent: 'clean' },
+      stackList: { selectedFile: 'web.yml' },
+    });
+    await result.current.loadFileOnNode(node!, 'other.yml', { startInComposeEdit: true });
+    expect(overlayState.setPendingUnsavedNode).toHaveBeenCalledWith(node);
+    expect(overlayState.setPendingUnsavedLoad).toHaveBeenCalledWith('other.yml');
+    expect(overlayState.setPendingLoadOptions).toHaveBeenCalledWith({ startInComposeEdit: true });
   });
 });
 
