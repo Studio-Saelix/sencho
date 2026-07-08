@@ -198,7 +198,7 @@ export function TopExploitRiskList({
   const needsPagination = ranked.length > EXPLOIT_PAGE_SIZE;
 
   return (
-    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel max-md:overflow-x-auto">
+    <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel max-md:overflow-x-auto h-full flex flex-col">
       <div className="flex items-center justify-between gap-4 px-4 py-3">
         <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle">Top exploit-risk findings</h3>
         {needsPagination && (
@@ -334,9 +334,9 @@ export function CvssEpssQuadrantChart({ items }: { items: ExploitIntelFinding[] 
 
   return (
     // Fixed height, not flex-fill: a flex/grid-stretched ResponsiveContainer
-    // re-measures a content-driven height and grows on every render. The parent
-    // grid (OverviewTab) uses items-start so this card does not stretch to a
-    // taller neighbour, which is what previously left dead space under the chart.
+    // re-measures a content-driven height and grows on every render. Both cards
+    // in the parent grid stretch to the same height via h-full so dead space
+    // never accumulates under the chart.
     <div>
       <ChartContainer config={QUADRANT_CONFIG} className="h-[260px] w-full">
         <ScatterChart margin={{ left: 12, right: 12, top: 8, bottom: 24 }}>

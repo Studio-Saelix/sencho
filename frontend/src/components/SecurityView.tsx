@@ -270,7 +270,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         </TabsContent>
 
         <TabsContent value="images">
-          <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning">
+          <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning" resolution="Install a scanner from the Scanner setup tab.">
             <ImagesTab
               summaries={summaries}
               loading={summariesLoading}
@@ -285,13 +285,13 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         </TabsContent>
 
         <TabsContent value="compose">
-          <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning">
+          <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning" resolution="Install a scanner from the Scanner setup tab.">
             <FindingsTab kind="misconfig" summaries={summaries} loading={summariesLoading} error={summariesError} onInspect={onInspect} />
           </CapabilityGate>
         </TabsContent>
 
         <TabsContent value="secrets">
-          <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning">
+          <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning" resolution="Install a scanner from the Scanner setup tab.">
             <FindingsTab kind="secret" summaries={summaries} loading={summariesLoading} error={summariesError} onInspect={onInspect} />
           </CapabilityGate>
         </TabsContent>
@@ -320,7 +320,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
         </TabsContent>
 
         <TabsContent value="history">
-          <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning">
+          <CapabilityGate capability="vulnerability-scanning" featureName="Vulnerability scanning" resolution="Install a scanner from the Scanner setup tab.">
             <HistoryTab onInspect={onInspect} />
           </CapabilityGate>
         </TabsContent>
