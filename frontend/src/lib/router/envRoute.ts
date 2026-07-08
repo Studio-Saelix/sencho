@@ -37,3 +37,16 @@ export function normalizeEnvFileQuery(raw: string | null): string | null {
   if (!basename || basename.length > 256) return null;
   return basename;
 }
+
+export type EnvRouteTarget =
+  | { ready: false }
+  | { ready: true; target: string | null };
+
+/** Pick the env file to open from a route token once envFiles are loaded. */
+export function resolveEnvRouteTarget(requested: string | null, envFiles: string[]): EnvRouteTarget {
+  if (envFiles.length === 0) return { ready: false };
+  const defaultFile = envFiles[0];
+  if (!requested) return { ready: true, target: defaultFile };
+  const resolved = resolveEnvFilePath(requested, envFiles);
+  return { ready: true, target: resolved ?? defaultFile };
+}

@@ -1,10 +1,10 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useRef, useCallback, useState, type MutableRefObject } from 'react';
 import type { Node } from '@/context/NodeContext';
 import type { FleetTab, SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { ActiveView, EditorTab, MobileRouteSurface } from '@/lib/router/routeTypes';
 import { buildPath, parsePath } from '@/lib/router/senchoRoute';
-import { envFileForRouteUrl, resolveEnvFilePath } from '@/lib/router/envRoute';
+import { envFileForRouteUrl, resolveEnvRouteTarget } from '@/lib/router/envRoute';
 import { nodeIdToSlug, slugToNodeId } from '@/lib/nodeSlug';
 import {
   authzReady,
@@ -84,6 +84,29 @@ function readIdx(state: unknown): number | null {
     return typeof v === 'number' ? v : null;
   }
   return null;
+}
+
+async function applyPendingEditorRoute(
+  optsRef: MutableRefObject<UseUrlSyncOptions>,
+  pendingEnvRef: MutableRefObject<string | null>,
+  tab: EditorTab,
+): Promise<boolean> {
+  const live = optsRef.current;
+  if (tab !== 'env') {
+    pendingEnvRef.current = null;
+    live.setActiveTab(tab);
+    live.applyEditorRouteState(tab);
+    return true;
+  }
+  const outcome = resolveEnvRouteTarget(pendingEnvRef.current, live.envFiles);
+  if (!outcome.ready) return false;
+  pendingEnvRef.current = null;
+  if (outcome.target && outcome.target !== live.selectedEnvFile) {
+    await live.changeEnvFile(outcome.target);
+  }
+  live.setActiveTab(tab);
+  live.applyEditorRouteState(tab);
+  return true;
 }
 
 export function useUrlSync(options: UseUrlSyncOptions) {
@@ -226,15 +249,10 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     // to avoid unmounting the editor (loadFileCore clears selectedFile on
     // failure, which would hide the recovery chip during a deploy).
     if (o.selectedFile === match) {
-      const env = resolveEnvFilePath(pendingEnvRef.current, o.envFiles);
       const tab = pendingTabRef.current ?? 'compose';
-      if (env && env !== o.envFiles[0]) {
-        await o.changeEnvFile(env);
-      }
-      o.setActiveTab(tab);
-      o.applyEditorRouteState(tab);
+      const applied = await applyPendingEditorRoute(optsRef, pendingEnvRef, tab);
+      if (!applied) return;
       pendingStackRef.current = null;
-      pendingEnvRef.current = null;
       pendingTabRef.current = null;
       pendingRouteRef.current = null;
       setUrlHydratingStack(null);
@@ -257,16 +275,14 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       return;
     }
 
-    const env = resolveEnvFilePath(pendingEnvRef.current, o.envFiles);
     const tab = pendingTabRef.current ?? 'compose';
-    if (env && env !== o.envFiles[0]) {
-      await o.changeEnvFile(env);
+    const applied = await applyPendingEditorRoute(optsRef, pendingEnvRef, tab);
+    if (!applied) {
+      resolvingRef.current = false;
+      return;
     }
-    o.setActiveTab(tab);
-    o.applyEditorRouteState(tab);
 
     pendingStackRef.current = null;
-    pendingEnvRef.current = null;
     pendingTabRef.current = null;
     pendingRouteRef.current = null;
     setUrlHydratingStack(null);

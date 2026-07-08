@@ -4,6 +4,7 @@ import {
   envFileForRouteUrl,
   normalizeEnvFileQuery,
   resolveEnvFilePath,
+  resolveEnvRouteTarget,
 } from './envRoute';
 
 const envFiles = [
@@ -35,5 +36,21 @@ describe('envRoute', () => {
     expect(normalizeEnvFileQuery('/home/user/compose/radarr/.env.prod')).toBe('.env.prod');
     expect(normalizeEnvFileQuery('.env.prod')).toBe('.env.prod');
     expect(normalizeEnvFileQuery('')).toBeNull();
+  });
+
+  it('resolveEnvRouteTarget waits for envFiles and falls back to default', () => {
+    expect(resolveEnvRouteTarget('.env.prod', [])).toEqual({ ready: false });
+    expect(resolveEnvRouteTarget('.env.prod', envFiles)).toEqual({
+      ready: true,
+      target: '/home/user/compose/radarr/.env.prod',
+    });
+    expect(resolveEnvRouteTarget(null, envFiles)).toEqual({
+      ready: true,
+      target: '/home/user/compose/radarr/.env',
+    });
+    expect(resolveEnvRouteTarget('.env.missing', envFiles)).toEqual({
+      ready: true,
+      target: '/home/user/compose/radarr/.env',
+    });
   });
 });

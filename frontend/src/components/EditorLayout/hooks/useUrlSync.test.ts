@@ -127,6 +127,49 @@ describe('useUrlSync', () => {
     pushSpy.mockRestore();
   });
 
+  it('restores non-default env selection after stack load populates file list', async () => {
+    const prodPath = '/compose/radarr/.env.prod';
+    const fileList = ['/compose/radarr/.env', prodPath];
+    const loadFileForRoute = vi.fn().mockResolvedValue(true);
+    const changeEnvFile = vi.fn().mockResolvedValue(undefined);
+
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/env?env=.env.prod');
+
+    const { rerender } = renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          activeView: 'editor',
+          files: ['radarr'],
+          selectedFile: null,
+          envFiles: [],
+          loadFileForRoute,
+          changeEnvFile,
+        }),
+      },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(loadFileForRoute).toHaveBeenCalledWith('radarr');
+
+    rerender(makeOpts({
+      activeView: 'editor',
+      files: ['radarr'],
+      selectedFile: 'radarr',
+      envFiles: fileList,
+      loadFileForRoute,
+      changeEnvFile,
+    }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(changeEnvFile).toHaveBeenCalledWith(prodPath);
+  });
+
   it('pushState increments senchoIdx on user navigation', () => {
     const pushSpy = vi.spyOn(window.history, 'pushState');
 
