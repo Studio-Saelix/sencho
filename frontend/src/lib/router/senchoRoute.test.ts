@@ -96,6 +96,25 @@ describe('senchoRoute', () => {
     expect(path).toBe('/nodes/local/settings/appearance');
   });
 
+  it('parses legacy absolute env query as basename', () => {
+    const parsed = parsePath(
+      '/nodes/local/stacks/radarr/env',
+      '?env=%2Fhome%2Fuser%2Fcompose%2Fradarr%2F.env.prod',
+    );
+    expect(parsed.envFile).toBe('.env.prod');
+  });
+
+  it('rejects absolute paths in buildPath env query', () => {
+    const path = buildPath({
+      ...base,
+      activeView: 'editor',
+      stackName: 'radarr',
+      editorTab: 'env',
+      envFile: '/home/user/compose/radarr/.env.prod',
+    });
+    expect(path).toBe('/nodes/local/stacks/radarr/env');
+  });
+
   it('parses stack list path as mobile list surface', () => {
     const parsed = parsePath('/nodes/local/stacks', '');
     expect(parsed.isStackList).toBe(true);

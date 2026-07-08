@@ -97,6 +97,36 @@ describe('useUrlSync', () => {
     expect(window.location.pathname).toBe('/nodes/local/security');
   });
 
+  it('does not write local node URL while hydrating a remote node deep link', () => {
+    const remote = makeNode({ id: 2, name: 'nas', type: 'remote', is_default: false });
+    const local = makeNode();
+    const setActiveNode = vi.fn();
+    const pushSpy = vi.spyOn(window.history, 'pushState');
+
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/nas-2/fleet/snapshots');
+
+    act(() => {
+      renderHook(
+        (props) => useUrlSync(props),
+        {
+          initialProps: makeOpts({
+            nodes: [local, remote],
+            activeNode: local,
+            activeView: 'fleet',
+            fleetActiveTab: 'snapshots',
+            setActiveNode,
+          }),
+        },
+      );
+    });
+
+    const badPush = pushSpy.mock.calls.find((call) => String(call[2]).includes('/nodes/local/'));
+    expect(badPush).toBeUndefined();
+    expect(setActiveNode).toHaveBeenCalledWith(remote);
+
+    pushSpy.mockRestore();
+  });
+
   it('pushState increments senchoIdx on user navigation', () => {
     const pushSpy = vi.spyOn(window.history, 'pushState');
 

@@ -47,7 +47,18 @@ On a phone, Home and the stack list are distinct URLs even though both relate to
 - `/nodes/local/dashboard` opens the home dashboard.
 - `/nodes/local/stacks` opens the stack list.
 
+On desktop, opening the stack list at `/nodes/local/stacks` canonicalizes to `/nodes/local/dashboard` because the sidebar stack list is part of the home layout on a wide screen.
+
 Settings follows the same list/detail split: `/nodes/local/settings` is the section list; `/nodes/local/settings/<section>` opens a section directly.
+
+On a phone, `/nodes/local/stacks/<stack>/files` opens the compose editor instead. Sencho does not expose a separate file-browser URL on a phone.
+
+## What is not in the URL
+
+Some in-app state is intentionally not encoded:
+
+- **Stack Anatomy sub-tabs** (Anatomy, Activity, Dossier, Drift, Environment, and the rest) stay in memory only. Refresh returns you to the default Anatomy tab for that stack.
+- **The default env file** for a stack is implied when you open `/env` with no `?env=` query. Non-default files use a basename only, for example `?env=.env.prod`.
 
 ## Tips
 

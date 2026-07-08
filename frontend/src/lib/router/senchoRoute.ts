@@ -1,6 +1,7 @@
 import type { FleetTab, SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { ActiveView, EditorTab, ParsedRoute, RouteState } from './routeTypes';
+import { normalizeEnvFileQuery } from './envRoute';
 
 const VIEW_SEGMENTS = {
   dashboard: 'dashboard',
@@ -85,7 +86,8 @@ export function parsePath(pathname: string, search: string): ParsedRoute {
   }
 
   const filterNodeId = parseBoundedPositiveInt(params.get('node'));
-  const envFile = safeDecodeQueryValue(params.get('env') ?? '');
+  const envRaw = safeDecodeQueryValue(params.get('env') ?? '');
+  const envFile = normalizeEnvFileQuery(envRaw);
 
   if (segment === 'stacks') {
     if (parts.length === 3) {
@@ -138,7 +140,7 @@ export function buildPath(state: RouteState): string {
   if (state.activeView === 'editor' && state.stackName) {
     const tab = state.editorTab || 'compose';
     url.pathname = `${base}/stacks/${encodeURIComponent(state.stackName)}/${tab}`;
-    if (tab === 'env' && state.envFile) {
+    if (tab === 'env' && state.envFile && !state.envFile.includes('/')) {
       url.searchParams.set('env', state.envFile);
     }
     if (state.filterNodeId != null) {

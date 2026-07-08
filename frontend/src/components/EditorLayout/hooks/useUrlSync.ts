@@ -4,6 +4,7 @@ import type { FleetTab, SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import type { ActiveView, EditorTab, MobileRouteSurface } from '@/lib/router/routeTypes';
 import { buildPath, parsePath } from '@/lib/router/senchoRoute';
+import { envFileForRouteUrl, resolveEnvFilePath } from '@/lib/router/envRoute';
 import { nodeIdToSlug, slugToNodeId } from '@/lib/nodeSlug';
 import {
   authzReady,
@@ -102,6 +103,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
   const initialHydratedRef = useRef(false);
   const routeReplaceRef = useRef(false);
   const appliedViewRef = useRef<ActiveView | null>(null);
+  const pendingNodeIdRef = useRef<number | null>(null);
   const resolvingRef = useRef(false);
 
   const writeHistory = useCallback((path: string, intent: RouteIntent) => {
@@ -129,7 +131,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       activeView: view,
       stackName: o.selectedFile,
       editorTab: o.activeTab,
-      envFile: o.selectedEnvFile || null,
+      envFile: envFileForRouteUrl(o.selectedEnvFile, o.envFiles, o.activeTab),
       securityTab: o.securityTab,
       fleetActiveTab: o.fleetActiveTab,
       settingsSection: o.isMobile ? o.mobileSettingsSection : o.settingsSection,
@@ -179,7 +181,9 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       setUrlHydratingStack(null);
       setRouteDetailError(null);
       pendingRouteRef.current = null;
-      if (o.activeView === view) {
+      const nodeReady = pendingNodeIdRef.current == null || o.activeNode?.id === pendingNodeIdRef.current;
+      if (o.activeView === view && nodeReady) {
+        pendingNodeIdRef.current = null;
         appliedViewRef.current = null;
         phaseRef.current = 'settled';
       } else {
@@ -222,9 +226,9 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     // to avoid unmounting the editor (loadFileCore clears selectedFile on
     // failure, which would hide the recovery chip during a deploy).
     if (o.selectedFile === match) {
-      const env = pendingEnvRef.current;
+      const env = resolveEnvFilePath(pendingEnvRef.current, o.envFiles);
       const tab = pendingTabRef.current ?? 'compose';
-      if (env && o.envFiles.includes(env) && env !== o.envFiles[0]) {
+      if (env && env !== o.envFiles[0]) {
         await o.changeEnvFile(env);
       }
       o.setActiveTab(tab);
@@ -235,6 +239,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       pendingRouteRef.current = null;
       setUrlHydratingStack(null);
       setRouteDetailError(null);
+      pendingNodeIdRef.current = null;
       phaseRef.current = 'settled';
       return;
     }
@@ -252,9 +257,9 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       return;
     }
 
-    const env = pendingEnvRef.current;
+    const env = resolveEnvFilePath(pendingEnvRef.current, o.envFiles);
     const tab = pendingTabRef.current ?? 'compose';
-    if (env && o.envFiles.includes(env) && env !== o.envFiles[0]) {
+    if (env && env !== o.envFiles[0]) {
       await o.changeEnvFile(env);
     }
     o.setActiveTab(tab);
@@ -266,6 +271,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     pendingRouteRef.current = null;
     setUrlHydratingStack(null);
     setRouteDetailError(null);
+    pendingNodeIdRef.current = null;
     phaseRef.current = 'settled';
     resolvingRef.current = false;
   }, []);
@@ -343,8 +349,11 @@ export function useUrlSync(options: UseUrlSyncOptions) {
 
     phaseRef.current = 'applying';
     if (o.activeNode?.id !== node.id) {
+      pendingNodeIdRef.current = node.id;
+      routeReplaceRef.current = true;
       o.setActiveNode(node);
     } else {
+      pendingNodeIdRef.current = null;
       void applyPendingRoute();
     }
   }, [applyPendingRoute, writeHistory]);
@@ -390,17 +399,20 @@ export function useUrlSync(options: UseUrlSyncOptions) {
   useEffect(() => {
     if (phaseRef.current !== 'applying') return;
     if (pendingStackRef.current) return;
+    if (pendingNodeIdRef.current != null && options.activeNode?.id !== pendingNodeIdRef.current) return;
     const applied = appliedViewRef.current;
     if (applied == null) return;
     if (options.activeView !== applied) return;
     appliedViewRef.current = null;
+    pendingNodeIdRef.current = null;
     phaseRef.current = 'settled';
-  }, [options.activeView]);
+  }, [options.activeView, options.activeNode?.id]);
 
   useEffect(() => {
     if (phaseRef.current !== 'settled') return;
     if (options.isFileLoading) return;
     if (pendingStackRef.current) return;
+    if (pendingNodeIdRef.current != null && options.activeNode?.id !== pendingNodeIdRef.current) return;
     if (options.activeView === 'editor' && !options.selectedFile) return;
 
     const target = buildCurrentPath();
@@ -416,6 +428,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     options.selectedFile,
     options.activeTab,
     options.selectedEnvFile,
+    options.envFiles,
     options.securityTab,
     options.fleetActiveTab,
     options.settingsSection,
