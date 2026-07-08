@@ -860,7 +860,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 </div>
                 )}
 
-                <ScrollArea className="flex-1 bg-background relative text-sm">
+                <div className="flex-1 relative">
 
                     {/* Images */}
                     <TabsContent value="images" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
@@ -902,6 +902,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             )}
                         </div>
                         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+                        <ScrollArea className="max-h-[62vh]">
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
@@ -1022,6 +1023,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableBody>
                             )}
                         </Table>
+                        </ScrollArea>
                         </div>
                     </TabsContent>
 
@@ -1048,6 +1050,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             />
                         </div>
                         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+                        <ScrollArea className="max-h-[62vh]">
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
@@ -1124,6 +1127,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableBody>
                             )}
                         </Table>
+                        </ScrollArea>
                         </div>
                     </TabsContent>
 
@@ -1213,6 +1217,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             </div>
                         ) : (
                         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+                        <ScrollArea className="max-h-[62vh]">
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
@@ -1288,6 +1293,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                 </TableBody>
                             )}
                         </Table>
+                        </ScrollArea>
                         </div>
                         )}
                     </TabsContent>
@@ -1377,7 +1383,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         )}
                         </div>
                     </TabsContent>
-                </ScrollArea>
+                </div>
             </Tabs>
         </>
     );
