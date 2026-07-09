@@ -25,7 +25,26 @@ interface EnvironmentCheck {
 interface EnvironmentReport {
     checks: EnvironmentCheck[];
     generatedAt: number;
+    discovery?: import('@/lib/discovery-types').ComposeDiscovery;
 }
+
+export type { EnvironmentReport, EnvironmentCheck };
+
+type EnvironmentChecksControlledProps = {
+    report: EnvironmentReport | null;
+    isLoading: boolean;
+    onRerun: () => void | Promise<void>;
+};
+
+type EnvironmentChecksUncontrolledProps = {
+    report?: undefined;
+    isLoading?: undefined;
+    onRerun?: undefined;
+};
+
+export type EnvironmentChecksProps = {
+    className?: string;
+} & (EnvironmentChecksControlledProps | EnvironmentChecksUncontrolledProps);
 
 const STATUS_WORD: Record<CheckStatus, string> = { pass: 'OK', warn: 'Warning', fail: 'Action needed' };
 
@@ -84,33 +103,44 @@ function ChecksSkeleton() {
  * a Re-run control. It never blocks; the caller decides what continue action,
  * if any, sits alongside it.
  */
-export function EnvironmentChecks({ className }: { className?: string }) {
-    const [report, setReport] = useState<EnvironmentReport | null>(null);
-    const [isLoading, setIsLoading] = useState(true);
+export function EnvironmentChecks(props: EnvironmentChecksProps) {
+    const { className } = props;
+    const isControlled = props.onRerun !== undefined;
+
+    const [internalReport, setInternalReport] = useState<EnvironmentReport | null>(null);
+    const [internalLoading, setInternalLoading] = useState(!isControlled);
 
     const load = useCallback(async () => {
-        setIsLoading(true);
+        if (isControlled) {
+            await props.onRerun();
+            return;
+        }
+        setInternalLoading(true);
         try {
             const res = await apiFetch('/diagnostics/environment', { localOnly: true });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 toast.error(err?.error || 'Failed to run environment checks.');
-                setReport(null);
+                setInternalReport(null);
                 return;
             }
-            setReport(await res.json() as EnvironmentReport);
+            setInternalReport(await res.json() as EnvironmentReport);
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Failed to run environment checks.');
-            setReport(null);
+            setInternalReport(null);
         } finally {
-            setIsLoading(false);
+            setInternalLoading(false);
         }
-    }, []);
+    }, [isControlled, isControlled ? props.onRerun : undefined]);
 
     useEffect(() => {
+        if (isControlled) return;
         // eslint-disable-next-line react-hooks/set-state-in-effect
         void load();
-    }, [load]);
+    }, [isControlled, load]);
+
+    const report = isControlled ? props.report : internalReport;
+    const isLoading = isControlled ? props.isLoading : internalLoading;
 
     return (
         <div className={cn('flex flex-col gap-3', className)}>
@@ -124,7 +154,7 @@ export function EnvironmentChecks({ className }: { className?: string }) {
                 <p className="text-xs text-stat-subtitle">Checks could not be run. Try again.</p>
             )}
             <SettingsActions hint="environment preflight">
-                <SettingsSecondaryButton onClick={() => void load()} disabled={isLoading}>
+                <SettingsSecondaryButton onClick={() => void (isControlled ? props.onRerun() : load())} disabled={isLoading}>
                     <RefreshCw className={cn('h-4 w-4', isLoading && 'animate-spin')} />
                     Re-run
                 </SettingsSecondaryButton>

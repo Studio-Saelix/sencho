@@ -28,6 +28,7 @@ import { parseServiceImages, isPreflightAckActive } from '../utils/preflight-ack
 import type { PreflightAckExpiryMode } from '../services/DatabaseService';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
 import { buildStorageInventory } from '../services/storage/inventory';
+import { probeComposeDiscovery } from '../services/ComposeDiscoveryService';
 import { buildEffectiveAnatomy } from '../services/effectiveAnatomy';
 import { buildEnvInventory } from '../services/EnvInventoryService';
 import { buildStackLabelInventory } from '../services/LabelInventoryService';
@@ -527,6 +528,32 @@ stacksRouter.post('/bulk', async (req: Request, res: Response) => {
   );
 
   res.json({ action: typedAction, results });
+});
+
+// Read-only compose discovery for the sidebar empty state. stack:read only;
+// never runs full environment diagnostics. Must register before /:stackName.
+stacksRouter.get('/discovery', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
+  try {
+    const probe = await probeComposeDiscovery(req.nodeId);
+    if (probe.readable) {
+      res.json({
+        composeDir: probe.composeDir,
+        readable: true,
+        discovery: probe.discovery,
+      });
+    } else {
+      res.json({
+        composeDir: probe.composeDir,
+        readable: false,
+        discovery: null,
+        error: probe.error,
+      });
+    }
+  } catch (error) {
+    console.error('Failed to probe compose discovery:', error);
+    res.status(500).json({ error: 'Failed to probe compose discovery' });
+  }
 });
 
 stacksRouter.get('/:stackName', async (req: Request, res: Response) => {

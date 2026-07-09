@@ -1,0 +1,57 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { ComponentProps } from 'react';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { CreateStackDialog } from '../CreateStackDialog';
+
+vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
+vi.mock('@/components/ui/toast-store', () => ({ toast: { error: vi.fn(), dismiss: vi.fn() } }));
+vi.mock('@/context/NodeContext', () => ({
+  useNodes: () => ({ activeNode: { id: 1, name: 'local' } }),
+}));
+
+describe('CreateStackDialog', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function renderOpen(overrides: Partial<ComponentProps<typeof CreateStackDialog>> = {}) {
+    return render(
+      <CreateStackDialog
+        open
+        onOpenChange={vi.fn()}
+        onStackCreated={vi.fn()}
+        onStacksChanged={vi.fn()}
+        {...overrides}
+      />,
+    );
+  }
+
+  it('renders exactly three evenly sized source tabs (no Import)', () => {
+    renderOpen();
+
+    const tablist = screen.getByRole('tablist', { name: 'Stack source' });
+    expect(tablist.className).toContain('grid-cols-3');
+
+    const tabs = screen.getAllByRole('tab');
+    expect(tabs).toHaveLength(3);
+    expect(tabs.map((t) => t.textContent)).toEqual(
+      expect.arrayContaining(['Empty', 'From Git', 'From Docker Run']),
+    );
+    expect(tabs.some((t) => /import/i.test(t.textContent ?? ''))).toBe(false);
+  });
+
+  it('exposes adopt footer link when onOpenAdopt is provided', () => {
+    const onOpenAdopt = vi.fn();
+    const onOpenChange = vi.fn();
+    renderOpen({ onOpenAdopt, onOpenChange });
+
+    fireEvent.click(screen.getByRole('button', { name: /adopt existing files instead/i }));
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(onOpenAdopt).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides adopt footer when onOpenAdopt is omitted', () => {
+    renderOpen();
+    expect(screen.queryByRole('button', { name: /adopt existing files instead/i })).toBeNull();
+  });
+});

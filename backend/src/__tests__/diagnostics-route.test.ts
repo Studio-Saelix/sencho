@@ -87,4 +87,17 @@ describe('GET /api/diagnostics/environment', () => {
             expect(typeof c.detail).toBe('string');
         }
     });
+
+    it('still returns 200 when discovery probe succeeds on a readable compose dir', async () => {
+        const res = await request(app).get('/api/diagnostics/environment').set('Authorization', adminAuthHeader);
+        expect(res.status).toBe(200);
+        if (res.body.discovery) {
+            expect(res.body.discovery).toMatchObject({
+                composeDir: expect.any(String),
+                stackCount: expect.any(Number),
+                adoptCandidateCount: expect.any(Number),
+                adoptCandidatesTruncated: expect.any(Boolean),
+            });
+        }
+    });
 });

@@ -104,6 +104,14 @@ export interface ImportCandidateRaw {
  */
 export type MovableImportCandidate = Pick<ImportCandidateRaw, 'location' | 'composeFile' | 'status'>;
 
+/** Placement metadata for a single import candidate (no file read). */
+export interface ImportCandidateMeta {
+  name: string;
+  composeFile: string;
+  location: string;
+  status: 'loose-root' | 'nested';
+}
+
 // Strips at most one trailing slash. The upstream validator
 // (isValidRelativeStackPath) rejects any '//' sequence, so a string reaching
 // this helper can carry at most one trailing slash, and a single slice is
@@ -612,33 +620,29 @@ export class FileSystemService {
   }
 
   /**
-   * Scan the compose directory for compose files that are not yet stacks: loose
-   * files at the root and compose files one directory too deep. A top-level
-   * subdirectory with a compose file is already a stack, so it is skipped, not
-   * surfaced. Read-only. Bounded by `maxCandidates` and by a single level of
-   * nesting so a deep tree cannot make this walk unbounded.
+   * Shared placement walk for import discovery and counting. Yields the same
+   * candidates findImportCandidates surfaces (including weird/unreadable files
+   * that readComposeCandidate returns content:null for). Stops after `limit`
+   * yields.
    */
-  async findImportCandidates(maxCandidates = 100): Promise<ImportCandidateRaw[]> {
-    const candidates: ImportCandidateRaw[] = [];
+  private async *enumerateImportCandidates(limit: number): AsyncGenerator<ImportCandidateMeta> {
+    let yielded = 0;
     let entries: Dirent[];
     try {
       entries = await fsPromises.readdir(this.baseDir, { withFileTypes: true });
     } catch (error) {
-      // The compose dir itself is unreadable (missing, permissions). The scan
-      // degrades to an empty list, so log it rather than report "no files found"
-      // for what is really an access failure.
       console.warn('[FileSystemService] Failed to scan compose directory for import:', sanitizeForLog((error as Error)?.message ?? String(error)));
-      return candidates;
+      return;
     }
 
     for (const entry of entries) {
-      if (candidates.length >= maxCandidates) break;
+      if (yielded >= limit) return;
       if (!entry.name || typeof entry.name !== 'string') continue;
 
       if (entry.isFile()) {
         if (IMPORT_COMPOSE_FILENAME_SET.has(entry.name)) {
-          const loaded = await this.readComposeCandidate(path.join(this.baseDir, entry.name));
-          candidates.push({ name: '', composeFile: entry.name, location: entry.name, status: 'loose-root', ...loaded });
+          yielded++;
+          yield { name: '', composeFile: entry.name, location: entry.name, status: 'loose-root' };
         }
         continue;
       }
@@ -646,14 +650,8 @@ export class FileSystemService {
 
       const dir = path.join(this.baseDir, entry.name);
       const topCompose = await this.firstComposeFilename(dir);
-      if (topCompose) {
-        // A top-level subdirectory with a compose file is already a stack (it
-        // shows in the sidebar), so it is not an import candidate. Skip it and do
-        // not descend: any compose files deeper inside belong to this stack.
-        continue;
-      }
+      if (topCompose) continue;
 
-      // No compose at the top level: peek exactly one level deeper.
       let children: Dirent[];
       try {
         children = await fsPromises.readdir(dir, { withFileTypes: true });
@@ -662,23 +660,54 @@ export class FileSystemService {
         continue;
       }
       for (const child of children) {
-        if (candidates.length >= maxCandidates) break;
+        if (yielded >= limit) return;
         if (!child.isDirectory() || !child.name || typeof child.name !== 'string') continue;
         const childDir = path.join(dir, child.name);
         const childCompose = await this.firstComposeFilename(childDir);
         if (childCompose) {
-          const loaded = await this.readComposeCandidate(path.join(childDir, childCompose));
-          candidates.push({
+          yielded++;
+          yield {
             name: child.name,
             composeFile: childCompose,
             location: `${entry.name}/${child.name}/${childCompose}`,
             status: 'nested',
-            ...loaded,
-          });
+          };
         }
       }
     }
+  }
 
+  /**
+   * Count adopt candidates with 101st lookahead: truncated is true only when
+   * more than maxCandidates exist.
+   */
+  async countImportCandidates(maxCandidates = 100): Promise<{ count: number; truncated: boolean }> {
+    let count = 0;
+    for await (const _ of this.enumerateImportCandidates(maxCandidates + 1)) {
+      count++;
+    }
+    if (count > maxCandidates) {
+      return { count: maxCandidates, truncated: true };
+    }
+    return { count, truncated: false };
+  }
+
+  /**
+   * Scan the compose directory for compose files that are not yet stacks: loose
+   * files at the root and compose files one directory too deep. A top-level
+   * subdirectory with a compose file is already a stack, so it is skipped, not
+   * surfaced. Read-only. Bounded by `maxCandidates` and by a single level of
+   * nesting so a deep tree cannot make this walk unbounded.
+   */
+  async findImportCandidates(maxCandidates = 100): Promise<ImportCandidateRaw[]> {
+    const candidates: ImportCandidateRaw[] = [];
+    for await (const meta of this.enumerateImportCandidates(maxCandidates)) {
+      const filePath = meta.status === 'loose-root'
+        ? path.join(this.baseDir, meta.composeFile)
+        : path.join(this.baseDir, ...meta.location.split('/'));
+      const loaded = await this.readComposeCandidate(filePath);
+      candidates.push({ ...meta, ...loaded });
+    }
     return candidates;
   }
 
