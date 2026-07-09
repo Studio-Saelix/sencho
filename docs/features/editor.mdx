@@ -25,13 +25,13 @@ The top card on the left holds the stack's identity and primary controls.
 
 ### Stack action bar
 
-The action bar runs every state transition for the whole stack. The primary buttons (**Start**, **Restart**, **Stop**, **Take down**, **Update**) require the `stack:deploy` permission; the **Delete** entry in the kebab dropdown requires the `stack:delete` permission. The bar still appears when only **Delete** is authorised so the operator has a way to remove the stack.
+The action bar runs every state transition for the whole stack. The primary buttons (**Start**, **Restart**, **Stop**, **Take down** when running, **Update**) require the `stack:deploy` permission; the **Delete** entry in the kebab dropdown requires the `stack:delete` permission. The bar still appears when only **Delete** is authorised so the operator has a way to remove the stack.
 
 | Button | Behavior |
 |--------|----------|
 | **Start** / **Restart** | A single button that becomes **Restart** when at least one container is running and **Start** otherwise. |
 | **Stop** | Stops every container in the stack. Hidden when nothing is running. |
-| **Take down** | Opens a confirmation dialog, then runs `docker compose down`. Removes containers and compose-created networks while keeping the stack directory. Optional volume removal is offered when the active node supports it. |
+| **Take down** | Shown when at least one container is running. Opens a confirmation dialog, then runs `docker compose down`. Removes containers and compose-created networks while keeping the stack directory. Optional volume removal is offered when the active node supports it. On stopped stacks, use the sidebar context menu or `⌘↓` / `Ctrl+↓`. |
 | **Update** | Pulls fresh images and reapplies the compose file. |
 | **More actions** (`⋮`) | Opens a dropdown with secondary actions. |
 
@@ -39,7 +39,6 @@ The kebab dropdown carries:
 
 - **Rollback `<timestamp>`** restores the previous deployment using the stored snapshot. Visible only when a backup exists.
 - **Scan config** runs Trivy against the compose configuration and surfaces misconfigurations inline. Visible only when Trivy is reachable. Admin role required.
-- **Take down** when the stack is stopped or partially running but not fully up (same confirmation as the inline button).
 - **Delete** stops the stack and removes its compose directory. Requires the `stack:delete` permission.
 
 ## Containers list

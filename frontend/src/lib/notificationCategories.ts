@@ -6,6 +6,7 @@ export const CATEGORY_LABELS: Record<NotificationCategory, string> = {
     stack_started: 'Stack started',
     stack_stopped: 'Stack stopped',
     stack_restarted: 'Stack restarted',
+    stack_taken_down: 'Stack taken down',
     image_update_available: 'Update available',
     image_update_applied: 'Update applied',
     autoheal_triggered: 'Auto-heal',

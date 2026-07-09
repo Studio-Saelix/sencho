@@ -94,4 +94,13 @@ describe('StackIdentityHeader', () => {
 
     expect(requestTakeDownStack).toHaveBeenCalledWith('plex');
   });
+
+  it('does not show Take down in the overflow menu when running', async () => {
+    const user = userEvent.setup();
+    renderHeader({ showTakeDown: true, isRunning: true, backupInfo: { exists: true, timestamp: Date.now() } });
+
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+
+    expect(screen.queryByRole('menuitem', { name: /Take down/i })).toBeNull();
+  });
 });

@@ -180,6 +180,7 @@ describe('useStackMenuItems', () => {
     const lifecycle = result.current.find(g => g.id === 'lifecycle')!;
     const item = lifecycle.items.find(i => i.id === 'take-down');
     expect(item?.label).toBe('Take down');
+    expect(item?.shortcut).toBe('⌘↓');
     item?.onSelect();
     expect(takeDown).toHaveBeenCalled();
   });

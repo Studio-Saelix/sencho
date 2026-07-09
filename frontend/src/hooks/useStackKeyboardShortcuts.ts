@@ -22,26 +22,30 @@ export function useStackKeyboardShortcuts(
       const cmdOrCtrl = e.metaKey || e.ctrlKey;
       const key = e.key.toLowerCase();
 
-      const isCmdKey = cmdOrCtrl && ['enter', '.', 'r', 'arrowup', 'backspace'].includes(key);
+      const isCmdKey = cmdOrCtrl && ['enter', '.', 'r', 'arrowup', 'arrowdown', 'backspace'].includes(key);
       const isSingleKey = !cmdOrCtrl && ['a', 'h', 'u', 'p'].includes(key);
       if (!isCmdKey && !isSingleKey) return;
 
       const ctx = buildMenuCtxRef.current(file);
-      const { showDeploy, showStop, showRestart, showUpdate } = ctx.menuVisibility;
+      const { showDeploy, showStop, showRestart, showUpdate, showTakeDown } = ctx.menuVisibility;
+      const canDeploy = (show: boolean) => ctx.canDeploy && show && !ctx.isBusy;
 
       if (cmdOrCtrl) {
-        if (key === 'enter' && ctx.canDeploy && showDeploy && !ctx.isBusy) {
+        if (key === 'enter' && canDeploy(showDeploy)) {
           e.preventDefault();
           ctx.deploy();
-        } else if (key === '.' && ctx.canDeploy && showStop && !ctx.isBusy) {
+        } else if (key === '.' && canDeploy(showStop)) {
           e.preventDefault();
           ctx.stop();
-        } else if (key === 'r' && ctx.canDeploy && showRestart && !ctx.isBusy) {
+        } else if (key === 'r' && canDeploy(showRestart)) {
           e.preventDefault();
           ctx.restart();
-        } else if (key === 'arrowup' && ctx.canDeploy && showUpdate && !ctx.isBusy) {
+        } else if (key === 'arrowup' && canDeploy(showUpdate)) {
           e.preventDefault();
           ctx.update();
+        } else if (key === 'arrowdown' && canDeploy(showTakeDown)) {
+          e.preventDefault();
+          ctx.takeDown();
         } else if (key === 'backspace' && ctx.canDelete && !ctx.isBusy) {
           e.preventDefault();
           ctx.remove();

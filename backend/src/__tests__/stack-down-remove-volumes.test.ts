@@ -37,6 +37,7 @@ let tmpDir: string;
 let app: import('express').Express;
 let authCookie: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
+let dispatchAlertSpy: ReturnType<typeof vi.spyOn>;
 
 function writeStack(name: string) {
   const dir = path.join(process.env.COMPOSE_DIR!, name);
@@ -67,7 +68,7 @@ beforeAll(async () => {
   writeStack('web');
 
   const { NotificationService } = await import('../services/NotificationService');
-  vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+  dispatchAlertSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
 });
 
 afterAll(() => {
@@ -92,6 +93,40 @@ describe('POST /api/stacks/:name/down removeVolumes', () => {
 
     expect(res.status).toBe(200);
     expect(mockRunDown).toHaveBeenCalledWith('web', { removeVolumes: false }, undefined);
+  });
+
+  it('dispatches stack_taken_down activity on plain down success', async () => {
+    dispatchAlertSpy.mockClear();
+    mockRunDown.mockResolvedValue(undefined);
+
+    const res = await request(app)
+      .post('/api/stacks/web/down')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(dispatchAlertSpy).toHaveBeenCalledWith(
+      'info',
+      'stack_taken_down',
+      'web taken down',
+      expect.objectContaining({ stackName: 'web', actor: 'testadmin' }),
+    );
+  });
+
+  it('notes volume removal in the activity message when removeVolumes=true', async () => {
+    dispatchAlertSpy.mockClear();
+    mockRunDown.mockResolvedValue(undefined);
+
+    const res = await request(app)
+      .post('/api/stacks/web/down?removeVolumes=true')
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(200);
+    expect(dispatchAlertSpy).toHaveBeenCalledWith(
+      'info',
+      'stack_taken_down',
+      'web taken down (volumes removed)',
+      expect.objectContaining({ stackName: 'web' }),
+    );
   });
 
   it('runs plain down when removeVolumes=false', async () => {

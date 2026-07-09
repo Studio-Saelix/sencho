@@ -1675,6 +1675,12 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
     await ComposeService.getInstance(req.nodeId).runDown(stackName, { removeVolumes }, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Down completed: ${sanitizeForLog(stackName)}`);
+    notifyActionSuccess(
+      'stack_taken_down',
+      `${stackName} taken down${removeVolumes ? ' (volumes removed)' : ''}`,
+      stackName,
+      req.user?.username ?? 'system',
+    );
     ok = true;
     res.json({ status: 'Command started' });
   } catch (error: unknown) {

@@ -84,7 +84,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
       if (showStop) lifecycle.push({ id: 'stop', label: 'Stop', icon: Square, shortcut: '⌘.', onSelect: stop, disabled: isBusy });
       if (showRestart) lifecycle.push({ id: 'restart', label: 'Restart', icon: RotateCw, shortcut: '⌘R', onSelect: restart, disabled: isBusy });
       if (showUpdate) lifecycle.push({ id: 'update', label: 'Update', icon: Download, shortcut: '⌘↑', onSelect: update, disabled: isBusy });
-      if (showTakeDown) lifecycle.push({ id: 'take-down', label: 'Take down', icon: ArrowDownToLine, onSelect: takeDown, disabled: isBusy || isSelfStack });
+      if (showTakeDown) lifecycle.push({ id: 'take-down', label: 'Take down', icon: ArrowDownToLine, shortcut: '⌘↓', onSelect: takeDown, disabled: isBusy || isSelfStack });
     }
     if (isAdmin) lifecycle.push({ id: 'schedule', label: 'Schedule task', icon: CalendarClock, onSelect: openScheduleTask });
     if (lifecycle.length > 0) groups.push({ id: 'lifecycle', items: lifecycle });
