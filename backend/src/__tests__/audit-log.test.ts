@@ -57,7 +57,7 @@ describe('getAuditSummary()', () => {
   });
 
   it('resolves wildcard match: POST /stacks/mystack/down', () => {
-    expect(getAuditSummary('POST', '/stacks/mystack/down')).toBe('Stopped stack: mystack');
+    expect(getAuditSummary('POST', '/stacks/mystack/down')).toBe('Took stack down: mystack');
   });
 
   it('resolves wildcard match: POST /stacks/mystack/rollback', () => {

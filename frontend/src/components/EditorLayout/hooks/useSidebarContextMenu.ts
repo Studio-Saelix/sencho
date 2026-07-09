@@ -62,6 +62,7 @@ export function useSidebarContextMenu({
       isBusy: stackListState.isStackBusy(file),
       isAdmin,
       canDelete: can('stack:delete', 'stack', sName),
+      canDeploy: can('stack:deploy', 'stack', sName),
       canEditLabels: can('stack:edit', 'stack', sName),
       // POST /api/labels (the inline "New label" entry) is guarded by the
       // unscoped requirePermission('stack:edit'); a user with only per-stack
@@ -79,6 +80,7 @@ export function useSidebarContextMenu({
       stop: () => stackActions.executeStackActionByFile(file, 'stop', 'stop'),
       restart: () => stackActions.executeStackActionByFile(file, 'restart', 'restart'),
       update: () => stackActions.executeStackActionByFile(file, 'update', 'update'),
+      takeDown: () => stackActions.requestTakeDownStack(sName),
       remove: () => {
         if (stackListState.stackSelfFlags[file]) {
           overlayState.openSelfStackProtected();

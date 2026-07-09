@@ -56,6 +56,7 @@ import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/e
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 import { isSelfStack, refuseIfSelfStack, selfStackProtectedBulkResult } from '../helpers/selfStackGuard';
+import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY } from '../services/CapabilityRegistry';
 
 // Authenticated users with edit permission can write arbitrarily large compose
 // files. Refuse to YAML.parse anything beyond this bound so a malformed (or
@@ -86,7 +87,7 @@ function notifyActionSuccess(category: NotificationCategory, message: string, st
 
 const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   deploy: 'deploying',
-  down: 'stopping',
+  down: 'taking down',
   restart: 'restarting',
   stop: 'stopping',
   start: 'starting',
@@ -1664,11 +1665,22 @@ stacksRouter.post('/:stackName/down', async (req: Request, res: Response) => {
   if (!tryAcquireStackOpLock(req, res, stackName, 'down')) return;
   const t0 = Date.now();
   let ok = false;
+  const removeVolumes = req.query.removeVolumes === 'true';
   try {
-    if (isDebugEnabled()) console.debug(`[Stacks:debug] Down starting`, { stackName: sanitizeForLog(stackName), nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).runCommand(stackName, 'down', getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
+    if (removeVolumes && !getActiveCapabilities().includes(STACK_DOWN_REMOVE_VOLUMES_CAPABILITY)) {
+      res.status(400).json({ error: 'Volume removal is not supported on this node' });
+      return;
+    }
+    if (isDebugEnabled()) console.debug(`[Stacks:debug] Down starting`, { stackName: sanitizeForLog(stackName), nodeId: req.nodeId, removeVolumes });
+    await ComposeService.getInstance(req.nodeId).runDown(stackName, { removeVolumes }, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)));
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Down completed: ${sanitizeForLog(stackName)}`);
+    notifyActionSuccess(
+      'stack_taken_down',
+      `${stackName} taken down${removeVolumes ? ' (volumes removed)' : ''}`,
+      stackName,
+      req.user?.username ?? 'system',
+    );
     ok = true;
     res.json({ status: 'Command started' });
   } catch (error: unknown) {

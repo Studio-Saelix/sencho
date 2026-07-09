@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Rocket, RefreshCcw, CircleStop, Play, ArrowUp, Activity, Loader2, AlertCircle,
-  TriangleAlert, CircleCheck, HeartPulse, HeartCrack,
+  TriangleAlert, CircleCheck, HeartPulse, HeartCrack, ArrowDownToLine,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -41,6 +41,7 @@ const CATEGORY_ICON: Record<string, LucideIcon> = {
   deploy_success: Rocket,
   stack_restarted: RefreshCcw,
   stack_stopped: CircleStop,
+  stack_taken_down: ArrowDownToLine,
   stack_started: Play,
   image_update_applied: ArrowUp,
   drift_detected: TriangleAlert,

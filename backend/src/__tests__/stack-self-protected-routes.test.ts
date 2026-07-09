@@ -13,6 +13,7 @@ import { SELF_STACK_PROTECTED_CODE } from '../helpers/selfStackGuard';
 const {
   mockDeployStack,
   mockRunCommand,
+  mockRunDown,
   mockUpdateStack,
   mockDownStack,
   mockGetContainersByStack,
@@ -22,6 +23,7 @@ const {
 } = vi.hoisted(() => ({
   mockDeployStack: vi.fn(),
   mockRunCommand: vi.fn(),
+  mockRunDown: vi.fn(),
   mockUpdateStack: vi.fn(),
   mockDownStack: vi.fn(),
   mockGetContainersByStack: vi.fn(),
@@ -41,6 +43,7 @@ vi.mock('../services/ComposeService', async () => {
       getInstance: () => ({
         deployStack: mockDeployStack,
         runCommand: mockRunCommand,
+        runDown: mockRunDown,
         updateStack: mockUpdateStack,
         downStack: mockDownStack,
       }),
@@ -146,6 +149,7 @@ describe('self stack lifecycle refusal', () => {
     expect(mockDeployStack).not.toHaveBeenCalled();
     expect(mockUpdateStack).not.toHaveBeenCalled();
     expect(mockRunCommand).not.toHaveBeenCalled();
+    expect(mockRunDown).not.toHaveBeenCalled();
     expect(mockDownStack).not.toHaveBeenCalled();
     expect(mockStopContainer).not.toHaveBeenCalled();
   });

@@ -94,7 +94,7 @@ interface StackOpInProgressInfo {
 
 const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   deploy: 'deploying',
-  down: 'stopping',
+  down: 'taking down',
   restart: 'restarting',
   stop: 'stopping',
   start: 'starting',
@@ -129,6 +129,8 @@ interface UseStackActionsOptions {
   // the pre-update readiness dialog. Defaults to false: without the
   // capability, updates run directly with no dialog.
   hasUpdateGuard?: boolean;
+  /** Fail-closed: true only when active node meta explicitly lists stack-down-remove-volumes. */
+  canOfferVolumeRemoval?: boolean;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -245,6 +247,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     getLastDeployOutputLine,
     diffPreviewEnabled,
     hasUpdateGuard = false,
+    canOfferVolumeRemoval = false,
   } = options;
 
   const pendingStackLoadRef = useRef<string | null>(null);
@@ -289,6 +292,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       showStop: !isSelf && status === 'running',
       showRestart: status === 'running',
       showUpdate: !isSelf && status === 'running',
+      showTakeDown: !isSelf && (raw === 'running' || raw === 'partial' || raw === 'exited'),
     };
   };
 
@@ -1226,6 +1230,85 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
+  const requestTakeDownStack = (stackName: string) => {
+    if (openSelfStackProtectedIfNeeded(
+      stackListState.files.find(f => f.replace(/\.(yml|yaml)$/, '') === stackName) ?? stackName,
+    )) return;
+    overlayState.openTakeDownDialog(stackName);
+  };
+
+  const takeDownStack = async (removeVolumes: boolean) => {
+    const stackToTakeDown = overlayState.stackToTakeDown;
+    if (!stackToTakeDown) return;
+    if (removeVolumes && !canOfferVolumeRemoval) {
+      toast.error('Volume removal is not supported on this node');
+      overlayState.closeTakeDownDialog();
+      return;
+    }
+    const stackFile =
+      stackListState.files.find(
+        f => f === stackToTakeDown || f.replace(/\.(yml|yaml)$/, '') === stackToTakeDown,
+      ) ?? stackToTakeDown;
+    if (stackListState.isStackBusy(stackFile)) return;
+    if (openSelfStackProtectedIfNeeded(stackFile)) return;
+
+    const previousStatus = stackListState.stackStatuses[stackFile];
+    const startedAt = Date.now();
+    const opNodeId = activeNode?.id ?? null;
+    stackListState.setStackAction(stackFile, 'down');
+    stackListState.setOptimisticStatus(stackFile, 'exited');
+    try {
+      await runWithLog({ stackName: stackToTakeDown, action: 'down', nodeId: opNodeId }, async (started, ds) => {
+        await started;
+        try {
+          const url = removeVolumes
+            ? `/stacks/${stackToTakeDown}/down?removeVolumes=true`
+            : `/stacks/${stackToTakeDown}/down`;
+          const response = await apiFetch(url, withDeploySession(ds, { method: 'POST', nodeId: opNodeId }));
+          if (!response.ok) {
+            const errText = await response.text();
+            if (response.status === 409) {
+              const inProgress = parseStackOpInProgress(errText);
+              if (inProgress) {
+                const message = stackOpInProgressMessage(stackToTakeDown, inProgress);
+                toast.error(message);
+                return { ok: false as const, errorMessage: message };
+              }
+            }
+            if (isSelfStackProtectedResponse(errText, response.status)) {
+              overlayState.openSelfStackProtected();
+              overlayState.closeTakeDownDialog();
+              return { ok: false as const, errorMessage: 'Protected stack' };
+            }
+            const actionError = parseStackActionError(errText, 'Take down failed', response.status);
+            recordActionFailureFor(stackFile, stackToTakeDown, 'down', startedAt, actionError.message, false, actionError.failure);
+            await refreshSelectedContainers(stackToTakeDown, stackFile);
+            return { ok: false as const, errorMessage: actionError.message };
+          }
+          toast.success('Stack taken down successfully!');
+          await refreshSelectedContainers(stackToTakeDown, stackFile);
+          stackListState.recordActionSuccess(stackFile);
+          overlayState.closeTakeDownDialog();
+          return { ok: true as const };
+        } catch (err) {
+          const message = (err as Error).message || 'Take down failed';
+          recordActionFailureFor(stackFile, stackToTakeDown, 'down', startedAt, message, false);
+          await refreshSelectedContainers(stackToTakeDown, stackFile);
+          return { ok: false as const, errorMessage: message };
+        }
+      });
+    } catch (error) {
+      console.error('Failed to take down stack:', error);
+      if (previousStatus !== undefined) {
+        stackListState.setOptimisticStatus(stackFile, previousStatus as 'running' | 'exited');
+      }
+      toast.error((error as Error).message || 'Failed to take down stack');
+    } finally {
+      stackListState.clearStackAction(stackFile);
+      stackListState.refreshStacks(true);
+    }
+  };
+
   // Guard a navigation that would leave (and discard) a dirty editor: back to
   // the list, Home, or any bottom-tab / hamburger / command-palette
   // destination. When the editor is dirty the navigation is stashed and the
@@ -1483,6 +1566,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     cancelPendingUnsavedLoad,
     discardAndLoadPending,
     requestDeleteStack,
+    requestTakeDownStack,
+    takeDownStack,
     executeStackActionByFile,
     checkUpdatesForStack,
     getDisplayName,

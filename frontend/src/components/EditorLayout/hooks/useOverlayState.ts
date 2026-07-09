@@ -39,6 +39,17 @@ export function useOverlayState() {
     setStackToDelete(null);
   }, []);
 
+  const [takeDownDialogOpen, setTakeDownDialogOpen] = useState(false);
+  const [stackToTakeDown, setStackToTakeDown] = useState<string | null>(null);
+  const openTakeDownDialog = useCallback((stackName: string) => {
+    setStackToTakeDown(stackName);
+    setTakeDownDialogOpen(true);
+  }, []);
+  const closeTakeDownDialog = useCallback(() => {
+    setTakeDownDialogOpen(false);
+    setStackToTakeDown(null);
+  }, []);
+
   const [pendingUnsavedLoad, setPendingUnsavedLoad] = useState<string | null>(null);
   const [pendingUnsavedNode, setPendingUnsavedNode] = useState<Node | null>(null);
   // A deferred "leave the dirty editor" navigation (back to the list, Home, a
@@ -130,6 +141,7 @@ export function useOverlayState() {
   return {
     createDialogOpen, setCreateDialogOpen,
     deleteDialogOpen, stackToDelete, openDeleteDialog, closeDeleteDialog,
+    takeDownDialogOpen, stackToTakeDown, openTakeDownDialog, closeTakeDownDialog,
     pendingUnsavedLoad, setPendingUnsavedLoad,
     pendingUnsavedNode, setPendingUnsavedNode,
     pendingLeaveAction, setPendingLeaveAction,

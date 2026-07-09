@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
 import { StackIdentityHeader } from '../editor-view-blocks';
 import type { ContainerInfo } from '../EditorView';
@@ -50,6 +51,8 @@ function renderHeader(over: Partial<ComponentProps<typeof StackIdentityHeader>> 
       rollbackStack={vi.fn()}
       scanStackConfig={vi.fn()}
       requestDeleteStack={vi.fn()}
+      requestTakeDownStack={vi.fn()}
+      showTakeDown={false}
       {...over}
     />,
   );
@@ -59,13 +62,45 @@ describe('StackIdentityHeader', () => {
   it('renders stack identity and stack-wide actions without a header image line', () => {
     renderHeader();
 
-    expect(screen.getByText('plex')).toBeInTheDocument();
-    expect(screen.getByText(/running · healthy/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Restart' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Update' })).toBeInTheDocument();
+    expect(screen.getByText('plex')).toBeTruthy();
+    expect(screen.getByText(/running · healthy/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Restart' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Update' })).toBeTruthy();
 
-    expect(screen.queryByText(/^image$/i)).not.toBeInTheDocument();
-    expect(screen.queryByText('nginx:alpine')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Copy digest' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/^image$/i)).toBeNull();
+    expect(screen.queryByText('nginx:alpine')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy digest' })).toBeNull();
+  });
+
+  it('shows Take down when running and showTakeDown is true', () => {
+    renderHeader({ showTakeDown: true });
+
+    expect(screen.getByTestId('stack-take-down-button')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Take down' })).toBeTruthy();
+  });
+
+  it('hides Take down when showTakeDown is false', () => {
+    renderHeader({ showTakeDown: false, isRunning: true });
+
+    expect(screen.queryByTestId('stack-take-down-button')).toBeNull();
+  });
+
+  it('calls requestTakeDownStack with the stack name when Take down is clicked', async () => {
+    const user = userEvent.setup();
+    const requestTakeDownStack = vi.fn();
+    renderHeader({ showTakeDown: true, requestTakeDownStack });
+
+    await user.click(screen.getByTestId('stack-take-down-button'));
+
+    expect(requestTakeDownStack).toHaveBeenCalledWith('plex');
+  });
+
+  it('does not show Take down in the overflow menu when running', async () => {
+    const user = userEvent.setup();
+    renderHeader({ showTakeDown: true, isRunning: true, backupInfo: { exists: true, timestamp: Date.now() } });
+
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+
+    expect(screen.queryByRole('menuitem', { name: /Take down/i })).toBeNull();
   });
 });

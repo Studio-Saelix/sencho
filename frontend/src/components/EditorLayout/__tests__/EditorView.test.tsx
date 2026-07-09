@@ -75,6 +75,8 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
     setEditingCompose: vi.fn(),
     setGitSourceOpen: vi.fn(),
     requestDeleteStack: vi.fn(),
+    requestTakeDownStack: vi.fn(),
+    showTakeDown: false,
     onRefreshState: vi.fn(),
     onDismissRecovery: vi.fn(),
     panelStartedAt: null,

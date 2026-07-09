@@ -150,7 +150,7 @@ Authorises every `GET`, plus exactly six `POST` patterns that operate on a stack
 | Method | Path pattern | Action |
 |--------|--------------|--------|
 | `POST` | `/api/stacks/:name/deploy` | Create or update and bring up. |
-| `POST` | `/api/stacks/:name/down` | Tear down. |
+| `POST` | `/api/stacks/:name/down` | Tear down containers and compose-created networks. Add `?removeVolumes=true` to also remove compose volumes when the node supports it. |
 | `POST` | `/api/stacks/:name/restart` | Restart in place. |
 | `POST` | `/api/stacks/:name/stop` | Stop without removing. |
 | `POST` | `/api/stacks/:name/start` | Start a stopped stack. |

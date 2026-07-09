@@ -4,7 +4,8 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
-import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
+import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
+import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY } from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { DatabaseService } from '../services/DatabaseService';
 import { redactSensitiveText } from '../utils/safeLog';
@@ -146,31 +147,37 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       return;
     }
 
-    // Mixed-version RBAC gate. The forwarded actor role is enforced only by a
-    // remote that advertises cross-node-rbac; an older remote ignores the
-    // header and runs the proxied request as admin. So a non-admin must not be
-    // forwarded to a remote that does not advertise the capability. Admins are
-    // unaffected (they are admin on the remote regardless), and the check is
-    // skipped for them so it never adds latency to the admin path. Fails closed
-    // when the capability cannot be determined. Using `?.` so an unresolved user
-    // (not reachable past authGate, but defensive) is gated, never waved through.
-    if (req.user?.role !== 'admin') {
-      remoteSupportsCrossNodeRbac(req.nodeId)
-        .then((supported) => {
-          if (!supported) {
-            res.status(403).json({
-              error: `Remote node "${node.name}" is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`,
-            });
-            return;
-          }
-          req.proxyTarget = target;
-          proxy(req, res, next);
-        })
-        .catch(next);
-      return;
-    }
+    const runGatedProxy = async (): Promise<void> => {
+      if (isStackDownWithRemoveVolumes(req)) {
+        const supported = await remoteAdvertisesCapability(req.nodeId, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY);
+        if (!supported) {
+          res.status(400).json({ error: 'Volume removal is not supported on this node' });
+          return;
+        }
+      }
 
-    req.proxyTarget = target;
-    proxy(req, res, next);
+      // Mixed-version RBAC gate (non-admin only).
+      if (req.user?.role !== 'admin') {
+        const rbacSupported = await remoteSupportsCrossNodeRbac(req.nodeId);
+        if (!rbacSupported) {
+          res.status(403).json({
+            error: `Remote node "${node.name}" is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`,
+          });
+          return;
+        }
+      }
+
+      req.proxyTarget = target;
+      proxy(req, res, next);
+    };
+
+    runGatedProxy().catch(next);
   };
+}
+
+/** POST /stacks/:stackName/down with ?removeVolumes=true (path is post-/api strip). */
+function isStackDownWithRemoveVolumes(req: Request): boolean {
+  if (req.method !== 'POST') return false;
+  if (!/^\/stacks\/[^/]+\/down$/.test(req.path)) return false;
+  return req.query.removeVolumes === 'true';
 }
