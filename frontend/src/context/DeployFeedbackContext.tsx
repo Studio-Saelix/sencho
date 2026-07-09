@@ -10,7 +10,7 @@ export type ActionVerb = 'deploy' | 'update' | 'down' | 'restart' | 'stop' | 'in
 export const VERB_LABELS: Record<ActionVerb, { present: string; past: string }> = {
   deploy:  { present: 'Deploying',  past: 'Deployed'  },
   update:  { present: 'Updating',   past: 'Updated'   },
-  down:    { present: 'Stopping',   past: 'Stopped'   },
+  down:    { present: 'Taking down', past: 'Took down'   },
   restart: { present: 'Restarting', past: 'Restarted' },
   stop:    { present: 'Stopping',   past: 'Stopped'   },
   install: { present: 'Installing', past: 'Installed' },

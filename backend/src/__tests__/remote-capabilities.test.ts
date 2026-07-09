@@ -10,6 +10,7 @@ import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type { RemoteMeta } from '../services/CapabilityRegistry';
 
 let remoteSupportsCrossNodeRbac: typeof import('../helpers/remoteCapabilities').remoteSupportsCrossNodeRbac;
+let remoteAdvertisesCapability: typeof import('../helpers/remoteCapabilities').remoteAdvertisesCapability;
 let NodeRegistry: typeof import('../services/NodeRegistry').NodeRegistry;
 let tmpDir: string;
 
@@ -17,7 +18,7 @@ const NODE_ID = 4242;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
-  ({ remoteSupportsCrossNodeRbac } = await import('../helpers/remoteCapabilities'));
+  ({ remoteSupportsCrossNodeRbac, remoteAdvertisesCapability } = await import('../helpers/remoteCapabilities'));
   ({ NodeRegistry } = await import('../services/NodeRegistry'));
 });
 
@@ -77,5 +78,25 @@ describe('remoteSupportsCrossNodeRbac', () => {
     expect(a).toBe(true);
     expect(b).toBe(true);
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('remoteAdvertisesCapability', () => {
+  it('returns true when the remote advertises the requested capability', async () => {
+    vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode')
+      .mockResolvedValue({ version: '0.93.0', capabilities: ['stack-down-remove-volumes'], ...ONLINE });
+    expect(await remoteAdvertisesCapability(NODE_ID, 'stack-down-remove-volumes')).toBe(true);
+  });
+
+  it('dedupes concurrent probes per node+capability, not per node alone', async () => {
+    const spy = vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode')
+      .mockResolvedValue({ version: '0.93.0', capabilities: ['cross-node-rbac', 'stack-down-remove-volumes'], ...ONLINE });
+    const [rbac, volumes] = await Promise.all([
+      remoteAdvertisesCapability(NODE_ID, 'cross-node-rbac'),
+      remoteAdvertisesCapability(NODE_ID, 'stack-down-remove-volumes'),
+    ]);
+    expect(rbac).toBe(true);
+    expect(volumes).toBe(true);
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 });

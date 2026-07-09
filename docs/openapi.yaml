@@ -1420,10 +1420,16 @@ paths:
       operationId: downStack
       tags: [Stacks]
       summary: Tear down stack
-      description: Runs `docker compose down` for the stack, removing containers and networks. Requires `stack:deploy` permission.
+      description: Runs `docker compose down` for the stack, removing containers and networks. The stack definition remains on disk. Requires `stack:deploy` permission. Pass `removeVolumes=true` to also remove compose volumes when the node advertises the `stack-down-remove-volumes` capability.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"
+        - name: removeVolumes
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: When `true`, runs `docker compose down --volumes`. Only honored when the target node advertises `stack-down-remove-volumes`.
       responses:
         "200":
           description: Command started.
@@ -1436,6 +1442,12 @@ paths:
                   status:
                     type: string
                     example: Command started
+        "400":
+          description: Volume removal requested on a node that does not support it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":

@@ -34,7 +34,11 @@ export interface RouteState {
   activeView: ActiveView;
   /** Stack directory name when activeView is editor or host-console. */
   stackName: string | null;
-  editorTab: EditorTab;
+  /**
+   * Monaco editor tab when the compose/env/files surface is open.
+   * Null means stack detail (anatomy) at `/stacks/:name` with no tab segment.
+   */
+  editorTab: EditorTab | null;
   envFile: string | null;
   securityTab: SecurityTab;
   fleetActiveTab: FleetTab;

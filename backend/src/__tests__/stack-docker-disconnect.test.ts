@@ -18,6 +18,7 @@ import { isDockerUnavailableError } from '../routes/stacks';
 const {
   mockDeployStack,
   mockRunCommand,
+  mockRunDown,
   mockUpdateStack,
   mockGetContainersByStack,
   mockRestartContainer,
@@ -26,6 +27,7 @@ const {
 } = vi.hoisted(() => ({
   mockDeployStack: vi.fn(),
   mockRunCommand: vi.fn(),
+  mockRunDown: vi.fn(),
   mockUpdateStack: vi.fn(),
   mockGetContainersByStack: vi.fn(),
   mockRestartContainer: vi.fn(),
@@ -44,6 +46,7 @@ vi.mock('../services/ComposeService', async () => {
       getInstance: () => ({
         deployStack: mockDeployStack,
         runCommand: mockRunCommand,
+        runDown: mockRunDown,
         updateStack: mockUpdateStack,
       }),
     },
@@ -98,6 +101,7 @@ afterAll(() => {
 beforeEach(() => {
   mockDeployStack.mockReset();
   mockRunCommand.mockReset();
+  mockRunDown.mockReset();
   mockUpdateStack.mockReset();
   mockGetContainersByStack.mockReset();
   mockRestartContainer.mockReset();
@@ -211,8 +215,8 @@ describe('POST /api/stacks/:name/deploy with daemon down', () => {
 });
 
 describe('POST /api/stacks/:name/down with daemon down', () => {
-  it('returns 503 with code: docker_unavailable when runCommand surfaces the daemon error', async () => {
-    mockRunCommand.mockRejectedValue(composeDaemonDownError());
+  it('returns 503 with code: docker_unavailable when runDown surfaces the daemon error', async () => {
+    mockRunDown.mockRejectedValue(composeDaemonDownError());
 
     const res = await request(app)
       .post('/api/stacks/web/down')

@@ -5,6 +5,7 @@ const PANEL_HIDDEN_CATEGORIES = new Set<NotificationCategory>([
   'stack_started',
   'stack_stopped',
   'stack_restarted',
+  'stack_taken_down',
   'image_update_applied',
 ]);
 

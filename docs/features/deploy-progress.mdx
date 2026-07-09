@@ -160,7 +160,7 @@ Of those, **Deploy**, **Update**, **Install**, and Git **Apply** route through `
 
 The [health gate](#health-gate) activates only after **Deploy** and **Update**; it does not fire for Restart, Stop, Install, Git Apply, or Scanning.
 
-The HTTP API also exposes a `down` action (compose-level teardown) that streams its output the same way Deploy and Update do, but no UI control currently triggers it; the `down` endpoint is reachable from automation and from Sencho's own internal cleanup paths.
+The HTTP API exposes **Take down** as `POST /api/stacks/:name/down`. The stack header, sidebar context menu, and confirmation dialog call this endpoint. Compose output streams through the same progress modal as Deploy and Update. Optional `?removeVolumes=true` removes compose volumes when the node advertises support.
 
 ## Troubleshooting
 

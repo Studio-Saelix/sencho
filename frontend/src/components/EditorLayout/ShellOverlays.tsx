@@ -4,6 +4,7 @@ import { PreDeployScanDialog } from '../stack/PreDeployScanDialog';
 import { UpdateReadinessDialog } from '../stack/UpdateReadinessDialog';
 import { SelfStackProtectedDialog } from '../stack/SelfStackProtectedDialog';
 import { DeleteStackDialog } from './DeleteStackDialog';
+import { TakeDownStackDialog } from './TakeDownStackDialog';
 import { UnsavedChangesDialog } from './UnsavedChangesDialog';
 import { StackAlertSheet } from '../StackAlertSheet';
 import { GitSourcePanel } from '../stack/GitSourcePanel';
@@ -25,6 +26,7 @@ interface ShellOverlaysProps {
   gitSourceOpen: boolean;
   setGitSourceOpen: (open: boolean) => void;
   canSelfUpdate: boolean;
+  canOfferVolumeRemoval: boolean;
   onOpenFleetNodeUpdates: () => void;
 }
 
@@ -39,10 +41,12 @@ export function ShellOverlays({
   gitSourceOpen,
   setGitSourceOpen,
   canSelfUpdate,
+  canOfferVolumeRemoval,
   onOpenFleetNodeUpdates,
 }: ShellOverlaysProps) {
   const {
     deleteDialogOpen, closeDeleteDialog, stackToDelete,
+    takeDownDialogOpen, closeTakeDownDialog, stackToTakeDown,
     pendingUnsavedLoad, pendingLeaveAction,
     bashModalOpen, selectedContainer,
     logViewerOpen, logContainer,
@@ -62,6 +66,14 @@ export function ShellOverlays({
         onOpenChange={(open) => { if (!open) closeDeleteDialog(); }}
         stackName={stackToDelete}
         onConfirm={stackActions.deleteStack}
+      />
+
+      <TakeDownStackDialog
+        open={takeDownDialogOpen}
+        onOpenChange={(open) => { if (!open) closeTakeDownDialog(); }}
+        stackName={stackToTakeDown}
+        showVolumeOption={canOfferVolumeRemoval}
+        onConfirm={stackActions.takeDownStack}
       />
 
       <SelfStackProtectedDialog

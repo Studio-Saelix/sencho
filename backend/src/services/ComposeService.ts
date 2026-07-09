@@ -390,6 +390,13 @@ export class ComposeService {
     await this.execute('docker', await this.authoredComposeArgs(stackName, [action]), stackDir, ws);
   }
 
+  /** Interactive compose down (Take down UI / POST /down). Plain `down` by default. */
+  async runDown(stackName: string, options?: { removeVolumes?: boolean }, ws?: WebSocket): Promise<void> {
+    const stackDir = path.join(this.baseDir, stackName);
+    const args = options?.removeVolumes ? ['down', '--volumes'] : ['down'];
+    await this.execute('docker', await this.authoredComposeArgs(stackName, args), stackDir, ws);
+  }
+
   /**
    * Opt-in guard: when `env_block_deploy_on_missing_required` is enabled, refuse a
    * deploy whose required `${VAR:?err}` variables are unset OR empty, before any

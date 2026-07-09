@@ -13,7 +13,8 @@ Sencho encodes the active node, the view you are on, and the deep state that vie
 |-------------|--------------|---------------|
 | Home dashboard | `/nodes/local/dashboard` | The home dashboard for the `local` node |
 | Stack list (phone) | `/nodes/local/stacks` | The full-width stack list on a phone |
-| Stack editor | `/nodes/local/stacks/radarr/compose` | Radarr's compose tab |
+| Stack detail | `/nodes/local/stacks/radarr` | Radarr's stack detail (anatomy). Sidebar entry point |
+| Compose editor | `/nodes/local/stacks/radarr/compose` | Radarr's compose.yaml Monaco editor |
 | Env tab + file | `/nodes/local/stacks/radarr/env?env=.env.prod` | Radarr's env tab with a specific env file selected |
 | Resources | `/nodes/local/resources` | Resources for the active node |
 | Security tab | `/nodes/local/security/images` | Security view on the Images tab |
@@ -22,6 +23,18 @@ Sencho encodes the active node, the view you are on, and the deep state that vie
 | Schedules filter | `/nodes/local/schedules?node=3` | Scheduled operations filtered to node `3` |
 
 Remote nodes use a slug derived from the node name and id (for example `/nodes/nas-box-42/dashboard`). The default local node keeps the short `local` slug.
+
+## Stack detail vs compose editor
+
+Clicking a stack in the sidebar opens **stack detail** at `/nodes/<node>/stacks/<stack>` (anatomy on the right). Opening the compose, env, or files editor appends that tab to the path:
+
+- `/stacks/radarr` — detail
+- `/stacks/radarr/compose` — compose.yaml editor
+- `/stacks/radarr/env` — env editor
+- `/stacks/radarr/files` — file browser (desktop)
+
+Closing the Monaco editor returns you to the detail URL for that stack.
+
 
 ## Env tab URLs
 
@@ -48,7 +61,7 @@ If a link points at a stack that cannot be loaded (for example the node is offli
 ## Back, Forward, and refresh
 
 - **Back / Forward** walk through the views you opened in order, including stack editor tabs where applicable.
-- **Refresh** reloads the current URL and restores the same node, view, stack, and tab when the underlying data is available.
+- **Refresh** reloads the current URL and restores the same node, view, stack, and surface (detail vs compose/env/files editor) when the underlying data is available.
 - **Unsaved edits** still block navigation. Sencho prompts before you leave a dirty compose or env buffer via Back, a sidebar link, or another stack.
 
 ## Phone layout

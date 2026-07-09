@@ -49,6 +49,17 @@ export function useOverlayState() {
     setStackToDelete(null);
   }, []);
 
+  const [takeDownDialogOpen, setTakeDownDialogOpen] = useState(false);
+  const [stackToTakeDown, setStackToTakeDown] = useState<string | null>(null);
+  const openTakeDownDialog = useCallback((stackName: string) => {
+    setStackToTakeDown(stackName);
+    setTakeDownDialogOpen(true);
+  }, []);
+  const closeTakeDownDialog = useCallback(() => {
+    setTakeDownDialogOpen(false);
+    setStackToTakeDown(null);
+  }, []);
+
   const [pendingUnsavedLoad, setPendingUnsavedLoad] = useState<string | null>(null);
   // Parallel to pendingUnsavedLoad: options for the deferred stack load after
   // the unsaved-changes dialog. Cleared on cancel and on node-switch paths
@@ -144,6 +155,7 @@ export function useOverlayState() {
   return {
     createDialogOpen, setCreateDialogOpen,
     deleteDialogOpen, stackToDelete, openDeleteDialog, closeDeleteDialog,
+    takeDownDialogOpen, stackToTakeDown, openTakeDownDialog, closeTakeDownDialog,
     pendingUnsavedLoad, setPendingUnsavedLoad,
     pendingLoadOptions, setPendingLoadOptions,
     pendingUnsavedNode, setPendingUnsavedNode,

@@ -14,7 +14,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
 
   // Stack lifecycle
   'POST /stacks/*/deploy': 'Deployed stack',
-  'POST /stacks/*/down': 'Stopped stack',
+  'POST /stacks/*/down': 'Took stack down',
   'POST /stacks/*/start': 'Started stack',
   'POST /stacks/*/stop': 'Stopped stack',
   'POST /stacks/*/restart': 'Restarted stack',

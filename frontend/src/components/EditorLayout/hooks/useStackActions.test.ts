@@ -1049,14 +1049,21 @@ describe('useStackActions.getStackMenuVisibility', () => {
   it('gives a partial stack the running-stack lifecycle actions', () => {
     const { result } = setup({ stackList: { stackStatuses: { 'web.yml': 'partial' } as never } });
     expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
-      showDeploy: false, showStop: true, showRestart: true, showUpdate: true,
+      showDeploy: false, showStop: true, showRestart: true, showUpdate: true, showTakeDown: true,
+    });
+  });
+
+  it('offers Take down for a running non-self stack', () => {
+    const { result } = setup({ stackList: { stackStatuses: { 'web.yml': 'running' } as never } });
+    expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
+      showDeploy: false, showStop: true, showRestart: true, showUpdate: true, showTakeDown: true,
     });
   });
 
   it('shows deploy (not stop/restart/update) for an exited stack', () => {
     const { result } = setup({ stackList: { stackStatuses: { 'web.yml': 'exited' } as never } });
     expect(result.current.getStackMenuVisibility('web.yml')).toEqual({
-      showDeploy: true, showStop: false, showRestart: false, showUpdate: false,
+      showDeploy: true, showStop: false, showRestart: false, showUpdate: false, showTakeDown: true,
     });
   });
 
@@ -1068,7 +1075,7 @@ describe('useStackActions.getStackMenuVisibility', () => {
       },
     });
     expect(result.current.getStackMenuVisibility('sencho.yml')).toEqual({
-      showDeploy: false, showStop: false, showRestart: true, showUpdate: false,
+      showDeploy: false, showStop: false, showRestart: true, showUpdate: false, showTakeDown: false,
     });
   });
 
