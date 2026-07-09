@@ -131,4 +131,30 @@ describe('senchoRoute', () => {
     expect(parsed.isStackList).toBe(true);
     expect(parsed.stackName).toBeNull();
   });
+
+  it('round-trips stack detail without a tab segment', () => {
+    const path = buildPath({
+      ...base,
+      activeView: 'editor',
+      stackName: 'radarr',
+      editorTab: null,
+    });
+    expect(path).toBe('/nodes/local/stacks/radarr');
+    const parsed = parsePath(path, '');
+    expect(parsed.view).toBe('editor');
+    expect(parsed.stackName).toBe('radarr');
+    expect(parsed.editorTab).toBeNull();
+  });
+
+  it('parses compose tab as Monaco editor, not detail', () => {
+    const parsed = parsePath('/nodes/local/stacks/radarr/compose', '');
+    expect(parsed.view).toBe('editor');
+    expect(parsed.editorTab).toBe('compose');
+  });
+
+  it('treats unknown stack tab segment as detail', () => {
+    const parsed = parsePath('/nodes/local/stacks/radarr/anatomy', '');
+    expect(parsed.view).toBe('editor');
+    expect(parsed.editorTab).toBeNull();
+  });
 });

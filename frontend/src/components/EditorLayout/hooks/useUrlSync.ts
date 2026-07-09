@@ -26,7 +26,8 @@ interface HistoryState {
 interface PendingRoute {
   view: ActiveView;
   stackName: string | null;
-  editorTab: EditorTab;
+  /** Null = stack detail (anatomy); set = Monaco tab surface. */
+  editorTab: EditorTab | null;
   envFile: string | null;
   securityTab: SecurityTab;
   fleetTab: FleetTab;
@@ -58,6 +59,8 @@ export interface UseUrlSyncOptions {
   isFileLoading: boolean;
   activeTab: EditorTab;
   setActiveTab: (tab: EditorTab) => void;
+  editingCompose: boolean;
+  setEditingCompose: (editing: boolean) => void;
   selectedEnvFile: string;
   envFiles: string[];
   loadFileForRoute: (filename: string) => Promise<RouteStackLoadResult>;
@@ -98,10 +101,17 @@ interface PendingEditorRouteOpts {
 async function applyPendingEditorRoute(
   optsRef: MutableRefObject<UseUrlSyncOptions>,
   pendingEnvRef: MutableRefObject<string | null>,
-  tab: EditorTab,
+  tab: EditorTab | null,
   routeOpts?: PendingEditorRouteOpts,
 ): Promise<boolean> {
   const live = optsRef.current;
+  // Tabless stack URL → detail (anatomy). Do not open Monaco.
+  if (tab == null) {
+    pendingEnvRef.current = null;
+    live.setEditingCompose(false);
+    live.setActiveTab('compose');
+    return true;
+  }
   if (tab !== 'env') {
     pendingEnvRef.current = null;
     live.setActiveTab(tab);
@@ -122,6 +132,7 @@ async function applyPendingEditorRoute(
   pendingEnvRef.current = null;
   let effectiveTab: EditorTab = tab;
   if (outcome.target == null && envFiles.length === 0) {
+    // Empty env inventory: stay on Monaco compose tab rather than detail.
     effectiveTab = 'compose';
   } else if (outcome.target && outcome.target !== live.selectedEnvFile) {
     await live.changeEnvFile(outcome.target);
@@ -175,7 +186,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       nodeSlug: slug,
       activeView: view,
       stackName: o.selectedFile,
-      editorTab: o.activeTab,
+      editorTab: o.editingCompose ? o.activeTab : null,
       envFile: envFileForRouteUrl(o.selectedEnvFile, o.envFiles, o.activeTab),
       securityTab: o.securityTab,
       fleetActiveTab: o.fleetActiveTab,
@@ -273,7 +284,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     // to avoid unmounting the editor (loadFileCore clears selectedFile on
     // failure, which would hide the recovery chip during a deploy).
     if (o.selectedFile === match) {
-      const tab = pendingTabRef.current ?? 'compose';
+      const tab = pendingTabRef.current;
       const applied = await applyPendingEditorRoute(optsRef, pendingEnvRef, tab, {
         envFiles: o.envFiles,
         inventoryReady: !o.isFileLoading,
@@ -302,7 +313,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
       return;
     }
 
-    const tab = pendingTabRef.current ?? 'compose';
+    const tab = pendingTabRef.current;
     const applied = await applyPendingEditorRoute(optsRef, pendingEnvRef, tab, {
       envFiles: loadResult.envFiles,
       inventoryReady: true,
@@ -384,7 +395,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     pendingRouteRef.current = {
       view,
       stackName: parsed.stackName,
-      editorTab: parsed.editorTab ?? 'compose',
+      editorTab: parsed.editorTab,
       envFile: parsed.envFile,
       securityTab: parsed.securityTab ?? 'overview',
       fleetTab,
@@ -473,6 +484,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     options.activeView,
     options.selectedFile,
     options.activeTab,
+    options.editingCompose,
     options.selectedEnvFile,
     options.envFiles,
     options.securityTab,

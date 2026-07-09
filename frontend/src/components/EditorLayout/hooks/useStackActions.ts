@@ -1248,6 +1248,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (targetView !== 'editor' || !targetStack || targetStack !== stackListState.selectedFile) {
       return isComposeDirty() || isEnvDirty();
     }
+    // Leaving Monaco for stack detail on the same stack.
+    if (editorState.editingCompose && parsed.editorTab == null) {
+      return isComposeDirty() || isEnvDirty();
+    }
     if (
       parsed.editorTab === 'env'
       && editorState.activeTab === 'env'

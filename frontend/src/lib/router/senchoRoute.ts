@@ -95,16 +95,18 @@ export function parsePath(pathname: string, search: string): ParsedRoute {
     }
     const stackName = parts[3];
     const tabRaw = parts[4]?.toLowerCase();
+    // No tab segment → stack detail (anatomy). A valid tab opens Monaco.
+    // Unknown fifth segments are treated as detail, not as compose.
     const editorTab = tabRaw && EDITOR_TABS.has(tabRaw as EditorTab)
       ? (tabRaw as EditorTab)
-      : 'compose';
+      : null;
     return {
       ...empty,
       nodeSlug,
       view: 'editor',
       stackName,
       editorTab,
-      envFile: envFile || null,
+      envFile: editorTab === 'env' ? (envFile || null) : null,
       filterNodeId,
     };
   }
@@ -138,10 +140,14 @@ export function buildPath(state: RouteState): string {
   const url = new URL('http://local');
 
   if (state.activeView === 'editor' && state.stackName) {
-    const tab = state.editorTab || 'compose';
-    url.pathname = `${base}/stacks/${encodeURIComponent(state.stackName)}/${tab}`;
-    if (tab === 'env' && state.envFile && !/[\\/]/.test(state.envFile)) {
-      url.searchParams.set('env', state.envFile);
+    const stackBase = `${base}/stacks/${encodeURIComponent(state.stackName)}`;
+    if (state.editorTab == null) {
+      url.pathname = stackBase;
+    } else {
+      url.pathname = `${stackBase}/${state.editorTab}`;
+      if (state.editorTab === 'env' && state.envFile && !/[\\/]/.test(state.envFile)) {
+        url.searchParams.set('env', state.envFile);
+      }
     }
     if (state.filterNodeId != null) {
       url.searchParams.set('node', String(state.filterNodeId));

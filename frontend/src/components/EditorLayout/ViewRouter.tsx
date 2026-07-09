@@ -16,6 +16,7 @@ import type { MuteRuleDraft } from '@/lib/muteRules';
 import type { ActiveView } from './hooks/useViewNavigationState';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
 import type { SecurityTab, FleetTab } from '@/lib/events';
+import { isStackEditorDeepLink } from '@/lib/router/readUrlRouteState';
 
 // Paid-tier views are loaded on demand. Their internal PaidGate /
 // CapabilityGate wrappers render
@@ -101,6 +102,8 @@ export interface ViewRouterProps {
     // not on every parent render that lands on a different view.
     renderEditor: () => ReactNode;
     stackUpdates: Record<string, StackUpdateInfo>;
+    urlHydratingStack: string | null;
+    isFileLoading: boolean;
 }
 
 export function ViewRouter({
@@ -131,6 +134,8 @@ export function ViewRouter({
     onFleetActiveTabChange,
     renderEditor,
     stackUpdates,
+    urlHydratingStack,
+    isFileLoading,
 }: ViewRouterProps): ReactNode {
     const { can } = useAuth();
     if (activeView === 'settings') {
@@ -175,12 +180,16 @@ export function ViewRouter({
             </PaidGate>
         );
     }
-    // Fall-through: when activeView === 'editor' but selectedFile is
-    // null or the stack is still loading, drop through to the default
-    // HomeDashboard render below. This matches the pre-extraction
-    // behavior of the conditional ternary chain in EditorLayout.tsx.
-    if (!isLoading && selectedFile && activeView === 'editor') {
-        return renderEditor();
+    // Stack workspace: keep a loading shell while the stack URL hydrates.
+    // Never fall through to HomeDashboard for editor deep links (refresh flash).
+    if (activeView === 'editor') {
+        if (selectedFile) {
+            return renderEditor();
+        }
+        const awaitingStack = urlHydratingStack != null || isFileLoading || isStackEditorDeepLink();
+        if (awaitingStack || isLoading) {
+            return <ViewSkeleton />;
+        }
     }
     if (activeView === 'global-observability') {
         return (

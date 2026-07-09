@@ -49,28 +49,45 @@ test.describe('URL routing', () => {
     await expect(page).toHaveURL(/\/nodes\/local\/dashboard/);
   });
 
-  test('opening a stack writes a stack editor URL', async ({ page }) => {
+  test('opening a stack writes a stack detail URL', async ({ page }) => {
     const stackName = await firstStackName(page);
     test.skip(!stackName, 'No stacks available to open');
 
     await page.locator('[role="listbox"]').getByText(stackName!, { exact: true }).click();
     const slug = stackName!.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
-    await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/`));
+    const escaped = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${escaped}/?$`));
+    await expect(page.getByRole('tab', { name: 'Anatomy' })).toBeVisible();
   });
 
-  test('refresh preserves a stack editor deep link', async ({ page }) => {
+  test('refresh preserves a stack detail deep link', async ({ page }) => {
     const stackName = await firstStackName(page);
     test.skip(!stackName, 'No stacks available to open');
 
     const slug = stackName!.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
-    await page.goto(`/nodes/local/stacks/${encodeURIComponent(slug)}/compose`);
+    const escaped = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    await page.goto(`/nodes/local/stacks/${encodeURIComponent(slug)}`);
     await waitForStacksLoaded(page);
-    await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${slug}|${stackName}`));
+    await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${escaped}/?$`));
     await expect(page.getByRole('tab', { name: 'Anatomy' })).toBeVisible();
     await page.reload();
     await waitForStacksLoaded(page);
-    await expect(page).toHaveURL(/\/nodes\/local\/stacks\//);
+    await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${escaped}/?$`));
     await expect(page.getByRole('tab', { name: 'Anatomy' })).toBeVisible();
+  });
+
+  test('refresh preserves a compose editor deep link', async ({ page }) => {
+    const stackName = await firstStackName(page);
+    test.skip(!stackName, 'No stacks available to open');
+
+    const slug = stackName!.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
+    const escaped = slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    await page.goto(`/nodes/local/stacks/${encodeURIComponent(slug)}/compose`);
+    await waitForStacksLoaded(page);
+    await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${escaped}/compose`));
+    await page.reload();
+    await waitForStacksLoaded(page);
+    await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/${escaped}/compose`));
   });
 
   test('compose editor env tab updates the URL', async ({ page }) => {
@@ -79,9 +96,11 @@ test.describe('URL routing', () => {
 
     const slug = stackName!.replace(/^-+/, '').replace(/\.(ya?ml)$/i, '');
     await page.locator('[role="listbox"]').getByText(stackName!, { exact: true }).click();
-    await expect(page).toHaveURL(/\/compose/);
+    await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/`));
+    await expect(page).not.toHaveURL(/\/compose$/);
 
     await page.getByRole('button', { name: 'edit', exact: true }).click();
+    await expect(page).toHaveURL(/\/compose/);
     const envTab = page.getByRole('tab', { name: '.env' });
     test.skip(!(await envTab.isEnabled()), 'Stack has no .env file');
     await envTab.click();
