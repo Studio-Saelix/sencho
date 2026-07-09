@@ -14,7 +14,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Plus, Eye, Loader2, History, FolderOpen, Search } from 'lucide-react';
+import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Eye, Loader2, History, FolderOpen, Search, ArrowRight } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { SeverityBadge } from '@/components/ui/SeverityBadge';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
@@ -23,25 +23,15 @@ import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from './NodeManager'
 import type { ScanSummary } from '@/types/security';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
-import { CapabilityGate } from './CapabilityGate';
-import LazyBoundary from './LazyBoundary';
 import { formatBytes } from '@/lib/utils';
 import { cn } from '@/lib/utils';
-import { SENCHO_OPEN_LOGS_EVENT, SENCHO_OPEN_STACK_EVENT } from '@/lib/events';
-import type { SenchoOpenStackDetail } from '@/lib/events';
-import type { SenchoOpenLogsDetail } from '@/lib/events';
-import { lazy, Suspense } from 'react';
 import { ReclaimHero } from './resources/ReclaimHero';
 import { FootprintTreemap } from './resources/FootprintTreemap';
 import { ImageDetailsSheet } from './resources/ImageDetailsSheet';
 import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
 import { VolumeNameLabel } from './resources/VolumeNameLabel';
-import { CreateNetworkDialog } from './resources/CreateNetworkDialog';
 import { useTableSort } from '@/hooks/useTableSort';
 import { SortableTableHead } from '@/components/ui/sortable-table';
-import { NetworkDetailSheet, type NetworkInspectData } from './resources/NetworkDetailSheet';
-
-const NetworkTopologyView = lazy(() => import('./NetworkTopologyView'));
 
 // ── Interfaces ─────────────────────────────────────────────────────────────────
 
@@ -385,11 +375,6 @@ const VOLUME_COMPARATORS: Record<'name' | 'driver', (a: DockerVolume, b: DockerV
     name: (a, b) => a.Name.localeCompare(b.Name),
     driver: (a, b) => a.Driver.localeCompare(b.Driver),
 };
-const NETWORK_COMPARATORS: Record<'name' | 'driver' | 'scope', (a: DockerNetwork, b: DockerNetwork) => number> = {
-    name: (a, b) => a.Name.localeCompare(b.Name),
-    driver: (a, b) => a.Driver.localeCompare(b.Driver),
-    scope: (a, b) => a.Scope.localeCompare(b.Scope),
-};
 
 // ── Main Component ─────────────────────────────────────────────────────────────
 
@@ -400,10 +385,9 @@ interface ResourcesViewProps {
 
 export default function ResourcesView({ headerActions }: ResourcesViewProps = {}) {
     const isMobile = useIsMobile();
-    const [resourceTab, setResourceTab] = useState<'images' | 'volumes' | 'networks' | 'unmanaged'>('images');
+    const [resourceTab, setResourceTab] = useState<'images' | 'volumes' | 'unmanaged'>('images');
     const { isAdmin } = useAuth();
     const { activeNode } = useNodes();
-    const [networkViewMode, setNetworkViewMode] = useState<'list' | 'topology'>('list');
     const [usage, setUsage] = useState<UsageData | null>(null);
     const [images, setImages] = useState<DockerImage[]>([]);
     const [volumes, setVolumes] = useState<DockerVolume[]>([]);
@@ -416,23 +400,18 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // Filter state
     const [imageFilter, setImageFilter] = useState<ResourceFilter>('all');
     const [volumeFilter, setVolumeFilter] = useState<ResourceFilter>('all');
-    const [networkFilter, setNetworkFilter] = useState<ResourceFilter>('all');
 
     // Search state
     const [imageSearch, setImageSearch] = useState('');
     const [volumeSearch, setVolumeSearch] = useState('');
-    const [networkSearch, setNetworkSearch] = useState('');
     // Collapsible search: icon-only until clicked, stays open while query is active.
     const [imageSearchExpanded, setImageSearchExpanded] = useState(false);
     const [volumeSearchExpanded, setVolumeSearchExpanded] = useState(false);
-    const [networkSearchExpanded, setNetworkSearchExpanded] = useState(false);
     const imageSearchRef = useRef<HTMLInputElement>(null);
     const volumeSearchRef = useRef<HTMLInputElement>(null);
-    const networkSearchRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => { if (imageSearchExpanded) imageSearchRef.current?.focus(); }, [imageSearchExpanded]);
     useEffect(() => { if (volumeSearchExpanded) volumeSearchRef.current?.focus(); }, [volumeSearchExpanded]);
-    useEffect(() => { if (networkSearchExpanded) networkSearchRef.current?.focus(); }, [networkSearchExpanded]);
 
     // Modal states
     const [confirmPrune, setConfirmPrune] = useState<{ target: PruneTarget; scope: PruneScope } | null>(null);
@@ -448,10 +427,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [reclaimHeroEnabled, setReclaimHeroEnabled] = useState(true);
     const [heroDismissedBytes, setHeroDismissedBytes] = useState<number | null>(null);
 
-    // Network create/inspect state
-    const [showCreateNetwork, setShowCreateNetwork] = useState(false);
-    const [inspectNetwork, setInspectNetwork] = useState<NetworkInspectData | null>(null);
-    const [inspectLoadingId, setInspectLoadingId] = useState<string | null>(null);
     // Classified image selection is node-bound so a node switch cannot leave
     // the previous node's usedByStacks visible beside a new node's inspect.
     const [inspectImage, setInspectImage] = useState<(DockerImage & { nodeId: string | number }) | null>(null);
@@ -774,22 +749,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         }
     };
 
-    const handleInspectNetwork = async (id: string) => {
-        setInspectLoadingId(id);
-        try {
-            const res = await apiFetch(`/system/networks/${id}`);
-            if (!res.ok) throw new Error('Failed to inspect network');
-            const data = await res.json();
-            setInspectNetwork(data);
-        } catch (error) {
-            const err = error as Record<string, unknown>;
-            toast.error(String(err?.message || err?.error || 'Something went wrong.'));
-        } finally {
-            setInspectLoadingId(null);
-        }
-    };
-
-    // Derived filtered lists
     const filteredImages = images.filter(img =>
         (imageFilter === 'managed' ? img.managedStatus === 'managed' :
             imageFilter === 'unmanaged' ? img.managedStatus !== 'managed' : true) &&
@@ -800,16 +759,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             volumeFilter === 'unmanaged' ? vol.managedStatus !== 'managed' : true) &&
         (volumeSearch === '' || vol.Name.toLowerCase().includes(volumeSearch.toLowerCase()))
     );
-    const filteredNetworks = networks.filter(net =>
-        (networkFilter === 'managed' ? net.managedStatus === 'managed' :
-            networkFilter === 'unmanaged' ? net.managedStatus !== 'managed' : true) &&
-        (networkSearch === '' || net.Name.toLowerCase().includes(networkSearch.toLowerCase()))
-    );
 
-    // Sortable tables (standard sort behavior across the resource tables).
     const imageSort = useTableSort(filteredImages, IMAGE_COMPARATORS, 'repo');
     const volumeSort = useTableSort(filteredVolumes, VOLUME_COMPARATORS, 'name');
-    const networkSort = useTableSort(filteredNetworks, NETWORK_COMPARATORS, 'name');
 
     const handleFootprintFilter = (filter: ResourceFilter) => {
         setImageFilter(filter);
@@ -978,6 +930,30 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             </div>
 
             {/* Resource Tabs */}
+            <Card className="mb-4 border-card-border bg-card/40">
+                <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <CardTitle className="text-base">Network inventory moved</CardTitle>
+                        <CardDescription>
+                            Compose network list, topology, inspect, and findings now live on the Networking page.
+                        </CardDescription>
+                    </div>
+                    <Button
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5 shrink-0"
+                        onClick={() => {
+                            window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
+                                detail: { view: 'networking' },
+                            }));
+                        }}
+                    >
+                        Open Networking
+                        <ArrowRight className="w-3.5 h-3.5" strokeWidth={1.5} />
+                    </Button>
+                </CardContent>
+            </Card>
+
             <Tabs
                 value={resourceTab}
                 onValueChange={(v) => setResourceTab(v as typeof resourceTab)}
@@ -991,7 +967,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         tabs={[
                             { value: 'images', label: 'Images', count: images.length },
                             { value: 'volumes', label: 'Volumes', count: volumes.length },
-                            { value: 'networks', label: 'Networks', count: networks.length },
                             { value: 'unmanaged', label: 'Unmanaged', count: totalOrphansCount },
                         ]}
                     />
@@ -999,12 +974,12 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 <div className="flex items-center gap-3 mb-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
                     <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
-                            {(['images', 'volumes', 'networks'] as const).map(tab => (
+                            {(['images', 'volumes'] as const).map(tab => (
                                 <TabsHighlightItem key={tab} value={tab}>
                                     <TabsTrigger value={tab}>
                                         {tab.charAt(0).toUpperCase() + tab.slice(1)}
                                         <span className="ml-1.5 text-[10px] text-stat-subtitle tabular-nums">
-                                            {tab === 'images' ? images.length : tab === 'volumes' ? volumes.length : networks.length}
+                                            {tab === 'images' ? images.length : volumes.length}
                                         </span>
                                     </TabsTrigger>
                                 </TabsHighlightItem>
@@ -1331,188 +1306,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         </div>
                     </TabsContent>
 
-                    {/* Networks */}
-                    <TabsContent value="networks" className="m-0 border-0 p-0 animate-in fade-in-0 duration-200">
-                        <div className="flex flex-wrap items-center gap-2 mb-4">
-                            {networkViewMode === 'list' ? (
-                                <>
-                                    {networkSearch !== '' || networkSearchExpanded ? (
-                                        <div className="relative flex-1 min-w-[200px] max-w-sm">
-                                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                                            <Input
-                                                ref={networkSearchRef}
-                                                placeholder="Search networks..."
-                                                value={networkSearch}
-                                                onChange={(e) => setNetworkSearch(e.target.value)}
-                                                onBlur={() => { if (networkSearch === '') setNetworkSearchExpanded(false); }}
-                                                className="pl-9 h-9"
-                                            />
-                                        </div>
-                                    ) : (
-                                        <TooltipProvider>
-                                            <Tooltip>
-                                                <TooltipTrigger asChild>
-                                                    <Button variant="outline" size="sm" className="h-9 w-9 p-0 shrink-0" onClick={() => setNetworkSearchExpanded(true)} aria-label="Search networks">
-                                                        <Search className="w-4 h-4" />
-                                                    </Button>
-                                                </TooltipTrigger>
-                                                <TooltipContent>Search networks</TooltipContent>
-                                            </Tooltip>
-                                        </TooltipProvider>
-                                    )}
-                                    <FilterToggle
-                                        value={networkFilter}
-                                        onChange={setNetworkFilter}
-                                        counts={{
-                                            all: networks.length,
-                                            managed: networks.filter(n => n.managedStatus === 'managed').length,
-                                            unmanaged: networks.filter(n => n.managedStatus !== 'managed').length,
-                                        }}
-                                    />
-                                </>
-                            ) : (
-                                <span aria-hidden="true" />
-                            )}
-                            <div className="flex-1" />
-                            <div className="flex items-center gap-2">
-                                <div className="flex items-center gap-0.5 bg-muted/50 rounded-lg p-0.5">
-                                    <button
-                                        onClick={() => setNetworkViewMode('list')}
-                                        className={cn(
-                                            'px-2.5 py-1 rounded-md text-xs font-medium transition-all duration-200',
-                                            networkViewMode === 'list' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-                                        )}
-                                    >
-                                        List
-                                    </button>
-                                    <button
-                                        onClick={() => setNetworkViewMode('topology')}
-                                        className={cn(
-                                            'px-2.5 py-1 rounded-md text-xs font-medium transition-all duration-200 flex items-center gap-1',
-                                            networkViewMode === 'topology' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-                                        )}
-                                    >
-                                        Topology
-                                    </button>
-                                </div>
-                                {isAdmin && (
-                                    <Button
-                                        variant="outline"
-                                        size="sm"
-                                        className="h-7 text-xs gap-1.5"
-                                        onClick={() => setShowCreateNetwork(true)}
-                                    >
-                                        <Plus className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                        Create Network
-                                    </Button>
-                                )}
-                            </div>
-                        </div>
-
-                        {networkViewMode === 'topology' ? (
-                            <div className="p-4">
-                                <CapabilityGate capability="network-topology" featureName="Network Topology">
-                                    <LazyBoundary>
-                                        <Suspense fallback={
-                                            <div className="flex items-center justify-center h-[400px] text-muted-foreground gap-2">
-                                                <span className="text-sm">Loading topology...</span>
-                                            </div>
-                                        }>
-                                            <NetworkTopologyView
-                                                key={activeNode?.id}
-                                                onContainerClick={(id, name) => {
-                                                    window.dispatchEvent(new CustomEvent<SenchoOpenLogsDetail>(SENCHO_OPEN_LOGS_EVENT, {
-                                                        detail: { containerId: id, containerName: name },
-                                                    }));
-                                                }}
-                                            />
-                                        </Suspense>
-                                    </LazyBoundary>
-                                </CapabilityGate>
-                            </div>
-                        ) : (
-                        <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-                        <ScrollArea className="max-h-[62vh]">
-                        <Table>
-                            <TableHeader>
-                                <TableRow className="hover:bg-transparent">
-                                    <TableHead className="w-[120px] text-[11px]">ID</TableHead>
-                                    <SortableTableHead label="Name" columnKey="name" activeKey={networkSort.sortKey} dir={networkSort.sortDir} onSort={networkSort.toggleSort} />
-                                    <SortableTableHead label="Driver" columnKey="driver" activeKey={networkSort.sortKey} dir={networkSort.sortDir} onSort={networkSort.toggleSort} />
-                                    <SortableTableHead label="Scope" columnKey="scope" activeKey={networkSort.sortKey} dir={networkSort.sortDir} onSort={networkSort.toggleSort} />
-                                    <TableHead className="text-[11px]">Status</TableHead>
-                                    <TableHead className="text-right text-[11px]">Actions</TableHead>
-                                </TableRow>
-                            </TableHeader>
-                            {isLoading ? <TableSkeleton cols={6} /> : (
-                                <TableBody>
-                                    {networkSort.sorted.length === 0 ? (
-                                        <TableRow><TableCell colSpan={6} className="text-center py-8 text-muted-foreground text-sm">No networks found.</TableCell></TableRow>
-                                    ) : networkSort.sorted.map((net, i) => (
-                                        <TableRow
-                                            key={net.Id}
-                                            className="animate-in fade-in-0 duration-200 hover:bg-muted/30 transition-colors"
-                                            style={{ animationDelay: `${Math.min(i * 20, 200)}ms` }}
-                                        >
-                                            <TableCell className="font-mono text-xs text-muted-foreground">{net.Id.substring(0, 12)}</TableCell>
-                                            <TableCell className="font-medium max-w-[200px] truncate">{net.Name}</TableCell>
-                                            <TableCell className="text-xs">{net.Driver}</TableCell>
-                                            <TableCell><Badge variant="outline" className="text-[10px] h-5">{net.Scope}</Badge></TableCell>
-                                            <TableCell>
-                                                <div className="flex items-center gap-1.5 flex-wrap">
-                                                    <ManagedBadge
-                                                        status={net.managedStatus}
-                                                        managedBy={net.managedBy}
-                                                        onOpenStack={activeNode ? (stack) => window.dispatchEvent(
-                                                            new CustomEvent<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, { detail: { nodeId: activeNode.id, stackName: stack } }),
-                                                        ) : undefined}
-                                                    />
-                                                    {net.isSencho && <SenchoBadge />}
-                                                </div>
-                                            </TableCell>
-                                            <TableCell className="text-right">
-                                                <div className="flex items-center justify-end gap-1">
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="icon"
-                                                        className="h-7 w-7 hover:text-foreground transition-colors"
-                                                        disabled={inspectLoadingId !== null}
-                                                        onClick={() => handleInspectNetwork(net.Id)}
-                                                    >
-                                                        {inspectLoadingId === net.Id ? <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={1.5} /> : <Eye className="w-3.5 h-3.5" strokeWidth={1.5} />}
-                                                    </Button>
-                                                    {isAdmin && (
-                                                        <TooltipProvider>
-                                                            <Tooltip>
-                                                                <TooltipTrigger asChild>
-                                                                    <span className={net.isSencho ? 'cursor-not-allowed' : undefined}>
-                                                                        <Button
-                                                                            variant="ghost"
-                                                                            size="icon"
-                                                                            className="h-7 w-7 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-destructive/60"
-                                                                            disabled={net.managedStatus === 'system' || net.isSencho}
-                                                                            onClick={() => setConfirmDelete({ type: 'networks', id: net.Id, name: net.Name })}
-                                                                        >
-                                                                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                                        </Button>
-                                                                    </span>
-                                                                </TooltipTrigger>
-                                                                {net.isSencho && <TooltipContent>Protected · running Sencho instance</TooltipContent>}
-                                                            </Tooltip>
-                                                        </TooltipProvider>
-                                                    )}
-                                                </div>
-                                            </TableCell>
-                                        </TableRow>
-                                    ))}
-                                </TableBody>
-                            )}
-                        </Table>
-                        </ScrollArea>
-                        </div>
-                        )}
-                    </TabsContent>
-
                     {/* Unmanaged Containers */}
                     <TabsContent value="unmanaged" className="m-0 border-0 p-0 h-full flex flex-col animate-in fade-in-0 duration-200">
                         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
@@ -1714,13 +1507,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 </p>
             </ConfirmModal>
 
-            {/* Create Network Modal */}
-            <CreateNetworkDialog
-                open={showCreateNetwork}
-                onOpenChange={setShowCreateNetwork}
-                onCreated={fetchAllData}
-            />
-
             {/* Image Details Sheet */}
             <ImageDetailsSheet
                 image={inspectImage && activeNode && inspectImage.nodeId === activeNode.id ? inspectImage : null}
@@ -1732,13 +1518,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
             {/* Volume Browser Sheet */}
             <VolumeBrowserSheet volumeName={browseVolume} onClose={() => setBrowseVolume(null)} />
-
-
-            {/* Network detail sheet */}
-            <NetworkDetailSheet
-                network={inspectNetwork}
-                onClose={() => setInspectNetwork(null)}
-            />
 
             <VulnerabilityScanSheet
                 scanId={inspectScanId}

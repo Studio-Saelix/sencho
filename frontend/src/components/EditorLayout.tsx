@@ -69,6 +69,7 @@ const AutoUpdateReadinessView = lazy(() => import('./AutoUpdateReadinessView'));
 const AppStoreView = lazy(() => import('./AppStoreView').then(m => ({ default: m.AppStoreView })));
 const AuditLogView = lazy(() => import('./AuditLogView').then(m => ({ default: m.AuditLogView })));
 const ResourcesView = lazy(() => import('./ResourcesView'));
+const NetworkingView = lazy(() => import('./networking/NetworkingView').then(m => ({ default: m.NetworkingView })));
 const GlobalObservabilityView = lazy(() => import('./GlobalObservabilityView').then(m => ({ default: m.GlobalObservabilityView })));
 
 export default function EditorLayout() {
@@ -1026,6 +1027,12 @@ export default function EditorLayout() {
             return (
               <Suspense fallback={lazyFallback}>
                 <ResourcesView headerActions={mobileMastheadActions} />
+              </Suspense>
+            );
+          case 'networking':
+            return (
+              <Suspense fallback={lazyFallback}>
+                <NetworkingView headerActions={mobileMastheadActions} />
               </Suspense>
             );
           case 'global-observability':

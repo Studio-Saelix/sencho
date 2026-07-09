@@ -22,6 +22,7 @@ export const MOBILE_TREATMENTS: Record<ActiveView, MobileTreatment> = {
   settings: 'bespoke',
   editor: 'detail',
   resources: 'bespoke',
+  networking: 'bespoke',
   security: 'bespoke',
   templates: 'bespoke',
   'global-observability': 'bespoke',

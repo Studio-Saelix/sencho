@@ -243,24 +243,47 @@ function layoutGraph(
 
 interface NetworkTopologyViewProps {
     onContainerClick?: (containerId: string, containerName: string) => void;
+    /** API path for topology data. Defaults to the Resources maintenance route. */
+    endpoint?: string;
+    /** When false, hides the include-system toggle (caller controls scope). */
+    showSystemToggle?: boolean;
+    /** Controlled include-system value when showSystemToggle is false. */
+    includeSystem?: boolean;
 }
 
-export default function NetworkTopologyView({ onContainerClick }: NetworkTopologyViewProps) {
+export default function NetworkTopologyView({
+    onContainerClick,
+    endpoint = '/system/networks/topology',
+    showSystemToggle = true,
+    includeSystem: controlledIncludeSystem,
+}: NetworkTopologyViewProps) {
     const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
     const [loading, setLoading] = useState(true);
-    const [includeSystem, setIncludeSystem] = useState(false);
+    const [internalIncludeSystem, setInternalIncludeSystem] = useState(false);
+    const includeSystem = controlledIncludeSystem ?? internalIncludeSystem;
     const onContainerClickRef = useRef(onContainerClick);
     onContainerClickRef.current = onContainerClick;
 
     const fetchTopology = useCallback(async () => {
         setLoading(true);
         try {
-            const res = await apiFetch(`/system/networks/topology?includeSystem=${includeSystem}`);
+            const res = await apiFetch(`${endpoint}?includeSystem=${includeSystem}`);
             if (!res.ok) throw new Error('Failed to fetch topology');
             const inspected = await res.json();
-
-            const { nodes: layoutNodes, edges: layoutEdges } = layoutGraph(inspected);
+            const networksList: TopologyNetwork[] = Array.isArray(inspected)
+              ? inspected
+              : (inspected.networks ?? []).map((n: {
+                  id: string; name: string; driver: string; isSystem: boolean; stack: string | null;
+                  containers: TopologyContainer[];
+                }) => ({
+                  Id: n.id,
+                  Name: n.name,
+                  Driver: n.driver,
+                  managedStatus: n.isSystem ? 'system' as const : (n.stack ? 'managed' as const : 'unmanaged' as const),
+                  containers: n.containers,
+                }));
+            const { nodes: layoutNodes, edges: layoutEdges } = layoutGraph(networksList);
             setNodes(layoutNodes);
             setEdges(layoutEdges);
         } catch (error) {
@@ -269,7 +292,7 @@ export default function NetworkTopologyView({ onContainerClick }: NetworkTopolog
         } finally {
             setLoading(false);
         }
-    }, [setNodes, setEdges, includeSystem]);
+    }, [setNodes, setEdges, includeSystem, endpoint]);
 
     useEffect(() => { fetchTopology(); }, [fetchTopology]);
 
@@ -307,10 +330,14 @@ export default function NetworkTopologyView({ onContainerClick }: NetworkTopolog
     return (
         <div className="rounded-lg border border-card-border bg-card shadow-card-bevel overflow-hidden">
             <div className="flex items-center gap-2 px-3 py-2 border-b border-card-border">
-                <TogglePill id="show-system" checked={includeSystem} onChange={setIncludeSystem} />
-                <Label htmlFor="show-system" className="text-xs cursor-pointer">
-                    Show system networks
-                </Label>
+                {showSystemToggle && (
+                  <>
+                    <TogglePill id="show-system" checked={includeSystem} onChange={setInternalIncludeSystem} />
+                    <Label htmlFor="show-system" className="text-xs cursor-pointer">
+                        Show system networks
+                    </Label>
+                  </>
+                )}
                 <Button
                     variant="ghost"
                     size="icon"

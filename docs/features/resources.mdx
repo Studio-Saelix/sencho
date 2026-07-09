@@ -1,9 +1,9 @@
 ---
 title: Resources Hub
-description: Browse, filter, scan, and clean up Docker images, volumes, networks, and unmanaged containers from a single view.
+description: Browse, filter, scan, and clean up Docker images, volumes, and unmanaged containers from a single view.
 ---
 
-The **Resources** tab shows everything Docker is storing on your host, broken down by ownership, with one-click cleanup, on-demand vulnerability scanning, and a topology view of how your containers connect.
+The **Resources** tab shows everything Docker is storing on your host, broken down by ownership, with one-click cleanup and on-demand vulnerability scanning.
 
 <Frame>
   <img src="/images/resources/resources-reclaim.png" alt="Resources Hub with the You can reclaim banner, Docker Disk Footprint treemap, Quick Clean panel, and the Images tab populated below" />
@@ -56,7 +56,9 @@ A confirmation dialog appears before any destructive prune. Sencho first builds 
 
 ## Resource tabs
 
-Below the hero, four tabs partition your inventory: **images**, **volumes**, **networks**, and **Unmanaged**. The Unmanaged tab shows a count badge whenever orphan containers are detected.
+Below the hero, three tabs partition your inventory: **images**, **volumes**, and **Unmanaged**. The Unmanaged tab shows a count badge whenever orphan containers are detected.
+
+Network inventory, topology, inspect, and findings live on the dedicated [Networking](/features/networking) page. Resources shows an **Open Networking** card where the Networks tab used to be, and **Quick Clean** still includes **Prune Dead Networks**.
 
 A **Scan history** button sits on the right of the tab strip when image vulnerability scanning is configured for the node. It takes you to the [Security page](/features/security) History tab so you can review past results without launching a new scan. See [Vulnerability scanning](/features/vulnerability-scanning) for the full workflow.
 
@@ -125,77 +127,6 @@ Click the folder icon on any volume row (admin-only) to open a read-only browser
 <Warning>
   Volumes commonly contain database files, password hashes, certificates, and other secrets. Treat the volume browser as a high-power admin tool.
 </Warning>
-
-### Networks
-
-<Frame>
-  <img src="/images/networks/networks-list.png" alt="Networks tab in List view with filter chips, view-mode toggle, Create Network button, and the network table" />
-</Frame>
-
-Lists all Docker networks with ID, name, driver, scope (`local`, `global`, `swarm`), and managed status. System networks (`bridge`, `host`, `none`) are shown but cannot be deleted.
-
-**Filter chips:** `All`, `Managed`, `External`, each with its count.
-
-A **List | Topology** view-mode toggle sits on the right of the toolbar. **List** is the default tabular view; **Topology** is a graph view of how containers connect to networks (covered below).
-
-#### Create Network
-
-In **List** view, the **+ Create Network** button (admin-only) opens the creation dialog.
-
-<Frame>
-  <img src="/images/networks/create-network.png" alt="Create network dialog with Name, Driver, Subnet, Gateway fields, and Internal and Attachable toggles" />
-</Frame>
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| **Name** | Yes | Alphanumeric, hyphens, underscores, and dots |
-| **Driver** | No | `bridge` (default), `overlay`, `macvlan`, `host`, or `none` |
-| **Subnet** | No | CIDR notation, for example `172.20.0.0/16` |
-| **Gateway** | No | Gateway IP, for example `172.20.0.1` |
-| **Internal** | No | Isolates the network from external access |
-| **Attachable** | No | Allows containers to be manually attached |
-
-The footer shows a **DRIVER** chip that mirrors the selected driver, and a **Create network** button that stays disabled until the form is valid.
-
-#### Inspect network
-
-Click the eye icon on any network row to open a detail sheet.
-
-<Frame>
-  <img src="/images/networks/network-inspect.png" alt="Network inspect sheet for arr-net showing the Overview, IPAM configuration, and Connected containers sections" />
-</Frame>
-
-The sheet is grouped into sections:
-
-- **Overview** lists the ID, driver, scope, creation date, and the internal/attachable flags.
-- **IPAM configuration** shows the subnet, gateway, and IP range for each configured address pool.
-- **Options** lists driver-specific options applied to the network (rendered only when present).
-- **Connected** shows every container attached to the network, with its name, IPv4 address, and MAC address. The section header counts the containers.
-- **Labels** lists all Docker labels on the network (rendered only when present).
-
-#### Network topology
-
-Switch to the **Topology** view to see an interactive graph of your Docker networks and the containers attached to them. The graph uses an automatic hierarchical layout (networks on top, containers below) that scales cleanly regardless of how many networks and containers you have.
-
-<Frame>
-  <img src="/images/networks/network-topology.png" alt="Network topology graph with arr-net at top and the connected containers fanned out below it, mini-map and zoom controls visible" />
-</Frame>
-
-- **Network nodes** are dashed-border cards showing the network name and driver, color-coded by status (managed, external, system).
-- **Container nodes** are cards showing the container name, a state indicator, the stack badge, the image name, and the IPv4 address per network.
-- **Edges** are animated, color-coded connections between networks and their containers.
-- **Click-to-logs.** Click any running container node to open its log viewer directly.
-- **Refresh.** Use the refresh button in the toolbar to re-fetch the topology on demand.
-- Pan, zoom, and drag nodes to explore the graph.
-- A **mini-map** in the bottom-right gives an overview of the full graph. Zoom and fit-view controls sit on the bottom-left.
-
-##### Show system networks
-
-By default, system networks (`bridge`, `host`, `none`) are hidden so the graph stays focused on user networks. Toggle **Show system networks** to include them, which is useful for debugging containers attached to the default bridge.
-
-<Frame>
-  <img src="/images/networks/network-topology-toggle.png" alt="Topology with Show system networks toggled on; arr-net plus the bridge, none, and host system networks all visible at the top" />
-</Frame>
 
 ### Unmanaged
 

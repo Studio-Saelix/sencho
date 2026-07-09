@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Terminal, CloudDownload, Home, HardDrive, ScrollText,
-  Activity, Radar, RefreshCw, Clock, ShieldCheck,
+  Activity, Radar, RefreshCw, Clock, ShieldCheck, Network,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
@@ -129,6 +129,7 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     }
     items.push(
       { value: 'resources', label: 'Resources', icon: HardDrive },
+      { value: 'networking', label: 'Networking', icon: Network },
       { value: 'security', label: 'Security', icon: ShieldCheck },
       { value: 'templates', label: 'App Store', icon: CloudDownload },
     );

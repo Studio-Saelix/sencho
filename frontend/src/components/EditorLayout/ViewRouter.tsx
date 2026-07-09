@@ -44,7 +44,10 @@ const AuditLogView = lazy(() =>
 const ScheduledOperationsView = lazy(() => import('../ScheduledOperationsView'));
 const AutoUpdateReadinessView = lazy(() => import('../AutoUpdateReadinessView'));
 const SecurityView = lazy(() =>
-    import('../SecurityView').then(m => ({ default: m.SecurityView })),
+  import('../SecurityView').then(m => ({ default: m.SecurityView })),
+);
+const NetworkingView = lazy(() =>
+  import('../networking/NetworkingView').then(m => ({ default: m.NetworkingView })),
 );
 
 // Sized for the main workspace area (flex-1 with p-6 padding). Visible
@@ -154,6 +157,13 @@ export function ViewRouter({
     }
     if (activeView === 'resources') {
         return <ResourcesView />;
+    }
+    if (activeView === 'networking') {
+        return (
+            <LazyView>
+                <NetworkingView />
+            </LazyView>
+        );
     }
     if (activeView === 'security') {
         // Node-scoped (not hub-only): scan/scanner data follows the active node

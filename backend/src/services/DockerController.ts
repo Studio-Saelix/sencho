@@ -21,6 +21,7 @@ import {
   type PruneScope,
   type PruneTarget,
 } from './prunePlan';
+import type { NetworkingNetworkBase } from './network/networkingTypes';
 import { isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -1795,6 +1796,39 @@ class DockerController {
     });
 
     return { containers, networks, volumes };
+  }
+
+  /**
+   * Classifies snapshot networks into base inventory rows (phase A). Uses only
+   * the provided snapshot; no additional Docker API calls.
+   */
+  public static classifySnapshotNetworks(
+    snapshot: DependencySnapshot,
+    _knownStackNames: string[],
+  ): NetworkingNetworkBase[] {
+    const selfIdentity = SelfIdentityService.getInstance();
+    const connectedByNetwork = new Map<string, number>();
+    for (const c of snapshot.containers) {
+      for (const attached of c.networks) {
+        const key = attached.id || attached.name;
+        connectedByNetwork.set(key, (connectedByNetwork.get(key) ?? 0) + 1);
+        if (attached.name && attached.name !== key) {
+          connectedByNetwork.set(attached.name, (connectedByNetwork.get(attached.name) ?? 0) + 1);
+        }
+      }
+    }
+
+    return snapshot.networks.map(net => ({
+      id: net.id,
+      name: net.name,
+      driver: net.driver,
+      scope: net.scope,
+      isSystem: net.isSystem,
+      composeProject: net.composeProject,
+      stack: net.stack,
+      connectedCount: connectedByNetwork.get(net.id) ?? connectedByNetwork.get(net.name) ?? 0,
+      isSencho: selfIdentity.isOwnNetwork(net.id) || selfIdentity.isOwnNetwork(net.name),
+    }));
   }
 
   /** Resolves a Docker Compose project label to a known Sencho stack name, or null. */

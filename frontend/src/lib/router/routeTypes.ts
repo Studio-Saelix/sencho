@@ -15,6 +15,7 @@ export type ActiveView =
   | 'editor'
   | 'host-console'
   | 'resources'
+  | 'networking'
   | 'templates'
   | 'global-observability'
   | 'fleet'

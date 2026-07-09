@@ -8,6 +8,7 @@ const VIEW_SEGMENTS = {
   editor: 'stacks',
   'host-console': 'host-console',
   resources: 'resources',
+  networking: 'networking',
   templates: 'templates',
   'global-observability': 'logs',
   fleet: 'fleet',

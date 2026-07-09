@@ -1,0 +1,174 @@
+/**
+ * Node networking operator routes: auth boundaries, aggregate reads, delete guards.
+ */
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'fs';
+import path from 'path';
+import request from 'supertest';
+import jwt from 'jsonwebtoken';
+import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
+import DockerController from '../services/DockerController';
+import { ComposeService } from '../services/ComposeService';
+import { DatabaseService } from '../services/DatabaseService';
+import { evaluateNetworkDeleteGuard } from '../services/network/networkDeleteGuards';
+
+let tmpDir: string;
+let app: import('express').Express;
+let authHeader: string;
+
+const STACK = 'netop';
+
+function token(username: string, role: string, tokenVersion = 1): string {
+  const user = DatabaseService.getInstance().getUserByUsername(username);
+  return `Bearer ${jwt.sign(
+    { username, role, tokenVersion: user?.token_version ?? tokenVersion },
+    TEST_JWT_SECRET,
+    { expiresIn: '5m' },
+  )}`;
+}
+
+const NET_ID = 'abcdefabcdef';
+
+function stubAggregate() {
+  vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+    getDependencySnapshot: vi.fn().mockResolvedValue({
+      containers: [],
+      networks: [
+        { id: NET_ID, name: 'orphan_net', driver: 'bridge', scope: 'local', isSystem: false, composeProject: null, stack: null },
+      ],
+      volumes: [],
+    }),
+    inspectNetwork: vi.fn().mockResolvedValue({
+      Id: NET_ID,
+      Name: 'orphan_net',
+      Driver: 'bridge',
+      Scope: 'local',
+      Labels: { 'com.example.key': 'secret-value' },
+      Containers: {},
+    }),
+    removeNetwork: vi.fn().mockResolvedValue(undefined),
+  } as unknown as DockerController);
+
+  vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+    renderConfig: vi.fn().mockResolvedValue({
+      rendered: JSON.stringify({
+        name: STACK,
+        services: { web: { image: 'nginx:latest', networks: { backend: null } } },
+        networks: { backend: { name: `${STACK}_backend` } },
+        volumes: {},
+      }),
+      stderr: '',
+      code: 0,
+      timedOut: false,
+    }),
+  } as unknown as ComposeService);
+}
+
+beforeAll(async () => {
+  tmpDir = await setupTestDb();
+  ({ app } = await import('../index'));
+  authHeader = token(TEST_USERNAME, 'admin');
+});
+
+afterAll(() => cleanupTestDb(tmpDir));
+
+describe('networking operator routes', () => {
+  let stackDir: string;
+
+  beforeEach(() => {
+    stackDir = path.join(process.env.COMPOSE_DIR as string, STACK);
+    fs.mkdirSync(stackDir, { recursive: true });
+    fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  web:\n    image: nginx:latest\n');
+    stubAggregate();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(stackDir, { recursive: true, force: true });
+  });
+
+  it('keeps GET /api/networking/summary auth-only for viewers', async () => {
+    const db = DatabaseService.getInstance();
+    db.addUser({ username: 'net-viewer', password_hash: 'x', role: 'viewer' });
+    const viewerHeader = token('net-viewer', 'viewer');
+    const res = await request(app).get('/api/networking/summary').set('Authorization', viewerHeader);
+    expect(res.status).toBe(200);
+  });
+
+  it('requires authentication on new overview route and allows stack:read roles', async () => {
+    expect((await request(app).get('/api/networking/overview')).status).toBe(401);
+
+    const db = DatabaseService.getInstance();
+    db.addUser({ username: 'net-viewer2', password_hash: 'x', role: 'viewer' });
+    const viewerRes = await request(app).get('/api/networking/overview').set('Authorization', token('net-viewer2', 'viewer'));
+    expect(viewerRes.status).toBe(200);
+
+    const ok = await request(app).get('/api/networking/overview').set('Authorization', authHeader);
+    expect(ok.status).toBe(200);
+    expect(ok.body.overview).toBeDefined();
+    expect(Array.isArray(ok.body.networks)).toBe(true);
+  });
+
+  it('sanitized network inspect returns label keys only', async () => {
+    const res = await request(app).get(`/api/networking/networks/${NET_ID}`).set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.labelKeys).toEqual(['com.example.key']);
+    expect(JSON.stringify(res.body)).not.toContain('secret-value');
+  });
+
+  it('blocks admin delete when network is attached', async () => {
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({
+        containers: [{ id: 'c1', name: 'web', service: 'web', composeProject: STACK, stack: STACK, state: 'running', image: 'nginx', networks: [{ name: 'orphan_net', id: NET_ID, ip: '' }], volumes: [], ports: [] }],
+        networks: [{ id: NET_ID, name: 'orphan_net', driver: 'bridge', scope: 'local', isSystem: false, composeProject: null, stack: null }],
+        volumes: [],
+      }),
+      removeNetwork: vi.fn(),
+    } as unknown as DockerController);
+
+    const removeSpy = vi.spyOn(DockerController.getInstance(1), 'removeNetwork');
+    const res = await request(app)
+      .post('/api/system/networks/delete')
+      .set('Authorization', authHeader)
+      .send({ id: NET_ID });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('attached');
+    expect(removeSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('classifySnapshotNetworks', () => {
+  it('preserves composeProject on external ownership rows', () => {
+    const snapshot = {
+      containers: [],
+      networks: [{
+        id: 'ext1',
+        name: 'external_shared',
+        driver: 'bridge',
+        scope: 'local',
+        isSystem: false,
+        composeProject: 'other-project',
+        stack: null,
+      }],
+      volumes: [],
+    };
+    const rows = DockerController.classifySnapshotNetworks(snapshot, ['localstack']);
+    expect(rows[0].composeProject).toBe('other-project');
+    expect(rows[0].stack).toBeNull();
+  });
+});
+
+describe('evaluateNetworkDeleteGuard', () => {
+  it('fails closed with stack-declaration-unknown when stacks are unrenderable', () => {
+    const snapshot = {
+      containers: [],
+      networks: [{ id: 'n1', name: 'app_net', driver: 'bridge', scope: 'local', isSystem: false, composeProject: STACK, stack: STACK }],
+      volumes: [],
+    };
+    const guard = evaluateNetworkDeleteGuard('n1', snapshot, [
+      { stack: STACK, renderable: false, renderError: 'x', runtime: 'available', networks: [], services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] } },
+    ]);
+    expect(guard.blocked).toBe(true);
+    expect(guard.code).toBe('stack-declaration-unknown');
+  });
+});
