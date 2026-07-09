@@ -59,7 +59,10 @@ export function useOverlayState() {
   // bottom-tab / hamburger destination). Wrapped in an object so the state
   // setter is not mistaken for a functional update. Runs after the user
   // confirms the unsaved-changes dialog. See useStackActions.attemptLeaveEditor.
-  const [pendingLeaveAction, setPendingLeaveAction] = useState<{ run: () => void } | null>(null);
+  const [pendingLeaveAction, setPendingLeaveAction] = useState<{
+    run: () => void;
+    onCancel?: () => void;
+  } | null>(null);
 
   const [bashModalOpen, setBashModalOpen] = useState(false);
   const [selectedContainer, setSelectedContainer] = useState<Container | null>(null);

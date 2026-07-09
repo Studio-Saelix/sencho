@@ -8,8 +8,8 @@
     "dark": "#00BEC7"
   },
   "logo": {
-    "light": "/images/logo/logo-light.png",
-    "dark": "/images/logo/logo-dark.png",
+    "light": "/images/logo/sencho-logo-light.svg",
+    "dark": "/images/logo/sencho-logo-dark.svg",
     "href": "https://sencho.io"
   },
   "favicon": "/images/logo/favicon.ico",
@@ -132,8 +132,9 @@
                 "group": "Observability",
                 "expanded": true,
                 "pages": [
-                  "features/dashboard",
-                  "features/global-search",
+              "features/dashboard",
+              "features/deep-links",
+              "features/global-search",
                   "features/global-observability",
                   "features/alerts-notifications",
                   "features/audit-log"

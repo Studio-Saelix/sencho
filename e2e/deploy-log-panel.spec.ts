@@ -382,12 +382,17 @@ test.describe('Deploy feedback modal', () => {
     await expect.poll(() => opCalls, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
 
     // Mobile shell (below the md break) renders the recovery card inline.
+    // Open from the stack list so URL hydration does not drop us into the
+    // full-screen compose editor surface (the /compose deep link does that).
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.reload();
+    await page.goto('/nodes/local/stacks');
     await waitForStacksLoaded(page);
     await page.getByText(HAPPY_STACK, { exact: true }).first().click();
+    await expect(page.getByRole('tablist', { name: 'Stack detail sections' })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('stack-deploy-button')).toBeEnabled({ timeout: 10_000 });
     await page.getByTestId('stack-deploy-button').click();
-    await expect(page.getByTestId('recovery-panel')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('Deploy failed')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByTestId('recovery-panel')).toBeVisible({ timeout: 10_000 });
   });
 
   test.afterEach(async ({ page }) => {

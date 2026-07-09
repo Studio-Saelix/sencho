@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
@@ -17,11 +17,17 @@ import { BackChip, Kicker, Masthead } from './mobile-ui';
 
 interface MobileSettingsProps {
   headerActions: ReactNode;
+  selectedSection: SectionId | null;
+  onSelectedSectionChange: (section: SectionId | null) => void;
 }
 
 const NOOP = () => {};
 
-export function MobileSettings({ headerActions }: MobileSettingsProps) {
+export function MobileSettings({
+  headerActions,
+  selectedSection,
+  onSelectedSectionChange,
+}: MobileSettingsProps) {
   const { isAdmin } = useAuth();
   const { isPaid } = useLicense();
   const { activeNode } = useNodes();
@@ -36,9 +42,9 @@ export function MobileSettings({ headerActions }: MobileSettingsProps) {
     .map(group => ({ ...group, items: visibleItems.filter(item => item.group === group.id) }))
     .filter(group => group.items.length > 0);
 
-  const [selected, setSelected] = useState<SectionId | null>(null);
-  // If the active node changes and hides the open section, fall back to the list.
-  const activeSection = selected && visibleItems.some(i => i.id === selected) ? selected : null;
+  const activeSection = selectedSection && visibleItems.some(i => i.id === selectedSection)
+    ? selectedSection
+    : null;
   const item = activeSection ? getSettingsItem(activeSection) : null;
 
   if (activeSection && item) {
@@ -46,7 +52,7 @@ export function MobileSettings({ headerActions }: MobileSettingsProps) {
     return (
       <div className="flex h-full min-h-0 flex-col">
         <div className="px-2 pt-1">
-          <BackChip label="Settings" onClick={() => setSelected(null)} />
+          <BackChip label="Settings" onClick={() => onSelectedSectionChange(null)} />
         </div>
         <div className="relative border-b border-hairline px-4 pb-[15px] pt-1">
           <span aria-hidden className="absolute left-0 top-1 bottom-[15px] w-[3px] bg-brand" />
@@ -82,7 +88,7 @@ export function MobileSettings({ headerActions }: MobileSettingsProps) {
               <button
                 key={it.id}
                 type="button"
-                onClick={() => setSelected(it.id)}
+                onClick={() => onSelectedSectionChange(it.id)}
                 className={`flex min-h-11 w-full items-center gap-3 px-[13px] py-3 text-left ${idx > 0 ? 'border-t border-hairline' : ''}`}
               >
                 <span className="min-w-0 flex-1">

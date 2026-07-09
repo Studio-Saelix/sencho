@@ -8,6 +8,9 @@ import type { useViewNavigationState } from './useViewNavigationState';
 import type { OverlayState, LoadFileOptions } from './useOverlayState';
 import type { Node } from '@/context/NodeContext';
 import type { RunWithLogParams } from '@/context/DeployFeedbackContext';
+import { parsePath } from '@/lib/router/senchoRoute';
+import { resolveEnvFilePath } from '@/lib/router/envRoute';
+import type { EditorTab, RouteStackLoadResult } from '@/lib/router/routeTypes';
 import type { StackAction, RecoverableAction, FailureClassification } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
@@ -278,6 +281,9 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.content !== editorState.originalContent ||
     editorState.envContent !== editorState.originalEnvContent;
 
+  const isComposeDirty = () => editorState.content !== editorState.originalContent;
+  const isEnvDirty = () => editorState.envContent !== editorState.originalEnvContent;
+
   const getStackMenuVisibility = (file: string) => {
     // A partial stack has running containers, so it shows the running-stack
     // lifecycle actions (stop/restart/update) rather than deploy.
@@ -425,16 +431,16 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setEnvEtag(null);
   };
 
-  const loadEnvState = async (filename: string, signal?: AbortSignal) => {
+  const loadEnvState = async (filename: string, signal?: AbortSignal): Promise<string[]> => {
     try {
       const envsRes = await apiFetch(`/stacks/${filename}/envs`, { signal });
-      if (signal?.aborted) return;
+      if (signal?.aborted) return [];
       if (!envsRes.ok) {
         clearEnvState();
-        return;
+        return [];
       }
       const { envFiles } = await envsRes.json();
-      if (signal?.aborted) return;
+      if (signal?.aborted) return [];
       if (envFiles && envFiles.length > 0) {
         editorState.setEnvFiles(envFiles);
         const firstFile = envFiles[0];
@@ -444,7 +450,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           `/stacks/${filename}/env?file=${encodeURIComponent(firstFile)}`,
           { signal },
         );
-        if (signal?.aborted) return;
+        if (signal?.aborted) return envFiles;
         if (envContentRes.ok) {
           const envText = await envContentRes.text();
           editorState.setEnvContent(envText || '');
@@ -455,12 +461,14 @@ export function useStackActions(options: UseStackActionsOptions) {
           editorState.setOriginalEnvContent('');
           editorState.setEnvEtag(null);
         }
-      } else {
-        clearEnvState();
+        return envFiles;
       }
-    } catch (err) {
-      if (isAbortError(err)) return;
       clearEnvState();
+      return [];
+    } catch (err) {
+      if (isAbortError(err)) return [];
+      clearEnvState();
+      return [];
     }
   };
 
@@ -489,8 +497,14 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const loadFile = async (filename: string, options?: LoadFileOptions) => {
-    if (!filename) return;
+  const applyEditorRouteState = (tab: EditorTab) => {
+    editorState.setActiveTab(tab);
+    editorState.setEditingCompose(true);
+    editorState.setIsEditing(false);
+  };
+
+  const loadFileCore = async (filename: string, options?: LoadFileOptions): Promise<RouteStackLoadResult> => {
+    if (!filename) return { ok: false };
     if (
       !options?.skipUnsavedCheck &&
       stackListState.selectedFile &&
@@ -499,10 +513,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     ) {
       overlayState.setPendingUnsavedLoad(filename);
       overlayState.setPendingLoadOptions(options ?? null);
-      return;
+      return { ok: false };
     }
-    // Cancel any in-flight load before starting a new one. A late response
-    // from the previous stack must not overwrite the freshly-loaded one.
     loadFileAbortRef.current?.abort();
     const controller = new AbortController();
     loadFileAbortRef.current = controller;
@@ -514,18 +526,20 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setActiveTab('compose');
     try {
       const res = await apiFetch(`/stacks/${filename}`, { signal });
-      if (signal.aborted) return;
+      if (signal.aborted) return { ok: false };
       const text = await res.text();
-      if (signal.aborted) return;
+      if (signal.aborted) return { ok: false };
+      if (!res.ok) {
+        throw new Error(`Failed to load stack: ${res.status}`);
+      }
       stackListState.setSelectedFile(filename);
       navState.setActiveView('editor');
       editorState.setContent(text || '');
       editorState.setOriginalContent(text || '');
       editorState.setComposeEtag(res.headers.get('etag'));
-      await loadEnvState(filename, signal);
+      const envFiles = await loadEnvState(filename, signal);
       await loadContainerState(filename, signal);
       await loadBackupState(filename, signal);
-      if (signal.aborted) return;
       // Post-load auto-edit evaluates permission for the loaded target, not
       // the previously selected stack (selectedFile was just updated above).
       if (options?.startInComposeEdit && canEditStack(filename)) {
@@ -533,12 +547,10 @@ export function useStackActions(options: UseStackActionsOptions) {
         editorState.setActiveTab('compose');
         editorState.setIsEditing(true);
       }
+      return { ok: true, envFiles };
     } catch (error) {
-      if (isAbortError(error) || signal.aborted) return;
+      if (isAbortError(error) || signal.aborted) return { ok: false };
       console.error('Failed to load file:', error);
-      // Surface the failure so a tap that cannot load (offline, dead remote
-      // node, 5xx) is not a silent no-op, especially on mobile where the row
-      // tap optimistically opens the detail surface.
       toast.error(`Could not open "${filename.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);
       stackListState.setSelectedFile(null);
       editorState.setContent('');
@@ -548,11 +560,20 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setOriginalEnvContent('');
       editorState.setEnvEtag(null);
       editorState.setContainers([]);
+      return { ok: false };
     } finally {
       if (!signal.aborted) {
         editorState.setIsFileLoading(false);
       }
     }
+  };
+
+  const loadFile = async (filename: string, options?: LoadFileOptions) => {
+    await loadFileCore(filename, options);
+  };
+
+  const loadFileForRoute = async (filename: string): Promise<RouteStackLoadResult> => {
+    return loadFileCore(filename);
   };
 
   // Keep ref in sync so loadFileOnNode always calls the latest loadFile closure
@@ -1243,19 +1264,51 @@ export function useStackActions(options: UseStackActionsOptions) {
   // destination. When the editor is dirty the navigation is stashed and the
   // unsaved-changes dialog opens; discardAndLoadPending runs it on confirm.
   // When clean it runs immediately.
-  const attemptLeaveEditor = (perform: () => void) => {
+  const attemptLeaveEditor = (perform: () => void, onCancel?: () => void) => {
     if (stackListState.selectedFile && hasUnsavedChanges()) {
-      overlayState.setPendingLeaveAction({ run: perform });
+      overlayState.setPendingLeaveAction({ run: perform, onCancel });
       return;
     }
     perform();
   };
 
+  const wouldDiscardOnPopstate = (): boolean => {
+    if (!stackListState.selectedFile) return false;
+    const parsed = parsePath(window.location.pathname, window.location.search);
+    const targetStack = parsed.stackName;
+    const targetView = parsed.view;
+
+    if (targetView !== 'editor' || !targetStack || targetStack !== stackListState.selectedFile) {
+      return isComposeDirty() || isEnvDirty();
+    }
+    if (
+      parsed.editorTab === 'env'
+      && editorState.activeTab === 'env'
+      && parsed.envFile
+    ) {
+      const resolved = resolveEnvFilePath(parsed.envFile, editorState.envFiles);
+      if (resolved && resolved !== editorState.selectedEnvFile) {
+        return isEnvDirty();
+      }
+    }
+    return false;
+  };
+
+  const attemptPopstateNavigation = (apply: () => void, onCancel: () => void) => {
+    if (wouldDiscardOnPopstate()) {
+      overlayState.setPendingLeaveAction({ run: apply, onCancel });
+      return;
+    }
+    apply();
+  };
+
   const cancelPendingUnsavedLoad = () => {
+    const cancel = overlayState.pendingLeaveAction?.onCancel;
     overlayState.setPendingUnsavedLoad(null);
     overlayState.setPendingLoadOptions(null);
     overlayState.setPendingUnsavedNode(null);
     overlayState.setPendingLeaveAction(null);
+    cancel?.();
   };
 
   const discardAndLoadPending = () => {
@@ -1439,7 +1492,9 @@ export function useStackActions(options: UseStackActionsOptions) {
     refreshSelectedContainers,
     refreshGitSourcePending,
     loadFile,
+    loadFileForRoute,
     loadFileOnNode,
+    applyEditorRouteState,
     navigateToNotification,
     changeEnvFile,
     saveFile,
@@ -1461,6 +1516,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     requestStackUpdate,
     deleteStack,
     attemptLeaveEditor,
+    attemptPopstateNavigation,
     cancelPendingUnsavedLoad,
     discardAndLoadPending,
     requestDeleteStack,

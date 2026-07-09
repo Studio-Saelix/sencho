@@ -1,0 +1,77 @@
+---
+title: Deep links and URLs
+description: Bookmark, share, and refresh Sencho views with real browser URLs that survive Back and Forward.
+---
+
+Every major screen in Sencho now has a stable address in the browser bar. Refresh the page, paste a link to a teammate, or use Back and Forward without losing your place.
+
+## What gets its own URL
+
+Sencho encodes the active node, the view you are on, and the deep state that view cares about.
+
+| Destination | Example path | What it opens |
+|-------------|--------------|---------------|
+| Home dashboard | `/nodes/local/dashboard` | The home dashboard for the `local` node |
+| Stack list (phone) | `/nodes/local/stacks` | The full-width stack list on a phone |
+| Stack editor | `/nodes/local/stacks/radarr/compose` | Radarr's compose tab |
+| Env tab + file | `/nodes/local/stacks/radarr/env?env=.env.prod` | Radarr's env tab with a specific env file selected |
+| Resources | `/nodes/local/resources` | Resources for the active node |
+| Security tab | `/nodes/local/security/images` | Security view on the Images tab |
+| Settings section | `/nodes/local/settings/nodes` | Settings on the Nodes section |
+| Fleet tab | `/nodes/local/fleet/snapshots` | Fleet on the Snapshots tab (desktop) |
+| Schedules filter | `/nodes/local/schedules?node=3` | Scheduled operations filtered to node `3` |
+
+Remote nodes use a slug derived from the node name and id (for example `/nodes/nas-box-42/dashboard`). The default local node keeps the short `local` slug.
+
+## Env tab URLs
+
+Sencho encodes env file selection in the `?env=` query on the Env tab only:
+
+- **Default file omitted:** when the stack's first env file is selected (usually `.env`), the URL is `/env` with no query parameter.
+- **Non-default files use basenames only:** `?env=.env.prod`, never a server filesystem path.
+- **Legacy bookmarks:** older links that used an absolute path in `?env=` still open the matching file by basename. Sencho normalizes the URL to basename form when the address bar updates.
+- **Unknown basenames:** if `?env=` does not match any file on the stack, Sencho opens the default env file.
+
+Compose and Files routes never carry `?env=`.
+
+## Node slugs
+
+- The primary local node is always `/nodes/local/...`.
+- Every other node uses `/nodes/<name-slug>-<id>/...`, which stays stable when you rename the node (the id suffix is what Sencho resolves).
+
+## Bookmarks and sharing
+
+Copy the address bar after you land on a screen. Anyone with access to that Sencho instance and the right role can open the same view from the link. Sencho waits for permissions and license metadata to finish loading before it redirects a link you are allowed to see, so a valid paid or admin-only URL is not rewritten while metadata is still in flight.
+
+If a link points at a stack that cannot be loaded (for example the node is offline), Sencho keeps the URL and shows a retryable error in the sidebar or on the phone stack detail screen instead of silently sending you home.
+
+## Back, Forward, and refresh
+
+- **Back / Forward** walk through the views you opened in order, including stack editor tabs where applicable.
+- **Refresh** reloads the current URL and restores the same node, view, stack, and tab when the underlying data is available.
+- **Unsaved edits** still block navigation. Sencho prompts before you leave a dirty compose or env buffer via Back, a sidebar link, or another stack.
+
+## Phone layout
+
+On a phone, Home and the stack list are distinct URLs even though both relate to stacks on desktop:
+
+- `/nodes/local/dashboard` opens the home dashboard.
+- `/nodes/local/stacks` opens the stack list.
+
+On desktop, opening the stack list at `/nodes/local/stacks` canonicalizes to `/nodes/local/dashboard` because the sidebar stack list is part of the home layout on a wide screen.
+
+Settings follows the same list/detail split: `/nodes/local/settings` is the section list; `/nodes/local/settings/<section>` opens a section directly.
+
+On a phone, `/nodes/local/stacks/<stack>/files` opens the compose editor instead. Sencho does not expose a separate file-browser URL on a phone.
+
+## What is not in the URL
+
+Some in-app state is intentionally not encoded:
+
+- **Stack Anatomy sub-tabs** (Anatomy, Activity, Dossier, Drift, Environment, and the rest) stay in memory only. Refresh returns you to the default Anatomy tab for that stack.
+
+## Tips
+
+- Use the global search palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) as today; navigation still updates the URL when you pick a page, node, or stack.
+- Deep links use stack directory names (the name you see in the sidebar), not internal compose filenames.
+- Opening Sencho at `/` sends you to the active node's dashboard once you are signed in.

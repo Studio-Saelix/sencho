@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Button } from './ui/button';
-import { Plus, Loader2, ChevronLeft } from 'lucide-react';
+import { Plus, Loader2, ChevronLeft, AlertCircle, RefreshCw } from 'lucide-react';
 import { UserProfileDropdown } from './UserProfileDropdown';
 import { NotificationPanel } from './NotificationPanel';
 import { TopBar } from './TopBar';
@@ -12,6 +12,8 @@ import { classifyFailedGate } from './EditorLayout/failed-gate-recovery';
 import { useEditorViewState } from './EditorLayout/hooks/useEditorViewState';
 import { useStackListState } from './EditorLayout/hooks/useStackListState';
 import { useViewNavigationState } from './EditorLayout/hooks/useViewNavigationState';
+import { useUrlSync } from './EditorLayout/hooks/useUrlSync';
+import { shouldClearPendingDetailStack } from './EditorLayout/mobile-pending-detail';
 import { useOverlayState } from './EditorLayout/hooks/useOverlayState';
 import { useStackActions, NODE_SWITCH_PENDING_TOKEN } from './EditorLayout/hooks/useStackActions';
 import { useTheme } from '@/hooks/use-theme';
@@ -136,9 +138,14 @@ export default function EditorLayout() {
     lastActionResult,
     clearActionRecords,
     dismissActionResult,
+    files,
+    filesNodeId,
+    stacksLoadStatus,
+    stacksLoadError,
+    stacksLoadNodeId,
   } = stackListState;
 
-  const { nodes, activeNode, setActiveNode, hasCapability } = useNodes();
+  const { nodes, activeNode, setActiveNode, hasCapability, isLoading: nodesLoading } = useNodes();
 
   // Mirror activeNode.id in a ref so async handlers (e.g. CreateStackDialog's
   // post-create handoff) can detect a node switch that happened mid-flight.
@@ -173,12 +180,14 @@ export default function EditorLayout() {
 
   const navState = useViewNavigationState({
     onNavigateToDashboard: () => resetEditorStateRef.current(),
+    hasFleetCapability: hasCapability('fleet'),
+    containerLabelsEnabled: hasCapability('container-label-inventory'),
   });
   const {
     activeView, setActiveView,
     settingsSection, setSettingsSection,
     securityTab, setSecurityTab,
-    fleetTab, setFleetTab,
+    fleetActiveTab, setFleetActiveTab,
     filterNodeId, setFilterNodeId,
     schedulePrefill,
     muteRulePrefill,
@@ -189,6 +198,7 @@ export default function EditorLayout() {
     handleNavigate,
     navItems,
     openMuteRulesWithPrefill,
+    reachCtx,
   } = navState;
 
   const {
@@ -305,15 +315,11 @@ export default function EditorLayout() {
   // `activeView`, so 'dashboard' still maps to HomeDashboard everywhere.
   const isMobile = useIsMobile();
   const [mobileView, setMobileView] = useState<MobileView>('list');
+  const [mobileSettingsSection, setMobileSettingsSection] = useState<SectionId | null>(null);
   // Optimistically flip to the detail surface the instant a row is tapped,
   // before loadFile's fetch resolves selectedFile; cleared once it settles.
   const [pendingDetailStack, setPendingDetailStack] = useState<string | null>(null);
   const [fleetUpdatesIntent, setFleetUpdatesIntent] = useState<{ tab: 'nodes' | 'changelog' } | null>(null);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (!isFileLoading && pendingDetailStack) setPendingDetailStack(null);
-  }, [isFileLoading, pendingDetailStack]);
 
   const handleFleetUpdatesIntentConsumed = useCallback(() => setFleetUpdatesIntent(null), []);
 
@@ -323,6 +329,62 @@ export default function EditorLayout() {
     mobileView,
     pendingDetailStack,
   });
+
+  const { retryFrozenRoute, urlHydratingStack, routeDetailError } = useUrlSync({
+    nodes,
+    nodesLoaded: !nodesLoading,
+    activeNode,
+    setActiveNode,
+    activeView,
+    setActiveView,
+    settingsSection,
+    setSettingsSection,
+    securityTab,
+    setSecurityTab,
+    fleetActiveTab,
+    setFleetActiveTab,
+    filterNodeId,
+    setFilterNodeId,
+    selectedFile,
+    files,
+    filesNodeId,
+    stacksLoadStatus,
+    stacksLoadNodeId,
+    isFileLoading,
+    activeTab,
+    setActiveTab,
+    selectedEnvFile,
+    envFiles,
+    loadFileForRoute: stackActions.loadFileForRoute,
+    changeEnvFile: stackActions.changeEnvFile,
+    applyEditorRouteState: stackActions.applyEditorRouteState,
+    refreshStacks,
+    reachCtx,
+    isMobile,
+    mobileSurface,
+    setMobileSurface: (surface) => {
+      if (surface === 'list') setMobileView('list');
+      else if (surface === 'content') setMobileView('content');
+    },
+    mobileSettingsSection,
+    setMobileSettingsSection,
+    setPendingDetailStack,
+    attemptPopstateNavigation: stackActions.attemptPopstateNavigation,
+  });
+
+  useEffect(() => {
+    if (shouldClearPendingDetailStack({
+      pendingDetailStack,
+      detailReady,
+      isFileLoading,
+      stacksLoadStatus,
+      urlHydratingStack,
+      routeDetailError,
+    })) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPendingDetailStack(null);
+    }
+  }, [pendingDetailStack, detailReady, isFileLoading, stacksLoadStatus, urlHydratingStack, routeDetailError]);
 
   // A phone shows one surface at a time, so every mobile navigation tears down
   // the current detail and switches surfaces, guarding a dirty editor first.
@@ -578,7 +640,7 @@ export default function EditorLayout() {
 
     if (pendingStack) {
       void stackActions.loadFile(pendingStack);
-    } else {
+    } else if (isRealSwitch) {
       setActiveView('dashboard');
     }
 
@@ -698,6 +760,9 @@ export default function EditorLayout() {
             filterChip,
             onOpenCreate: can('stack:create') ? openCreateDialog : undefined,
             openMuteRulesWithPrefill,
+            stacksLoadStatus,
+            stacksLoadError,
+            onRetryStacksLoad: () => { void retryFrozenRoute(); },
           }}
           activitySummary={activitySummary}
           onActivityAction={handleActivityAction}
@@ -785,8 +850,8 @@ export default function EditorLayout() {
             onFleetUpdatesIntentConsumed={handleFleetUpdatesIntentConsumed}
             securityTab={securityTab}
             onSecurityTabChange={setSecurityTab}
-            fleetTab={fleetTab}
-            onFleetTabConsumed={() => setFleetTab(null)}
+            fleetActiveTab={fleetActiveTab}
+            onFleetActiveTabChange={setFleetActiveTab}
             renderEditor={renderEditor}
             stackUpdates={stackUpdates}
           />
@@ -853,7 +918,13 @@ export default function EditorLayout() {
           case 'scheduled-ops':
             return <MobileSchedules headerActions={mobileMastheadActions} />;
           case 'settings':
-            return <MobileSettings headerActions={mobileMastheadActions} />;
+            return (
+              <MobileSettings
+                headerActions={mobileMastheadActions}
+                selectedSection={mobileSettingsSection}
+                onSelectedSectionChange={setMobileSettingsSection}
+              />
+            );
           case 'security':
             return (
               <Suspense
@@ -972,6 +1043,17 @@ export default function EditorLayout() {
                 detailReady ? (
                   <div className="flex-1 min-h-0 overflow-hidden flex flex-col">{renderEditor(mobileMastheadActions)}</div>
                 ) : (
+                  (stacksLoadStatus === 'error' && stacksLoadNodeId === activeNode?.id && pendingDetailStack)
+                  || (routeDetailError && pendingDetailStack)
+                ) ? (
+                  <MobileDetailError
+                    name={pendingDetailStack}
+                    message={routeDetailError ?? stacksLoadError ?? 'Could not load stacks for this node.'}
+                    onBack={goToMobileList}
+                    onRetry={() => { void retryFrozenRoute(); }}
+                    headerActions={mobileMastheadActions}
+                  />
+                ) : (
                   <MobileDetailLoading name={pendingDetailStack ?? ''} onBack={goToMobileList} headerActions={mobileMastheadActions} />
                 )
               )}
@@ -1033,6 +1115,48 @@ function MobileDetailLoading({ name, onBack, headerActions }: { name: string; on
       </div>
       <div className="flex flex-1 items-center justify-center text-stat-subtitle">
         <Loader2 className="h-5 w-5 animate-spin" strokeWidth={1.5} />
+      </div>
+    </div>
+  );
+}
+
+function MobileDetailError({
+  name,
+  message,
+  onBack,
+  onRetry,
+  headerActions,
+}: {
+  name: string;
+  message: string;
+  onBack: () => void;
+  onRetry: () => void;
+  headerActions?: ReactNode;
+}) {
+  return (
+    <div className="flex-1 min-h-0 flex flex-col">
+      <div className="flex items-center gap-1 border-b border-hairline px-3 py-2">
+        <button
+          type="button"
+          onClick={onBack}
+          aria-label="Back to stacks"
+          className="inline-flex min-h-11 items-center gap-1 pr-3 font-mono text-xs text-brand"
+        >
+          <ChevronLeft className="h-4 w-4" strokeWidth={1.6} />
+          Stacks
+        </button>
+        <span className="min-w-0 flex-1 truncate font-heading text-2xl text-stat-value">
+          {name.replace(/\.(ya?ml)$/, '')}
+        </span>
+        {headerActions ? <div className="shrink-0">{headerActions}</div> : null}
+      </div>
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center text-stat-subtitle">
+        <AlertCircle className="h-8 w-8 text-muted-foreground" aria-hidden />
+        <p className="text-sm">{message}</p>
+        <Button type="button" variant="outline" size="sm" onClick={onRetry}>
+          <RefreshCw className="w-4 h-4" />
+          Retry
+        </Button>
       </div>
     </div>
   );
