@@ -79,29 +79,39 @@
   "navigation": {
     "tabs": [
       {
-        "tab": "Documentation",
+        "tab": "Guides",
         "groups": [
           {
-            "group": "Getting Started",
+            "group": "Start here",
+            "root": "getting-started/introduction",
+            "directory": "card",
             "pages": [
-              "getting-started/introduction",
               "getting-started/quickstart",
-              "getting-started/configuration",
-              "getting-started/sso-quickstart"
+              "getting-started/configuration"
             ]
           },
           {
-            "group": "Features",
+            "group": "Product guide",
+            "root": "features/overview",
             "pages": [
-              "features/overview",
-              "features/appearance",
               {
-                "group": "Stacks",
+                "group": "Core workflow",
                 "expanded": true,
                 "pages": [
                   "features/stack-management",
                   "features/editor",
                   "features/stack-file-explorer",
+                  "features/resources",
+                  "features/dashboard",
+                  "features/app-store",
+                  "features/global-search",
+                  "features/deep-links",
+                  "features/appearance"
+                ]
+              },
+              {
+                "group": "Stack intelligence",
+                "pages": [
                   "features/stack-activity",
                   "features/stack-dossier",
                   "features/stack-drift",
@@ -115,34 +125,30 @@
                 ]
               },
               {
-                "group": "Deployment",
-                "expanded": true,
+                "group": "Deploy and automate",
                 "pages": [
                   "features/deploy-progress",
                   "features/atomic-deployments",
                   "features/health-gated-updates",
                   "features/deploy-enforcement",
                   "features/git-sources",
-                  "features/app-store",
-                  "features/blueprint-model"
+                  "features/blueprint-model",
+                  "features/scheduled-operations",
+                  "features/auto-update-policies",
+                  "features/auto-heal-policies",
+                  "features/webhooks"
                 ]
               },
-              "features/resources",
               {
-                "group": "Observability",
-                "expanded": true,
+                "group": "Observe and audit",
                 "pages": [
-              "features/dashboard",
-              "features/deep-links",
-              "features/global-search",
                   "features/global-observability",
                   "features/alerts-notifications",
                   "features/audit-log"
                 ]
               },
               {
-                "group": "Fleet",
-                "expanded": true,
+                "group": "Fleet management",
                 "pages": [
                   "features/multi-node",
                   "features/pilot-agent",
@@ -160,35 +166,26 @@
                 ]
               },
               {
-                "group": "Automation",
-                "expanded": true,
+                "group": "Security and access",
                 "pages": [
-                  "features/scheduled-operations",
-                  "features/auto-update-policies",
-                  "features/auto-heal-policies",
-                  "features/webhooks"
-                ]
-              },
-              {
-                "group": "Security & Identity",
-                "expanded": true,
-                "pages": [
-                  "features/two-factor-authentication",
-                  "features/rbac",
-                  "features/sso",
-                  "features/api-tokens",
                   "features/security",
                   "features/vulnerability-scanning",
                   "features/cve-suppressions",
-                  "features/private-registries"
+                  "features/private-registries",
+                  "features/two-factor-authentication",
+                  "features/rbac",
+                  "features/sso",
+                  "getting-started/sso-quickstart",
+                  "features/api-tokens"
                 ]
               }
             ]
           },
           {
             "group": "Operations",
+            "root": "operations/self-hosting",
+            "directory": "accordion",
             "pages": [
-              "operations/self-hosting",
               "operations/upgrade",
               "operations/backup",
               "operations/recovery",
@@ -201,8 +198,9 @@
           },
           {
             "group": "Reference",
+            "root": "reference/settings",
+            "directory": "accordion",
             "pages": [
-              "reference/settings",
               "features/licensing",
               "reference/security",
               "reference/contact"
