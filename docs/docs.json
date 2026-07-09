@@ -8,8 +8,8 @@
     "dark": "#00BEC7"
   },
   "logo": {
-    "light": "/images/logo/logo-light.png",
-    "dark": "/images/logo/logo-dark.png",
+    "light": "/images/logo/sencho-logo-light.svg",
+    "dark": "/images/logo/sencho-logo-dark.svg",
     "href": "https://sencho.io"
   },
   "favicon": "/images/logo/favicon.ico",
