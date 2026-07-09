@@ -58,7 +58,14 @@ export function TopBar({
 
             {/* NAV ZONE: Navigation (hidden on mobile) */}
             <TooltipProvider delayDuration={300} disableHoverableContent>
-                <nav aria-label="Primary" className="hidden md:flex self-stretch items-stretch">
+                <nav
+                    aria-label="Primary"
+                    className={cn(
+                        'hidden md:flex self-stretch items-stretch',
+                        showLabels && 'min-w-0 flex-1 overflow-x-auto [scrollbar-width:none]',
+                        !showLabels && centered && 'shrink-0',
+                    )}
+                >
                     {navItems.map(({ value, label, icon: Icon }) => {
                         const isActive = activeView === value;
                         const button = (
@@ -67,7 +74,7 @@ export function TopBar({
                                 aria-label={label}
                                 aria-current={isActive ? 'page' : undefined}
                                 className={cn(
-                                    'relative inline-flex h-full items-center gap-2 px-4',
+                                    'relative inline-flex h-full shrink-0 items-center gap-2 px-4',
                                     'font-mono text-[10px] uppercase tracking-[0.18em] transition-colors',
                                     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50',
                                     isActive ? 'text-foreground' : 'text-muted-foreground hover:text-foreground',
@@ -98,7 +105,12 @@ export function TopBar({
             </TooltipProvider>
 
             {/* RIGHT ZONE: Utilities + identity pin */}
-            <div className="flex flex-1 min-w-0 items-center justify-end gap-2">
+            <div
+                className={cn(
+                    'flex items-center justify-end gap-2',
+                    centered ? 'flex-1 min-w-0' : showLabels ? 'relative z-10 shrink-0' : 'flex-1 min-w-0',
+                )}
+            >
                 {search}
                 {themeSwitch}
                 {notifications}
