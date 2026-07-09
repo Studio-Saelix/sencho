@@ -7,7 +7,6 @@ import { AuthCanvas } from '@/components/auth/AuthCanvas';
 import { AuthStepHeader } from '@/components/auth/AuthStepHeader';
 import { ErrorRail } from '@/components/auth/ErrorRail';
 import { EnvironmentChecks, type EnvironmentReport } from '@/components/settings/EnvironmentChecks';
-import { ComposeDiscoveryBanner } from '@/components/settings/ComposeDiscoveryBanner';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 
@@ -77,9 +76,6 @@ export function Setup({ onComplete, className, ...props }: SetupProps & React.Co
         : strength
           ? 'text-destructive'
           : '';
-
-  const composeDirFromChecks =
-    envReport?.checks.find((c) => c.id === 'compose_dir')?.detail;
 
   const handleEnterSencho = () => {
     const adoptCount = envReport?.discovery?.adoptCandidateCount ?? 0;
@@ -156,18 +152,6 @@ export function Setup({ onComplete, className, ...props }: SetupProps & React.Co
               kicker="SENCHO · ENVIRONMENT"
               hero="Preflight"
               caption="A quick check that this host can run Docker deploys. Warnings won't stop you; each one carries a fix."
-            />
-            <ComposeDiscoveryBanner
-              discovery={envReport?.discovery}
-              composeDir={composeDirFromChecks}
-              isLoading={envLoading}
-              onReview={() => {
-                try {
-                  sessionStorage.setItem(POST_SETUP_KEY, JSON.stringify({ openAdopt: true }));
-                } catch {
-                  // sessionStorage unavailable
-                }
-              }}
             />
             <EnvironmentChecks report={envReport} isLoading={envLoading} onRerun={loadEnvironment} />
           </div>

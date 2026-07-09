@@ -56,7 +56,10 @@ describe('Setup preflight', () => {
     });
 
     expect(apiFetchMock).not.toHaveBeenCalledWith('/stacks/discovery', expect.anything());
-    expect(screen.getByText(/found/i)).toBeTruthy();
+    expect(screen.getByText('Compose discovery')).toBeTruthy();
+    expect(screen.getByText(/Found 1 stack and 2 files to adopt in \/opt\/compose/i)).toBeTruthy();
+    expect(screen.getByText(/Enter Sencho to review and adopt/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /review discovered files/i })).toBeNull();
     expect(screen.getByText('ok')).toBeTruthy();
   });
 

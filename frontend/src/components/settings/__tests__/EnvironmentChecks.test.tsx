@@ -67,4 +67,43 @@ describe('EnvironmentChecks', () => {
     );
     expect(screen.getByText('Checks could not be run. Try again.')).toBeTruthy();
   });
+
+  it('appends a compose discovery row when discovery has counts', () => {
+    render(
+      <EnvironmentChecks
+        report={{
+          ...ENV_REPORT,
+          discovery: {
+            composeDir: '/opt/compose',
+            stackCount: 0,
+            adoptCandidateCount: 1,
+            adoptCandidatesTruncated: false,
+          },
+        }}
+        isLoading={false}
+        onRerun={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Compose discovery')).toBeTruthy();
+    expect(screen.getByText(/Found 1 file to adopt in \/opt\/compose/i)).toBeTruthy();
+    expect(screen.getByText(/Enter Sencho to review and adopt/i)).toBeTruthy();
+  });
+
+  it('omits the discovery row when uncontrolled even if the report includes discovery', async () => {
+    vi.mocked(apiFetch).mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...ENV_REPORT,
+        discovery: {
+          composeDir: '/opt/compose',
+          stackCount: 0,
+          adoptCandidateCount: 1,
+          adoptCandidatesTruncated: false,
+        },
+      }),
+    } as Response);
+    render(<EnvironmentChecks />);
+    await waitFor(() => expect(screen.getByText('ok')).toBeTruthy());
+    expect(screen.queryByText('Compose discovery')).toBeNull();
+  });
 });

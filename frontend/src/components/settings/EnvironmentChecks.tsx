@@ -12,7 +12,15 @@ import { SettingsActions, SettingsSecondaryButton } from './SettingsActions';
 // reads checks, so `remediation` stays optional here even though the backend
 // models it as required on every warn / fail row.
 type CheckStatus = 'pass' | 'warn' | 'fail';
-type CheckId = 'docker_socket' | 'docker_compose' | 'compose_dir' | 'self_stack_location' | 'path_mapping' | 'tls' | 'disk_space';
+type CheckId =
+    | 'docker_socket'
+    | 'docker_compose'
+    | 'compose_dir'
+    | 'self_stack_location'
+    | 'path_mapping'
+    | 'tls'
+    | 'disk_space'
+    | 'compose_discovery';
 
 interface EnvironmentCheck {
     id: CheckId;
@@ -29,6 +37,35 @@ interface EnvironmentReport {
 }
 
 export type { EnvironmentReport, EnvironmentCheck };
+
+/** Frontend-only row derived from optional discovery on the environment report. */
+function discoveryCheckRow(
+    discovery: NonNullable<EnvironmentReport['discovery']>,
+): EnvironmentCheck | null {
+    const { stackCount, adoptCandidateCount, adoptCandidatesTruncated, composeDir } = discovery;
+    if (stackCount + adoptCandidateCount === 0) return null;
+
+    const stackPart =
+        stackCount > 0
+            ? `${stackCount} stack${stackCount === 1 ? '' : 's'}`
+            : null;
+    const adoptPart =
+        adoptCandidateCount > 0
+            ? `${adoptCandidateCount}${adoptCandidatesTruncated ? '+' : ''} file${adoptCandidateCount === 1 && !adoptCandidatesTruncated ? '' : 's'} to adopt`
+            : null;
+    const summary = [stackPart, adoptPart].filter(Boolean).join(' and ');
+
+    return {
+        id: 'compose_discovery',
+        label: 'Compose discovery',
+        status: 'pass',
+        detail: `Found ${summary} in ${composeDir}.`,
+        remediation:
+            adoptCandidateCount > 0
+                ? 'Enter Sencho to review and adopt them into their own stack folders.'
+                : undefined,
+    };
+}
 
 type EnvironmentChecksControlledProps = {
     report: EnvironmentReport | null;
@@ -141,6 +178,15 @@ export function EnvironmentChecks(props: EnvironmentChecksProps) {
 
     const report = isControlled ? props.report : internalReport;
     const isLoading = isControlled ? props.isLoading : internalLoading;
+    // Discovery is a Setup-only affordance (post-enter adopt handoff). Recovery
+    // keeps the host-readiness checklist without a compose-discovery row.
+    const discoveryRow =
+        isControlled && report?.discovery ? discoveryCheckRow(report.discovery) : null;
+    const rows = report
+        ? discoveryRow
+            ? [...report.checks, discoveryRow]
+            : report.checks
+        : [];
 
     return (
         <div className={cn('flex flex-col gap-3', className)}>
@@ -148,7 +194,7 @@ export function EnvironmentChecks(props: EnvironmentChecksProps) {
                 <ChecksSkeleton />
             ) : report ? (
                 <div className="flex flex-col gap-2">
-                    {report.checks.map(check => <CheckRow key={check.id} check={check} />)}
+                    {rows.map(check => <CheckRow key={check.id} check={check} />)}
                 </div>
             ) : (
                 <p className="text-xs text-stat-subtitle">Checks could not be run. Try again.</p>
