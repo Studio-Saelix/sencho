@@ -23,6 +23,17 @@ Sencho encodes the active node, the view you are on, and the deep state that vie
 
 Remote nodes use a slug derived from the node name and id (for example `/nodes/nas-box-42/dashboard`). The default local node keeps the short `local` slug.
 
+## Env tab URLs
+
+Sencho encodes env file selection in the `?env=` query on the Env tab only:
+
+- **Default file omitted:** when the stack's first env file is selected (usually `.env`), the URL is `/env` with no query parameter.
+- **Non-default files use basenames only:** `?env=.env.prod`, never a server filesystem path.
+- **Legacy bookmarks:** older links that used an absolute path in `?env=` still open the matching file by basename. Sencho normalizes the URL to basename form when the address bar updates.
+- **Unknown basenames:** if `?env=` does not match any file on the stack, Sencho opens the default env file.
+
+Compose and Files routes never carry `?env=`.
+
 ## Node slugs
 
 - The primary local node is always `/nodes/local/...`.
@@ -47,7 +58,17 @@ On a phone, Home and the stack list are distinct URLs even though both relate to
 - `/nodes/local/dashboard` opens the home dashboard.
 - `/nodes/local/stacks` opens the stack list.
 
+On desktop, opening the stack list at `/nodes/local/stacks` canonicalizes to `/nodes/local/dashboard` because the sidebar stack list is part of the home layout on a wide screen.
+
 Settings follows the same list/detail split: `/nodes/local/settings` is the section list; `/nodes/local/settings/<section>` opens a section directly.
+
+On a phone, `/nodes/local/stacks/<stack>/files` opens the compose editor instead. Sencho does not expose a separate file-browser URL on a phone.
+
+## What is not in the URL
+
+Some in-app state is intentionally not encoded:
+
+- **Stack Anatomy sub-tabs** (Anatomy, Activity, Dossier, Drift, Environment, and the rest) stay in memory only. Refresh returns you to the default Anatomy tab for that stack.
 
 ## Tips
 

@@ -97,6 +97,79 @@ describe('useUrlSync', () => {
     expect(window.location.pathname).toBe('/nodes/local/security');
   });
 
+  it('does not write local node URL while hydrating a remote node deep link', () => {
+    const remote = makeNode({ id: 2, name: 'nas', type: 'remote', is_default: false });
+    const local = makeNode();
+    const setActiveNode = vi.fn();
+    const pushSpy = vi.spyOn(window.history, 'pushState');
+
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/nas-2/fleet/snapshots');
+
+    act(() => {
+      renderHook(
+        (props) => useUrlSync(props),
+        {
+          initialProps: makeOpts({
+            nodes: [local, remote],
+            activeNode: local,
+            activeView: 'fleet',
+            fleetActiveTab: 'snapshots',
+            setActiveNode,
+          }),
+        },
+      );
+    });
+
+    const badPush = pushSpy.mock.calls.find((call) => String(call[2]).includes('/nodes/local/'));
+    expect(badPush).toBeUndefined();
+    expect(setActiveNode).toHaveBeenCalledWith(remote);
+
+    pushSpy.mockRestore();
+  });
+
+  it('restores non-default env selection after stack load populates file list', async () => {
+    const prodPath = '/compose/radarr/.env.prod';
+    const fileList = ['/compose/radarr/.env', prodPath];
+    const loadFileForRoute = vi.fn().mockResolvedValue(true);
+    const changeEnvFile = vi.fn().mockResolvedValue(undefined);
+
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/env?env=.env.prod');
+
+    const { rerender } = renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          activeView: 'editor',
+          files: ['radarr'],
+          selectedFile: null,
+          envFiles: [],
+          loadFileForRoute,
+          changeEnvFile,
+        }),
+      },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(loadFileForRoute).toHaveBeenCalledWith('radarr');
+
+    rerender(makeOpts({
+      activeView: 'editor',
+      files: ['radarr'],
+      selectedFile: 'radarr',
+      envFiles: fileList,
+      loadFileForRoute,
+      changeEnvFile,
+    }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(changeEnvFile).toHaveBeenCalledWith(prodPath);
+  });
+
   it('pushState increments senchoIdx on user navigation', () => {
     const pushSpy = vi.spyOn(window.history, 'pushState');
 

@@ -9,6 +9,7 @@ import type { OverlayState } from './useOverlayState';
 import type { Node } from '@/context/NodeContext';
 import type { RunWithLogParams } from '@/context/DeployFeedbackContext';
 import { parsePath } from '@/lib/router/senchoRoute';
+import { resolveEnvFilePath } from '@/lib/router/envRoute';
 import type { EditorTab } from '@/lib/router/routeTypes';
 import type { StackAction, RecoverableAction, FailureClassification } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
@@ -1249,9 +1250,11 @@ export function useStackActions(options: UseStackActionsOptions) {
       parsed.editorTab === 'env'
       && editorState.activeTab === 'env'
       && parsed.envFile
-      && parsed.envFile !== editorState.selectedEnvFile
     ) {
-      return isEnvDirty();
+      const resolved = resolveEnvFilePath(parsed.envFile, editorState.envFiles);
+      if (resolved && resolved !== editorState.selectedEnvFile) {
+        return isEnvDirty();
+      }
     }
     return false;
   };
