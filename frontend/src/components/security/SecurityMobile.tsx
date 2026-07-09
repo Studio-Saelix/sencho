@@ -6,10 +6,11 @@ import type { ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Kicker, MobileSubTabs, MobileChipRow } from '@/components/mobile/mobile-ui';
+import { Checkbox } from '@/components/ui/checkbox';
 import { getSeverityKey, SEVERITY_DOT_CLASSES, type ImageFilterValue } from '@/lib/severityStyles';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import type { SecurityTab } from '@/lib/events';
-import type { ScanSummary, SecurityOverview, ScanDetailTab } from '@/types/security';
+import type { ScanSummary, SecurityOverview, ScanDetailTab, VulnerabilityScan } from '@/types/security';
 
 export interface SecurityMobileTab {
   value: SecurityTab;
@@ -147,6 +148,61 @@ export function ImageScanRow({ summary, onInspect }: {
       </span>
       <ChevronRight className="h-3 w-3 shrink-0 text-stat-icon" strokeWidth={1.5} aria-hidden />
     </button>
+  );
+}
+
+/** One scan-history row in the mobile History list: checkbox (44px touch target
+ *  for compare selection), severity dot, truncated mono ref over a freshness meta
+ *  line, trailing count tags (total vulns + fixable, max 2), and a chevron. */
+export function HistoryScanRow({ scan, selected, onToggle, onInspect }: {
+  scan: VulnerabilityScan;
+  selected: boolean;
+  onToggle: () => void;
+  onInspect: () => void;
+}) {
+  // VulnerabilityScan has the same highest_severity / secret_count /
+  // misconfig_count fields as ScanSummary but a different shape, so the
+  // classification is inlined rather than cast through getSeverityKey.
+  const hasNonVuln = scan.secret_count > 0 || scan.misconfig_count > 0;
+  const severityKey = scan.highest_severity ?? (hasNonVuln ? 'FINDINGS' : 'CLEAN');
+
+  return (
+    <div className="flex min-h-11 items-center gap-[11px] border-b border-hairline py-[11px] last:border-b-0">
+      <Checkbox
+        checked={selected}
+        onCheckedChange={onToggle}
+        aria-label="Select scan to compare"
+        className="h-11 w-11"
+      />
+      <button
+        type="button"
+        onClick={onInspect}
+        className="flex min-h-11 flex-1 items-center gap-[11px] text-left min-w-0"
+      >
+        <span
+          className={cn('h-[7px] w-[7px] shrink-0 rounded-full', SEVERITY_DOT_CLASSES[severityKey])}
+          aria-hidden
+        />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate font-mono text-[13px] text-stat-value">
+            {scan.image_ref}
+          </span>
+          <span className="mt-px block font-mono text-[10px] text-stat-icon">
+            {scan.triggered_by} · scanned {formatTimeAgo(scan.scanned_at)}
+          </span>
+        </span>
+        <span className="flex shrink-0 items-center gap-1">
+          {scan.total_vulnerabilities > 0 && (
+            <CountTag tone="destructive">{scan.total_vulnerabilities}</CountTag>
+          )}
+          {scan.fixable_count > 0 && (
+            <CountTag tone="success">{scan.fixable_count} fixable</CountTag>
+          )}
+          {severityKey === 'CLEAN' && <CountTag tone="success">clean</CountTag>}
+        </span>
+        <ChevronRight className="h-3 w-3 shrink-0 text-stat-icon" strokeWidth={1.5} aria-hidden />
+      </button>
+    </div>
   );
 }
 

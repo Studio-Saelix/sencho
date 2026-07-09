@@ -66,6 +66,19 @@ function listResponse(items: VulnerabilityScan[], total?: number): Response {
   return { ok: true, status: 200, json: async () => ({ items, total: total ?? items.length }) } as unknown as Response;
 }
 
+function installMatchMedia(matches: boolean) {
+  window.matchMedia = vi.fn().mockReturnValue({
+    matches,
+    media: '',
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  }) as unknown as typeof window.matchMedia;
+}
+
 beforeEach(() => {
   mockedFetch.mockReset();
   compareProps.length = 0;
@@ -147,5 +160,87 @@ describe('HistoryTab', () => {
     render(<HistoryTab onInspect={vi.fn()} />);
     await waitFor(() => expect(screen.getByText(/Couldn't load scan history/)).toBeInTheDocument());
     expect(screen.queryByText(/No completed scans yet/)).not.toBeInTheDocument();
+  });
+});
+
+describe('HistoryTab (mobile)', () => {
+  const original = window.matchMedia;
+  afterEach(() => { window.matchMedia = original; vi.clearAllMocks(); });
+
+  it('renders mobile rows instead of a table', async () => {
+    installMatchMedia(true);
+    mockedFetch.mockResolvedValue(listResponse([scan({ image_ref: 'alpine:3.19' })]));
+    render(<HistoryTab onInspect={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText('alpine:3.19')).toBeInTheDocument());
+    // No table element, no column headers.
+    expect(document.querySelector('table')).toBeNull();
+    expect(screen.queryByText('Trigger')).toBeNull();
+  });
+
+  it('opens the scan sheet from a mobile row tap', async () => {
+    installMatchMedia(true);
+    const onInspect = vi.fn();
+    mockedFetch.mockResolvedValue(listResponse([scan({ id: 42, image_ref: 'nginx:1' })]));
+    render(<HistoryTab onInspect={onInspect} />);
+    await waitFor(() => expect(screen.getByText('nginx:1')).toBeInTheDocument());
+    // Click the row's content button (the inspect target), not the checkbox.
+    const rowBtn = screen.getByRole('button', { name: /nginx:1/ });
+    await userEvent.click(rowBtn);
+    expect(onInspect).toHaveBeenCalledWith(42, 'vulns');
+  });
+
+  it('selects two scans via mobile checkboxes and opens compare', async () => {
+    installMatchMedia(true);
+    const older = scan({ id: 10, image_ref: 'a:1', scanned_at: 1000 });
+    const newer = scan({ id: 20, image_ref: 'b:1', scanned_at: 2000 });
+    mockedFetch.mockResolvedValue(listResponse([newer, older]));
+    render(<HistoryTab onInspect={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText('a:1')).toBeInTheDocument());
+    const checks = screen.getAllByLabelText('Select scan to compare');
+    await userEvent.click(checks[0]);
+    await userEvent.click(checks[1]);
+    await userEvent.click(screen.getByRole('button', { name: /Compare/ }));
+    const last = compareProps[compareProps.length - 1];
+    expect(last.baselineScanId).toBe(10);
+    expect(last.currentScanId).toBe(20);
+  });
+
+  it('does not show clean for a secret-only scan', async () => {
+    installMatchMedia(true);
+    mockedFetch.mockResolvedValue(listResponse([scan({
+      image_ref: 'secret-img:1',
+      total_vulnerabilities: 0,
+      secret_count: 2,
+      misconfig_count: 0,
+      highest_severity: null,
+    })]));
+    render(<HistoryTab onInspect={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText('secret-img:1')).toBeInTheDocument());
+    expect(screen.queryByText('clean')).not.toBeInTheDocument();
+  });
+
+  it('shows clean tag for a truly clean scan', async () => {
+    installMatchMedia(true);
+    mockedFetch.mockResolvedValue(listResponse([scan({
+      image_ref: 'clean-img:1',
+      total_vulnerabilities: 0,
+      fixable_count: 0,
+      secret_count: 0,
+      misconfig_count: 0,
+      highest_severity: null,
+    })]));
+    render(<HistoryTab onInspect={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText('clean-img:1')).toBeInTheDocument());
+    expect(screen.getByText('clean')).toBeInTheDocument();
+  });
+
+  it('renders checkbox with 44px touch target', async () => {
+    installMatchMedia(true);
+    mockedFetch.mockResolvedValue(listResponse([scan({ image_ref: 'nginx:1' })]));
+    render(<HistoryTab onInspect={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText('nginx:1')).toBeInTheDocument());
+    const checkbox = screen.getByLabelText('Select scan to compare');
+    expect(checkbox.className).toContain('h-11');
+    expect(checkbox.className).toContain('w-11');
   });
 });
