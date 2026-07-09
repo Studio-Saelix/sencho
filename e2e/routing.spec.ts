@@ -99,7 +99,7 @@ test.describe('URL routing', () => {
     await expect(page).toHaveURL(new RegExp(`/nodes/local/stacks/`));
     await expect(page).not.toHaveURL(/\/compose$/);
 
-    await page.getByRole('button', { name: 'edit', exact: true }).click();
+    await page.getByTestId('anatomy-edit-compose-btn').click();
     await expect(page).toHaveURL(/\/compose/);
     const envTab = page.getByRole('tab', { name: '.env' });
     test.skip(!(await envTab.isEnabled()), 'Stack has no .env file');

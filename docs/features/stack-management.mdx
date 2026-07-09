@@ -251,10 +251,10 @@ The right column of the stack view is a tabbed panel. Tabs appear only when the 
   <img src="/images/stack-view/anatomy-panel.png" alt="Anatomy panel showing all eight tabs: Anatomy, Activity, Dossier, Drift, Environment, Networking, Doctor, and Storage, with the Networking tab active" />
 </Frame>
 
-The **Files** and **Edit** buttons sit to the right of the tab row.
+The **Files** and **Edit compose** buttons sit to the right of the tab row.
 
 - **Files**: opens the in-stack file explorer; see [Stack File Explorer](/features/stack-file-explorer).
-- **Edit**: slides the Monaco editor over the panel for inline compose and env edits.
+- **Edit compose**: opens an editable Monaco workspace for compose and env edits.
 
 ### Anatomy
 
@@ -327,7 +327,7 @@ Each mount row shows its type (bind, named, anonymous, tmpfs, socket), permissio
 
 ### Editing compose.yaml
 
-Click **Edit** in the panel header to open the Monaco editor. Tabs at the top switch between `compose.yaml`, `.env` (when one exists), and **Files** (the stack directory tree). The save split-button reads **Save & Deploy** by default; its dropdown also offers **Save Only** and **Discard Changes**. Close the editor to return to the anatomy view; unsaved changes are kept in the buffer until you discard them. See [Compose Editor](/features/editor) for autocomplete, schema validation, and Git Source workflow.
+Click **Edit compose** in the panel header to open an editable Monaco workspace. Tabs at the top switch between `compose.yaml`, `.env` (when one exists), and **Files** (the stack directory tree). The save split-button reads **Save & Deploy** by default; its dropdown also offers **Save Only** and **Discard Changes**. Close the editor to return to the anatomy view; closing discards any unsaved compose and env edits. See [Compose Editor](/features/editor) for autocomplete, schema validation, and Git Source workflow.
 
 ## Deploying a stack
 

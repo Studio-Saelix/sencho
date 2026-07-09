@@ -91,6 +91,32 @@ function panel(applying: boolean, onApplyUpdate: () => void = vi.fn(), stackName
   );
 }
 
+describe('StackAnatomyPanel edit affordance', () => {
+  it('renders Edit compose with a stable test id when canEdit is true', () => {
+    render(panel(false));
+    expect(screen.getByTestId('anatomy-edit-compose-btn')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /edit compose/i })).toBeInTheDocument();
+  });
+
+  it('hides Edit compose when canEdit is false', () => {
+    render(
+      <StackAnatomyPanel
+        stackName="web"
+        content={COMPOSE}
+        envContent=""
+        selectedEnvFile=".env"
+        gitSourcePending={false}
+        onEditCompose={vi.fn()}
+        onOpenGitSource={vi.fn()}
+        onApplyUpdate={vi.fn()}
+        canEdit={false}
+        applying={false}
+      />,
+    );
+    expect(screen.queryByTestId('anatomy-edit-compose-btn')).not.toBeInTheDocument();
+  });
+});
+
 describe('StackAnatomyPanel update banner', () => {
   it('shows the apply button and fires onApplyUpdate when clicked', async () => {
     const onApply = vi.fn();

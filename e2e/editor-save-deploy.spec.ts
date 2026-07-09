@@ -57,11 +57,10 @@ test.describe('EditorView save-and-deploy', () => {
       await route.continue();
     });
 
-    // The editor surface has two distinct edit affordances. First click swaps
-    // the right panel from Anatomy to the editor tabs (Monaco mounts read-only);
-    // second click flips Monaco into edit mode and reveals Save & Deploy.
-    await page.getByRole('button', { name: /^edit$/ }).click();
-    await page.getByRole('button', { name: /^Edit$/ }).click();
+    // One click on Anatomy "Edit compose" opens an immediately editable Monaco
+    // workspace with Save & Deploy visible (no second Edit gate).
+    await page.getByTestId('anatomy-edit-compose-btn').click();
+    await expect(page.getByRole('button', { name: 'Save & Deploy', exact: true })).toBeVisible({ timeout: 5_000 });
 
     // No need to modify Monaco content: saveFile fires the PUT regardless of
     // dirty state. The route interceptor forces it to 500; the gated handler

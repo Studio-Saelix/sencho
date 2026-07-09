@@ -5,7 +5,7 @@ import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
 import type { useViewNavigationState } from './useViewNavigationState';
-import type { OverlayState } from './useOverlayState';
+import type { OverlayState, LoadFileOptions } from './useOverlayState';
 import type { Node } from '@/context/NodeContext';
 import type { RunWithLogParams } from '@/context/DeployFeedbackContext';
 import { parsePath } from '@/lib/router/senchoRoute';
@@ -129,6 +129,11 @@ interface UseStackActionsOptions {
   // the pre-update readiness dialog. Defaults to false: without the
   // capability, updates run directly with no dialog.
   hasUpdateGuard?: boolean;
+  // Target-aware stack:edit check. Pass the loaded stack identity (folder name
+  // or compose path); callers strip extensions when comparing to RBAC stack
+  // names. Evaluated against the load target so post-load auto-edit is not
+  // gated by a stale previously-selected stack.
+  canEditStack: (stackNameOrFilename: string) => boolean;
   /** Fail-closed: true only when active node meta explicitly lists stack-down-remove-volumes. */
   canOfferVolumeRemoval?: boolean;
 }
@@ -247,6 +252,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     getLastDeployOutputLine,
     diffPreviewEnabled,
     hasUpdateGuard = false,
+    canEditStack,
     canOfferVolumeRemoval = false,
   } = options;
 
@@ -400,22 +406,24 @@ export function useStackActions(options: UseStackActionsOptions) {
   // loadFile and loadFileOnNode call each other (loadFileOnNode -> loadFile, navigateToNotification
   // -> loadFileOnNode or loadFile). A ref breaks the mutual-recursion hoisting constraint without
   // needing to hoist both functions or restructure the call graph.
-  const loadFileRef = useRef<(filename: string) => Promise<void>>(async () => {});
+  const loadFileRef = useRef<(filename: string, options?: LoadFileOptions) => Promise<void>>(async () => {});
 
-  const loadFileOnNode = async (node: Node, filename: string) => {
+  const loadFileOnNode = async (node: Node, filename: string, options?: LoadFileOptions) => {
     if (!filename) return;
     if (
+      !options?.skipUnsavedCheck &&
       stackListState.selectedFile &&
       filename !== stackListState.selectedFile &&
       hasUnsavedChanges()
     ) {
       overlayState.setPendingUnsavedNode(node);
       overlayState.setPendingUnsavedLoad(filename);
+      overlayState.setPendingLoadOptions(options ?? null);
       return;
     }
     setActiveNode(node);
     stackListState.setSearchQuery('');
-    await loadFileRef.current(filename);
+    await loadFileRef.current(filename, options);
   };
 
   const clearEnvState = () => {
@@ -499,14 +507,16 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setIsEditing(false);
   };
 
-  const loadFileCore = async (filename: string): Promise<RouteStackLoadResult> => {
+  const loadFileCore = async (filename: string, options?: LoadFileOptions): Promise<RouteStackLoadResult> => {
     if (!filename) return { ok: false };
     if (
+      !options?.skipUnsavedCheck &&
       stackListState.selectedFile &&
       filename !== stackListState.selectedFile &&
       hasUnsavedChanges()
     ) {
       overlayState.setPendingUnsavedLoad(filename);
+      overlayState.setPendingLoadOptions(options ?? null);
       return { ok: false };
     }
     loadFileAbortRef.current?.abort();
@@ -534,6 +544,13 @@ export function useStackActions(options: UseStackActionsOptions) {
       const envFiles = await loadEnvState(filename, signal);
       await loadContainerState(filename, signal);
       await loadBackupState(filename, signal);
+      // Post-load auto-edit evaluates permission for the loaded target, not
+      // the previously selected stack (selectedFile was just updated above).
+      if (options?.startInComposeEdit && canEditStack(filename)) {
+        editorState.setEditingCompose(true);
+        editorState.setActiveTab('compose');
+        editorState.setIsEditing(true);
+      }
       return { ok: true, envFiles };
     } catch (error) {
       if (isAbortError(error) || signal.aborted) return { ok: false };
@@ -555,8 +572,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const loadFile = async (filename: string) => {
-    await loadFileCore(filename);
+  const loadFile = async (filename: string, options?: LoadFileOptions) => {
+    await loadFileCore(filename, options);
   };
 
   const loadFileForRoute = async (filename: string): Promise<RouteStackLoadResult> => {
@@ -651,7 +668,6 @@ export function useStackActions(options: UseStackActionsOptions) {
           editorState.setOriginalEnvContent(currentRemoteContent);
           editorState.setEnvEtag(response.headers.get('etag'));
         }
-        editorState.setIsEditing(false);
         toast.success('Reloaded the latest version of the file.');
         return false;
       }
@@ -666,7 +682,6 @@ export function useStackActions(options: UseStackActionsOptions) {
         editorState.setOriginalEnvContent(editorState.envContent);
         if (newEtag) editorState.setEnvEtag(newEtag);
       }
-      editorState.setIsEditing(false);
       toast.success('File saved successfully!');
       return true;
     } catch (error) {
@@ -984,11 +999,29 @@ export function useStackActions(options: UseStackActionsOptions) {
     } else {
       editorState.setEnvContent(editorState.originalEnvContent);
     }
-    editorState.setIsEditing(false);
   };
 
-  const enterEditMode = () => {
+  // Revert both compose and env buffers. Used by closeComposeEditor so a dirty
+  // buffer on a non-active tab is not left hidden behind the Anatomy panel.
+  // Keep discardChanges for the Save-dropdown current-tab discard.
+  const discardAllChanges = () => {
+    editorState.setContent(editorState.originalContent);
+    editorState.setEnvContent(editorState.originalEnvContent);
+  };
+
+  const openComposeEditor = () => {
+    const selected = stackListState.selectedFile;
+    if (!selected || !canEditStack(selected)) return;
+    editorState.setEditingCompose(true);
+    editorState.setActiveTab('compose');
     editorState.setIsEditing(true);
+  };
+
+  const closeComposeEditor = () => {
+    if (hasUnsavedChanges()) {
+      discardAllChanges();
+    }
+    editorState.setEditingCompose(false);
   };
 
   const scanStackConfig = async () => {
@@ -1359,6 +1392,7 @@ export function useStackActions(options: UseStackActionsOptions) {
   const cancelPendingUnsavedLoad = () => {
     const cancel = overlayState.pendingLeaveAction?.onCancel;
     overlayState.setPendingUnsavedLoad(null);
+    overlayState.setPendingLoadOptions(null);
     overlayState.setPendingUnsavedNode(null);
     overlayState.setPendingLeaveAction(null);
     cancel?.();
@@ -1368,9 +1402,11 @@ export function useStackActions(options: UseStackActionsOptions) {
     const leave = overlayState.pendingLeaveAction;
     const target = overlayState.pendingUnsavedLoad;
     const targetNode = overlayState.pendingUnsavedNode;
+    const loadOptions = overlayState.pendingLoadOptions;
     editorState.setContent(editorState.originalContent);
     editorState.setEnvContent(editorState.originalEnvContent);
     overlayState.setPendingUnsavedLoad(null);
+    overlayState.setPendingLoadOptions(null);
     overlayState.setPendingUnsavedNode(null);
     overlayState.setPendingLeaveAction(null);
     // A stashed "leave editor" navigation takes precedence; it already knows
@@ -1384,8 +1420,12 @@ export function useStackActions(options: UseStackActionsOptions) {
       return;
     }
     if (target) {
-      if (targetNode) void loadFileOnNode(targetNode, target);
-      else void loadFile(target);
+      const resumeOptions: LoadFileOptions = {
+        ...(loadOptions ?? {}),
+        skipUnsavedCheck: true,
+      };
+      if (targetNode) void loadFileOnNode(targetNode, target, resumeOptions);
+      else void loadFile(target, resumeOptions);
     }
   };
 
@@ -1550,7 +1590,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     handleSaveAndDeploy,
     rollbackStack,
     discardChanges,
-    enterEditMode,
+    openComposeEditor,
+    closeComposeEditor,
     scanStackConfig,
     runDeploy,
     deployStack,

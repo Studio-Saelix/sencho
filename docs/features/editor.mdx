@@ -3,7 +3,7 @@ title: Editor
 description: The per-stack cockpit. Run, restart, update, and update compose files; stream logs; exec into a container.
 ---
 
-Selecting a stack in the sidebar opens the editor cockpit, a two-column workspace for everything you do to a single stack. The left column is the **Command Center** with the stack's identity, action bar, container list, and log stream. The right column starts on the **Anatomy panel**, a read-only summary of the compose file; clicking **edit** swaps it for the Monaco editor with `compose.yaml`, `.env`, and **Files** tabs.
+Selecting a stack in the sidebar opens the editor cockpit, a two-column workspace for everything you do to a single stack. The left column is the **Command Center** with the stack's identity, action bar, container list, and log stream. The right column starts on the **Anatomy panel**, a read-only summary of the compose file; clicking **Edit compose** swaps it for an editable Monaco workspace with `compose.yaml`, `.env`, and **Files** tabs. Creating an empty stack lands you there automatically.
 
 <Frame>
   <img src="/images/editor/editor-overview.png" alt="Editor cockpit showing the Command Center and live logs on the left and the Anatomy panel on the right" />
@@ -68,7 +68,7 @@ When the container has a compose service name attached, an extra `⋮` button ap
 The right column shows the **Anatomy panel** by default: a read-only summary of the compose file alongside a scrollable tab row for other stack views.
 
 <Frame>
-  <img src="/images/editor/anatomy-tabs.png" alt="Anatomy panel header strip showing the Anatomy, Activity, Dossier, Drift, Environment, Networking, Doctor, and Storage tab row with Files and Edit shortcuts on the right" />
+  <img src="/images/editor/anatomy-tabs.png" alt="Anatomy panel header strip showing the Anatomy, Activity, Dossier, Drift, Environment, Networking, Doctor, and Storage tab row with Files and Edit compose shortcuts on the right" />
 </Frame>
 
 The tab row always shows four tabs: **Anatomy**, **Activity**, **Dossier**, and **Drift**. Four more tabs appear when the active node advertises the matching capability.
@@ -85,7 +85,7 @@ The tab row always shows four tabs: **Anatomy**, **Activity**, **Dossier**, and 
 | **Doctor** | When `compose-doctor` capability is present | Preflight check results grouped by severity. The tab gains a red dot for blocker findings and an amber dot for high-risk findings. See [Compose Doctor](/features/compose-doctor). |
 | **Storage** | When `compose-storage` capability is present | Mount inventory with portability assessment and snapshot coverage. See [Compose Storage](/features/compose-storage). |
 
-The **Files** shortcut and the **Edit** button sit at the right end of the strip and stay available regardless of which tab is active.
+The **Files** shortcut and the **Edit compose** button sit at the right end of the strip and stay available regardless of which tab is active.
 
 The Anatomy tab lists:
 
@@ -101,7 +101,7 @@ When an image update is available, or the stack declares services with a local `
 
 ## Editor mode
 
-Clicking **edit** in the Anatomy strip swaps the right column for the Monaco editor card.
+Clicking **Edit compose** in the Anatomy strip opens an editable Monaco workspace. Creating a new empty stack does the same automatically.
 
 <Frame>
   <img src="/images/editor/editor-edit-mode.png" alt="Editor in edit mode with the compose.yaml tab selected, the Git Source button, the Save and Deploy split button, and the close button visible" />
@@ -118,22 +118,22 @@ The editor card has three tabs:
 Above the editor area, the toolbar carries:
 
 - **Git Source** opens the Git source dialog. A pulsing brand-color dot appears next to it when an upstream change is waiting to be applied.
-- **Edit** (when read-only) flips the editor into write mode. Replaced by the save split-button while editing.
-- **Close editor** (`X`) returns the right column to the Anatomy panel.
+- **Save & Deploy** split button (shown as soon as the compose editor opens for operators with `stack:edit`).
+- **Close editor** (`X`) discards any unsaved compose and env edits and returns the right column to the Anatomy panel.
 
-When you switch to the `.env` tab and the stack defines more than one env file, a dropdown appears next to the tab strip so you can pick which file to edit. Sencho discovers env files from the `env_file:` entries in `compose.yaml`; if none are declared, it falls back to a `.env` in the stack directory.
+When you switch to the `.env` tab and the stack defines more than one env file, a dropdown appears next to the tab strip so you can pick which file to edit. The dropdown locks while you have unsaved edits so switching files cannot drop them. Sencho discovers env files from the `env_file:` entries in `compose.yaml`; if none are declared, it falls back to a `.env` in the stack directory.
 
 The `.env` editor renders a teal banner above the textarea reminding you that variables defined there are available for substitution in `compose.yaml` (`${VAR}`), and that passing them into containers requires an `env_file:` entry on the service.
 
 ### Save options
 
-In edit mode the toolbar shows a split button. The primary action is **Save & Deploy**; the dropdown chevron reveals two more.
+As soon as the compose editor opens, the toolbar shows a split button. The primary action is **Save & Deploy**; the dropdown chevron reveals two more.
 
 | Action | Effect |
 |--------|--------|
 | **Save & Deploy** | Writes the file to disk, then runs `docker compose up -d` to apply changes. |
 | **Save Only** | Writes the file to disk without restarting any containers. Changes take effect on the next deploy. |
-| **Discard Changes** | Reverts the editor to the last saved version. Unsaved edits are lost. |
+| **Discard Changes** | Reverts the active file (compose or env) to the last saved version. Unsaved edits in that file are lost. |
 
 The same controls apply to the `compose.yaml` and `.env` editors.
 
@@ -154,7 +154,7 @@ If there are no unsaved changes the modal is skipped and the save proceeds direc
 
 ## On a phone
 
-On a narrow screen the stack opens as a full-screen detail with **Health**, **Logs**, and **Compose** segments instead of the two-column cockpit. The **Compose** segment shows the read-only Anatomy summary; tap **edit** to open a full-screen editor for small, safe changes.
+On a narrow screen the stack opens as a full-screen detail with **Health**, **Logs**, and **Compose** segments instead of the two-column cockpit. The **Compose** segment shows the read-only Anatomy summary; tap **Edit compose** to open a full-screen editor for small, safe changes.
 
 <Frame>
   <img src="/images/editor/editor-mobile.png" alt="Mobile compose editor with a Cancel button, the compose.yaml label, a monospace text field showing the compose file, a small-edits note, and Save and Save and Deploy buttons" />
@@ -205,7 +205,7 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
 
 <AccordionGroup>
   <Accordion title="The compose editor is read-only and I can't type">
-    You have not entered edit mode yet. Click **edit** in the Anatomy panel header (or the **Edit** button at the top of the editor card) to enable typing. If the **Edit** button is missing entirely, your role lacks the `stack:edit` permission; ask an admin to grant it.
+    Click **Edit compose** in the Anatomy panel header to open an editable workspace. If that control is missing, your role lacks the `stack:edit` permission; ask an admin to grant it.
   </Accordion>
   <Accordion title="Save & Deploy is disabled">
     A deploy is already running for this stack. Watch the action bar for the spinning state to clear, then save again.
@@ -214,7 +214,7 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
     The stack has no env file to edit. Add an `env_file:` entry to a service in `compose.yaml` and save, or create a `.env` file in the stack directory through the **Files** tab.
   </Accordion>
   <Accordion title="I can't edit compose from my phone">
-    Open the **Compose** segment in the stack detail and tap **edit**. If the **edit** affordance is missing, your role lacks the `stack:edit` permission; ask an admin to grant it. The phone editor is intended for small corrections; for large compose rewrites, open the stack on a desktop.
+    Open the **Compose** segment in the stack detail and tap **Edit compose**. If that affordance is missing, your role lacks the `stack:edit` permission; ask an admin to grant it. The phone editor is intended for small corrections; for large compose rewrites, open the stack on a desktop.
   </Accordion>
   <Accordion title='"Container is not running" error when opening a bash session'>
     The container stopped between clicking the button and the exec starting. Start the container from the action bar (or the row's **Start service** option) and try again.

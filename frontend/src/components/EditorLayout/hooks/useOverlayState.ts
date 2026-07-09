@@ -25,6 +25,16 @@ type PolicyBlock = {
 };
 type Container = { id: string; name: string };
 
+// Kept here (not in useStackActions) so overlay state can hold load options
+// without a circular type import between the two hooks.
+export type LoadFileOptions = {
+  startInComposeEdit?: boolean;
+  // Skip the unsaved-changes deferral. Used by discardAndLoadPending after
+  // buffers have been reverted via setters that have not re-rendered yet, so
+  // hasUnsavedChanges() would still see the pre-discard values.
+  skipUnsavedCheck?: boolean;
+};
+
 export function useOverlayState() {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
 
@@ -51,6 +61,10 @@ export function useOverlayState() {
   }, []);
 
   const [pendingUnsavedLoad, setPendingUnsavedLoad] = useState<string | null>(null);
+  // Parallel to pendingUnsavedLoad: options for the deferred stack load after
+  // the unsaved-changes dialog. Cleared on cancel and on node-switch paths
+  // (which use NODE_SWITCH_PENDING_TOKEN and never carry load options).
+  const [pendingLoadOptions, setPendingLoadOptions] = useState<LoadFileOptions | null>(null);
   const [pendingUnsavedNode, setPendingUnsavedNode] = useState<Node | null>(null);
   // A deferred "leave the dirty editor" navigation (back to the list, Home, a
   // bottom-tab / hamburger destination). Wrapped in an object so the state
@@ -143,6 +157,7 @@ export function useOverlayState() {
     deleteDialogOpen, stackToDelete, openDeleteDialog, closeDeleteDialog,
     takeDownDialogOpen, stackToTakeDown, openTakeDownDialog, closeTakeDownDialog,
     pendingUnsavedLoad, setPendingUnsavedLoad,
+    pendingLoadOptions, setPendingLoadOptions,
     pendingUnsavedNode, setPendingUnsavedNode,
     pendingLeaveAction, setPendingLeaveAction,
     bashModalOpen, selectedContainer, openBashModal, closeBashModal,

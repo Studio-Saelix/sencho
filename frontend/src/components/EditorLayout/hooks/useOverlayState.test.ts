@@ -9,6 +9,7 @@ describe('useOverlayState', () => {
     expect(result.current.deleteDialogOpen).toBe(false);
     expect(result.current.stackToDelete).toBeNull();
     expect(result.current.pendingUnsavedLoad).toBeNull();
+    expect(result.current.pendingLoadOptions).toBeNull();
     expect(result.current.pendingUnsavedNode).toBeNull();
     expect(result.current.bashModalOpen).toBe(false);
     expect(result.current.selectedContainer).toBeNull();
@@ -91,5 +92,22 @@ describe('useOverlayState', () => {
     act(() => result.current.openAlertSheet('web-stack'));
     act(() => result.current.closeStackMonitor());
     expect(result.current.stackMonitor).toBeNull();
+  });
+
+  it('pendingLoadOptions starts null, can be set, and clears independently', () => {
+    const { result } = renderHook(() => useOverlayState());
+    expect(result.current.pendingLoadOptions).toBeNull();
+    act(() => {
+      result.current.setPendingUnsavedLoad('web.yml');
+      result.current.setPendingLoadOptions({ startInComposeEdit: true });
+    });
+    expect(result.current.pendingUnsavedLoad).toBe('web.yml');
+    expect(result.current.pendingLoadOptions).toEqual({ startInComposeEdit: true });
+    act(() => {
+      result.current.setPendingUnsavedLoad(null);
+      result.current.setPendingLoadOptions(null);
+    });
+    expect(result.current.pendingUnsavedLoad).toBeNull();
+    expect(result.current.pendingLoadOptions).toBeNull();
   });
 });

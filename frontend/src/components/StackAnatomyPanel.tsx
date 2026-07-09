@@ -447,11 +447,12 @@ export default function StackAnatomyPanel({
           {canEdit && (
             <button
               type="button"
+              data-testid="anatomy-edit-compose-btn"
               onClick={onEditCompose}
               className="inline-flex items-center gap-1 font-mono text-xs uppercase tracking-wide text-stat-subtitle hover:text-brand transition-colors"
             >
               <Pencil className="h-3 w-3" strokeWidth={1.5} />
-              edit
+              Edit compose
             </button>
           )}
         </div>

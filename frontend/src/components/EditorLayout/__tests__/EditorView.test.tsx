@@ -1,16 +1,18 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { EditorView } from '../EditorView';
 import type { EditorViewProps } from '../EditorView';
 
-// Capture Monaco language/value props to assert env tab gets 'ini', compose gets 'yaml'.
+// Capture Monaco language/value/readOnly props.
 let lastLanguage: string | undefined;
 let lastValue: string | undefined;
+let lastReadOnly: boolean | undefined;
 vi.mock('@/lib/monacoLoader', () => ({
-  Editor: ({ language, value }: { language?: string; value?: string }) => {
+  Editor: ({ language, value, options }: { language?: string; value?: string; options?: { readOnly?: boolean } }) => {
     lastLanguage = language;
     lastValue = value;
+    lastReadOnly = options?.readOnly;
     return <div data-testid="monaco-editor" />;
   },
 }));
@@ -27,6 +29,9 @@ vi.mock('../../StackAnatomyPanel', () => ({
 vi.mock('../StackOperationBanner', () => ({ StackOperationBanner: () => null }));
 vi.mock('../../ErrorBoundary', () => ({ default: ({ children }: { children: ReactNode }) => <>{children}</> }));
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
+vi.mock('../../files/StackFileExplorer', () => ({
+  StackFileExplorer: () => <div data-testid="file-explorer" />,
+}));
 
 function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
   return {
@@ -60,7 +65,8 @@ function makeProps(over: Partial<EditorViewProps> = {}): EditorViewProps {
     updateStack: vi.fn(),
     rollbackStack: vi.fn(),
     scanStackConfig: vi.fn(),
-    enterEditMode: vi.fn(),
+    openComposeEditor: vi.fn(),
+    closeComposeEditor: vi.fn(),
     requestSave: vi.fn(),
     requestSaveAndDeploy: vi.fn(),
     discardChanges: vi.fn(),
@@ -91,6 +97,7 @@ describe('EditorView Monaco language prop', () => {
   afterEach(() => {
     lastLanguage = undefined;
     lastValue = undefined;
+    lastReadOnly = undefined;
   });
 
   it('passes language="ini" when the env tab is active', () => {
@@ -134,5 +141,53 @@ describe('EditorView Monaco language prop', () => {
     // StackFileExplorer replaces Monaco in the files tab path.
     expect(lastLanguage).toBeUndefined();
     expect(lastValue).toBeUndefined();
+  });
+});
+
+describe('EditorView single edit gate', () => {
+  afterEach(() => {
+    lastLanguage = undefined;
+    lastValue = undefined;
+    lastReadOnly = undefined;
+  });
+
+  it('shows Save & Deploy immediately without an Edit button when compose editor is open', () => {
+    render(<EditorView {...makeProps({ editingCompose: true, activeTab: 'compose' })} />);
+    expect(screen.getByRole('button', { name: 'Save & Deploy' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Edit$/ })).not.toBeInTheDocument();
+    expect(lastReadOnly).toBe(false);
+  });
+
+  it('disables the env file selector when hasUnsavedChanges is true', () => {
+    render(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'env',
+          envExists: true,
+          envFiles: ['.env', '.env.prod'],
+          selectedEnvFile: '.env',
+          hasUnsavedChanges: () => true,
+        })}
+      />,
+    );
+    // Radix Select trigger is a button; disabled when dirty.
+    const trigger = screen.getByRole('combobox');
+    expect(trigger).toBeDisabled();
+  });
+
+  it('routes Close through closeComposeEditor', () => {
+    const closeComposeEditor = vi.fn();
+    render(
+      <EditorView
+        {...makeProps({
+          editingCompose: true,
+          activeTab: 'compose',
+          closeComposeEditor,
+        })}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Close editor' }));
+    expect(closeComposeEditor).toHaveBeenCalledTimes(1);
   });
 });
