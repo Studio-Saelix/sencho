@@ -13,12 +13,13 @@ A **stack** in Sencho is a Docker Compose project: a directory inside your `COMP
 
 Click **Create Stack** in the left sidebar to open the **New stack** dialog. Pick a source from the tabs at the top:
 
-- **Import**: scan the compose directory for compose files you already have on disk and preview what they contain before you bring them in. See [Import existing files](#import-existing-files) below.
 - **Empty**: start with a minimal `compose.yaml` skeleton. The default service uses `nginx:latest` with the host port binding commented out, so a fresh deploy never collides with an existing service on the host. Uncomment and adjust the `ports:` block when you're ready to expose the container.
 - **From Git**: clone a Git repository so its compose file becomes the stack source. Future webhook pulls keep it in sync. See [Git Sources](/features/git-sources) for the full sync flow.
 - **From Docker Run**: paste a `docker run` command and let Sencho convert it to compose YAML.
 
-When you have no stacks yet, the sidebar shows a short prompt with **Import existing** and **New stack** buttons that open this dialog on the matching tab.
+To bring in compose files that are already on disk but not yet stacks, use **Adopt existing files** (from the empty sidebar, Create Stack footer, or after first-boot preflight). See [Adopt existing files](#adopt-existing-files) below.
+
+When you have no stacks yet, the sidebar shows what Sencho found under your compose directory and offers **Adopt existing files** and **New stack** when those actions apply.
 
 <Frame>
   <img src="/images/stack-management/create-stack-dialog.png" alt="New stack dialog on the Empty tab with a stack name field" />
@@ -31,11 +32,13 @@ When you have no stacks yet, the sidebar shows a short prompt with **Import exis
 
 Sencho creates a new directory inside `COMPOSE_DIR` with the chosen seed file. You land in the editor for the new stack and can deploy it from there.
 
-### Import existing files
+### Adopt existing files
 
-If you already have compose files on disk, the **Import** tab helps you land your first stack without reading the rest of this page. It scans your compose directory for compose files that are not yet stacks and lists them with a dry preview of each file's services, ports, volumes, and env files. Scanning is read only: it never moves, writes, or changes anything. The only change to disk is the **Move into place** action, which you trigger per file and confirm before it runs. Stacks that already sit in their own subfolder are not listed here; they appear in the sidebar.
+If you already have compose files on disk that are not yet stacks, **Adopt existing files** lists them with a dry preview of each file's services, ports, volumes, and env files. Scanning is read only: it never moves, writes, or changes anything. The only change to disk is the **Move into place** action, which you trigger per file and confirm before it runs. Stacks that already sit in their own subfolder with a standard compose filename (`compose.yaml`, `compose.yml`, `docker-compose.yaml`, or `docker-compose.yml`) are not listed here; they appear in the sidebar.
 
-Each listed file is one that will not show up as a stack on its own, because it is loose at the root of the compose directory or one folder too deep. Expand it, give the stack a name, and click **Move into place** to relocate it into its own subfolder; confirm the move, and it appears as a stack in the sidebar. This only relocates the compose file on disk: it does not adopt or capture running containers, and containers start only when you deploy the stack. Moving a loose root file relocates only that file, so anything it references by a relative path (such as a root `.env`) stays where it is. You can also arrange the file by hand and click **Rescan** instead.
+Adopt surfaces any `.yml` or `.yaml` file that is loose at the compose directory root, or one folder too deep (for example `apps/plex/plex.yml`). Compose override filenames such as `compose.override.yml` are skipped. A top-level folder that only has a non-standard name like `plex/plex.yml` is neither a stack nor an adopt candidate; put a standard compose filename in that folder, or nest one level deeper (for example `apps/plex/plex.yml`). Expand a candidate, give the stack a name, and click **Move into place** to relocate it into its own subfolder; confirm the move, and it appears as a stack in the sidebar. If the file was not already named `compose.yaml`, `compose.yml`, `docker-compose.yaml`, or `docker-compose.yml`, Sencho renames it to `compose.yaml` during the move so the stack registers. This only relocates files on disk: it does not adopt or capture running containers, and containers start only when you deploy the stack. Moving a loose root file relocates only that file, so anything it references by a relative path (such as a root `.env`) stays where it is. You can also arrange the file by hand and click **Rescan** instead.
+
+On startup, Sencho also auto-promotes every top-level `*.yml` / `*.yaml` file in `COMPOSE_DIR` into a `<name>/compose.yaml` stack directory. That migration covers loose root files on the next restart, so adopting a root file is optional if you are about to restart. Nested placements (one directory too deep) are not touched by that migration; adopt is the guided path for those.
 
 The top of the panel shows the directory Sencho is scanning and a reminder of the path rule: each stack lives in its own subfolder, and the host mount path must match the path inside the container so relative volume paths resolve. See [Configuration](/getting-started/configuration) for the full explanation.
 
@@ -439,7 +442,7 @@ Items are disabled while another operation is in progress on that stack.
 
 ## Scanning for stacks
 
-If you place Docker Compose files directly into the stacks directory (for example, via `scp`, a file manager, or the command line), you can import them without going through the full **Create Stack** flow. For a guided version that previews each file and points out anything placed where it will not register, use the [Import tab](#import-existing-files) of the **Create Stack** dialog.
+If you place Docker Compose files directly into the stacks directory (for example, via `scp`, a file manager, or the command line), click **Scan stacks folder** to re-index subdirectories that already look like stacks. For compose files that are loose at the root or one folder too deep, use [Adopt existing files](#adopt-existing-files).
 
 <Frame>
   <img src="/images/stack-management/sidebar-actions.png" alt="Sidebar action row with Create Stack button, bulk mode toggle, and scan stacks folder icon button" />
