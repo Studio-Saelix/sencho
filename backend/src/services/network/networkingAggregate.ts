@@ -99,7 +99,7 @@ function buildOverview(
   }
 
   const connectedContainerCount = new Set(
-    snapshot.containers.flatMap(c => c.networks.map(n => c.id)),
+    snapshot.containers.flatMap(c => c.networks.map(_n => c.id)),
   ).size;
 
   return {
