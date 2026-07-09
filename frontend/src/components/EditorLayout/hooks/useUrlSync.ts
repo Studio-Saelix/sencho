@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback, useState, type MutableRefObject } from 
 import type { Node } from '@/context/NodeContext';
 import type { FleetTab, SecurityTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
-import type { ActiveView, EditorTab, MobileRouteSurface } from '@/lib/router/routeTypes';
+import type { ActiveView, EditorTab, MobileRouteSurface, RouteStackLoadResult } from '@/lib/router/routeTypes';
 import { buildPath, parsePath } from '@/lib/router/senchoRoute';
 import { envFileForRouteUrl, resolveEnvRouteTarget } from '@/lib/router/envRoute';
 import { nodeIdToSlug, slugToNodeId } from '@/lib/nodeSlug';
@@ -60,7 +60,7 @@ export interface UseUrlSyncOptions {
   setActiveTab: (tab: EditorTab) => void;
   selectedEnvFile: string;
   envFiles: string[];
-  loadFileForRoute: (filename: string) => Promise<boolean>;
+  loadFileForRoute: (filename: string) => Promise<RouteStackLoadResult>;
   changeEnvFile: (file: string) => Promise<void>;
   applyEditorRouteState: (tab: EditorTab) => void;
   refreshStacks: (background?: boolean) => Promise<string[]>;
@@ -86,10 +86,20 @@ function readIdx(state: unknown): number | null {
   return null;
 }
 
+function pendingNodeMatchesActive(pendingNodeId: number | null, activeNodeId: number | undefined): boolean {
+  return pendingNodeId == null || activeNodeId === pendingNodeId;
+}
+
+interface PendingEditorRouteOpts {
+  envFiles: string[];
+  inventoryReady: boolean;
+}
+
 async function applyPendingEditorRoute(
   optsRef: MutableRefObject<UseUrlSyncOptions>,
   pendingEnvRef: MutableRefObject<string | null>,
   tab: EditorTab,
+  routeOpts?: PendingEditorRouteOpts,
 ): Promise<boolean> {
   const live = optsRef.current;
   if (tab !== 'env') {
@@ -98,14 +108,26 @@ async function applyPendingEditorRoute(
     live.applyEditorRouteState(tab);
     return true;
   }
-  const outcome = resolveEnvRouteTarget(pendingEnvRef.current, live.envFiles);
+  const envFiles = routeOpts?.envFiles ?? live.envFiles;
+  const inventoryReady = routeOpts?.inventoryReady
+    ?? (!live.isFileLoading && live.selectedFile != null);
+  const stackLoading = live.isFileLoading && routeOpts?.envFiles == null;
+  const outcome = resolveEnvRouteTarget(
+    pendingEnvRef.current,
+    envFiles,
+    stackLoading,
+    inventoryReady,
+  );
   if (!outcome.ready) return false;
   pendingEnvRef.current = null;
-  if (outcome.target && outcome.target !== live.selectedEnvFile) {
+  let effectiveTab: EditorTab = tab;
+  if (outcome.target == null && envFiles.length === 0) {
+    effectiveTab = 'compose';
+  } else if (outcome.target && outcome.target !== live.selectedEnvFile) {
     await live.changeEnvFile(outcome.target);
   }
-  live.setActiveTab(tab);
-  live.applyEditorRouteState(tab);
+  live.setActiveTab(effectiveTab);
+  live.applyEditorRouteState(effectiveTab);
   return true;
 }
 
@@ -168,6 +190,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     const o = optsRef.current;
     const pending = pendingRouteRef.current;
     if (!pending) return;
+    if (!pendingNodeMatchesActive(pendingNodeIdRef.current, o.activeNode?.id)) return;
 
     let view = pending.view;
     if (authzReady(o.reachCtx)) {
@@ -221,6 +244,7 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     const o = optsRef.current;
     const stack = pendingStackRef.current;
     if (!stack || !o.activeNode) return;
+    if (!pendingNodeMatchesActive(pendingNodeIdRef.current, o.activeNode.id)) return;
     if (o.filesNodeId !== o.activeNode.id) return;
 
     if (o.stacksLoadStatus === 'loading' || o.stacksLoadStatus === 'idle') return;
@@ -250,7 +274,10 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     // failure, which would hide the recovery chip during a deploy).
     if (o.selectedFile === match) {
       const tab = pendingTabRef.current ?? 'compose';
-      const applied = await applyPendingEditorRoute(optsRef, pendingEnvRef, tab);
+      const applied = await applyPendingEditorRoute(optsRef, pendingEnvRef, tab, {
+        envFiles: o.envFiles,
+        inventoryReady: !o.isFileLoading,
+      });
       if (!applied) return;
       pendingStackRef.current = null;
       pendingTabRef.current = null;
@@ -264,10 +291,10 @@ export function useUrlSync(options: UseUrlSyncOptions) {
 
     resolvingRef.current = true;
     const attempted = match;
-    const loaded = await o.loadFileForRoute(match);
+    const loadResult = await o.loadFileForRoute(match);
     if (pendingStackRef.current !== attempted) { resolvingRef.current = false; return; }
 
-    if (!loaded) {
+    if (!loadResult.ok) {
       phaseRef.current = 'frozen';
       pendingRouteRef.current = null;
       setRouteDetailError(`Could not open "${attempted.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);
@@ -276,7 +303,10 @@ export function useUrlSync(options: UseUrlSyncOptions) {
     }
 
     const tab = pendingTabRef.current ?? 'compose';
-    const applied = await applyPendingEditorRoute(optsRef, pendingEnvRef, tab);
+    const applied = await applyPendingEditorRoute(optsRef, pendingEnvRef, tab, {
+      envFiles: loadResult.envFiles,
+      inventoryReady: true,
+    });
     if (!applied) {
       resolvingRef.current = false;
       return;
@@ -393,9 +423,9 @@ export function useUrlSync(options: UseUrlSyncOptions) {
   }, [hydrateFromUrl, options.nodesLoaded, options.nodes.length]);
 
   useEffect(() => {
-    if (pendingRouteRef.current && optsRef.current.activeNode) {
-      void applyPendingRoute();
-    }
+    if (!pendingRouteRef.current || !optsRef.current.activeNode) return;
+    if (!pendingNodeMatchesActive(pendingNodeIdRef.current, optsRef.current.activeNode.id)) return;
+    void applyPendingRoute();
   }, [applyPendingRoute, options.activeNode?.id]);
 
   useEffect(() => {

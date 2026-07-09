@@ -10,7 +10,7 @@ import type { Node } from '@/context/NodeContext';
 import type { RunWithLogParams } from '@/context/DeployFeedbackContext';
 import { parsePath } from '@/lib/router/senchoRoute';
 import { resolveEnvFilePath } from '@/lib/router/envRoute';
-import type { EditorTab } from '@/lib/router/routeTypes';
+import type { EditorTab, RouteStackLoadResult } from '@/lib/router/routeTypes';
 import type { StackAction, RecoverableAction, FailureClassification } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
@@ -423,16 +423,16 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setEnvEtag(null);
   };
 
-  const loadEnvState = async (filename: string, signal?: AbortSignal) => {
+  const loadEnvState = async (filename: string, signal?: AbortSignal): Promise<string[]> => {
     try {
       const envsRes = await apiFetch(`/stacks/${filename}/envs`, { signal });
-      if (signal?.aborted) return;
+      if (signal?.aborted) return [];
       if (!envsRes.ok) {
         clearEnvState();
-        return;
+        return [];
       }
       const { envFiles } = await envsRes.json();
-      if (signal?.aborted) return;
+      if (signal?.aborted) return [];
       if (envFiles && envFiles.length > 0) {
         editorState.setEnvFiles(envFiles);
         const firstFile = envFiles[0];
@@ -442,7 +442,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           `/stacks/${filename}/env?file=${encodeURIComponent(firstFile)}`,
           { signal },
         );
-        if (signal?.aborted) return;
+        if (signal?.aborted) return envFiles;
         if (envContentRes.ok) {
           const envText = await envContentRes.text();
           editorState.setEnvContent(envText || '');
@@ -453,12 +453,14 @@ export function useStackActions(options: UseStackActionsOptions) {
           editorState.setOriginalEnvContent('');
           editorState.setEnvEtag(null);
         }
-      } else {
-        clearEnvState();
+        return envFiles;
       }
-    } catch (err) {
-      if (isAbortError(err)) return;
       clearEnvState();
+      return [];
+    } catch (err) {
+      if (isAbortError(err)) return [];
+      clearEnvState();
+      return [];
     }
   };
 
@@ -493,15 +495,15 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setIsEditing(false);
   };
 
-  const loadFileCore = async (filename: string): Promise<boolean> => {
-    if (!filename) return false;
+  const loadFileCore = async (filename: string): Promise<RouteStackLoadResult> => {
+    if (!filename) return { ok: false };
     if (
       stackListState.selectedFile &&
       filename !== stackListState.selectedFile &&
       hasUnsavedChanges()
     ) {
       overlayState.setPendingUnsavedLoad(filename);
-      return false;
+      return { ok: false };
     }
     loadFileAbortRef.current?.abort();
     const controller = new AbortController();
@@ -514,9 +516,9 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setActiveTab('compose');
     try {
       const res = await apiFetch(`/stacks/${filename}`, { signal });
-      if (signal.aborted) return false;
+      if (signal.aborted) return { ok: false };
       const text = await res.text();
-      if (signal.aborted) return false;
+      if (signal.aborted) return { ok: false };
       if (!res.ok) {
         throw new Error(`Failed to load stack: ${res.status}`);
       }
@@ -525,12 +527,12 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setContent(text || '');
       editorState.setOriginalContent(text || '');
       editorState.setComposeEtag(res.headers.get('etag'));
-      await loadEnvState(filename, signal);
+      const envFiles = await loadEnvState(filename, signal);
       await loadContainerState(filename, signal);
       await loadBackupState(filename, signal);
-      return true;
+      return { ok: true, envFiles };
     } catch (error) {
-      if (isAbortError(error) || signal.aborted) return false;
+      if (isAbortError(error) || signal.aborted) return { ok: false };
       console.error('Failed to load file:', error);
       toast.error(`Could not open "${filename.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);
       stackListState.setSelectedFile(null);
@@ -541,7 +543,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setOriginalEnvContent('');
       editorState.setEnvEtag(null);
       editorState.setContainers([]);
-      return false;
+      return { ok: false };
     } finally {
       if (!signal.aborted) {
         editorState.setIsFileLoading(false);
@@ -553,7 +555,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     await loadFileCore(filename);
   };
 
-  const loadFileForRoute = async (filename: string): Promise<boolean> => {
+  const loadFileForRoute = async (filename: string): Promise<RouteStackLoadResult> => {
     return loadFileCore(filename);
   };
 

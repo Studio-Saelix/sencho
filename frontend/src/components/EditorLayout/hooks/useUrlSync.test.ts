@@ -57,7 +57,7 @@ function makeOpts(over: Partial<UseUrlSyncOptions> = {}): UseUrlSyncOptions {
     setActiveTab: vi.fn(),
     selectedEnvFile: '',
     envFiles: [],
-    loadFileForRoute: vi.fn().mockResolvedValue(true),
+    loadFileForRoute: vi.fn().mockResolvedValue({ ok: true, envFiles: [] }),
     changeEnvFile: vi.fn().mockResolvedValue(undefined),
     applyEditorRouteState: vi.fn(),
     refreshStacks: vi.fn().mockResolvedValue(['radarr']),
@@ -127,10 +127,94 @@ describe('useUrlSync', () => {
     pushSpy.mockRestore();
   });
 
+  it('does not resolve remote stack against stale local node files', async () => {
+    const remote = makeNode({ id: 2, name: 'nas', type: 'remote', is_default: false });
+    const local = makeNode();
+    const setActiveNode = vi.fn();
+    const setActiveView = vi.fn();
+    const loadFileForRoute = vi.fn().mockResolvedValue({ ok: true, envFiles: [] });
+
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/nas-2/stacks/remote-stack/compose');
+
+    const { rerender } = renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          nodes: [local, remote],
+          activeNode: local,
+          activeView: 'dashboard',
+          files: ['local-only'],
+          filesNodeId: 1,
+          stacksLoadStatus: 'success',
+          stacksLoadNodeId: 1,
+          setActiveNode,
+          setActiveView,
+          loadFileForRoute,
+        }),
+      },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(setActiveNode).toHaveBeenCalledWith(remote);
+    expect(setActiveView).not.toHaveBeenCalledWith('dashboard');
+    expect(loadFileForRoute).not.toHaveBeenCalled();
+
+    rerender(makeOpts({
+      nodes: [local, remote],
+      activeNode: remote,
+      activeView: 'dashboard',
+      files: ['remote-stack'],
+      filesNodeId: 2,
+      stacksLoadStatus: 'success',
+      stacksLoadNodeId: 2,
+      setActiveNode,
+      setActiveView,
+      loadFileForRoute,
+    }));
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(loadFileForRoute).toHaveBeenCalledWith('remote-stack');
+    expect(setActiveView).not.toHaveBeenCalledWith('dashboard');
+  });
+
+  it('settles env tab route when stack has no env files', async () => {
+    const loadFileForRoute = vi.fn().mockResolvedValue({ ok: true, envFiles: [] });
+    const applyEditorRouteState = vi.fn();
+
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/env');
+
+    renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          activeView: 'editor',
+          files: ['radarr'],
+          selectedFile: null,
+          envFiles: [],
+          loadFileForRoute,
+          applyEditorRouteState,
+        }),
+      },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(loadFileForRoute).toHaveBeenCalledWith('radarr');
+    expect(applyEditorRouteState).toHaveBeenCalledWith('compose');
+  });
+
   it('restores non-default env selection after stack load populates file list', async () => {
     const prodPath = '/compose/radarr/.env.prod';
     const fileList = ['/compose/radarr/.env', prodPath];
-    const loadFileForRoute = vi.fn().mockResolvedValue(true);
+    const loadFileForRoute = vi.fn().mockResolvedValue({ ok: true, envFiles: fileList });
     const changeEnvFile = vi.fn().mockResolvedValue(undefined);
 
     window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/env?env=.env.prod');
@@ -351,7 +435,7 @@ describe('useUrlSync', () => {
 
   it('freezes route and sets routeDetailError when compose load fails', async () => {
     window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/compose');
-    const loadFileForRoute = vi.fn().mockResolvedValue(false);
+    const loadFileForRoute = vi.fn().mockResolvedValue({ ok: false });
     const setPendingDetailStack = vi.fn();
 
     const { result } = renderHook(
@@ -377,7 +461,7 @@ describe('useUrlSync', () => {
 
   it('clears routeDetailError after a successful retry', async () => {
     window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/compose');
-    const loadFileForRoute = vi.fn().mockResolvedValue(false);
+    const loadFileForRoute = vi.fn().mockResolvedValue({ ok: false });
 
     const { result, rerender } = renderHook(
       (props) => useUrlSync(props),
@@ -395,7 +479,7 @@ describe('useUrlSync', () => {
     });
     expect(result.current.routeDetailError).not.toBeNull();
 
-    loadFileForRoute.mockResolvedValue(true);
+    loadFileForRoute.mockResolvedValue({ ok: true, envFiles: [] });
 
     rerender(makeOpts({
       isMobile: true,

@@ -140,7 +140,7 @@ export function buildPath(state: RouteState): string {
   if (state.activeView === 'editor' && state.stackName) {
     const tab = state.editorTab || 'compose';
     url.pathname = `${base}/stacks/${encodeURIComponent(state.stackName)}/${tab}`;
-    if (tab === 'env' && state.envFile && !state.envFile.includes('/')) {
+    if (tab === 'env' && state.envFile && !/[\\/]/.test(state.envFile)) {
       url.searchParams.set('env', state.envFile);
     }
     if (state.filterNodeId != null) {

@@ -38,19 +38,31 @@ describe('envRoute', () => {
     expect(normalizeEnvFileQuery('')).toBeNull();
   });
 
-  it('resolveEnvRouteTarget waits for envFiles and falls back to default', () => {
-    expect(resolveEnvRouteTarget('.env.prod', [])).toEqual({ ready: false });
-    expect(resolveEnvRouteTarget('.env.prod', envFiles)).toEqual({
+  it('resolveEnvRouteTarget waits for inventory and falls back to default', () => {
+    expect(resolveEnvRouteTarget('.env.prod', [], true, false)).toEqual({ ready: false });
+    expect(resolveEnvRouteTarget('.env.prod', [], false, false)).toEqual({ ready: false });
+    expect(resolveEnvRouteTarget('.env.prod', envFiles, false, true)).toEqual({
       ready: true,
       target: '/home/user/compose/radarr/.env.prod',
     });
-    expect(resolveEnvRouteTarget(null, envFiles)).toEqual({
+    expect(resolveEnvRouteTarget(null, envFiles, false, true)).toEqual({
       ready: true,
       target: '/home/user/compose/radarr/.env',
     });
-    expect(resolveEnvRouteTarget('.env.missing', envFiles)).toEqual({
+    expect(resolveEnvRouteTarget('.env.missing', envFiles, false, true)).toEqual({
       ready: true,
       target: '/home/user/compose/radarr/.env',
+    });
+  });
+
+  it('resolveEnvRouteTarget settles when env inventory is empty', () => {
+    expect(resolveEnvRouteTarget('.env.prod', [], false, true)).toEqual({
+      ready: true,
+      target: null,
+    });
+    expect(resolveEnvRouteTarget(null, [], false, true)).toEqual({
+      ready: true,
+      target: null,
     });
   });
 });
