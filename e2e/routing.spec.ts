@@ -81,7 +81,7 @@ test.describe('URL routing', () => {
     await page.locator('[role="listbox"]').getByText(stackName!, { exact: true }).click();
     await expect(page).toHaveURL(/\/compose/);
 
-    await page.getByRole('button', { name: 'edit', exact: true }).click();
+    await page.getByTestId('anatomy-edit-compose-btn').click();
     const envTab = page.getByRole('tab', { name: '.env' });
     test.skip(!(await envTab.isEnabled()), 'Stack has no .env file');
     await envTab.click();
