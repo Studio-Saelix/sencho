@@ -843,6 +843,8 @@ export default function EditorLayout() {
             onFleetActiveTabChange={setFleetActiveTab}
             renderEditor={renderEditor}
             stackUpdates={stackUpdates}
+            urlHydratingStack={urlHydratingStack}
+            isFileLoading={isFileLoading}
           />
         </div>
       );
