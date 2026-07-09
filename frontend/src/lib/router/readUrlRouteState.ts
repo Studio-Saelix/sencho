@@ -19,6 +19,13 @@ const DEFAULT: UrlRouteState = {
   filterNodeId: null,
 };
 
+/** True when the current URL is a stack workspace deep link (detail or editor). */
+export function isStackEditorDeepLink(): boolean {
+  if (typeof window === 'undefined') return false;
+  const parsed = parsePath(window.location.pathname, window.location.search);
+  return parsed.view === 'editor' && parsed.stackName != null;
+}
+
 /** Read shell navigation fields from the current browser URL (cold-load bootstrap). */
 export function readUrlRouteState(): UrlRouteState {
   if (typeof window === 'undefined') return DEFAULT;

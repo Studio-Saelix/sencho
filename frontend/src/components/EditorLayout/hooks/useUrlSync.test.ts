@@ -55,6 +55,8 @@ function makeOpts(over: Partial<UseUrlSyncOptions> = {}): UseUrlSyncOptions {
     isFileLoading: false,
     activeTab: 'compose',
     setActiveTab: vi.fn(),
+    editingCompose: false,
+    setEditingCompose: vi.fn(),
     selectedEnvFile: '',
     envFiles: [],
     loadFileForRoute: vi.fn().mockResolvedValue({ ok: true, envFiles: [] }),
@@ -493,5 +495,87 @@ describe('useUrlSync', () => {
     });
 
     expect(result.current.routeDetailError).toBeNull();
+  });
+
+  it('hydrates tabless stack URL as detail without opening Monaco', async () => {
+    const loadFileForRoute = vi.fn().mockResolvedValue({ ok: true, envFiles: [] });
+    const applyEditorRouteState = vi.fn();
+    const setEditingCompose = vi.fn();
+
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr');
+
+    renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          activeView: 'editor',
+          files: ['radarr'],
+          selectedFile: null,
+          envFiles: [],
+          loadFileForRoute,
+          applyEditorRouteState,
+          setEditingCompose,
+        }),
+      },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(loadFileForRoute).toHaveBeenCalledWith('radarr');
+    expect(applyEditorRouteState).not.toHaveBeenCalled();
+    expect(setEditingCompose).toHaveBeenCalledWith(false);
+  });
+
+  it('writes tabless stack URL when detail is open', () => {
+    const pushSpy = vi.spyOn(window.history, 'pushState');
+
+    const { rerender } = renderHook(
+      (props) => useUrlSync(props),
+      { initialProps: makeOpts({ activeView: 'dashboard' }) },
+    );
+
+    act(() => {
+      rerender(makeOpts({
+        activeView: 'editor',
+        selectedFile: 'radarr',
+        editingCompose: false,
+        activeTab: 'compose',
+      }));
+    });
+
+    const pushed = pushSpy.mock.calls.map((call) => String(call[2] ?? ''));
+    expect(pushed.some((p) => p === '/nodes/local/stacks/radarr')).toBe(true);
+    expect(pushed.some((p) => p.includes('/compose'))).toBe(false);
+
+    pushSpy.mockRestore();
+  });
+
+  it('opens Monaco when hydrating /compose deep link', async () => {
+    const loadFileForRoute = vi.fn().mockResolvedValue({ ok: true, envFiles: [] });
+    const applyEditorRouteState = vi.fn();
+
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr/compose');
+
+    renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          activeView: 'editor',
+          files: ['radarr'],
+          selectedFile: null,
+          loadFileForRoute,
+          applyEditorRouteState,
+        }),
+      },
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(loadFileForRoute).toHaveBeenCalledWith('radarr');
+    expect(applyEditorRouteState).toHaveBeenCalledWith('compose');
   });
 });
