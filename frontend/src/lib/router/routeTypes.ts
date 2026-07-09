@@ -44,6 +44,11 @@ export interface RouteState {
   isMobile: boolean;
 }
 
+/** Result of loading a stack for URL hydration (includes env inventory snapshot). */
+export type RouteStackLoadResult =
+  | { ok: false }
+  | { ok: true; envFiles: string[] };
+
 export interface ParsedRoute {
   nodeSlug: string | null;
   view: ActiveView | null;

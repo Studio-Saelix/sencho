@@ -26,7 +26,7 @@ export function envFileForRouteUrl(
   const first = envFiles[0];
   if (first && selectedEnvFile === first) return null;
   const basename = envFileBasename(selectedEnvFile);
-  if (!basename || basename.includes('/')) return null;
+  if (!basename || /[\\/]/.test(basename)) return null;
   return basename;
 }
 
@@ -42,9 +42,15 @@ export type EnvRouteTarget =
   | { ready: false }
   | { ready: true; target: string | null };
 
-/** Pick the env file to open from a route token once envFiles are loaded. */
-export function resolveEnvRouteTarget(requested: string | null, envFiles: string[]): EnvRouteTarget {
-  if (envFiles.length === 0) return { ready: false };
+/** Pick the env file to open from a route token once env inventory is known. */
+export function resolveEnvRouteTarget(
+  requested: string | null,
+  envFiles: string[],
+  stackLoading = false,
+  inventoryReady = true,
+): EnvRouteTarget {
+  if (stackLoading || !inventoryReady) return { ready: false };
+  if (envFiles.length === 0) return { ready: true, target: null };
   const defaultFile = envFiles[0];
   if (!requested) return { ready: true, target: defaultFile };
   const resolved = resolveEnvFilePath(requested, envFiles);

@@ -115,6 +115,17 @@ describe('senchoRoute', () => {
     expect(path).toBe('/nodes/local/stacks/radarr/env');
   });
 
+  it('rejects Windows paths in buildPath env query', () => {
+    const path = buildPath({
+      ...base,
+      activeView: 'editor',
+      stackName: 'radarr',
+      editorTab: 'env',
+      envFile: 'C:\\compose\\stack\\.env.prod',
+    });
+    expect(path).toBe('/nodes/local/stacks/radarr/env');
+  });
+
   it('parses stack list path as mobile list surface', () => {
     const parsed = parsePath('/nodes/local/stacks', '');
     expect(parsed.isStackList).toBe(true);
