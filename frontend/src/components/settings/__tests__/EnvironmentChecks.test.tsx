@@ -89,6 +89,25 @@ describe('EnvironmentChecks', () => {
     expect(screen.getByText(/Enter Sencho to review and adopt/i)).toBeTruthy();
   });
 
+  it('omits the discovery row when counts are zero', () => {
+    render(
+      <EnvironmentChecks
+        report={{
+          ...ENV_REPORT,
+          discovery: {
+            composeDir: '/opt/compose',
+            stackCount: 0,
+            adoptCandidateCount: 0,
+            adoptCandidatesTruncated: false,
+          },
+        }}
+        isLoading={false}
+        onRerun={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('Compose discovery')).toBeNull();
+  });
+
   it('omits the discovery row when uncontrolled even if the report includes discovery', async () => {
     vi.mocked(apiFetch).mockResolvedValue({
       ok: true,
