@@ -61,7 +61,6 @@ describe('Setup preflight', () => {
   });
 
   it('sets post-setup adopt handoff when discovery has candidates', async () => {
-    const setItemSpy = vi.spyOn(Storage.prototype, 'setItem');
     vi.mocked(fetch).mockResolvedValue(jsonRes({ success: true }));
     apiFetchMock.mockResolvedValue(jsonRes(ENV_REPORT));
     const onComplete = vi.fn();
@@ -77,7 +76,6 @@ describe('Setup preflight', () => {
     fireEvent.click(screen.getByRole('button', { name: /enter sencho/i }));
 
     expect(onComplete).toHaveBeenCalledTimes(1);
-    expect(setItemSpy).toHaveBeenCalledWith('sencho:post-setup', JSON.stringify({ openAdopt: true }));
-    setItemSpy.mockRestore();
+    expect(sessionStorage.getItem('sencho:post-setup')).toBe(JSON.stringify({ openAdopt: true }));
   });
 });
