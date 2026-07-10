@@ -1,5 +1,12 @@
 import { Router, type Request, type Response } from 'express';
-import DockerController, { type CreateNetworkOptions, type NetworkDriver } from '../services/DockerController';
+import DockerController, {
+  PrunePlanStaleError,
+  type CreateNetworkOptions,
+  type NetworkDriver,
+  type PruneScope,
+  type PruneTarget,
+} from '../services/DockerController';
+import { isPruneTarget } from '../services/prunePlan';
 import { FileSystemService } from '../services/FileSystemService';
 import SelfIdentityService from '../services/SelfIdentityService';
 import { requireAdmin } from '../middleware/tierGates';
@@ -88,61 +95,170 @@ systemMaintenanceRouter.post('/prune/orphans', async (req: Request, res: Respons
   }
 });
 
+function parsePruneTargets(body: {
+  target?: unknown;
+  targets?: unknown;
+}): PruneTarget[] | null {
+  if (Array.isArray(body.targets)) {
+    if (body.targets.length === 0) return null;
+    if (!body.targets.every(isPruneTarget)) return null;
+    return body.targets;
+  }
+  if (isPruneTarget(body.target)) return [body.target];
+  return null;
+}
+
+function parsePruneScope(scope: unknown): PruneScope {
+  return scope === 'managed' ? 'managed' : 'all';
+}
+
+// Preview an itemized prune plan (no deletes). Resources confirm dialogs call
+// this before enabling the destructive confirm button.
+systemMaintenanceRouter.post('/prune/plan', async (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const targets = parsePruneTargets(req.body as { target?: unknown; targets?: unknown });
+    if (!targets) {
+      return res.status(400).json({ error: 'Invalid prune target(s)' });
+    }
+    const pruneScope = parsePruneScope((req.body as { scope?: unknown }).scope);
+    const dockerController = DockerController.getInstance(req.nodeId);
+    const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
+    const plan = await withTimeout(
+      dockerController.buildPrunePlan(targets, pruneScope, knownStacks, req.nodeId),
+      PRUNE_ESTIMATE_TIMEOUT_MS,
+      'docker prune plan',
+    );
+    if (isDebugEnabled()) {
+      console.debug('[Resources:debug] Prune plan', {
+        scope: pruneScope,
+        targets: plan.targets,
+        items: plan.items.length,
+        reclaimableBytes: plan.reclaimableBytes,
+      });
+    }
+    res.json(plan);
+  } catch (error: unknown) {
+    if (error instanceof TimeoutError) {
+      console.warn('Prune plan: docker enumeration timed out');
+      return respondDfSlow(res);
+    }
+    console.error('Prune plan error:', error);
+    res.status(500).json({ error: 'Failed to build prune plan' });
+  }
+});
+
 systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response) => {
   if (!requireAdmin(req, res)) return;
   try {
-    const { target, scope, dryRun } = req.body as { target: string; scope?: string; dryRun?: boolean };
-    if (!['containers', 'images', 'networks', 'volumes'].includes(target)) {
-      return res.status(400).json({ error: 'Invalid prune target' });
+    const body = req.body as {
+      target?: unknown;
+      targets?: unknown;
+      scope?: unknown;
+      dryRun?: unknown;
+      planFingerprint?: unknown;
+    };
+    const targets = parsePruneTargets(body);
+    if (!targets) {
+      return res.status(400).json({ error: 'Invalid prune target(s)' });
     }
 
-    const pruneScope = scope === 'managed' ? 'managed' : 'all';
-    const isDryRun = dryRun === true;
+    const pruneScope = parsePruneScope(body.scope);
+    const isDryRun = body.dryRun === true;
+    const planFingerprint = typeof body.planFingerprint === 'string' ? body.planFingerprint : null;
     const dockerController = DockerController.getInstance(req.nodeId);
+    const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
 
     if (isDryRun) {
-      // Rehearse the destructive path: same scope resolution, same Docker
-      // enumeration, no remove calls. Containers have no managed estimate
-      // helper because pruneManagedOnly does not handle them.
-      const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
-      let estimate: { reclaimableBytes: number };
-      if (pruneScope === 'managed' && target !== 'containers') {
-        estimate = await dockerController.estimateManagedReclaim(
-          target as 'images' | 'volumes' | 'networks',
-          knownStacks,
-        );
-      } else {
-        // estimateSystemReclaim calls `docker system df`; bound it so a slow
-        // daemon doesn't hang the admin's tab (F-6).
-        estimate = await withTimeout(
-          dockerController.estimateSystemReclaim(
-            target as 'containers' | 'images' | 'networks' | 'volumes',
-            knownStacks,
-          ),
-          PRUNE_ESTIMATE_TIMEOUT_MS,
-          'docker disk usage',
-        );
-      }
+      // Dry-run returns the same itemized plan shape Resources uses for preview.
+      const plan = await withTimeout(
+        dockerController.buildPrunePlan(targets, pruneScope, knownStacks, req.nodeId),
+        PRUNE_ESTIMATE_TIMEOUT_MS,
+        'docker prune plan',
+      );
       if (isDebugEnabled()) {
         console.debug('[Resources:debug] Prune dry-run', {
-          target, scope: pruneScope, reclaimableBytes: estimate.reclaimableBytes,
+          targets: plan.targets,
+          scope: pruneScope,
+          reclaimableBytes: plan.reclaimableBytes,
+          items: plan.items.length,
         });
       }
-      res.json({ message: 'Dry run', success: true, dryRun: true, reclaimedBytes: estimate.reclaimableBytes });
+      res.json({
+        message: 'Dry run',
+        success: true,
+        dryRun: true,
+        reclaimedBytes: plan.reclaimableBytes,
+        ...plan,
+      });
       return;
     }
 
+    // Resources path: fingerprint-bound execute. Fleet still calls without a
+    // fingerprint and keeps the legacy pruneManagedOnly / pruneSystem path.
+    if (planFingerprint) {
+      const built = await withTimeout(
+        dockerController.buildPrunePlan(targets, pruneScope, knownStacks, req.nodeId),
+        PRUNE_ESTIMATE_TIMEOUT_MS,
+        'docker prune plan',
+      );
+      if (built.fingerprint !== planFingerprint) {
+        return res.status(409).json({
+          error: 'Prune plan is stale; refresh and confirm again',
+          code: 'PRUNE_PLAN_STALE',
+        });
+      }
+      console.log(
+        `[Resources] System prune (plan): ${built.targets.join(',')} (scope: ${pruneScope}, items: ${built.items.length})`,
+      );
+      const pruneStartedAt = Date.now();
+      const result = await dockerController.executePrunePlan(built, knownStacks);
+      console.log(
+        `[Resources] System prune completed: reclaimed ${result.reclaimedBytes} bytes, outcomes=${result.outcomes.length}`,
+      );
+      if (isDebugEnabled()) {
+        console.debug('[Resources:debug] System prune (plan)', {
+          targets: built.targets,
+          scope: pruneScope,
+          ms: Date.now() - pruneStartedAt,
+          reclaimedBytes: result.reclaimedBytes,
+          success: result.success,
+        });
+      }
+      if (built.targets.includes('containers')) {
+        invalidateNodeCaches(req.nodeId);
+      }
+      res.json({
+        message: 'Prune completed',
+        success: result.success,
+        reclaimedBytes: result.reclaimedBytes,
+        outcomes: result.outcomes,
+      });
+      return;
+    }
+
+    // Legacy single-target path for Fleet (and any caller without a plan).
+    if (targets.length > 1) {
+      return res.status(400).json({
+        error: 'Multi-target prune requires a planFingerprint from POST /system/prune/plan',
+      });
+    }
+    const target = targets[0];
     console.log(`[Resources] System prune: ${target} (scope: ${pruneScope})`);
     const pruneStartedAt = Date.now();
     let result: { success: boolean; reclaimedBytes: number };
     if (pruneScope === 'managed' && target !== 'containers') {
-      const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
       result = await dockerController.pruneManagedOnly(
         target as 'images' | 'volumes' | 'networks',
-        knownStacks
+        knownStacks,
       );
+    } else if (pruneScope === 'managed' && target === 'containers') {
+      // Managed containers must never fall through to system prune. Build and
+      // execute an itemized plan for this single target instead.
+      const plan = await dockerController.buildPrunePlan(['containers'], 'managed', knownStacks, req.nodeId);
+      result = await dockerController.executePrunePlan(plan, knownStacks);
     } else {
-      result = await dockerController.pruneSystem(target as 'containers' | 'images' | 'networks' | 'volumes');
+      result = await dockerController.pruneSystem(target);
     }
 
     console.log(`[Resources] System prune completed: ${target}, reclaimed ${result.reclaimedBytes} bytes`);
@@ -159,6 +275,9 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
     if (error instanceof TimeoutError) {
       console.warn('System prune: docker disk usage timed out');
       return respondDfSlow(res);
+    }
+    if (error instanceof PrunePlanStaleError) {
+      return res.status(409).json({ error: error.message, code: error.code });
     }
     console.error('System prune error:', error);
     res.status(500).json({ error: 'System prune failed' });

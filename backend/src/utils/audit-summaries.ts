@@ -35,6 +35,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   // System operations
   'POST /system/prune': 'Pruned system resources',
   'POST /system/prune/orphans': 'Pruned orphan containers',
+  'POST /system/prune/plan': 'Built prune plan',
   'POST /system/prune/system': 'Pruned system resources',
   'POST /system/images/delete': 'Deleted images',
   'POST /system/volumes/delete': 'Deleted volumes',
