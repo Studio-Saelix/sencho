@@ -173,8 +173,8 @@ export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProp
                 </SettingsField>
 
                 <SettingsField
-                    label="Scan history per image"
-                    helper="How many vulnerability scans to keep per image. Older scans beyond the cap are pruned."
+                    label="Scan history per digest"
+                    helper="How many vulnerability scans to keep per image digest (or per image reference when no digest is stored). Older scans beyond the cap are pruned."
                 >
                     <div className="flex items-center gap-2">
                         <Input

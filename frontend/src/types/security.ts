@@ -224,9 +224,18 @@ export interface ScanCompareVulnerability {
   suppression_reason?: string;
 }
 
+/** One side of a scan comparison (baseline or current). */
+export interface ScanCompareSide {
+  id: number;
+  scanned_at: number;
+  image_ref: string;
+  image_digest?: string | null;
+  total_vulnerabilities?: number;
+}
+
 export interface ScanCompareResult {
-  scanA: { id: number; scanned_at: number; image_ref: string; total_vulnerabilities?: number };
-  scanB: { id: number; scanned_at: number; image_ref: string; total_vulnerabilities?: number };
+  scanA: ScanCompareSide;
+  scanB: ScanCompareSide;
   added: ScanCompareVulnerability[];
   removed: ScanCompareVulnerability[];
   unchanged: ScanCompareVulnerability[];

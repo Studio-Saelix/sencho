@@ -26,10 +26,12 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
 import { cveUrl } from '@/lib/cveUrl';
+import { formatShortDigest } from '@/lib/formatDigest';
 import { SEVERITY_ROW_TINT } from '@/lib/severityStyles';
 import { SeverityChip } from './VulnerabilityScanSheet';
 import type {
   ScanCompareResult,
+  ScanCompareSide,
   ScanCompareVulnerability,
   VulnSeverity,
 } from '@/types/security';
@@ -43,6 +45,24 @@ interface ScanComparisonSheetProps {
 type DiffFilter = 'added' | 'removed' | 'unchanged';
 
 const PAGE_SIZE = 25;
+
+function trimmedDigest(scan: ScanCompareSide): string | null {
+  const digest = scan.image_digest?.trim();
+  return digest || null;
+}
+
+function scanCompareLabel(scan: ScanCompareSide): string {
+  const digest = trimmedDigest(scan);
+  if (digest) return `${formatShortDigest(digest)} · ${scan.image_ref}`;
+  return scan.image_ref;
+}
+
+function isCrossIdentity(a: ScanCompareSide, b: ScanCompareSide): boolean {
+  const aDigest = trimmedDigest(a);
+  const bDigest = trimmedDigest(b);
+  if (aDigest && bDigest) return aDigest !== bDigest;
+  return a.image_ref !== b.image_ref;
+}
 
 const SEVERITY_ORDER: Record<VulnSeverity, number> = {
   CRITICAL: 0,
@@ -130,7 +150,7 @@ export function ScanComparisonSheet({
   const addedCounts = useMemo(() => (data ? countBySeverity(data.added) : null), [data]);
   const removedCounts = useMemo(() => (data ? countBySeverity(data.removed) : null), [data]);
 
-  const crossImage = data != null && data.scanA.image_ref !== data.scanB.image_ref;
+  const crossImage = data != null && isCrossIdentity(data.scanA, data.scanB);
 
   const rows = useMemo<ScanCompareVulnerability[]>(() => {
     if (!data) return [];
@@ -149,7 +169,7 @@ export function ScanComparisonSheet({
     : (loading ? 'Loading…' : '');
 
   const footerContext = data
-    ? `${data.scanA.image_ref} → ${data.scanB.image_ref}`
+    ? `${scanCompareLabel(data.scanA)} → ${scanCompareLabel(data.scanB)}`
     : undefined;
 
   return (
@@ -174,13 +194,13 @@ export function ScanComparisonSheet({
             <div className="flex items-center gap-3 text-xs font-mono tabular-nums mb-3">
               <div className="flex-1 min-w-0">
                 <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Baseline</div>
-                <div className="text-stat-value truncate">{data.scanA.image_ref}</div>
+                <div className="text-stat-value truncate">{scanCompareLabel(data.scanA)}</div>
                 <div className="text-stat-subtitle tabular-nums">{new Date(data.scanA.scanned_at).toLocaleString()}</div>
               </div>
               <ArrowRight className="w-4 h-4 text-muted-foreground shrink-0" strokeWidth={1.5} />
               <div className="flex-1 min-w-0">
                 <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Current</div>
-                <div className="text-stat-value truncate">{data.scanB.image_ref}</div>
+                <div className="text-stat-value truncate">{scanCompareLabel(data.scanB)}</div>
                 <div className="text-stat-subtitle tabular-nums">{new Date(data.scanB.scanned_at).toLocaleString()}</div>
               </div>
             </div>
@@ -189,7 +209,7 @@ export function ScanComparisonSheet({
               <div className="flex items-start gap-2 rounded border border-warning/40 bg-warning/10 px-3 py-2 mb-3 text-xs text-warning">
                 <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-[1px]" strokeWidth={1.5} />
                 <span>
-                  You are comparing scans from two different image references. Package-level changes may reflect image differences rather than CVE drift.
+                  You are comparing scans from two different image identities. Package-level changes may reflect image differences rather than CVE drift.
                 </span>
               </div>
             )}

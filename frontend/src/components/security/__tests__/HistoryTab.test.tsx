@@ -125,15 +125,28 @@ describe('HistoryTab', () => {
     expect(screen.getByRole('button', { name: /Compare \(2\/2\)/ })).toBeInTheDocument();
   });
 
-  it('searches by image as you type (no Enter), adding imageRefLike to the request', async () => {
+  it('searches by imageIdentityLike as you type (not legacy imageRefLike)', async () => {
     mockedFetch.mockResolvedValue(listResponse([scan({ image_ref: 'alpine:3.19' })]));
     render(<HistoryTab onInspect={vi.fn()} />);
     await waitFor(() => expect(screen.getByText('alpine:3.19')).toBeInTheDocument());
-    await userEvent.type(screen.getByPlaceholderText('Search by image...'), 'redis');
+    await userEvent.type(screen.getByPlaceholderText('Search by image or digest...'), 'redis');
     await waitFor(() => {
       const calls = mockedFetch.mock.calls.map((c) => c[0] as string);
-      expect(calls.some((u) => u.includes('imageRefLike=redis'))).toBe(true);
+      expect(calls.some((u) => u.includes('imageIdentityLike=redis'))).toBe(true);
+      expect(calls.every((u) => !u.includes('imageRefLike='))).toBe(true);
     });
+  });
+
+  it('shows short digest as primary when image_digest is present', async () => {
+    mockedFetch.mockResolvedValue(listResponse([
+      scan({
+        image_ref: 'nginx:1.25',
+        image_digest: 'sha256:abcdef0123456789ffff',
+      }),
+    ]));
+    render(<HistoryTab onInspect={vi.fn()} />);
+    await waitFor(() => expect(screen.getByText('abcdef012345')).toBeInTheDocument());
+    expect(screen.getByText('nginx:1.25')).toBeInTheDocument();
   });
 
   it('renders the error state when the load fails', async () => {

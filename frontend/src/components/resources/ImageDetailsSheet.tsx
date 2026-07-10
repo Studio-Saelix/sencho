@@ -6,6 +6,7 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { copyToClipboard } from '@/lib/clipboard';
+import { formatShortDigest } from '@/lib/formatDigest';
 import { Copy } from 'lucide-react';
 
 interface ImageInspect {
@@ -59,12 +60,6 @@ function formatRelativeAge(timestampSec: number): string {
   return `${Math.floor(diff / (86400 * 365))}y ago`;
 }
 
-function shortDigest(id: string): string {
-  const colon = id.indexOf(':');
-  const hex = colon >= 0 ? id.slice(colon + 1) : id;
-  return hex.substring(0, 12);
-}
-
 export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) {
   const [data, setData] = useState<ImageDetails | null>(null);
   const [loading, setLoading] = useState(false);
@@ -104,7 +99,7 @@ export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) 
   const history = data?.history ?? [];
   const totalLayers = history.length;
 
-  const name = inspect?.RepoTags?.[0] || (inspect ? shortDigest(inspect.Id) : 'Image details');
+  const name = inspect?.RepoTags?.[0] || (inspect ? formatShortDigest(inspect.Id) : 'Image details');
   const meta = inspect
     ? `${formatBytes(inspect.Size)} · ${inspect.Architecture ?? '?'}/${inspect.Os ?? '?'} · ${totalLayers} layers`
     : (loading ? 'Loading…' : '');
@@ -138,7 +133,7 @@ export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) 
             <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
               <Field label="ID">
                 <p className="font-mono text-xs mt-0.5 flex items-center gap-1.5">
-                  {shortDigest(inspect.Id)}
+                  {formatShortDigest(inspect.Id)}
                   <button
                     className="text-muted-foreground hover:text-foreground transition-colors"
                     onClick={async () => {

@@ -226,7 +226,16 @@ curl -X POST https://your-sencho-instance:1852/api/security/scan \
 
 **License:** Community
 
-Supports filters: `imageRef`, `imageRefLike`, `status`, `limit`, `offset`. Response is paginated with `total` and `scans` fields.
+Supports filters: `imageRef`, `imageRefLike` (reference-only substring), `imageDigest` (exact), `imageIdentityLike` (substring match on reference **or** digest), `status`, `limit`, `offset`.
+
+Response is paginated with `items`, `total`, `perImageLimit`, and `cappedIdentities` (digest-or-ref buckets at the retention cap). Exact `imageRef` or `imageDigest` deep-dives bypass the per-identity cap.
+
+```bash
+curl -H "Authorization: Bearer YOUR_API_TOKEN" \
+  "https://your-sencho-instance:1852/api/security/scans?imageIdentityLike=nginx&limit=20"
+```
+
+Legacy clients may still use `imageRefLike` for reference-only search:
 
 ```bash
 curl -H "Authorization: Bearer YOUR_API_TOKEN" \

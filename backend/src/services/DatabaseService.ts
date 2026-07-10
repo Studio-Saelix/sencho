@@ -4818,10 +4818,31 @@ export class DatabaseService {
         );
     }
 
+    /**
+     * Stable scan-history identity: prefer a non-empty digest, else image_ref.
+     * TRIM so whitespace-only digests fall back to the reference (config scans,
+     * legacy rows). Used for retention partitioning and cap metadata.
+     */
+    private static readonly SCAN_IDENTITY_SQL =
+        `COALESCE(NULLIF(TRIM(image_digest), ''), image_ref)`;
+
     public getVulnerabilityScans(
         nodeId: number,
-        opts: { imageRef?: string; imageRefLike?: string; status?: VulnScanStatus; limit?: number; offset?: number } = {},
-    ): { items: VulnerabilityScan[]; total: number; cappedImageRefs: string[]; perImageLimit: number } {
+        opts: {
+            imageRef?: string;
+            imageRefLike?: string;
+            imageDigest?: string;
+            imageIdentityLike?: string;
+            status?: VulnScanStatus;
+            limit?: number;
+            offset?: number;
+        } = {},
+    ): {
+        items: VulnerabilityScan[];
+        total: number;
+        cappedIdentities: Array<{ key: string; kind: 'digest' | 'ref'; displayRef: string }>;
+        perImageLimit: number;
+    } {
         const limit = Math.max(1, Math.min(opts.limit ?? 50, 500));
         const offset = Math.max(0, opts.offset ?? 0);
         const where = ['node_id = ?'];
@@ -4830,20 +4851,32 @@ export class DatabaseService {
             where.push('image_ref = ?');
             params.push(opts.imageRef);
         }
+        if (opts.imageDigest) {
+            where.push('image_digest = ?');
+            params.push(opts.imageDigest);
+        }
+        // Legacy reference-only substring filter (documented API; keep).
         if (opts.imageRefLike) {
             where.push('image_ref LIKE ?');
             params.push(`%${opts.imageRefLike}%`);
+        }
+        // Additive OR identity search: tag or digest fragment.
+        if (opts.imageIdentityLike) {
+            const like = `%${opts.imageIdentityLike}%`;
+            where.push('(image_ref LIKE ? OR image_digest LIKE ?)');
+            params.push(like, like);
         }
         if (opts.status) {
             where.push('status = ?');
             params.push(opts.status);
         }
         const whereSql = where.join(' AND ');
+        const identitySql = DatabaseService.SCAN_IDENTITY_SQL;
 
-        // Grouped (history) view caps rows per image_ref so a hot image
-        // cannot drown out the others. Single-image deep-dive (imageRef set)
-        // bypasses the cap so users can drill past it.
-        const applyPerImageCap = !opts.imageRef;
+        // Grouped history caps rows per digest identity so a hot digest cannot
+        // drown out others. Exact imageRef or imageDigest deep-dives bypass the
+        // cap so operators can page past retention.
+        const applyPerImageCap = !opts.imageRef && !opts.imageDigest;
         const parsedLimit = parseInt(this.getGlobalSettings()['scan_history_per_image_limit'] ?? '50', 10);
         const perImageLimit = parsedLimit > 0 ? parsedLimit : 50;
 
@@ -4858,11 +4891,11 @@ export class DatabaseService {
                     `SELECT * FROM vulnerability_scans WHERE ${whereSql} ORDER BY scanned_at DESC LIMIT ? OFFSET ?`,
                 )
                 .all(...(params as never[]), limit, offset) as VulnerabilityScan[];
-            return { items, total, cappedImageRefs: [], perImageLimit };
+            return { items, total, cappedIdentities: [], perImageLimit };
         }
 
         const rankedCte = `WITH ranked AS (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY image_ref ORDER BY scanned_at DESC) AS rn
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY ${identitySql} ORDER BY scanned_at DESC) AS rn
             FROM vulnerability_scans
             WHERE ${whereSql}
         )`;
@@ -4883,38 +4916,50 @@ export class DatabaseService {
             )
             .all(...(params as never[]), perImageLimit, limit, offset) as VulnerabilityScan[];
 
-        // Identify which image_refs sit at or above the cap so the UI can
-        // flag them. `>=` (not `>`) is intentional: the daily prune keeps
-        // each image at exactly perImageLimit rows, so by the time a user
-        // opens the history sheet the underlying count rarely exceeds the
-        // cap. Flagging at-cap groups still tells the truth (older scans
-        // have been or will be pruned at this image's next scan).
+        // Cap metadata keyed by digest identity. displayRef is the newest
+        // image_ref in the bucket so UI copy stays accurate when multiple tags
+        // share one digest. `>=` matches the daily prune keeping each identity
+        // at exactly perImageLimit rows.
         const cappedRows = this.db
             .prepare(
-                `SELECT image_ref FROM vulnerability_scans
-                 WHERE ${whereSql}
-                 GROUP BY image_ref HAVING COUNT(*) >= ?`,
+                `WITH buckets AS (
+                    SELECT
+                      ${identitySql} AS identity_key,
+                      image_ref,
+                      image_digest,
+                      COUNT(*) OVER (PARTITION BY ${identitySql}) AS cnt,
+                      ROW_NUMBER() OVER (PARTITION BY ${identitySql} ORDER BY scanned_at DESC) AS rn
+                    FROM vulnerability_scans
+                    WHERE ${whereSql}
+                  )
+                  SELECT identity_key AS key,
+                    CASE WHEN NULLIF(TRIM(image_digest), '') IS NOT NULL THEN 'digest' ELSE 'ref' END AS kind,
+                    image_ref AS displayRef
+                  FROM buckets
+                  WHERE rn = 1 AND cnt >= ?`,
             )
-            .all(...(params as never[]), perImageLimit) as Array<{ image_ref: string }>;
-        const cappedImageRefs = cappedRows.map((r) => r.image_ref);
+            .all(...(params as never[]), perImageLimit) as Array<{
+                key: string;
+                kind: 'digest' | 'ref';
+                displayRef: string;
+            }>;
 
-        return { items, total, cappedImageRefs, perImageLimit };
+        return { items, total, cappedIdentities: cappedRows, perImageLimit };
     }
 
     /**
-     * Per-image scan history pruner. For each (node_id, image_ref), keep the
-     * newest N scans (ordered by scanned_at DESC) and delete older rows along
-     * with their child findings. SQLite foreign-key cascade is not enabled
-     * at the connection level here, so children are deleted explicitly. The
-     * subquery is self-contained so we don't bind one parameter per ID. A
-     * first-run backlog of thousands of stale scans would otherwise blow
-     * past SQLITE_MAX_VARIABLE_NUMBER.
+     * Per-identity scan history pruner. For each (node_id, digest-or-ref
+     * identity), keep the newest N scans and delete older rows plus child
+     * findings. SQLite FK cascade is not enabled here, so children are deleted
+     * explicitly. The subquery is self-contained to stay under
+     * SQLITE_MAX_VARIABLE_NUMBER on large first-run backlogs.
      */
     public pruneScanHistoryPerImage(perImageLimit: number): number {
         const limit = Math.max(1, Math.floor(perImageLimit));
+        const identitySql = DatabaseService.SCAN_IDENTITY_SQL;
         const overflowSubquery = `SELECT id FROM (
             SELECT id, ROW_NUMBER() OVER (
-              PARTITION BY node_id, image_ref ORDER BY scanned_at DESC
+              PARTITION BY node_id, ${identitySql} ORDER BY scanned_at DESC
             ) AS rn
             FROM vulnerability_scans
           ) WHERE rn > ?`;
