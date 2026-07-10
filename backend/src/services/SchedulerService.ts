@@ -771,9 +771,10 @@ export class SchedulerService {
      * The remote node runs the image checks and compose update locally.
      */
     private async executeUpdateRemote(nodeId: number, target: string): Promise<string> {
+        const label = this.nodeLabel(nodeId);
         const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
         if (!proxyTarget) {
-            throw new Error('Remote node is not configured or missing API credentials');
+            throw new Error(`${label}: Remote node is not configured or missing API credentials`);
         }
 
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
@@ -782,27 +783,32 @@ export class SchedulerService {
             console.log(`[SchedulerService] executeUpdateRemote: node=${nodeId} target=${target}`);
         }
         const startTime = Date.now();
-        const response = await fetch(`${baseUrl}/api/auto-update/execute`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${proxyTarget.apiToken}`,
-                [PROXY_TIER_HEADER]: proxyHeaders.tier,
-            },
-            body: JSON.stringify({ target }),
-            signal: AbortSignal.timeout(300_000), // 5 minute timeout for long updates
-        });
+        try {
+            const response = await fetch(`${baseUrl}/api/auto-update/execute`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${proxyTarget.apiToken}`,
+                    [PROXY_TIER_HEADER]: proxyHeaders.tier,
+                },
+                body: JSON.stringify({ target }),
+                signal: AbortSignal.timeout(300_000), // 5 minute timeout for long updates
+            });
 
-        if (!response.ok) {
-            const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-            throw new Error((body as { error?: string }).error || `Remote node returned ${response.status}`);
-        }
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                throw new Error(`${label}: ${(body as { error?: string }).error || `Remote node returned ${response.status}`}`);
+            }
 
-        const body = await response.json() as { result?: string };
-        if (isDebugEnabled()) {
-            console.log(`[SchedulerService] executeUpdateRemote: completed in ${Date.now() - startTime}ms`);
+            const body = await response.json() as { result?: string };
+            if (isDebugEnabled()) {
+                console.log(`[SchedulerService] executeUpdateRemote: completed in ${Date.now() - startTime}ms`);
+            }
+            return body.result || 'Remote auto-update completed (no details returned).';
+        } catch (err) {
+            if (err instanceof Error && err.message.startsWith(label)) throw err;
+            throw new Error(`${label}: ${getErrorMessage(err, String(err))}`);
         }
-        return body.result || 'Remote auto-update completed (no details returned).';
     }
 
     /**
@@ -816,6 +822,12 @@ export class SchedulerService {
     private containerNotFoundMessage(containerName: string, nodeId: number): string {
         const nodeName = NodeRegistry.getInstance().getNode(nodeId)?.name ?? String(nodeId);
         return `Container "${containerName}" not found on node "${nodeName}". It may have been renamed or removed.`;
+    }
+
+    /** Stable node identifier for error correlation across remote proxy hops. */
+    private nodeLabel(nodeId: number): string {
+        const node = NodeRegistry.getInstance().getNode(nodeId);
+        return node ? `node "${node.name}" (id=${nodeId})` : `node id=${nodeId}`;
     }
 
     private async resolveContainerId(task: ScheduledTask): Promise<{ id: string; name: string }> {
@@ -878,30 +890,36 @@ export class SchedulerService {
         State?: string;
         Image?: string;
     }>> {
+        const label = this.nodeLabel(nodeId);
         const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
         if (!proxyTarget) {
-            throw new Error('Remote node is not configured or missing API credentials');
+            throw new Error(`${label}: Remote node is not configured or missing API credentials`);
         }
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
-        const response = await fetch(`${baseUrl}/api/containers?all=true`, {
-            headers: {
-                'Authorization': `Bearer ${proxyTarget.apiToken}`,
-                [PROXY_TIER_HEADER]: proxyHeaders.tier,
-            },
-            signal: AbortSignal.timeout(60_000),
-        });
-        if (!response.ok) {
-            const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-            throw new Error((body as { error?: string }).error || `Remote node returned ${response.status}`);
+        try {
+            const response = await fetch(`${baseUrl}/api/containers?all=true`, {
+                headers: {
+                    'Authorization': `Bearer ${proxyTarget.apiToken}`,
+                    [PROXY_TIER_HEADER]: proxyHeaders.tier,
+                },
+                signal: AbortSignal.timeout(60_000),
+            });
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                throw new Error(`${label}: ${(body as { error?: string }).error || `Remote node returned ${response.status}`}`);
+            }
+            return excludeSelfContainers(await response.json() as Array<{
+                Id: string;
+                Names?: string[];
+                State?: string;
+                Image?: string;
+                ImageID?: string;
+            }>);
+        } catch (err) {
+            if (err instanceof Error && err.message.startsWith(label)) throw err;
+            throw new Error(`${label}: ${getErrorMessage(err, String(err))}`);
         }
-        return excludeSelfContainers(await response.json() as Array<{
-            Id: string;
-            Names?: string[];
-            State?: string;
-            Image?: string;
-            ImageID?: string;
-        }>);
     }
 
     private async postToRemoteContainer(
@@ -909,15 +927,49 @@ export class SchedulerService {
         containerId: string,
         action: 'start' | 'stop' | 'restart',
     ): Promise<void> {
+        const label = this.nodeLabel(nodeId);
         const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
         if (!proxyTarget) {
-            throw new Error('Remote node is not configured or missing API credentials');
+            throw new Error(`${label}: Remote node is not configured or missing API credentials`);
         }
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
-        const response = await fetch(
-            `${baseUrl}/api/containers/${encodeURIComponent(containerId)}/${action}`,
-            {
+        try {
+            const response = await fetch(
+                `${baseUrl}/api/containers/${encodeURIComponent(containerId)}/${action}`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${proxyTarget.apiToken}`,
+                        [PROXY_TIER_HEADER]: proxyHeaders.tier,
+                    },
+                    signal: AbortSignal.timeout(300_000),
+                },
+            );
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                throw new Error(`${label}: ${(body as { error?: string }).error || `Remote node returned ${response.status}`}`);
+            }
+        } catch (err) {
+            if (err instanceof Error && err.message.startsWith(label)) throw err;
+            throw new Error(`${label}: ${getErrorMessage(err, String(err))}`);
+        }
+    }
+
+    private async postToRemoteStack(nodeId: number, routeSuffix: string): Promise<void> {
+        const label = this.nodeLabel(nodeId);
+        const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
+        if (!proxyTarget) {
+            throw new Error(`${label}: Remote node is not configured or missing API credentials`);
+        }
+        const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
+        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+        if (isDebugEnabled()) {
+            console.log(`[SchedulerService:debug] postToRemoteStack: node=${nodeId} route=${routeSuffix}`);
+        }
+        try {
+            const response = await fetch(`${baseUrl}/api/stacks/${routeSuffix}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -925,36 +977,14 @@ export class SchedulerService {
                     [PROXY_TIER_HEADER]: proxyHeaders.tier,
                 },
                 signal: AbortSignal.timeout(300_000),
-            },
-        );
-        if (!response.ok) {
-            const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-            throw new Error((body as { error?: string }).error || `Remote node returned ${response.status}`);
-        }
-    }
-
-    private async postToRemoteStack(nodeId: number, routeSuffix: string): Promise<void> {
-        const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
-        if (!proxyTarget) {
-            throw new Error('Remote node is not configured or missing API credentials');
-        }
-        const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
-        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
-        if (isDebugEnabled()) {
-            console.log(`[SchedulerService:debug] postToRemoteStack: node=${nodeId} route=${routeSuffix}`);
-        }
-        const response = await fetch(`${baseUrl}/api/stacks/${routeSuffix}`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${proxyTarget.apiToken}`,
-                [PROXY_TIER_HEADER]: proxyHeaders.tier,
-            },
-            signal: AbortSignal.timeout(300_000),
-        });
-        if (!response.ok) {
-            const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-            throw new Error((body as { error?: string }).error || `Remote node returned ${response.status}`);
+            });
+            if (!response.ok) {
+                const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
+                throw new Error(`${label}: ${(body as { error?: string }).error || `Remote node returned ${response.status}`}`);
+            }
+        } catch (err) {
+            if (err instanceof Error && err.message.startsWith(label)) throw err;
+            throw new Error(`${label}: ${getErrorMessage(err, String(err))}`);
         }
     }
 

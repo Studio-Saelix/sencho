@@ -1741,7 +1741,7 @@ describe('SchedulerService - executeUpdateRemote', () => {
 
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure', error: expect.stringContaining('Internal error') })
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('node "remote" (id=2): Internal error') })
     );
   });
 });
@@ -1946,7 +1946,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     await SchedulerService.getInstance().triggerTask(300);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure', error: expect.stringContaining('Docker daemon is unreachable') }),
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('node "remote" (id=2): Docker daemon is unreachable') }),
     );
   });
 
@@ -1962,7 +1962,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     await SchedulerService.getInstance().triggerTask(300);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure', error: expect.stringContaining('HTTP 502') }),
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('node "remote" (id=2): HTTP 502') }),
     );
   });
 
@@ -1976,7 +1976,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure', error: expect.stringContaining('not configured or missing API credentials') }),
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('node "remote" (id=2): Remote node is not configured or missing API credentials') }),
     );
   });
 
@@ -1993,11 +1993,60 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     await SchedulerService.getInstance().triggerTask(300);
     // Third service is never reached after the second fails.
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    const call = (mockUpdateScheduledTaskRun as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    const errorMsg: string = call[1].error;
+    // Node context appears exactly once (via postToRemoteStack's inner prefix, not duplicated
+    // by executeRestartRemote's catch wrapper).
+    const nodeLabel = 'node "remote" (id=2)';
+    expect(errorMsg).toContain(nodeLabel);
+    expect(errorMsg.indexOf(nodeLabel)).toBe(errorMsg.lastIndexOf(nodeLabel));
+    expect(errorMsg).toContain('already restarted: api');
+    expect(errorMsg).toContain('worker');
+    expect(errorMsg).toContain('boom');
+  });
+});
+
+// ── Remote container proxy error context ─────────────────────────────
+
+describe('SchedulerService - remote container proxy error context', () => {
+  it('prefixes transport failures with node context', async () => {
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+    mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tkn' });
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connect ECONNREFUSED')));
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure', error: expect.stringContaining('already restarted: api') }),
+      expect.objectContaining({
+        status: 'failure',
+        error: expect.stringContaining('node "remote" (id=2): connect ECONNREFUSED'),
+      }),
     );
   });
+
+  it('prefixes remote container list failures with node context', async () => {
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+    mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tkn' });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({ error: 'Docker daemon is unreachable' }),
+    }));
+    mockGetScheduledTask.mockReturnValue({
+      ...makeLifecycleTask('restart', { node_id: 2 }),
+      target_type: 'container',
+      target_services: null,
+    });
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        status: 'failure',
+        error: expect.stringContaining('node "remote" (id=2): Docker daemon is unreachable'),
+      }),
+    );
+  });
+
 });
 
 // ── Unpaid-tier guard in executeTask ────────────────────────────────────
