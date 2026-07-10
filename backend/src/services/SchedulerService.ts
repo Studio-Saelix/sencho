@@ -12,6 +12,7 @@ import { ImageUpdateService } from './ImageUpdateService';
 import type { ImageCheckResult } from './ImageUpdateService';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { formatNoTargetError } from '../utils/remoteTarget';
 import { sanitizeForLog } from '../utils/safeLog';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, type SnapshotNodeData } from '../utils/snapshot-capture';
 import { NodeRegistry } from './NodeRegistry';
@@ -771,12 +772,7 @@ export class SchedulerService {
      * The remote node runs the image checks and compose update locally.
      */
     private async executeUpdateRemote(nodeId: number, target: string): Promise<string> {
-        const label = this.nodeLabel(nodeId);
-        const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
-        if (!proxyTarget) {
-            throw new Error(`${label}: Remote node is not configured or missing API credentials`);
-        }
-
+        const proxyTarget = this.requireRemoteProxyTarget(nodeId);
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         if (isDebugEnabled()) {
@@ -796,8 +792,7 @@ export class SchedulerService {
             });
 
             if (!response.ok) {
-                const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-                throw new Error(`${label}: ${(body as { error?: string }).error || `Remote node returned ${response.status}`}`);
+                throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
             }
 
             const body = await response.json() as { result?: string };
@@ -806,8 +801,7 @@ export class SchedulerService {
             }
             return body.result || 'Remote auto-update completed (no details returned).';
         } catch (err) {
-            if (err instanceof Error && err.message.startsWith(label)) throw err;
-            throw new Error(`${label}: ${getErrorMessage(err, String(err))}`);
+            this.rethrowRemoteProxyError(nodeId, err);
         }
     }
 
@@ -824,10 +818,44 @@ export class SchedulerService {
         return `Container "${containerName}" not found on node "${nodeName}". It may have been renamed or removed.`;
     }
 
-    /** Stable node identifier for error correlation across remote proxy hops. */
-    private nodeLabel(nodeId: number): string {
+    /** Hub target tag used for startsWith rethrow guards (no trailing detail). */
+    private remoteProxyNodeTag(nodeId: number): string {
+        const nodeName = NodeRegistry.getInstance().getNode(nodeId)?.name ?? String(nodeId);
+        return `Remote node "${nodeName}" (id=${nodeId})`;
+    }
+
+    /** Operator-facing remote proxy failure with stable node correlation. */
+    private remoteProxyFailureMessage(nodeId: number, detail: string): string {
+        return `${this.remoteProxyNodeTag(nodeId)}: ${detail}`;
+    }
+
+    private noProxyTargetDetail(nodeId: number): string {
         const node = NodeRegistry.getInstance().getNode(nodeId);
-        return node ? `node "${node.name}" (id=${nodeId})` : `node id=${nodeId}`;
+        if (!node) return 'Remote node is not configured or missing API credentials';
+        return formatNoTargetError(node);
+    }
+
+    private async remoteResponseDetail(response: Response): Promise<string> {
+        try {
+            const body = await response.json() as { error?: string };
+            return body.error || `Remote node returned ${response.status}`;
+        } catch {
+            return `HTTP ${response.status}`;
+        }
+    }
+
+    private requireRemoteProxyTarget(nodeId: number): { apiUrl: string; apiToken: string } {
+        const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
+        if (!proxyTarget) {
+            throw new Error(this.remoteProxyFailureMessage(nodeId, this.noProxyTargetDetail(nodeId)));
+        }
+        return proxyTarget;
+    }
+
+    private rethrowRemoteProxyError(nodeId: number, err: unknown): never {
+        const tag = this.remoteProxyNodeTag(nodeId);
+        if (err instanceof Error && err.message.startsWith(tag)) throw err;
+        throw new Error(this.remoteProxyFailureMessage(nodeId, getErrorMessage(err, 'Remote proxy request failed')));
     }
 
     private async resolveContainerId(task: ScheduledTask): Promise<{ id: string; name: string }> {
@@ -890,11 +918,7 @@ export class SchedulerService {
         State?: string;
         Image?: string;
     }>> {
-        const label = this.nodeLabel(nodeId);
-        const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
-        if (!proxyTarget) {
-            throw new Error(`${label}: Remote node is not configured or missing API credentials`);
-        }
+        const proxyTarget = this.requireRemoteProxyTarget(nodeId);
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         try {
@@ -906,8 +930,7 @@ export class SchedulerService {
                 signal: AbortSignal.timeout(60_000),
             });
             if (!response.ok) {
-                const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-                throw new Error(`${label}: ${(body as { error?: string }).error || `Remote node returned ${response.status}`}`);
+                throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
             }
             return excludeSelfContainers(await response.json() as Array<{
                 Id: string;
@@ -917,8 +940,7 @@ export class SchedulerService {
                 ImageID?: string;
             }>);
         } catch (err) {
-            if (err instanceof Error && err.message.startsWith(label)) throw err;
-            throw new Error(`${label}: ${getErrorMessage(err, String(err))}`);
+            this.rethrowRemoteProxyError(nodeId, err);
         }
     }
 
@@ -927,11 +949,7 @@ export class SchedulerService {
         containerId: string,
         action: 'start' | 'stop' | 'restart',
     ): Promise<void> {
-        const label = this.nodeLabel(nodeId);
-        const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
-        if (!proxyTarget) {
-            throw new Error(`${label}: Remote node is not configured or missing API credentials`);
-        }
+        const proxyTarget = this.requireRemoteProxyTarget(nodeId);
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         try {
@@ -948,21 +966,15 @@ export class SchedulerService {
                 },
             );
             if (!response.ok) {
-                const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-                throw new Error(`${label}: ${(body as { error?: string }).error || `Remote node returned ${response.status}`}`);
+                throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
             }
         } catch (err) {
-            if (err instanceof Error && err.message.startsWith(label)) throw err;
-            throw new Error(`${label}: ${getErrorMessage(err, String(err))}`);
+            this.rethrowRemoteProxyError(nodeId, err);
         }
     }
 
     private async postToRemoteStack(nodeId: number, routeSuffix: string): Promise<void> {
-        const label = this.nodeLabel(nodeId);
-        const proxyTarget = NodeRegistry.getInstance().getProxyTarget(nodeId);
-        if (!proxyTarget) {
-            throw new Error(`${label}: Remote node is not configured or missing API credentials`);
-        }
+        const proxyTarget = this.requireRemoteProxyTarget(nodeId);
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
         if (isDebugEnabled()) {
@@ -979,12 +991,10 @@ export class SchedulerService {
                 signal: AbortSignal.timeout(300_000),
             });
             if (!response.ok) {
-                const body = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
-                throw new Error(`${label}: ${(body as { error?: string }).error || `Remote node returned ${response.status}`}`);
+                throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
             }
         } catch (err) {
-            if (err instanceof Error && err.message.startsWith(label)) throw err;
-            throw new Error(`${label}: ${getErrorMessage(err, String(err))}`);
+            this.rethrowRemoteProxyError(nodeId, err);
         }
     }
 

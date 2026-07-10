@@ -131,6 +131,17 @@ vi.mock('../services/DockerController', () => ({
   },
 }));
 
+vi.mock('../services/SelfIdentityService', () => ({
+  default: {
+    getInstance: () => ({
+      initialize: vi.fn().mockResolvedValue(undefined),
+      isOwnContainer: vi.fn().mockReturnValue(false),
+      isOwnImage: vi.fn().mockReturnValue(false),
+      resetForTesting: vi.fn(),
+    }),
+  },
+}));
+
 vi.mock('../services/ComposeService', () => ({
   ComposeService: {
     getInstance: () => ({
@@ -1741,7 +1752,7 @@ describe('SchedulerService - executeUpdateRemote', () => {
 
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure', error: expect.stringContaining('node "remote" (id=2): Internal error') })
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('Remote node "remote" (id=2): Internal error') })
     );
   });
 });
@@ -1946,7 +1957,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     await SchedulerService.getInstance().triggerTask(300);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure', error: expect.stringContaining('node "remote" (id=2): Docker daemon is unreachable') }),
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('Remote node "remote" (id=2): Docker daemon is unreachable') }),
     );
   });
 
@@ -1962,13 +1973,13 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     await SchedulerService.getInstance().triggerTask(300);
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure', error: expect.stringContaining('node "remote" (id=2): HTTP 502') }),
+      expect.objectContaining({ status: 'failure', error: expect.stringContaining('Remote node "remote" (id=2): HTTP 502') }),
     );
   });
 
-  it('records failure when the remote node has no proxy credentials', async () => {
-    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
-    // getProxyTarget defaults to null (no credentials configured).
+  it('records failure when the remote proxy target is unavailable', async () => {
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online', mode: 'proxy' });
+    // getProxyTarget defaults to null (proxy credentials missing / unreachable).
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { node_id: 2 }));
@@ -1976,7 +1987,34 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     expect(fetchMock).not.toHaveBeenCalled();
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ status: 'failure', error: expect.stringContaining('node "remote" (id=2): Remote node is not configured or missing API credentials') }),
+      expect.objectContaining({
+        status: 'failure',
+        error: expect.stringContaining('Remote node "remote" (id=2): Remote node not configured'),
+      }),
+    );
+  });
+
+  it('records pilot-aware no-target messaging when the tunnel is disconnected', async () => {
+    mockGetNode.mockReturnValue({
+      id: 2,
+      name: 'edge-pilot',
+      type: 'remote',
+      status: 'online',
+      mode: 'pilot_agent',
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_stop', { node_id: 2 }));
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        status: 'failure',
+        error: expect.stringContaining(
+          'Remote node "edge-pilot" (id=2): Pilot tunnel to "edge-pilot" is disconnected',
+        ),
+      }),
     );
   });
 
@@ -1997,7 +2035,7 @@ describe('SchedulerService - lifecycle remote proxy', () => {
     const errorMsg: string = call[1].error;
     // Node context appears exactly once (via postToRemoteStack's inner prefix, not duplicated
     // by executeRestartRemote's catch wrapper).
-    const nodeLabel = 'node "remote" (id=2)';
+    const nodeLabel = 'Remote node "remote" (id=2)';
     expect(errorMsg).toContain(nodeLabel);
     expect(errorMsg.indexOf(nodeLabel)).toBe(errorMsg.lastIndexOf(nodeLabel));
     expect(errorMsg).toContain('already restarted: api');
@@ -2019,7 +2057,7 @@ describe('SchedulerService - remote container proxy error context', () => {
       1,
       expect.objectContaining({
         status: 'failure',
-        error: expect.stringContaining('node "remote" (id=2): connect ECONNREFUSED'),
+        error: expect.stringContaining('Remote node "remote" (id=2): connect ECONNREFUSED'),
       }),
     );
   });
@@ -2042,7 +2080,38 @@ describe('SchedulerService - remote container proxy error context', () => {
       1,
       expect.objectContaining({
         status: 'failure',
-        error: expect.stringContaining('node "remote" (id=2): Docker daemon is unreachable'),
+        error: expect.stringContaining('Remote node "remote" (id=2): Docker daemon is unreachable'),
+      }),
+    );
+  });
+
+  it('prefixes remote container action failures with node context', async () => {
+    mockGetNode.mockReturnValue({ id: 2, name: 'remote', type: 'remote', status: 'online' });
+    mockGetProxyTarget.mockReturnValue({ apiUrl: 'http://remote:1852', apiToken: 'tkn' });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ([{ Id: 'ctrdeadbeef01', Names: ['/watchtower'], State: 'running', Image: 'containrrr/watchtower' }]),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: async () => ({ error: 'container stop failed' }),
+      });
+    vi.stubGlobal('fetch', fetchMock);
+    mockGetScheduledTask.mockReturnValue({
+      ...makeLifecycleTask('auto_stop', { node_id: 2, target_id: 'watchtower' }),
+      target_type: 'container',
+      target_services: null,
+    });
+    await SchedulerService.getInstance().triggerTask(300);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toContain('/api/containers/ctrdeadbeef01/stop');
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        status: 'failure',
+        error: expect.stringContaining('Remote node "remote" (id=2): container stop failed'),
       }),
     );
   });
