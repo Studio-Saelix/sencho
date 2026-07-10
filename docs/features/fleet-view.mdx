@@ -315,9 +315,6 @@ Fleet View queries every registered node in parallel. Each node responds indepen
   <Accordion title="Update fails with 'Remote node is unreachable'">
     The gateway could not connect to the remote's API while issuing the update. Check that the remote is powered on, that the API URL saved for the row is still correct, that the network allows traffic between the control instance and the remote on the configured port, and that `docker ps` on the remote shows the Sencho container running. Once the remote answers `/api/health`, retry from the row's **Update** button.
   </Accordion>
-  <Accordion title="The Update button returns 'Admin access required'">
-    Fleet update operations (per-row and **Update all**) are admin-only. Viewer and operator roles can see the table and the badges but the button returns a 403 when clicked. Ask a Sencho administrator either to run the update for you or to grant your account the admin role.
-  </Accordion>
   <Accordion title="The local-update overlay says 'Taking longer than expected'">
     When you update the local (control) node, Sencho restarts itself and a full-screen overlay waits for the new gateway to answer. If it has not come back within five minutes the overlay stops waiting and offers a **Reload to check** button. On its own this is not a failure: a large image pull can take longer than the reconnect window. Give the pull a little more time and click **Reload to check**. If the page still does not load after the Sencho container has restarted, inspect it on the Docker host with `docker ps` and `docker logs`.
   </Accordion>
