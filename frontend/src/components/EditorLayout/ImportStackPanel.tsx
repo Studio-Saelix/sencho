@@ -16,6 +16,14 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useAuth } from '@/context/AuthContext';
 
+// Mirrors backend IMPORT_COMPOSE_FILENAMES: non-canonical basenames land as compose.yaml.
+const CANONICAL_COMPOSE_FILENAMES = new Set([
+  'compose.yaml',
+  'compose.yml',
+  'docker-compose.yaml',
+  'docker-compose.yml',
+]);
+
 // Mirrors backend isValidStackName so the move button stays disabled until the
 // name the backend would accept; the backend remains authoritative.
 const VALID_STACK_NAME = /^[a-zA-Z0-9_-]+$/;
@@ -187,7 +195,7 @@ export function ImportStackPanel({ onClose, onImported }: ImportStackPanelProps)
                   canCreate={canCreate}
                   moving={movingLocation === c.location}
                   onToggle={() => toggle(c.location)}
-                  onMove={(name) => void move(c.location, name)}
+                  onMove={(name) => move(c.location, name)}
                 />
               ))}
             </div>
@@ -230,7 +238,7 @@ function CandidateCard({
   canCreate: boolean;
   moving: boolean;
   onToggle: () => void;
-  onMove: (name: string) => void;
+  onMove: (name: string) => Promise<void>;
 }) {
   const { name, composeFile, location, status, services, warnings, parseError } = candidate;
   // Prefill the destination name: a nested stack already has a folder name worth
@@ -240,7 +248,9 @@ function CandidateCard({
   const trimmedName = destName.trim();
   const nameValid = VALID_STACK_NAME.test(trimmedName);
   const displayName = name || '<name>';
-  const target = joinPath(composeDir, trimmedName || displayName, composeFile);
+  // Match backend importCandidateIntoStack: non-canonical basenames land as compose.yaml.
+  const destComposeFile = CANONICAL_COMPOSE_FILENAMES.has(composeFile) ? composeFile : 'compose.yaml';
+  const target = joinPath(composeDir, trimmedName || displayName, destComposeFile);
 
   return (
     <div className="rounded-md border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
@@ -299,13 +309,25 @@ function CandidateCard({
                   put.
                 </p>
               )}
+              {destComposeFile !== composeFile && (
+                <p className="text-[10px] leading-relaxed text-stat-subtitle">
+                  Will be saved as compose.yaml so Sencho recognizes the stack.
+                </p>
+              )}
               {confirming ? (
                 <div className="flex items-center gap-2">
                   <span className="flex-1 text-[11px] text-stat-subtitle">Move it on disk?</span>
                   <Button size="sm" variant="ghost" onClick={() => setConfirming(false)} disabled={moving}>
                     Cancel
                   </Button>
-                  <Button size="sm" onClick={() => onMove(trimmedName)} disabled={moving || !nameValid}>
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      // Close confirm on success or failure (toast already shows errors).
+                      void onMove(trimmedName).finally(() => setConfirming(false));
+                    }}
+                    disabled={moving || !nameValid}
+                  >
                     {moving ? (
                       <>
                         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" strokeWidth={1.5} />

@@ -50,6 +50,43 @@ describe('FileSystemService.importCandidateIntoStack', () => {
     expect(await FileSystemService.getInstance().getStacks()).toContain('webapp');
   });
 
+  it('renames a non-canonical loose-root yaml to compose.yaml so the stack registers', async () => {
+    fs.writeFileSync(path.join(tmpRoot, 'nginx.yml'), COMPOSE);
+    try {
+      await FileSystemService.getInstance().importCandidateIntoStack(
+        { location: 'nginx.yml', composeFile: 'nginx.yml', status: 'loose-root' },
+        'nginx',
+      );
+      expect(fs.existsSync(path.join(tmpRoot, 'nginx', 'compose.yaml'))).toBe(true);
+      expect(fs.existsSync(path.join(tmpRoot, 'nginx', 'nginx.yml'))).toBe(false);
+      expect(fs.existsSync(path.join(tmpRoot, 'nginx.yml'))).toBe(false);
+      expect(await FileSystemService.getInstance().getStacks()).toContain('nginx');
+    } finally {
+      fs.rmSync(path.join(tmpRoot, 'nginx'), { recursive: true, force: true });
+      fs.rmSync(path.join(tmpRoot, 'nginx.yml'), { force: true });
+    }
+  });
+
+  it('renames a nested non-canonical yaml to compose.yaml after promoting the directory', async () => {
+    fs.mkdirSync(path.join(tmpRoot, 'apps', 'plex'), { recursive: true });
+    fs.writeFileSync(path.join(tmpRoot, 'apps', 'plex', 'plex.yml'), COMPOSE);
+    fs.writeFileSync(path.join(tmpRoot, 'apps', 'plex', '.env'), 'TOKEN=1\n');
+    try {
+      await FileSystemService.getInstance().importCandidateIntoStack(
+        { location: 'apps/plex/plex.yml', composeFile: 'plex.yml', status: 'nested' },
+        'plex',
+      );
+      expect(fs.existsSync(path.join(tmpRoot, 'plex', 'compose.yaml'))).toBe(true);
+      expect(fs.existsSync(path.join(tmpRoot, 'plex', 'plex.yml'))).toBe(false);
+      expect(fs.existsSync(path.join(tmpRoot, 'plex', '.env'))).toBe(true);
+      expect(fs.existsSync(path.join(tmpRoot, 'apps', 'plex'))).toBe(false);
+      expect(await FileSystemService.getInstance().getStacks()).toContain('plex');
+    } finally {
+      fs.rmSync(path.join(tmpRoot, 'plex'), { recursive: true, force: true });
+      fs.rmSync(path.join(tmpRoot, 'apps', 'plex'), { recursive: true, force: true });
+    }
+  });
+
   it('leaves sibling root files (a root .env) untouched when moving a loose-root file', async () => {
     fs.writeFileSync(path.join(tmpRoot, 'compose.yaml'), COMPOSE);
     fs.writeFileSync(path.join(tmpRoot, '.env'), 'TOKEN=keep-me\n');
@@ -77,6 +114,49 @@ describe('FileSystemService.importCandidateIntoStack', () => {
     expect(fs.existsSync(path.join(tmpRoot, 'vault', '.env'))).toBe(true);
     expect(fs.existsSync(path.join(tmpRoot, 'apps', 'vault'))).toBe(false);
     expect(await FileSystemService.getInstance().getStacks()).toContain('vault');
+  });
+
+  it('refuses nested non-canonical adopt when compose.yaml already exists in the source dir', async () => {
+    fs.mkdirSync(path.join(tmpRoot, 'apps', 'clash'), { recursive: true });
+    fs.writeFileSync(path.join(tmpRoot, 'apps', 'clash', 'plex.yml'), COMPOSE);
+    fs.writeFileSync(path.join(tmpRoot, 'apps', 'clash', 'compose.yaml'), 'services:\n  other: {}\n');
+    await expect(
+      FileSystemService.getInstance().importCandidateIntoStack(
+        { location: 'apps/clash/plex.yml', composeFile: 'plex.yml', status: 'nested' },
+        'clash',
+      ),
+    ).rejects.toMatchObject({ code: 'DEST_EXISTS' });
+    expect(fs.existsSync(path.join(tmpRoot, 'apps', 'clash', 'plex.yml'))).toBe(true);
+    expect(fs.existsSync(path.join(tmpRoot, 'clash'))).toBe(false);
+    fs.rmSync(path.join(tmpRoot, 'apps', 'clash'), { recursive: true, force: true });
+  });
+
+  it('rolls nested directory back when post-promote rename to compose.yaml fails', async () => {
+    fs.mkdirSync(path.join(tmpRoot, 'apps', 'plexrb'), { recursive: true });
+    fs.writeFileSync(path.join(tmpRoot, 'apps', 'plexrb', 'plex.yml'), COMPOSE);
+    const realRename = fsPromises.rename.bind(fsPromises);
+    let calls = 0;
+    const spy = vi.spyOn(fsPromises, 'rename').mockImplementation(async (...args: Parameters<typeof fsPromises.rename>) => {
+      calls += 1;
+      if (calls === 2) {
+        throw Object.assign(new Error('rename failed'), { code: 'EIO' });
+      }
+      return realRename(...args);
+    });
+    try {
+      await expect(
+        FileSystemService.getInstance().importCandidateIntoStack(
+          { location: 'apps/plexrb/plex.yml', composeFile: 'plex.yml', status: 'nested' },
+          'plex-rb',
+        ),
+      ).rejects.toMatchObject({ code: 'EIO' });
+      expect(fs.existsSync(path.join(tmpRoot, 'apps', 'plexrb', 'plex.yml'))).toBe(true);
+      expect(fs.existsSync(path.join(tmpRoot, 'plex-rb'))).toBe(false);
+    } finally {
+      spy.mockRestore();
+      fs.rmSync(path.join(tmpRoot, 'apps', 'plexrb'), { recursive: true, force: true });
+      fs.rmSync(path.join(tmpRoot, 'plex-rb'), { recursive: true, force: true });
+    }
   });
 
   it('honors a destination name different from the nested folder name', async () => {

@@ -1,5 +1,5 @@
 import { useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { Plus, GitBranch, FileCode2, FolderSearch, Loader2, type LucideIcon } from 'lucide-react';
+import { Plus, GitBranch, FileCode2, Loader2, type LucideIcon } from 'lucide-react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/modal';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
@@ -8,7 +8,6 @@ import { ScrollArea } from '../ui/scroll-area';
 import { Checkbox } from '../ui/checkbox';
 import { GitSourceFields, type ApplyMode } from '../stack/GitSourceFields';
 import type { GitBrowseResult } from '../stack/GitComposeFilePicker';
-import { ImportStackPanel } from './ImportStackPanel';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
@@ -26,15 +25,13 @@ export interface CreateStackDialogProps {
         meta?: { mode: CreateMode },
     ) => void | Promise<void>;
     onStacksChanged: () => void | Promise<void>;
-    // Mode the dialog opens on. The empty-state entry opens directly on 'import';
-    // the toolbar Create button opens on 'empty'.
     initialMode?: CreateMode;
+    onOpenAdopt?: () => void;
 }
 
-export type CreateMode = 'import' | 'empty' | 'git' | 'docker-run';
+export type CreateMode = 'empty' | 'git' | 'docker-run';
 
 const MODES: ReadonlyArray<{ id: CreateMode; label: string; icon: LucideIcon }> = [
-    { id: 'import', label: 'Import', icon: FolderSearch },
     { id: 'empty', label: 'Empty', icon: Plus },
     { id: 'git', label: 'From Git', icon: GitBranch },
     { id: 'docker-run', label: 'From Docker Run', icon: FileCode2 },
@@ -43,7 +40,7 @@ const MODES: ReadonlyArray<{ id: CreateMode; label: string; icon: LucideIcon }> 
 const tabId = (m: CreateMode) => `create-stack-tab-${m}`;
 const panelId = (m: CreateMode) => `create-stack-panel-${m}`;
 
-export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacksChanged, initialMode = 'empty' }: CreateStackDialogProps) {
+export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacksChanged, initialMode = 'empty', onOpenAdopt }: CreateStackDialogProps) {
     const { activeNode } = useNodes();
     const [createMode, setCreateMode] = useState<CreateMode>(initialMode);
     // Reset to the requested starting mode each time the dialog opens (empty for
@@ -373,18 +370,9 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
             <ModalHeader
                 kicker="STACKS · NEW"
                 title="New stack"
-                description="Import a compose file you already have, or create one: empty, cloned from a Git repository, or converted from a docker run command."
+                description="Create a stack from scratch, clone from a Git repository, or convert a docker run command."
             />
             <ModeRail mode={createMode} onModeChange={setCreateMode} disabled={busy} />
-
-            {createMode === 'import' && (
-                <div role="tabpanel" id={panelId('import')} aria-labelledby={tabId('import')}>
-                    <ImportStackPanel
-                        onClose={() => onOpenChange(false)}
-                        onImported={() => { void onStacksChanged(); }}
-                    />
-                </div>
-            )}
 
             {createMode === 'empty' && (
                 <div role="tabpanel" id={panelId('empty')} aria-labelledby={tabId('empty')}>
@@ -575,6 +563,20 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
                     />
                 </div>
             )}
+            {onOpenAdopt ? (
+                <div className="border-t border-card-border/60 px-4 py-2.5 text-center">
+                    <button
+                        type="button"
+                        onClick={() => {
+                            onOpenChange(false);
+                            onOpenAdopt();
+                        }}
+                        className="font-mono text-[10px] uppercase tracking-[0.14em] text-brand hover:underline"
+                    >
+                        Adopt existing files instead
+                    </button>
+                </div>
+            ) : null}
         </Modal>
     );
 }
@@ -620,7 +622,7 @@ function ModeRail({
         <div
             role="tablist"
             aria-label="Stack source"
-            className="grid grid-cols-4 border-b border-card-border/60"
+            className="grid grid-cols-3 border-b border-card-border/60"
             onKeyDown={handleKeyDown}
         >
             {MODES.map((m, i) => {

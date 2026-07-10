@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { requireAdmin, requireUserSession } from '../middleware/tierGates';
 import { collectDiagnostics } from '../services/DiagnosticsService';
 import { collectEnvironmentReport, buildRealProbes } from '../services/EnvironmentCheckService';
+import { probeComposeDiscovery } from '../services/ComposeDiscoveryService';
 import DockerController from '../services/DockerController';
 import { withTimeout } from '../utils/withTimeout';
 
@@ -50,6 +51,14 @@ diagnosticsRouter.get('/environment', async (req: Request, res: Response): Promi
         const proto = (req.get('x-forwarded-proto')?.split(',')[0].trim()) || req.protocol;
         const host = req.get('host') || '';
         const report = await collectEnvironmentReport(buildRealProbes({ proto, host }));
+        try {
+            const probe = await probeComposeDiscovery(req.nodeId);
+            if (probe.readable) {
+                (report as typeof report & { discovery?: typeof probe.discovery }).discovery = probe.discovery;
+            }
+        } catch (discoveryErr) {
+            console.error('[diagnostics] compose discovery probe failed:', (discoveryErr as Error).message);
+        }
         res.json(report);
     } catch (err) {
         console.error('[diagnostics] failed to collect environment report:', (err as Error).message);

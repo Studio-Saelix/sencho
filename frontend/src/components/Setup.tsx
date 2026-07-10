@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -6,11 +6,15 @@ import { ArrowRight, Loader2 } from 'lucide-react';
 import { AuthCanvas } from '@/components/auth/AuthCanvas';
 import { AuthStepHeader } from '@/components/auth/AuthStepHeader';
 import { ErrorRail } from '@/components/auth/ErrorRail';
-import { EnvironmentChecks } from '@/components/settings/EnvironmentChecks';
+import { EnvironmentChecks, type EnvironmentReport } from '@/components/settings/EnvironmentChecks';
+import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 
 interface SetupProps {
   onComplete: () => void;
 }
+
+const POST_SETUP_KEY = 'sencho:post-setup';
 
 const INPUT_CLASS =
   'h-11 bg-background/60 border-card-border font-sans text-base shadow-[inset_0_2px_4px_0_oklch(0_0_0/0.25)] placeholder:text-stat-subtitle/60 focus-visible:border-brand/60 focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-0';
@@ -35,10 +39,33 @@ export function Setup({ onComplete, className, ...props }: SetupProps & React.Co
   const [confirmPassword, setConfirmPassword] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  // The admin account is created in step 1; /api/auth/setup signs the operator
-  // in (session cookie), so step 2 can run the admin-gated environment checks
-  // before handing off to the console.
   const [step, setStep] = useState<'account' | 'env'>('account');
+  const [envReport, setEnvReport] = useState<EnvironmentReport | null>(null);
+  const [envLoading, setEnvLoading] = useState(false);
+
+  const loadEnvironment = useCallback(async () => {
+    setEnvLoading(true);
+    try {
+      const res = await apiFetch('/diagnostics/environment', { localOnly: true });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast.error((err as { error?: string })?.error || 'Failed to run environment checks.');
+        setEnvReport(null);
+        return;
+      }
+      setEnvReport((await res.json()) as EnvironmentReport);
+    } catch (e: unknown) {
+      toast.error((e as Error)?.message || 'Failed to run environment checks.');
+      setEnvReport(null);
+    } finally {
+      setEnvLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (step !== 'env') return;
+    void loadEnvironment();
+  }, [step, loadEnvironment]);
 
   const strength = gaugePassword(password);
   const strengthClass =
@@ -49,6 +76,18 @@ export function Setup({ onComplete, className, ...props }: SetupProps & React.Co
         : strength
           ? 'text-destructive'
           : '';
+
+  const handleEnterSencho = () => {
+    const adoptCount = envReport?.discovery?.adoptCandidateCount ?? 0;
+    if (adoptCount > 0) {
+      try {
+        sessionStorage.setItem(POST_SETUP_KEY, JSON.stringify({ openAdopt: true }));
+      } catch {
+        // sessionStorage unavailable
+      }
+    }
+    onComplete();
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -96,7 +135,7 @@ export function Setup({ onComplete, className, ...props }: SetupProps & React.Co
             <div className="flex flex-col gap-4">
               <Button
                 type="button"
-                onClick={onComplete}
+                onClick={handleEnterSencho}
                 className="h-11 w-full bg-brand text-brand-foreground shadow-btn-glow hover:bg-brand/90"
               >
                 Enter Sencho<ArrowRight strokeWidth={1.5} />
@@ -114,7 +153,7 @@ export function Setup({ onComplete, className, ...props }: SetupProps & React.Co
               hero="Preflight"
               caption="A quick check that this host can run Docker deploys. Warnings won't stop you; each one carries a fix."
             />
-            <EnvironmentChecks />
+            <EnvironmentChecks report={envReport} isLoading={envLoading} onRerun={loadEnvironment} />
           </div>
         </AuthCanvas>
       </div>
@@ -222,4 +261,3 @@ function Field({ id, label, children }: { id: string; label: string; children: R
     </div>
   );
 }
-

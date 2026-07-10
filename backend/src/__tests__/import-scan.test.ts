@@ -151,6 +151,104 @@ describe('FileSystemService.findImportCandidates', () => {
     }
   });
 
+
+  it('surfaces non-canonical loose-root yaml (e.g. nginx.yml)', async () => {
+    fs.writeFileSync(path.join(tmpRoot, 'nginx.yml'), COMPOSE);
+    try {
+      const candidates = await FileSystemService.getInstance().findImportCandidates();
+      const loose = candidates.find((c) => c.location === 'nginx.yml');
+      expect(loose).toMatchObject({
+        name: '',
+        composeFile: 'nginx.yml',
+        status: 'loose-root',
+      });
+      expect(loose?.content).toContain('services:');
+    } finally {
+      fs.rmSync(path.join(tmpRoot, 'nginx.yml'), { force: true });
+    }
+  });
+
+  it('surfaces nested non-canonical yaml (e.g. apps/plex/plex.yml)', async () => {
+    const dir = path.join(tmpRoot, 'apps', 'plex');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'plex.yml'), COMPOSE);
+    try {
+      const candidates = await FileSystemService.getInstance().findImportCandidates();
+      const nested = candidates.find((c) => c.location === 'apps/plex/plex.yml');
+      expect(nested).toMatchObject({
+        name: 'plex',
+        composeFile: 'plex.yml',
+        status: 'nested',
+      });
+    } finally {
+      fs.rmSync(path.join(tmpRoot, 'apps', 'plex'), { recursive: true, force: true });
+    }
+  });
+
+  it('does not surface compose override filenames as adopt candidates', async () => {
+    fs.writeFileSync(path.join(tmpRoot, 'compose.override.yml'), COMPOSE);
+    const wrap = path.join(tmpRoot, 'ovr-wrap', 'ovr');
+    fs.mkdirSync(wrap, { recursive: true });
+    fs.writeFileSync(path.join(wrap, 'docker-compose.override.yaml'), COMPOSE);
+    try {
+      const candidates = await FileSystemService.getInstance().findImportCandidates();
+      expect(candidates.some((c) => c.composeFile.includes('override'))).toBe(false);
+    } finally {
+      fs.rmSync(path.join(tmpRoot, 'compose.override.yml'), { force: true });
+      fs.rmSync(path.join(tmpRoot, 'ovr-wrap'), { recursive: true, force: true });
+    }
+  });
+
+  it('does not surface non-canonical yaml inside a top-level folder (not a stack, not adoptable)', async () => {
+    // plex/plex.yml at the compose root is neither a stack (no canonical compose)
+    // nor an adopt candidate (promoting with destName === folder would conflict).
+    const dir = path.join(tmpRoot, 'plex-top');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'plex.yml'), COMPOSE);
+    try {
+      const candidates = await FileSystemService.getInstance().findImportCandidates();
+      expect(candidates.some((c) => c.location.includes('plex-top'))).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('picks the localeCompare-first non-canonical yaml when several exist', async () => {
+    const dir = path.join(tmpRoot, 'sort-wrap', 'svc');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'z.yml'), COMPOSE);
+    fs.writeFileSync(path.join(dir, 'a.yml'), COMPOSE);
+    try {
+      const candidates = await FileSystemService.getInstance().findImportCandidates();
+      const nested = candidates.find((c) => c.name === 'svc');
+      expect(nested).toMatchObject({
+        composeFile: 'a.yml',
+        location: 'sort-wrap/svc/a.yml',
+        status: 'nested',
+      });
+    } finally {
+      fs.rmSync(path.join(tmpRoot, 'sort-wrap'), { recursive: true, force: true });
+    }
+  });
+
+  it('prefers a canonical compose filename over a sibling non-canonical yaml', async () => {
+    const dir = path.join(tmpRoot, 'pref-wrap', 'svc');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'compose.yaml'), COMPOSE);
+    fs.writeFileSync(path.join(dir, 'nginx.yml'), COMPOSE);
+    try {
+      const candidates = await FileSystemService.getInstance().findImportCandidates();
+      const nested = candidates.find((c) => c.name === 'svc');
+      expect(nested).toMatchObject({
+        composeFile: 'compose.yaml',
+        location: 'pref-wrap/svc/compose.yaml',
+        status: 'nested',
+      });
+    } finally {
+      fs.rmSync(path.join(tmpRoot, 'pref-wrap'), { recursive: true, force: true });
+    }
+  });
+
   it('truncates at maxCandidates', async () => {
     // Base fixtures yield 2 candidates (loose-root + nested); add a third loose
     // file so a cap of 2 actually truncates rather than coincidentally matching.
