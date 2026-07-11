@@ -214,6 +214,44 @@ describe('POST /api/security/suppressions', () => {
       .send(minimal);
     expect(dup.status).toBe(409);
   });
+
+  it('defaults the triage status to accepted and justification to null', async () => {
+    const res = await request(app)
+      .post('/api/security/suppressions')
+      .set('Authorization', adminAuthHeader)
+      .send(validBody);
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe('accepted');
+    expect(res.body.justification).toBeNull();
+  });
+
+  it('stores a status and justification round trip', async () => {
+    const res = await request(app)
+      .post('/api/security/suppressions')
+      .set('Authorization', adminAuthHeader)
+      .send({ ...validBody, status: 'not_affected', justification: 'vulnerable_code_not_present' });
+    expect(res.status).toBe(201);
+    expect(res.body.status).toBe('not_affected');
+    expect(res.body.justification).toBe('vulnerable_code_not_present');
+  });
+
+  it('rejects an invalid triage status', async () => {
+    const res = await request(app)
+      .post('/api/security/suppressions')
+      .set('Authorization', adminAuthHeader)
+      .send({ ...validBody, status: 'bogus' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/triage status/);
+  });
+
+  it('rejects an invalid justification code', async () => {
+    const res = await request(app)
+      .post('/api/security/suppressions')
+      .set('Authorization', adminAuthHeader)
+      .send({ ...validBody, justification: 'not-a-real-code' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/triage justification/);
+  });
 });
 
 describe('PUT /api/security/suppressions/:id', () => {
@@ -247,6 +285,28 @@ describe('PUT /api/security/suppressions/:id', () => {
       .set('Authorization', adminAuthHeader)
       .send({ reason: 'whatever' });
     expect(res.status).toBe(404);
+  });
+
+  it('updates the triage status and justification', async () => {
+    const db = DatabaseService.getInstance();
+    const created = db.createCveSuppression({
+      cve_id: 'CVE-2024-3001',
+      pkg_name: null,
+      image_pattern: null,
+      reason: 'original reason',
+      created_by: TEST_USERNAME,
+      created_at: Date.now(),
+      expires_at: null,
+      replicated_from_control: 0,
+    });
+
+    const res = await request(app)
+      .put(`/api/security/suppressions/${created.id}`)
+      .set('Authorization', adminAuthHeader)
+      .send({ status: 'false_positive', justification: 'component_not_present' });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('false_positive');
+    expect(res.body.justification).toBe('component_not_present');
   });
 
   it('rejects writes on replicas', async () => {
@@ -440,7 +500,7 @@ describe('Control-side audit log entries (L2)', () => {
     expect(entries[0].summary).not.toContain('\n');
     expect(entries[0].summary).not.toContain('\r');
     // The forged prefix the attacker tried to inject must not appear as a new
-    // logical entry — the sanitiser turns control chars into `?` so the
+    // logical entry  -  the sanitiser turns control chars into `?` so the
     // string still appears, but on a single line, framed inside the real entry.
     expect(entries[0].summary).toContain('cve_suppression.create');
   });

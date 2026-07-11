@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { CveSuppression } from '@/types/security';
 
 vi.mock('@/lib/api', () => ({
@@ -72,5 +73,65 @@ describe('SuppressionsPanel', () => {
 
     await waitFor(() => expect(screen.getByText('CVE-2026-0001')).toBeInTheDocument());
     expect(mockedToast.error).not.toHaveBeenCalled();
+  });
+
+  async function openCreateDialog() {
+    render(<SuppressionsPanel isReplica={false} />);
+    await waitFor(() => expect(screen.getByText('Add suppression')).toBeInTheDocument());
+    await userEvent.click(screen.getByText('Add suppression'));
+  }
+
+  function postCall() {
+    return mockedFetch.mock.calls.find(
+      ([url, opts]) => url === '/security/suppressions' && (opts as { method?: string } | undefined)?.method === 'POST',
+    );
+  }
+
+  it('sends the triage status and justification when creating a suppression', async () => {
+    mockedFetch.mockImplementation(async (_url: string, opts?: { method?: string }) =>
+      opts?.method === 'POST' ? { ok: true, json: async () => ({}) } : { ok: true, json: async () => [] },
+    );
+
+    await openCreateDialog();
+    await userEvent.type(screen.getByLabelText('CVE or advisory ID'), 'CVE-2026-0002');
+    await userEvent.type(screen.getByLabelText('Reason'), 'Vendor confirmed the code path is unreachable.');
+    await userEvent.selectOptions(screen.getByLabelText('Triage decision'), 'not_affected');
+    await userEvent.selectOptions(screen.getByLabelText('OpenVEX justification'), 'vulnerable_code_not_present');
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    await waitFor(() => expect(postCall()).toBeTruthy());
+    const body = JSON.parse((postCall()![1] as { body: string }).body);
+    expect(body.status).toBe('not_affected');
+    expect(body.justification).toBe('vulnerable_code_not_present');
+  });
+
+  it('requires an OpenVEX justification when the decision is not affected', async () => {
+    mockedFetch.mockImplementation(async (_url: string, opts?: { method?: string }) =>
+      opts?.method === 'POST' ? { ok: true, json: async () => ({}) } : { ok: true, json: async () => [] },
+    );
+
+    await openCreateDialog();
+    await userEvent.type(screen.getByLabelText('CVE or advisory ID'), 'CVE-2026-0003');
+    await userEvent.type(screen.getByLabelText('Reason'), 'Needs a justification before this can save.');
+    await userEvent.selectOptions(screen.getByLabelText('Triage decision'), 'not_affected');
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+
+    expect(mockedToast.error).toHaveBeenCalledWith('An OpenVEX justification is required for this triage decision.');
+    expect(postCall()).toBeUndefined();
+  });
+
+  it('clears the justification when switching to a decision that does not require one', async () => {
+    mockedFetch.mockResolvedValue({ ok: true, json: async () => [] });
+
+    await openCreateDialog();
+    await userEvent.selectOptions(screen.getByLabelText('Triage decision'), 'false_positive');
+    await userEvent.selectOptions(screen.getByLabelText('OpenVEX justification'), 'component_not_present');
+    expect(screen.getByLabelText<HTMLSelectElement>('OpenVEX justification').value).toBe('component_not_present');
+
+    await userEvent.selectOptions(screen.getByLabelText('Triage decision'), 'accepted');
+    expect(screen.queryByLabelText('OpenVEX justification')).not.toBeInTheDocument();
+
+    await userEvent.selectOptions(screen.getByLabelText('Triage decision'), 'not_affected');
+    expect(screen.getByLabelText<HTMLSelectElement>('OpenVEX justification').value).toBe('');
   });
 });

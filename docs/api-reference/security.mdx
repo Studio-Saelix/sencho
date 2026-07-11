@@ -163,6 +163,8 @@ Response rows include an `active` boolean computed from the `expires_at` timesta
 | `image_pattern` | string or `null` | no | Glob against image references. `null` applies fleet-wide. |
 | `reason` | string | yes | Required justification, up to 2000 characters. Surfaced on every dimmed row. |
 | `expires_at` | number or `null` | no | Unix timestamp in milliseconds. `null` for an indefinite suppression. |
+| `status` | string | no | Triage decision. Defaults to `accepted`. One of `accepted`, `not_affected`, `false_positive`, `affected`, `needs_review`, `fixed`, `ignored`. |
+| `justification` | string or `null` | no | OpenVEX justification code, prompted for by the Sencho UI when `status` is `not_affected` or `false_positive`. One of `vulnerable_code_not_present`, `vulnerable_code_not_in_execute_path`, `component_not_present`, `inline_mitigations_already_exist`. |
 
 ```bash
 curl -X POST https://your-sencho-instance:1852/api/security/suppressions \
