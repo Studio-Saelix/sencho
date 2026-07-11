@@ -94,7 +94,7 @@ describe('ScanComparisonSheet', () => {
     render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
 
     await waitFor(() =>
-      expect(screen.getByText(/different image references/i)).toBeInTheDocument(),
+      expect(screen.getByText(/different image identities/i)).toBeInTheDocument(),
     );
   });
 
@@ -104,7 +104,22 @@ describe('ScanComparisonSheet', () => {
     render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
 
     await waitFor(() => expect(screen.getByText(/Baseline/i)).toBeInTheDocument());
-    expect(screen.queryByText(/different image references/i)).toBeNull();
+    expect(screen.queryByText(/different image identities/i)).toBeNull();
+  });
+
+  it('shows cross-image warning when digests differ for the same tag', async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, result({
+        scanA: { id: 1, image_ref: 'app:latest', scanned_at: 1, image_digest: 'sha256:aaa' },
+        scanB: { id: 2, image_ref: 'app:latest', scanned_at: 2, image_digest: 'sha256:bbb' },
+      })),
+    );
+
+    render(<ScanComparisonSheet baselineScanId={1} currentScanId={2} onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(screen.getByText(/different image identities/i)).toBeInTheDocument(),
+    );
   });
 
   it('surfaces a toast and closes the sheet on fetch error', async () => {
