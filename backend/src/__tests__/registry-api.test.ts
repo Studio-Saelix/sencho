@@ -236,7 +236,7 @@ describe('getRemoteDigestResult failure reasons', () => {
   });
 
   it('falls back to anonymous manifest lookup when auth transport fails', async () => {
-    route = (url, method) => {
+    route = (url, method): FakeResp => {
       if (url.includes('auth.docker.io/token')) {
         throw Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' });
       }
