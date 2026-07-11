@@ -72,7 +72,7 @@ Lists all Docker images on the host with their ID, repository tag, size, and sta
 
 **Status column** combines two pieces of information per row:
 
-- A usage badge: `In Use` plus the stack name when the image runs in a Sencho-managed stack, `In Use` plus `External` when it runs in another Docker project, or `Unused` when no container references it.
+- A usage badge: `In Use` plus one chip per Sencho stack that uses the image (click a chip to open that stack), `In Use` plus `External` when it runs only in another Docker project, or `Unused` when no container references it.
 - A severity badge from any image scan: `Clean`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, or `UNKNOWN`. Click the badge to open the scan results.
 
 **Per-row actions** sit on the right:
@@ -85,7 +85,7 @@ Lists all Docker images on the host with their ID, repository tag, size, and sta
 
 Click the eye icon on any image row to open a detail sheet with three sections:
 
-- **Overview** lists the ID, size, creation date, architecture and OS, author, and all repository tags.
+- **Overview** lists the ID, size, creation date, architecture and OS, author, all repository tags, and which Sencho stacks use the image.
 - **Config** shows the default `Cmd`, `Entrypoint`, `WorkingDir`, `User`, exposed ports, environment variables, and labels. Env vars and labels are collapsible.
 - **Layers** lists the layer history in build order. Each row shows the layer index, size, age, and the build command (`CreatedBy`). Empty layers (metadata-only, zero bytes) are dimmed.
 

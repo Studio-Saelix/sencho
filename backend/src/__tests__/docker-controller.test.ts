@@ -431,6 +431,10 @@ describe('DockerController - pruneDanglingImages', () => {
 // ── getClassifiedResources ─────────────────────────────────────────────
 
 describe('DockerController - getClassifiedResources', () => {
+  beforeEach(() => {
+    CacheService.getInstance().invalidate('project-name-map');
+  });
+
   it('classifies managed and unmanaged images', async () => {
     mockDocker.listImages.mockResolvedValue([
       { Id: 'img1', RepoTags: ['nginx:latest'], Size: 100, Containers: 1 },
@@ -450,12 +454,36 @@ describe('DockerController - getClassifiedResources', () => {
     const managed = result.images.find(i => i.Id === 'img1');
     expect(managed!.managedStatus).toBe('managed');
     expect(managed!.managedBy).toBe('my-stack');
+    expect(managed!.usedByStacks).toEqual(['my-stack']);
 
     const unmanaged = result.images.find(i => i.Id === 'img2');
     expect(unmanaged!.managedStatus).toBe('unmanaged');
+    expect(unmanaged!.usedByStacks).toEqual([]);
 
     const unused = result.images.find(i => i.Id === 'img3');
     expect(unused!.managedStatus).toBe('unused');
+    expect(unused!.usedByStacks).toEqual([]);
+  });
+
+  it('aggregates multi-stack usedByStacks with stable sort and managedBy first entry', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-shared', RepoTags: ['postgres:16'], Size: 100, Containers: 2 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([
+      { ImageID: 'img-shared', Labels: { 'com.docker.compose.project': 'zeta' } },
+      { ImageID: 'img-shared', Labels: { 'com.docker.compose.project': 'alpha' } },
+      { ImageID: 'img-shared', Labels: { 'com.docker.compose.project': 'alpha' } },
+    ]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+    mockDocker.listNetworks.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getClassifiedResources(['alpha', 'zeta']);
+    const img = result.images.find(i => i.Id === 'img-shared');
+
+    expect(img!.usedByStacks).toEqual(['alpha', 'zeta']);
+    expect(img!.managedBy).toBe('alpha');
+    expect(img!.managedStatus).toBe('managed');
   });
 
   it('classifies system networks', async () => {

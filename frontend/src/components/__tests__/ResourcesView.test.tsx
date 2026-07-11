@@ -86,6 +86,7 @@ function image(repoTag: string) {
     RepoTags: [repoTag],
     Size: 1000,
     Containers: 0,
+    usedByStacks: [],
     managedBy: null,
     managedStatus: 'unmanaged' as const,
     isSencho: false,

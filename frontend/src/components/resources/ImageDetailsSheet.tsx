@@ -44,9 +44,23 @@ interface ImageDetails {
   history: ImageHistoryEntry[];
 }
 
+/** Classified image row passed from Resources (node-bound). */
+export interface ClassifiedImageSelection {
+  Id: string;
+  RepoTags: string[];
+  Size: number;
+  Containers: number;
+  usedByStacks: string[];
+  managedBy: string | null;
+  managedStatus: 'managed' | 'unmanaged' | 'unused';
+  isSencho: boolean;
+  nodeId: string | number;
+}
+
 interface ImageDetailsSheetProps {
-  imageId: string | null;
+  image: ClassifiedImageSelection | null;
   onClose: () => void;
+  onOpenStack?: (stack: string) => void;
 }
 
 function formatRelativeAge(timestampSec: number): string {
@@ -60,7 +74,8 @@ function formatRelativeAge(timestampSec: number): string {
   return `${Math.floor(diff / (86400 * 365))}y ago`;
 }
 
-export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) {
+export function ImageDetailsSheet({ image, onClose, onOpenStack }: ImageDetailsSheetProps) {
+  const imageId = image?.Id ?? null;
   const [data, setData] = useState<ImageDetails | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -98,11 +113,14 @@ export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) 
   const inspect = data?.inspect;
   const history = data?.history ?? [];
   const totalLayers = history.length;
+  const usedByStacks = image?.usedByStacks ?? [];
 
-  const name = inspect?.RepoTags?.[0] || (inspect ? formatShortDigest(inspect.Id) : 'Image details');
+  const name = image?.RepoTags?.[0]
+    || inspect?.RepoTags?.[0]
+    || (inspect ? formatShortDigest(inspect.Id) : (imageId ? formatShortDigest(imageId) : 'Image details'));
   const meta = inspect
     ? `${formatBytes(inspect.Size)} · ${inspect.Architecture ?? '?'}/${inspect.Os ?? '?'} · ${totalLayers} layers`
-    : (loading ? 'Loading…' : '');
+    : (loading ? 'Loading…' : (image ? formatBytes(image.Size) : ''));
 
   const footerContext = inspect?.Created
     ? `Created ${formatRelativeAge(new Date(inspect.Created).getTime() / 1000)}`
@@ -110,7 +128,7 @@ export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) 
 
   return (
     <SystemSheet
-      open={!!imageId}
+      open={!!image}
       onOpenChange={(open) => !open && onClose()}
       crumb={['Resources', 'Images', name]}
       name={name}
@@ -173,6 +191,30 @@ export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) 
                   </div>
                 </Field>
               )}
+              <Field label="Used by" span={2}>
+                {usedByStacks.length === 0 ? (
+                  <p className="text-xs mt-0.5 text-muted-foreground">
+                    {image?.managedStatus === 'unused' ? 'No containers' : 'Not used by a Sencho stack'}
+                  </p>
+                ) : (
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {usedByStacks.map((stack) => (
+                      onOpenStack ? (
+                        <button
+                          key={stack}
+                          type="button"
+                          className="inline-flex items-center px-1.5 py-0.5 rounded border border-success/25 bg-success/8 text-success text-[10px] font-medium hover:bg-success/15 transition-colors"
+                          onClick={() => onOpenStack(stack)}
+                        >
+                          {stack}
+                        </button>
+                      ) : (
+                        <Badge key={stack} variant="outline" className="text-[10px] h-5">{stack}</Badge>
+                      )
+                    ))}
+                  </div>
+                )}
+              </Field>
             </div>
           </SheetSection>
 
