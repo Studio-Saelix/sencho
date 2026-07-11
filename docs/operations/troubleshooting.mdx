@@ -13,7 +13,7 @@ If something has broken and you want a quick "what do I do now?" overview rather
 
 **Symptom:** With Sencho as the active browser tab, GPU use stays high on idle, and can climb further when an update or deploy dialog is open. Other sites in the same browser stay quieter. On some dual-GPU PCs the issue shows up only when the browser is forced onto integrated graphics.
 
-**Likely cause:** Full material effects (glass blur on the top bar, sidebar, and floating surfaces) cost more to composite on integrated graphics, single-board computers, and other constrained rendering devices. Discrete or high-performance GPUs often hide that cost. Fresh installs default to **Calm**, which already enables **Reduced effects**.
+**Possible contributor:** Full material effects (glass blur on the top bar, sidebar, and floating surfaces) can cost more to composite on integrated graphics, single-board computers, and other constrained rendering devices. The reporter of this issue did not reproduce it when Windows selected the GPU or when Chrome used their discrete GPU. Fresh installs default to **Calm**, which already enables **Reduced effects**.
 
 **What to try:**
 
