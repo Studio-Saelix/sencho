@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ChevronLeft, ChevronRight, Plus, Pencil, Trash2, Download } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
@@ -25,7 +26,6 @@ import { useAuth } from '@/context/AuthContext';
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
 const PAGE_SIZE = 8;
-const SELECT_CLASS = 'flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50';
 
 interface SuppressionFormState {
   cveId: string;
@@ -407,16 +407,16 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
           </div>
           <div className="space-y-2">
             <Label htmlFor="s-status">Triage decision</Label>
-            <select
-              id="s-status"
-              className={SELECT_CLASS}
-              value={form.status}
-              onChange={(e) => handleStatusChange(e.target.value as TriageStatus)}
-            >
-              {TRIAGE_STATUS_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
+            <Select value={form.status} onValueChange={(v) => handleStatusChange(v as TriageStatus)}>
+              <SelectTrigger id="s-status" aria-label="Triage decision" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {TRIAGE_STATUS_OPTIONS.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <p className="text-xs text-muted-foreground">
               {TRIAGE_STATUS_HINT}
             </p>
@@ -424,17 +424,19 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
           {openVexRequiresJustification(form.status) && (
             <div className="space-y-2">
               <Label htmlFor="s-justification">OpenVEX justification</Label>
-              <select
-                id="s-justification"
-                className={SELECT_CLASS}
-                value={form.justification}
-                onChange={(e) => setForm({ ...form, justification: e.target.value })}
+              <Select
+                value={form.justification || undefined}
+                onValueChange={(v) => setForm({ ...form, justification: v })}
               >
-                <option value="">Select a justification</option>
-                {TRIAGE_JUSTIFICATION_OPTIONS.map((o) => (
-                  <option key={o.value} value={o.value}>{o.label}</option>
-                ))}
-              </select>
+                <SelectTrigger id="s-justification" aria-label="OpenVEX justification" className="w-full">
+                  <SelectValue placeholder="Select a justification" />
+                </SelectTrigger>
+                <SelectContent>
+                  {TRIAGE_JUSTIFICATION_OPTIONS.map((o) => (
+                    <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           )}
           <div className="space-y-2">

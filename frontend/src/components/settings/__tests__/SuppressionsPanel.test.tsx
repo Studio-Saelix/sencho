@@ -36,6 +36,11 @@ import { SuppressionsPanel } from '../SuppressionsPanel';
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
 const mockedToast = toast as unknown as { error: ReturnType<typeof vi.fn> };
 
+async function pickSelect(label: string, optionName: string) {
+  await userEvent.click(screen.getByRole('combobox', { name: label }));
+  await userEvent.click(await screen.findByRole('option', { name: optionName }));
+}
+
 function suppression(overrides: Partial<CveSuppression> = {}): CveSuppression {
   return {
     id: 1,
@@ -95,8 +100,8 @@ describe('SuppressionsPanel', () => {
     await openCreateDialog();
     await userEvent.type(screen.getByLabelText('CVE or advisory ID'), 'CVE-2026-0002');
     await userEvent.type(screen.getByLabelText('Reason'), 'Vendor confirmed the code path is unreachable.');
-    await userEvent.selectOptions(screen.getByLabelText('Triage decision'), 'not_affected');
-    await userEvent.selectOptions(screen.getByLabelText('OpenVEX justification'), 'vulnerable_code_not_present');
+    await pickSelect('Triage decision', 'Not affected');
+    await pickSelect('OpenVEX justification', 'Vulnerable code not present');
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     await waitFor(() => expect(postCall()).toBeTruthy());
@@ -113,7 +118,7 @@ describe('SuppressionsPanel', () => {
     await openCreateDialog();
     await userEvent.type(screen.getByLabelText('CVE or advisory ID'), 'CVE-2026-0003');
     await userEvent.type(screen.getByLabelText('Reason'), 'Needs a justification before this can save.');
-    await userEvent.selectOptions(screen.getByLabelText('Triage decision'), 'not_affected');
+    await pickSelect('Triage decision', 'Not affected');
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
 
     expect(mockedToast.error).toHaveBeenCalledWith('An OpenVEX justification is required for this triage decision.');
@@ -124,14 +129,14 @@ describe('SuppressionsPanel', () => {
     mockedFetch.mockResolvedValue({ ok: true, json: async () => [] });
 
     await openCreateDialog();
-    await userEvent.selectOptions(screen.getByLabelText('Triage decision'), 'false_positive');
-    await userEvent.selectOptions(screen.getByLabelText('OpenVEX justification'), 'component_not_present');
-    expect(screen.getByLabelText<HTMLSelectElement>('OpenVEX justification').value).toBe('component_not_present');
+    await pickSelect('Triage decision', 'False positive');
+    await pickSelect('OpenVEX justification', 'Component not present');
+    expect(screen.getByRole('combobox', { name: 'OpenVEX justification' })).toHaveTextContent('Component not present');
 
-    await userEvent.selectOptions(screen.getByLabelText('Triage decision'), 'accepted');
-    expect(screen.queryByLabelText('OpenVEX justification')).not.toBeInTheDocument();
+    await pickSelect('Triage decision', 'Accepted risk');
+    expect(screen.queryByRole('combobox', { name: 'OpenVEX justification' })).not.toBeInTheDocument();
 
-    await userEvent.selectOptions(screen.getByLabelText('Triage decision'), 'not_affected');
-    expect(screen.getByLabelText<HTMLSelectElement>('OpenVEX justification').value).toBe('');
+    await pickSelect('Triage decision', 'Not affected');
+    expect(screen.getByRole('combobox', { name: 'OpenVEX justification' })).toHaveTextContent(/Select a justification/i);
   });
 });

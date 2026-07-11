@@ -9,6 +9,24 @@ class MockResizeObserver {
 }
 globalThis.ResizeObserver = globalThis.ResizeObserver ?? MockResizeObserver;
 
+// jsdom does not implement these, but Radix Select's trigger reads them on
+// pointerdown/keyboard open, so without a stub the click crashes before the
+// listbox ever renders.
+if (typeof Element !== 'undefined') {
+  if (!Element.prototype.hasPointerCapture) {
+    Element.prototype.hasPointerCapture = () => false;
+  }
+  if (!Element.prototype.setPointerCapture) {
+    Element.prototype.setPointerCapture = () => {};
+  }
+  if (!Element.prototype.releasePointerCapture) {
+    Element.prototype.releasePointerCapture = () => {};
+  }
+  if (!Element.prototype.scrollIntoView) {
+    Element.prototype.scrollIntoView = () => {};
+  }
+}
+
 type StorageName = 'localStorage' | 'sessionStorage';
 
 class TestStorage {
