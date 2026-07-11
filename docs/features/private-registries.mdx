@@ -25,6 +25,14 @@ Sencho stores credentials for your private Docker registries and injects them au
 
 AWS ECR requires a Sencho **Admiral** license; Docker Hub, GHCR, and custom registries are available on every tier.
 
+
+
+## Browse tags from Resources
+
+When you inspect an image on the Resources page, the detail sheet includes a **Registry tags** section for admins. Sencho lists tags from the configured registry that matches the image host (credentials come from that registry row only). Tag browsing always runs on the hub instance; local image digests still come from the active node.
+
+If credentials are wrong, Sencho reports a registry error without signing you out of the dashboard.
+
 ## Where to find it
 
 Open **Settings → Infrastructure → Registries** on the Sencho instance you are signed into directly. The section is hidden when you are viewing another node through the node switcher.
