@@ -63,6 +63,7 @@ interface DockerImage {
     RepoTags: string[];
     Size: number;
     Containers: number;
+    usedByStacks: string[];
     managedBy: string | null;
     managedStatus: 'managed' | 'unmanaged' | 'unused';
     isSencho: boolean;
@@ -227,30 +228,41 @@ function FilterToggle({ value, onChange, counts }: FilterToggleProps) {
 
 // ── Managed Status Badge ───────────────────────────────────────────────────────
 
-function ManagedBadge({ status, managedBy, onOpenStack }: {
+function ManagedBadge({ status, managedBy, usedByStacks, onOpenStack }: {
     status: 'managed' | 'unmanaged' | 'unused' | 'system';
     managedBy: string | null;
+    /** When length > 1, render one chip per stack (images shared across stacks). */
+    usedByStacks?: string[];
     /** When provided on a managed resource, the owning-stack badge becomes a link to that stack. */
     onOpenStack?: (stack: string) => void;
 }) {
     if (status === 'managed') {
+        const stacks = (usedByStacks && usedByStacks.length > 0)
+            ? usedByStacks
+            : (managedBy ? [managedBy] : []);
         const cls = "inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-success/25 bg-success/8 text-success text-[10px] font-medium";
-        const inner = (<><span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />{managedBy}</>);
-        if (onOpenStack && managedBy) {
-            return (
-                <TooltipProvider>
-                    <Tooltip>
-                        <TooltipTrigger asChild>
-                            <button type="button" className={`${cls} hover:bg-success/15 transition-colors`} onClick={() => onOpenStack(managedBy)}>
-                                {inner}
-                            </button>
-                        </TooltipTrigger>
-                        <TooltipContent>Open stack {managedBy}</TooltipContent>
-                    </Tooltip>
-                </TooltipProvider>
-            );
-        }
-        return <span className={cls}>{inner}</span>;
+        return (
+            <span className="inline-flex items-center gap-1 flex-wrap">
+                {stacks.map((stack) => {
+                    const inner = (<><span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />{stack}</>);
+                    if (onOpenStack) {
+                        return (
+                            <TooltipProvider key={stack}>
+                                <Tooltip>
+                                    <TooltipTrigger asChild>
+                                        <button type="button" className={`${cls} hover:bg-success/15 transition-colors`} onClick={() => onOpenStack(stack)}>
+                                            {inner}
+                                        </button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>Open stack {stack}</TooltipContent>
+                                </Tooltip>
+                            </TooltipProvider>
+                        );
+                    }
+                    return <span key={stack} className={cls}>{inner}</span>;
+                })}
+            </span>
+        );
     }
     if (status === 'unmanaged') {
         return (
@@ -429,7 +441,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [showCreateNetwork, setShowCreateNetwork] = useState(false);
     const [inspectNetwork, setInspectNetwork] = useState<NetworkInspectData | null>(null);
     const [inspectLoadingId, setInspectLoadingId] = useState<string | null>(null);
-    const [inspectImageId, setInspectImageId] = useState<string | null>(null);
+    // Classified image selection is node-bound so a node switch cannot leave
+    // the previous node's usedByStacks visible beside a new node's inspect.
+    const [inspectImage, setInspectImage] = useState<(DockerImage & { nodeId: string | number }) | null>(null);
     const [browseVolume, setBrowseVolume] = useState<string | null>(null);
 
     // Unmanaged container state
@@ -502,6 +516,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // Load the per-node reclaim-banner dismiss snapshot when the node changes.
     useEffect(() => {
         setHeroDismissedBytes(readHeroDismissed(activeNode?.id));
+        setInspectImage(null);
     }, [activeNode?.id]);
 
     // Cancel an in-flight scan poll on unmount or node switch; its result
@@ -1069,7 +1084,14 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                     <Badge variant={img.Containers > 0 ? "default" : "secondary"} className="text-[10px] h-5">
                                                         {img.Containers > 0 ? "In Use" : "Unused"}
                                                     </Badge>
-                                                    <ManagedBadge status={img.managedStatus} managedBy={img.managedBy} />
+                                                    <ManagedBadge
+                                                        status={img.managedStatus}
+                                                        managedBy={img.managedBy}
+                                                        usedByStacks={img.usedByStacks}
+                                                        onOpenStack={activeNode ? (stack) => window.dispatchEvent(
+                                                            new CustomEvent<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, { detail: { nodeId: activeNode.id, stackName: stack } }),
+                                                        ) : undefined}
+                                                    />
                                                     {img.isSencho && <SenchoBadge />}
                                                     {(() => {
                                                         const tag = img.RepoTags?.[0];
@@ -1088,7 +1110,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                                     variant="ghost"
                                                                     size="icon"
                                                                     className="h-7 w-7 text-muted-foreground hover:text-foreground transition-colors"
-                                                                    onClick={() => setInspectImageId(img.Id)}
+                                                                    onClick={() => {
+                                                                        if (!activeNode) return;
+                                                                        setInspectImage({ ...img, nodeId: activeNode.id });
+                                                                    }}
                                                                     aria-label={`Inspect ${img.RepoTags?.[0] || 'image'}`}
                                                                 >
                                                                     <Eye className="w-3.5 h-3.5" strokeWidth={1.5} />
@@ -1640,7 +1665,13 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             />
 
             {/* Image Details Sheet */}
-            <ImageDetailsSheet imageId={inspectImageId} onClose={() => setInspectImageId(null)} />
+            <ImageDetailsSheet
+                image={inspectImage && activeNode && inspectImage.nodeId === activeNode.id ? inspectImage : null}
+                onClose={() => setInspectImage(null)}
+                onOpenStack={activeNode ? (stack) => window.dispatchEvent(
+                    new CustomEvent<SenchoOpenStackDetail>(SENCHO_OPEN_STACK_EVENT, { detail: { nodeId: activeNode.id, stackName: stack } }),
+                ) : undefined}
+            />
 
             {/* Volume Browser Sheet */}
             <VolumeBrowserSheet volumeName={browseVolume} onClose={() => setBrowseVolume(null)} />

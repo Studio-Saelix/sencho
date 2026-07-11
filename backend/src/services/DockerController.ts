@@ -133,6 +133,9 @@ export interface ClassifiedImage {
   RepoTags: string[];
   Size: number;
   Containers: number;
+  /** Deduped, localeCompare-sorted Sencho stacks that currently use this image. */
+  usedByStacks: string[];
+  /** First entry of usedByStacks, or null when unused / unmanaged-only. */
   managedBy: string | null;
   managedStatus: 'managed' | 'unmanaged' | 'unused';
   isSencho: boolean;
@@ -482,29 +485,34 @@ class DockerController {
     const absDirToStack = DockerController.buildAbsDirMap(knownStackNames);
     const resolvedBase = path.resolve(COMPOSE_DIR);
 
-    // Build imageId → stack mapping using the full fallback resolution chain
-    const imageToStack = new Map<string, string>();
+    // Build imageId → set of Sencho stacks (multi-stack reverse index).
+    const imageToStacks = new Map<string, Set<string>>();
     for (const c of allContainers as any[]) {
       if (!c.ImageID) continue;
       const stack = DockerController.resolveContainerStack(
         c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
       );
-      if (stack) imageToStack.set(c.ImageID, stack);
+      if (!stack) continue;
+      const set = imageToStacks.get(c.ImageID) ?? new Set<string>();
+      set.add(stack);
+      imageToStacks.set(c.ImageID, set);
     }
 
     const selfIdentity = SelfIdentityService.getInstance();
 
     const images: ClassifiedImage[] = this.validateApiData<any[]>(rawImages).map((img: any) => {
-      const stack = imageToStack.get(img.Id) ?? null;
+      const usedByStacks = [...(imageToStacks.get(img.Id) ?? [])].sort((a, b) => a.localeCompare(b));
+      const managedBy = usedByStacks[0] ?? null;
       const managedStatus: ClassifiedImage['managedStatus'] =
         img.Containers === 0 ? 'unused' :
-        stack ? 'managed' : 'unmanaged';
+        managedBy ? 'managed' : 'unmanaged';
       return {
         Id: img.Id,
         RepoTags: img.RepoTags ?? [],
         Size: img.Size ?? 0,
         Containers: img.Containers ?? 0,
-        managedBy: stack,
+        usedByStacks,
+        managedBy,
         managedStatus,
         isSencho: selfIdentity.isOwnImage(img.Id),
       };
