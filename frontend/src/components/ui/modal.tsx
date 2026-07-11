@@ -208,6 +208,8 @@ interface ConfirmModalProps {
   confirmLabel: React.ReactNode;
   cancelLabel?: React.ReactNode;
   confirming?: boolean;
+  /** When true, the confirm action stays disabled (e.g. plan still loading). */
+  confirmDisabled?: boolean;
   onConfirm: () => void | Promise<void>;
   onCancel?: () => void;
   children?: React.ReactNode;
@@ -225,6 +227,7 @@ export function ConfirmModal({
   confirmLabel,
   cancelLabel = 'Cancel',
   confirming = false,
+  confirmDisabled = false,
   onConfirm,
   onCancel,
   children,
@@ -235,6 +238,7 @@ export function ConfirmModal({
     variant: variant === 'destructive' ? 'destructive' : 'default',
     size: 'sm',
   });
+  const actionDisabled = confirming || confirmDisabled;
 
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
@@ -255,7 +259,7 @@ export function ConfirmModal({
           primary={
             <AlertDialogAction
               className={actionClass}
-              disabled={confirming}
+              disabled={actionDisabled}
               onClick={(e) => {
                 const result = onConfirm();
                 // Async confirms keep the dialog open so the caller can render

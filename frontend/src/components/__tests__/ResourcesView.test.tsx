@@ -116,6 +116,33 @@ function reclaimableUsage(images: number, volumes: number) {
   };
 }
 
+
+function samplePrunePlan(overrides: Record<string, unknown> = {}) {
+  return {
+    scope: 'managed',
+    targets: ['images'],
+    items: [{ target: 'images', id: 'img1', name: 'old:v1', sizeBytes: 1000 }],
+    reclaimableBytes: 1000,
+    fingerprint: 'fp-test',
+    createdAt: Date.now(),
+    nodeId: 1,
+    ...overrides,
+  };
+}
+
+function reclaimPlan() {
+  return samplePrunePlan({
+    scope: 'all',
+    targets: ['volumes', 'containers', 'images'],
+    items: [
+      { target: 'volumes', id: 'v1', name: 'v1', sizeBytes: 500 },
+      { target: 'images', id: 'img1', name: 'old:v1', sizeBytes: 1000 },
+    ],
+    reclaimableBytes: 1500,
+    fingerprint: 'fp-reclaim',
+  });
+}
+
 afterEach(() => vi.clearAllMocks());
 
 describe('ResourcesView', () => {
@@ -171,8 +198,46 @@ describe('ResourcesView', () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 
+  it('fetches a prune plan before enabling confirm, then sends the fingerprint', async () => {
+    mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan()));
+      }
+      if (url === '/system/prune/system' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse({ success: true, reclaimedBytes: 1000, outcomes: [] }));
+      }
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const user = userEvent.setup();
+    render(<ResourcesView />);
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
+
+    await user.click(screen.getByRole('button', { name: /Prune Unused Images/ }));
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith(
+      '/system/prune/plan',
+      expect.objectContaining({ method: 'POST' }),
+    ));
+    expect(await screen.findByText(/old:v1/)).toBeInTheDocument();
+
+    await user.click(await screen.findByRole('button', { name: /Prune/ }));
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    const pruneCall = mockedFetch.mock.calls.find(
+      ([u, o]) => u === '/system/prune/system' && (o as RequestInit)?.method === 'POST',
+    );
+    expect(pruneCall).toBeTruthy();
+    const body = JSON.parse(String((pruneCall![1] as RequestInit).body));
+    expect(body.planFingerprint).toBe('fp-test');
+  });
+
   it('surfaces the server error on a failed prune instead of a false success (M-2)', async () => {
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(samplePrunePlan()));
+      }
       if (url === '/system/prune/system' && opts?.method === 'POST') {
         return Promise.resolve(jsonResponse({ error: 'Prune blew up' }, { ok: false, status: 500 }));
       }
@@ -187,7 +252,8 @@ describe('ResourcesView', () => {
     await waitFor(() => expect(mockedFetch).toHaveBeenCalledWith('/system/resources'));
 
     await user.click(screen.getByRole('button', { name: /Prune Unused Images/ }));
-    await user.click(await screen.findByRole('button', { name: /^Prune$/ }));
+    await waitFor(() => expect(screen.getByText(/old:v1/)).toBeInTheDocument());
+    await user.click(await screen.findByRole('button', { name: /Prune/ }));
 
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Prune blew up'));
     expect(toast.success).not.toHaveBeenCalled();
@@ -195,12 +261,11 @@ describe('ResourcesView', () => {
 
   it('reports partial failure from "Review & prune" without a false success', async () => {
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(reclaimPlan()));
+      }
       if (url === '/system/prune/system' && opts?.method === 'POST') {
-        const target = (JSON.parse(String(opts.body)) as { target: string }).target;
-        if (target === 'volumes') {
-          return Promise.resolve(jsonResponse({ error: 'volume prune failed' }, { ok: false, status: 500 }));
-        }
-        return Promise.resolve(jsonResponse({ reclaimedBytes: 100 }));
+        return Promise.resolve(jsonResponse({ error: 'volume prune failed' }, { ok: false, status: 500 }));
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
@@ -211,22 +276,24 @@ describe('ResourcesView', () => {
     render(<ResourcesView />);
 
     await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await waitFor(() => expect(screen.getByText(/2 items/)).toBeInTheDocument());
     await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
 
-    await waitFor(() => expect(toast.warning).toHaveBeenCalled());
-    const warningMsg = (toast.warning as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
-    expect(warningMsg).toMatch(/volumes/);
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
     expect(toast.success).not.toHaveBeenCalled();
-    // Volumes are pruned first (while stopped containers still protect their
-    // named volumes), then containers, then images.
     const pruned = mockedFetch.mock.calls
-      .filter(([u, o]) => u === '/system/prune/system' && (o as RequestInit)?.method === 'POST')
-      .map(([, o]) => (JSON.parse(String((o as RequestInit).body)) as { target: string }).target);
-    expect(pruned).toEqual(['volumes', 'containers', 'images']);
+      .filter(([u, o]) => u === '/system/prune/system' && (o as RequestInit)?.method === 'POST');
+    expect(pruned).toHaveLength(1);
+    const body = JSON.parse(String((pruned[0][1] as RequestInit).body));
+    expect(body.targets).toEqual(['volumes', 'containers', 'images']);
+    expect(body.planFingerprint).toBe('fp-reclaim');
   });
 
   it('reports an error when every prune fails, with no success or warning', async () => {
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(reclaimPlan()));
+      }
       if (url === '/system/prune/system' && opts?.method === 'POST') {
         return Promise.resolve(jsonResponse({ error: 'daemon down' }, { ok: false, status: 500 }));
       }
@@ -238,17 +305,21 @@ describe('ResourcesView', () => {
     const user = userEvent.setup();
     render(<ResourcesView />);
     await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await waitFor(() => expect(screen.getByText(/2 items/)).toBeInTheDocument());
     await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
 
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('Failed to reclaim disk space.'));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('daemon down'));
     expect(toast.success).not.toHaveBeenCalled();
     expect(toast.warning).not.toHaveBeenCalled();
   });
 
   it('omits the reclaimed figure on full success when the daemon reports zero bytes', async () => {
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(reclaimPlan()));
+      }
       if (url === '/system/prune/system' && opts?.method === 'POST') {
-        return Promise.resolve(jsonResponse({ reclaimedBytes: 0 }));
+        return Promise.resolve(jsonResponse({ reclaimedBytes: 0, outcomes: [] }));
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
@@ -258,6 +329,7 @@ describe('ResourcesView', () => {
     const user = userEvent.setup();
     render(<ResourcesView />);
     await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await waitFor(() => expect(screen.getByText(/2 items/)).toBeInTheDocument());
     await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
 
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
@@ -269,8 +341,11 @@ describe('ResourcesView', () => {
 
   it('shows the reclaimed figure on full success when the daemon reports bytes', async () => {
     mockedFetch.mockImplementation((url: string, opts?: RequestInit) => {
+      if (url === '/system/prune/plan' && opts?.method === 'POST') {
+        return Promise.resolve(jsonResponse(reclaimPlan()));
+      }
       if (url === '/system/prune/system' && opts?.method === 'POST') {
-        return Promise.resolve(jsonResponse({ reclaimedBytes: 1048576 }));
+        return Promise.resolve(jsonResponse({ reclaimedBytes: 1048576, outcomes: [] }));
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
@@ -280,6 +355,7 @@ describe('ResourcesView', () => {
     const user = userEvent.setup();
     render(<ResourcesView />);
     await user.click(await screen.findByRole('button', { name: /Review & prune/ }));
+    await waitFor(() => expect(screen.getByText(/2 items/)).toBeInTheDocument());
     await user.click(await screen.findByRole('button', { name: /^Reclaim/ }));
 
     await waitFor(() => expect(toast.success).toHaveBeenCalled());

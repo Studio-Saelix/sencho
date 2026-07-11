@@ -11,7 +11,7 @@ The **Resources** tab shows everything Docker is storing on your host, broken do
 
 ## Reclaim hero
 
-When there is reclaimable disk space (unused images, stopped containers, or dangling volumes), an amber banner leads the view with the total amount you can free and a `·`-separated breakdown of what contributes to it (for example, `16 unused images · 10 dangling volumes`). Click **Review & prune** to open a single confirmation dialog scoped to every reclaimable resource at once.
+When there is reclaimable disk space (unused images, stopped containers, or dangling volumes), an amber banner leads the view with the total amount you can free and a `·`-separated breakdown of what contributes to it (for example, `16 unused images · 10 dangling volumes`). Click **Review & prune** to open a confirmation dialog that lists the exact items that will be removed (capped in the preview with an "and N more" note when the list is long). Confirm only after the plan is ready; Sencho rechecks the list at execute time and skips anything that is no longer eligible.
 
 The hero stays hidden when there is nothing to reclaim, keeping the view focused on the rest of your inventory.
 
@@ -48,7 +48,7 @@ The right card under the hero exposes four prune actions. Each tile has a single
 
 The first three tiles also show a **More options** menu with a single destructive entry, **All Docker (includes external)**, that broadens the prune to every Docker resource on the host. Use it carefully, since it can affect other Compose projects sharing the same daemon. The **Purge Unmanaged Containers** tile has no menu and always targets unmanaged containers only.
 
-A confirmation dialog appears before any destructive operation, with a summary of what will be removed. While the operation runs, a loading notification keeps you informed; on completion it is replaced with a success or error notification, including how much space was reclaimed.
+A confirmation dialog appears before any destructive prune. Sencho first builds an itemized plan of exactly which resources will be removed, shows that list in the dialog, and only then enables confirm. The confirm action is bound to that plan: if the daemon state changes before you confirm, Sencho refreshes the plan instead of deleting a different set. While the operation runs, a loading notification keeps you informed; on completion it is replaced with a success or error notification, including how much space was reclaimed.
 
 <Note>
   Quick Clean is admin-only. The panel is hidden for users without admin permissions.
