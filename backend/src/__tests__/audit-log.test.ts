@@ -138,6 +138,13 @@ describe('getAuditSummary()', () => {
     expect(getAuditSummary('POST', '/users/42/mfa/reset')).toBe('Reset two-factor authentication: 42');
     expect(getAuditSummary('POST', '/users/42/mfa/reset')).not.toBe('Created user: 42');
   });
+
+  it('does not claim prune success on 409/400 responses', () => {
+    expect(getAuditSummary('POST', '/system/prune/system', 409)).toBe('Prune blocked: plan stale');
+    expect(getAuditSummary('POST', '/system/prune/system', 400)).toBe('Prune request rejected');
+    expect(getAuditSummary('POST', '/system/prune/system', 500)).toBe('Prune failed (500)');
+    expect(getAuditSummary('POST', '/system/prune/system', 200)).toBe('Pruned system resources');
+  });
 });
 
 // ---- DatabaseService audit methods ----

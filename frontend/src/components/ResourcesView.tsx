@@ -103,6 +103,69 @@ type ResourceFilter = 'all' | 'managed' | 'unmanaged';
 type PruneTarget = 'containers' | 'images' | 'networks' | 'volumes';
 type PruneScope = 'managed' | 'all';
 
+interface PrunePlanItem {
+    target: PruneTarget;
+    id: string;
+    name: string;
+    sizeBytes?: number;
+}
+
+interface PrunePlan {
+    scope: PruneScope;
+    targets: PruneTarget[];
+    items: PrunePlanItem[];
+    reclaimableBytes: number;
+    fingerprint: string;
+    createdAt: number;
+    nodeId: number;
+}
+
+const PLAN_PREVIEW_CAP = 30;
+
+function PrunePlanPreview({
+    plan,
+    loading,
+    error,
+}: {
+    plan: PrunePlan | null;
+    loading: boolean;
+    error: string | null;
+}) {
+    if (loading) {
+        return <p className="text-sm text-stat-subtitle">Building prune plan...</p>;
+    }
+    if (error) {
+        return <p className="text-sm text-destructive">{error}</p>;
+    }
+    if (!plan) return null;
+    if (plan.items.length === 0) {
+        return <p className="text-sm text-stat-subtitle">Nothing eligible to prune right now.</p>;
+    }
+    const shown = plan.items.slice(0, PLAN_PREVIEW_CAP);
+    const remaining = plan.items.length - shown.length;
+    return (
+        <div className="space-y-2">
+            <p className="text-xs font-mono text-stat-subtitle/90">
+                {plan.items.length} {plan.items.length === 1 ? 'item' : 'items'}
+                {plan.reclaimableBytes > 0 ? ` · ${formatBytes(plan.reclaimableBytes)}` : ''}
+            </p>
+            <ul className="max-h-40 overflow-y-auto space-y-1 font-mono text-[12px] text-stat-subtitle/90">
+                {shown.map((item) => (
+                    <li key={`${item.target}:${item.id}`} className="block truncate">
+                        <span className="text-stat-subtitle/60">{item.target}</span>
+                        {' · '}
+                        {item.name}
+                        {item.sizeBytes != null && item.sizeBytes > 0 ? ` · ${formatBytes(item.sizeBytes)}` : ''}
+                    </li>
+                ))}
+            </ul>
+            {remaining > 0 && (
+                <p className="text-xs text-stat-subtitle/70">and {remaining} more</p>
+            )}
+        </div>
+    );
+}
+
 // Per-node, per-browser snooze for the reclaim banner. We store the reclaimable
 // byte total at the moment of dismissal; the banner returns only once the node's
 // reclaimable total grows past that snapshot, so a stable residue stays hidden.
@@ -352,6 +415,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [confirmPrune, setConfirmPrune] = useState<{ target: PruneTarget; scope: PruneScope } | null>(null);
     const [confirmDelete, setConfirmDelete] = useState<{ type: 'images' | 'volumes' | 'networks'; id: string; name?: string } | null>(null);
     const [confirmReclaim, setConfirmReclaim] = useState(false);
+    const [prunePlan, setPrunePlan] = useState<PrunePlan | null>(null);
+    const [planLoading, setPlanLoading] = useState(false);
+    const [planError, setPlanError] = useState<string | null>(null);
+    const planFetchGenRef = useRef(0);
 
     // Reclaim banner visibility: the per-node opt-out setting (loaded in
     // fetchAllData) and the per-browser dismiss snapshot for the active node.
@@ -447,34 +514,107 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // view is gone cannot run state setters or surface a load-error toast.
     useEffect(() => () => { fetchGenerationRef.current += 1; }, []);
 
-    const handlePrune = async () => {
+    type PrunePlanRequest = { target?: PruneTarget; targets?: PruneTarget[]; scope: PruneScope };
+
+    const fetchPrunePlan = async (body: PrunePlanRequest) => {
+        const generation = ++planFetchGenRef.current;
+        setPlanLoading(true);
+        setPlanError(null);
+        setPrunePlan(null);
+        try {
+            const res = await apiFetch('/system/prune/plan', {
+                method: 'POST',
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => null);
+            if (planFetchGenRef.current !== generation) return null;
+            if (!res.ok) {
+                throw new Error(data?.error || 'Failed to build prune plan');
+            }
+            setPrunePlan(data as PrunePlan);
+            return data as PrunePlan;
+        } catch (error) {
+            if (planFetchGenRef.current !== generation) return null;
+            const err = error as { message?: string };
+            const message = err?.message || 'Failed to build prune plan';
+            setPlanError(message);
+            console.error('Failed to build prune plan', error);
+            return null;
+        } finally {
+            if (planFetchGenRef.current === generation) setPlanLoading(false);
+        }
+    };
+
+    /** POST /prune/system with fingerprint. On stale 409, refresh the plan and
+     *  require another confirm rather than executing a set the user never saw. */
+    const executeFingerprintPrune = async (body: PrunePlanRequest, fingerprint: string) => {
+        const res = await apiFetch('/system/prune/system', {
+            method: 'POST',
+            body: JSON.stringify({ ...body, planFingerprint: fingerprint }),
+        });
+        const data = await res.json().catch(() => null);
+        if (res.status === 409 && data?.code === 'PRUNE_PLAN_STALE') {
+            await fetchPrunePlan(body);
+            throw new Error('Prune plan changed; review the updated list and confirm again');
+        }
+        return { res, data };
+    };
+
+    // Fetch an itemized plan whenever a prune confirm dialog opens.
+    useEffect(() => {
         if (!confirmPrune) return;
+        void fetchPrunePlan({ target: confirmPrune.target, scope: confirmPrune.scope });
+    }, [confirmPrune]);
+
+    useEffect(() => {
+        if (!confirmReclaim) return;
+        void fetchPrunePlan({ targets: ['volumes', 'containers', 'images'], scope: 'all' });
+    }, [confirmReclaim]);
+
+    useEffect(() => {
+        if (confirmPrune || confirmReclaim) return;
+        planFetchGenRef.current += 1;
+        setPrunePlan(null);
+        setPlanLoading(false);
+        setPlanError(null);
+    }, [confirmPrune, confirmReclaim]);
+
+    const handlePrune = async () => {
+        if (!confirmPrune || !prunePlan) return;
         setIsActioning(true);
         const loadingId = toast.loading(`Pruning ${confirmPrune.target}...`);
         try {
-            const res = await apiFetch('/system/prune/system', {
-                method: 'POST',
-                body: JSON.stringify({ target: confirmPrune.target, scope: confirmPrune.scope })
-            });
-            const data = await res.json().catch(() => null);
+            const { res, data } = await executeFingerprintPrune(
+                { target: confirmPrune.target, scope: confirmPrune.scope },
+                prunePlan.fingerprint,
+            );
             if (!res.ok) {
                 throw new Error(data?.error || `Failed to prune ${confirmPrune.target}`);
             }
             const scopeLabel = confirmPrune.scope === 'managed' ? 'Sencho-managed' : 'all';
-            toast.success(
-                data?.reclaimedBytes !== undefined
-                    ? `Pruned ${scopeLabel} ${confirmPrune.target}. Reclaimed ${formatBytes(data.reclaimedBytes)}.`
-                    : `Pruned ${scopeLabel} ${confirmPrune.target}.`
-            );
+            const reclaimed = typeof data?.reclaimedBytes === 'number' ? data.reclaimedBytes : undefined;
+            const outcomes = Array.isArray(data?.outcomes) ? data.outcomes : [];
+            const failed = outcomes.filter((o: { status?: string }) => o.status === 'failed');
+            const reclaimedLabel = reclaimed !== undefined
+                ? ` Reclaimed ${formatBytes(reclaimed)}.`
+                : '';
+            if (failed.length > 0 && failed.length === outcomes.length) {
+                toast.error(`Failed to prune ${confirmPrune.target}.`);
+            } else if (failed.length > 0) {
+                toast.warning(`Some ${confirmPrune.target} could not be pruned.${reclaimedLabel}`);
+            } else {
+                toast.success(`Pruned ${scopeLabel} ${confirmPrune.target}.${reclaimedLabel}`);
+            }
             await fetchAllData();
+            setConfirmPrune(null);
         } catch (error) {
             console.error('Failed to prune', error);
             const err = error as { message?: string };
             toast.error(err?.message || `Failed to prune ${confirmPrune.target}`);
+            // Keep the dialog open on stale-plan so the operator can re-confirm.
         } finally {
             toast.dismiss(loadingId);
             setIsActioning(false);
-            setConfirmPrune(null);
         }
     };
 
@@ -684,39 +824,38 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     // false success); the reclaimed figure is shown only when the daemon reports
     // one (the containerd image store returns 0).
     const handleReclaimAll = async () => {
+        if (!prunePlan) return;
         setIsActioning(true);
         const loadingId = toast.loading('Reclaiming disk space...');
-        const order: PruneTarget[] = ['volumes', 'containers', 'images'];
-        let reclaimed = 0;
-        const failed: PruneTarget[] = [];
         try {
-            for (const target of order) {
-                try {
-                    const res = await apiFetch('/system/prune/system', {
-                        method: 'POST',
-                        body: JSON.stringify({ target, scope: 'all' }),
-                    });
-                    const data = await res.json().catch(() => null);
-                    if (!res.ok) throw new Error(data?.error || `Failed to prune ${target}`);
-                    if (typeof data?.reclaimedBytes === 'number') reclaimed += data.reclaimedBytes;
-                } catch (err) {
-                    console.error(`Failed to prune ${target}`, err);
-                    failed.push(target);
-                }
+            const { res, data } = await executeFingerprintPrune(
+                { targets: ['volumes', 'containers', 'images'], scope: 'all' },
+                prunePlan.fingerprint,
+            );
+            if (!res.ok) {
+                throw new Error(data?.error || 'Failed to reclaim disk space');
             }
+            const reclaimed = typeof data?.reclaimedBytes === 'number' ? data.reclaimedBytes : 0;
             const reclaimedLabel = reclaimed > 0 ? ` Freed ${formatBytes(reclaimed)}.` : '';
-            if (failed.length === order.length) {
+            const outcomes = Array.isArray(data?.outcomes) ? data.outcomes : [];
+            const failed = outcomes.filter((o: { status?: string }) => o.status === 'failed');
+            if (failed.length > 0 && failed.length === outcomes.length) {
                 toast.error('Failed to reclaim disk space.');
             } else if (failed.length > 0) {
-                toast.warning(`Could not prune: ${failed.join(', ')}.${reclaimedLabel}`);
+                toast.warning(`Some items could not be pruned.${reclaimedLabel}`);
             } else {
                 toast.success(`Reclaimed unused images, stopped containers, and dangling volumes.${reclaimedLabel}`);
             }
             await fetchAllData();
+            setConfirmReclaim(false);
+        } catch (error) {
+            console.error('Failed to reclaim', error);
+            const err = error as { message?: string };
+            toast.error(err?.message || 'Failed to reclaim disk space.');
+            // Keep the dialog open on stale-plan so the operator can re-confirm.
         } finally {
             toast.dismiss(loadingId);
             setIsActioning(false);
-            setConfirmReclaim(false);
         }
     };
 
@@ -1398,23 +1537,35 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         : `Prune Sencho-managed ${confirmPrune?.target}`
                 }
                 hint={confirmPrune?.scope === 'all' ? 'AFFECTS external Docker resources' : 'KEEPS external resources'}
-                confirmLabel={isActioning ? 'Pruning...' : (confirmPrune?.scope === 'all' ? 'Prune all' : 'Prune')}
+                confirmLabel={
+                    isActioning
+                        ? 'Pruning...'
+                        : planLoading
+                            ? 'Preparing...'
+                            : prunePlan && prunePlan.reclaimableBytes > 0
+                                ? `Prune · ${formatBytes(prunePlan.reclaimableBytes)}`
+                                : (confirmPrune?.scope === 'all' ? 'Prune all' : 'Prune')
+                }
                 confirming={isActioning}
+                confirmDisabled={planLoading || !prunePlan || !!planError || (prunePlan?.items.length ?? 0) === 0}
                 onConfirm={handlePrune}
             >
-                <p className="text-sm text-stat-subtitle">
-                    {confirmPrune?.scope === 'all' ? (
-                        <>
-                            Prunes <span className="font-medium text-stat-value">all</span> unused {confirmPrune?.target} from the Docker daemon, including those from{' '}
-                            <span className="font-medium text-stat-value">external projects not managed by Sencho</span>.
-                        </>
-                    ) : (
-                        <>
-                            Removes only unused {confirmPrune?.target} belonging to your Sencho stacks. External Docker resources are{' '}
-                            <span className="font-medium text-stat-value">not affected</span>.
-                        </>
-                    )}
-                </p>
+                <div className="space-y-3 text-sm text-stat-subtitle">
+                    <p>
+                        {confirmPrune?.scope === 'all' ? (
+                            <>
+                                Prunes <span className="font-medium text-stat-value">all</span> unused {confirmPrune?.target} from the Docker daemon, including those from{' '}
+                                <span className="font-medium text-stat-value">external projects not managed by Sencho</span>.
+                            </>
+                        ) : (
+                            <>
+                                Removes only unused {confirmPrune?.target} belonging to your Sencho stacks. External Docker resources are{' '}
+                                <span className="font-medium text-stat-value">not affected</span>.
+                            </>
+                        )}
+                    </p>
+                    <PrunePlanPreview plan={prunePlan} loading={planLoading} error={planError} />
+                </div>
             </ConfirmModal>
 
             {/* Reclaim Confirm (banner "Review & prune") */}
@@ -1425,8 +1576,15 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                 kicker="RESOURCES · PRUNE · IRREVERSIBLE"
                 title="Reclaim disk space"
                 hint="AFFECTS external Docker resources"
-                confirmLabel={isActioning ? 'Reclaiming...' : `Reclaim ${formatBytes(totalReclaimableBytes)}`}
+                confirmLabel={
+                    isActioning
+                        ? 'Reclaiming...'
+                        : planLoading
+                            ? 'Preparing...'
+                            : `Reclaim ${formatBytes(prunePlan?.reclaimableBytes ?? totalReclaimableBytes)}`
+                }
                 confirming={isActioning}
+                confirmDisabled={planLoading || !prunePlan || !!planError || (prunePlan?.items.length ?? 0) === 0}
                 onConfirm={handleReclaimAll}
             >
                 <div className="space-y-3 text-sm text-stat-subtitle">
@@ -1434,19 +1592,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                         Removes every unused image, stopped container, and dangling volume on this node, including those from{' '}
                         <span className="font-medium text-stat-value">external projects not managed by Sencho</span>.
                     </p>
-                    {usage && (
-                        <ul className="flex flex-col gap-1 font-mono text-[12px] text-stat-subtitle/90">
-                            {usage.reclaimableImageCount > 0 && (
-                                <li>{usage.reclaimableImageCount} {usage.reclaimableImageCount === 1 ? 'unused image' : 'unused images'} · {formatBytes(usage.reclaimableImages)}</li>
-                            )}
-                            {usage.reclaimableContainerCount > 0 && (
-                                <li>{usage.reclaimableContainerCount} {usage.reclaimableContainerCount === 1 ? 'stopped container' : 'stopped containers'} · {formatBytes(usage.reclaimableContainers)}</li>
-                            )}
-                            {usage.reclaimableVolumeCount > 0 && (
-                                <li>{usage.reclaimableVolumeCount} {usage.reclaimableVolumeCount === 1 ? 'dangling volume' : 'dangling volumes'} · {formatBytes(usage.reclaimableVolumes)}</li>
-                            )}
-                        </ul>
-                    )}
+                    <PrunePlanPreview plan={prunePlan} loading={planLoading} error={planError} />
                 </div>
             </ConfirmModal>
 
