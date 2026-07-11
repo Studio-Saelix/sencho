@@ -4,6 +4,7 @@ import { useDashboardData } from '@/components/dashboard';
 import { deriveHealth } from '@/components/dashboard/deriveHealth';
 import type { HealthLevel, NotificationItem, StackCpuSeries, StackStatusEntry } from '@/components/dashboard/types';
 import { Bar, Kicker, Masthead, MSparkline, SectionHead, StateDot } from './mobile-ui';
+import { NodeSwitcher } from '@/components/NodeSwitcher';
 
 interface MobileDashboardProps {
   notifications: NotificationItem[];
@@ -11,6 +12,8 @@ interface MobileDashboardProps {
   headerActions: ReactNode;
   onNavigateToStack: (stackFile: string) => void;
   onViewAllStacks: () => void;
+  /** Opens the Nodes settings section from the masthead node switcher. */
+  onManageNodes: () => void;
 }
 
 const SPARK_WINDOW_MS = 10 * 60 * 1000;
@@ -73,11 +76,10 @@ function StripCell({ label, value, bar }: { label: string; value: string; bar?: 
   );
 }
 
-export function MobileDashboard({ notifications, headerActions, onNavigateToStack, onViewAllStacks }: MobileDashboardProps) {
+export function MobileDashboard({ notifications, headerActions, onNavigateToStack, onViewAllStacks, onManageNodes }: MobileDashboardProps) {
   const { activeNode } = useNodes();
   const data = useDashboardData();
   const activeNodeName = activeNode?.name || 'Local';
-  const locality = activeNode?.type === 'remote' ? 'remote' : 'local';
 
   // Re-render every few seconds so the "sync Xs" freshness label advances
   // without a parent refetch, mirroring the desktop HealthStatusBar ticker.
@@ -142,7 +144,7 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
   return (
     <div className="flex h-full min-h-0 flex-col">
       <Masthead
-        kicker={`${activeNodeName} · ${locality}`}
+        kickerSlot={<NodeSwitcher compact onManageNodes={onManageNodes} />}
         state={LEVEL_LABEL[level]}
         stateTone={LEVEL_TONE[level]}
         live={level !== 'healthy' || data.metricsStale}
