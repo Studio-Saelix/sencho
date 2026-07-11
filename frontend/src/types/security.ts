@@ -159,6 +159,13 @@ export interface VulnerabilityDetail {
 export type TriageStatus =
   | 'needs_review' | 'affected' | 'not_affected' | 'accepted' | 'fixed' | 'false_positive' | 'ignored';
 
+/** OpenVEX-aligned justification codes (mirrors the backend TriageJustification). */
+export type TriageJustification =
+  | 'vulnerable_code_not_in_execute_path'
+  | 'vulnerable_code_not_present'
+  | 'component_not_present'
+  | 'inline_mitigations_already_exist';
+
 export interface CveSuppression {
   id: number;
   cve_id: string;
@@ -171,7 +178,7 @@ export interface CveSuppression {
   replicated_from_control: number;
   active: boolean;
   status?: TriageStatus;
-  justification?: string | null;
+  justification?: TriageJustification | null;
 }
 
 export interface ScanSummary {
