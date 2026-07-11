@@ -425,7 +425,7 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
             <div className="space-y-2">
               <Label htmlFor="s-justification">OpenVEX justification</Label>
               <Select
-                value={form.justification || undefined}
+                value={form.justification}
                 onValueChange={(v) => setForm({ ...form, justification: v })}
               >
                 <SelectTrigger id="s-justification" aria-label="OpenVEX justification" className="w-full">
