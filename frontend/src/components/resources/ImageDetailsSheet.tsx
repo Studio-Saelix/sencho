@@ -7,6 +7,8 @@ import { apiFetch } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { copyToClipboard } from '@/lib/clipboard';
 import { formatShortDigest } from '@/lib/formatDigest';
+import { useAuth } from '@/context/AuthContext';
+import { RegistryTagsPanel } from './RegistryTagsPanel';
 import { Copy } from 'lucide-react';
 
 interface ImageInspect {
@@ -76,6 +78,7 @@ function formatRelativeAge(timestampSec: number): string {
 
 export function ImageDetailsSheet({ image, onClose, onOpenStack }: ImageDetailsSheetProps) {
   const imageId = image?.Id ?? null;
+  const { isAdmin } = useAuth();
   const [data, setData] = useState<ImageDetails | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -113,7 +116,6 @@ export function ImageDetailsSheet({ image, onClose, onOpenStack }: ImageDetailsS
   const inspect = data?.inspect;
   const history = data?.history ?? [];
   const totalLayers = history.length;
-  const usedByStacks = image?.usedByStacks ?? [];
 
   const name = image?.RepoTags?.[0]
     || inspect?.RepoTags?.[0]
@@ -143,6 +145,33 @@ export function ImageDetailsSheet({ image, onClose, onOpenStack }: ImageDetailsS
           <Skeleton className="h-5 w-full" />
           <Skeleton className="h-5 w-3/4" />
         </div>
+      )}
+
+      {image && (
+        <SheetSection title="Used by">
+          {(image.usedByStacks?.length ?? 0) === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              {image.managedStatus === 'unused' ? 'No containers' : 'Not used by a Sencho stack'}
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-1">
+              {image.usedByStacks.map((stack) => (
+                onOpenStack ? (
+                  <button
+                    key={stack}
+                    type="button"
+                    className="inline-flex items-center px-1.5 py-0.5 rounded border border-success/25 bg-success/8 text-success text-[10px] font-medium hover:bg-success/15 transition-colors"
+                    onClick={() => onOpenStack(stack)}
+                  >
+                    {stack}
+                  </button>
+                ) : (
+                  <Badge key={stack} variant="outline" className="text-[10px] h-5">{stack}</Badge>
+                )
+              ))}
+            </div>
+          )}
+        </SheetSection>
       )}
 
       {!loading && inspect && (
@@ -191,30 +220,6 @@ export function ImageDetailsSheet({ image, onClose, onOpenStack }: ImageDetailsS
                   </div>
                 </Field>
               )}
-              <Field label="Used by" span={2}>
-                {usedByStacks.length === 0 ? (
-                  <p className="text-xs mt-0.5 text-muted-foreground">
-                    {image?.managedStatus === 'unused' ? 'No containers' : 'Not used by a Sencho stack'}
-                  </p>
-                ) : (
-                  <div className="flex flex-wrap gap-1 mt-1">
-                    {usedByStacks.map((stack) => (
-                      onOpenStack ? (
-                        <button
-                          key={stack}
-                          type="button"
-                          className="inline-flex items-center px-1.5 py-0.5 rounded border border-success/25 bg-success/8 text-success text-[10px] font-medium hover:bg-success/15 transition-colors"
-                          onClick={() => onOpenStack(stack)}
-                        >
-                          {stack}
-                        </button>
-                      ) : (
-                        <Badge key={stack} variant="outline" className="text-[10px] h-5">{stack}</Badge>
-                      )
-                    ))}
-                  </div>
-                )}
-              </Field>
             </div>
           </SheetSection>
 
@@ -278,6 +283,15 @@ export function ImageDetailsSheet({ image, onClose, onOpenStack }: ImageDetailsS
                 })}
               </ol>
             )}
+          </SheetSection>
+
+          <SheetSection title="Registry tags">
+            <RegistryTagsPanel
+              repoTags={inspect.RepoTags ?? image?.RepoTags ?? []}
+              repoDigests={inspect.RepoDigests ?? []}
+              nodeId={image?.nodeId ?? 0}
+              isAdmin={isAdmin}
+            />
           </SheetSection>
         </>
       )}

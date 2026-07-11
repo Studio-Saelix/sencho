@@ -39,7 +39,7 @@ function fakeRequest(url: string, options: { method?: string }, cb: (res: EventE
 vi.mock('https', () => ({ default: { request: (...args: unknown[]) => fakeRequest(...(args as Parameters<typeof fakeRequest>)) } }));
 vi.mock('http', () => ({ default: { request: (...args: unknown[]) => fakeRequest(...(args as Parameters<typeof fakeRequest>)) } }));
 
-import { repoDigestMatchesRef, getRemoteDigest, getRemoteDigestResult, getAuthToken, parseImageRef } from '../services/registry-api';
+import { repoDigestMatchesRef, getRemoteDigest, getRemoteDigestResult, getAuthToken, listRegistryTagsResult, parseImageRef } from '../services/registry-api';
 
 const TOKEN_BODY = JSON.stringify({ token: 'test-token' });
 const REMOTE = 'sha256:remote000000000000000000000000000000000000000000000000000000';
@@ -233,5 +233,87 @@ describe('getRemoteDigestResult failure reasons', () => {
   it('reports unreachable when the request throws, including the error cause', async () => {
     route = () => { throw new Error('ENOTFOUND'); };
     expect(await get()).toEqual({ ok: false, reason: `Registry unreachable for ${REF} (ENOTFOUND)` });
+  });
+
+  it('falls back to anonymous manifest lookup when auth transport fails', async () => {
+    route = (url, method): FakeResp => {
+      if (url.includes('auth.docker.io/token')) {
+        throw Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' });
+      }
+      if (method === 'HEAD') return { statusCode: 200, headers: { 'docker-content-digest': REMOTE } };
+      return { statusCode: 500, headers: {} };
+    };
+    expect(await get()).toEqual({ ok: true, digest: REMOTE });
+  });
+});
+
+describe('listRegistryTagsResult', () => {
+  const creds = { username: 'u', password: 'p' };
+  const GHCR_CHALLENGE = 'Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:user/image:pull"';
+
+  beforeEach(() => {
+    calls.length = 0;
+  });
+
+  function authThenTags(tagResp: FakeResp): (url: string, method: string) => FakeResp {
+    return (url) => {
+      if (url === 'https://ghcr.io/v2/') return { statusCode: 401, headers: { 'www-authenticate': GHCR_CHALLENGE } };
+      if (url.startsWith('https://ghcr.io/token')) return { statusCode: 200, headers: {}, body: TOKEN_BODY };
+      if (url.includes('/tags/list')) return tagResp;
+      return { statusCode: 500, headers: {} };
+    };
+  }
+
+  async function expectFailure(code: string, message?: string): Promise<void> {
+    const result = await listRegistryTagsResult('ghcr.io', 'acme/app', creds);
+    expect(result).toMatchObject(message ? { ok: false, code, message } : { ok: false, code });
+  }
+
+  it('returns tags on a successful list', async () => {
+    route = authThenTags({ statusCode: 200, headers: {}, body: JSON.stringify({ tags: ['latest', '1.0'] }) });
+    await expect(listRegistryTagsResult('ghcr.io', 'acme/app', creds)).resolves.toEqual({
+      ok: true,
+      tags: ['latest', '1.0'],
+    });
+  });
+
+  it('maps transport failure during auth ping to REGISTRY_UPSTREAM (not UNAUTHORIZED)', async () => {
+    route = () => { throw Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }); };
+    await expectFailure('REGISTRY_UPSTREAM', 'Registry unreachable');
+  });
+
+  it('maps a rejected token to REGISTRY_UNAUTHORIZED', async () => {
+    route = (url): FakeResp => {
+      if (url === 'https://ghcr.io/v2/') return { statusCode: 401, headers: { 'www-authenticate': GHCR_CHALLENGE } };
+      if (url.startsWith('https://ghcr.io/token')) return { statusCode: 401, headers: {} };
+      return { statusCode: 200, headers: {}, body: '{}' };
+    };
+    await expectFailure('REGISTRY_UNAUTHORIZED', 'Registry rejected credentials');
+  });
+
+  it('maps 403 on tags/list to REGISTRY_FORBIDDEN', async () => {
+    route = authThenTags({ statusCode: 403, headers: {} });
+    await expectFailure('REGISTRY_FORBIDDEN');
+  });
+
+  it('maps 429 on tags/list to REGISTRY_RATE_LIMITED', async () => {
+    route = authThenTags({ statusCode: 429, headers: {} });
+    await expectFailure('REGISTRY_RATE_LIMITED');
+  });
+
+  it('maps invalid JSON to REGISTRY_INVALID_RESPONSE', async () => {
+    route = authThenTags({ statusCode: 200, headers: {}, body: 'not-json' });
+    await expectFailure('REGISTRY_INVALID_RESPONSE', 'Registry returned invalid JSON');
+  });
+
+  it('maps a non-array tags field to REGISTRY_INVALID_RESPONSE', async () => {
+    route = authThenTags({ statusCode: 200, headers: {}, body: JSON.stringify({ tags: 'latest' }) });
+    await expectFailure('REGISTRY_INVALID_RESPONSE', 'Registry tag list was malformed');
+  });
+
+  it('maps an oversized body to REGISTRY_INVALID_RESPONSE', async () => {
+    const huge = '{"tags":["' + 'x'.repeat(2 * 1024 * 1024) + '"]}';
+    route = authThenTags({ statusCode: 200, headers: {}, body: huge });
+    await expectFailure('REGISTRY_INVALID_RESPONSE', 'Registry tag list response too large');
   });
 });

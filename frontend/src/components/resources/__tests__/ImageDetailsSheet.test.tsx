@@ -5,6 +5,7 @@ import { ImageDetailsSheet } from '../ImageDetailsSheet';
 
 const apiFetch = vi.fn();
 vi.mock('@/lib/api', () => ({ apiFetch: (...args: unknown[]) => apiFetch(...args) }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ isAdmin: true }) }));
 vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn() },
 }));

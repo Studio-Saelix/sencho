@@ -644,6 +644,26 @@ components:
           description: Required when `type` is `ecr`.
           example: us-east-1
 
+    RegistryTagList:
+      type: object
+      required: [tags, nextCursor, registryId, registryName, repository]
+      properties:
+        tags:
+          type: array
+          items: { type: string }
+          example: [latest, "1.0"]
+        nextCursor:
+          type: ["string", "null"]
+          description: Opaque cursor for the next page, or null when there are no more tags.
+        registryId:
+          type: integer
+        registryName:
+          type: string
+        repository:
+          type: string
+          description: Path-safe repository name after Docker Hub library/ normalization when applicable.
+          example: library/nginx
+
     ImageUpdateStatus:
       type: object
       properties:
@@ -3605,3 +3625,44 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: Non-admin users cannot change the schedule.
+
+  /api/registries/{id}/tags:
+    get:
+      tags: [Registries]
+      summary: List tags for a repository on a configured registry
+      description: |
+        Hub-only. Admin only. Credentials are resolved by exact registry ID.
+        Upstream registry auth failures return 424 with a REGISTRY_* code, never HTTP 401.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer }
+        - name: repository
+          in: query
+          required: true
+          schema: { type: string }
+          description: Path-safe repository name (no host or scheme)
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Tag page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistryTagList"
+        '400':
+          description: Invalid repository or response
+        '404':
+          description: Registry or repository not found
+        '424':
+          description: Upstream registry auth or policy failure (not a Sencho session 401)
+        '502':
+          description: Upstream registry transport failure

@@ -1,8 +1,10 @@
 import { Router, type Request, type Response } from 'express';
 import { RegistryService } from '../services/RegistryService';
+import { listRegistryTagsResult, type TagListCode } from '../services/registry-api';
 import { requireAdmin, requirePaid } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { parseIntParam } from '../utils/parseIntParam';
+import { sanitizeForLog } from '../utils/safeLog';
 
 const VALID_REGISTRY_TYPES = ['dockerhub', 'ghcr', 'ecr', 'custom'] as const;
 const REGISTRY_SCOPE_MESSAGE = 'API tokens cannot manage registry credentials.';
@@ -28,6 +30,40 @@ function isValidRegistryUrl(url: string, type: string): boolean {
 function allowRegistryType(type: string | undefined, req: Request, res: Response): boolean {
   if (type === 'ecr') return requirePaid(req, res);
   return true;
+}
+
+
+const REPO_MAX_LEN = 255;
+const REPO_PATTERN = /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/i;
+
+/** Path-safe repository name only (no scheme, host, or tag). */
+function parseRepositoryParam(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const repo = raw.trim();
+  if (!repo || repo.length > REPO_MAX_LEN) return null;
+  if (repo.includes('://') || repo.includes('@') || repo.startsWith('/') || repo.includes(':')) return null;
+  const first = repo.split('/')[0];
+  // Host-looking first segment (e.g. ghcr.io/org/name) is rejected; host comes from the registry row.
+  if (first.includes('.')) return null;
+  if (!REPO_PATTERN.test(repo)) return null;
+  return repo;
+}
+
+function tagListHttpStatus(code: TagListCode): number {
+  switch (code) {
+    case 'REGISTRY_UNAUTHORIZED':
+    case 'REGISTRY_FORBIDDEN':
+    case 'REGISTRY_RATE_LIMITED':
+    case 'REGISTRY_UNSUPPORTED':
+      return 424;
+    case 'REGISTRY_NOT_FOUND':
+      return 404;
+    case 'REGISTRY_INVALID_RESPONSE':
+      return 400;
+    case 'REGISTRY_UPSTREAM':
+    default:
+      return 502;
+  }
 }
 
 export const registriesRouter = Router();
@@ -133,6 +169,80 @@ registriesRouter.delete('/:id', (req: Request, res: Response): void => {
   } catch (error) {
     console.error('[Registries] Delete error:', error);
     res.status(500).json({ error: 'Failed to delete registry' });
+  }
+});
+
+
+// Browse tags for a configured registry + validated repository (hub-only).
+// Upstream registry auth failures map to 424/502 — never HTTP 401 (that would
+// log the browser session out via the frontend unauthorized handler).
+registriesRouter.get('/:id/tags', async (req: Request, res: Response): Promise<void> => {
+  if (rejectApiTokenScope(req, res, REGISTRY_SCOPE_MESSAGE)) return;
+  if (!requireAdmin(req, res)) return;
+  try {
+    const id = parseIntParam(req, res, 'id', 'registry ID');
+    if (id === null) return;
+
+    const repository = parseRepositoryParam(req.query.repository);
+    if (!repository) {
+      res.status(400).json({ error: 'Query parameter repository is required and must be a path-safe repository name' });
+      return;
+    }
+
+    const limitRaw = req.query.limit;
+    let limit = 50;
+    if (limitRaw !== undefined) {
+      const n = typeof limitRaw === 'string' ? Number.parseInt(limitRaw, 10) : NaN;
+      if (!Number.isFinite(n) || n < 1 || n > 100) {
+        res.status(400).json({ error: 'limit must be an integer from 1 to 100' });
+        return;
+      }
+      limit = n;
+    }
+    const cursor = typeof req.query.cursor === 'string' && req.query.cursor.trim()
+      ? req.query.cursor.trim()
+      : undefined;
+
+    const auth = await RegistryService.getInstance().getAuthForRegistryId(id);
+    if (!auth.ok) {
+      if (auth.code === 'missing') {
+        res.status(404).json({ error: auth.message, code: 'REGISTRY_NOT_FOUND' });
+        return;
+      }
+      const code = auth.code === 'ecr_failed' || auth.code === 'decrypt_failed'
+        ? 'REGISTRY_UNAUTHORIZED'
+        : 'REGISTRY_UPSTREAM';
+      res.status(424).json({ error: auth.message, code });
+      return;
+    }
+    if (!allowRegistryType(auth.type, req, res)) return;
+
+    // Docker Hub official images are often referenced as library/<name>.
+    let repo = repository;
+    if (auth.type === 'dockerhub' && !repo.includes('/')) {
+      repo = `library/${repo}`;
+    }
+
+    const result = await listRegistryTagsResult(
+      auth.registryHost,
+      repo,
+      { username: auth.username, password: auth.password },
+      { limit, cursor },
+    );
+    if (!result.ok) {
+      res.status(tagListHttpStatus(result.code)).json({ error: result.message, code: result.code });
+      return;
+    }
+    res.json({
+      tags: result.tags,
+      nextCursor: result.nextCursor ?? null,
+      registryId: id,
+      registryName: auth.name,
+      repository: repo,
+    });
+  } catch (error) {
+    console.error('[Registries] Tag list error:', sanitizeForLog(error instanceof Error ? error.message : String(error)));
+    res.status(500).json({ error: 'Failed to list registry tags' });
   }
 });
 
