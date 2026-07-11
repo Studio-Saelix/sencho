@@ -98,39 +98,41 @@ export async function getAuthToken(
     repo: string,
     credentials?: RegistryCredentials | null,
 ): Promise<string | null> {
+    // Transport errors propagate (callers map to REGISTRY_UPSTREAM). null = auth/token failure only.
+    const basicHeaders: Record<string, string> = {};
+    if (credentials) {
+        basicHeaders['Authorization'] = `Basic ${Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64')}`;
+    }
+
+    let tokenUrl: string;
+    if (registry === 'registry-1.docker.io') {
+        tokenUrl = `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`;
+    } else {
+        const ping = await httpGet(`https://${registry}/v2/`, basicHeaders);
+        const wwwAuth = ping.headers['www-authenticate'] as string | undefined;
+        if (!wwwAuth) return null;
+
+        const realmMatch = wwwAuth.match(/realm="([^"]+)"/);
+        const serviceMatch = wwwAuth.match(/service="([^"]+)"/);
+        if (!realmMatch) return null;
+
+        const params = new URLSearchParams();
+        if (serviceMatch) params.set('service', serviceMatch[1]);
+        // The /v2/ ping carries no repository context, so any scope it echoes is a
+        // placeholder (ghcr.io returns repository:user/image:pull). Always request
+        // the scope for the repository we actually want; reusing the echoed scope
+        // makes ghcr.io mint a token for the wrong repo and then reject the pull.
+        params.set('scope', `repository:${repo}:pull`);
+        tokenUrl = `${realmMatch[1]}?${params.toString()}`;
+    }
+
+    const tokenRes = await httpGet(tokenUrl, basicHeaders);
+    if (tokenRes.statusCode !== 200) return null;
+
     try {
-        const basicHeaders: Record<string, string> = {};
-        if (credentials) {
-            basicHeaders['Authorization'] = `Basic ${Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64')}`;
-        }
-
-        let tokenUrl: string;
-        if (registry === 'registry-1.docker.io') {
-            tokenUrl = `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`;
-        } else {
-            const ping = await httpGet(`https://${registry}/v2/`, basicHeaders);
-            const wwwAuth = ping.headers['www-authenticate'] as string | undefined;
-            if (!wwwAuth) return null;
-
-            const realmMatch = wwwAuth.match(/realm="([^"]+)"/);
-            const serviceMatch = wwwAuth.match(/service="([^"]+)"/);
-            if (!realmMatch) return null;
-
-            const params = new URLSearchParams();
-            if (serviceMatch) params.set('service', serviceMatch[1]);
-            // The /v2/ ping carries no repository context, so any scope it echoes is a
-            // placeholder (ghcr.io returns repository:user/image:pull). Always request
-            // the scope for the repository we actually want; reusing the echoed scope
-            // makes ghcr.io mint a token for the wrong repo and then reject the pull.
-            params.set('scope', `repository:${repo}:pull`);
-            tokenUrl = `${realmMatch[1]}?${params.toString()}`;
-        }
-
-        const tokenRes = await httpGet(tokenUrl, basicHeaders);
-        if (tokenRes.statusCode !== 200) return null;
-
-        const parsed = JSON.parse(tokenRes.body);
-        return parsed.token ?? parsed.access_token ?? null;
+        const parsed = JSON.parse(tokenRes.body) as { token?: unknown; access_token?: unknown };
+        const token = parsed.token ?? parsed.access_token;
+        return typeof token === 'string' ? token : null;
     } catch {
         return null;
     }
@@ -210,7 +212,21 @@ export async function getRemoteDigestResult(
 ): Promise<RemoteDigestResult> {
     const ref = `${registry}/${repo}:${tag}`;
     try {
-        const token = await getAuthToken(registry, repo, credentials);
+        // Auth transport failures used to collapse to null inside getAuthToken.
+        // Tag listing now needs those errors to propagate (REGISTRY_UPSTREAM), so
+        // digest lookup keeps anonymous fallback here when the token endpoint is down.
+        let token: string | null = null;
+        try {
+            token = await getAuthToken(registry, repo, credentials);
+        } catch (authErr) {
+            const cause = authErr instanceof Error
+                ? ((authErr as NodeJS.ErrnoException).code ?? authErr.message)
+                : String(authErr);
+            console.error(
+                `[registry-api] Auth for ${sanitizeForLog(ref)} failed; trying anonymous:`,
+                sanitizeForLog(cause),
+            );
+        }
         const headers: Record<string, string> = { Accept: MANIFEST_ACCEPT };
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const url = `https://${registry}/v2/${repo}/manifests/${tag}`;

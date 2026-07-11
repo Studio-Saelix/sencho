@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { toast } from '@/components/ui/toast-store';
@@ -87,6 +87,7 @@ export function RegistryTagsPanel({
 
   const [registries, setRegistries] = useState<RegistryRow[]>([]);
   const [loadingRegs, setLoadingRegs] = useState(false);
+  const [regsError, setRegsError] = useState<string | null>(null);
   const [selectedRepoIdx, setSelectedRepoIdx] = useState(0);
   const [selectedRegistryId, setSelectedRegistryId] = useState<number | null>(null);
   const [tags, setTags] = useState<string[]>([]);
@@ -105,6 +106,7 @@ export function RegistryTagsPanel({
     if (!isAdmin) return;
     let cancelled = false;
     setLoadingRegs(true);
+    setRegsError(null);
     apiFetch('/registries', { localOnly: true })
       .then(async (res) => {
         if (!res.ok) throw new Error('Failed to load registries');
@@ -115,7 +117,10 @@ export function RegistryTagsPanel({
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : 'Failed to load registries');
+        const msg = err instanceof Error ? err.message : 'Failed to load registries';
+        setRegsError(msg);
+        setRegistries([]);
+        toast.error(msg);
       })
       .finally(() => {
         if (!cancelled) setLoadingRegs(false);
@@ -180,6 +185,81 @@ export function RegistryTagsPanel({
     return <p className="text-xs text-muted-foreground">No repository tags to browse.</p>;
   }
 
+  let registryBody: ReactNode;
+  if (loadingRegs) {
+    registryBody = (
+      <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+        <Loader2 className="w-3 h-3 animate-spin" /> Loading registries…
+      </p>
+    );
+  } else if (regsError) {
+    registryBody = <p className="text-xs text-destructive">{regsError}</p>;
+  } else if (matchingRegistries.length === 0) {
+    registryBody = (
+      <p className="text-xs text-muted-foreground">
+        No configured registry matches {selected?.host}. Add credentials under Settings → Registries.
+      </p>
+    );
+  } else {
+    registryBody = (
+      <>
+        {matchingRegistries.length > 1 && (
+          <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+            Registry
+            <select
+              className="h-8 rounded-md border border-input bg-background px-2 text-foreground text-xs"
+              value={selectedRegistryId ?? ''}
+              onChange={(e) => setSelectedRegistryId(Number(e.target.value))}
+            >
+              {matchingRegistries.map((r) => (
+                <option key={r.id} value={r.id}>{r.name}</option>
+              ))}
+            </select>
+          </label>
+        )}
+
+        {error && <p className="text-xs text-destructive">{error}</p>}
+
+        {loadingTags && tags.length === 0 ? (
+          <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+            <Loader2 className="w-3 h-3 animate-spin" /> Loading tags…
+          </p>
+        ) : tags.length === 0 && !error ? (
+          <p className="text-xs text-muted-foreground">No tags returned.</p>
+        ) : (
+          <ul className="max-h-48 overflow-y-auto space-y-1 font-mono text-[11px]">
+            {tags.map((tag) => {
+              const isCurrent = selected?.tagName === tag;
+              return (
+                <li key={tag} className="flex items-center gap-2 truncate">
+                  <span className={isCurrent ? 'text-foreground font-medium' : 'text-stat-subtitle/90'}>
+                    {tag}
+                  </span>
+                  {isCurrent && (
+                    <Badge variant="outline" className="text-[9px] h-4">current</Badge>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        {nextCursor && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs"
+            disabled={loadingTags}
+            onClick={() => void loadTags(nextCursor, true)}
+          >
+            {loadingTags ? 'Loading…' : 'Load more'}
+          </Button>
+        )}
+      </>
+    );
+  }
+
   return (
     <div className="space-y-3 text-sm">
       {candidates.length > 1 && (
@@ -200,72 +280,7 @@ export function RegistryTagsPanel({
           ))}
         </div>
       )}
-
-      {loadingRegs ? (
-        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-          <Loader2 className="w-3 h-3 animate-spin" /> Loading registries…
-        </p>
-      ) : matchingRegistries.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
-          No configured registry matches {selected?.host}. Add credentials under Settings → Registries.
-        </p>
-      ) : (
-        <>
-          {matchingRegistries.length > 1 && (
-            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-              Registry
-              <select
-                className="h-8 rounded-md border border-input bg-background px-2 text-foreground text-xs"
-                value={selectedRegistryId ?? ''}
-                onChange={(e) => setSelectedRegistryId(Number(e.target.value))}
-              >
-                {matchingRegistries.map((r) => (
-                  <option key={r.id} value={r.id}>{r.name}</option>
-                ))}
-              </select>
-            </label>
-          )}
-
-          {error && <p className="text-xs text-destructive">{error}</p>}
-
-          {loadingTags && tags.length === 0 ? (
-            <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-              <Loader2 className="w-3 h-3 animate-spin" /> Loading tags…
-            </p>
-          ) : tags.length === 0 && !error ? (
-            <p className="text-xs text-muted-foreground">No tags returned.</p>
-          ) : (
-            <ul className="max-h-48 overflow-y-auto space-y-1 font-mono text-[11px]">
-              {tags.map((tag) => {
-                const isCurrent = selected?.tagName === tag;
-                return (
-                  <li key={tag} className="flex items-center gap-2 truncate">
-                    <span className={isCurrent ? 'text-foreground font-medium' : 'text-stat-subtitle/90'}>
-                      {tag}
-                    </span>
-                    {isCurrent && (
-                      <Badge variant="outline" className="text-[9px] h-4">current</Badge>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-
-          {nextCursor && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-7 text-xs"
-              disabled={loadingTags}
-              onClick={() => void loadTags(nextCursor, true)}
-            >
-              {loadingTags ? 'Loading…' : 'Load more'}
-            </Button>
-          )}
-        </>
-      )}
+      {registryBody}
     </div>
   );
 }

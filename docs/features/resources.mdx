@@ -83,13 +83,15 @@ Lists all Docker images on the host with their ID, repository tag, size, and sta
 
 #### Inspect image
 
-Click the eye icon on any image row to open a detail sheet with three sections:
+Click the eye icon on any image row to open a detail sheet with these sections:
 
-- **Overview** lists the ID, size, creation date, architecture and OS, author, all repository tags, and which Sencho stacks use the image.
+- **Used by** lists every Sencho stack that references the image (chips open that stack). Sourced from the Resources inventory, so it stays visible while inspect loads or if inspect fails.
+- **Overview** lists the ID, size, creation date, architecture and OS, author, and all repository tags.
 - **Config** shows the default `Cmd`, `Entrypoint`, `WorkingDir`, `User`, exposed ports, environment variables, and labels. Env vars and labels are collapsible.
 - **Layers** lists the layer history in build order. Each row shows the layer index, size, age, and the build command (`CreatedBy`). Empty layers (metadata-only, zero bytes) are dimmed.
+- **Registry tags** (admins) lists remote tags from a matching configured registry. See [Private registries](/features/private-registries) for credential and failure behavior.
 
-The inspect sheet is read-only and available to all roles.
+The inspect sheet is available to all roles. Registry tag browsing is admin-only.
 
 ### Volumes
 

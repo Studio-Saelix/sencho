@@ -97,6 +97,29 @@ describe('GET /api/registries/:id/tags', () => {
     expect(listRegistryTagsResult).not.toHaveBeenCalled();
   });
 
+  it('maps REGISTRY_UPSTREAM from the client to HTTP 502', async () => {
+    const id = RegistryService.getInstance().create({
+      name: 'Down',
+      url: 'https://registry.example.invalid/',
+      type: 'custom',
+      username: 'user',
+      secret: 'token',
+    });
+    vi.mocked(listRegistryTagsResult).mockResolvedValue({
+      ok: false,
+      code: 'REGISTRY_UPSTREAM',
+      message: 'Registry unreachable',
+    });
+
+    const res = await request(app)
+      .get(`/api/registries/${id}/tags`)
+      .query({ repository: 'org/app' })
+      .set('Authorization', authHeader);
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('REGISTRY_UPSTREAM');
+  });
+
   it('returns 404 for unknown registry id', async () => {
     const res = await request(app)
       .get('/api/registries/999999/tags')
