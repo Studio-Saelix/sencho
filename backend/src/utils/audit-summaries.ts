@@ -159,8 +159,19 @@ const SORTED_PATTERNS = Object.entries(AUDIT_ROUTE_SUMMARIES)
  * falls back to prefix matching. Returns a generic method+path string
  * if no pattern matches.
  */
-export function getAuditSummary(method: string, apiPath: string): string {
+export function getAuditSummary(method: string, apiPath: string, statusCode?: number): string {
   const normalized = apiPath.replace(/^\//, '');
+  // Do not claim a successful prune when the request was rejected or blocked.
+  if (typeof statusCode === 'number' && statusCode >= 400) {
+    if (method === 'POST' && normalized.startsWith('system/prune/system')) {
+      if (statusCode === 409) return 'Prune blocked: plan stale';
+      if (statusCode === 400) return 'Prune request rejected';
+      return `Prune failed (${statusCode})`;
+    }
+    if (method === 'POST' && normalized.startsWith('system/prune/plan')) {
+      return `Prune plan failed (${statusCode})`;
+    }
+  }
   const normalizedSegments = normalized.split('/');
 
   for (const [pattern, summary] of SORTED_PATTERNS) {

@@ -149,9 +149,9 @@ function PrunePlanPreview({
                 {plan.items.length} {plan.items.length === 1 ? 'item' : 'items'}
                 {plan.reclaimableBytes > 0 ? ` · ${formatBytes(plan.reclaimableBytes)}` : ''}
             </p>
-            <ul className="max-h-40 overflow-y-auto flex flex-col gap-1 font-mono text-[12px] text-stat-subtitle/90">
+            <ul className="max-h-40 overflow-y-auto space-y-1 font-mono text-[12px] text-stat-subtitle/90">
                 {shown.map((item) => (
-                    <li key={`${item.target}:${item.id}`} className="truncate">
+                    <li key={`${item.target}:${item.id}`} className="block truncate">
                         <span className="text-stat-subtitle/60">{item.target}</span>
                         {' · '}
                         {item.name}

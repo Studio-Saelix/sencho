@@ -68,6 +68,8 @@ beforeEach(() => {
   mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
   mockDocker.listNetworks.mockResolvedValue([]);
   mockDocker.listContainers.mockResolvedValue([]);
+  // Real Docker listVolumes returns UsageData: null; RefCount lives on df.
+  mockDocker.df.mockResolvedValue({ Volumes: [], Images: [], LayersSize: 0 });
 });
 
 describe('fingerprintPrunePlan', () => {
@@ -147,8 +149,13 @@ describe('DockerController.buildPrunePlan', () => {
       Volumes: [{
         Name: 'my-stack_data',
         Labels: { 'com.docker.compose.project': 'my-stack' },
-        UsageData: { RefCount: 0, Size: 50 },
+        UsageData: null,
       }],
+    });
+    mockDocker.df.mockResolvedValue({
+      Volumes: [{ Name: 'my-stack_data', UsageData: { RefCount: 0, Size: 50 } }],
+      Images: [],
+      LayersSize: 0,
     });
     const remove = vi.fn();
     mockDocker.getVolume.mockReturnValue({ remove });
@@ -158,6 +165,99 @@ describe('DockerController.buildPrunePlan', () => {
 
     expect(remove).not.toHaveBeenCalled();
     expect(mockDocker.getVolume).not.toHaveBeenCalled();
+  });
+
+  it('plans dangling volumes using df RefCount when listVolumes UsageData is null', async () => {
+    mockDocker.listVolumes.mockResolvedValue({
+      Volumes: [{
+        Name: 'my-stack_data',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+        UsageData: null,
+      }],
+    });
+    mockDocker.df.mockResolvedValue({
+      Volumes: [{ Name: 'my-stack_data', UsageData: { RefCount: 0, Size: 42 } }],
+      Images: [],
+      LayersSize: 0,
+    });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['volumes'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items).toEqual([
+      expect.objectContaining({
+        target: 'volumes',
+        id: 'my-stack_data',
+        sizeBytes: 42,
+      }),
+    ]);
+  });
+
+  it('excludes unattributed unused images from managed scope', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-external', RepoTags: ['saelix/sencho:pr-1610'], Size: 100, Containers: 0 },
+      {
+        Id: 'img-labeled',
+        RepoTags: ['my-stack-web:latest'],
+        Size: 50,
+        Containers: 0,
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items.map((i) => i.id)).toEqual(['img-labeled']);
+  });
+
+  it('does not mark an image free when only some referencing containers are planned', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      {
+        Id: 'c-exited',
+        Names: ['/exited'],
+        State: 'exited',
+        ImageID: 'img-shared',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+      {
+        Id: 'c-running',
+        Names: ['/running'],
+        State: 'running',
+        ImageID: 'img-shared',
+        Labels: { 'com.docker.compose.project': 'my-stack' },
+      },
+    ]);
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-shared', RepoTags: ['alpine:3.19'], Size: 7_000_000, Containers: 2 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['containers', 'images'], 'managed', ['my-stack'], 1);
+
+    expect(plan.items.some((i) => i.target === 'containers' && i.id === 'c-exited')).toBe(true);
+    expect(plan.items.some((i) => i.target === 'images' && i.id === 'img-shared')).toBe(false);
+  });
+
+  it('uses SharedSize when estimating reclaimable image bytes', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-a', RepoTags: ['a:1'], Size: 1_000_000_000, Containers: 0 },
+      { Id: 'img-b', RepoTags: ['b:1'], Size: 1_000_000_000, Containers: 0 },
+    ]);
+    mockDocker.df.mockResolvedValue({
+      Volumes: [],
+      Images: [
+        { Id: 'img-a', SharedSize: 900_000_000, Size: 1_000_000_000 },
+        { Id: 'img-b', SharedSize: 900_000_000, Size: 1_000_000_000 },
+      ],
+      LayersSize: 1_100_000_000,
+    });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
+
+    // Unique bytes per image = Size - SharedSize = 100MB each, not full 1GB each.
+    expect(plan.reclaimableBytes).toBe(200_000_000);
   });
 });
 
@@ -263,14 +363,22 @@ describe('DockerController.executePrunePlan', () => {
         {
           Name: 'planned-vol',
           Labels: { 'com.docker.compose.project': 'my-stack' },
-          UsageData: { RefCount: 0, Size: 10 },
+          UsageData: null,
         },
         {
           Name: 'other-vol',
           Labels: { 'com.docker.compose.project': 'my-stack' },
-          UsageData: { RefCount: 0, Size: 20 },
+          UsageData: null,
         },
       ],
+    });
+    mockDocker.df.mockResolvedValue({
+      Volumes: [
+        { Name: 'planned-vol', UsageData: { RefCount: 0, Size: 10 } },
+        { Name: 'other-vol', UsageData: { RefCount: 0, Size: 20 } },
+      ],
+      Images: [],
+      LayersSize: 0,
     });
 
     const removed: string[] = [];
@@ -303,8 +411,13 @@ describe('DockerController.executePrunePlan', () => {
       Volumes: [{
         Name: 'v1',
         Labels: { 'com.docker.compose.project': 'my-stack' },
-        UsageData: { RefCount: 0, Size: 5 },
+        UsageData: null,
       }],
+    });
+    mockDocker.df.mockResolvedValue({
+      Volumes: [{ Name: 'v1', UsageData: { RefCount: 0, Size: 5 } }],
+      Images: [],
+      LayersSize: 0,
     });
     const remove = vi.fn().mockResolvedValue(undefined);
     mockDocker.getVolume.mockReturnValue({ remove });

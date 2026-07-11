@@ -557,13 +557,37 @@ class DockerController {
    */
   private async safeDfSnapshot(): Promise<{
     LayersSize?: number;
-    Images?: Array<{ Id?: string; SharedSize?: number }>;
+    Images?: Array<{ Id?: string; Size?: number; VirtualSize?: number; SharedSize?: number; Containers?: number }>;
+    Volumes?: Array<{ Name?: string; UsageData?: { RefCount?: number; Size?: number } }>;
   } | null> {
     try {
       return await this.docker.df();
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Volume RefCount/Size come from `docker system df`, not `GET /volumes`.
+   * listVolumes returns UsageData: null on real daemons, so treating a missing
+   * RefCount as "in use" (?? 1) would make every volume look non-prunable.
+   */
+  private static mapVolumeUsageFromDf(
+    df: { Volumes?: Array<{ Name?: string; UsageData?: { RefCount?: number; Size?: number } }> } | null,
+  ): Map<string, { refCount: number; size: number }> {
+    const m = new Map<string, { refCount: number; size: number }>();
+    if (!df?.Volumes) return m;
+    for (const vol of df.Volumes) {
+      if (!vol?.Name) continue;
+      const refCount = vol.UsageData?.RefCount;
+      // Missing RefCount is unknown usage; omit so callers treat as non-prunable.
+      if (typeof refCount !== 'number') continue;
+      m.set(vol.Name, {
+        refCount,
+        size: typeof vol.UsageData?.Size === 'number' ? vol.UsageData.Size : 0,
+      });
+    }
+    return m;
   }
 
   /**
@@ -585,6 +609,18 @@ class DockerController {
     return m;
   }
 
+  /** Unique-ish reclaim estimate for one image: Size/VirtualSize minus SharedSize. */
+  private static imageUniqueBytes(
+    img: { Id: string; Size?: number; VirtualSize?: number },
+    sharedSizes: Map<string, number>,
+  ): number {
+    let virt = -1;
+    if (typeof img.VirtualSize === 'number' && img.VirtualSize >= 0) virt = img.VirtualSize;
+    else if (typeof img.Size === 'number' && img.Size >= 0) virt = img.Size;
+    if (virt < 0) return 0;
+    return Math.max(0, virt - (sharedSizes.get(img.Id) ?? 0));
+  }
+
   public async pruneManagedOnly(
     target: 'images' | 'volumes' | 'networks',
     knownStackNames: string[]
@@ -597,9 +633,12 @@ class DockerController {
     if (target === 'volumes') {
       const rawVolumeData = await this.docker.listVolumes();
       const rawVolumes: any[] = (this.validateApiData<any>(rawVolumeData)).Volumes || [];
+      const volumeUsage = DockerController.mapVolumeUsageFromDf(await this.safeDfSnapshot());
       const prunable = rawVolumes.filter((v: any) => {
+        const usage = volumeUsage.get(v.Name);
+        // Missing from df: unknown usage; do not prune.
+        if (!usage || usage.refCount !== 0) return false;
         return !!DockerController.resolveProjectLabel(v.Labels?.['com.docker.compose.project'], knownSet, projectToStack)
-          && (v.UsageData?.RefCount ?? 1) === 0
           && !selfIdentity.isOwnVolume(v.Name);
       });
       // Removals are independent and Docker handles concurrent volume
@@ -608,7 +647,7 @@ class DockerController {
       await Promise.all(prunable.map(async (vol) => {
         try {
           await this.docker.getVolume(vol.Name).remove({ force: true });
-          reclaimedBytes += vol.UsageData?.Size ?? 0;
+          reclaimedBytes += volumeUsage.get(vol.Name)?.size ?? 0;
         } catch (e) {
           console.error(`[pruneManagedOnly] Failed to remove volume ${vol.Name}:`, e);
         }
@@ -632,18 +671,24 @@ class DockerController {
       const resolvedBase = path.resolve(COMPOSE_DIR);
       const absDirToStack = DockerController.buildAbsDirMap(knownStackNames);
       const unmanagedImageIds = new Set<string>();
+      const managedImageIds = new Set<string>();
       for (const c of allContainers as any[]) {
         const stack = DockerController.resolveContainerStack(
           c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
         );
-        if (!stack) unmanagedImageIds.add(c.ImageID);
+        if (!c.ImageID) continue;
+        if (stack) managedImageIds.add(c.ImageID);
+        else unmanagedImageIds.add(c.ImageID);
       }
       const rawImages = await this.docker.listImages({ all: false });
-      const prunable = (rawImages as any[]).filter((img: any) =>
-        img.Containers === 0
-        && !unmanagedImageIds.has(img.Id)
-        && !selfIdentity.isOwnImage(img.Id)
-      );
+      const prunable = (rawImages as any[]).filter((img: any) => {
+        if (img.Containers !== 0 || selfIdentity.isOwnImage(img.Id)) return false;
+        if (unmanagedImageIds.has(img.Id)) return false;
+        const labeled = DockerController.resolveProjectLabel(
+          img.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
+        );
+        return !!labeled || managedImageIds.has(img.Id);
+      });
       // df-before / df-after delta is the only honest measurement of bytes
       // actually freed. Per-image (Size - SharedSize) undercounts layers
       // shared exclusively between prunable images (Docker frees the layer
@@ -705,12 +750,14 @@ class DockerController {
     if (target === 'volumes') {
       const rawVolumeData = await this.docker.listVolumes();
       const rawVolumes: any[] = (this.validateApiData<any>(rawVolumeData)).Volumes || [];
+      const volumeUsage = DockerController.mapVolumeUsageFromDf(await this.safeDfSnapshot());
       const prunable = rawVolumes.filter((v: any) => {
+        const usage = volumeUsage.get(v.Name);
+        if (!usage || usage.refCount !== 0) return false;
         return !!DockerController.resolveProjectLabel(v.Labels?.['com.docker.compose.project'], knownSet, projectToStack)
-          && (v.UsageData?.RefCount ?? 1) === 0
           && !selfIdentity.isOwnVolume(v.Name);
       });
-      for (const vol of prunable) reclaimableBytes += vol.UsageData?.Size ?? 0;
+      for (const vol of prunable) reclaimableBytes += volumeUsage.get(vol.Name)?.size ?? 0;
     } else if (target === 'networks') {
       // Networks have no on-disk size; the dry-run still reports 0 so the
       // shape matches the destructive path.
@@ -719,18 +766,25 @@ class DockerController {
       const resolvedBase = path.resolve(COMPOSE_DIR);
       const absDirToStack = DockerController.buildAbsDirMap(knownStackNames);
       const unmanagedImageIds = new Set<string>();
+      const managedImageIds = new Set<string>();
       for (const c of allContainers as any[]) {
         const stack = DockerController.resolveContainerStack(
           c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
         );
-        if (!stack) unmanagedImageIds.add(c.ImageID);
+        if (!c.ImageID) continue;
+        if (stack) managedImageIds.add(c.ImageID);
+        else unmanagedImageIds.add(c.ImageID);
       }
       const rawImages = await this.docker.listImages({ all: false });
-      const prunable = (rawImages as any[]).filter((img: any) =>
-        img.Containers === 0
-        && !unmanagedImageIds.has(img.Id)
-        && !selfIdentity.isOwnImage(img.Id),
-      );
+      const prunable = (rawImages as any[]).filter((img: any) => {
+        if (img.Containers !== 0 || selfIdentity.isOwnImage(img.Id)) return false;
+        if (unmanagedImageIds.has(img.Id)) return false;
+        // Unused images with no container attribution are not Sencho-managed.
+        const labeled = DockerController.resolveProjectLabel(
+          img.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
+        );
+        return !!labeled || managedImageIds.has(img.Id);
+      });
       const sharedSizes = DockerController.mapSharedSizesFromDf(await this.safeDfSnapshot());
       for (const img of prunable) {
         reclaimableBytes += Math.max(0, (img.Size ?? 0) - (sharedSizes.get(img.Id) ?? 0));
@@ -787,7 +841,6 @@ class DockerController {
     }>;
 
     const items: PrunePlanItem[] = [];
-    const plannedContainerImageIds = new Set<string>();
 
     const containerName = (c: { Id: string; Names?: string[] }) =>
       (c.Names?.[0] ?? c.Id).replace(/^\//, '');
@@ -809,20 +862,25 @@ class DockerController {
           name: containerName(c),
           sizeBytes: typeof c.SizeRw === 'number' && c.SizeRw > 0 ? c.SizeRw : undefined,
         });
-        if (c.ImageID) plannedContainerImageIds.add(c.ImageID);
       }
     }
+
+    // Volume usage (RefCount/Size) must come from docker.df(); listVolumes
+    // returns UsageData: null on real daemons.
+    const dfSnapshot = await this.safeDfSnapshot();
+    const volumeUsage = DockerController.mapVolumeUsageFromDf(dfSnapshot);
+    const sharedSizes = DockerController.mapSharedSizesFromDf(dfSnapshot);
 
     if (ordered.includes('volumes')) {
       const rawVolumeData = await this.docker.listVolumes();
       const rawVolumes = (this.validateApiData<{ Volumes?: Array<{
         Name: string;
         Labels?: Record<string, string>;
-        UsageData?: { RefCount?: number; Size?: number };
       }> }>(rawVolumeData)).Volumes || [];
       for (const vol of rawVolumes) {
         if (selfIdentity.isOwnVolume(vol.Name)) continue;
-        if ((vol.UsageData?.RefCount ?? 1) !== 0) continue;
+        const usage = volumeUsage.get(vol.Name);
+        if (!usage || usage.refCount !== 0) continue;
         if (scope === 'managed') {
           const stack = DockerController.resolveProjectLabel(
             vol.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
@@ -833,7 +891,7 @@ class DockerController {
           target: 'volumes',
           id: vol.Name,
           name: vol.Name,
-          sizeBytes: vol.UsageData?.Size ?? undefined,
+          sizeBytes: usage.size > 0 ? usage.size : undefined,
         });
       }
     }
@@ -881,37 +939,60 @@ class DockerController {
 
     if (ordered.includes('images')) {
       const unmanagedImageIds = new Set<string>();
+      const managedImageIds = new Set<string>();
+      const imageToContainerIds = new Map<string, string[]>();
       for (const c of allContainers) {
         if (!c.ImageID) continue;
+        const refs = imageToContainerIds.get(c.ImageID) ?? [];
+        refs.push(c.Id);
+        imageToContainerIds.set(c.ImageID, refs);
         const stack = DockerController.resolveContainerStack(
           c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase,
         );
-        if (!stack) unmanagedImageIds.add(c.ImageID);
+        if (stack) managedImageIds.add(c.ImageID);
+        else unmanagedImageIds.add(c.ImageID);
       }
+      const plannedContainerIds = new Set(
+        items.filter((i) => i.target === 'containers').map((i) => i.id),
+      );
       const rawImages = await this.docker.listImages({ all: false }) as Array<{
         Id: string;
         RepoTags?: string[] | null;
+        Labels?: Record<string, string>;
         Size?: number;
+        VirtualSize?: number;
         Containers?: number;
       }>;
-      // When this plan also removes containers, treat those ImageIDs as becoming free.
+      // An image becomes free only when every container that references it is
+      // also in this plan (not merely when any planned container uses it).
       const freeingImages = ordered.includes('containers');
       for (const img of rawImages) {
         if (selfIdentity.isOwnImage(img.Id)) continue;
         const containers = img.Containers ?? 0;
-        const becomesFree = freeingImages && plannedContainerImageIds.has(img.Id);
+        const refs = imageToContainerIds.get(img.Id) ?? [];
+        const becomesFree = freeingImages
+          && refs.length > 0
+          && refs.length >= containers
+          && refs.every((id) => plannedContainerIds.has(id));
         if (containers > 0 && !becomesFree) continue;
-        // Same ownership rule as pruneManagedOnly: never prune an image that is
-        // (or was) solely tied to unmanaged containers.
-        if (scope === 'managed' && unmanagedImageIds.has(img.Id)) continue;
+        if (scope === 'managed') {
+          if (unmanagedImageIds.has(img.Id)) continue;
+          const labeled = DockerController.resolveProjectLabel(
+            img.Labels?.['com.docker.compose.project'], knownSet, projectToStack,
+          );
+          // Unattributed unused images (no managed container, no compose label)
+          // are not Sencho-managed; keep them out of managed prune.
+          if (!becomesFree && !labeled && !managedImageIds.has(img.Id)) continue;
+        }
         const name = img.RepoTags?.[0] && img.RepoTags[0] !== '<none>:<none>'
           ? img.RepoTags[0]
           : img.Id.slice(0, 12);
+        const unique = DockerController.imageUniqueBytes(img, sharedSizes);
         items.push({
           target: 'images',
           id: img.Id,
           name,
-          sizeBytes: typeof img.Size === 'number' ? img.Size : undefined,
+          sizeBytes: unique > 0 ? unique : undefined,
         });
       }
     }
@@ -1151,13 +1232,13 @@ class DockerController {
     const rawVolumes = (this.validateApiData<{ Volumes?: Array<{
       Name: string;
       Labels?: Record<string, string>;
-      UsageData?: { RefCount?: number; Size?: number };
     }> }>(rawVolumeData)).Volumes || [];
     const vol = rawVolumes.find((v) => v.Name === item.id);
     if (!vol) {
       return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume no longer exists' };
     }
-    if ((vol.UsageData?.RefCount ?? 1) !== 0) {
+    const usage = DockerController.mapVolumeUsageFromDf(await this.safeDfSnapshot()).get(item.id);
+    if (!usage || usage.refCount !== 0) {
       return { id: item.id, target: 'volumes', status: 'skipped', reason: 'Volume is in use' };
     }
     if (scope === 'managed') {
@@ -1169,7 +1250,7 @@ class DockerController {
       }
     }
     await this.docker.getVolume(item.id).remove({ force: false });
-    return { id: item.id, target: 'volumes', status: 'removed', sizeBytes: item.sizeBytes ?? vol.UsageData?.Size };
+    return { id: item.id, target: 'volumes', status: 'removed', sizeBytes: item.sizeBytes ?? usage.size };
   }
 
   private async executePlannedNetwork(
@@ -1250,7 +1331,8 @@ class DockerController {
       }
     }
     await this.docker.getImage(item.id).remove({ force: false });
-    return { id: item.id, target: 'images', status: 'removed', sizeBytes: item.sizeBytes ?? img.Size };
+    // Prefer plan unique-bytes; do not fall back to full Size (shared layers).
+    return { id: item.id, target: 'images', status: 'removed', sizeBytes: item.sizeBytes ?? 0 };
   }
 
   public async getDiskUsageClassified(knownStackNames: string[]): Promise<{
