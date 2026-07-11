@@ -275,7 +275,7 @@ export default function HostConsole({ stackName, onClose }: HostConsoleProps) {
                 <div ref={terminalRef} style={{ width: '100%', height: '100%' }} />
 
                 <div className="pointer-events-none absolute bottom-4 right-6 z-10 flex items-center gap-2">
-                    <div className="pointer-events-auto flex items-center gap-1 rounded-md border border-glass-border bg-popover/95 p-1 shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]">
+                    <div className="pointer-events-auto flex items-center gap-1 rounded-md border border-glass-border bg-popover/95 p-1 shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]" data-sn-glass="panel">
                         <Button
                             variant="ghost"
                             size="sm"

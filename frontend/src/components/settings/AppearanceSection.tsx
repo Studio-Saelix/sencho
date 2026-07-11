@@ -20,6 +20,7 @@ import { UI_FONT_OPTIONS, MONO_FONT_OPTIONS } from '@/components/theme/typeOptio
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsSecondaryButton } from './SettingsActions';
+import { SettingsCallout } from './SettingsCallout';
 
 const DENSITY_OPTIONS: { value: Density; label: string }[] = [
     { value: 'comfortable', label: 'Comfortable' },
@@ -240,9 +241,17 @@ export function AppearanceSection() {
             </SettingsSection>
 
             <SettingsSection title="Motion & effects" kicker="this browser">
+                {!effectiveReduced ? (
+                    <SettingsCallout
+                        tone="warn"
+                        icon={<Info className="h-4 w-4" strokeWidth={1.5} />}
+                        title="Constrained rendering devices"
+                        subtitle="Full material effects can be costly on integrated graphics, browsers on single-board computers, and other constrained rendering devices. Enable Reduced effects or choose Calm for a simpler rendering path."
+                    />
+                ) : null}
                 <SettingsField
                     label="Reduced effects"
-                    helper="Flattens card bevels, the accent glow, and chart gradients for a calmer surface."
+                    helper="Flattens card bevels, the accent glow, and chart gradients, and turns off glass blur with solid chrome fills for a simpler rendering path on constrained devices."
                 >
                     <TogglePill
                         checked={effectiveReduced}

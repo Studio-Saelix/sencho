@@ -53,7 +53,7 @@ export function UpdateStatusBadge({ status, error, onRetry, onDismiss }: UpdateS
                                 <div className="h-2 w-2 rounded-full bg-destructive/60" />
                             </Cursor>
                             <CursorFollow side="bottom" sideOffset={8} align="end">
-                                <div className="bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] border border-card-border shadow-md rounded-lg px-3 py-2 max-w-xs">
+                                <div className="bg-popover/95 backdrop-blur-[10px] backdrop-saturate-[1.15] border border-card-border shadow-md rounded-lg px-3 py-2 max-w-xs" data-sn-glass="panel">
                                     <p className="font-mono tabular-nums text-xs text-stat-subtitle">{error}</p>
                                 </div>
                             </CursorFollow>

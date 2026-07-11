@@ -9,6 +9,22 @@ description: Solutions to the most common Sencho setup and runtime problems.
 
 If something has broken and you want a quick "what do I do now?" overview rather than a specific symptom, start with the [Recovery guide](/operations/recovery). It walks through getting back to a working state when Sencho, a deploy, sign-in, Docker, or a remote node fails, and links back here for the details.
 
+## High GPU usage with full material effects
+
+**Symptom:** With Sencho as the active browser tab, GPU use stays high on idle, and can climb further when an update or deploy dialog is open. Other sites in the same browser stay quieter. On some dual-GPU PCs the issue shows up only when the browser is forced onto integrated graphics.
+
+**Likely cause:** Full material effects (glass blur on the top bar, sidebar, and floating surfaces) cost more to composite on integrated graphics, single-board computers, and other constrained rendering devices. Discrete or high-performance GPUs often hide that cost. Fresh installs default to **Calm**, which already enables **Reduced effects**.
+
+**What to try:**
+
+1. Open **Settings → Appearance → Motion & effects**.
+2. Turn on **Reduced effects**, or choose the **Calm** visual style (or **Readability mode**). That turns off glass blur and uses solid chrome fills.
+3. On dual-GPU Windows PCs, you can also set the browser's GPU preference to let the OS decide, or prefer a discrete GPU, if your OS exposes that control.
+
+**How to help validate a fix on your hardware:** After changing Appearance, leave the Sencho tab in the foreground on a quiet page for about 15 seconds, note browser GPU process utilization for about 10 seconds, then open an update dialog and compare. Close and reopen the tab between trials. On Windows, use Task Manager's GPU column for Chrome's GPU process. On Linux single-board devices, use whatever documented GPU or responsiveness counters your board provides, and label CPU-only readings as secondary. Report idle and dialog results with Reduced effects on versus off.
+
+---
+
 ## Containers won't start after deploy
 
 **Symptom:** You click Deploy and containers immediately exit or never appear.

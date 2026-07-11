@@ -47,6 +47,7 @@ export function TopBar({
     const centered = !showLabels && navAlign === 'center';
     return (
         <div
+            data-sn-chrome="topbar"
             className={cn(
                 'relative flex h-14 items-center gap-3 px-4',
                 'border-b border-glass-border bg-sidebar backdrop-blur-md',

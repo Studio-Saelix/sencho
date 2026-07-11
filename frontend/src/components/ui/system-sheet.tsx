@@ -153,7 +153,7 @@ interface SheetHeaderBandProps {
 function SheetHeaderBand({ crumb, name, meta, onDismiss }: SheetHeaderBandProps) {
   const lastIdx = crumb.length - 1;
   return (
-    <div className="relative bg-popover/95 backdrop-blur-md border-b border-card-border/60 px-6 pt-5 pb-4 pr-14">
+    <div className="relative bg-popover/95 backdrop-blur-md border-b border-card-border/60 px-6 pt-5 pb-4 pr-14" data-sn-glass="panel">
       <span aria-hidden className="absolute inset-y-0 left-0 w-[2px] bg-brand" />
 
       <nav aria-label="Sheet location" className={cn(CRUMB_CLASS, 'flex items-center gap-1.5 leading-none')}>
@@ -221,7 +221,7 @@ interface ToolbarBandProps {
 
 function ToolbarBand({ primary, secondaries, destructive }: ToolbarBandProps) {
   return (
-    <div className="bg-popover/95 backdrop-blur-md flex items-center gap-2 border-b border-card-border/60 px-6 py-3">
+    <div className="bg-popover/95 backdrop-blur-md flex items-center gap-2 border-b border-card-border/60 px-6 py-3" data-sn-glass="panel">
       {primary && (
         <Button size="sm" onClick={primary.onClick} disabled={primary.disabled} className="gap-1.5">
           {primary.icon && <primary.icon className="h-3.5 w-3.5" strokeWidth={1.5} />}
@@ -266,7 +266,7 @@ interface TabsBandProps {
 
 function TabsBand({ tabs, activeTab, onTabChange }: TabsBandProps) {
   return (
-    <div role="tablist" className="bg-popover/95 backdrop-blur-md flex items-stretch gap-0 border-b border-card-border/60 px-4">
+    <div role="tablist" className="bg-popover/95 backdrop-blur-md flex items-stretch gap-0 border-b border-card-border/60 px-4" data-sn-glass="panel">
       {tabs.map((tab) => {
         const isActive = tab.id === activeTab;
         return (
@@ -305,7 +305,7 @@ function TabsBand({ tabs, activeTab, onTabChange }: TabsBandProps) {
 
 function FooterBand({ context }: { context: React.ReactNode }) {
   return (
-    <div className="bg-popover/95 backdrop-blur-md border-t border-card-border/60 px-6 py-3">
+    <div className="bg-popover/95 backdrop-blur-md border-t border-card-border/60 px-6 py-3" data-sn-glass="panel">
       <div className={cn(KICKER_CLASS, 'text-stat-subtitle leading-none')}>{context}</div>
     </div>
   );

@@ -559,7 +559,7 @@ export function GlobalObservabilityView({ headerActions }: GlobalObservabilityVi
                         </button>
                     )}
                     {fabOpen ? (
-                        <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-glass-border bg-popover/95 p-1 shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]">
+                        <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-glass-border bg-popover/95 p-1 shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]" data-sn-glass="panel">
                             <Button variant="ghost" size="icon" className="h-10 w-10" onClick={() => { setIsPaused(p => !p); setFabOpen(false); }} aria-label={isPaused ? 'Resume stream' : 'Pause stream'}>
                                 {isPaused ? <Play className="h-4 w-4" strokeWidth={1.5} /> : <Pause className="h-4 w-4" strokeWidth={1.5} />}
                             </Button>
@@ -579,6 +579,7 @@ export function GlobalObservabilityView({ headerActions }: GlobalObservabilityVi
                             onClick={() => setFabOpen(true)}
                             aria-label="Log actions"
                             className="pointer-events-auto flex h-12 w-12 items-center justify-center rounded-full border border-glass-border bg-popover/95 text-stat-value shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]"
+                            data-sn-glass="panel"
                         >
                             {isPaused ? <Play className="h-5 w-5" strokeWidth={1.5} /> : <SlidersHorizontal className="h-5 w-5" strokeWidth={1.5} />}
                         </button>
@@ -595,7 +596,7 @@ export function GlobalObservabilityView({ headerActions }: GlobalObservabilityVi
                         {pendingCount} new · resume
                     </button>
                 )}
-                <div className="pointer-events-auto flex items-center gap-1 rounded-md border border-glass-border bg-popover/95 p-1 shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]">
+                <div className="pointer-events-auto flex items-center gap-1 rounded-md border border-glass-border bg-popover/95 p-1 shadow-md backdrop-blur-[10px] backdrop-saturate-[1.15]" data-sn-glass="panel">
                     <Button
                         variant="ghost"
                         size="sm"

@@ -26,6 +26,7 @@ const DialogContent = React.forwardRef<
     <AnimateDialogOverlay className="fixed inset-0 z-50 bg-[var(--scrim)] backdrop-blur-sm" />
     <AnimateDialogContent
       ref={ref}
+      data-sn-chrome="dialog"
       className={cn(
         'fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border border-glass-border bg-popover p-6 shadow-lg backdrop-blur-[10px] backdrop-saturate-[1.15] sm:rounded-lg',
         panelGlow && 'panel-glow',

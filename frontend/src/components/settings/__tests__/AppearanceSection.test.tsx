@@ -35,6 +35,20 @@ describe('AppearanceSection', () => {
         expect(document.documentElement.dataset.chartStyle).toBe('muted');
     });
 
+    it('shows the constrained-device callout when effects are full, and hides it when reduced', () => {
+        render(<AppearanceSection />);
+        expect(screen.getByText('Constrained rendering devices')).toBeTruthy();
+
+        fireEvent.click(screen.getByRole('switch', { name: 'Reduced effects' }));
+        expect(screen.queryByText('Constrained rendering devices', { exact: true })).toBeNull();
+
+        fireEvent.click(screen.getByRole('switch', { name: 'Reduced effects' }));
+        expect(screen.getByText('Constrained rendering devices')).toBeTruthy();
+
+        fireEvent.click(screen.getByRole('switch', { name: 'Readability mode' }));
+        expect(screen.queryByText('Constrained rendering devices', { exact: true })).toBeNull();
+    });
+
     it('readability locks the header + chart controls and disables the glow slider', () => {
         const { container } = render(<AppearanceSection />);
         // Baseline: nothing reduced, so no slider is disabled.
