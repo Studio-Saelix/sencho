@@ -285,4 +285,3 @@ export function RegistryTagsPanel({
   );
 }
 
-export const __test = { parseRepoFromTag, registryMatchesHost };
