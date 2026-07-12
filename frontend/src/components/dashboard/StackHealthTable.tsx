@@ -22,8 +22,8 @@ const PAGE_SIZE = 8;
 // Shared by the header and data rows so their columns stay aligned. The
 // `max-md:min-w` keeps both at the same width below md, where the card scrolls
 // horizontally; desktop is unaffected by the `max-md:` prefix. Columns:
-// dot · STACK · SOURCE · PORT · UP · CPU · MEM · CPU·10m · chevron.
-const GRID_TEMPLATE = 'grid-cols-[14px_minmax(0,1fr)_64px_56px_52px_52px_72px_110px_16px] max-md:min-w-[640px]';
+// STACK · SOURCE · PORT · UP · CPU · MEM · CPU·10m · chevron.
+const GRID_TEMPLATE = 'grid-cols-[minmax(0,1fr)_64px_56px_52px_52px_72px_110px_16px] max-md:min-w-[620px]';
 
 const formatMemory = (mb: number): string => {
   if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
@@ -68,12 +68,6 @@ function formatUptime(seconds: number): string {
   if (minutes > 0) return `${minutes}m`;
   return `${Math.max(1, Math.floor(seconds))}s`;
 }
-
-const stateDot: Record<RowState, string> = {
-  healthy: 'bg-success',
-  warn: 'bg-warning',
-  error: 'bg-destructive',
-};
 
 const rowTint: Record<RowState, string> = {
   healthy: '',
@@ -224,7 +218,6 @@ export function StackHealthTable({
         ) : null}
       </div>
       <div className={`grid ${GRID_TEMPLATE} items-center gap-4 border-t border-border/60 px-[var(--density-row-x)] py-[var(--density-cell-y)] font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle`}>
-        <span />
         <SortHeader label="STACK" k="stack" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
         <span>SOURCE</span>
         <span>PORT</span>
@@ -249,11 +242,10 @@ export function StackHealthTable({
             }}
             className={`grid ${GRID_TEMPLATE} cursor-pointer items-center gap-4 px-[var(--density-row-x)] py-[var(--density-row-y)] transition-colors hover:bg-accent/5 ${rowTint[row.state]}`}
           >
-            <span className={`h-1.5 w-1.5 rounded-full justify-self-center ${stateDot[row.state]}`} aria-hidden="true" />
-            <span className="flex items-center gap-2 min-w-0">
-              <span className="flex-1 min-w-0 truncate font-mono text-sm text-stat-value">{row.name}</span>
+            <span className="flex items-center gap-1.5 min-w-0">
+              <span className="min-w-0 truncate font-mono text-sm text-stat-value">{row.name}</span>
               {row.hasUpdate && (
-                <span className="shrink-0 rounded-full bg-update/15 px-2 py-0.5 font-mono text-[10px] leading-none text-update tracking-wide">
+                <span className="shrink-0 rounded-full bg-brand/15 px-2 py-0.5 font-mono text-[10px] leading-none text-brand tracking-wide">
                   Update available
                 </span>
               )}

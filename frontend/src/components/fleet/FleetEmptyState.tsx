@@ -15,7 +15,7 @@ interface FleetTabHeadingProps {
  */
 export function FleetTabHeading({ title, subtitle, action }: FleetTabHeadingProps) {
     return (
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
                 <h2 className="font-heading text-[1.5rem] leading-tight text-stat-value">{title}</h2>
                 <p className="text-sm text-stat-subtitle">{subtitle}</p>

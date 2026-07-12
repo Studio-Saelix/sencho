@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Boxes, AlertTriangle, Search, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, ShieldCheck, Loader2 } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
@@ -90,6 +90,10 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
   const [sortKey, setSortKey] = useState<SortKey>('scanned_at');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [page, setPage] = useState(0);
+  const [searchExpanded, setSearchExpanded] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { if (searchExpanded) searchInputRef.current?.focus(); }, [searchExpanded]);
 
   // Apply an externally-driven filter (e.g. an overview "fixable" deep link).
   // Keyed on the incoming value so re-navigating to the same filter re-applies.
@@ -166,15 +170,30 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
     <div className="space-y-4">
       {isMobile ? (
         <>
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-            <Input
-              placeholder="Filter images…"
-              value={search}
-              onChange={(e) => { setSearch(e.target.value); setPage(0); }}
-              className="pl-8"
-            />
-          </div>
+          {search !== '' || searchExpanded ? (
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
+              <Input
+                ref={searchInputRef}
+                placeholder="Filter images…"
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+                onBlur={() => { if (search === '') setSearchExpanded(false); }}
+                className="pl-8"
+              />
+            </div>
+          ) : (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="outline" size="sm" className="h-9 w-9 p-0 shrink-0" onClick={() => setSearchExpanded(true)} aria-label="Search images">
+                    <Search className="w-4 h-4" strokeWidth={1.5} />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Search images</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
           <ImageFilterChips
             chips={MOBILE_FILTER_CHIPS}
             active={severity}
@@ -196,25 +215,40 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
       ) : (
         <>
       <div className="flex items-center gap-2 flex-wrap">
-        <div className="relative flex-1 min-w-[200px] max-w-sm">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-          <Input
-            placeholder="Search images..."
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(0); }}
-            className="pl-8"
-          />
-        </div>
+        {search !== '' || searchExpanded ? (
+          <div className="relative flex-1 min-w-[200px] max-w-sm">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
+            <Input
+              ref={searchInputRef}
+              placeholder="Search images..."
+              value={search}
+              onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+              onBlur={() => { if (search === '') setSearchExpanded(false); }}
+              className="pl-8"
+            />
+          </div>
+        ) : (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" size="sm" className="h-9 w-9 p-0 shrink-0" onClick={() => setSearchExpanded(true)} aria-label="Search images">
+                  <Search className="w-4 h-4" strokeWidth={1.5} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Search images</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
         <Combobox
           options={FILTER_OPTIONS}
           value={severity}
           onValueChange={(v) => { setSeverity((v || 'all') as ImageFilterValue); setPage(0); }}
-          className="w-[200px]"
+          className="w-[200px] [&>button]:!bg-background"
         />
       </div>
 
       <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-        <ScrollArea className="max-h-[62vh] bg-background">
+        <ScrollArea className="max-h-[62vh]">
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
