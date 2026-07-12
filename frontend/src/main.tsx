@@ -1,3 +1,6 @@
+// Side-effect import first so the timing store records boot_start at the
+// earliest possible point, before React mounts.
+import '@/lib/hydrationTiming'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'

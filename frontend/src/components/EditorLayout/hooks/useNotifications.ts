@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiFetch, fetchForNode } from '@/lib/api';
+import { beginSpan, endSpan, markMilestone } from '@/lib/hydrationTiming';
 import { toast } from '@/components/ui/toast-store';
 import type { Node } from '@/context/NodeContext';
 import type { NotificationItem } from '../../dashboard/types';
@@ -23,6 +24,10 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
   onStateInvalidateRef.current = onStateInvalidate;
   const onImageUpdatesChangeRef = useRef(onImageUpdatesChange);
   onImageUpdatesChangeRef.current = onImageUpdatesChange;
+  // One-shot: the notifications_ready milestone reflects the first local settle.
+  // Its spans instrument only that first fetch so later polls do not pollute the
+  // report.
+  const notificationsReadyRef = useRef(false);
 
   const fetchNotifications = async () => {
     try {
@@ -31,18 +36,39 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
       // Skip offline nodes: polling a removed/unreachable node only yields 502s.
       const remoteNodes = currentNodes.filter(n => n.type === 'remote' && n.status !== 'offline');
 
-      const [localResult, ...remoteNodeResults] = await Promise.allSettled([
-        apiFetch('/notifications', { localOnly: true } as Parameters<typeof apiFetch>[1]),
-        ...remoteNodes.map(n => fetchForNode('/notifications', n.id)),
-      ]);
+      // Launch every request concurrently, but settle the local one first so the
+      // notifications_ready milestone is not held back by the slowest remote.
+      const localPromise = apiFetch('/notifications', { localOnly: true } as Parameters<typeof apiFetch>[1]);
+      const remotePromises = remoteNodes.map(n => fetchForNode('/notifications', n.id));
 
       const all: NotificationItem[] = [];
 
-      if (localResult.status === 'fulfilled' && localResult.value.ok) {
-        const data = await localResult.value.json() as Omit<NotificationItem, 'nodeId' | 'nodeName'>[];
-        data.forEach(n => all.push({ ...n, nodeId: localNode?.id ?? -1, nodeName: localNode?.name ?? 'Local' }));
+      const instrument = !notificationsReadyRef.current;
+      const headersSpan = instrument ? beginSpan('fetch_headers', { background: true }) : null;
+      let bodySpan: ReturnType<typeof beginSpan> | null = null;
+      try {
+        const localRes = await localPromise;
+        if (headersSpan !== null) endSpan(headersSpan, { detail: { status: localRes.status } });
+        if (localRes.ok) {
+          bodySpan = instrument ? beginSpan('body_decode', { background: true }) : null;
+          const data = await localRes.json() as Omit<NotificationItem, 'nodeId' | 'nodeName'>[];
+          if (bodySpan !== null) endSpan(bodySpan);
+          bodySpan = null;
+          data.forEach(n => all.push({ ...n, nodeId: localNode?.id ?? -1, nodeName: localNode?.name ?? 'Local' }));
+        }
+      } catch (e) {
+        if (headersSpan !== null) endSpan(headersSpan, { outcome: 'error' });
+        if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
+        console.error('[Notifications] local fetch error:', e);
+      } finally {
+        if (!notificationsReadyRef.current) {
+          notificationsReadyRef.current = true;
+          markMilestone('notifications_ready');
+        }
       }
 
+      // Remotes settle in the background; they never gate the milestone above.
+      const remoteNodeResults = await Promise.allSettled(remotePromises);
       for (let i = 0; i < remoteNodes.length; i++) {
         const result = remoteNodeResults[i];
         if (result?.status === 'fulfilled' && result.value.ok) {

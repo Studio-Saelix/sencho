@@ -1,5 +1,15 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
+import {
+  newAttemptId,
+  abortAttempt,
+  beginSpan,
+  endSpan,
+  flushPendingCommit,
+  markMilestone,
+  type SpanHandle,
+  type PendingCommit,
+} from '@/lib/hydrationTiming';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { useImageUpdates } from '@/hooks/useImageUpdates';
@@ -84,6 +94,13 @@ export function useStackListState() {
   // Monotonic token per refreshStacks call; lets a superseded fetch skip its
   // state writes so a rapid node switch cannot leave a stale files/filesNodeId.
   const fetchSeqRef = useRef(0);
+
+  // Hydration-timing: the current foreground list attempt and the commits it is
+  // waiting for React to observe. Only foreground loads arm these; background
+  // refreshes still record diagnostic spans but do not re-commit the milestones.
+  const listAttemptRef = useRef<string | null>(null);
+  const listVisiblePendingRef = useRef<PendingCommit | null>(null);
+  const listHydratedPendingRef = useRef<PendingCommit | null>(null);
 
   // Per-stack terminal failure records driving the in-detail recovery panel.
   // In-memory only. Node scoping is enforced by the caller, which clears these
@@ -196,6 +213,20 @@ export function useStackListState() {
     const mySeq = ++fetchSeqRef.current;
     const stale = () => fetchSeqRef.current !== mySeq;
 
+    // Supersede any in-flight list attempt so a late commit from an interrupted
+    // load cannot record list_visible / list_hydrated for a stale fetch.
+    if (listAttemptRef.current) abortAttempt(listAttemptRef.current);
+    listVisiblePendingRef.current = null;
+    listHydratedPendingRef.current = null;
+
+    const attemptId = newAttemptId();
+    listAttemptRef.current = attemptId;
+    // True once the list itself is committed, so the shared catch below can tell
+    // a list-fetch failure (nothing visible) from a status-path failure (list is
+    // visible, hydration errored).
+    let listSucceeded = false;
+    let proxied = false;
+
     if (!background) setIsLoading(true);
     setStacksLoadNodeId(fetchNodeId);
     if (!background || !hadSuccessfulListRef.current) {
@@ -203,9 +234,13 @@ export function useStackListState() {
       setStacksLoadError(null);
     }
 
+    const headersSpan = beginSpan('fetch_headers', { attemptId, background });
+    let bodySpan: SpanHandle | null = null;
     try {
       const res = await apiFetch('/stacks');
-      if (stale()) return [];
+      proxied = res.headers.get('x-sencho-proxy') === '1';
+      endSpan(headersSpan, { proxied, detail: { status: res.status } });
+      if (stale()) { abortAttempt(attemptId); return []; }
       if (!res.ok) {
         const message = `Could not load stacks (${res.status})`;
         if (background && hadSuccessfulListRef.current) {
@@ -218,20 +253,30 @@ export function useStackListState() {
         setStacksLoadError(message);
         return [];
       }
+      bodySpan = beginSpan('body_decode', { attemptId, background, proxied });
       const data = await res.json();
+      endSpan(bodySpan);
+      bodySpan = null;
       const fileList: string[] = Array.isArray(data) ? data : [];
       setFiles(fileList);
       setFilesNodeId(fetchNodeId);
       hadSuccessfulListRef.current = true;
       setStacksLoadStatus('success');
       setStacksLoadError(null);
+      listSucceeded = true;
+      // Token folds node + count so an empty->empty commit still fires once per
+      // attempt even when the committed `files` is referentially equal.
+      const listToken = `${fetchNodeId}:${fileList.length}`;
+      if (!background) {
+        listVisiblePendingRef.current = { attemptId, token: listToken, proxied };
+      }
 
       // Fetch all stack statuses in a single bulk call. Only the current object
       // format can express `partial`; a node lacking the endpoint or returning
       // the legacy plain-string format is re-derived from per-stack containers
       // so a crashed container is not hidden behind a healthy sibling.
       const statusRes = await apiFetch('/stacks/statuses');
-      if (stale()) return fileList;
+      if (stale()) { abortAttempt(attemptId); return fileList; }
       let bulkStatuses: Record<string, StackRowStatus> = {};
       const bulkPorts: Record<string, number | undefined> = {};
       const bulkSelf: Record<string, boolean> = {};
@@ -266,11 +311,22 @@ export function useStackListState() {
       setStackSelfFlags(bulkSelf);
       setStackCounts(bulkCounts);
       refreshLabels();
+      if (!background) {
+        listHydratedPendingRef.current = { attemptId, token: listToken, proxied };
+      }
       return fileList;
     } catch (error) {
-      if (stale()) return [];
+      // endSpan is a no-op when the span was already closed (or never opened).
+      endSpan(headersSpan, { outcome: 'error' });
+      if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
+      if (stale()) { abortAttempt(attemptId); return []; }
       console.error('Failed to refresh stacks:', error);
       const message = error instanceof Error ? error.message : 'Failed to load stacks';
+      // The list committed but hydrating its statuses threw: record the list
+      // path as hydrated-with-error rather than leaving it hanging.
+      if (listSucceeded && !background) {
+        markMilestone('list_hydrated', { attemptId, outcome: 'error', proxied });
+      }
       if (background && hadSuccessfulListRef.current) {
         setStacksLoadError(message);
         return files;
@@ -289,6 +345,20 @@ export function useStackListState() {
   // never close over a stale refreshStacks.
   const refreshStacksRef = useRef(refreshStacks);
   useEffect(() => { refreshStacksRef.current = refreshStacks; });
+
+  // Commit-aligned list milestones: fire once React has actually committed the
+  // file list (list_visible) and the statuses (list_hydrated) for the owning
+  // attempt. commitMilestone no-ops for a superseded/aborted attempt, so a stale
+  // load can never complete a session it no longer owns. Empty lists still fire
+  // via the completion token.
+  useEffect(() => {
+    if (stacksLoadStatus !== 'success') return;
+    flushPendingCommit(listVisiblePendingRef, 'list_visible');
+  }, [files, filesNodeId, stacksLoadStatus]);
+
+  useEffect(() => {
+    flushPendingCommit(listHydratedPendingRef, 'list_hydrated');
+  }, [stackStatuses, filesNodeId]);
 
   const handleScanStacks = async () => {
     if (isScanning) return;

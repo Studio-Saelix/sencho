@@ -1,5 +1,11 @@
-import { useRef, useCallback, useEffect } from 'react';
+import { useRef, useCallback, useEffect, useState } from 'react';
 import { apiFetch, withDeploySession } from '@/lib/api';
+import {
+  newAttemptId,
+  abortAttempt,
+  flushPendingCommit,
+  type PendingCommit,
+} from '@/lib/hydrationTiming';
 import { toast } from '@/components/ui/toast-store';
 import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
 import type { useEditorViewState } from './useEditorViewState';
@@ -268,6 +274,17 @@ export function useStackActions(options: UseStackActionsOptions) {
   // late responses never overwrite freshly-loaded state.
   const loadFileAbortRef = useRef<AbortController | null>(null);
 
+  // Hydration-timing: the current detail (loadFileCore) attempt, the file it is
+  // loading, and the commits waiting for React to observe committed state.
+  const detailAttemptRef = useRef<string | null>(null);
+  const detailFileRef = useRef<string | null>(null);
+  const detailVisiblePendingRef = useRef<PendingCommit | null>(null);
+  const detailContainersPendingRef = useRef<PendingCommit | null>(null);
+  const detailHydratedPendingRef = useRef<PendingCommit | null>(null);
+  // Bumped when arming detail_visible so same-file reloads (selectedFile and
+  // activeView unchanged) still re-run the commit effect.
+  const [detailVisibleEpoch, setDetailVisibleEpoch] = useState(0);
+
   useEffect(() => {
     return () => {
       if (checkUpdatesIntervalRef.current !== null) {
@@ -276,6 +293,28 @@ export function useStackActions(options: UseStackActionsOptions) {
       loadFileAbortRef.current?.abort();
     };
   }, []);
+
+  // Commit-aligned detail milestones. Each fires once React has committed the
+  // observed state for the owning attempt; commitMilestone no-ops for a
+  // superseded (node switch) or aborted (re-load) attempt so an interrupted
+  // load never records a success milestone.
+  useEffect(() => {
+    if (stackListState.selectedFile !== detailFileRef.current) return;
+    if (navState.activeView !== 'editor') return;
+    flushPendingCommit(detailVisiblePendingRef, 'detail_visible');
+  }, [stackListState.selectedFile, navState.activeView, detailVisibleEpoch]);
+
+  useEffect(() => {
+    if (stackListState.selectedFile !== detailFileRef.current) return;
+    flushPendingCommit(detailContainersPendingRef, 'detail_containers_ready');
+  }, [editorState.containers, stackListState.selectedFile]);
+
+  useEffect(() => {
+    // Wait for the load to settle so this reflects the fully hydrated detail.
+    if (editorState.isFileLoading) return;
+    if (stackListState.selectedFile !== detailFileRef.current) return;
+    flushPendingCommit(detailHydratedPendingRef, 'detail_hydrated');
+  }, [editorState.isFileLoading, stackListState.selectedFile, editorState.containers]);
 
   const isAbortError = (err: unknown): boolean =>
     err instanceof Error && err.name === 'AbortError';
@@ -476,16 +515,19 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const loadContainerState = async (filename: string, signal?: AbortSignal) => {
+  const loadContainerState = async (filename: string, signal?: AbortSignal): Promise<number> => {
     try {
       const containersRes = await apiFetch(`/stacks/${filename}/containers`, { signal });
-      if (signal?.aborted) return;
+      if (signal?.aborted) return 0;
       const conts = await containersRes.json();
-      editorState.setContainers(Array.isArray(conts) ? conts : []);
+      const list = Array.isArray(conts) ? conts : [];
+      editorState.setContainers(list);
+      return list.length;
     } catch (error) {
-      if (isAbortError(error)) return;
+      if (isAbortError(error)) return 0;
       console.error('Failed to load containers:', error);
       editorState.setContainers([]);
+      return 0;
     }
   };
 
@@ -520,9 +562,18 @@ export function useStackActions(options: UseStackActionsOptions) {
       return { ok: false };
     }
     loadFileAbortRef.current?.abort();
+    // Supersede the previous detail attempt so a late commit from an interrupted
+    // load can never record a success milestone.
+    if (detailAttemptRef.current) abortAttempt(detailAttemptRef.current);
+    detailVisiblePendingRef.current = null;
+    detailContainersPendingRef.current = null;
+    detailHydratedPendingRef.current = null;
     const controller = new AbortController();
     loadFileAbortRef.current = controller;
     const { signal } = controller;
+    const attemptId = newAttemptId();
+    detailAttemptRef.current = attemptId;
+    detailFileRef.current = filename;
 
     editorState.setIsFileLoading(true);
     editorState.setIsEditing(false);
@@ -530,19 +581,29 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setActiveTab('compose');
     try {
       const res = await apiFetch(`/stacks/${filename}`, { signal });
-      if (signal.aborted) return { ok: false };
+      if (signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       const text = await res.text();
-      if (signal.aborted) return { ok: false };
+      if (signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       if (!res.ok) {
         throw new Error(`Failed to load stack: ${res.status}`);
       }
+      const proxied = res.headers.get('x-sencho-proxy') === '1';
       stackListState.setSelectedFile(filename);
       navState.setActiveView('editor');
       editorState.setContent(text || '');
       editorState.setOriginalContent(text || '');
       editorState.setComposeEtag(res.headers.get('etag'));
+      detailVisiblePendingRef.current = { attemptId, token: filename, proxied };
+      setDetailVisibleEpoch((n) => n + 1);
       const envFiles = await loadEnvState(filename, signal);
-      await loadContainerState(filename, signal);
+      const containerCount = await loadContainerState(filename, signal);
+      if (!signal.aborted) {
+        detailContainersPendingRef.current = {
+          attemptId,
+          token: `${filename}:${containerCount}`,
+          proxied,
+        };
+      }
       await loadBackupState(filename, signal);
       // Post-load auto-edit evaluates permission for the loaded target, not
       // the previously selected stack (selectedFile was just updated above).
@@ -551,9 +612,12 @@ export function useStackActions(options: UseStackActionsOptions) {
         editorState.setActiveTab('compose');
         editorState.setIsEditing(true);
       }
+      if (!signal.aborted) {
+        detailHydratedPendingRef.current = { attemptId, token: filename, proxied };
+      }
       return { ok: true, envFiles };
     } catch (error) {
-      if (isAbortError(error) || signal.aborted) return { ok: false };
+      if (isAbortError(error) || signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       console.error('Failed to load file:', error);
       toast.error(`Could not open "${filename.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);
       stackListState.setSelectedFile(null);

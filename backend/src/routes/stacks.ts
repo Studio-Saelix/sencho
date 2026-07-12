@@ -16,7 +16,7 @@ import { ComposeService, getComposeRollbackInfo } from '../services/ComposeServi
 import DockerController, { type BulkStackInfo } from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { MeshService } from '../services/MeshService';
-import { CacheService } from '../services/CacheService';
+import { CacheService, type CacheFetchOutcome } from '../services/CacheService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
@@ -47,6 +47,7 @@ import { normalizeBulkPaths, destWithinAnySource } from '../utils/bulkPaths';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
+import { logDebugTiming } from '../utils/requestTiming';
 import { sendGitSourceError } from '../utils/gitSourceHttp';
 import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describePolicyBlock } from '../helpers/policyGate';
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
@@ -234,25 +235,45 @@ stacksRouter.param('stackName', (req, res, next, stackName) => {
 
 stacksRouter.get('/', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:read')) return;
+  const startedAt = Date.now();
+  let outcome: 'ok' | 'error' = 'ok';
+  let count = 0;
   try {
     const stacks = await FileSystemService.getInstance(req.nodeId).getStacks();
+    count = stacks.length;
     res.json(stacks);
   } catch (error) {
+    outcome = 'error';
     res.status(500).json({ error: 'Failed to fetch stacks' });
+  } finally {
+    logDebugTiming('[Stacks:debug]', {
+      route: 'GET /',
+      nodeId: req.nodeId,
+      count,
+      elapsedMs: Date.now() - startedAt,
+      outcome,
+    });
   }
 });
 
 stacksRouter.get('/statuses', async (req: Request, res: Response) => {
   if (!requirePermission(req, res, 'stack:read')) return;
+  const startedAt = Date.now();
+  let outcome: 'ok' | 'error' = 'ok';
+  let cacheOutcome: CacheFetchOutcome | null = null;
+  let dockerMs: number | null = null;
+  let count = 0;
   try {
-    const result = await CacheService.getInstance().getOrFetch(
+    const { value: result, outcome: fetchOutcome } = await CacheService.getInstance().getOrFetchWithMeta(
       `stack-statuses:${req.nodeId}`,
       STACK_STATUSES_CACHE_TTL_MS,
       async () => {
         const stacks = await FileSystemService.getInstance(req.nodeId).getStacks();
         const stackNames = stacks.map((s: string) => s.replace(/\.(yml|yaml)$/, ''));
         const dockerController = DockerController.getInstance(req.nodeId);
+        const dockerStartedAt = Date.now();
         const bulkInfo = await dockerController.getBulkStackStatuses(stackNames);
+        dockerMs = Date.now() - dockerStartedAt;
         const data: Record<string, BulkStackInfo> = {};
         for (const stack of stacks) {
           const name = stack.replace(/\.(yml|yaml)$/, '');
@@ -261,6 +282,8 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
         return data;
       },
     );
+    cacheOutcome = fetchOutcome;
+    count = Object.keys(result).length;
     // Git-source labels are computed live, outside the cache, so linking or
     // unlinking a stack's Git source is reflected immediately. The Docker
     // status portion keeps its short TTL; only the cheap source label is fresh.
@@ -285,8 +308,19 @@ stacksRouter.get('/statuses', async (req: Request, res: Response) => {
     }
     res.json(withSource);
   } catch (error) {
+    outcome = 'error';
     console.error('Failed to fetch stack statuses:', error);
     res.status(500).json({ error: 'Failed to fetch stack statuses' });
+  } finally {
+    logDebugTiming('[Stacks:debug]', {
+      route: 'GET /statuses',
+      nodeId: req.nodeId,
+      cacheOutcome,
+      count,
+      dockerMs,
+      elapsedMs: Date.now() - startedAt,
+      outcome,
+    });
   }
 });
 
@@ -1151,13 +1185,31 @@ stacksRouter.get('/:stackName/containers', async (req: Request, res: Response) =
     return;
   }
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  const startedAt = Date.now();
+  let outcome: 'ok' | 'error' = 'ok';
+  let dockerMs: number | null = null;
+  let count = 0;
   try {
     const dockerController = DockerController.getInstance(req.nodeId);
+    const dockerStartedAt = Date.now();
     const containers = await dockerController.getContainersByStack(stackName);
+    dockerMs = Date.now() - dockerStartedAt;
+    count = containers.length;
     res.json(containers);
   } catch (error) {
+    outcome = 'error';
     console.error('[Stacks] Failed to fetch containers for %s:', sanitizeForLog(stackName), error);
     res.status(500).json({ error: 'Failed to fetch containers' });
+  } finally {
+    logDebugTiming('[Stacks:debug]', {
+      route: 'GET /:stack/containers',
+      nodeId: req.nodeId,
+      stack: sanitizeForLog(stackName),
+      count,
+      dockerMs,
+      elapsedMs: Date.now() - startedAt,
+      outcome,
+    });
   }
 });
 
