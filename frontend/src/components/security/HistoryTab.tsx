@@ -9,10 +9,12 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
 import { useNodes } from '@/context/NodeContext';
+import { useIsMobile } from '@/hooks/use-is-mobile';
 import { formatShortDigest } from '@/lib/formatDigest';
 import { FleetTabHeading } from '@/components/fleet/FleetEmptyState';
 import { SeverityChip } from '../VulnerabilityScanSheet';
 import { ScanComparisonSheet } from '../ScanComparisonSheet';
+import { HistoryScanRow } from './SecurityMobile';
 import type { VulnerabilityScan, ScanDetailTab, VulnSeverity } from '@/types/security';
 
 const PAGE_SIZE = 100;
@@ -59,6 +61,29 @@ interface HistoryTabProps {
   onInspect: (scanId: number, initialTab?: ScanDetailTab) => void;
 }
 
+/** Shared loading/error/empty state messages for the mobile and desktop branches. */
+function HistoryStateMessage({ loading, error, search, isEmpty }: {
+  loading: boolean;
+  error: boolean;
+  search: string;
+  isEmpty: boolean;
+}) {
+  if (loading) {
+    return <div className="py-12 text-center text-sm text-muted-foreground">Loading scan history...</div>;
+  }
+  if (error) {
+    return <div className="py-12 text-center text-sm text-muted-foreground">Couldn't load scan history. Try again.</div>;
+  }
+  if (isEmpty) {
+    return (
+      <div className="py-12 text-center text-sm text-muted-foreground">
+        {search ? 'No scans match your search.' : 'No completed scans yet. Scan an image from the Images tab.'}
+      </div>
+    );
+  }
+  return null;
+}
+
 /** Inline scan-history table: search, sortable columns, two-scan compare, and
  *  server-paginated completed scans. Replaces the former history sheet. */
 export function HistoryTab({ onInspect }: HistoryTabProps) {
@@ -76,6 +101,7 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
   const [compareIds, setCompareIds] = useState<[number, number] | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>('scanned_at');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
+  const isMobile = useIsMobile();
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);
@@ -191,7 +217,21 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
       </div>
 
       <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-        <ScrollArea block className="max-h-[60vh] bg-background">
+        {isMobile ? (
+          <div className="px-4">
+            {!loading && !error && sorted.map((scan) => (
+              <HistoryScanRow
+                key={scan.id}
+                scan={scan}
+                selected={selected.includes(scan.id)}
+                onToggle={() => toggleSelect(scan.id)}
+                onInspect={() => onInspect(scan.id, 'vulns')}
+              />
+            ))}
+            <HistoryStateMessage loading={loading} error={error} search={search} isEmpty={sorted.length === 0} />
+          </div>
+        ) : (
+        <ScrollArea block className="max-h-[60vh]">
           <Table className="max-md:min-w-[720px]">
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -239,14 +279,9 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
               })}
             </TableBody>
           </Table>
-          {loading && <div className="py-12 text-center text-sm text-muted-foreground">Loading scan history...</div>}
-          {!loading && error && <div className="py-12 text-center text-sm text-muted-foreground">Couldn't load scan history. Try again.</div>}
-          {!loading && !error && sorted.length === 0 && (
-            <div className="py-12 text-center text-sm text-muted-foreground">
-              {search ? 'No scans match your search.' : 'No completed scans yet. Scan an image from the Images tab.'}
-            </div>
-          )}
+          <HistoryStateMessage loading={loading} error={error} search={search} isEmpty={sorted.length === 0} />
         </ScrollArea>
+        )}
       </div>
 
       {total > PAGE_SIZE && (

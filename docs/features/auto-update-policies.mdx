@@ -14,7 +14,7 @@ Auto-Update Policies are the launchpad for every pending update across your stac
 
 Each card shows:
 
-- The current tag and (for semver updates) the next tag, with the new version highlighted in cyan. For digest-only updates, the card shows the current tag with a **Rebuild available** marker instead of a version diff.
+- The current tag and (for semver updates) the next tag, with the new version highlighted in cyan. For digest-only updates (same tag name, new registry content), the card shows the current tag with a **Rebuild available** marker instead of a version diff. See [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
 - A **risk badge** derived from the version delta: `Safe · patch` (green), `Review · minor` (amber), `Blocked · major` (red), or `Digest rebuild` (gray) for non-semver tags.
 - The primary image reference, plus a count of additional services if more than one image in the stack has an update.
 - A one-line changelog preview when the registry publishes one. Registries that omit changelog metadata render the card with "No changelog available from the registry yet."
@@ -80,7 +80,7 @@ Once the cause is resolved, the next check (on the interval, or via **Recheck**)
 | `Safe · patch` | Green (Shield icon) | Patch-level semver bump (e.g. `1.2.3` to `1.2.4`) |
 | `Review · minor` | Amber (AlertTriangle icon) | Minor semver bump (e.g. `1.2.3` to `1.3.0`) |
 | `Blocked · major` | Red (ShieldAlert icon) | Major semver bump (e.g. `1.2.3` to `2.0.0`). **Apply now** is disabled; the card surfaces the reason "Major version jumps require human review before applying." |
-| `Digest rebuild` | Gray | Non-semver tag (e.g. `main`, `stable`) with an updated digest |
+| `Digest rebuild` | Gray | Non-semver tag (e.g. `main`, `stable`) with an updated digest (tag name unchanged; content changed; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests)) |
 
 A separate inline `Rebuild available` label replaces the version diff when only the digest changed (same tag, new image). The risk badge on those cards still reflects the underlying semver classification reported by the registry.
 
@@ -127,7 +127,7 @@ For each stack with a pending image update, Sencho computes a preview by:
 
 1. Parsing the compose file to enumerate every pullable image reference.
 2. Calling the registry with your configured credentials to fetch the current tag list and remote digest.
-3. Picking the highest semver tag greater than the current tag (keeping the same prefix and suffix). If the highest available tag matches the current one but the remote digest has changed, the card surfaces as a `Rebuild available` update.
+3. Picking the highest semver tag greater than the current tag (keeping the same prefix and suffix). If the highest available tag matches the current one but the remote digest has changed, the card surfaces as a `Rebuild available` update. Sencho checks both a newer semver tag and a digest change behind the same tag; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
 4. Scoring the overall stack by the most severe image bump. Any major bump marks the stack as blocked.
 5. Normalizing Docker Hub library paths so credentials and changelog lookups resolve correctly.
 

@@ -26,7 +26,7 @@ Open the **Schedules** tab from the top navigation bar. The page opens on the Ti
 The Timeline plots every firing of every enabled task across a rolling 24-hour window starting from the current minute.
 
 - **Masthead.** A `NEXT 24 HOURS` kicker, an italic display heading, the window's start and end timestamps in a monospace range, and a right-anchored **Next** pill that reads out the time and task name of the next firing and a relative countdown.
-- **Five lanes.** Lifecycle (label blue), Updates (success green), Security (label purple), Maintenance (warning amber), and Backups (brand cyan). The Lifecycle lane holds stack lifecycle actions (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down) and standalone container actions (Restart Container, Stop Container, Start Container); Updates holds per-node and fleet image updates; Security holds vulnerability scans; Maintenance holds node resource prunes; Backups holds fleet snapshots.
+- **Five lanes.** Lifecycle (label blue), Updates (success green), Security (label purple), Upkeep (warning amber), and Backups (brand cyan). The Lifecycle lane holds stack lifecycle actions (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down) and standalone container actions (Restart Container, Stop Container, Start Container); Updates holds per-node and fleet image updates; Security holds vulnerability scans; Upkeep holds node resource prunes; Backups holds fleet snapshots.
 - **Pills.** One pill per firing within the window, positioned proportionally to the firing's time. Each pill shows the firing time and a target: the stack for stack actions, the container name for container actions, the selected node for prune and scan, and "Entire fleet" for a fleet snapshot. Hover a pill for the full detail (action, task name, and node). Pills are color-matched to their lane. Click a pill to open the run history sheet for that task.
 - **Now rail.** A glowing vertical rail at the current minute, anchored to the left of the track at page open and drifting right as time passes (the page recomputes positions periodically).
 - **Axis.** Six monospace time ticks run along the bottom, evenly spaced through the window.
@@ -74,7 +74,7 @@ The All tasks toggle swaps the lane track for a sortable table.
 
 ## Creating a scheduled task
 
-Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation, grouped by category: Lifecycle, Updates, Security, Maintenance, and Backups.
+Click **New Schedule** in the header. The form opens in a centered modal. The Action picker lists every supported operation, grouped by category: Lifecycle, Updates, Security, Upkeep, and Backups.
 
 <Frame>
   <img src="/images/scheduled-operations/action-picker.png" alt="The New scheduled task modal with the Action combobox expanded. The dropdown groups actions under category headers: Stack lifecycle (Backup Stack Compose Files, Start / Bring Up Stack, Restart Stack, Stop Stack, Take Stack Down), Updates (Auto-update Stack, Auto-update All Stacks on Node), Security (Scan Node Images), Maintenance (Prune Node Resources), and Backups (Create Fleet Snapshot). Below the picker, partly visible, sit a Services row with 'echo' and 'prober' checkboxes, the Cron Expression input, the Enabled toggle, and the Delete after successful run checkbox." />

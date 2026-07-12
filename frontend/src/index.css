@@ -386,7 +386,7 @@
 
   /* Material simulation (light) */
   --card-bevel: inset 0 1px 0 0 oklch(1 0 0 / 0.04), 0 1px 2px 0 oklch(0 0 0 / 0.05);
-  --button-inner-glow: inset 0 1px 0 0 oklch(1 0 0 / 0.04);
+  --button-inner-glow: inset 0 1px 0 0 oklch(1 0 0 / 0.10), 0 1px 2px 0 oklch(0 0 0 / 0.06);
   --chrome-top-highlight: inset 0 1px 0 0 oklch(1 0 0 / 0.45);
 
   /* Shadows (light) */

@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.95.0](https://github.com/Studio-Saelix/sencho/compare/v0.94.1...v0.95.0) (2026-07-12)
+
+
+### Thanks
+
+* @auspex for [#1581](https://github.com/Studio-Saelix/sencho/issues/1581)
+
+### Added
+
+* add confirmed Take down stack action with optional volume removal ([#1599](https://github.com/Studio-Saelix/sencho/issues/1599)) ([d113004](https://github.com/Studio-Saelix/sencho/commit/d1130043592778749db4169711ed3f8028fb6719))
+* add mobile row layout to Security History tab ([#1608](https://github.com/Studio-Saelix/sencho/issues/1608)) ([2da87c8](https://github.com/Studio-Saelix/sencho/commit/2da87c8c5d2df408e81d2d199b2db49b24b379f5))
+* add routable browser URLs for stacks and shell views ([#1586](https://github.com/Studio-Saelix/sencho/issues/1586)) ([5fe0843](https://github.com/Studio-Saelix/sencho/commit/5fe0843eb275a31726a17ffa9f6dbd3c8adf9cce))
+* first-boot compose discovery and adopt-first sidebar ([#1600](https://github.com/Studio-Saelix/sencho/issues/1600)) ([ba2e7bd](https://github.com/Studio-Saelix/sencho/commit/ba2e7bded94b3332e78bfc1356bb808016c376c3))
+* open compose editor in edit mode with one click ([#1592](https://github.com/Studio-Saelix/sencho/issues/1592)) ([e2001fe](https://github.com/Studio-Saelix/sencho/commit/e2001fed72ef9a140b76da499d7e8020a45ef8e2))
+* **registries:** add exact-ID tag browser with non-401 failures ([#1613](https://github.com/Studio-Saelix/sencho/issues/1613)) ([ce69986](https://github.com/Studio-Saelix/sencho/commit/ce699864c1bdfc499c9e927a62941379e9a3b4f5))
+* **resources:** bind prune to fingerprinted itemized plans ([#1611](https://github.com/Studio-Saelix/sencho/issues/1611)) ([213d3d5](https://github.com/Studio-Saelix/sencho/commit/213d3d5d3a8fb02bf0d092a43da2c4b0fdc09203))
+* **resources:** show multi-stack usedByStacks on images ([#1612](https://github.com/Studio-Saelix/sencho/issues/1612)) ([362a18e](https://github.com/Studio-Saelix/sencho/commit/362a18e91aea02816f377017b32198e6f838bca4))
+* **scheduler:** include node identifier in remote proxy error messages ([#1609](https://github.com/Studio-Saelix/sencho/issues/1609)) ([8fd526b](https://github.com/Studio-Saelix/sencho/commit/8fd526ba0532cc891efe0366b0f9ad8e658e8319))
+* **security:** add triage status and OpenVEX justification parity ([#1615](https://github.com/Studio-Saelix/sencho/issues/1615)) ([e7ac496](https://github.com/Studio-Saelix/sencho/commit/e7ac496009ef6e6efbe2c6f467c5cbd7adc64909))
+* **security:** prefer digest identity in scan history ([#1610](https://github.com/Studio-Saelix/sencho/issues/1610)) ([4834e2e](https://github.com/Studio-Saelix/sencho/commit/4834e2e51ddbc4ee648642523e88fe047f2b8b52))
+
+
+### Fixed
+
+* assorted UI polish across Home, Security, and Resources pages ([#1590](https://github.com/Studio-Saelix/sencho/issues/1590)) ([3fed67a](https://github.com/Studio-Saelix/sencho/commit/3fed67a3f1ef17f5b3639c90d3f579a05b014201))
+* **drift:** resolve explicit network names that equal compose keys ([#1588](https://github.com/Studio-Saelix/sencho/issues/1588)) ([4123793](https://github.com/Studio-Saelix/sencho/commit/4123793e68a43cc60b8e9b3a4665d1ae9be58886)), closes [#1581](https://github.com/Studio-Saelix/sencho/issues/1581)
+* **editor:** remove misleading image line above stack actions ([#1584](https://github.com/Studio-Saelix/sencho/issues/1584)) ([dbe230e](https://github.com/Studio-Saelix/sencho/commit/dbe230eef39dd92faf86fd5a49ebc9e2fd31100a))
+* keep confirm modal actions visible for long titles ([#1578](https://github.com/Studio-Saelix/sencho/issues/1578)) ([383d224](https://github.com/Studio-Saelix/sencho/commit/383d2248a20f821f5e70a63f97fa47d34ff28a29))
+* normalize dashboard network sparkline to bytes per second ([#1589](https://github.com/Studio-Saelix/sencho/issues/1589)) ([0c37d18](https://github.com/Studio-Saelix/sencho/commit/0c37d18586fea006e34fd226305b1d744d84aa76))
+* repin semver compose tags during fleet self-update ([#1587](https://github.com/Studio-Saelix/sencho/issues/1587)) ([e126020](https://github.com/Studio-Saelix/sencho/commit/e12602091adfbe6b51354027d50b6b7c7c807532))
+* **routing:** basename env URLs and defer writes during node hydration ([#1598](https://github.com/Studio-Saelix/sencho/issues/1598)) ([1de9f5e](https://github.com/Studio-Saelix/sencho/commit/1de9f5e4b24ff4d2cedade3275662f0d418cf993))
+* **routing:** guard remote stack hydration and settle empty env routes ([#1602](https://github.com/Studio-Saelix/sencho/issues/1602)) ([7517a4f](https://github.com/Studio-Saelix/sencho/commit/7517a4f49c3a2f9f6af348d773829e377812476f))
+* **routing:** split stack detail URL from compose editor URL ([#1605](https://github.com/Studio-Saelix/sencho/issues/1605)) ([296ddff](https://github.com/Studio-Saelix/sencho/commit/296ddff2a0b0a521ad717c40d43c22a85054a5ac))
+* **scheduler:** show every Timeline lane dot and rename the Maintenance lane to Upkeep ([#1618](https://github.com/Studio-Saelix/sencho/issues/1618)) ([78fbc15](https://github.com/Studio-Saelix/sencho/commit/78fbc151e70778dfb8404aa2a9ed5125fe6cc62c))
+
 ## [0.94.1](https://github.com/Studio-Saelix/sencho/compare/v0.94.0...v0.94.1) (2026-07-06)
 
 

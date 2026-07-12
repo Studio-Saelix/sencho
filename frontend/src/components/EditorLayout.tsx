@@ -960,6 +960,7 @@ export default function EditorLayout() {
                 headerActions={mobileMastheadActions}
                 onNavigateToStack={handleSelectStack}
                 onViewAllStacks={goToMobileList}
+                onManageNodes={() => openSettings('nodes')}
               />
             );
           case 'fleet':
