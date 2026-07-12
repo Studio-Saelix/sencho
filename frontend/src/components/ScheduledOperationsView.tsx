@@ -621,7 +621,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                         <div key={lane.key} className="grid grid-cols-[80px_1fr] items-center gap-3">
                           <div className="flex items-center gap-2">
                             <span
-                              className="w-1.5 h-1.5 rounded-full"
+                              className="w-1.5 h-1.5 rounded-full shrink-0"
                               style={{ backgroundColor: lane.color }}
                               aria-hidden="true"
                             />

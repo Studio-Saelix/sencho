@@ -373,7 +373,7 @@ describe('ScheduledOperationsView', () => {
   it('renders the five registry category lanes in the timeline view', async () => {
     render(<ScheduledOperationsView />);
     // Timeline is the default view; the lane track always renders.
-    for (const lane of ['Lifecycle', 'Updates', 'Security', 'Maintenance', 'Backups']) {
+    for (const lane of ['Lifecycle', 'Updates', 'Security', 'Upkeep', 'Backups']) {
       expect(await screen.findByText(lane)).toBeInTheDocument();
     }
   });
