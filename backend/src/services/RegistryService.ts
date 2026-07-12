@@ -42,6 +42,23 @@ export interface ResolvedDockerConfig {
     warnings: string[];
 }
 
+export type RegistryAuthForIdResult =
+    | {
+        ok: true;
+        username: string;
+        password: string;
+        registryHost: string;
+        type: RegistryType;
+        name: string;
+    }
+    | { ok: false; code: 'missing' | 'decrypt_failed' | 'ecr_failed'; message: string };
+
+/** Host used for Docker Registry HTTP API calls (/v2/...). */
+export function registryApiHost(reg: Pick<Registry, 'url' | 'type'>): string {
+    if (reg.type === 'dockerhub') return 'registry-1.docker.io';
+    return hostFromStoredRegistry(reg);
+}
+
 interface HttpResult {
     statusCode: number;
     headers: Record<string, string | string[] | undefined>;
@@ -83,7 +100,7 @@ function toProbeUrl(url: string, type: RegistryType): string {
 }
 
 /** Canonical host for matching (image ref → stored credential). */
-function hostFromStoredRegistry(reg: Pick<Registry, 'url' | 'type'>): string {
+export function hostFromStoredRegistry(reg: Pick<Registry, 'url' | 'type'>): string {
     if (reg.type === 'dockerhub') return 'index.docker.io';
     try {
         const withProtocol = reg.url.startsWith('http') ? reg.url : `https://${reg.url}`;
@@ -373,6 +390,50 @@ export class RegistryService {
         }
 
         return { config: { auths }, warnings };
+    }
+
+
+    /**
+     * Resolve credentials for a specific registry row by ID only.
+     * Never falls back to host-based matching (duplicate hosts must use the requested ID).
+     */
+    public async getAuthForRegistryId(id: number): Promise<RegistryAuthForIdResult> {
+        const reg = DatabaseService.getInstance().getRegistry(id);
+        if (!reg) {
+            return { ok: false, code: 'missing', message: 'Registry not found' };
+        }
+        try {
+            const registryHost = registryApiHost(reg);
+            if (reg.type === 'ecr') {
+                const creds = await this.getEcrCredentials(reg);
+                return {
+                    ok: true,
+                    username: creds.username,
+                    password: creds.password,
+                    registryHost,
+                    type: reg.type,
+                    name: reg.name,
+                };
+            }
+            return {
+                ok: true,
+                username: reg.username,
+                password: this.crypto.decrypt(reg.secret),
+                registryHost,
+                type: reg.type,
+                name: reg.name,
+            };
+        } catch (e) {
+            const detail = e instanceof Error ? e.message : String(e);
+            console.warn(
+                `[RegistryService] getAuthForRegistryId(${id}) failed:`,
+                sanitizeForLog(detail),
+            );
+            if (reg.type === 'ecr') {
+                return { ok: false, code: 'ecr_failed', message: 'Failed to refresh ECR credentials' };
+            }
+            return { ok: false, code: 'decrypt_failed', message: 'Failed to decrypt registry credentials' };
+        }
     }
 
     // ─── Registry auth for ImageUpdateService ────────────────────────────────

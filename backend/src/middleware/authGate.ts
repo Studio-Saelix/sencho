@@ -51,7 +51,7 @@ export const auditLog: RequestHandler = (req: Request, res: Response, next: Next
         status_code: res.statusCode,
         node_id: nodeId,
         ip_address: ip,
-        summary: getAuditSummary(req.method, apiPath),
+        summary: getAuditSummary(req.method, apiPath, res.statusCode),
       });
     } catch (err) {
       console.error('[Audit] Failed to write audit log:', err);

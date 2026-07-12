@@ -63,8 +63,8 @@ const PROTECTED_STACK_FILES = new Set([
 // was taken; `.checksums` is the integrity manifest verified before a restore.
 const BACKUP_MARKER_FILES = new Set(['.timestamp', '.checksums']);
 
-// Compose filenames Sencho recognizes, in resolution-priority order. Mirrors the
-// list FileSystemService uses elsewhere; named here for the import scan.
+// Compose filenames Sencho recognizes as a managed stack, in resolution-priority
+// order. Used by getStacks / hasComposeFile / firstComposeFilename.
 const IMPORT_COMPOSE_FILENAMES = ['compose.yaml', 'compose.yml', 'docker-compose.yaml', 'docker-compose.yml'] as const;
 const IMPORT_COMPOSE_FILENAME_SET = new Set<string>(IMPORT_COMPOSE_FILENAMES);
 // Override filenames docker compose can auto-discover, listed in priority order (first
@@ -77,6 +77,25 @@ const COMPOSE_OVERRIDE_FILENAMES = [
   'docker-compose.override.yaml',
   'docker-compose.override.yml',
 ] as const;
+const COMPOSE_OVERRIDE_FILENAME_SET = new Set<string>(COMPOSE_OVERRIDE_FILENAMES);
+
+/** True for adopt-scan candidates: any .yml/.yaml that is not a compose override. */
+function isAdoptYamlFilename(name: string): boolean {
+  return !COMPOSE_OVERRIDE_FILENAME_SET.has(name) && (name.endsWith('.yml') || name.endsWith('.yaml'));
+}
+
+function assertSafeComposeBasename(name: string): void {
+  // Basename only: reject path separators and the special entries . / .., but allow
+  // names that merely contain ".." as a substring (e.g. foo..bar.yml).
+  if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) {
+    throw Object.assign(new Error('Invalid path'), { code: 'INVALID_PATH' });
+  }
+}
+
+/** Canonical names keep their basename; everything else lands as compose.yaml. */
+function adoptDestComposeBasename(name: string): string {
+  return IMPORT_COMPOSE_FILENAME_SET.has(name) ? name : 'compose.yaml';
+}
 // Skip reading compose files larger than this into the import preview.
 const IMPORT_MAX_PREVIEW_BYTES = 1_048_576; // 1 MiB
 
@@ -103,6 +122,14 @@ export interface ImportCandidateRaw {
  * these two placements, so any candidate it returns can be moved into place.
  */
 export type MovableImportCandidate = Pick<ImportCandidateRaw, 'location' | 'composeFile' | 'status'>;
+
+/** Placement metadata for a single import candidate (no file read). */
+export interface ImportCandidateMeta {
+  name: string;
+  composeFile: string;
+  location: string;
+  status: 'loose-root' | 'nested';
+}
 
 // Strips at most one trailing slash. The upstream validator
 // (isValidRelativeStackPath) rejects any '//' sequence, so a string reaching
@@ -576,6 +603,33 @@ export class FileSystemService {
     return null;
   }
 
+  /**
+   * Compose file to surface for adopt: prefer the four canonical names (same
+   * access probe as firstComposeFilename, including weird/unreadable entries),
+   * then any other regular .yml/.yaml file that is not a compose override.
+   */
+  private async firstAdoptComposeFilename(dir: string): Promise<string | null> {
+    const canonical = await this.firstComposeFilename(dir);
+    if (canonical) return canonical;
+
+    this.assertWithinBase(dir);
+    let entries: Dirent[];
+    try {
+      entries = await fsPromises.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      console.warn(
+        '[FileSystemService] Failed to read directory during adopt scan:',
+        sanitizeForLog((error as Error)?.message ?? String(error)),
+      );
+      return null;
+    }
+    const yamlFiles = entries
+      .filter((e) => e.isFile() && typeof e.name === 'string' && isAdoptYamlFilename(e.name))
+      .map((e) => e.name)
+      .sort((a, b) => a.localeCompare(b));
+    return yamlFiles[0] ?? null;
+  }
+
   private async readComposeCandidate(filePath: string): Promise<{ content: string | null; oversized: boolean }> {
     this.assertWithinBase(filePath);
     let fh: import('fs/promises').FileHandle | null = null;
@@ -612,48 +666,43 @@ export class FileSystemService {
   }
 
   /**
-   * Scan the compose directory for compose files that are not yet stacks: loose
-   * files at the root and compose files one directory too deep. A top-level
-   * subdirectory with a compose file is already a stack, so it is skipped, not
-   * surfaced. Read-only. Bounded by `maxCandidates` and by a single level of
-   * nesting so a deep tree cannot make this walk unbounded.
+   * Shared placement walk for import discovery and counting. Yields the same
+   * candidates findImportCandidates surfaces (including weird/unreadable files
+   * that readComposeCandidate returns content:null for). Loose-root and nested
+   * candidates accept any .yml/.yaml except compose override filenames; a
+   * top-level subdirectory is still a stack only when it has a canonical
+   * compose filename. Stops after `limit` yields.
    */
-  async findImportCandidates(maxCandidates = 100): Promise<ImportCandidateRaw[]> {
-    const candidates: ImportCandidateRaw[] = [];
+  private async *enumerateImportCandidates(limit: number): AsyncGenerator<ImportCandidateMeta> {
+    let yielded = 0;
     let entries: Dirent[];
     try {
       entries = await fsPromises.readdir(this.baseDir, { withFileTypes: true });
     } catch (error) {
-      // The compose dir itself is unreadable (missing, permissions). The scan
-      // degrades to an empty list, so log it rather than report "no files found"
-      // for what is really an access failure.
       console.warn('[FileSystemService] Failed to scan compose directory for import:', sanitizeForLog((error as Error)?.message ?? String(error)));
-      return candidates;
+      return;
     }
 
     for (const entry of entries) {
-      if (candidates.length >= maxCandidates) break;
+      if (yielded >= limit) return;
       if (!entry.name || typeof entry.name !== 'string') continue;
 
       if (entry.isFile()) {
-        if (IMPORT_COMPOSE_FILENAME_SET.has(entry.name)) {
-          const loaded = await this.readComposeCandidate(path.join(this.baseDir, entry.name));
-          candidates.push({ name: '', composeFile: entry.name, location: entry.name, status: 'loose-root', ...loaded });
+        if (isAdoptYamlFilename(entry.name)) {
+          yielded++;
+          yield { name: '', composeFile: entry.name, location: entry.name, status: 'loose-root' };
         }
         continue;
       }
       if (!entry.isDirectory()) continue;
 
       const dir = path.join(this.baseDir, entry.name);
+      // Canonical compose here means already a stack. Non-canonical yaml in this
+      // folder (e.g. plex/plex.yml) is neither a stack nor an adopt candidate:
+      // promoting with destName equal to the folder would conflict on disk.
       const topCompose = await this.firstComposeFilename(dir);
-      if (topCompose) {
-        // A top-level subdirectory with a compose file is already a stack (it
-        // shows in the sidebar), so it is not an import candidate. Skip it and do
-        // not descend: any compose files deeper inside belong to this stack.
-        continue;
-      }
+      if (topCompose) continue;
 
-      // No compose at the top level: peek exactly one level deeper.
       let children: Dirent[];
       try {
         children = await fsPromises.readdir(dir, { withFileTypes: true });
@@ -662,23 +711,54 @@ export class FileSystemService {
         continue;
       }
       for (const child of children) {
-        if (candidates.length >= maxCandidates) break;
+        if (yielded >= limit) return;
         if (!child.isDirectory() || !child.name || typeof child.name !== 'string') continue;
         const childDir = path.join(dir, child.name);
-        const childCompose = await this.firstComposeFilename(childDir);
+        const childCompose = await this.firstAdoptComposeFilename(childDir);
         if (childCompose) {
-          const loaded = await this.readComposeCandidate(path.join(childDir, childCompose));
-          candidates.push({
+          yielded++;
+          yield {
             name: child.name,
             composeFile: childCompose,
             location: `${entry.name}/${child.name}/${childCompose}`,
             status: 'nested',
-            ...loaded,
-          });
+          };
         }
       }
     }
+  }
 
+  /**
+   * Count adopt candidates with 101st lookahead: truncated is true only when
+   * more than maxCandidates exist.
+   */
+  async countImportCandidates(maxCandidates = 100): Promise<{ count: number; truncated: boolean }> {
+    let count = 0;
+    for await (const _ of this.enumerateImportCandidates(maxCandidates + 1)) {
+      count++;
+    }
+    if (count > maxCandidates) {
+      return { count: maxCandidates, truncated: true };
+    }
+    return { count, truncated: false };
+  }
+
+  /**
+   * Scan the compose directory for compose files that are not yet stacks: loose
+   * files at the root and compose files one directory too deep. A top-level
+   * subdirectory with a compose file is already a stack, so it is skipped, not
+   * surfaced. Read-only. Bounded by `maxCandidates` and by a single level of
+   * nesting so a deep tree cannot make this walk unbounded.
+   */
+  async findImportCandidates(maxCandidates = 100): Promise<ImportCandidateRaw[]> {
+    const candidates: ImportCandidateRaw[] = [];
+    for await (const meta of this.enumerateImportCandidates(maxCandidates)) {
+      const filePath = meta.status === 'loose-root'
+        ? path.join(this.baseDir, meta.composeFile)
+        : path.join(this.baseDir, ...meta.location.split('/'));
+      const loaded = await this.readComposeCandidate(filePath);
+      candidates.push({ ...meta, ...loaded });
+    }
     return candidates;
   }
 
@@ -687,11 +767,13 @@ export class FileSystemService {
    * auto-discovery (getStacks) picks it up. This is the single write path of the
    * guided import flow and only runs on an explicit, per-file user action.
    *
-   * A `loose-root` file is moved into <base>/<destName>/<composeFile>: only the
-   * chosen compose file moves, so sibling files referenced by a relative path
+   * A `loose-root` file is moved into <base>/<destName>/: only the chosen
+   * compose file moves, so sibling files referenced by a relative path
    * (e.g. a root .env) stay where they are. A `nested` stack directory
    * (<parent>/<child>) is promoted whole to <base>/<destName>, preserving its
-   * .env and any other files.
+   * .env and any other files. Non-canonical basenames (anything other than the
+   * four managed compose names) are renamed to compose.yaml so getStacks sees
+   * the new stack, matching migrateFlatToDirectory.
    *
    * Never overwrites: a pre-existing destination is a conflict. Source and
    * destination are both confirmed to resolve inside the compose directory
@@ -732,9 +814,12 @@ export class FileSystemService {
     if (candidate.status === 'loose-root') {
       const realSource = await this.realPathWithinBase(source);
       // Build the relocated file path through the same inline containment barrier so
-      // the rename target is a credited safe path (candidate.composeFile is an
-      // allowlisted compose filename, but it is traced from the request).
-      const destComposePath = path.resolve(baseResolved, destName, candidate.composeFile);
+      // the rename target is a credited safe path. composeFile is a basename from
+      // the scan (any .yml/.yaml except overrides); containment is re-checked here.
+      assertSafeComposeBasename(candidate.composeFile);
+      // Non-canonical names (e.g. nginx.yml) become compose.yaml so getStacks picks
+      // them up, matching migrateFlatToDirectory. Canonical names keep their basename.
+      const destComposePath = path.resolve(baseResolved, destName, adoptDestComposeBasename(candidate.composeFile));
       if (!destComposePath.startsWith(baseResolved + path.sep)) {
         throw Object.assign(new Error('Invalid path'), { code: 'INVALID_PATH' });
       }
@@ -770,7 +855,42 @@ export class FileSystemService {
       if (!isPathWithinBase(realCompose, realSourceDir)) {
         throw Object.assign(new Error('Compose file escapes the import directory'), { code: 'INVALID_PATH' });
       }
+      // Non-canonical basenames become compose.yaml after promotion. Preflight so a
+      // sibling compose.yaml cannot strand the folder after the directory move.
+      const destBasename = adoptDestComposeBasename(candidate.composeFile);
+      const needsComposeRename = destBasename !== candidate.composeFile;
+      if (needsComposeRename) {
+        assertSafeComposeBasename(candidate.composeFile);
+        try {
+          await fsPromises.access(path.join(realSourceDir, destBasename));
+          throw Object.assign(
+            new Error(`Cannot rename ${candidate.composeFile} to ${destBasename}: destination already exists`),
+            { code: 'DEST_EXISTS' },
+          );
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException)?.code;
+          if (code === 'DEST_EXISTS') throw error;
+          if (code !== 'ENOENT') throw error;
+        }
+      }
       await fsPromises.rename(realSourceDir, destDir);
+      if (needsComposeRename) {
+        const fromPath = path.resolve(destDir, candidate.composeFile);
+        const toPath = path.resolve(destDir, destBasename);
+        if (!fromPath.startsWith(destDir + path.sep) || !toPath.startsWith(destDir + path.sep)) {
+          // Directory already moved; roll it back before failing.
+          await fsPromises.rename(destDir, realSourceDir).catch(() => undefined);
+          throw Object.assign(new Error('Invalid path'), { code: 'INVALID_PATH' });
+        }
+        try {
+          await fsPromises.rename(fromPath, toPath);
+        } catch (error) {
+          // Roll the directory back to its nested path so the candidate stays
+          // adoptable and a retry is not blocked by DEST_EXISTS on destName.
+          await fsPromises.rename(destDir, realSourceDir).catch(() => undefined);
+          throw error;
+        }
+      }
       return;
     }
 

@@ -10,6 +10,7 @@ import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
 import { useNodes } from '@/context/NodeContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
+import { formatShortDigest } from '@/lib/formatDigest';
 import { FleetTabHeading } from '@/components/fleet/FleetEmptyState';
 import { SeverityChip } from '../VulnerabilityScanSheet';
 import { ScanComparisonSheet } from '../ScanComparisonSheet';
@@ -18,6 +19,22 @@ import type { VulnerabilityScan, ScanDetailTab, VulnSeverity } from '@/types/sec
 
 const PAGE_SIZE = 100;
 const SEVERITY_RANK: Record<VulnSeverity, number> = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1, UNKNOWN: 0 };
+
+function scanIdentityLabel(scan: VulnerabilityScan): {
+  primary: string;
+  subtitle: string | null;
+  title: string;
+} {
+  const digest = scan.image_digest?.trim();
+  if (digest) {
+    return {
+      primary: formatShortDigest(digest),
+      subtitle: scan.image_ref,
+      title: digest,
+    };
+  }
+  return { primary: scan.image_ref, subtitle: null, title: scan.image_ref };
+}
 
 type SortKey = 'scanned_at' | 'image_ref' | 'severity' | 'total';
 
@@ -98,7 +115,7 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
         limit: String(PAGE_SIZE),
         offset: String(pageToLoad * PAGE_SIZE),
       });
-      if (term.trim()) params.set('imageRefLike', term.trim());
+      if (term.trim()) params.set('imageIdentityLike', term.trim());
       const res = await apiFetch(`/security/scans?${params.toString()}`);
       if (!res.ok) {
         setError(true);
@@ -192,7 +209,7 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
       <div className="relative max-w-sm">
         <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
         <Input
-          placeholder="Search by image..."
+          placeholder="Search by image or digest..."
           value={searchDraft}
           onChange={(e) => setSearchDraft(e.target.value)}
           className="pl-8"
@@ -231,12 +248,22 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
             <TableBody>
               {!loading && !error && sorted.map((scan) => {
                 const isSelected = selected.includes(scan.id);
+                const identity = scanIdentityLabel(scan);
                 return (
                   <TableRow key={scan.id} className={cn('hover:bg-muted/30 transition-colors', isSelected && 'bg-accent/30')}>
                     <TableCell>
                       <Checkbox checked={isSelected} onCheckedChange={() => toggleSelect(scan.id)} aria-label="Select scan to compare" />
                     </TableCell>
-                    <TableCell className="font-mono text-xs truncate max-w-[280px]">{scan.image_ref}</TableCell>
+                    <TableCell className="max-w-[280px]">
+                      <div className="font-mono text-xs truncate" title={identity.title}>
+                        {identity.primary}
+                      </div>
+                      {identity.subtitle && (
+                        <div className="font-mono text-[10px] text-muted-foreground truncate" title={identity.subtitle}>
+                          {identity.subtitle}
+                        </div>
+                      )}
+                    </TableCell>
                     <TableCell className="font-mono text-xs text-stat-subtitle whitespace-nowrap">{new Date(scan.scanned_at).toLocaleString()}</TableCell>
                     <TableCell className="font-mono text-xs capitalize text-stat-subtitle">{scan.triggered_by}</TableCell>
                     <TableCell>

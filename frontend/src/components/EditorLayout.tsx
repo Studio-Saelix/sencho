@@ -6,6 +6,7 @@ import { NotificationPanel } from './NotificationPanel';
 import { TopBar } from './TopBar';
 import { ViewRouter } from './EditorLayout/ViewRouter';
 import { CreateStackDialog, type CreateMode } from './EditorLayout/CreateStackDialog';
+import { AdoptExistingDialog } from './EditorLayout/AdoptExistingDialog';
 import { EditorView } from './EditorLayout/EditorView';
 import { ShellOverlays } from './EditorLayout/ShellOverlays';
 import { classifyFailedGate } from './EditorLayout/failed-gate-recovery';
@@ -71,7 +72,7 @@ const ResourcesView = lazy(() => import('./ResourcesView'));
 const GlobalObservabilityView = lazy(() => import('./GlobalObservabilityView').then(m => ({ default: m.GlobalObservabilityView })));
 
 export default function EditorLayout() {
-  const { isAdmin, can } = useAuth();
+  const { isAdmin, can, permissions } = useAuth();
   const { status: trivy } = useTrivyStatus();
   const { runWithLog, panelState, logRows, healthGate } = useDeployFeedback();
 
@@ -164,12 +165,19 @@ export default function EditorLayout() {
     createDialogOpen, setCreateDialogOpen,
   } = overlayState;
 
-  // Which mode the create dialog opens on. The toolbar Create button opens on
-  // 'empty'; the zero-stacks empty state opens on 'import'.
+  // Which mode the create dialog opens on (always empty after import tab removal).
   const [createDialogInitialMode, setCreateDialogInitialMode] = useState<CreateMode>('empty');
-  const openCreateDialog = useCallback((mode: CreateMode) => {
+  const [adoptDialogOpen, setAdoptDialogOpen] = useState(false);
+  const adoptOpenedFromSetupRef = useRef(false);
+
+  const openCreateDialog = useCallback((mode: CreateMode = 'empty') => {
     setCreateDialogInitialMode(mode);
     setCreateDialogOpen(true);
+  }, [setCreateDialogOpen]);
+
+  const openAdoptDialog = useCallback(() => {
+    setCreateDialogOpen(false);
+    setAdoptDialogOpen(true);
   }, [setCreateDialogOpen]);
 
   const [diffPreviewEnabled] = useComposeDiffPreviewEnabled();
@@ -677,6 +685,23 @@ export default function EditorLayout() {
     }
   }, [containers, selectedFile]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (permissions === null) return;
+    if (adoptOpenedFromSetupRef.current) return;
+    try {
+      const raw = sessionStorage.getItem('sencho:post-setup');
+      if (!raw) return;
+      sessionStorage.removeItem('sencho:post-setup');
+      const parsed = JSON.parse(raw) as { openAdopt?: boolean };
+      if (parsed.openAdopt && can('stack:create')) {
+        adoptOpenedFromSetupRef.current = true;
+        setAdoptDialogOpen(true);
+      }
+    } catch {
+      // ignore malformed session flag
+    }
+  }, [permissions, can]);
+
   const createStackSlot = can('stack:create') ? (
     <>
       <Button
@@ -709,9 +734,18 @@ export default function EditorLayout() {
           );
         }}
         onStacksChanged={async () => { await refreshStacks(); }}
+        onOpenAdopt={openAdoptDialog}
       />
     </>
   ) : null;
+
+  const adoptDialogEl = (
+    <AdoptExistingDialog
+      open={adoptDialogOpen}
+      onOpenChange={setAdoptDialogOpen}
+      onStacksChanged={async () => { await refreshStacks(); }}
+    />
+  );
 
   return (
     <GlobalCommandPaletteProvider>
@@ -766,7 +800,11 @@ export default function EditorLayout() {
               if (node) void stackActions.loadFileOnNode(node, file);
             },
             filterChip,
-            onOpenCreate: can('stack:create') ? openCreateDialog : undefined,
+            onOpenCreate: can('stack:create') ? () => openCreateDialog('empty') : undefined,
+            onOpenAdopt: can('stack:read') ? openAdoptDialog : undefined,
+            onScan: handleScanStacks,
+            canCreate: can('stack:create'),
+            activeNodeId: activeNode?.id ?? null,
             openMuteRulesWithPrefill,
             stacksLoadStatus,
             stacksLoadError,
@@ -1079,6 +1117,7 @@ export default function EditorLayout() {
               onNavigate={navigateMobileAware}
               onSettings={openSettingsMobileAware}
             />
+            {adoptDialogEl}
             {shellOverlaysEl}
           </div>
         );
@@ -1095,6 +1134,7 @@ export default function EditorLayout() {
             {/* Main Workspace */}
             {workspaceEl}
           </div>
+          {adoptDialogEl}
           {shellOverlaysEl}
         </div>
       );

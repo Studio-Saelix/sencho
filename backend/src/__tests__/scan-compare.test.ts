@@ -187,6 +187,8 @@ describe('GET /api/security/compare', () => {
     expect(res.status).toBe(200);
     expect(res.body.scanA.id).toBe(baseline);
     expect(res.body.scanB.id).toBe(current);
+    expect(res.body.scanA).toHaveProperty('image_digest');
+    expect(res.body.scanB).toHaveProperty('image_digest');
     expect(res.body.added).toHaveLength(1);
     expect(res.body.added[0].vulnerability_id).toBe('CVE-2024-0003');
     expect(res.body.removed).toHaveLength(1);

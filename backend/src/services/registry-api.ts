@@ -98,39 +98,41 @@ export async function getAuthToken(
     repo: string,
     credentials?: RegistryCredentials | null,
 ): Promise<string | null> {
+    // Transport errors propagate (callers map to REGISTRY_UPSTREAM). null = auth/token failure only.
+    const basicHeaders: Record<string, string> = {};
+    if (credentials) {
+        basicHeaders['Authorization'] = `Basic ${Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64')}`;
+    }
+
+    let tokenUrl: string;
+    if (registry === 'registry-1.docker.io') {
+        tokenUrl = `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`;
+    } else {
+        const ping = await httpGet(`https://${registry}/v2/`, basicHeaders);
+        const wwwAuth = ping.headers['www-authenticate'] as string | undefined;
+        if (!wwwAuth) return null;
+
+        const realmMatch = wwwAuth.match(/realm="([^"]+)"/);
+        const serviceMatch = wwwAuth.match(/service="([^"]+)"/);
+        if (!realmMatch) return null;
+
+        const params = new URLSearchParams();
+        if (serviceMatch) params.set('service', serviceMatch[1]);
+        // The /v2/ ping carries no repository context, so any scope it echoes is a
+        // placeholder (ghcr.io returns repository:user/image:pull). Always request
+        // the scope for the repository we actually want; reusing the echoed scope
+        // makes ghcr.io mint a token for the wrong repo and then reject the pull.
+        params.set('scope', `repository:${repo}:pull`);
+        tokenUrl = `${realmMatch[1]}?${params.toString()}`;
+    }
+
+    const tokenRes = await httpGet(tokenUrl, basicHeaders);
+    if (tokenRes.statusCode !== 200) return null;
+
     try {
-        const basicHeaders: Record<string, string> = {};
-        if (credentials) {
-            basicHeaders['Authorization'] = `Basic ${Buffer.from(`${credentials.username}:${credentials.password}`).toString('base64')}`;
-        }
-
-        let tokenUrl: string;
-        if (registry === 'registry-1.docker.io') {
-            tokenUrl = `https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repo}:pull`;
-        } else {
-            const ping = await httpGet(`https://${registry}/v2/`, basicHeaders);
-            const wwwAuth = ping.headers['www-authenticate'] as string | undefined;
-            if (!wwwAuth) return null;
-
-            const realmMatch = wwwAuth.match(/realm="([^"]+)"/);
-            const serviceMatch = wwwAuth.match(/service="([^"]+)"/);
-            if (!realmMatch) return null;
-
-            const params = new URLSearchParams();
-            if (serviceMatch) params.set('service', serviceMatch[1]);
-            // The /v2/ ping carries no repository context, so any scope it echoes is a
-            // placeholder (ghcr.io returns repository:user/image:pull). Always request
-            // the scope for the repository we actually want; reusing the echoed scope
-            // makes ghcr.io mint a token for the wrong repo and then reject the pull.
-            params.set('scope', `repository:${repo}:pull`);
-            tokenUrl = `${realmMatch[1]}?${params.toString()}`;
-        }
-
-        const tokenRes = await httpGet(tokenUrl, basicHeaders);
-        if (tokenRes.statusCode !== 200) return null;
-
-        const parsed = JSON.parse(tokenRes.body);
-        return parsed.token ?? parsed.access_token ?? null;
+        const parsed = JSON.parse(tokenRes.body) as { token?: unknown; access_token?: unknown };
+        const token = parsed.token ?? parsed.access_token;
+        return typeof token === 'string' ? token : null;
     } catch {
         return null;
     }
@@ -210,7 +212,21 @@ export async function getRemoteDigestResult(
 ): Promise<RemoteDigestResult> {
     const ref = `${registry}/${repo}:${tag}`;
     try {
-        const token = await getAuthToken(registry, repo, credentials);
+        // Auth transport failures used to collapse to null inside getAuthToken.
+        // Tag listing now needs those errors to propagate (REGISTRY_UPSTREAM), so
+        // digest lookup keeps anonymous fallback here when the token endpoint is down.
+        let token: string | null = null;
+        try {
+            token = await getAuthToken(registry, repo, credentials);
+        } catch (authErr) {
+            const cause = authErr instanceof Error
+                ? ((authErr as NodeJS.ErrnoException).code ?? authErr.message)
+                : String(authErr);
+            console.error(
+                `[registry-api] Auth for ${sanitizeForLog(ref)} failed; trying anonymous:`,
+                sanitizeForLog(cause),
+            );
+        }
         const headers: Record<string, string> = { Accept: MANIFEST_ACCEPT };
         if (token) headers['Authorization'] = `Bearer ${token}`;
         const url = `https://${registry}/v2/${repo}/manifests/${tag}`;
@@ -260,22 +276,105 @@ export async function getRemoteDigest(
     return result.ok ? result.digest : null;
 }
 
+export type TagListCode =
+    | 'REGISTRY_UNAUTHORIZED'
+    | 'REGISTRY_FORBIDDEN'
+    | 'REGISTRY_NOT_FOUND'
+    | 'REGISTRY_RATE_LIMITED'
+    | 'REGISTRY_UNSUPPORTED'
+    | 'REGISTRY_UPSTREAM'
+    | 'REGISTRY_INVALID_RESPONSE';
+
+export type TagListResult =
+    | { ok: true; tags: string[]; nextCursor?: string }
+    | { ok: false; code: TagListCode; message: string };
+
+const TAG_LIST_BODY_CAP = 2 * 1024 * 1024; // 2 MiB
+
+function tagListFailure(statusCode: number): TagListResult {
+    if (statusCode === 401) {
+        return { ok: false, code: 'REGISTRY_UNAUTHORIZED', message: 'Registry rejected credentials' };
+    }
+    if (statusCode === 403) {
+        return { ok: false, code: 'REGISTRY_FORBIDDEN', message: 'Registry denied access to this repository' };
+    }
+    if (statusCode === 404) {
+        return { ok: false, code: 'REGISTRY_NOT_FOUND', message: 'Repository not found on registry' };
+    }
+    if (statusCode === 429) {
+        return { ok: false, code: 'REGISTRY_RATE_LIMITED', message: 'Registry rate limit exceeded' };
+    }
+    if (statusCode >= 500) {
+        return { ok: false, code: 'REGISTRY_UPSTREAM', message: `Registry error (${statusCode})` };
+    }
+    return { ok: false, code: 'REGISTRY_UPSTREAM', message: `Registry returned status ${statusCode}` };
+}
+
+function parseNextCursor(linkHeader: string | string[] | undefined): string | undefined {
+    const raw = Array.isArray(linkHeader) ? linkHeader.join(',') : linkHeader;
+    if (!raw) return undefined;
+    // Rel=next Link: </v2/repo/tags/list?n=50&last=foo>; rel="next"
+    const match = raw.match(/<[^>]*[?&]last=([^&>]+)[^>]*>\s*;\s*rel="?next"?/i);
+    if (!match) return undefined;
+    try {
+        return decodeURIComponent(match[1]);
+    } catch {
+        return match[1];
+    }
+}
+
+/**
+ * Typed tag list for the Resources registry browser. Never collapses auth
+ * failures into an empty array (that would hide credential problems).
+ */
+export async function listRegistryTagsResult(
+    registry: string,
+    repo: string,
+    credentials: RegistryCredentials,
+    opts: { limit?: number; cursor?: string } = {},
+): Promise<TagListResult> {
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
+    try {
+        const token = await getAuthToken(registry, repo, credentials);
+        if (!token) {
+            return { ok: false, code: 'REGISTRY_UNAUTHORIZED', message: 'Registry rejected credentials' };
+        }
+        const headers: Record<string, string> = { Accept: 'application/json', Authorization: `Bearer ${token}` };
+        const params = new URLSearchParams({ n: String(limit) });
+        if (opts.cursor) params.set('last', opts.cursor);
+        const url = `https://${registry}/v2/${repo}/tags/list?${params.toString()}`;
+        const res = await httpGet(url, headers);
+        if (res.statusCode !== 200) return tagListFailure(res.statusCode);
+        if (res.body.length > TAG_LIST_BODY_CAP) {
+            return { ok: false, code: 'REGISTRY_INVALID_RESPONSE', message: 'Registry tag list response too large' };
+        }
+        let parsed: { tags?: unknown };
+        try {
+            parsed = JSON.parse(res.body) as { tags?: unknown };
+        } catch {
+            return { ok: false, code: 'REGISTRY_INVALID_RESPONSE', message: 'Registry returned invalid JSON' };
+        }
+        if (!Array.isArray(parsed.tags) || !parsed.tags.every((t) => typeof t === 'string')) {
+            return { ok: false, code: 'REGISTRY_INVALID_RESPONSE', message: 'Registry tag list was malformed' };
+        }
+        const nextCursor = parseNextCursor(res.headers['link']);
+        return nextCursor
+            ? { ok: true, tags: parsed.tags as string[], nextCursor }
+            : { ok: true, tags: parsed.tags as string[] };
+    } catch (e) {
+        const cause = e instanceof Error ? ((e as NodeJS.ErrnoException).code ?? e.message) : String(e);
+        console.error('[registry-api] Tag list failed:', sanitizeForLog(cause));
+        return { ok: false, code: 'REGISTRY_UPSTREAM', message: 'Registry unreachable' };
+    }
+}
+
+/** Compatibility wrapper for update-preview: empty list on any failure. */
 export async function listRegistryTags(
     registry: string,
     repo: string,
     credentials?: RegistryCredentials | null,
 ): Promise<string[]> {
-    try {
-        const token = await getAuthToken(registry, repo, credentials);
-        const headers: Record<string, string> = { Accept: 'application/json' };
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-
-        const res = await httpGet(`https://${registry}/v2/${repo}/tags/list`, headers);
-        if (res.statusCode !== 200) return [];
-
-        const parsed = JSON.parse(res.body) as { tags?: string[] };
-        return Array.isArray(parsed.tags) ? parsed.tags : [];
-    } catch {
-        return [];
-    }
+    if (!credentials) return [];
+    const result = await listRegistryTagsResult(registry, repo, credentials);
+    return result.ok ? result.tags : [];
 }

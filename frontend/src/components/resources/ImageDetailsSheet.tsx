@@ -6,6 +6,9 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { formatBytes } from '@/lib/utils';
 import { copyToClipboard } from '@/lib/clipboard';
+import { formatShortDigest } from '@/lib/formatDigest';
+import { useAuth } from '@/context/AuthContext';
+import { RegistryTagsPanel } from './RegistryTagsPanel';
 import { Copy } from 'lucide-react';
 
 interface ImageInspect {
@@ -43,9 +46,23 @@ interface ImageDetails {
   history: ImageHistoryEntry[];
 }
 
+/** Classified image row passed from Resources (node-bound). */
+export interface ClassifiedImageSelection {
+  Id: string;
+  RepoTags: string[];
+  Size: number;
+  Containers: number;
+  usedByStacks: string[];
+  managedBy: string | null;
+  managedStatus: 'managed' | 'unmanaged' | 'unused';
+  isSencho: boolean;
+  nodeId: string | number;
+}
+
 interface ImageDetailsSheetProps {
-  imageId: string | null;
+  image: ClassifiedImageSelection | null;
   onClose: () => void;
+  onOpenStack?: (stack: string) => void;
 }
 
 function formatRelativeAge(timestampSec: number): string {
@@ -59,13 +76,9 @@ function formatRelativeAge(timestampSec: number): string {
   return `${Math.floor(diff / (86400 * 365))}y ago`;
 }
 
-function shortDigest(id: string): string {
-  const colon = id.indexOf(':');
-  const hex = colon >= 0 ? id.slice(colon + 1) : id;
-  return hex.substring(0, 12);
-}
-
-export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) {
+export function ImageDetailsSheet({ image, onClose, onOpenStack }: ImageDetailsSheetProps) {
+  const imageId = image?.Id ?? null;
+  const { isAdmin } = useAuth();
   const [data, setData] = useState<ImageDetails | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -104,10 +117,12 @@ export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) 
   const history = data?.history ?? [];
   const totalLayers = history.length;
 
-  const name = inspect?.RepoTags?.[0] || (inspect ? shortDigest(inspect.Id) : 'Image details');
+  const name = image?.RepoTags?.[0]
+    || inspect?.RepoTags?.[0]
+    || (inspect ? formatShortDigest(inspect.Id) : (imageId ? formatShortDigest(imageId) : 'Image details'));
   const meta = inspect
     ? `${formatBytes(inspect.Size)} · ${inspect.Architecture ?? '?'}/${inspect.Os ?? '?'} · ${totalLayers} layers`
-    : (loading ? 'Loading…' : '');
+    : (loading ? 'Loading…' : (image ? formatBytes(image.Size) : ''));
 
   const footerContext = inspect?.Created
     ? `Created ${formatRelativeAge(new Date(inspect.Created).getTime() / 1000)}`
@@ -115,7 +130,7 @@ export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) 
 
   return (
     <SystemSheet
-      open={!!imageId}
+      open={!!image}
       onOpenChange={(open) => !open && onClose()}
       crumb={['Resources', 'Images', name]}
       name={name}
@@ -132,13 +147,40 @@ export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) 
         </div>
       )}
 
+      {image && (
+        <SheetSection title="Used by">
+          {(image.usedByStacks?.length ?? 0) === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              {image.managedStatus === 'unused' ? 'No containers' : 'Not used by a Sencho stack'}
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-1">
+              {image.usedByStacks.map((stack) => (
+                onOpenStack ? (
+                  <button
+                    key={stack}
+                    type="button"
+                    className="inline-flex items-center px-1.5 py-0.5 rounded border border-success/25 bg-success/8 text-success text-[10px] font-medium hover:bg-success/15 transition-colors"
+                    onClick={() => onOpenStack(stack)}
+                  >
+                    {stack}
+                  </button>
+                ) : (
+                  <Badge key={stack} variant="outline" className="text-[10px] h-5">{stack}</Badge>
+                )
+              ))}
+            </div>
+          )}
+        </SheetSection>
+      )}
+
       {!loading && inspect && (
         <>
           <SheetSection title="Overview">
             <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
               <Field label="ID">
                 <p className="font-mono text-xs mt-0.5 flex items-center gap-1.5">
-                  {shortDigest(inspect.Id)}
+                  {formatShortDigest(inspect.Id)}
                   <button
                     className="text-muted-foreground hover:text-foreground transition-colors"
                     onClick={async () => {
@@ -241,6 +283,15 @@ export function ImageDetailsSheet({ imageId, onClose }: ImageDetailsSheetProps) 
                 })}
               </ol>
             )}
+          </SheetSection>
+
+          <SheetSection title="Registry tags">
+            <RegistryTagsPanel
+              repoTags={inspect.RepoTags ?? image?.RepoTags ?? []}
+              repoDigests={inspect.RepoDigests ?? []}
+              nodeId={image?.nodeId ?? 0}
+              isAdmin={isAdmin}
+            />
           </SheetSection>
         </>
       )}

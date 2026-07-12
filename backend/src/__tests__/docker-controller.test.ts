@@ -431,6 +431,10 @@ describe('DockerController - pruneDanglingImages', () => {
 // ── getClassifiedResources ─────────────────────────────────────────────
 
 describe('DockerController - getClassifiedResources', () => {
+  beforeEach(() => {
+    CacheService.getInstance().invalidate('project-name-map');
+  });
+
   it('classifies managed and unmanaged images', async () => {
     mockDocker.listImages.mockResolvedValue([
       { Id: 'img1', RepoTags: ['nginx:latest'], Size: 100, Containers: 1 },
@@ -450,12 +454,36 @@ describe('DockerController - getClassifiedResources', () => {
     const managed = result.images.find(i => i.Id === 'img1');
     expect(managed!.managedStatus).toBe('managed');
     expect(managed!.managedBy).toBe('my-stack');
+    expect(managed!.usedByStacks).toEqual(['my-stack']);
 
     const unmanaged = result.images.find(i => i.Id === 'img2');
     expect(unmanaged!.managedStatus).toBe('unmanaged');
+    expect(unmanaged!.usedByStacks).toEqual([]);
 
     const unused = result.images.find(i => i.Id === 'img3');
     expect(unused!.managedStatus).toBe('unused');
+    expect(unused!.usedByStacks).toEqual([]);
+  });
+
+  it('aggregates multi-stack usedByStacks with stable sort and managedBy first entry', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-shared', RepoTags: ['postgres:16'], Size: 100, Containers: 2 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([
+      { ImageID: 'img-shared', Labels: { 'com.docker.compose.project': 'zeta' } },
+      { ImageID: 'img-shared', Labels: { 'com.docker.compose.project': 'alpha' } },
+      { ImageID: 'img-shared', Labels: { 'com.docker.compose.project': 'alpha' } },
+    ]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+    mockDocker.listNetworks.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getClassifiedResources(['alpha', 'zeta']);
+    const img = result.images.find(i => i.Id === 'img-shared');
+
+    expect(img!.usedByStacks).toEqual(['alpha', 'zeta']);
+    expect(img!.managedBy).toBe('alpha');
+    expect(img!.managedStatus).toBe('managed');
   });
 
   it('classifies system networks', async () => {
@@ -511,8 +539,8 @@ describe('DockerController - managed image prune accounting', () => {
     ],
   };
   const unusedManagedListMock = [
-    { Id: 'img-a', Containers: 0, Size: 1000 },
-    { Id: 'img-b', Containers: 0, Size: 1000 },
+    { Id: 'img-a', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
+    { Id: 'img-b', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
     { Id: 'img-c', Containers: 1, Size: 800 },  // in-use; filtered by Containers===0
   ];
 
@@ -543,8 +571,8 @@ describe('DockerController - managed image prune accounting', () => {
       })
       .mockResolvedValueOnce({ LayersSize: 3400, Images: [] });
     mockDocker.listImages.mockResolvedValue([
-      { Id: 'img-a', Containers: 0, Size: 1000 },
-      { Id: 'img-b', Containers: 0, Size: 1000 },
+      { Id: 'img-a', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
+      { Id: 'img-b', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
     ]);
     mockDocker.listContainers.mockResolvedValue([]);
     const removeFn = vi.fn().mockResolvedValue(undefined);
@@ -571,8 +599,8 @@ describe('DockerController - managed image prune accounting', () => {
       })
       .mockRejectedValueOnce(new Error('df unavailable after prune'));
     mockDocker.listImages.mockResolvedValue([
-      { Id: 'img-a', Containers: 0, Size: 1000 },
-      { Id: 'img-b', Containers: 0, Size: 1000 },
+      { Id: 'img-a', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
+      { Id: 'img-b', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
     ]);
     mockDocker.listContainers.mockResolvedValue([]);
     mockDocker.getImage.mockReturnValue({ remove: vi.fn().mockResolvedValue(undefined) });
@@ -593,7 +621,7 @@ describe('DockerController - managed image prune accounting', () => {
       .mockRejectedValueOnce(new Error('df unavailable before'))
       .mockRejectedValueOnce(new Error('df unavailable after'));
     mockDocker.listImages.mockResolvedValue([
-      { Id: 'img-a', Containers: 0, Size: 1000 },
+      { Id: 'img-a', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
     ]);
     mockDocker.listContainers.mockResolvedValue([]);
     const removeFn = vi.fn().mockResolvedValue(undefined);
@@ -619,8 +647,8 @@ describe('DockerController - managed image prune accounting', () => {
       ],
     });
     mockDocker.listImages.mockResolvedValue([
-      { Id: 'img-a', Containers: 0, Size: 1000 },
-      { Id: 'img-b', Containers: 0, Size: 1000 },
+      { Id: 'img-a', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
+      { Id: 'img-b', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
     ]);
     mockDocker.listContainers.mockResolvedValue([]);
 
@@ -644,8 +672,8 @@ describe('DockerController - managed image prune accounting', () => {
     };
     const dfAfter = { LayersSize: 3400, Images: [] };
     const listImages = [
-      { Id: 'img-a', Containers: 0, Size: 1000 },
-      { Id: 'img-b', Containers: 0, Size: 1000 },
+      { Id: 'img-a', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
+      { Id: 'img-b', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
     ];
 
     // Estimate path: df called once.
@@ -669,8 +697,8 @@ describe('DockerController - managed image prune accounting', () => {
     // The accounting should still process img-b, defaulting its SharedSize to 0.
     mockDocker.df.mockResolvedValue({ Images: [{ Id: 'img-a', SharedSize: 400 }] });
     mockDocker.listImages.mockResolvedValue([
-      { Id: 'img-a', Containers: 0, Size: 1000 },
-      { Id: 'img-b', Containers: 0, Size: 1000 },
+      { Id: 'img-a', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
+      { Id: 'img-b', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
     ]);
     mockDocker.listContainers.mockResolvedValue([]);
 
@@ -687,8 +715,8 @@ describe('DockerController - managed image prune accounting', () => {
     // rather than failing the prune.
     mockDocker.df.mockRejectedValue(new Error('daemon df failed'));
     mockDocker.listImages.mockResolvedValue([
-      { Id: 'img-a', Containers: 0, Size: 1000 },
-      { Id: 'img-b', Containers: 0, Size: 1000 },
+      { Id: 'img-a', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
+      { Id: 'img-b', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
     ]);
     mockDocker.listContainers.mockResolvedValue([]);
 

@@ -1,12 +1,10 @@
 /**
- * Route-level test for F-6: when `docker system df` is slow, the prune
- * estimate endpoints must return 503 with code `docker_df_slow` instead
- * of hanging the admin's tab. Mirrors the pattern from
- * system-maintenance-self-protect.test.ts.
+ * Route-level tests for prune estimate timeouts (F-6) and the fingerprinted
+ * prune plan / stale-409 path used by Resources.
  *
  * Uses real timers because supertest dispatches lazily and vi.useFakeTimers
  * does not compose cleanly with that pattern. Each timeout test waits the
- * full 8s `withTimeout` budget, so two such tests add ~17s to the file.
+ * full 8s withTimeout budget, so two such tests add ~17s to the file.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import request from 'supertest';
@@ -48,6 +46,18 @@ function stubEstimate(impl: () => Promise<{ reclaimableBytes: number }>) {
   } as unknown as ReturnType<typeof DockerController.getInstance>);
 }
 
+function samplePlan(fingerprint = 'abc123') {
+  return {
+    scope: 'managed' as const,
+    targets: ['volumes' as const],
+    items: [{ target: 'volumes' as const, id: 'v1', name: 'v1', sizeBytes: 42 }],
+    reclaimableBytes: 42,
+    fingerprint,
+    createdAt: Date.now(),
+    nodeId: 1,
+  };
+}
+
 describe('Prune estimate endpoints return 503 on slow docker df (F-6)', () => {
   it('POST /api/system/prune/estimate returns 503 docker_df_slow when estimateSystemReclaim never settles', async () => {
     stubFsStacks();
@@ -63,15 +73,15 @@ describe('Prune estimate endpoints return 503 on slow docker df (F-6)', () => {
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('docker_df_slow');
     expect(res.body.error).toMatch(/Docker daemon is busy/);
-    // Confirm the timeout actually fired (~8s), not an unrelated early
-    // 5xx that happened to look right.
     expect(elapsed).toBeGreaterThanOrEqual(7_500);
     expect(elapsed).toBeLessThan(15_000);
   }, 20_000);
 
-  it('POST /api/system/prune/system dry-run returns 503 docker_df_slow when estimateSystemReclaim never settles', async () => {
+  it('POST /api/system/prune/system dry-run returns 503 docker_df_slow when buildPrunePlan never settles', async () => {
     stubFsStacks();
-    stubEstimate(() => new Promise(() => { /* never resolves */ }));
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockImplementation(() => new Promise(() => { /* never resolves */ })),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
 
     const res = await request(app)
       .post('/api/system/prune/system')
@@ -106,5 +116,87 @@ describe('Prune estimate endpoints return 503 on slow docker df (F-6)', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.code).not.toBe('docker_df_slow');
+  });
+});
+
+describe('Prune plan routes', () => {
+  it('POST /api/system/prune/plan returns an itemized plan', async () => {
+    stubFsStacks();
+    const plan = samplePlan('fp-plan');
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(plan),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const res = await request(app)
+      .post('/api/system/prune/plan')
+      .set('Authorization', authHeader)
+      .send({ target: 'volumes', scope: 'managed' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.fingerprint).toBe('fp-plan');
+    expect(res.body.items).toHaveLength(1);
+    expect(res.body.reclaimableBytes).toBe(42);
+  });
+
+  it('POST /api/system/prune/system with a matching fingerprint executes the plan', async () => {
+    stubFsStacks();
+    const plan = samplePlan('fp-ok');
+    const executePrunePlan = vi.fn().mockResolvedValue({
+      outcomes: [{ id: 'v1', target: 'volumes', status: 'removed', sizeBytes: 42 }],
+      reclaimedBytes: 42,
+      success: true,
+    });
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(plan),
+      executePrunePlan,
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const res = await request(app)
+      .post('/api/system/prune/system')
+      .set('Authorization', authHeader)
+      .send({ target: 'volumes', scope: 'managed', planFingerprint: 'fp-ok' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.reclaimedBytes).toBe(42);
+    expect(res.body.outcomes).toHaveLength(1);
+    expect(executePrunePlan).toHaveBeenCalled();
+  });
+
+  it('POST /api/system/prune/system returns 409 PRUNE_PLAN_STALE on fingerprint mismatch', async () => {
+    stubFsStacks();
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(samplePlan('fp-current')),
+      executePrunePlan: vi.fn(),
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const res = await request(app)
+      .post('/api/system/prune/system')
+      .set('Authorization', authHeader)
+      .send({ target: 'volumes', scope: 'managed', planFingerprint: 'fp-stale' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PRUNE_PLAN_STALE');
+  });
+
+  it('dry-run returns plan fields without executing deletes', async () => {
+    stubFsStacks();
+    const plan = samplePlan('fp-dry');
+    const executePrunePlan = vi.fn();
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      buildPrunePlan: vi.fn().mockResolvedValue(plan),
+      executePrunePlan,
+    } as unknown as ReturnType<typeof DockerController.getInstance>);
+
+    const res = await request(app)
+      .post('/api/system/prune/system')
+      .set('Authorization', authHeader)
+      .send({ target: 'volumes', scope: 'managed', dryRun: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.dryRun).toBe(true);
+    expect(res.body.fingerprint).toBe('fp-dry');
+    expect(res.body.items).toHaveLength(1);
+    expect(executePrunePlan).not.toHaveBeenCalled();
   });
 });

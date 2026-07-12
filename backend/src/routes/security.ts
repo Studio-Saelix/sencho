@@ -114,6 +114,10 @@ function parseScannersInput(raw: unknown): readonly ('vuln' | 'secret')[] | unde
   return Array.from(out) as readonly ('vuln' | 'secret')[];
 }
 
+function optionalTrimmedQuery(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
 function shapeScanForResponse(scan: VulnerabilityScan): Omit<VulnerabilityScan, 'policy_evaluation'> & {
   policy_evaluation: ReturnType<typeof parsePolicyEvaluation>;
 } {
@@ -556,10 +560,9 @@ securityRouter.post('/scan-node', authMiddleware, async (req: Request, res: Resp
 securityRouter.get('/scans', authMiddleware, (req: Request, res: Response) => {
   try {
     const imageRef = typeof req.query.imageRef === 'string' ? req.query.imageRef : undefined;
-    const imageRefLike =
-      typeof req.query.imageRefLike === 'string' && req.query.imageRefLike.trim()
-        ? req.query.imageRefLike.trim()
-        : undefined;
+    const imageRefLike = optionalTrimmedQuery(req.query.imageRefLike);
+    const imageDigest = optionalTrimmedQuery(req.query.imageDigest);
+    const imageIdentityLike = optionalTrimmedQuery(req.query.imageIdentityLike);
     const statusParam = typeof req.query.status === 'string' ? req.query.status : undefined;
     const status =
       statusParam === 'completed' || statusParam === 'in_progress' || statusParam === 'failed'
@@ -570,6 +573,8 @@ securityRouter.get('/scans', authMiddleware, (req: Request, res: Response) => {
     const result = DatabaseService.getInstance().getVulnerabilityScans(req.nodeId, {
       imageRef,
       imageRefLike,
+      imageDigest,
+      imageIdentityLike,
       status,
       limit,
       offset,
@@ -1579,12 +1584,14 @@ securityRouter.get('/compare', authMiddleware, (req: Request, res: Response): vo
       id: a.id,
       scanned_at: a.scanned_at,
       image_ref: a.image_ref,
+      image_digest: a.image_digest,
       total_vulnerabilities: a.total_vulnerabilities,
     },
     scanB: {
       id: b.id,
       scanned_at: b.scanned_at,
       image_ref: b.image_ref,
+      image_digest: b.image_digest,
       total_vulnerabilities: b.total_vulnerabilities,
     },
     added,
