@@ -1,7 +1,7 @@
 import { Button } from '@/components/ui/button';
 import type { useAuth } from '@/context/AuthContext';
+import { isNetworkingActionVisible } from '@/lib/networking';
 import type { NetworkingFinding, NetworkingRecommendedAction } from '@/types/networking';
-export type { NetworkingFinding } from '@/types/networking';
 
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'info'] as const;
 
@@ -11,16 +11,6 @@ const SEVERITY_CLASS: Record<NetworkingFinding['severity'], string> = {
   high: 'text-destructive',
   critical: 'text-destructive',
 };
-
-export function isNetworkingActionVisible(
-  action: NetworkingRecommendedAction,
-  canEdit: ReturnType<typeof useAuth>['can'],
-  isAdmin: boolean,
-): boolean {
-  if (action.kind === 'create-network') return isAdmin;
-  if (action.kind === 'set-exposure-intent') return canEdit('stack:edit', 'stack', action.stack);
-  return true;
-}
 
 export function NetworkingFindingsList({
   findings,
@@ -78,7 +68,11 @@ export function NetworkingFindingsList({
                   {!disabled && finding.recommendedActions.length > 0 && (
                     <div className="mt-3 flex flex-wrap gap-2">
                       {finding.recommendedActions
-                        .filter((action) => isNetworkingActionVisible(action, canEdit, isAdmin))
+                        .filter((action) => isNetworkingActionVisible(
+                          action,
+                          isAdmin,
+                          (stack) => canEdit('stack:edit', 'stack', stack),
+                        ))
                         .map((action) => (
                           <Button
                             key={`${finding.id}-${action.kind}-${action.label}`}

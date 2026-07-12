@@ -1,9 +1,19 @@
 import type {
   NetworkingFinding, NetworkingNetworkRow, NetworkingOverviewEnvelope,
-  NodeNetworkingOverview,
+  NetworkingRecommendedAction, NodeNetworkingOverview,
 } from '@/types/networking';
 
 export type NetworkFilter = 'all' | 'managed' | 'external' | 'system' | 'shared' | 'exposed' | 'drift';
+
+export function isNetworkingActionVisible(
+  action: NetworkingRecommendedAction,
+  isAdmin: boolean,
+  canEditStack: (stack: string) => boolean,
+): boolean {
+  if (action.kind === 'create-network') return isAdmin;
+  if (action.kind === 'set-exposure-intent') return canEditStack(action.stack);
+  return true;
+}
 
 function matchesNetworkFilter(row: NetworkingNetworkRow, filter: NetworkFilter): boolean {
   switch (filter) {

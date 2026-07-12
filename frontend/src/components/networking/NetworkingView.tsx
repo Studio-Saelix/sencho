@@ -18,11 +18,12 @@ import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog'
 import { ConfirmModal } from '@/components/ui/modal';
 import { NetworkDetailDrawer } from './NetworkDetailDrawer';
 import { NetworkInventoryTable } from './NetworkInventoryTable';
-import { NetworkingFindingsList, isNetworkingActionVisible } from './NetworkingFindingsList';
+import { NetworkingFindingsList } from './NetworkingFindingsList';
 import { NetworkingTopologyPanel } from './NetworkingTopologyPanel';
 import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import {
   adaptNetworkingOverview, buildExternalNetworkSnippet, canUseNetworkName, getNetworkingPosture,
+  isNetworkingActionVisible,
 } from '@/lib/networking';
 import type {
   NetworkingFinding, NetworkingOverviewEnvelope, NetworkingRecommendedAction,
@@ -285,7 +286,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           </p>
           {!isLegacy && (() => {
             const primary = findings[0]?.recommendedActions.find((action) =>
-              isNetworkingActionVisible(action, can, isAdmin),
+              isNetworkingActionVisible(action, isAdmin, (stack) => can('stack:edit', 'stack', stack)),
             );
             return primary ? (
               <Button className="mt-3" size="sm" onClick={() => void dispatchAction(primary)}>
