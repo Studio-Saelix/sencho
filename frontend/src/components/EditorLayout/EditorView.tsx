@@ -216,6 +216,7 @@ export interface EditorViewProps {
     // Mobile-only: notifications + more-menu cluster for the detail header right
     // slot (the global TopBar is dropped on the full-screen detail surface).
     headerActions?: React.ReactNode;
+    requestedAnatomyTab?: 'networking' | 'doctor';
 
     stackMuteActions?: ReturnType<typeof useStackMuteActions>;
 }
@@ -679,6 +680,7 @@ export function EditorView(props: EditorViewProps) {
                         applying={loadingAction === 'update'}
                         canEdit={can('stack:edit', 'stack', stackName)}
                         notifications={notifications}
+                        requestedTab={props.requestedAnatomyTab}
                     />
                 )}
             </div>

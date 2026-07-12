@@ -22,25 +22,15 @@ import { TogglePill } from '@/components/ui/toggle-pill';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import {
+    DEFAULT_TOPOLOGY_FILTERS, filterTopologyNetworks, isMissingTopologyNetwork, normalizeTopologyResponse,
+    type NetworkingTopologyFilters,
+} from '@/lib/networkingTopology';
+import type { NetworkingTopologyContainer, NetworkingTopologyNetwork } from '@/types/networking';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface TopologyContainer {
-    id: string;
-    name: string;
-    ip: string;
-    state: string;
-    image: string;
-    stack: string | null;
-}
-
-interface TopologyNetwork {
-    Id: string;
-    Name: string;
-    Driver: string;
-    managedStatus: 'managed' | 'unmanaged' | 'system';
-    containers: TopologyContainer[];
-}
+type TopologyNetwork = NetworkingTopologyNetwork;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -64,6 +54,12 @@ interface ContainerNodeData {
     state: string;
     image: string;
     stack: string | null;
+    service: string | null;
+    composeAliases: string[];
+    publishedPorts: NetworkingTopologyContainer['publishedPorts'];
+    exposureIntent: NetworkingTopologyContainer['exposureIntent'];
+    findingIds: string[];
+    driftFlags: string[];
 }
 
 function ContainerNodeComponent({ data }: { data: ContainerNodeData }) {
@@ -103,13 +99,14 @@ function ContainerNodeComponent({ data }: { data: ContainerNodeData }) {
     );
 }
 
-function NetworkNodeComponent({ data }: { data: { label: string; driver: string; status: string } }) {
-    const statusColor = data.status === 'managed' ? 'text-success' : data.status === 'system' ? 'text-muted-foreground' : 'text-warning';
+function NetworkNodeComponent({ data }: { data: { label: string; driver: string; ownership: NetworkingTopologyNetwork['ownership']; missing: boolean; exposed: boolean; drift: boolean } }) {
+    const statusColor = data.ownership === 'sencho-managed' ? 'text-success' : data.ownership === 'system' ? 'text-muted-foreground' : data.missing ? 'text-destructive' : 'text-warning';
     return (
         <div className={cn(
             'rounded-lg border-2 border-dashed px-4 py-2.5 min-w-[140px] text-center',
-            data.status === 'managed' ? 'border-success/30 bg-success/5' :
-                data.status === 'system' ? 'border-muted-foreground/20 bg-muted/20' :
+            data.missing ? 'border-destructive/40 bg-destructive/5 cursor-pointer' :
+            data.ownership === 'sencho-managed' ? 'border-success/30 bg-success/5 cursor-pointer' :
+                data.ownership === 'system' ? 'border-muted-foreground/20 bg-muted/20 cursor-pointer' :
                     'border-warning/30 bg-warning/5'
         )}>
             <Handle type="target" position={Position.Top} className="!bg-transparent !border-none !w-0 !h-0" />
@@ -118,6 +115,11 @@ function NetworkNodeComponent({ data }: { data: { label: string; driver: string;
                 <span className="text-xs font-medium">{data.label}</span>
             </div>
             <Badge variant="outline" className="text-[9px] h-4">{data.driver}</Badge>
+            {(data.exposed || data.drift || data.missing) && (
+                <div className="mt-1 font-mono text-[9px] uppercase text-stat-subtitle">
+                    {data.missing ? 'missing external' : data.drift ? 'drift' : 'exposed'}
+                </div>
+            )}
             <Handle type="source" position={Position.Bottom} className="!bg-transparent !border-none !w-0 !h-0" />
         </div>
     );
@@ -157,24 +159,33 @@ function layoutGraph(
         state: string;
         image: string;
         stack: string | null;
+        service: string | null;
+        composeAliases: string[];
+        publishedPorts: NetworkingTopologyContainer['publishedPorts'];
+        exposureIntent: NetworkingTopologyContainer['exposureIntent'];
+        findingIds: string[];
+        driftFlags: string[];
     }>();
     for (const net of networksList) {
         for (const c of net.containers) {
             if (!containerMap.has(c.id)) {
                 containerMap.set(c.id, {
                     name: c.name, networks: [], ipAddresses: {},
-                    state: c.state, image: c.image, stack: c.stack,
+                    state: c.state, image: c.image, stack: c.stack, service: c.service,
+                    composeAliases: c.composeAliases, publishedPorts: c.publishedPorts,
+                    exposureIntent: c.exposureIntent,
+                    findingIds: c.findingIds, driftFlags: c.driftFlags,
                 });
             }
             const entry = containerMap.get(c.id)!;
-            entry.networks.push(net.Name);
-            entry.ipAddresses[net.Name] = c.ip;
+            entry.networks.push(net.name);
+            entry.ipAddresses[net.name] = c.ip;
         }
     }
 
     // Add nodes to dagre graph
     for (const net of networksList) {
-        g.setNode(`net-${net.Id}`, { width: 160, height: 60 });
+        g.setNode(`net-${net.id}`, { width: 160, height: 60 });
     }
     for (const [id] of containerMap) {
         g.setNode(`ctr-${id}`, { width: 200, height: 100 });
@@ -186,11 +197,11 @@ function layoutGraph(
     networksList.forEach((net, ni) => {
         const color = EDGE_COLORS[ni % EDGE_COLORS.length];
         for (const c of net.containers) {
-            const edgeKey = `${net.Id}-${c.id}`;
+                const edgeKey = `${net.id}-${c.id}`;
             if (!seenEdges.has(edgeKey)) {
                 seenEdges.add(edgeKey);
-                g.setEdge(`net-${net.Id}`, `ctr-${c.id}`);
-                edgeList.push({ netId: net.Id, ctrId: c.id, color });
+                g.setEdge(`net-${net.id}`, `ctr-${c.id}`);
+                edgeList.push({ netId: net.id, ctrId: c.id, color });
             }
         }
     });
@@ -200,12 +211,18 @@ function layoutGraph(
     // Convert dagre positions (center-based) to React Flow positions (top-left)
     const flowNodes: Node[] = [];
     for (const net of networksList) {
-        const pos = g.node(`net-${net.Id}`);
+        const pos = g.node(`net-${net.id}`);
         flowNodes.push({
-            id: `net-${net.Id}`,
+            id: `net-${net.id}`,
             type: 'network',
             position: { x: pos.x - pos.width / 2, y: pos.y - pos.height / 2 },
-            data: { label: net.Name, driver: net.Driver, status: net.managedStatus },
+            data: {
+                label: net.name, driver: net.driver, ownership: net.ownership,
+                missing: isMissingTopologyNetwork(net),
+                exposed: net.containers.some((container) => container.publishedPorts.length > 0),
+                drift: net.findingIds.length > 0 || net.containers.some((container) => container.findingIds.length > 0 || container.driftFlags.length > 0),
+                network: net,
+            },
             draggable: true,
         });
     }
@@ -223,6 +240,12 @@ function layoutGraph(
                 state: ctr.state,
                 image: ctr.image,
                 stack: ctr.stack,
+                service: ctr.service,
+                composeAliases: ctr.composeAliases,
+                publishedPorts: ctr.publishedPorts,
+                exposureIntent: ctr.exposureIntent,
+                findingIds: ctr.findingIds,
+                driftFlags: ctr.driftFlags,
             },
             draggable: true,
         });
@@ -243,19 +266,25 @@ function layoutGraph(
 
 interface NetworkTopologyViewProps {
     onContainerClick?: (containerId: string, containerName: string) => void;
+    onContainerSelect?: (container: NetworkingTopologyContainer) => void;
+    onNetworkClick?: (network: NetworkingTopologyNetwork) => void;
     /** API path for topology data. Defaults to the Resources maintenance route. */
     endpoint?: string;
     /** When false, hides the include-system toggle (caller controls scope). */
     showSystemToggle?: boolean;
     /** Controlled include-system value when showSystemToggle is false. */
     includeSystem?: boolean;
+    filters?: NetworkingTopologyFilters;
 }
 
 export default function NetworkTopologyView({
     onContainerClick,
+    onContainerSelect,
+    onNetworkClick,
     endpoint = '/system/networks/topology',
     showSystemToggle = true,
     includeSystem: controlledIncludeSystem,
+    filters,
 }: NetworkTopologyViewProps) {
     const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
@@ -264,41 +293,64 @@ export default function NetworkTopologyView({
     const includeSystem = controlledIncludeSystem ?? internalIncludeSystem;
     const onContainerClickRef = useRef(onContainerClick);
     onContainerClickRef.current = onContainerClick;
+    const onContainerSelectRef = useRef(onContainerSelect);
+    onContainerSelectRef.current = onContainerSelect;
+    const onNetworkClickRef = useRef(onNetworkClick);
+    onNetworkClickRef.current = onNetworkClick;
+    const [runtimeAvailable, setRuntimeAvailable] = useState(true);
+    const [loadError, setLoadError] = useState(false);
 
     const fetchTopology = useCallback(async () => {
         setLoading(true);
+        setLoadError(false);
         try {
             const res = await apiFetch(`${endpoint}?includeSystem=${includeSystem}`);
             if (!res.ok) throw new Error('Failed to fetch topology');
-            const inspected = await res.json();
-            const networksList: TopologyNetwork[] = Array.isArray(inspected)
-              ? inspected
-              : (inspected.networks ?? []).map((n: {
-                  id: string; name: string; driver: string; isSystem: boolean; stack: string | null;
-                  containers: TopologyContainer[];
-                }) => ({
-                  Id: n.id,
-                  Name: n.name,
-                  Driver: n.driver,
-                  managedStatus: n.isSystem ? 'system' as const : (n.stack ? 'managed' as const : 'unmanaged' as const),
-                  containers: n.containers,
-                }));
+            const inspected: unknown = await res.json();
+            const topology = normalizeTopologyResponse(inspected);
+            setRuntimeAvailable(topology.runtimeAvailable);
+            const networksList: TopologyNetwork[] = filterTopologyNetworks(
+                topology.networks.filter((network) => includeSystem || !network.isSystem),
+                filters ?? DEFAULT_TOPOLOGY_FILTERS,
+            );
             const { nodes: layoutNodes, edges: layoutEdges } = layoutGraph(networksList);
             setNodes(layoutNodes);
             setEdges(layoutEdges);
         } catch (error) {
             const err = error as Record<string, unknown>;
             toast.error(String(err?.message || err?.error || 'Something went wrong.'));
+            setLoadError(true);
+            setNodes([]);
+            setEdges([]);
         } finally {
             setLoading(false);
         }
-    }, [setNodes, setEdges, includeSystem, endpoint]);
+    }, [setNodes, setEdges, includeSystem, endpoint, filters]);
 
     useEffect(() => { fetchTopology(); }, [fetchTopology]);
 
     const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
-        if (node.type === 'container' && (!node.data.state || node.data.state === 'running')) {
-            onContainerClickRef.current?.(node.data.containerId as string, node.data.label as string);
+        if (node.type === 'network') {
+            onNetworkClickRef.current?.(node.data.network as NetworkingTopologyNetwork);
+        }
+        if (node.type === 'container') {
+            onContainerSelectRef.current?.({
+                id: node.data.containerId as string,
+                name: node.data.label as string,
+                ip: '',
+                state: node.data.state as string,
+                image: node.data.image as string,
+                stack: node.data.stack as string | null,
+                service: node.data.service as string | null,
+                composeAliases: node.data.composeAliases as string[],
+                publishedPorts: node.data.publishedPorts as NetworkingTopologyContainer['publishedPorts'],
+                exposureIntent: node.data.exposureIntent as NetworkingTopologyContainer['exposureIntent'],
+                findingIds: node.data.findingIds as string[],
+                driftFlags: node.data.driftFlags as string[],
+            });
+            if (!node.data.state || node.data.state === 'running') {
+                onContainerClickRef.current?.(node.data.containerId as string, node.data.label as string);
+            }
         }
     }, []);
 
@@ -316,10 +368,18 @@ export default function NetworkTopologyView({
             <div className="flex flex-col items-center justify-center h-[400px] text-muted-foreground gap-3">
                 <Network className="w-8 h-8 opacity-40" strokeWidth={1.5} />
                 <p className="text-sm">
-                    {includeSystem ? 'No networks found.' : 'No user-created networks found.'}
+                    {loadError
+                      ? 'Could not load topology for this node.'
+                      : !runtimeAvailable
+                        ? 'Docker runtime unavailable.'
+                        : includeSystem
+                          ? 'No networks found.'
+                          : 'No user-created networks found.'}
                 </p>
                 <p className="text-xs opacity-70">
-                    {includeSystem
+                    {!runtimeAvailable
+                        ? 'Topology is unavailable until Docker responds on this node.'
+                        : includeSystem
                         ? 'No Docker networks are available on this node.'
                         : 'Create a network or deploy stacks with custom networks to see the topology.'}
                 </p>

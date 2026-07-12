@@ -1,13 +1,8 @@
-/**
- * DTOs for the node-scoped Networking operator page. These payloads never carry
- * raw Docker label values or inspect secrets; label keys only on detail views.
- */
-import type { StackNetworkFacts } from './types';
+export const NETWORKING_SCHEMA_VERSION = 2 as const;
 
-export const NETWORKING_SCHEMA_VERSION = 2;
 export type NetworkingOwnership = 'system' | 'sencho-managed' | 'compose-managed' | 'unmanaged';
+export type NetworkingFindingSeverity = 'critical' | 'high' | 'medium' | 'info';
 
-/** Phase A row: identity and ownership from the dependency snapshot only. */
 export interface NetworkingNetworkBase {
   id: string;
   name: string;
@@ -26,42 +21,16 @@ export interface NetworkingNetworkBase {
   isExternalDependency: boolean;
 }
 
-export interface NetworkingExposureSummary {
-  publishingStackCount: number;
-  broadExposureCount: number;
-  unclassifiedStackCount: number;
-}
-
-/** Phase B row: inventory enrichment after stack facts and findings exist. */
 export interface NetworkingNetworkRow extends NetworkingNetworkBase {
   sharedStackCount: number;
-  exposureSummary: NetworkingExposureSummary | null;
+  exposureSummary: {
+    publishingStackCount: number;
+    broadExposureCount: number;
+    unclassifiedStackCount: number;
+  } | null;
   findingIds: string[];
 }
 
-export const NETWORKING_FINDING_KINDS = [
-  'external-network-missing',
-  'network-missing',
-  'network-undeclared',
-  'declared-network-unused',
-  'foreign-network-attachment',
-  'alias-collision',
-  'network-mode-host',
-  'exposure-unclassified',
-  'exposure-all-interfaces',
-  'exposure-internal-conflict',
-  'shared-network',
-  'network-name-collision',
-  'service-name-collision',
-  'large-flat-network',
-  'advanced-driver-caveat',
-  'runtime-unavailable',
-  'exposure-intent-mismatch',
-] as const;
-
-export type NetworkingFindingKind = typeof NETWORKING_FINDING_KINDS[number];
-
-export type NetworkingFindingSeverity = 'critical' | 'high' | 'medium' | 'info';
 export type NetworkingRecommendedAction =
   | { kind: 'open-stack'; label: string; stack: string }
   | { kind: 'open-stack-networking'; label: string; stack: string }
@@ -78,7 +47,7 @@ export type NetworkingRecommendedAction =
 
 export interface NetworkingFinding {
   id: string;
-  kind: NetworkingFindingKind;
+  kind: string;
   severity: NetworkingFindingSeverity;
   title: string;
   message: string;
@@ -103,6 +72,13 @@ export interface NodeNetworkingOverview {
   renderFailedStacks: string[];
 }
 
+export interface NetworkFactPort {
+  hostIp: string | null;
+  published: string | null;
+  target: string;
+  protocol: string;
+}
+
 export interface NetworkingTopologyContainer {
   id: string;
   name: string;
@@ -112,8 +88,8 @@ export interface NetworkingTopologyContainer {
   stack: string | null;
   service: string | null;
   composeAliases: string[];
-  publishedPorts: import('./types').NetworkFactPort[];
-  exposureIntent: import('./types').ExposureIntent | null;
+  publishedPorts: NetworkFactPort[];
+  exposureIntent: 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown' | null;
   findingIds: string[];
   driftFlags: string[];
 }
@@ -141,14 +117,29 @@ export interface NetworkingTopology {
   includeSystem: boolean;
 }
 
-export interface NodeNetworkingAggregate {
+export interface NetworkingActivity {
+  id: number;
+  category: string;
+  message: string;
+  timestamp: string | number;
+  stack_name?: string | null;
+}
+
+export interface NetworkingEnvelope {
+  schemaVersion: typeof NETWORKING_SCHEMA_VERSION;
+  runtimeAvailable: boolean;
+  generatedAt: string;
+}
+
+export interface NetworkingOverviewEnvelope extends NetworkingEnvelope {
   overview: NodeNetworkingOverview;
   networks: NetworkingNetworkRow[];
   findings: NetworkingFinding[];
-  topology?: NetworkingTopology;
-  stackFacts: StackNetworkFacts[];
-  runtimeAvailable: boolean;
-  recentActivity: import('../DatabaseService').NotificationHistory[];
+  recentActivity: NetworkingActivity[];
+}
+
+export interface NetworkingTopologyEnvelope extends NetworkingEnvelope {
+  networks: NetworkingTopologyNetwork[];
 }
 
 export interface SanitizedNetworkInspect {
@@ -166,10 +157,4 @@ export interface SanitizedNetworkInspect {
   labelKeys: string[];
   subnets: string[];
   gateways: string[];
-}
-
-export interface NetworkingEnvelope {
-  schemaVersion: typeof NETWORKING_SCHEMA_VERSION;
-  runtimeAvailable: boolean;
-  generatedAt: string;
 }

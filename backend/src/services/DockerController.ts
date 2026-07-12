@@ -221,6 +221,8 @@ export interface DependencyNetwork {
   driver: string;
   scope: string;
   isSystem: boolean;
+  ingress?: boolean;
+  enableIPv6?: boolean;
   /** Raw com.docker.compose.project label (may not map to a known stack). */
   composeProject: string | null;
   /** Resolved Sencho stack this network belongs to, or null. */
@@ -1774,12 +1776,15 @@ class DockerController {
 
     const networks: DependencyNetwork[] = networksRaw.map((net: any) => {
       const project = net.Labels?.['com.docker.compose.project'] ?? null;
+      const ingress = net.Ingress === true;
       return {
         id: net.Id,
         name: net.Name,
         driver: net.Driver ?? 'bridge',
         scope: net.Scope ?? 'local',
-        isSystem: DockerController.SYSTEM_NETWORKS.has(net.Name),
+        isSystem: DockerController.SYSTEM_NETWORKS.has(net.Name) || ingress,
+        ingress,
+        ...(typeof net.EnableIPv6 === 'boolean' ? { enableIPv6: net.EnableIPv6 } : {}),
         composeProject: project,
         stack: DockerController.resolveProjectLabel(project ?? undefined, knownSet, projectToStack),
       };
@@ -1824,10 +1829,22 @@ class DockerController {
       driver: net.driver,
       scope: net.scope,
       isSystem: net.isSystem,
+      ingress: net.ingress === true,
+      enableIPv6: net.enableIPv6,
       composeProject: net.composeProject,
       stack: net.stack,
       connectedCount: connectedByNetwork.get(net.id) ?? connectedByNetwork.get(net.name) ?? 0,
       isSencho: selfIdentity.isOwnNetwork(net.id) || selfIdentity.isOwnNetwork(net.name),
+      ownership: net.isSystem || net.ingress === true
+        ? 'system'
+        : net.stack
+          ? 'sencho-managed'
+          : net.composeProject
+            ? 'compose-managed'
+            : 'unmanaged',
+      declaredByStacks: [],
+      declaredExternalByStacks: [],
+      isExternalDependency: false,
     }));
   }
 

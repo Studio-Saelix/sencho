@@ -332,6 +332,7 @@ export default function EditorLayout() {
   // Optimistically flip to the detail surface the instant a row is tapped,
   // before loadFile's fetch resolves selectedFile; cleared once it settles.
   const [pendingDetailStack, setPendingDetailStack] = useState<string | null>(null);
+  const [pendingAnatomyTab, setPendingAnatomyTab] = useState<'networking' | 'doctor' | undefined>();
   const [fleetUpdatesIntent, setFleetUpdatesIntent] = useState<{ tab: 'nodes' | 'changelog' } | null>(null);
 
   const handleFleetUpdatesIntentConsumed = useCallback(() => setFleetUpdatesIntent(null), []);
@@ -401,6 +402,14 @@ export default function EditorLayout() {
     }
   }, [pendingDetailStack, detailReady, isFileLoading, stacksLoadStatus, urlHydratingStack, routeDetailError]);
 
+  useEffect(() => {
+    if (pendingAnatomyTab && selectedFile && !isFileLoading) {
+      const timer = window.setTimeout(() => setPendingAnatomyTab(undefined), 0);
+      return () => window.clearTimeout(timer);
+    }
+    return undefined;
+  }, [isFileLoading, pendingAnatomyTab, selectedFile]);
+
   // A phone shows one surface at a time, so every mobile navigation tears down
   // the current detail and switches surfaces, guarding a dirty editor first.
   // `then` runs the destination-specific work (navigate to a view, open
@@ -436,9 +445,14 @@ export default function EditorLayout() {
   // is already active, else stash it and switch nodes (the node-switch effect
   // loads the pending stack once the registry settles). Mobile shows the
   // optimistic detail surface immediately.
-  const handleFleetNavigateToNode = (nodeId: number, stackName: string) => {
+  const handleFleetNavigateToNode = (
+    nodeId: number,
+    stackName: string,
+    destination: SenchoOpenStackDetail['destination'] = 'stack',
+  ) => {
     const node = nodes.find(n => n.id === nodeId);
     if (!node) return;
+    setPendingAnatomyTab(destination === 'anatomy-networking' ? 'networking' : destination === 'doctor' ? 'doctor' : undefined);
     if (isMobile) setPendingDetailStack(stackName);
     if (activeNode?.id === nodeId) {
       void stackActions.loadFile(stackName);
@@ -457,7 +471,7 @@ export default function EditorLayout() {
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<SenchoOpenStackDetail>).detail;
-      if (detail) openStackFromEventRef.current(detail.nodeId, detail.stackName);
+      if (detail) openStackFromEventRef.current(detail.nodeId, detail.stackName, detail.destination);
     };
     window.addEventListener(SENCHO_OPEN_STACK_EVENT, handler);
     return () => window.removeEventListener(SENCHO_OPEN_STACK_EVENT, handler);
@@ -526,6 +540,7 @@ export default function EditorLayout() {
   const renderEditor = (headerActions?: ReactNode) => (
     <EditorView
       headerActions={headerActions}
+      requestedAnatomyTab={pendingAnatomyTab}
       stackName={stackName}
       isDarkMode={isDarkMode}
       containers={containers}

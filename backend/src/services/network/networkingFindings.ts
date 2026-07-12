@@ -5,227 +5,328 @@
 import { createHash } from 'crypto';
 import type { DependencySnapshot } from '../DockerController';
 import { DatabaseService } from '../DatabaseService';
-import type { StackNetworkFacts } from './types';
+import type { ExposureIntent, StackNetworkFacts } from './types';
 import { isHostNetwork } from './normalize';
-import type { ExposureIntent } from './types';
-import type { NetworkingFinding, NetworkingFindingKind, NetworkingNetworkBase } from './networkingTypes';
+import type { NetworkingFinding, NetworkingFindingKind, NetworkingNetworkBase, NetworkingRecommendedAction } from './networkingTypes';
+
+type FindingExtra = Pick<NetworkingFinding, 'stack' | 'network' | 'service'>;
 
 function finding(
   kind: NetworkingFindingKind,
   severity: NetworkingFinding['severity'],
   title: string,
   message: string,
-  extra: Pick<NetworkingFinding, 'stack' | 'network' | 'service'> = {},
+  extra: FindingExtra = {},
+  recommendedActions: NetworkingRecommendedAction[] = [],
 ): NetworkingFinding {
   const idPayload = [kind, message, extra.stack ?? '', extra.network ?? '', extra.service ?? ''].join('\0');
-  const id = createHash('sha256').update(idPayload).digest('hex').slice(0, 16);
-  return { id, kind, severity, title, message, ...extra };
+  return {
+    id: createHash('sha256').update(idPayload).digest('hex').slice(0, 16),
+    kind,
+    severity,
+    title,
+    message,
+    ...extra,
+    evidence: [
+      ...(extra.stack ? [{ label: 'Stack', value: extra.stack }] : []),
+      ...(extra.service ? [{ label: 'Service', value: extra.service }] : []),
+      ...(extra.network ? [{ label: 'Network', value: extra.network }] : []),
+    ],
+    recommendedActions,
+  };
 }
 
-function effectiveIntent(
-  stack: string,
-  service: string,
-  stackIntent: ExposureIntent | null,
-  byService: Map<string, ExposureIntent>,
-): ExposureIntent | null {
+function stackActions(stack: string): NetworkingRecommendedAction[] {
+  return [{ kind: 'open-stack-networking', label: 'Open stack networking', stack }];
+}
+
+function effectiveIntent(stack: string, service: string, stackIntent: ExposureIntent | null, byService: Map<string, ExposureIntent>): ExposureIntent | null {
   return byService.get(service) ?? stackIntent;
 }
 
-function publishesPort(facts: StackNetworkFacts, serviceName: string): boolean {
-  const svc = facts.services.find(s => s.name === serviceName);
-  if (!svc) return false;
-  return svc.publishedPorts.length > 0 || isHostNetwork(svc.networkMode);
+function addExposureFindings(
+  out: NetworkingFinding[],
+  facts: StackNetworkFacts,
+  stackIntent: ExposureIntent | null,
+  byService: Map<string, ExposureIntent>,
+): void {
+  for (const service of facts.services) {
+    const hostMode = isHostNetwork(service.networkMode);
+    const publishes = hostMode || service.publishedPorts.length > 0;
+    if (!publishes) continue;
+    const intent = effectiveIntent(facts.stack, service.name, stackIntent, byService);
+    const intentAction: NetworkingRecommendedAction = {
+      kind: 'set-exposure-intent', label: 'Set exposure intent', stack: facts.stack, service: service.name,
+    };
+    if (hostMode) {
+      out.push(finding(
+        'network-mode-host',
+        intent === 'internal' ? 'high' : 'medium',
+        'Host network mode',
+        `Service "${service.name}" in stack "${facts.stack}" uses network_mode: host.`,
+        { stack: facts.stack, service: service.name },
+        [intentAction, ...stackActions(facts.stack)],
+      ));
+      continue;
+    }
+    const broad = service.publishedPorts.some(port => port.allInterfaces);
+    if (intent === null || intent === 'unknown') {
+      out.push(finding(
+        'exposure-unclassified',
+        'info',
+        'Publishing without exposure intent',
+        `Stack "${facts.stack}" publishes ports from "${service.name}" without a classified exposure intent.`,
+        { stack: facts.stack, service: service.name },
+        [intentAction],
+      ));
+    }
+    if (intent === 'internal' && service.publishedPorts.some(port => !port.loopbackOnly)) {
+      out.push(finding(
+        'exposure-intent-mismatch',
+        'high',
+        'Internal intent with host publish',
+        `Service "${service.name}" is classified internal but publishes ports to the host.`,
+        { stack: facts.stack, service: service.name },
+        [intentAction],
+      ));
+    } else if (intent === 'temporary' && broad) {
+      out.push(finding(
+        'exposure-intent-mismatch',
+        'medium',
+        'Temporary exposure is broadly bound',
+        `Service "${service.name}" is marked temporary and publishes on all interfaces.`,
+        { stack: facts.stack, service: service.name },
+        [intentAction],
+      ));
+    } else if (broad && intent !== 'public' && intent !== 'reverse-proxy') {
+      out.push(finding(
+        'exposure-all-interfaces',
+        'medium',
+        'Port bound on all interfaces',
+        `Service "${service.name}" in stack "${facts.stack}" publishes ports on all interfaces.`,
+        { stack: facts.stack, service: service.name },
+        [intentAction],
+      ));
+    }
+  }
 }
 
-export function buildNodeNetworkingFindings(
-  nodeId: number,
-  snapshot: DependencySnapshot,
-  stackFacts: StackNetworkFacts[],
-  baseNetworks: NetworkingNetworkBase[],
-): NetworkingFinding[] {
-  const out: NetworkingFinding[] = [];
-  const db = DatabaseService.getInstance();
-  const networkByName = new Map(baseNetworks.map(n => [n.name, n]));
-
-  for (const facts of stackFacts) {
-    if (!facts.renderable) continue;
-
-    const intents = db.getStackExposureIntents(nodeId, facts.stack);
-    const stackIntent = intents.find(i => i.service === '')?.intent ?? null;
-    const byService = new Map(intents.filter(i => i.service !== '').map(i => [i.service, i.intent]));
-
-    for (const net of facts.networks) {
-      if (net.external && facts.drift.missingFromRuntime.includes(net.name)) {
-        out.push(finding(
-          'external-network-missing',
-          'error',
-          'External network not found',
-          `Stack "${facts.stack}" requires the external network "${net.name}", which is not present on this node.`,
-          { stack: facts.stack, network: net.name },
-        ));
-      }
-      if (!net.external && net.createdByStack && facts.drift.missingFromRuntime.includes(net.name)) {
-        out.push(finding(
-          'network-missing',
-          'warning',
-          'Declared network missing',
-          `Stack "${facts.stack}" declares network "${net.name}" but it does not exist in the runtime.`,
-          { stack: facts.stack, network: net.name },
-        ));
-      }
-      if (!net.external && net.createdByStack && facts.drift.declaredButUnused.includes(net.key)) {
-        out.push(finding(
-          'declared-network-unused',
-          'info',
-          'Declared network unused',
-          `Stack "${facts.stack}" declares network "${net.name}" but no running service is attached.`,
-          { stack: facts.stack, network: net.name },
-        ));
-      }
-    }
-
-    for (const row of facts.drift.runtimeOnlyAttachments) {
-      out.push(finding(
-        'network-undeclared',
-        'warning',
-        'Undeclared network attachment',
-        `Container "${row.container}" (${row.service ?? 'unknown service'}) is attached to undeclared network "${row.network}".`,
-        { stack: facts.stack, network: row.network, service: row.service ?? undefined },
-      ));
-    }
-
-    for (const row of facts.drift.foreignNetworkAttachments) {
-      out.push(finding(
-        'foreign-network-attachment',
-        'warning',
-        'Foreign network attachment',
-        `Container "${row.container}" in stack "${facts.stack}" is attached to network "${row.network}" owned elsewhere.`,
-        { stack: facts.stack, network: row.network },
-      ));
-    }
-
-    for (const svc of facts.services) {
-      if (isHostNetwork(svc.networkMode)) {
-        out.push(finding(
-          'network-mode-host',
-          'warning',
-          'Host network mode',
-          `Service "${svc.name}" in stack "${facts.stack}" uses network_mode: host.`,
-          { stack: facts.stack, service: svc.name },
-        ));
-      }
-
-      for (const port of svc.publishedPorts) {
-        if (port.allInterfaces) {
-          out.push(finding(
-            'exposure-all-interfaces',
-            'warning',
-            'Port bound on all interfaces',
-            `Service "${svc.name}" in stack "${facts.stack}" publishes ${port.startPort}/${port.protocol} on all interfaces.`,
-            { stack: facts.stack, service: svc.name },
-          ));
-        }
-      }
-
-      const intent = effectiveIntent(facts.stack, svc.name, stackIntent, byService);
-      if (publishesPort(facts, svc.name) && (intent === null || intent === 'unknown')) {
-        out.push(finding(
-          'exposure-unclassified',
-          'info',
-          'Publishing without exposure intent',
-          `Stack "${facts.stack}" publishes ports from "${svc.name}" without a classified exposure intent.`,
-          { stack: facts.stack, service: svc.name },
-        ));
-      }
-      if (publishesPort(facts, svc.name) && intent === 'internal' && svc.publishedPorts.some(p => !p.loopbackOnly)) {
-        out.push(finding(
-          'exposure-internal-conflict',
-          'warning',
-          'Internal intent with host publish',
-          `Service "${svc.name}" is classified internal but publishes ports to the host.`,
-          { stack: facts.stack, service: svc.name },
-        ));
-      }
-    }
-
-    const aliasByNetwork = new Map<string, Map<string, string[]>>();
-    for (const svc of facts.services) {
-      for (const membership of svc.networks) {
-        const net = facts.networks.find(n => n.key === membership.key);
-        const runtimeName = net?.name ?? membership.key;
-        for (const alias of membership.aliases) {
-          const bucket = aliasByNetwork.get(runtimeName) ?? new Map<string, string[]>();
-          const list = bucket.get(alias) ?? [];
-          list.push(svc.name);
-          bucket.set(alias, list);
-          aliasByNetwork.set(runtimeName, bucket);
-        }
-      }
-    }
-    for (const [runtimeName, aliases] of aliasByNetwork) {
-      for (const [alias, services] of aliases) {
-        if (services.length > 1) {
-          out.push(finding(
-            'alias-collision',
-            'error',
-            'Duplicate network alias',
-            `Alias "${alias}" on network "${runtimeName}" is used by multiple services in stack "${facts.stack}": ${services.join(', ')}.`,
-            { stack: facts.stack, network: runtimeName },
-          ));
-        }
+function addCrossStackDnsFindings(out: NetworkingFinding[], stackFacts: StackNetworkFacts[], baseNetworks: NetworkingNetworkBase[]): void {
+  const runtimeNetworks = new Map(baseNetworks.map(network => [network.name, network]));
+  const entriesByNetwork = new Map<string, Array<{ stack: string; service: string; names: string[] }>>();
+  for (const facts of stackFacts.filter(facts => facts.renderable)) {
+    for (const service of facts.services) {
+      for (const membership of service.networks) {
+        const declared = facts.networks.find(network => network.key === membership.key);
+        const networkName = declared?.name ?? membership.key;
+        const network = runtimeNetworks.get(networkName);
+        if (network?.isSystem || network?.ingress) continue;
+        const shared = declared?.external === true || (network?.connectedCount ?? 0) > 1;
+        if (!shared) continue;
+        const entries = entriesByNetwork.get(networkName) ?? [];
+        entries.push({ stack: facts.stack, service: service.name, names: [service.name, ...membership.aliases] });
+        entriesByNetwork.set(networkName, entries);
       }
     }
   }
+  for (const [networkName, entries] of entriesByNetwork) {
+    const names = new Map<string, Array<{ stack: string; service: string; isAlias: boolean }>>();
+    for (const entry of entries) {
+      entry.names.forEach((name, index) => {
+        const values = names.get(name) ?? [];
+        values.push({ stack: entry.stack, service: entry.service, isAlias: index > 0 });
+        names.set(name, values);
+      });
+    }
+    for (const [name, owners] of names) {
+      const distinct = new Set(owners.map(owner => `${owner.stack}\0${owner.service}`));
+      if (distinct.size < 2) continue;
+      const allServices = owners.every(owner => !owner.isAlias);
+      out.push(finding(
+        allServices ? 'service-name-collision' : 'alias-collision',
+        allServices ? 'medium' : 'high',
+        allServices ? 'Duplicate service name on shared network' : 'Duplicate DNS name on shared network',
+        `Name "${name}" resolves to multiple services on shared network "${networkName}".`,
+        { network: networkName },
+        [{ kind: 'filter-topology', label: 'View network topology', networkName }],
+      ));
+    }
+  }
+}
 
+function addComposeDriftFindings(
+  out: NetworkingFinding[],
+  facts: StackNetworkFacts,
+  baseNetworks: NetworkingNetworkBase[],
+): void {
+  const networkIds = new Map(baseNetworks.map((network) => [network.name, network.id]));
+  for (const network of facts.networks) {
+    if (!network.external && network.createdByStack && facts.drift.missingFromRuntime.includes(network.name)) {
+      out.push(finding(
+        'network-missing',
+        'high',
+        'Declared network missing',
+        `Stack "${facts.stack}" declares network "${network.name}" but it does not exist in the runtime.`,
+        { stack: facts.stack, network: network.name },
+        [...stackActions(facts.stack), { kind: 'copy-docker-command', label: 'Copy Docker command', commandKind: 'network-create', networkName: network.name }],
+      ));
+    }
+    if (!network.external && network.createdByStack && facts.drift.declaredButUnused.includes(network.key)) {
+      out.push(finding(
+        'declared-network-unused',
+        'info',
+        'Declared network unused',
+        `Stack "${facts.stack}" declares network "${network.name}" but no running service is attached.`,
+        { stack: facts.stack, network: network.name },
+        stackActions(facts.stack),
+      ));
+    }
+  }
+  for (const attachment of facts.drift.runtimeOnlyAttachments) {
+    out.push(finding(
+      'network-undeclared',
+      'high',
+      'Undeclared network attachment',
+      `Container "${attachment.container}" (${attachment.service ?? 'unknown service'}) is attached to undeclared network "${attachment.network}".`,
+      { stack: facts.stack, network: attachment.network, service: attachment.service ?? undefined },
+      [...stackActions(facts.stack), ...(networkIds.has(attachment.network) ? [{ kind: 'inspect-network', label: 'Inspect network', networkId: networkIds.get(attachment.network)! } satisfies NetworkingRecommendedAction] : [])],
+    ));
+  }
+  for (const attachment of facts.drift.foreignNetworkAttachments) {
+    out.push(finding(
+      'foreign-network-attachment',
+      'high',
+      'Foreign network attachment',
+      `Container "${attachment.container}" in stack "${facts.stack}" is attached to network "${attachment.network}" owned elsewhere.`,
+      { stack: facts.stack, network: attachment.network },
+      [...stackActions(facts.stack), ...(networkIds.has(attachment.network) ? [{ kind: 'inspect-network', label: 'Inspect network', networkId: networkIds.get(attachment.network)! } satisfies NetworkingRecommendedAction] : [])],
+    ));
+  }
+}
+
+function addSharedNetworkFindings(
+  out: NetworkingFinding[],
+  snapshot: DependencySnapshot,
+  stackFacts: StackNetworkFacts[],
+): void {
   const stacksByNetwork = new Map<string, Set<string>>();
-  for (const c of snapshot.containers) {
-    if (!c.stack) continue;
-    for (const attached of c.networks) {
-      const set = stacksByNetwork.get(attached.name) ?? new Set<string>();
-      set.add(c.stack);
-      stacksByNetwork.set(attached.name, set);
+  for (const container of snapshot.containers) {
+    if (!container.stack) continue;
+    for (const attached of container.networks) {
+      const stacks = stacksByNetwork.get(attached.name) ?? new Set<string>();
+      stacks.add(container.stack);
+      stacksByNetwork.set(attached.name, stacks);
     }
   }
   for (const [networkName, stacks] of stacksByNetwork) {
-    if (stacks.size > 1) {
-      out.push(finding(
-        'shared-network',
-        'info',
-        'Shared network',
-        `Network "${networkName}" connects containers from ${stacks.size} stacks: ${[...stacks].sort().join(', ')}.`,
-        { network: networkName },
-      ));
-    }
+    if (stacks.size < 2) continue;
+    out.push(finding(
+      'shared-network',
+      'info',
+      'Shared network',
+      `Network "${networkName}" connects containers from ${stacks.size} stacks: ${[...stacks].sort().join(', ')}.`,
+      { network: networkName },
+      [{ kind: 'filter-topology', label: 'View network topology', networkName }],
+    ));
   }
 
   const declaredNames = new Map<string, string[]>();
   for (const facts of stackFacts) {
     if (!facts.renderable) continue;
-    for (const net of facts.networks) {
-      const owners = declaredNames.get(net.name) ?? [];
-      owners.push(facts.stack);
-      declaredNames.set(net.name, owners);
+    for (const network of facts.networks) {
+      const stacks = declaredNames.get(network.name) ?? [];
+      stacks.push(facts.stack);
+      declaredNames.set(network.name, stacks);
     }
   }
-  for (const [name, stacks] of declaredNames) {
-    const unique = [...new Set(stacks)];
-    if (unique.length > 1) {
+  for (const [networkName, stacks] of declaredNames) {
+    const uniqueStacks = [...new Set(stacks)];
+    if (uniqueStacks.length < 2) continue;
+    out.push(finding(
+      'network-name-collision',
+      'medium',
+      'Network name collision',
+      `Multiple stacks resolve to the same network name "${networkName}": ${uniqueStacks.join(', ')}.`,
+      { network: networkName },
+      [{ kind: 'filter-topology', label: 'View network topology', networkName }],
+    ));
+  }
+}
+
+function largeFlatSeverity(connectedCount: number): NetworkingFinding['severity'] {
+  if (connectedCount >= 1000) return 'high';
+  if (connectedCount >= 500) return 'medium';
+  return 'info';
+}
+
+export function buildNodeNetworkingFindings(
+  nodeId: number,
+  snapshot: DependencySnapshot | null,
+  stackFacts: StackNetworkFacts[],
+  baseNetworks: NetworkingNetworkBase[],
+): NetworkingFinding[] {
+  const out: NetworkingFinding[] = [];
+  const db = DatabaseService.getInstance();
+  if (!snapshot) {
+    out.push(finding(
+      'runtime-unavailable', 'info', 'Runtime networking unavailable',
+      'Sencho could not read Docker networking state on this node.',
+      {},
+      [
+        { kind: 'refresh', label: 'Refresh runtime data' },
+        { kind: 'open-docs', label: 'Open troubleshooting guide', docsPath: '/operations/troubleshooting' },
+      ],
+    ));
+  }
+
+  for (const facts of stackFacts) {
+    if (!facts.renderable) continue;
+    const intents = db.getStackExposureIntents(nodeId, facts.stack);
+    const stackIntent = intents.find(intent => intent.service === '')?.intent ?? null;
+    const byService = new Map(intents.filter(intent => intent.service !== '').map(intent => [intent.service, intent.intent]));
+    addExposureFindings(out, facts, stackIntent, byService);
+
+    if (!snapshot) continue;
+    addComposeDriftFindings(out, facts, baseNetworks);
+    for (const network of facts.networks) {
+      if (network.external && facts.drift.missingFromRuntime.includes(network.name)) {
+        const isRunning = snapshot.containers.some(container => container.stack === facts.stack && ['running', 'restarting'].includes(container.state));
+        out.push(finding(
+          'external-network-missing', isRunning ? 'critical' : 'high', 'External network not found',
+          `Stack "${facts.stack}" requires the external network "${network.name}", which is not present on this node.`,
+          { stack: facts.stack, network: network.name },
+          [
+            { kind: 'create-network', label: 'Create network', networkName: network.name, requiresAdmin: true },
+            { kind: 'copy-compose-snippet', label: 'Copy Compose snippet', snippetKind: 'external-network', networkName: network.name },
+            { kind: 'copy-docker-command', label: 'Copy Docker command', commandKind: 'network-create', networkName: network.name },
+            { kind: 'open-stack-editor', label: 'Open stack editor', stack: facts.stack },
+          ],
+        ));
+      }
+    }
+  }
+
+  if (!snapshot) return out;
+  addSharedNetworkFindings(out, snapshot, stackFacts);
+  addCrossStackDnsFindings(out, stackFacts, baseNetworks);
+  for (const network of baseNetworks) {
+    if (network.isSystem || network.ingress || ['host', 'none'].includes(network.driver)) continue;
+    if (network.connectedCount >= 100) {
       out.push(finding(
-        'network-name-collision',
-        'warning',
-        'Network name collision',
-        `Multiple stacks resolve to the same network name "${name}": ${unique.join(', ')}.`,
-        { network: name },
+        'large-flat-network', largeFlatSeverity(network.connectedCount), 'Large flat network',
+        `Network "${network.name}" has ${network.connectedCount} connected endpoints.`,
+        { network: network.name },
+        [{ kind: 'filter-topology', label: 'View network topology', networkName: network.name }],
+      ));
+    }
+    if (['overlay', 'macvlan', 'ipvlan'].includes(network.driver) || network.enableIPv6) {
+      out.push(finding(
+        'advanced-driver-caveat', 'info', 'Advanced network configuration',
+        `Network "${network.name}" uses ${network.enableIPv6 ? 'IPv6 or ' : ''}${network.driver} networking.`,
+        { network: network.name },
+        [{ kind: 'inspect-network', label: 'Inspect network', networkId: network.id }],
       ));
     }
   }
-
-  for (const f of out) {
-    if (f.network && !networkByName.has(f.network)) {
-      const snap = snapshot.networks.find(n => n.name === f.network);
-      if (snap) networkByName.set(snap.name, { id: snap.id, name: snap.name } as NetworkingNetworkBase);
-    }
-  }
-
   return out;
 }

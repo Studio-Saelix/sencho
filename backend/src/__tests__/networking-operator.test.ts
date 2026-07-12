@@ -105,15 +105,37 @@ describe('networking operator routes', () => {
 
     const ok = await request(app).get('/api/networking/overview').set('Authorization', authHeader);
     expect(ok.status).toBe(200);
+    expect(ok.body.schemaVersion).toBe(2);
+    expect(ok.body.runtimeAvailable).toBe(true);
     expect(ok.body.overview).toBeDefined();
     expect(Array.isArray(ok.body.networks)).toBe(true);
+    expect(Array.isArray(ok.body.findings)).toBe(true);
   });
 
   it('sanitized network inspect returns label keys only', async () => {
     const res = await request(app).get(`/api/networking/networks/${NET_ID}`).set('Authorization', authHeader);
     expect(res.status).toBe(200);
-    expect(res.body.labelKeys).toEqual(['com.example.key']);
+    expect(res.body.schemaVersion).toBe(2);
+    expect(res.body.network.labelKeys).toEqual(['com.example.key']);
     expect(JSON.stringify(res.body)).not.toContain('secret-value');
+  });
+
+  it('returns a degraded schema envelope when Docker networking is unavailable', async () => {
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockRejectedValue(new Error('runtime unavailable')),
+    } as unknown as DockerController);
+
+    const res = await request(app).get('/api/networking/overview').set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      schemaVersion: 2,
+      runtimeAvailable: false,
+      networks: [],
+    });
+    expect(res.body.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'runtime-unavailable', severity: 'info' }),
+    ]));
+    expect(res.body.findings.every((finding: { severity: string }) => !['warning', 'error'].includes(finding.severity))).toBe(true);
   });
 
   it('blocks admin delete when network is attached', async () => {
@@ -155,6 +177,7 @@ describe('classifySnapshotNetworks', () => {
     const rows = DockerController.classifySnapshotNetworks(snapshot, ['localstack']);
     expect(rows[0].composeProject).toBe('other-project');
     expect(rows[0].stack).toBeNull();
+    expect(rows[0].ownership).toBe('compose-managed');
   });
 });
 

@@ -20,6 +20,7 @@ import { SeverityBadge } from '@/components/ui/SeverityBadge';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
 import { VulnerabilityScanSheet } from './VulnerabilityScanSheet';
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from './NodeManager';
+import { SENCHO_OPEN_STACK_EVENT, type SenchoOpenStackDetail } from '@/lib/events';
 import type { ScanSummary } from '@/types/security';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';

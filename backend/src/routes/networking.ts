@@ -10,6 +10,7 @@ import { findSnapshotNetwork, sanitizeNetworkInspect } from '../services/network
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isValidDockerResourceId } from '../utils/validation';
+import { okEnvelope, runtimeUnavailableEnvelope } from '../services/network/networkingEnvelope';
 
 export const networkingRouter = Router();
 
@@ -29,8 +30,13 @@ networkingRouter.get('/summary', async (req: Request, res: Response): Promise<vo
 networkingRouter.get('/overview', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:read')) return;
   try {
-    const aggregate = await buildNodeNetworkingAggregate(req.nodeId, { depth: 'overview' });
-    res.json({ overview: aggregate.overview, networks: aggregate.networks });
+    const aggregate = await buildNodeNetworkingAggregate(req.nodeId, {});
+    res.json(okEnvelope(aggregate.runtimeAvailable, {
+      overview: aggregate.overview,
+      networks: aggregate.networks,
+      findings: aggregate.findings,
+      recentActivity: aggregate.recentActivity,
+    }));
   } catch (error) {
     console.error('[Networking] Failed to build overview:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to build networking overview' });
@@ -40,8 +46,8 @@ networkingRouter.get('/overview', async (req: Request, res: Response): Promise<v
 networkingRouter.get('/networks', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:read')) return;
   try {
-    const aggregate = await buildNodeNetworkingAggregate(req.nodeId, { depth: 'overview' });
-    res.json(aggregate.networks);
+    const aggregate = await buildNodeNetworkingAggregate(req.nodeId, {});
+    res.json(okEnvelope(aggregate.runtimeAvailable, { networks: aggregate.networks }));
   } catch (error) {
     console.error('[Networking] Failed to list networks:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to list networks' });
@@ -57,16 +63,21 @@ networkingRouter.get('/networks/:id', async (req: Request, res: Response): Promi
   }
   try {
     const { snapshot } = await loadNetworkingSnapshot(req.nodeId);
+    if (!snapshot) {
+      res.status(503).json(runtimeUnavailableEnvelope());
+      return;
+    }
     const snapNet = findSnapshotNetwork(snapshot, id);
-    const inspectId = snapNet?.id ?? id;
-    const raw = await DockerController.getInstance(req.nodeId).inspectNetwork(inspectId);
-    res.json(sanitizeNetworkInspect(raw, snapNet));
+    const raw = await DockerController.getInstance(req.nodeId).inspectNetwork(snapNet?.id ?? id);
+    res.json(okEnvelope(true, { network: sanitizeNetworkInspect(raw, snapNet) }));
   } catch (error: unknown) {
     console.error('[Networking] Failed to inspect network:', sanitizeForLog(getErrorMessage(error, 'unknown')));
-    const err = error as Record<string, unknown>;
-    const is404 = (typeof err.statusCode === 'number' && err.statusCode === 404)
+    const statusCode = (error as { statusCode?: number }).statusCode;
+    const is404 = statusCode === 404
       || (error instanceof Error && error.message.includes('404'));
-    res.status(is404 ? 404 : 500).json({ error: is404 ? 'Network not found' : 'Failed to inspect network' });
+    res.status(is404 ? 404 : 500).json({
+      error: is404 ? 'Network not found' : 'Failed to inspect network',
+    });
   }
 });
 
@@ -75,10 +86,13 @@ networkingRouter.get('/topology', async (req: Request, res: Response): Promise<v
   const includeSystem = req.query.includeSystem === 'true';
   try {
     const aggregate = await buildNodeNetworkingAggregate(req.nodeId, {
-      depth: 'topology',
+      includeTopology: true,
       includeSystem,
     });
-    res.json(aggregate.topology ?? { networks: [], includeSystem });
+    res.json(okEnvelope(aggregate.runtimeAvailable, {
+      networks: aggregate.topology?.networks ?? [],
+      includeSystem,
+    }));
   } catch (error) {
     console.error('[Networking] Failed to build topology:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to build networking topology' });
@@ -88,8 +102,8 @@ networkingRouter.get('/topology', async (req: Request, res: Response): Promise<v
 networkingRouter.get('/findings', async (req: Request, res: Response): Promise<void> => {
   if (!requirePermission(req, res, 'stack:read')) return;
   try {
-    const aggregate = await buildNodeNetworkingAggregate(req.nodeId, { depth: 'findings' });
-    res.json(aggregate.findings);
+    const aggregate = await buildNodeNetworkingAggregate(req.nodeId, {});
+    res.json(okEnvelope(aggregate.runtimeAvailable, { findings: aggregate.findings }));
   } catch (error) {
     console.error('[Networking] Failed to list findings:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to list networking findings' });
@@ -104,13 +118,13 @@ networkingRouter.get('/findings/:id', async (req: Request, res: Response): Promi
     return;
   }
   try {
-    const aggregate = await buildNodeNetworkingAggregate(req.nodeId, { depth: 'findings' });
+    const aggregate = await buildNodeNetworkingAggregate(req.nodeId, {});
     const match = aggregate.findings.find(f => f.id === findingId);
     if (!match) {
       res.status(404).json({ error: 'Finding not found' });
       return;
     }
-    res.json(match);
+    res.json(okEnvelope(aggregate.runtimeAvailable, { finding: match }));
   } catch (error) {
     console.error('[Networking] Failed to load finding:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to load networking finding' });

@@ -12,6 +12,33 @@ import type {
   NetworkingNetworkRow,
 } from './networkingTypes';
 
+/** Stacks whose effective model declares a network (optionally external-only). */
+export function stacksDeclaringNetwork(
+  stackFacts: StackNetworkFacts[],
+  networkName: string,
+  externalOnly = false,
+): string[] {
+  return stackFacts
+    .filter((facts) =>
+      facts.renderable
+      && facts.networks.some((network) =>
+        network.name === networkName && (!externalOnly || network.external),
+      ),
+    )
+    .map((facts) => facts.stack);
+}
+
+export function indexFindingIdsByNetwork(findings: NetworkingFinding[]): Map<string, string[]> {
+  const byNetwork = new Map<string, string[]>();
+  for (const finding of findings) {
+    if (!finding.network) continue;
+    const list = byNetwork.get(finding.network) ?? [];
+    list.push(finding.id);
+    byNetwork.set(finding.network, list);
+  }
+  return byNetwork;
+}
+
 export function enrichNetworkRows(
   nodeId: number,
   baseRows: NetworkingNetworkBase[],
@@ -20,28 +47,29 @@ export function enrichNetworkRows(
   findings: NetworkingFinding[],
 ): NetworkingNetworkRow[] {
   const stacksByNetwork = new Map<string, Set<string>>();
-  for (const c of snapshot.containers) {
-    for (const attached of c.networks) {
+  for (const container of snapshot.containers) {
+    for (const attached of container.networks) {
       const set = stacksByNetwork.get(attached.name) ?? new Set<string>();
-      if (c.stack) set.add(c.stack);
+      if (container.stack) set.add(container.stack);
       stacksByNetwork.set(attached.name, set);
     }
   }
 
-  const findingsByNetwork = new Map<string, string[]>();
-  for (const f of findings) {
-    if (!f.network) continue;
-    const list = findingsByNetwork.get(f.network) ?? [];
-    list.push(f.id);
-    findingsByNetwork.set(f.network, list);
-  }
+  const findingsByNetwork = indexFindingIdsByNetwork(findings);
 
-  return baseRows.map(row => ({
-    ...row,
-    sharedStackCount: stacksByNetwork.get(row.name)?.size ?? 0,
-    exposureSummary: buildExposureSummary(nodeId, row.name, stackFacts, snapshot),
-    findingIds: findingsByNetwork.get(row.name) ?? [],
-  }));
+  return baseRows.map((row) => {
+    const declaredByStacks = stacksDeclaringNetwork(stackFacts, row.name);
+    const declaredExternalByStacks = stacksDeclaringNetwork(stackFacts, row.name, true);
+    return {
+      ...row,
+      declaredByStacks,
+      declaredExternalByStacks,
+      isExternalDependency: declaredExternalByStacks.length > 0,
+      sharedStackCount: stacksByNetwork.get(row.name)?.size ?? 0,
+      exposureSummary: buildExposureSummary(nodeId, row.name, stackFacts, snapshot),
+      findingIds: findingsByNetwork.get(row.name) ?? [],
+    };
+  });
 }
 
 function buildExposureSummary(

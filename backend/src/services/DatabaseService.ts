@@ -3113,6 +3113,22 @@ export class DatabaseService {
         return (this.db.prepare(sql).all(...args) as unknown[]).map(row => this.mapNotificationRow(row as any));
     }
 
+    public getNodeStackActivity(nodeId: number, opts: { limit: number }): NotificationHistory[] {
+        const categories = [
+            'deploy_success', 'deploy_failure', 'stack_started', 'stack_stopped', 'stack_restarted',
+            'image_update_applied', 'update_started', 'health_gate_passed', 'health_gate_failed',
+        ];
+        const placeholders = categories.map(() => '?').join(', ');
+        const sql = `
+            SELECT * FROM notification_history
+            WHERE node_id = ? AND category IN (${placeholders})
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+        `;
+        return (this.db.prepare(sql).all(nodeId, ...categories, opts.limit) as unknown[])
+            .map(row => this.mapNotificationRow(row as any));
+    }
+
     public addNotificationHistory(nodeId: number, notification: Omit<NotificationHistory, 'id' | 'is_read'>): NotificationHistory {
         const stmt = this.db.prepare(
             'INSERT INTO notification_history (node_id, level, message, timestamp, is_read, stack_name, container_name, category, actor_username) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)'

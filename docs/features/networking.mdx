@@ -11,7 +11,7 @@ Networking follows whichever node is selected in the top bar. Remote nodes load 
 
 ## Overview
 
-The overview masthead summarizes the node at a glance: network and stack counts, connected containers, exposed stacks, and how many findings need review. Stat tiles call out common risk signals such as missing external networks, name collisions, and stacks whose effective model failed to render.
+The overview masthead summarizes the node at a glance and derives its posture from findings: action needed, review, contained, partial networking data, or runtime unavailable. The overview cards link to the relevant inventory or findings view. The operator attention card exposes the next safe action, while the activity band shows recent node-wide stack work.
 
 Use **Refresh** to re-fetch live Docker state and Compose facts in one pass.
 
@@ -24,11 +24,11 @@ The **Topology** tab reuses Sencho's interactive network graph: networks on top,
 - **Click-to-logs** on a running container opens its log stream.
 - **Show system networks** toggles `bridge`, `host`, and `none` into the graph when you need to debug default-bridge attachments.
 
-Data comes from `GET /api/networking/topology` on the active node.
+Data comes from `GET /api/networking/topology` on the active node. Missing external dependencies appear as a distinct graph node when Docker is available. These synthetic nodes cannot be inspected or deleted, but link back to the declaring stack.
 
 ## Networks
 
-The **Networks** tab lists every Docker network with ID, name, driver, scope, and managed status. Filter chips (`All`, `Managed`, `External`) include counts.
+The **Networks** tab distinguishes runtime ownership from Compose dependency intent. Ownership identifies system, Sencho-managed, Compose-managed, or unmanaged networks. An external dependency is a separate signal: a network can be owned by a stack and still be declared as external by another stack. Filter chips cover managed, external dependencies, system, shared, exposed, and drift signals.
 
 Click the eye icon on a row to open the detail drawer. Inspect is sanitized: structural fields and label **keys** only, never secret values interpolated into names or options.
 
@@ -40,7 +40,7 @@ Admins can open **Create network** from the page header. The dialog matches the 
 
 The **Findings** tab lists Compose-first networking issues Sencho derives from the effective model plus one live Docker snapshot per refresh. Examples include missing external networks, duplicate network names across stacks, host-network exposure mismatches, and stacks whose model could not be rendered.
 
-Each finding includes a severity, a short explanation, and links back to the stacks or networks involved when applicable.
+Each finding includes a severity, evidence, and the actions that are appropriate for the current operator. Depending on permissions and the finding, this can open the affected stack, its Networking or Doctor tab, filter topology, inspect a network, create a missing network, copy a safe Compose snippet, or refresh the data.
 
 ## Resources and cleanup
 
@@ -62,5 +62,14 @@ Day-to-day network cleanup stays on [Resources](/features/resources): **Quick Cl
   </Accordion>
   <Accordion title="Findings mention a stack that failed to render">
     Sencho compares live Docker state against each stack's effective Compose model. When `docker compose config` fails for a stack, that stack is listed under render failures on the overview and related findings may be incomplete until the Compose file is fixed.
+  </Accordion>
+  <Accordion title="The overview says runtime unavailable">
+    Sencho could not reach Docker on this node. Compose-model findings remain visible, while runtime-only inventory, drift, missing external checks, and inspect are unavailable until Docker responds again.
+  </Accordion>
+  <Accordion title="The overview says partial networking data">
+    The selected remote node supports the earlier networking response format. Inventory fields may be available, but Sencho does not infer a healthy posture or show enriched finding actions. Update that node to use the complete operator view.
+  </Accordion>
+  <Accordion title="A network is marked as an external dependency">
+    This means one or more Compose stacks expect the network to exist before deployment. It does not imply that the network is unmanaged. Review the ownership and declaring stacks together before changing or deleting it.
   </Accordion>
 </AccordionGroup>

@@ -474,6 +474,9 @@ systemMaintenanceRouter.post('/networks/delete', async (req: Request, res: Respo
     if (rejectIfSelf('network', id, res)) return;
 
     const { stacks, snapshot } = await loadNetworkingSnapshot(req.nodeId);
+    if (!snapshot) {
+      return res.status(503).json({ error: 'Docker networking runtime is unavailable' });
+    }
     const stackFacts = await Promise.all(
       stacks.map(stack => buildStackNetworkFacts(req.nodeId, stack, snapshot)),
     );
