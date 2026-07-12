@@ -231,7 +231,7 @@ export function HistoryTab({ onInspect }: HistoryTabProps) {
             <HistoryStateMessage loading={loading} error={error} search={search} isEmpty={sorted.length === 0} />
           </div>
         ) : (
-        <ScrollArea block className="max-h-[60vh] bg-background">
+        <ScrollArea block className="max-h-[60vh]">
           <Table className="max-md:min-w-[720px]">
             <TableHeader>
               <TableRow className="hover:bg-transparent">

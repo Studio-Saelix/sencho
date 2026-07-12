@@ -6,12 +6,22 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ChevronLeft, ChevronRight, Plus, Pencil, Trash2, Download } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
 import { FleetTabHeading } from '@/components/fleet/FleetEmptyState';
-import type { CveSuppression } from '@/types/security';
+import type { CveSuppression, TriageStatus } from '@/types/security';
+import {
+  TRIAGE_STATUS_OPTIONS,
+  TRIAGE_JUSTIFICATION_OPTIONS,
+  TRIAGE_STATUS_HINT,
+  openVexRequiresJustification,
+  justificationForStatus,
+  triageStatusLabel,
+  triageJustificationLabel,
+} from '@/lib/triage';
 import { useAuth } from '@/context/AuthContext';
 
 const CVE_ID_RE = /^(CVE-\d{4}-\d{4,}|GHSA-[\w-]{14,})$/;
@@ -23,6 +33,8 @@ interface SuppressionFormState {
   imagePattern: string;
   reason: string;
   expiresInDays: string;
+  status: TriageStatus;
+  justification: string;
 }
 
 const EMPTY_FORM: SuppressionFormState = {
@@ -31,6 +43,8 @@ const EMPTY_FORM: SuppressionFormState = {
   imagePattern: '',
   reason: '',
   expiresInDays: '',
+  status: 'accepted',
+  justification: '',
 };
 
 interface SuppressionsPanelProps {
@@ -88,13 +102,19 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
       // Recompute the expiry as days from now so the same control edits it; blank
       // means "no expiry". The CVE id and package scope are identity, not editable.
       expiresInDays: row.expires_at === null ? '' : String(Math.max(1, Math.ceil((row.expires_at - Date.now()) / 86_400_000))),
+      status: row.status ?? 'accepted',
+      justification: row.justification ?? '',
     });
     setDialogOpen(true);
   };
 
+  const handleStatusChange = (status: TriageStatus) => {
+    setForm((f) => ({ ...f, status, justification: justificationForStatus(status, f.justification) }));
+  };
+
   const handleSave = async () => {
     // CVE id and package scope identify a suppression, so they are only validated
-    // and sent on create; the edit endpoint updates reason, image pattern, expiry.
+    // and sent on create; the edit endpoint updates reason, image pattern, expiry, status, and justification.
     const cveId = form.cveId.trim();
     if (!editRow && !CVE_ID_RE.test(cveId)) {
       toast.error('CVE must look like CVE-YYYY-NNNN or GHSA-xxxx-xxxx-xxxx.');
@@ -103,6 +123,11 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
     const reason = form.reason.trim();
     if (!reason) {
       toast.error('A reason is required.');
+      return;
+    }
+    const justification = form.justification.trim();
+    if (openVexRequiresJustification(form.status) && !justification) {
+      toast.error('An OpenVEX justification is required for this triage decision.');
       return;
     }
     let expiresAt: number | null = null;
@@ -115,17 +140,20 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
       }
       expiresAt = Date.now() + n * 24 * 60 * 60 * 1000;
     }
+    const sharedBody = {
+      image_pattern: form.imagePattern.trim() || null,
+      reason,
+      expires_at: expiresAt,
+      status: form.status,
+      justification: openVexRequiresJustification(form.status) ? (justification || null) : null,
+    };
     setSaving(true);
     try {
       const res = editRow
         ? await apiFetch(`/security/suppressions/${editRow.id}`, {
             method: 'PUT',
             localOnly: true,
-            body: JSON.stringify({
-              image_pattern: form.imagePattern.trim() || null,
-              reason,
-              expires_at: expiresAt,
-            }),
+            body: JSON.stringify(sharedBody),
           })
         : await apiFetch('/security/suppressions', {
             method: 'POST',
@@ -133,9 +161,7 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
             body: JSON.stringify({
               cve_id: cveId,
               pkg_name: form.pkgName.trim() || null,
-              image_pattern: form.imagePattern.trim() || null,
-              reason,
-              expires_at: expiresAt,
+              ...sharedBody,
             }),
           });
       if (!res.ok) {
@@ -262,69 +288,80 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
       {!loading && rows.length > 0 && (
         <ScrollArea className="max-h-[420px] pr-2">
           <ul className="divide-y divide-glass-border">
-            {pageItems.map((row) => (
-              <li key={row.id} className="py-2.5 flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1 space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono text-xs font-medium">{row.cve_id}</span>
-                    {row.pkg_name && (
-                      <Badge variant="outline" className="text-[10px] font-mono">
-                        {row.pkg_name}
+            {pageItems.map((row) => {
+              const justLabel = triageJustificationLabel(row.justification);
+              return (
+                <li key={row.id} className="py-2.5 flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-xs font-medium">{row.cve_id}</span>
+                      <Badge variant="outline" className="text-[10px]">
+                        {triageStatusLabel(row.status)}
                       </Badge>
+                      {row.pkg_name && (
+                        <Badge variant="outline" className="text-[10px] font-mono">
+                          {row.pkg_name}
+                        </Badge>
+                      )}
+                      {row.image_pattern && (
+                        <Badge variant="outline" className="text-[10px] font-mono truncate max-w-[220px]">
+                          {row.image_pattern}
+                        </Badge>
+                      )}
+                      {!row.active && (
+                        <Badge variant="secondary" className="text-[10px]">expired</Badge>
+                      )}
+                      {row.replicated_from_control === 1 && (
+                        <Badge variant="secondary" className="text-[10px]">replicated</Badge>
+                      )}
+                    </div>
+                    <div className="text-xs text-muted-foreground line-clamp-2">{row.reason}</div>
+                    {justLabel && (
+                      <div className="text-[11px] font-mono text-stat-subtitle">
+                        Justification: {justLabel}
+                      </div>
                     )}
-                    {row.image_pattern && (
-                      <Badge variant="outline" className="text-[10px] font-mono truncate max-w-[220px]">
-                        {row.image_pattern}
-                      </Badge>
-                    )}
-                    {!row.active && (
-                      <Badge variant="secondary" className="text-[10px]">expired</Badge>
-                    )}
-                    {row.replicated_from_control === 1 && (
-                      <Badge variant="secondary" className="text-[10px]">replicated</Badge>
-                    )}
+                    <div className="text-[11px] font-mono text-stat-subtitle">
+                      by {row.created_by} - expires {formatExpiry(row)}
+                    </div>
                   </div>
-                  <div className="text-xs text-muted-foreground line-clamp-2">{row.reason}</div>
-                  <div className="text-[11px] font-mono text-stat-subtitle">
-                    by {row.created_by} - expires {formatExpiry(row)}
-                  </div>
-                </div>
-                {isAdmin && !isReplica && row.replicated_from_control === 0 && (
-                  <div className="flex items-center gap-1 shrink-0">
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-stat-subtitle hover:text-stat-value"
-                            onClick={() => openEdit(row)}
-                          >
-                            <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Edit suppression</TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-8 w-8 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
-                            onClick={() => setDeleteRow(row)}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Remove suppression</TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                  </div>
-                )}
-              </li>
-            ))}
+                  {isAdmin && !isReplica && row.replicated_from_control === 0 && (
+                    <div className="flex items-center gap-1 shrink-0">
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-stat-subtitle hover:text-stat-value"
+                              onClick={() => openEdit(row)}
+                            >
+                              <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Edit suppression</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-destructive/60 hover:bg-destructive hover:text-destructive-foreground"
+                              onClick={() => setDeleteRow(row)}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" strokeWidth={1.5} />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Remove suppression</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         </ScrollArea>
       )}
@@ -335,8 +372,8 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
           kicker={editRow ? 'SUPPRESSIONS · EDIT' : 'SUPPRESSIONS · NEW'}
           title={editRow ? 'Edit suppression' : 'New suppression'}
           description={editRow
-            ? 'Update the reason, image scope, or expiry. The CVE and package scope are fixed.'
-            : 'Accept a CVE as known-benign so it stops triggering alerts across the fleet.'}
+            ? 'Update the triage decision, reason, image scope, or expiry. The CVE and package scope are fixed.'
+            : 'Record a triage decision for a CVE so it stops triggering alerts across the fleet.'}
         />
         <ModalBody>
           <div className="space-y-2">
@@ -368,6 +405,40 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
               onChange={(e) => setForm({ ...form, imagePattern: e.target.value })}
             />
           </div>
+          <div className="space-y-2">
+            <Label htmlFor="s-status">Triage decision</Label>
+            <Select value={form.status} onValueChange={(v) => handleStatusChange(v as TriageStatus)}>
+              <SelectTrigger id="s-status" aria-label="Triage decision" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {TRIAGE_STATUS_OPTIONS.map((o) => (
+                  <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {TRIAGE_STATUS_HINT}
+            </p>
+          </div>
+          {openVexRequiresJustification(form.status) && (
+            <div className="space-y-2">
+              <Label htmlFor="s-justification">OpenVEX justification</Label>
+              <Select
+                value={form.justification}
+                onValueChange={(v) => setForm({ ...form, justification: v })}
+              >
+                <SelectTrigger id="s-justification" aria-label="OpenVEX justification" className="w-full">
+                  <SelectValue placeholder="Select a justification" />
+                </SelectTrigger>
+                <SelectContent>
+                  {TRIAGE_JUSTIFICATION_OPTIONS.map((o) => (
+                    <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="space-y-2">
             <Label htmlFor="s-reason">Reason</Label>
             <textarea

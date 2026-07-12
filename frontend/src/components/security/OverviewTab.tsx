@@ -55,7 +55,7 @@ function StatusRow({ label, value, tone }: { label: string; value: string; tone?
 
 function ChartCard({ title, className, children }: { title: string; className?: string; children: React.ReactNode }) {
   return (
-    <div className={cn('rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4', className)}>
+    <div className={cn('rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4 h-full', className)}>
       <h3 className="font-mono text-[10px] uppercase tracking-[0.22em] text-stat-subtitle mb-3">{title}</h3>
       {children}
     </div>
@@ -234,10 +234,7 @@ export function OverviewTab({ overview, loadError, trend, exploitIntel, exploitT
         </ChartCard>
       </div>
 
-      {/* items-start: each card keeps its natural height so the fixed-height chart
-          card never stretches to a taller exploit table (which left dead space
-          under the chart). The exploit-risk table owns its own card chrome. */}
-      <div className="grid items-start gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-2">
         <TopExploitRiskList items={exploitIntel} truncated={exploitTruncated} onInspect={onInspect} />
         <ChartCard title="Severity × exploitability">
           <CvssEpssQuadrantChart items={exploitIntel} />

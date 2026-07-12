@@ -75,7 +75,7 @@ Image references are normalized before comparison, so equivalent forms do not pr
 
 If a service has multiple replicas, any replica running a different image than the declared one triggers an image finding. This catches stacks that are mid-update with mixed versions running simultaneously.
 
-If the Compose file declares a tag (`:latest`, `:1.25`) and the running container was pulled from a digest pin, the two forms are compared as-is. A digest-pinned container reads as an image mismatch against a tag declaration. This is intentional: the two references are not equivalent.
+If the Compose file declares a tag (`:latest`, `:1.25`) and the running container was pulled from a digest pin, the two forms are compared as-is. A digest-pinned container reads as an image mismatch against a tag declaration. This is intentional: the two references are not equivalent. Sencho uses the same distinction in scan history and update detection; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
 
 ### Port ranges
 

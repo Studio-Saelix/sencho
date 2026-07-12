@@ -29,6 +29,8 @@ interface PilotEnrollment {
   composeYaml: string;
 }
 
+const PILOT_AGENT_START_COMMAND = 'docker compose up -d';
+
 interface NodeFormData {
   name: string;
   type: 'local' | 'remote';
@@ -552,8 +554,22 @@ export function useNodeActions(opts: UseNodeActionsOptions = {}): UseNodeActions
 
               <div className="space-y-2">
                 <p className="text-xs font-medium text-foreground/80">Step 2: start the agent on the remote host</p>
-                <div className="rounded-md border border-card-border bg-muted/50 p-3">
-                  <code className="text-xs font-mono text-foreground/90">docker compose -f compose.yaml up -d</code>
+                <div className="rounded-md border border-card-border bg-muted/50 p-3 flex items-center justify-between gap-2">
+                  <code className="text-xs font-mono text-foreground/90">{PILOT_AGENT_START_COMMAND}</code>
+                  <button
+                    className="text-muted-foreground hover:text-foreground transition-colors shrink-0"
+                    onClick={async () => {
+                      try {
+                        await copyToClipboard(PILOT_AGENT_START_COMMAND);
+                        toast.success('Command copied to clipboard');
+                      } catch {
+                        toast.error('Copy failed.');
+                      }
+                    }}
+                    aria-label="Copy start command"
+                  >
+                    <Copy className="w-3.5 h-3.5" strokeWidth={1.5} />
+                  </button>
                 </div>
               </div>
 
