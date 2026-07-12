@@ -109,7 +109,7 @@ describe('[Stacks:debug] GET /api/stacks/statuses', () => {
 });
 
 describe('[Stacks:debug] GET /api/stacks/:stack/containers', () => {
-  it('logs the docker subspan, count, and a sanitized stack name', async () => {
+  it('logs the docker subspan and count without the stack name', async () => {
     setDeveloperMode(true);
     const dockerSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack').mockResolvedValue([]);
 
@@ -122,7 +122,8 @@ describe('[Stacks:debug] GET /api/stacks/:stack/containers', () => {
     const line = lines.find((l) => l.startsWith('[Stacks:debug]') && l.includes('/:stack/containers'));
     expect(line).toBeDefined();
     expect(line).toContain('route=GET /:stack/containers');
-    expect(line).toContain('stack=web');
+    expect(line).not.toContain('web');
+    expect(line).not.toMatch(/\bstack=/);
     expect(line).toMatch(/count=0/);
     expect(line).toMatch(/dockerMs=\d+/);
     expect(line).toMatch(/outcome=ok/);

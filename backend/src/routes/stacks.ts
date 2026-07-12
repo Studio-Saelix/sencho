@@ -1204,7 +1204,6 @@ stacksRouter.get('/:stackName/containers', async (req: Request, res: Response) =
     logDebugTiming('[Stacks:debug]', {
       route: 'GET /:stack/containers',
       nodeId: req.nodeId,
-      stack: sanitizeForLog(stackName),
       count,
       dockerMs,
       elapsedMs: Date.now() - startedAt,

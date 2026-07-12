@@ -54,7 +54,9 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
           const data = await localRes.json() as Omit<NotificationItem, 'nodeId' | 'nodeName'>[];
           if (bodySpan !== null) endSpan(bodySpan);
           bodySpan = null;
+          const dispatchSpan = instrument ? beginSpan('state_dispatch', { background: true }) : null;
           data.forEach(n => all.push({ ...n, nodeId: localNode?.id ?? -1, nodeName: localNode?.name ?? 'Local' }));
+          if (dispatchSpan !== null) endSpan(dispatchSpan);
         }
       } catch (e) {
         if (headersSpan !== null) endSpan(headersSpan, { outcome: 'error' });

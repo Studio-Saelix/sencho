@@ -3,8 +3,11 @@ import { apiFetch, withDeploySession } from '@/lib/api';
 import {
   newAttemptId,
   abortAttempt,
+  beginSpan,
+  endSpan,
   flushPendingCommit,
   type PendingCommit,
+  type SpanHandle,
 } from '@/lib/hydrationTiming';
 import { toast } from '@/components/ui/toast-store';
 import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
@@ -515,15 +518,43 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const loadContainerState = async (filename: string, signal?: AbortSignal): Promise<number> => {
+  const loadContainerState = async (
+    filename: string,
+    signal?: AbortSignal,
+    attemptId?: string,
+    proxied?: boolean,
+  ): Promise<number> => {
+    let headersSpan: SpanHandle | null = null;
+    let bodySpan: SpanHandle | null = null;
     try {
+      headersSpan = attemptId
+        ? beginSpan('fetch_headers', { attemptId, proxied })
+        : null;
       const containersRes = await apiFetch(`/stacks/${filename}/containers`, { signal });
+      const hopProxied = containersRes.headers.get('x-sencho-proxy') === '1' || proxied === true;
+      if (headersSpan !== null) {
+        endSpan(headersSpan, { proxied: hopProxied, detail: { status: containersRes.status } });
+        headersSpan = null;
+      }
       if (signal?.aborted) return 0;
+      bodySpan = attemptId
+        ? beginSpan('body_decode', { attemptId, proxied: hopProxied })
+        : null;
       const conts = await containersRes.json();
+      if (bodySpan !== null) {
+        endSpan(bodySpan);
+        bodySpan = null;
+      }
       const list = Array.isArray(conts) ? conts : [];
+      const dispatchSpan = attemptId
+        ? beginSpan('state_dispatch', { attemptId, proxied: hopProxied })
+        : null;
       editorState.setContainers(list);
+      if (dispatchSpan !== null) endSpan(dispatchSpan);
       return list.length;
     } catch (error) {
+      if (headersSpan !== null) endSpan(headersSpan, { outcome: 'error' });
+      if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
       if (isAbortError(error)) return 0;
       console.error('Failed to load containers:', error);
       editorState.setContainers([]);
@@ -579,24 +610,34 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setIsEditing(false);
     editorState.setEditingCompose(false);
     editorState.setActiveTab('compose');
+    let headersSpan: SpanHandle | null = null;
+    let bodySpan: SpanHandle | null = null;
     try {
+      headersSpan = beginSpan('fetch_headers', { attemptId });
       const res = await apiFetch(`/stacks/${filename}`, { signal });
+      const proxied = res.headers.get('x-sencho-proxy') === '1';
+      endSpan(headersSpan, { proxied, detail: { status: res.status } });
+      headersSpan = null;
       if (signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
+      bodySpan = beginSpan('body_decode', { attemptId, proxied });
       const text = await res.text();
+      endSpan(bodySpan);
+      bodySpan = null;
       if (signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       if (!res.ok) {
         throw new Error(`Failed to load stack: ${res.status}`);
       }
-      const proxied = res.headers.get('x-sencho-proxy') === '1';
+      const dispatchSpan = beginSpan('state_dispatch', { attemptId, proxied });
       stackListState.setSelectedFile(filename);
       navState.setActiveView('editor');
       editorState.setContent(text || '');
       editorState.setOriginalContent(text || '');
       editorState.setComposeEtag(res.headers.get('etag'));
+      endSpan(dispatchSpan);
       detailVisiblePendingRef.current = { attemptId, token: filename, proxied };
       setDetailVisibleEpoch((n) => n + 1);
       const envFiles = await loadEnvState(filename, signal);
-      const containerCount = await loadContainerState(filename, signal);
+      const containerCount = await loadContainerState(filename, signal, attemptId, proxied);
       if (!signal.aborted) {
         detailContainersPendingRef.current = {
           attemptId,
@@ -617,6 +658,8 @@ export function useStackActions(options: UseStackActionsOptions) {
       }
       return { ok: true, envFiles };
     } catch (error) {
+      if (headersSpan !== null) endSpan(headersSpan, { outcome: 'error' });
+      if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
       if (isAbortError(error) || signal.aborted) { abortAttempt(attemptId); return { ok: false }; }
       console.error('Failed to load file:', error);
       toast.error(`Could not open "${filename.replace(/\.(ya?ml)$/, '')}". Check your connection and try again.`);

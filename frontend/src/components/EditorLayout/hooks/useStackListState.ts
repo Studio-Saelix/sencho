@@ -258,11 +258,13 @@ export function useStackListState() {
       endSpan(bodySpan);
       bodySpan = null;
       const fileList: string[] = Array.isArray(data) ? data : [];
+      const listDispatch = beginSpan('state_dispatch', { attemptId, background, proxied });
       setFiles(fileList);
       setFilesNodeId(fetchNodeId);
       hadSuccessfulListRef.current = true;
       setStacksLoadStatus('success');
       setStacksLoadError(null);
+      endSpan(listDispatch);
       listSucceeded = true;
       // Token folds node + count so an empty->empty commit still fires once per
       // attempt even when the committed `files` is referentially equal.
@@ -275,14 +277,27 @@ export function useStackListState() {
       // format can express `partial`; a node lacking the endpoint or returning
       // the legacy plain-string format is re-derived from per-stack containers
       // so a crashed container is not hidden behind a healthy sibling.
+      const statusHeaders = beginSpan('fetch_headers', { attemptId, background, proxied });
       const statusRes = await apiFetch('/stacks/statuses');
+      const statusProxied = statusRes.headers.get('x-sencho-proxy') === '1' || proxied;
+      endSpan(statusHeaders, { proxied: statusProxied, detail: { status: statusRes.status } });
       if (stale()) { abortAttempt(attemptId); return fileList; }
       let bulkStatuses: Record<string, StackRowStatus> = {};
       const bulkPorts: Record<string, number | undefined> = {};
       const bulkSelf: Record<string, boolean> = {};
       const bulkCounts: StackCounts = {};
 
-      const raw: unknown = statusRes.ok ? await statusRes.json() : null;
+      let raw: unknown = null;
+      if (statusRes.ok) {
+        const statusBodySpan = beginSpan('body_decode', { attemptId, background, proxied: statusProxied });
+        try {
+          raw = await statusRes.json();
+          endSpan(statusBodySpan);
+        } catch (decodeErr) {
+          endSpan(statusBodySpan, { outcome: 'error' });
+          throw decodeErr;
+        }
+      }
       if (isBulkStatusObjectFormat(raw)) {
         for (const [key, val] of Object.entries(raw as Record<string, StackStatusInfo>)) {
           bulkStatuses[key] = val.status;
@@ -295,6 +310,7 @@ export function useStackListState() {
       } else {
         bulkStatuses = await deriveStatusesFromContainers(fileList);
       }
+      const statusDispatch = beginSpan('state_dispatch', { attemptId, background, proxied: statusProxied });
       setStackStatuses(prev => {
         const next: StackStatus = {};
         for (const file of fileList) {
@@ -310,9 +326,10 @@ export function useStackListState() {
       });
       setStackSelfFlags(bulkSelf);
       setStackCounts(bulkCounts);
+      endSpan(statusDispatch);
       refreshLabels();
       if (!background) {
-        listHydratedPendingRef.current = { attemptId, token: listToken, proxied };
+        listHydratedPendingRef.current = { attemptId, token: listToken, proxied: statusProxied };
       }
       return fileList;
     } catch (error) {
