@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.95.0](https://github.com/Studio-Saelix/sencho/compare/v0.94.1...v0.95.0) (2026-07-12)
 
 
+### Thanks
+
+* @auspex for [#1581](https://github.com/Studio-Saelix/sencho/issues/1581)
+
 ### Added
 
 * add confirmed Take down stack action with optional volume removal ([#1599](https://github.com/Studio-Saelix/sencho/issues/1599)) ([d113004](https://github.com/Studio-Saelix/sencho/commit/d1130043592778749db4169711ed3f8028fb6719))
