@@ -49,6 +49,25 @@ describe('scheduledActions registry', () => {
     }
   });
 
+  describe('timeline lanes', () => {
+    it('pins each lane key, order, and label so a registry rewrite cannot silently rename or reorder one', () => {
+      expect(SCHEDULED_ACTION_CATEGORIES.map(lane => [lane.key, lane.label])).toEqual([
+        ['lifecycle', 'Lifecycle'],
+        ['updates', 'Updates'],
+        ['security', 'Security'],
+        ['maintenance', 'Upkeep'],
+        ['backups', 'Backups'],
+      ]);
+    });
+
+    it('gives every lane a non-empty color and background so its Timeline dot always renders', () => {
+      for (const lane of SCHEDULED_ACTION_CATEGORIES) {
+        expect(lane.color.trim()).not.toBe('');
+        expect(lane.bg.trim()).not.toBe('');
+      }
+    });
+  });
+
   it('marks scan and prune as local-node actions', () => {
     expect(getActionById('scan')).toMatchObject({ requiresNode: true, nodeScope: 'local' });
     expect(getActionById('prune')).toMatchObject({ requiresNode: true, nodeScope: 'local' });
