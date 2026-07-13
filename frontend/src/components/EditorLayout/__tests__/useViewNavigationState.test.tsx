@@ -222,6 +222,9 @@ describe('useViewNavigationState', () => {
     expect(values).toContain('fleet');
     expect(values).toContain('resources');
     expect(values).toContain('templates');
+    // Networking is a base nav item; the global search palette's Pages group
+    // derives from this list, so it needs no separate registration.
+    expect(values).toContain('networking');
     // Logs is an admin-only operator view; a non-admin must not see the entry.
     expect(values).not.toContain('global-observability');
     expect(values).not.toContain('auto-updates');

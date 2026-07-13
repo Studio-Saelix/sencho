@@ -1,9 +1,19 @@
 import { Button } from '@/components/ui/button';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import type { useAuth } from '@/context/AuthContext';
 import { isNetworkingActionVisible } from '@/lib/networking';
+import {
+  FINDING_GROUP_LABELS, findingSourceLabel, groupFindings, type NetworkingFindingGroup,
+} from '@/lib/networkingSeverity';
 import type { NetworkingFinding, NetworkingRecommendedAction } from '@/types/networking';
 
-const SEVERITY_ORDER = ['critical', 'high', 'medium', 'info'] as const;
+const GROUP_ORDER: NetworkingFindingGroup[] = ['needs-action', 'review-recommended', 'informational'];
+
+const GROUP_CLASS: Record<NetworkingFindingGroup, string> = {
+  'needs-action': 'text-destructive',
+  'review-recommended': 'text-warning',
+  informational: 'text-stat-subtitle',
+};
 
 const SEVERITY_CLASS: Record<NetworkingFinding['severity'], string> = {
   info: 'text-stat-subtitle',
@@ -29,65 +39,78 @@ export function NetworkingFindingsList({
 }) {
   if (loading) return <p className="text-sm text-muted-foreground">Loading findings…</p>;
   if (findings.length === 0) {
-    return <p className="text-sm text-muted-foreground">No networking findings on this node.</p>;
+    return <p className="text-sm text-muted-foreground">No networking issues detected.</p>;
   }
 
+  const groups = groupFindings(findings);
+
   return (
-    <div className="space-y-4">
-      {SEVERITY_ORDER.map((severity) => {
-        const group = findings.filter((finding) => finding.severity === severity);
-        if (!group.length) return null;
+    <div className="space-y-6">
+      {GROUP_ORDER.map((group) => {
+        const items = groups[group];
+        if (!items.length) return null;
         return (
-          <section key={severity}>
-            <p className={`mb-2 font-mono text-[10px] uppercase tracking-[0.18em] ${SEVERITY_CLASS[severity]}`}>
-              {severity} · {group.length}
+          <section key={group}>
+            <p className={`mb-2 font-mono text-[10px] uppercase tracking-[0.18em] ${GROUP_CLASS[group]}`}>
+              {FINDING_GROUP_LABELS[group]} · {items.length}
             </p>
-            <ul className="space-y-2">
-              {group.map((finding) => (
-                <li
-                  key={finding.id}
-                  className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-3 py-2.5"
-                >
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className={`font-mono text-[10px] uppercase tracking-wide ${SEVERITY_CLASS[finding.severity]}`}>
-                      {finding.kind}
-                    </span>
-                    <span className="text-sm font-medium text-stat-value">{finding.title}</span>
-                  </div>
-                  <p className="mt-1 text-sm text-stat-subtitle">{finding.message}</p>
-                  {finding.evidence.length > 0 && (
-                    <dl className="mt-2 grid gap-1 text-xs sm:grid-cols-2">
-                      {finding.evidence.map((item) => (
-                        <div key={`${item.label}-${item.value}`}>
-                          <dt className="font-mono uppercase text-stat-subtitle">{item.label}</dt>
-                          <dd className="font-mono text-stat-value">{item.value}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  )}
-                  {!disabled && finding.recommendedActions.length > 0 && (
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {finding.recommendedActions
-                        .filter((action) => isNetworkingActionVisible(
-                          action,
-                          isAdmin,
-                          (stack) => canEdit('stack:edit', 'stack', stack),
-                        ))
-                        .map((action) => (
-                          <Button
-                            key={`${finding.id}-${action.kind}-${action.label}`}
-                            variant="outline"
-                            size="sm"
-                            onClick={() => void onAction(action)}
-                          >
-                            {action.label}
-                          </Button>
-                        ))}
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
+            <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
+              <div className="max-h-[62vh] overflow-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className="w-20 text-[11px]">Severity</TableHead>
+                      <TableHead className="text-[11px]">Finding</TableHead>
+                      <TableHead className="w-32 text-[11px]">Stack</TableHead>
+                      <TableHead className="w-32 text-[11px]">Service</TableHead>
+                      <TableHead className="w-32 text-[11px]">Network</TableHead>
+                      <TableHead className="w-40 text-[11px]">Source</TableHead>
+                      {!disabled && <TableHead className="w-44 text-right text-[11px]">Action</TableHead>}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {items.map((finding, i) => {
+                      const sourceLabel = findingSourceLabel(finding);
+                      const primary = finding.recommendedActions.find((action) =>
+                        isNetworkingActionVisible(action, isAdmin, (stack) => canEdit('stack:edit', 'stack', stack)),
+                      );
+                      return (
+                        <TableRow
+                          key={finding.id}
+                          className="animate-in fade-in-0 duration-200 hover:bg-muted/30 transition-colors"
+                          style={{ animationDelay: `${Math.min(i * 20, 200)}ms` }}
+                        >
+                          <TableCell>
+                            <span className={`font-mono text-[10px] uppercase tracking-wide ${SEVERITY_CLASS[finding.severity]}`}>
+                              {finding.severity}
+                            </span>
+                          </TableCell>
+                          <TableCell>
+                            <p className="text-sm font-medium text-stat-value">{finding.title}</p>
+                            <p className="text-xs text-stat-subtitle">{finding.message}</p>
+                          </TableCell>
+                          <TableCell className="font-mono text-xs text-stat-subtitle">{finding.stack ?? ''}</TableCell>
+                          <TableCell className="font-mono text-xs text-stat-subtitle">{finding.service ?? ''}</TableCell>
+                          <TableCell className="font-mono text-xs text-stat-subtitle">{finding.network ?? ''}</TableCell>
+                          <TableCell className="font-mono text-[10px] uppercase tracking-wide text-stat-subtitle/80">
+                            {sourceLabel ?? ''}
+                          </TableCell>
+                          {!disabled && (
+                            <TableCell className="text-right">
+                              {primary && (
+                                <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => void onAction(primary)}>
+                                  {primary.label}
+                                </Button>
+                              )}
+                            </TableCell>
+                          )}
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
           </section>
         );
       })}

@@ -1,6 +1,7 @@
-import type {
-  NetworkingFinding, NetworkingNetworkRow, NetworkingOverviewEnvelope,
-  NetworkingRecommendedAction, NodeNetworkingOverview,
+import {
+  isNetworkDriftFindingKind,
+  type NetworkingFinding, type NetworkingNetworkRow, type NetworkingOverviewEnvelope,
+  type NetworkingRecommendedAction, type NodeNetworkingOverview,
 } from '@/types/networking';
 
 export type NetworkFilter = 'all' | 'managed' | 'external' | 'system' | 'shared' | 'exposed' | 'drift';
@@ -15,7 +16,13 @@ export function isNetworkingActionVisible(
   return true;
 }
 
-function matchesNetworkFilter(row: NetworkingNetworkRow, filter: NetworkFilter): boolean {
+// findingIds on a row are opaque hash IDs; the drift filter needs each finding's
+// kind, so the caller supplies a lookup built from the full findings list.
+function matchesNetworkFilter(
+  row: NetworkingNetworkRow,
+  filter: NetworkFilter,
+  findingKindById: Map<string, string>,
+): boolean {
   switch (filter) {
     case 'managed':
       return row.ownership === 'sencho-managed';
@@ -28,7 +35,10 @@ function matchesNetworkFilter(row: NetworkingNetworkRow, filter: NetworkFilter):
     case 'exposed':
       return Boolean(row.exposureSummary?.broadExposureCount);
     case 'drift':
-      return row.findingIds.length > 0;
+      return row.findingIds.some((id) => {
+        const kind = findingKindById.get(id);
+        return kind !== undefined && isNetworkDriftFindingKind(kind);
+      });
     case 'all':
     default:
       return true;
@@ -39,10 +49,11 @@ export function filterNetworkRows(
   rows: NetworkingNetworkRow[],
   filter: NetworkFilter,
   search: string,
+  findingKindById: Map<string, string> = new Map(),
 ): NetworkingNetworkRow[] {
   const query = search.trim().toLowerCase();
   return rows.filter((row) => {
-    if (!matchesNetworkFilter(row, filter)) return false;
+    if (!matchesNetworkFilter(row, filter, findingKindById)) return false;
     if (!query) return true;
     return [
       row.name,
@@ -51,6 +62,7 @@ export function filterNetworkRows(
       row.driver,
       ...row.declaredByStacks,
       ...row.declaredExternalByStacks,
+      ...row.serviceNames,
     ].filter(Boolean).some((value) => value!.toLowerCase().includes(query));
   });
 }
@@ -80,6 +92,66 @@ export function buildExternalNetworkSnippet(name: string): string | null {
   return `networks:\n  ${name}:\n    external: true`;
 }
 
+/** Normalizes a network row from a schema-2 remote (no serviceNames) so the UI
+ *  never crashes on a missing array. */
+function adaptNetworkRow(row: Partial<NetworkingNetworkRow>): NetworkingNetworkRow {
+  return {
+    id: row.id ?? '',
+    name: row.name ?? '',
+    driver: row.driver ?? 'bridge',
+    scope: row.scope ?? 'local',
+    isSystem: row.isSystem === true,
+    ingress: row.ingress === true,
+    enableIPv6: row.enableIPv6,
+    composeProject: row.composeProject ?? null,
+    stack: row.stack ?? null,
+    connectedCount: row.connectedCount ?? 0,
+    isSencho: row.isSencho === true,
+    ownership: row.ownership ?? 'unmanaged',
+    declaredByStacks: row.declaredByStacks ?? [],
+    declaredExternalByStacks: row.declaredExternalByStacks ?? [],
+    isExternalDependency: row.isExternalDependency === true,
+    sharedStackCount: row.sharedStackCount ?? 0,
+    exposureSummary: row.exposureSummary ?? null,
+    findingIds: row.findingIds ?? [],
+    serviceNames: row.serviceNames ?? [],
+  };
+}
+
+/** Normalizes a finding from a schema-2 remote (no sources/doctorFindings). */
+function adaptFinding(f: Partial<NetworkingFinding>): NetworkingFinding {
+  return {
+    id: f.id ?? '',
+    kind: (f.kind ?? 'runtime-unavailable') as NetworkingFinding['kind'],
+    severity: f.severity ?? 'info',
+    title: f.title ?? '',
+    message: f.message ?? '',
+    stack: f.stack,
+    network: f.network,
+    service: f.service,
+    evidence: f.evidence ?? [],
+    recommendedActions: f.recommendedActions ?? [],
+    sources: f.sources ?? ['live'],
+    doctorFindings: f.doctorFindings ?? [],
+  };
+}
+
+/** Derives ownership counts from network rows when the overview envelope itself
+ *  omits them (schema 2), instead of showing incorrect zeroes. */
+function deriveOwnershipCounts(networks: NetworkingNetworkRow[]): {
+  senchoManagedNetworkCount: number;
+  composeManagedNetworkCount: number;
+  unmanagedNetworkCount: number;
+  externalDependencyNetworkCount: number;
+} {
+  return {
+    senchoManagedNetworkCount: networks.filter((n) => n.ownership === 'sencho-managed').length,
+    composeManagedNetworkCount: networks.filter((n) => n.ownership === 'compose-managed').length,
+    unmanagedNetworkCount: networks.filter((n) => n.ownership === 'unmanaged').length,
+    externalDependencyNetworkCount: networks.filter((n) => n.isExternalDependency).length,
+  };
+}
+
 export function adaptNetworkingOverview(body: Partial<NetworkingOverviewEnvelope>): {
   isLegacy: boolean;
   runtimeAvailable: boolean;
@@ -88,13 +160,39 @@ export function adaptNetworkingOverview(body: Partial<NetworkingOverviewEnvelope
   findings: NetworkingFinding[];
   recentActivity: NetworkingOverviewEnvelope['recentActivity'];
 } {
-  const isLegacy = body.schemaVersion !== 2;
+  // A remote node's actual schemaVersion may be older than the type literal this
+  // build declares (3); widen it to a plain number for the compatibility checks.
+  const schemaVersion = body.schemaVersion as unknown as number | undefined;
+
+  // Schema 1 / absent: fully legacy, no usable shape at all.
+  const isLegacy = schemaVersion === undefined || schemaVersion < 2;
+  if (isLegacy) {
+    return {
+      isLegacy: true,
+      runtimeAvailable: false,
+      overview: null,
+      networks: [],
+      findings: [],
+      recentActivity: [],
+    };
+  }
+
+  const networks = (body.networks ?? []).map(adaptNetworkRow);
+  const findings = (body.findings ?? []).map(adaptFinding);
+  const isSchema2 = schemaVersion === 2;
+  const overview = body.overview
+    ? {
+      ...body.overview,
+      ...(isSchema2 ? deriveOwnershipCounts(networks) : {}),
+    }
+    : null;
+
   return {
-    isLegacy,
-    runtimeAvailable: isLegacy ? false : body.runtimeAvailable === true,
-    overview: body.overview ?? null,
-    networks: body.networks ?? [],
-    findings: isLegacy ? [] : body.findings ?? [],
-    recentActivity: isLegacy ? [] : body.recentActivity ?? [],
+    isLegacy: false,
+    runtimeAvailable: body.runtimeAvailable === true,
+    overview,
+    networks,
+    findings,
+    recentActivity: body.recentActivity ?? [],
   };
 }

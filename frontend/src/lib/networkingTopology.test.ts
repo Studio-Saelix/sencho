@@ -18,7 +18,7 @@ describe('networking topology adapters', () => {
 
   it('filters synthetic missing external nodes', () => {
     expect(filterTopologyNetworks([missingNetwork], {
-      stack: '', network: '', exposedOnly: false, driftOnly: false, missingExternalOnly: true, sharedOnly: false,
+      stack: '', network: '', ownership: 'all', exposedOnly: false, driftOnly: false, missingExternalOnly: true, sharedOnly: false,
     })).toEqual([missingNetwork]);
   });
 });

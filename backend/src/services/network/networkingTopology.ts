@@ -5,6 +5,7 @@
 import type { DependencySnapshot } from '../DockerController';
 import { DatabaseService } from '../DatabaseService';
 import type { ExposureIntent, StackNetworkFacts } from './types';
+import { isHostNetwork } from './normalize';
 import type {
   NetworkingFinding,
   NetworkingOwnership,
@@ -95,6 +96,7 @@ export function buildNetworkingTopology(
             : null,
           findingIds: findingsByNetwork.get(net.name) ?? [],
           driftFlags: getDriftFlags(container.stack, container.service, net.name, stackFacts),
+          hostMode: isHostNetwork(findService(container.stack, container.service, stackFacts)?.networkMode),
         });
       }
     }

@@ -69,7 +69,7 @@ networkingRouter.get('/networks/:id', async (req: Request, res: Response): Promi
     }
     const snapNet = findSnapshotNetwork(snapshot, id);
     const raw = await DockerController.getInstance(req.nodeId).inspectNetwork(snapNet?.id ?? id);
-    res.json(okEnvelope(true, { network: sanitizeNetworkInspect(raw, snapNet) }));
+    res.json(okEnvelope(true, { network: sanitizeNetworkInspect(raw, snapNet, snapshot) }));
   } catch (error: unknown) {
     console.error('[Networking] Failed to inspect network:', sanitizeForLog(getErrorMessage(error, 'unknown')));
     const statusCode = (error as { statusCode?: number }).statusCode;

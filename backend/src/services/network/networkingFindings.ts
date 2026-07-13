@@ -4,9 +4,9 @@
  */
 import { createHash } from 'crypto';
 import type { DependencySnapshot } from '../DockerController';
-import { DatabaseService } from '../DatabaseService';
 import type { ExposureIntent, StackNetworkFacts } from './types';
 import { isHostNetwork } from './normalize';
+import { getExposureContext, type ExposureContext } from './exposureContext';
 import type { NetworkingFinding, NetworkingFindingKind, NetworkingNetworkBase, NetworkingRecommendedAction } from './networkingTypes';
 
 type FindingExtra = Pick<NetworkingFinding, 'stack' | 'network' | 'service'>;
@@ -33,6 +33,8 @@ function finding(
       ...(extra.network ? [{ label: 'Network', value: extra.network }] : []),
     ],
     recommendedActions,
+    sources: ['live'],
+    doctorFindings: [],
   };
 }
 
@@ -40,28 +42,44 @@ function stackActions(stack: string): NetworkingRecommendedAction[] {
   return [{ kind: 'open-stack-networking', label: 'Open stack networking', stack }];
 }
 
-function effectiveIntent(stack: string, service: string, stackIntent: ExposureIntent | null, byService: Map<string, ExposureIntent>): ExposureIntent | null {
-  return byService.get(service) ?? stackIntent;
+function effectiveIntent(service: string, stackIntent: ExposureIntent | null, byService: Record<string, ExposureIntent>): ExposureIntent | null {
+  return byService[service] ?? stackIntent ?? null;
+}
+
+/** Host-mode severity matrix, parameterized by documented Dossier access.
+ *  Internal/same-node are a contradiction regardless of documentation: high. Unset
+ *  and unknown are unclassified exposure with the network gone entirely: high.
+ *  Everything else (lan/public/reverse-proxy/temporary) is medium undocumented,
+ *  info when a Dossier access URL documents the exposure. */
+function hostModeSeverity(intent: ExposureIntent | null, hasAccessUrls: boolean): NetworkingFinding['severity'] {
+  if (intent === 'internal' || intent === 'same-node') return 'high';
+  if (intent === null || intent === 'unknown') return 'high';
+  return hasAccessUrls ? 'info' : 'medium';
 }
 
 function addExposureFindings(
   out: NetworkingFinding[],
   facts: StackNetworkFacts,
-  stackIntent: ExposureIntent | null,
-  byService: Map<string, ExposureIntent>,
+  context: ExposureContext,
 ): void {
+  const stackIntent = context.available ? context.stackIntent : null;
+  const byService = context.available ? context.serviceIntents : {};
+  const hasAccessUrls = context.available && context.hasAccessUrls;
+
   for (const service of facts.services) {
     const hostMode = isHostNetwork(service.networkMode);
     const publishes = hostMode || service.publishedPorts.length > 0;
     if (!publishes) continue;
-    const intent = effectiveIntent(facts.stack, service.name, stackIntent, byService);
+    const intent = effectiveIntent(service.name, stackIntent, byService);
     const intentAction: NetworkingRecommendedAction = {
       kind: 'set-exposure-intent', label: 'Set exposure intent', stack: facts.stack, service: service.name,
     };
     if (hostMode) {
+      // Structural fact; stays visible even when exposure context is unavailable,
+      // at the neutral fallback severity (no intent/Dossier interpretation).
       out.push(finding(
         'network-mode-host',
-        intent === 'internal' ? 'high' : 'medium',
+        context.available ? hostModeSeverity(intent, hasAccessUrls) : 'medium',
         'Host network mode',
         `Service "${service.name}" in stack "${facts.stack}" uses network_mode: host.`,
         { stack: facts.stack, service: service.name },
@@ -70,6 +88,21 @@ function addExposureFindings(
       continue;
     }
     const broad = service.publishedPorts.some(port => port.allInterfaces);
+    if (!context.available) {
+      // Structural all-interface bind fact stays visible at fallback severity;
+      // intent-dependent interpretation (unclassified/mismatch) is skipped.
+      if (broad) {
+        out.push(finding(
+          'exposure-all-interfaces',
+          'medium',
+          'Port bound on all interfaces',
+          `Service "${service.name}" in stack "${facts.stack}" publishes ports on all interfaces.`,
+          { stack: facts.stack, service: service.name },
+          [intentAction],
+        ));
+      }
+      continue;
+    }
     if (intent === null || intent === 'unknown') {
       out.push(finding(
         'exposure-unclassified',
@@ -80,12 +113,12 @@ function addExposureFindings(
         [intentAction],
       ));
     }
-    if (intent === 'internal' && service.publishedPorts.some(port => !port.loopbackOnly)) {
+    if ((intent === 'internal' || intent === 'same-node') && service.publishedPorts.some(port => !port.loopbackOnly)) {
       out.push(finding(
         'exposure-intent-mismatch',
         'high',
-        'Internal intent with host publish',
-        `Service "${service.name}" is classified internal but publishes ports to the host.`,
+        intent === 'internal' ? 'Internal intent with host publish' : 'Same-node intent with host publish',
+        `Service "${service.name}" is classified ${intent} but publishes ports to the host.`,
         { stack: facts.stack, service: service.name },
         [intentAction],
       ));
@@ -174,7 +207,7 @@ function addComposeDriftFindings(
     if (!network.external && network.createdByStack && facts.drift.declaredButUnused.includes(network.key)) {
       out.push(finding(
         'declared-network-unused',
-        'info',
+        'medium',
         'Declared network unused',
         `Stack "${facts.stack}" declares network "${network.name}" but no running service is attached.`,
         { stack: facts.stack, network: network.name },
@@ -230,18 +263,26 @@ function addSharedNetworkFindings(
     ));
   }
 
-  const declaredNames = new Map<string, string[]>();
+  // Only genuinely unsafe name collisions are worth a warning: two or more stacks
+  // declaring a NON-external network that happens to resolve to the same literal
+  // name (a forced `name:` override colliding by accident). Two or more stacks
+  // that all declare the SAME network as `external: true` is the ordinary
+  // shared-external-network pattern, already covered above as an info-level
+  // "shared network" finding, not a collision.
+  const declaredNames = new Map<string, { stack: string; external: boolean }[]>();
   for (const facts of stackFacts) {
     if (!facts.renderable) continue;
     for (const network of facts.networks) {
-      const stacks = declaredNames.get(network.name) ?? [];
-      stacks.push(facts.stack);
-      declaredNames.set(network.name, stacks);
+      const entries = declaredNames.get(network.name) ?? [];
+      entries.push({ stack: facts.stack, external: network.external === true });
+      declaredNames.set(network.name, entries);
     }
   }
-  for (const [networkName, stacks] of declaredNames) {
-    const uniqueStacks = [...new Set(stacks)];
+  for (const [networkName, entries] of declaredNames) {
+    const uniqueStacks = [...new Set(entries.map((e) => e.stack))];
     if (uniqueStacks.length < 2) continue;
+    const allExternal = entries.every((e) => e.external);
+    if (allExternal) continue;
     out.push(finding(
       'network-name-collision',
       'medium',
@@ -266,7 +307,6 @@ export function buildNodeNetworkingFindings(
   baseNetworks: NetworkingNetworkBase[],
 ): NetworkingFinding[] {
   const out: NetworkingFinding[] = [];
-  const db = DatabaseService.getInstance();
   if (!snapshot) {
     out.push(finding(
       'runtime-unavailable', 'info', 'Runtime networking unavailable',
@@ -281,10 +321,8 @@ export function buildNodeNetworkingFindings(
 
   for (const facts of stackFacts) {
     if (!facts.renderable) continue;
-    const intents = db.getStackExposureIntents(nodeId, facts.stack);
-    const stackIntent = intents.find(intent => intent.service === '')?.intent ?? null;
-    const byService = new Map(intents.filter(intent => intent.service !== '').map(intent => [intent.service, intent.intent]));
-    addExposureFindings(out, facts, stackIntent, byService);
+    const context = getExposureContext(nodeId, facts.stack);
+    addExposureFindings(out, facts, context);
 
     if (!snapshot) continue;
     addComposeDriftFindings(out, facts, baseNetworks);

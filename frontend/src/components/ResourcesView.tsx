@@ -14,7 +14,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
-import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Eye, Loader2, History, FolderOpen, Search, ArrowRight } from 'lucide-react';
+import { Trash2, HardDrive, Network, PackageMinus, MonitorX, MoreVertical, AlertTriangle, ShieldCheck, Eye, Loader2, History, FolderOpen, Search } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { SeverityBadge } from '@/components/ui/SeverityBadge';
 import { useTrivyStatus } from '@/hooks/useTrivyStatus';
@@ -88,8 +88,6 @@ interface UnmanagedContainer {
     Status: string;
     Image: string;
 }
-
-// NetworkInspectData is re-exported from ./resources/NetworkDetailSheet
 
 type ResourceFilter = 'all' | 'managed' | 'unmanaged';
 type PruneTarget = 'containers' | 'images' | 'networks' | 'volumes';
@@ -931,30 +929,6 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             </div>
 
             {/* Resource Tabs */}
-            <Card className="mb-4 border-card-border bg-card/40">
-                <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                        <CardTitle className="text-base">Network inventory moved</CardTitle>
-                        <CardDescription>
-                            Compose network list, topology, inspect, and findings now live on the Networking page.
-                        </CardDescription>
-                    </div>
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        className="gap-1.5 shrink-0"
-                        onClick={() => {
-                            window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
-                                detail: { view: 'networking' },
-                            }));
-                        }}
-                    >
-                        Open Networking
-                        <ArrowRight className="w-3.5 h-3.5" strokeWidth={1.5} />
-                    </Button>
-                </CardContent>
-            </Card>
-
             <Tabs
                 value={resourceTab}
                 onValueChange={(v) => setResourceTab(v as typeof resourceTab)}

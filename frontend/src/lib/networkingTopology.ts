@@ -1,8 +1,11 @@
 import type { NetworkingTopologyContainer, NetworkingTopologyEnvelope, NetworkingTopologyNetwork } from '@/types/networking';
 
+export type TopologyOwnershipFilter = 'all' | 'managed' | 'external' | 'system';
+
 export interface NetworkingTopologyFilters {
   stack: string;
   network: string;
+  ownership: TopologyOwnershipFilter;
   exposedOnly: boolean;
   driftOnly: boolean;
   missingExternalOnly: boolean;
@@ -12,11 +15,37 @@ export interface NetworkingTopologyFilters {
 export const DEFAULT_TOPOLOGY_FILTERS: NetworkingTopologyFilters = {
   stack: '',
   network: '',
+  ownership: 'all',
   exposedOnly: false,
   driftOnly: false,
   missingExternalOnly: false,
   sharedOnly: false,
 };
+
+/** Large-topology strategy (Workstream D): edges stop animating above this count,
+ *  and the graph refuses to render (falling back to the Networks table) above
+ *  the combined node+edge cap. The cap check runs on FILTERED, already-deduped
+ *  counts so narrowing a filter can bring an over-cap graph back under it. */
+export const TOPOLOGY_ANIMATION_EDGE_LIMIT = 80;
+export const TOPOLOGY_RENDER_CAP = 350;
+
+/** Cheap pre-layout size count. Mirrors the container cross-network dedupe that
+ *  `layoutGraph`/`aggregateContainers` perform, so a container attached to two
+ *  networks counts as one node (not two) and contributes one edge per network. */
+export function countTopologyGraphSize(networks: NetworkingTopologyNetwork[]): {
+  nodeCount: number;
+  edgeCount: number;
+} {
+  const containerIds = new Set<string>();
+  let edgeCount = 0;
+  for (const network of networks) {
+    for (const container of network.containers) {
+      containerIds.add(container.id);
+      edgeCount += 1;
+    }
+  }
+  return { nodeCount: networks.length + containerIds.size, edgeCount };
+}
 
 export function normalizeTopologyResponse(payload: unknown): {
   networks: NetworkingTopologyNetwork[];
@@ -35,10 +64,16 @@ export function normalizeTopologyResponse(payload: unknown): {
   if (!Array.isArray(envelope.networks)) {
     throw new Error('Invalid topology response');
   }
-  return {
-    networks: envelope.networks,
-    runtimeAvailable: true,
-  };
+  // A schema-2 remote's containers lack `hostMode`; default it so exposedOnly
+  // filtering degrades to published-ports-only instead of crashing.
+  const networks = envelope.networks.map((network) => ({
+    ...network,
+    containers: network.containers.map((container) => ({
+      ...container,
+      hostMode: container.hostMode === true,
+    })),
+  }));
+  return { networks, runtimeAvailable: true };
 }
 
 function containerMatchesStackQuery(
@@ -49,6 +84,16 @@ function containerMatchesStackQuery(
     container.stack?.toLowerCase().includes(stackQuery)
     || container.service?.toLowerCase().includes(stackQuery),
   );
+}
+
+function matchesOwnership(network: NetworkingTopologyNetwork, ownership: TopologyOwnershipFilter): boolean {
+  switch (ownership) {
+    case 'managed': return network.ownership === 'sencho-managed';
+    case 'external': return network.isExternalDependency;
+    case 'system': return network.ownership === 'system';
+    case 'all':
+    default: return true;
+  }
 }
 
 export function filterTopologyNetworks(
@@ -72,7 +117,11 @@ export function filterTopologyNetworks(
     ) {
       return [];
     }
-    if (filters.exposedOnly && !network.containers.some((container) => container.publishedPorts.length > 0)) {
+    if (!matchesOwnership(network, filters.ownership)) return [];
+    if (
+      filters.exposedOnly
+      && !network.containers.some((container) => container.publishedPorts.length > 0 || container.hostMode)
+    ) {
       return [];
     }
     if (
@@ -83,8 +132,12 @@ export function filterTopologyNetworks(
       return [];
     }
     if (filters.missingExternalOnly && !isMissing) return [];
-    if (filters.sharedOnly && network.declaredByStacks.length + network.declaredExternalByStacks.length < 2) {
-      return [];
+    if (filters.sharedOnly) {
+      // declaredExternalByStacks is a SUBSET of declaredByStacks (an external
+      // declaration is still a declaration), so summing both double-counts.
+      // Shared means 2+ distinct declaring stacks.
+      const uniqueStacks = new Set(network.declaredByStacks);
+      if (uniqueStacks.size < 2) return [];
     }
 
     return [{ ...network, containers }];

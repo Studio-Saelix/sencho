@@ -3,16 +3,18 @@ import {
   LayoutDashboard, Network, GitBranch, AlertTriangle, RefreshCw, Plus, Unplug,
 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
-import { PageMasthead } from '@/components/ui/PageMasthead';
+import { PageMasthead, type MastheadMetadataItem } from '@/components/ui/PageMasthead';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { LockCard } from '@/components/ui/LockCard';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
-import { Masthead, MobileSubTabs } from '@/components/mobile/mobile-ui';
+import { Masthead, MobileSubTabs, type Tone } from '@/components/mobile/mobile-ui';
 import { springs } from '@/lib/motion';
 import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog';
 import { ConfirmModal } from '@/components/ui/modal';
@@ -25,6 +27,7 @@ import {
   adaptNetworkingOverview, buildExternalNetworkSnippet, canUseNetworkName, getNetworkingPosture,
   isNetworkingActionVisible,
 } from '@/lib/networking';
+import { rankFindings } from '@/lib/networkingSeverity';
 import type {
   NetworkingFinding, NetworkingOverviewEnvelope, NetworkingRecommendedAction,
   NetworkingNetworkRow, NodeNetworkingOverview,
@@ -38,8 +41,8 @@ interface NetworkingViewProps {
 
 const TABS: { value: NetworkingTab; label: string; icon: typeof LayoutDashboard }[] = [
   { value: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { value: 'topology', label: 'Topology', icon: GitBranch },
   { value: 'networks', label: 'Networks', icon: Network },
+  { value: 'topology', label: 'Topology', icon: GitBranch },
   { value: 'findings', label: 'Findings', icon: AlertTriangle },
 ];
 
@@ -48,6 +51,16 @@ const POSTURE_TONE: Record<ReturnType<typeof getNetworkingPosture>['tone'], 'err
   warning: 'warn',
   neutral: 'idle',
   live: 'live',
+};
+
+// Maps the shared posture tone onto the mobile masthead's dot tone, state-word
+// color, and pulse, mirroring SecurityView's MOBILE_MASTHEAD_TONE table.
+type StateWordClass = 'text-destructive' | 'text-warning' | 'text-stat-value' | 'text-stat-title';
+const MOBILE_MASTHEAD_TONE: Record<'error' | 'warn' | 'idle' | 'live', { dot: Tone; word: StateWordClass; pulse: boolean }> = {
+  error: { dot: 'destructive', word: 'text-destructive', pulse: true },
+  warn: { dot: 'warning', word: 'text-warning', pulse: true },
+  live: { dot: 'brand', word: 'text-stat-value', pulse: false },
+  idle: { dot: 'warning', word: 'text-stat-title', pulse: false },
 };
 
 function destinationForAction(kind: NetworkingRecommendedAction['kind']): SenchoOpenStackDetail['destination'] {
@@ -59,6 +72,10 @@ function destinationForAction(kind: NetworkingRecommendedAction['kind']): Sencho
       return 'doctor';
     case 'open-stack-editor':
       return 'editor';
+    case 'open-stack-dossier':
+      return 'dossier';
+    case 'open-stack-drift':
+      return 'drift';
     default:
       return 'stack';
   }
@@ -167,6 +184,8 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
       case 'open-stack-networking':
       case 'open-stack-doctor':
       case 'open-stack-editor':
+      case 'open-stack-dossier':
+      case 'open-stack-drift':
       case 'set-exposure-intent':
         openStack(action.stack, destinationForAction(action.kind));
         return;
@@ -226,12 +245,25 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   }
 
   const posture = getNetworkingPosture(findings, runtimeAvailable, isLegacy);
+  const mobileTone = MOBILE_MASTHEAD_TONE[POSTURE_TONE[posture.tone]];
+  const needsActionCount = findings.filter((f) => f.severity === 'critical' || f.severity === 'high').length;
+  const reviewCount = findings.filter((f) => f.severity === 'medium').length;
+
+  const mastheadMetadata: MastheadMetadataItem[] | undefined = overview ? [
+    { label: 'NEEDS ACTION', value: String(needsActionCount), tone: needsActionCount > 0 ? 'error' : 'value' },
+    { label: 'REVIEW', value: String(reviewCount), tone: reviewCount > 0 ? 'warn' : 'value' },
+    { label: 'DRIFT', value: String(overview.networkCount === null ? '—' : findings.filter((f) => f.kind === 'network-missing' || f.kind === 'network-undeclared' || f.kind === 'declared-network-unused' || f.kind === 'foreign-network-attachment').length) },
+  ] : undefined;
+
   const masthead = isMobile ? (
     <Masthead
       kicker="networking"
       state={posture.label}
       meta={activeNode?.name}
       right={headerActions}
+      stateTone={mobileTone.dot}
+      stateClassName={mobileTone.word}
+      live={mobileTone.pulse}
     />
   ) : (
     <PageMasthead
@@ -239,15 +271,16 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
       state={posture.label}
       tone={POSTURE_TONE[posture.tone]}
       subtitle={isLegacy ? 'Update this node to unlock findings and attention.' : 'Compose-first network inventory, topology, and findings for this node.'}
+      metadata={mastheadMetadata}
       size="hero"
       className="rounded-lg"
-    >
-      <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setReloadKey(k => k + 1)} disabled={loading}>
-        <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} strokeWidth={1.5} />
-        Refresh
-      </Button>
-    </PageMasthead>
+    />
   );
+
+  const externalDependencies = networks.filter((n) => n.isExternalDependency);
+  const sharedNetworks = networks.filter((n) => n.sharedStackCount >= 2);
+  const unclassifiedExposureNetworks = networks.filter((n) => (n.exposureSummary?.unclassifiedStackCount ?? 0) > 0);
+  const topFindings = rankFindings(findings).slice(0, 5);
 
   const overviewCards = overview ? (
     <div className="space-y-4">
@@ -258,50 +291,151 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
       )}
       <div className="grid overflow-hidden rounded-lg border border-card-border bg-card shadow-card-bevel sm:grid-cols-2 xl:grid-cols-4">
         {[
-          { label: 'Needs action', value: findings.filter((finding) => finding.severity === 'critical' || finding.severity === 'high').length, tab: 'findings' as const },
-          { label: 'Review', value: findings.filter((finding) => finding.severity === 'medium').length, tab: 'findings' as const },
           { label: 'Networks', value: overview.networkCount ?? '—', tab: 'networks' as const },
+          { label: 'Managed', value: overview.senchoManagedNetworkCount ?? '—', tab: 'networks' as const },
+          { label: 'External deps.', value: overview.externalDependencyNetworkCount ?? '—', tab: 'networks' as const },
+          { label: 'System', value: overview.systemNetworkCount ?? '—', tab: 'networks' as const },
           { label: 'Exposed stacks', value: overview.exposedStackCount, tab: 'networks' as const },
+          { label: 'Unknown exposure', value: overview.unknownExposureStackCount, tab: 'findings' as const },
+          { label: 'Missing externals', value: overview.missingExternalCount, tab: 'findings' as const },
+          { label: 'Collisions', value: overview.networkCollisionCount, tab: 'findings' as const },
         ].map((item) => (
           <button
             key={item.label}
             type="button"
             onClick={() => setTab(item.tab)}
-            className="border-r border-card-border p-4 text-left last:border-r-0 hover:bg-muted/20"
+            className="border-r border-b border-card-border p-4 text-left hover:bg-muted/20 sm:[&:nth-child(2n)]:border-r-0 xl:[&:nth-child(4n)]:border-r-0 xl:[&:nth-child(n+5)]:border-b-0"
           >
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">{item.label}</p>
             <p className="mt-1 text-2xl font-semibold tabular-nums text-stat-value">{item.value}</p>
           </button>
         ))}
       </div>
+
       <Card>
         <CardContent className="p-4">
-          <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Operator attention</p>
-          <p className="mt-1 text-sm text-stat-value">
-            {isLegacy
-              ? 'This node provides a partial networking response. Update it to review enriched findings.'
-              : findings.length
-                ? `${findings.length} finding${findings.length === 1 ? '' : 's'} need review on this node.`
-                : 'No networking findings need attention.'}
-          </p>
-          {!isLegacy && (() => {
-            const primary = findings[0]?.recommendedActions.find((action) =>
-              isNetworkingActionVisible(action, isAdmin, (stack) => can('stack:edit', 'stack', stack)),
-            );
-            return primary ? (
-              <Button className="mt-3" size="sm" onClick={() => void dispatchAction(primary)}>
-                {primary.label}
-              </Button>
-            ) : null;
-          })()}
+          <div className="mb-2 flex items-center justify-between">
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Operator attention</p>
+            {findings.length > 5 && (
+              <button type="button" className="text-xs text-brand hover:underline" onClick={() => setTab('findings')}>
+                View all findings
+              </button>
+            )}
+          </div>
+          {isLegacy ? (
+            <p className="text-sm text-stat-value">This node provides a partial networking response. Update it to review enriched findings.</p>
+          ) : topFindings.length === 0 ? (
+            <p className="text-sm text-stat-value">No networking issues detected.</p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-20">Severity</TableHead>
+                  <TableHead>Finding</TableHead>
+                  <TableHead>Stack</TableHead>
+                  <TableHead className="w-44">Action</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {topFindings.map((finding) => {
+                  const primary = finding.recommendedActions.find((action) =>
+                    isNetworkingActionVisible(action, isAdmin, (stack) => can('stack:edit', 'stack', stack)),
+                  );
+                  return (
+                    <TableRow key={finding.id}>
+                      <TableCell className="w-20">
+                        <span className={`font-mono text-[10px] uppercase tracking-wide ${finding.severity === 'info' ? 'text-stat-subtitle' : finding.severity === 'medium' ? 'text-warning' : 'text-destructive'}`}>
+                          {finding.severity}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-sm text-stat-value">{finding.title}</TableCell>
+                      <TableCell className="font-mono text-xs text-stat-subtitle">{finding.stack ?? finding.network ?? ''}</TableCell>
+                      <TableCell className="w-44">
+                        {primary && (
+                          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => void dispatchAction(primary)}>
+                            {primary.label}
+                          </Button>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
         </CardContent>
       </Card>
+
+      {!isLegacy && (
+        <div className="grid gap-4 md:grid-cols-3">
+          <Card>
+            <CardContent className="p-4">
+              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">External network dependencies</p>
+              {externalDependencies.length === 0 ? (
+                <p className="mt-2 text-sm text-stat-subtitle">No stack depends on an external network.</p>
+              ) : (
+                <ul className="mt-2 space-y-1 text-sm">
+                  {externalDependencies.slice(0, 5).map((n) => (
+                    <li key={n.id} className="flex items-center justify-between gap-2">
+                      <span className="truncate font-mono text-xs">{n.name}</span>
+                      <span className="text-xs text-stat-subtitle">{n.declaredExternalByStacks.join(', ')}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4">
+              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Shared networks</p>
+              {sharedNetworks.length === 0 ? (
+                <p className="mt-2 text-sm text-stat-subtitle">No network is shared across stacks.</p>
+              ) : (
+                <ul className="mt-2 space-y-1 text-sm">
+                  {sharedNetworks.slice(0, 5).map((n) => (
+                    <li key={n.id} className="flex items-center justify-between gap-2">
+                      <span className="truncate font-mono text-xs">{n.name}</span>
+                      <span className="text-xs text-stat-subtitle">{n.sharedStackCount} stacks</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4">
+              <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Exposure without intent</p>
+              {unclassifiedExposureNetworks.length === 0 ? (
+                <p className="mt-2 text-sm text-stat-subtitle">Every publishing service has a classified intent.</p>
+              ) : (
+                <ul className="mt-2 space-y-1 text-sm">
+                  {unclassifiedExposureNetworks.slice(0, 5).map((n) => (
+                    <li key={n.id} className="flex items-center justify-between gap-2">
+                      <span className="truncate font-mono text-xs">{n.name}</span>
+                      <span className="text-xs text-stat-subtitle">{n.exposureSummary?.unclassifiedStackCount ?? 0}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
       {recentActivity.length > 0 && (
         <Card>
           <CardContent className="p-4">
             <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">Recent activity</p>
             <ul className="mt-2 space-y-1 text-sm text-stat-subtitle">
-              {recentActivity.slice(0, 5).map((activity) => <li key={activity.id}>{activity.message}</li>)}
+              {recentActivity.slice(0, 5).map((activity) => (
+                <li key={activity.id}>
+                  {activity.stack_name ? (
+                    <button type="button" className="hover:underline" onClick={() => openStack(activity.stack_name!)}>
+                      {activity.message}
+                    </button>
+                  ) : activity.message}
+                </li>
+              ))}
             </ul>
           </CardContent>
         </Card>
@@ -309,20 +443,13 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
     </div>
   ) : null;
 
-  const tabControls = isMobile ? (
-    <MobileSubTabs
-      ariaLabel="Networking sections"
-      active={tab}
-      onSelect={(v) => setTab(v as NetworkingTab)}
-      tabs={TABS.map(t => ({ value: t.value, label: t.label }))}
-    />
-  ) : (
-    <TabsList className="border-transparent bg-transparent">
+  const tabControls = (
+    <TabsList className="border-transparent bg-transparent max-md:w-full max-md:overflow-x-auto max-md:[scrollbar-width:none]">
       <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
         {TABS.map(t => (
           <TabsHighlightItem key={t.value} value={t.value}>
-            <TabsTrigger value={t.value} className="gap-1.5">
-              <t.icon className="w-3.5 h-3.5" strokeWidth={1.5} />
+            <TabsTrigger value={t.value}>
+              <t.icon className="mr-1.5 h-4 w-4" strokeWidth={1.5} />
               {t.label}
             </TabsTrigger>
           </TabsHighlightItem>
@@ -332,14 +459,49 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   );
 
   return (
-    <div className="flex h-full flex-col gap-4 p-4 md:p-6">
+    <div className="h-full overflow-auto p-4 md:p-6">
       {masthead}
 
-      <Tabs value={tab} onValueChange={(v) => setTab(v as NetworkingTab)} className="flex min-h-0 flex-1 flex-col">
-        {!isMobile && <div className="mb-2">{tabControls}</div>}
-        {isMobile && tabControls}
+      <Tabs value={tab} onValueChange={(v) => setTab(v as NetworkingTab)}>
+        {isMobile ? (
+          <MobileSubTabs
+            ariaLabel="Networking sections"
+            active={tab}
+            onSelect={(v) => setTab(v as NetworkingTab)}
+            tabs={TABS.map(t => ({ value: t.value, label: t.label }))}
+          />
+        ) : (
+          <div className="flex items-center justify-between gap-3 mb-4 mt-4 flex-wrap rounded-lg border border-card-border bg-card/40 px-2.5 py-1.5">
+            {tabControls}
+            <div className="flex items-center gap-2">
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setReloadKey(k => k + 1)}
+                      disabled={loading}
+                      className="h-9 w-9 p-0"
+                      aria-label="Refresh"
+                    >
+                      <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Refresh</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+              {isAdmin && (
+                <Button size="sm" className="gap-1.5" onClick={() => setShowCreateNetwork(true)}>
+                  <Plus className="w-3.5 h-3.5" strokeWidth={1.5} />
+                  Create network
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
 
-        <TabsContent value="overview" className="mt-4 flex-1 overflow-auto">
+        <TabsContent value="overview" className="mt-4">
           {loading ? <p className="text-sm text-muted-foreground">Loading overview…</p> : overviewCards}
           {overview && overview.renderFailedStacks.length > 0 && (
             <p className="mt-3 text-sm text-warning">
@@ -348,33 +510,10 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           )}
         </TabsContent>
 
-        <TabsContent value="topology" className="mt-4 flex-1 overflow-auto">
-          {isLegacy ? (
-            <Card>
-              <CardContent className="p-4 text-sm text-stat-subtitle">
-                Topology enrichment requires the complete networking response. Update this node to view it.
-              </CardContent>
-            </Card>
-          ) : (
-            <NetworkingTopologyPanel
-              reloadKey={reloadKey}
-              pendingNetworkFilter={pendingTopologyFilter}
-              onPendingNetworkFilterApplied={() => setPendingTopologyFilter(undefined)}
-            />
-          )}
-        </TabsContent>
-
-        <TabsContent value="networks" className="mt-4 flex-1 overflow-auto">
-          <div className="mb-3 flex justify-end">
-            {isAdmin && (
-              <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setShowCreateNetwork(true)}>
-                <Plus className="w-3.5 h-3.5" strokeWidth={1.5} />
-                Create network
-              </Button>
-            )}
-          </div>
+        <TabsContent value="networks" className="mt-4">
           <NetworkInventoryTable
             rows={networks}
+            findings={findings}
             loading={loading}
             isAdmin={isAdmin}
             onInspect={(id) => setSelectedNetworkId(id)}
@@ -387,7 +526,24 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
           />
         </TabsContent>
 
-        <TabsContent value="findings" className="mt-4 flex-1 overflow-auto">
+        <TabsContent value="topology" className="mt-4">
+          {isLegacy ? (
+            <Card>
+              <CardContent className="p-4 text-sm text-stat-subtitle">
+                Topology enrichment requires the complete networking response. Update this node to view it.
+              </CardContent>
+            </Card>
+          ) : (
+            <NetworkingTopologyPanel
+              reloadKey={reloadKey}
+              pendingNetworkFilter={pendingTopologyFilter}
+              onPendingNetworkFilterApplied={() => setPendingTopologyFilter(undefined)}
+              onOpenStack={openStack}
+            />
+          )}
+        </TabsContent>
+
+        <TabsContent value="findings" className="mt-4">
           <NetworkingFindingsList findings={findings} loading={loading} canEdit={can} isAdmin={isAdmin} onAction={dispatchAction} disabled={isLegacy} />
         </TabsContent>
       </Tabs>

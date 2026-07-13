@@ -165,6 +165,10 @@ To resolve exposure-related findings:
 
 Once an intent and access URLs are set, Sencho can detect when the configuration contradicts the documented intent, making future runs more precise.
 
+## Networking-relevant findings on the Networking page
+
+The networking-relevant rules on this page (host mode, exposure intent, port conflicts, and the exposure-intent checks above) also surface on the node-wide [Networking](/features/networking) page's Findings tab, using the result of your last run here. A finding both engines detect is merged into one card; a finding only these Doctor rules catch appears there labeled with the run's timestamp. Acknowledging a finding here also excludes it from the Networking page.
+
 ## Node-state checks and graceful degradation
 
 Six of the 30 rules require live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision) and one is "Host port is already in use" in Port conflicts. All six are skipped when the Docker daemon is unreachable.

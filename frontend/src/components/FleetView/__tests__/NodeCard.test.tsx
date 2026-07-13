@@ -128,4 +128,31 @@ describe('NodeCard', () => {
     expect(screen.getByText('Pinned')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Update/ })).not.toBeInTheDocument();
   });
+
+  it('shows the networking signal badge and switches to the node on click', async () => {
+    const onOpenNetworking = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <NodeCard
+        {...baseProps(onlineNode())}
+        onOpenNetworking={onOpenNetworking}
+        networkingSignal={{ exposed: false, unknown: false, drift: true }}
+      />,
+    );
+    const badge = screen.getByText(/Networking/);
+    expect(badge).toBeInTheDocument();
+    await user.click(badge);
+    expect(onOpenNetworking).toHaveBeenCalledWith(2);
+  });
+
+  it('hides the networking signal badge when there is nothing to flag', () => {
+    render(
+      <NodeCard
+        {...baseProps(onlineNode())}
+        onOpenNetworking={vi.fn()}
+        networkingSignal={{ exposed: false, unknown: false, drift: false }}
+      />,
+    );
+    expect(screen.queryByText(/Networking/)).not.toBeInTheDocument();
+  });
 });

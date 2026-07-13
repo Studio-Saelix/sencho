@@ -16,6 +16,7 @@ export function runtimeUnavailableEnvelope() {
   return {
     schemaVersion: NETWORKING_SCHEMA_VERSION,
     runtimeAvailable: false,
+    generatedAt: new Date().toISOString(),
     error: 'Docker networking runtime is unavailable',
     code: 'runtime-unavailable' as const,
   };

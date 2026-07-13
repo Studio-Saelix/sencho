@@ -34,7 +34,7 @@ interface StackAnatomyPanelProps {
   canEdit: boolean;
   applying?: boolean;
   notifications?: NotificationItem[];
-  requestedTab?: 'networking' | 'doctor';
+  requestedTab?: 'networking' | 'doctor' | 'dossier' | 'drift';
 }
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
@@ -145,6 +145,10 @@ export default function StackAnatomyPanel({
   useEffect(() => {
     if (requestedTab === 'networking' && networkingEnabled) setActiveTab('networking');
     if (requestedTab === 'doctor' && doctorEnabled) setActiveTab('doctor');
+    // Dossier and Drift are unconditional base tabs (no capability gate), unlike
+    // Doctor/Networking which require a node capability.
+    if (requestedTab === 'dossier') setActiveTab('dossier');
+    if (requestedTab === 'drift') setActiveTab('drift');
   }, [doctorEnabled, networkingEnabled, requestedTab]);
   const { dismissed: scanBannerDismissed, dismiss: dismissScanBanner } =
     useScanBannerDismiss(stackName, activeNode?.id, scanStatus);

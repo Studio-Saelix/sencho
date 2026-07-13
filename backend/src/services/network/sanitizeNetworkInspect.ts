@@ -24,6 +24,7 @@ interface RawNetworkInspect {
 export function sanitizeNetworkInspect(
   raw: RawNetworkInspect,
   snapshotNet: DependencyNetwork | undefined,
+  snapshot?: DependencySnapshot,
 ): SanitizedNetworkInspect {
   const subnets: string[] = [];
   const gateways: string[] = [];
@@ -32,9 +33,25 @@ export function sanitizeNetworkInspect(
     if (typeof cfg.Gateway === 'string' && cfg.Gateway) gateways.push(cfg.Gateway);
   }
 
+  const networkId = raw.Id ?? snapshotNet?.id ?? '';
+  const networkName = raw.Name ?? snapshotNet?.name ?? '';
+  const connectedContainers = snapshot
+    ? snapshot.containers
+      .filter((c) => c.networks.some((n) => n.id === networkId || n.name === networkName))
+      .map((c) => {
+        const attachment = c.networks.find((n) => n.id === networkId || n.name === networkName);
+        return {
+          name: c.name,
+          service: c.service,
+          stack: c.stack,
+          ipv4: attachment?.ip ? attachment.ip.replace(/\/\d+$/, '') : null,
+        };
+      })
+    : [];
+
   return {
-    id: raw.Id ?? snapshotNet?.id ?? '',
-    name: raw.Name ?? snapshotNet?.name ?? '',
+    id: networkId,
+    name: networkName,
     driver: raw.Driver ?? snapshotNet?.driver ?? 'bridge',
     scope: raw.Scope ?? snapshotNet?.scope ?? 'local',
     internal: raw.Internal === true,
@@ -47,6 +64,7 @@ export function sanitizeNetworkInspect(
     labelKeys: Object.keys(raw.Labels ?? {}).sort(),
     subnets,
     gateways,
+    connectedContainers,
   };
 }
 

@@ -47,11 +47,18 @@ export function enrichNetworkRows(
   findings: NetworkingFinding[],
 ): NetworkingNetworkRow[] {
   const stacksByNetwork = new Map<string, Set<string>>();
+  const serviceNamesByNetwork = new Map<string, Set<string>>();
   for (const container of snapshot.containers) {
     for (const attached of container.networks) {
       const set = stacksByNetwork.get(attached.name) ?? new Set<string>();
       if (container.stack) set.add(container.stack);
       stacksByNetwork.set(attached.name, set);
+
+      if (container.service) {
+        const services = serviceNamesByNetwork.get(attached.name) ?? new Set<string>();
+        services.add(container.service);
+        serviceNamesByNetwork.set(attached.name, services);
+      }
     }
   }
 
@@ -68,6 +75,7 @@ export function enrichNetworkRows(
       sharedStackCount: stacksByNetwork.get(row.name)?.size ?? 0,
       exposureSummary: buildExposureSummary(nodeId, row.name, stackFacts, snapshot),
       findingIds: findingsByNetwork.get(row.name) ?? [],
+      serviceNames: [...(serviceNamesByNetwork.get(row.name) ?? [])].sort(),
     };
   });
 }

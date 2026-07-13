@@ -39,6 +39,8 @@ import type { MuteRuleDraft } from '@/lib/muteRules';
 
 interface FleetViewProps {
     onNavigateToNode: (nodeId: number, stackName: string) => void;
+    /** Switches to a node and opens its Networking page (Fleet networking signal). */
+    onOpenNodeNetworking: (nodeId: number) => void;
     /** Opens a Settings section (used to send "Add node" to Settings > Nodes). */
     onOpenSettingsSection?: (section: SectionId) => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
@@ -51,6 +53,7 @@ interface FleetViewProps {
 
 export function FleetView({
     onNavigateToNode,
+    onOpenNodeNetworking,
     onOpenSettingsSection,
     onOpenMuteRulesWithPrefill,
     fleetUpdatesIntent,
@@ -244,6 +247,8 @@ export function FleetView({
                         fleetStackLabelMap={overview.fleetStackLabelMap}
                         updateStatusMap={overview.updateStatusMap}
                         onNavigateToNode={onNavigateToNode}
+                        onOpenNodeNetworking={onOpenNodeNetworking}
+                        networkingByNode={overview.networkingByNode}
                         onUpdate={updateStatus.triggerNodeUpdate}
                         updatingNodeId={updateStatus.updatingNodeId}
                         onRetryUpdate={updateStatus.retryNodeUpdate}

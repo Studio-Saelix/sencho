@@ -105,7 +105,7 @@ describe('networking operator routes', () => {
 
     const ok = await request(app).get('/api/networking/overview').set('Authorization', authHeader);
     expect(ok.status).toBe(200);
-    expect(ok.body.schemaVersion).toBe(2);
+    expect(ok.body.schemaVersion).toBe(3);
     expect(ok.body.runtimeAvailable).toBe(true);
     expect(ok.body.overview).toBeDefined();
     expect(Array.isArray(ok.body.networks)).toBe(true);
@@ -115,7 +115,7 @@ describe('networking operator routes', () => {
   it('sanitized network inspect returns label keys only', async () => {
     const res = await request(app).get(`/api/networking/networks/${NET_ID}`).set('Authorization', authHeader);
     expect(res.status).toBe(200);
-    expect(res.body.schemaVersion).toBe(2);
+    expect(res.body.schemaVersion).toBe(3);
     expect(res.body.network.labelKeys).toEqual(['com.example.key']);
     expect(JSON.stringify(res.body)).not.toContain('secret-value');
   });
@@ -128,7 +128,7 @@ describe('networking operator routes', () => {
     const res = await request(app).get('/api/networking/overview').set('Authorization', authHeader);
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       runtimeAvailable: false,
       networks: [],
     });

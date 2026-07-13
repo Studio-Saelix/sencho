@@ -83,6 +83,7 @@ export interface ViewRouterProps {
     onTemplateDeploySuccess: (stackName: string) => void;
     onHostConsoleClose: () => void;
     onFleetNavigateToNode: (nodeId: number, stackName: string) => void;
+    onOpenNodeNetworking: (nodeId: number) => void;
     filterNodeId: number | null;
     onClearScheduledOpsFilter: () => void;
     schedulePrefill: ScheduleTaskPrefill | null;
@@ -118,6 +119,7 @@ export function ViewRouter({
     onTemplateDeploySuccess,
     onHostConsoleClose,
     onFleetNavigateToNode,
+    onOpenNodeNetworking,
     filterNodeId,
     onClearScheduledOpsFilter,
     schedulePrefill,
@@ -217,6 +219,7 @@ export function ViewRouter({
                     <LazyView>
                         <FleetView
                       onNavigateToNode={onFleetNavigateToNode}
+                      onOpenNodeNetworking={onOpenNodeNetworking}
                       onOpenSettingsSection={onOpenSettingsSection}
                       onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
                       fleetUpdatesIntent={fleetUpdatesIntent}

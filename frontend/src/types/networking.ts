@@ -1,7 +1,45 @@
-export const NETWORKING_SCHEMA_VERSION = 2 as const;
+export const NETWORKING_SCHEMA_VERSION = 3 as const;
 
 export type NetworkingOwnership = 'system' | 'sencho-managed' | 'compose-managed' | 'unmanaged';
 export type NetworkingFindingSeverity = 'critical' | 'high' | 'medium' | 'info';
+
+export type NetworkingFindingKind =
+  | 'external-network-missing'
+  | 'network-missing'
+  | 'network-undeclared'
+  | 'declared-network-unused'
+  | 'foreign-network-attachment'
+  | 'alias-collision'
+  | 'network-mode-host'
+  | 'exposure-unclassified'
+  | 'exposure-all-interfaces'
+  | 'shared-network'
+  | 'network-name-collision'
+  | 'service-name-collision'
+  | 'large-flat-network'
+  | 'advanced-driver-caveat'
+  | 'runtime-unavailable'
+  | 'exposure-intent-mismatch'
+  | 'port-conflict-node'
+  | 'port-conflict-internal'
+  | 'sensitive-service-broad-exposure'
+  | 'exposure-port-vs-dossier'
+  | 'reverse-proxy-undocumented'
+  | 'new-network';
+
+/** Single source of truth for what counts as "drift" across the Networks table,
+ *  Topology filters/badges, and Overview drift count. */
+export const NETWORK_DRIFT_FINDING_KINDS: readonly NetworkingFindingKind[] = [
+  'network-undeclared',
+  'network-missing',
+  'declared-network-unused',
+  'foreign-network-attachment',
+  'external-network-missing',
+];
+
+export function isNetworkDriftFindingKind(kind: string): boolean {
+  return (NETWORK_DRIFT_FINDING_KINDS as readonly string[]).includes(kind);
+}
 
 export interface NetworkingNetworkBase {
   id: string;
@@ -29,6 +67,7 @@ export interface NetworkingNetworkRow extends NetworkingNetworkBase {
     unclassifiedStackCount: number;
   } | null;
   findingIds: string[];
+  serviceNames: string[];
 }
 
 export type NetworkingRecommendedAction =
@@ -36,6 +75,8 @@ export type NetworkingRecommendedAction =
   | { kind: 'open-stack-networking'; label: string; stack: string }
   | { kind: 'open-stack-doctor'; label: string; stack: string }
   | { kind: 'open-stack-editor'; label: string; stack: string }
+  | { kind: 'open-stack-dossier'; label: string; stack: string }
+  | { kind: 'open-stack-drift'; label: string; stack: string }
   | { kind: 'set-exposure-intent'; label: string; stack: string; service?: string }
   | { kind: 'create-network'; label: string; networkName: string; requiresAdmin: true }
   | { kind: 'copy-compose-snippet'; label: string; snippetKind: 'external-network'; networkName: string }
@@ -45,9 +86,22 @@ export type NetworkingRecommendedAction =
   | { kind: 'open-docs'; label: string; docsPath: string }
   | { kind: 'refresh'; label: string };
 
+export type NetworkingFindingSource = 'live' | 'doctor';
+
+export interface DoctorFindingMetadata {
+  ruleId: string;
+  ranAt: string;
+  title: string;
+  message: string;
+  service?: string;
+  sourcePath?: string;
+  remediation?: string;
+  severity: NetworkingFindingSeverity;
+}
+
 export interface NetworkingFinding {
   id: string;
-  kind: string;
+  kind: NetworkingFindingKind;
   severity: NetworkingFindingSeverity;
   title: string;
   message: string;
@@ -56,6 +110,8 @@ export interface NetworkingFinding {
   service?: string;
   evidence: { label: string; value: string }[];
   recommendedActions: NetworkingRecommendedAction[];
+  sources: NetworkingFindingSource[];
+  doctorFindings: DoctorFindingMetadata[];
 }
 
 export interface NodeNetworkingOverview {
@@ -64,6 +120,10 @@ export interface NodeNetworkingOverview {
   stackCount: number;
   connectedContainerCount: number | null;
   systemNetworkCount: number | null;
+  senchoManagedNetworkCount: number | null;
+  composeManagedNetworkCount: number | null;
+  unmanagedNetworkCount: number | null;
+  externalDependencyNetworkCount: number | null;
   exposedStackCount: number;
   unknownExposureStackCount: number;
   missingExternalCount: number;
@@ -90,6 +150,26 @@ export interface NetworkingTopologyContainer {
   composeAliases: string[];
   publishedPorts: NetworkFactPort[];
   exposureIntent: 'internal' | 'same-node' | 'lan' | 'reverse-proxy' | 'public' | 'temporary' | 'unknown' | null;
+  findingIds: string[];
+  driftFlags: string[];
+  hostMode: boolean;
+}
+
+/** Client-computed detail model for the topology container drawer: aggregates a
+ *  container's attachments across every network it belongs to (layoutGraph already
+ *  dedupes containers cross-network; this preserves that full attachment list
+ *  instead of collapsing it to a single `ip` string). */
+export interface NetworkingTopologyContainerDetail {
+  id: string;
+  name: string;
+  stack: string | null;
+  service: string | null;
+  image: string;
+  state: string;
+  attachments: { network: string; ip: string }[];
+  composeAliases: string[];
+  publishedPorts: NetworkFactPort[];
+  exposureIntent: NetworkingTopologyContainer['exposureIntent'];
   findingIds: string[];
   driftFlags: string[];
 }
@@ -142,6 +222,13 @@ export interface NetworkingTopologyEnvelope extends NetworkingEnvelope {
   networks: NetworkingTopologyNetwork[];
 }
 
+export interface SanitizedNetworkInspectContainer {
+  name: string;
+  service: string | null;
+  stack: string | null;
+  ipv4: string | null;
+}
+
 export interface SanitizedNetworkInspect {
   id: string;
   name: string;
@@ -157,4 +244,5 @@ export interface SanitizedNetworkInspect {
   labelKeys: string[];
   subnets: string[];
   gateways: string[];
+  connectedContainers: SanitizedNetworkInspectContainer[];
 }

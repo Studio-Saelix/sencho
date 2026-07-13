@@ -60,7 +60,6 @@ vi.mock('../resources/ReclaimHero', () => ({
 vi.mock('../resources/FootprintTreemap', () => ({ FootprintTreemap: () => null }));
 vi.mock('../resources/ImageDetailsSheet', () => ({ ImageDetailsSheet: () => null }));
 vi.mock('../resources/VolumeBrowserSheet', () => ({ VolumeBrowserSheet: () => null }));
-vi.mock('../resources/NetworkDetailSheet', () => ({ NetworkDetailSheet: () => null }));
 vi.mock('../NetworkTopologyView', () => ({ default: () => null }));
 vi.mock('../CapabilityGate', () => ({ CapabilityGate: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 vi.mock('../LazyBoundary', () => ({ default: ({ children }: { children: React.ReactNode }) => <>{children}</> }));

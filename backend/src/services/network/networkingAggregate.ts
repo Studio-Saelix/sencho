@@ -7,8 +7,10 @@ import { FileSystemService } from '../FileSystemService';
 import { DatabaseService } from '../DatabaseService';
 import { buildStackNetworkFacts } from './composeNetworkInspector';
 import { buildNodeNetworkingFindings } from './networkingFindings';
+import { applyDoctorNetworkingFindings } from './doctorNetworkingFindings';
 import { enrichNetworkRows } from './networkingInventory';
 import { buildNetworkingTopology } from './networkingTopology';
+import { rankFindings } from './networkingSeverity';
 import { isHostNetwork, isLoopback } from './normalize';
 import type { ExposureIntent } from './types';
 import type { DependencySnapshot } from '../DockerController';
@@ -38,9 +40,15 @@ export async function buildNodeNetworkingAggregate(
     () => buildStackNetworkFacts(nodeId, stack, snapshot),
   ));
 
-  const findings = buildNodeNetworkingFindings(nodeId, snapshot, stackFacts, baseRows);
+  // Pipeline order matters (H4b): live findings, then cached Doctor adaptation
+  // and merge, BEFORE inventory enrichment / overview / topology all consume
+  // the same unified list, so counts and findingIds never disagree.
+  const liveFindings = buildNodeNetworkingFindings(nodeId, snapshot, stackFacts, baseRows);
+  const findings = rankFindings(applyDoctorNetworkingFindings(liveFindings, {
+    nodeId, stackNames: stacks, stackFacts, snapshot,
+  }));
   const networks = snapshot ? enrichNetworkRows(nodeId, baseRows, stackFacts, snapshot, findings) : [];
-  const overview = buildOverview(nodeId, stacks, snapshot, stackFacts, findings);
+  const overview = buildOverview(nodeId, stacks, snapshot, stackFacts, findings, networks);
 
   const aggregate: NodeNetworkingAggregate = {
     overview,
@@ -70,6 +78,7 @@ function buildOverview(
   snapshot: DependencySnapshot | null,
   stackFacts: Awaited<ReturnType<typeof buildStackNetworkFacts>>[],
   findings: ReturnType<typeof buildNodeNetworkingFindings>,
+  networks: import('./networkingTypes').NetworkingNetworkRow[],
 ): NodeNetworkingOverview {
   const db = DatabaseService.getInstance();
   const renderFailedStacks = stackFacts.filter(f => !f.renderable).map(f => f.stack);
@@ -118,10 +127,18 @@ function buildOverview(
     stackCount: stacks.length,
     connectedContainerCount,
     systemNetworkCount: snapshot?.networks.filter(n => n.isSystem).length ?? null,
+    senchoManagedNetworkCount: snapshot ? networks.filter((r) => r.ownership === 'sencho-managed').length : null,
+    composeManagedNetworkCount: snapshot ? networks.filter((r) => r.ownership === 'compose-managed').length : null,
+    unmanagedNetworkCount: snapshot ? networks.filter((r) => r.ownership === 'unmanaged').length : null,
+    externalDependencyNetworkCount: snapshot ? networks.filter((r) => r.isExternalDependency).length : null,
     exposedStackCount,
     unknownExposureStackCount,
     missingExternalCount,
-    networkCollisionCount: findings.filter(f => f.kind === 'network-name-collision').length,
+    // Alias/service DNS collisions plus genuine (non-intentional-sharing) name
+    // collisions all count toward the overview number.
+    networkCollisionCount: findings.filter(f =>
+      f.kind === 'network-name-collision' || f.kind === 'alias-collision' || f.kind === 'service-name-collision',
+    ).length,
     findingCount: findings.length,
     renderFailedStacks,
   };

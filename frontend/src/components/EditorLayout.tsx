@@ -302,6 +302,12 @@ export default function EditorLayout() {
     pendingStackLoadRef,
     pendingLogsRef,
   } = stackActions;
+  // Pending-intent target for a cross-node "open this node's Networking page"
+  // request (e.g. a Fleet networking signal). Mirrors pendingStackLoadRef:
+  // setActiveNode first, then the node-settled effect below navigates once
+  // activeNode actually reflects the target, so Networking never briefly
+  // mounts and fetches against the previous node.
+  const pendingNetworkingNodeRef = useRef<number | null>(null);
 
   const panelStartedAt = usePanelSessionStartedAt(panelState);
 
@@ -332,7 +338,7 @@ export default function EditorLayout() {
   // Optimistically flip to the detail surface the instant a row is tapped,
   // before loadFile's fetch resolves selectedFile; cleared once it settles.
   const [pendingDetailStack, setPendingDetailStack] = useState<string | null>(null);
-  const [pendingAnatomyTab, setPendingAnatomyTab] = useState<'networking' | 'doctor' | undefined>();
+  const [pendingAnatomyTab, setPendingAnatomyTab] = useState<'networking' | 'doctor' | 'dossier' | 'drift' | undefined>();
   const [fleetUpdatesIntent, setFleetUpdatesIntent] = useState<{ tab: 'nodes' | 'changelog' } | null>(null);
 
   const handleFleetUpdatesIntentConsumed = useCallback(() => setFleetUpdatesIntent(null), []);
@@ -452,7 +458,13 @@ export default function EditorLayout() {
   ) => {
     const node = nodes.find(n => n.id === nodeId);
     if (!node) return;
-    setPendingAnatomyTab(destination === 'anatomy-networking' ? 'networking' : destination === 'doctor' ? 'doctor' : undefined);
+    setPendingAnatomyTab(
+      destination === 'anatomy-networking' ? 'networking'
+        : destination === 'doctor' ? 'doctor'
+        : destination === 'dossier' ? 'dossier'
+        : destination === 'drift' ? 'drift'
+        : undefined,
+    );
     if (isMobile) setPendingDetailStack(stackName);
     if (activeNode?.id === nodeId) {
       void stackActions.loadFile(stackName);
@@ -476,6 +488,22 @@ export default function EditorLayout() {
     window.addEventListener(SENCHO_OPEN_STACK_EVENT, handler);
     return () => window.removeEventListener(SENCHO_OPEN_STACK_EVENT, handler);
   }, []);
+
+  // Open a node's Networking page from a Fleet card's networking signal.
+  // Pending-intent gated (see pendingNetworkingNodeRef above): if the node is
+  // already active, navigate immediately; otherwise switch nodes first and let
+  // the node-settled effect complete the navigation once activeNode reflects
+  // the switch.
+  const handleOpenNodeNetworking = (nodeId: number) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    if (activeNode?.id === nodeId) {
+      setActiveView('networking');
+      return;
+    }
+    pendingNetworkingNodeRef.current = nodeId;
+    setActiveNode(node);
+  };
 
   // "Inspect" a node from the mobile Fleet screen: switch to it and land on its
   // stack list.
@@ -664,6 +692,8 @@ export default function EditorLayout() {
 
     const pendingStack = pendingStackLoadRef.current;
     pendingStackLoadRef.current = null;
+    const pendingNetworkingNodeId = pendingNetworkingNodeRef.current;
+    pendingNetworkingNodeRef.current = null;
 
     stackActions.resetEditorState();
     // Stack filenames can repeat across nodes; drop the previous node's failure
@@ -672,6 +702,8 @@ export default function EditorLayout() {
 
     if (pendingStack) {
       void stackActions.loadFile(pendingStack);
+    } else if (pendingNetworkingNodeId === activeNode.id) {
+      setActiveView('networking');
     } else if (isRealSwitch) {
       setActiveView('dashboard');
     }
@@ -897,6 +929,7 @@ export default function EditorLayout() {
             }}
             onHostConsoleClose={() => setActiveView(selectedFile ? 'editor' : 'dashboard')}
             onFleetNavigateToNode={handleFleetNavigateToNode}
+            onOpenNodeNetworking={handleOpenNodeNetworking}
             filterNodeId={filterNodeId}
             onClearScheduledOpsFilter={() => setFilterNodeId(null)}
             schedulePrefill={schedulePrefill}

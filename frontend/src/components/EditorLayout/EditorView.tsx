@@ -216,7 +216,7 @@ export interface EditorViewProps {
     // Mobile-only: notifications + more-menu cluster for the detail header right
     // slot (the global TopBar is dropped on the full-screen detail surface).
     headerActions?: React.ReactNode;
-    requestedAnatomyTab?: 'networking' | 'doctor';
+    requestedAnatomyTab?: 'networking' | 'doctor' | 'dossier' | 'drift';
 
     stackMuteActions?: ReturnType<typeof useStackMuteActions>;
 }

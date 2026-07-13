@@ -4,7 +4,7 @@
  */
 import type { StackNetworkFacts } from './types';
 
-export const NETWORKING_SCHEMA_VERSION = 2;
+export const NETWORKING_SCHEMA_VERSION = 3;
 export type NetworkingOwnership = 'system' | 'sencho-managed' | 'compose-managed' | 'unmanaged';
 
 /** Phase A row: identity and ownership from the dependency snapshot only. */
@@ -37,6 +37,8 @@ export interface NetworkingNetworkRow extends NetworkingNetworkBase {
   sharedStackCount: number;
   exposureSummary: NetworkingExposureSummary | null;
   findingIds: string[];
+  /** Compose service names publishing on this network, from the dependency snapshot only (never labels). */
+  serviceNames: string[];
 }
 
 export const NETWORKING_FINDING_KINDS = [
@@ -49,7 +51,6 @@ export const NETWORKING_FINDING_KINDS = [
   'network-mode-host',
   'exposure-unclassified',
   'exposure-all-interfaces',
-  'exposure-internal-conflict',
   'shared-network',
   'network-name-collision',
   'service-name-collision',
@@ -57,16 +58,57 @@ export const NETWORKING_FINDING_KINDS = [
   'advanced-driver-caveat',
   'runtime-unavailable',
   'exposure-intent-mismatch',
+  // Doctor-only rules (cached, aggregated via doctorNetworkingFindings.ts)
+  'port-conflict-node',
+  'port-conflict-internal',
+  'sensitive-service-broad-exposure',
+  'exposure-port-vs-dossier',
+  'reverse-proxy-undocumented',
+  'new-network',
 ] as const;
 
 export type NetworkingFindingKind = typeof NETWORKING_FINDING_KINDS[number];
 
+/** Kinds a Networking finding may be counted as "drift" under. Single source of truth
+ *  reused by network rows, topology, badges, and the overview drift count. */
+export const NETWORK_DRIFT_FINDING_KINDS: readonly NetworkingFindingKind[] = [
+  'network-undeclared',
+  'network-missing',
+  'declared-network-unused',
+  'foreign-network-attachment',
+  'external-network-missing',
+];
+
+export function isNetworkDriftFindingKind(kind: NetworkingFindingKind): boolean {
+  return (NETWORK_DRIFT_FINDING_KINDS as readonly string[]).includes(kind);
+}
+
 export type NetworkingFindingSeverity = 'critical' | 'high' | 'medium' | 'info';
+
+export type NetworkingFindingSource = 'live' | 'doctor';
+
+/** One retained Doctor occurrence merged into (or standing in for) a unified finding.
+ *  Never derived from message text; ruleId + structural fields only. */
+export interface DoctorFindingMetadata {
+  ruleId: string;
+  ranAt: string;
+  title: string;
+  message: string;
+  service?: string;
+  sourcePath?: string;
+  remediation?: string;
+  /** Doctor's own severity translation, kept even when the merged card's canonical
+   *  severity (live) differs, so provenance is never lost. */
+  severity: NetworkingFindingSeverity;
+}
+
 export type NetworkingRecommendedAction =
   | { kind: 'open-stack'; label: string; stack: string }
   | { kind: 'open-stack-networking'; label: string; stack: string }
   | { kind: 'open-stack-doctor'; label: string; stack: string }
   | { kind: 'open-stack-editor'; label: string; stack: string }
+  | { kind: 'open-stack-dossier'; label: string; stack: string }
+  | { kind: 'open-stack-drift'; label: string; stack: string }
   | { kind: 'set-exposure-intent'; label: string; stack: string; service?: string }
   | { kind: 'create-network'; label: string; networkName: string; requiresAdmin: true }
   | { kind: 'copy-compose-snippet'; label: string; snippetKind: 'external-network'; networkName: string }
@@ -87,6 +129,12 @@ export interface NetworkingFinding {
   service?: string;
   evidence: { label: string; value: string }[];
   recommendedActions: NetworkingRecommendedAction[];
+  /** Which engine(s) detected this finding. A card merged from both engines keeps
+   *  live severity/title/message as canonical and carries Doctor context in doctorFindings. */
+  sources: NetworkingFindingSource[];
+  /** Every retained Doctor occurrence that structurally matches this card (one-to-many:
+   *  e.g. two broad-bind ports on one service both attach here). Empty for live-only findings. */
+  doctorFindings: DoctorFindingMetadata[];
 }
 
 export interface NodeNetworkingOverview {
@@ -95,6 +143,10 @@ export interface NodeNetworkingOverview {
   stackCount: number;
   connectedContainerCount: number | null;
   systemNetworkCount: number | null;
+  senchoManagedNetworkCount: number | null;
+  composeManagedNetworkCount: number | null;
+  unmanagedNetworkCount: number | null;
+  externalDependencyNetworkCount: number | null;
   exposedStackCount: number;
   unknownExposureStackCount: number;
   missingExternalCount: number;
@@ -116,6 +168,7 @@ export interface NetworkingTopologyContainer {
   exposureIntent: import('./types').ExposureIntent | null;
   findingIds: string[];
   driftFlags: string[];
+  hostMode: boolean;
 }
 
 export interface NetworkingTopologyNetwork {
@@ -151,6 +204,13 @@ export interface NodeNetworkingAggregate {
   recentActivity: import('../DatabaseService').NotificationHistory[];
 }
 
+export interface SanitizedNetworkInspectContainer {
+  name: string;
+  service: string | null;
+  stack: string | null;
+  ipv4: string | null;
+}
+
 export interface SanitizedNetworkInspect {
   id: string;
   name: string;
@@ -166,6 +226,9 @@ export interface SanitizedNetworkInspect {
   labelKeys: string[];
   subnets: string[];
   gateways: string[];
+  /** Strict allowlist join against the DependencySnapshot; never labels, MAC addresses,
+   *  endpoint IDs, or raw Docker options. */
+  connectedContainers: SanitizedNetworkInspectContainer[];
 }
 
 export interface NetworkingEnvelope {
