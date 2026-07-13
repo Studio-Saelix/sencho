@@ -51,7 +51,7 @@ The project uses `strict: true`. Write code that compiles without `any` casts or
 
 ## Contributing to Community
 
-This public repository is the AGPLv3 **Community** product. Contributions here stay in Community under AGPLv3. We will not take a Community contribution and move it behind a paid gate.
+This public repository is the AGPLv3 **Community** product. Contributions here stay under AGPLv3 for the Community product. We will not take a Community contribution and move it behind a paid gate.
 
 You will be required to sign our Contributor License Agreement (CLA) when you open your first Pull Request.
 
