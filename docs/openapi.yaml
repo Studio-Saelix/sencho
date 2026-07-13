@@ -33,7 +33,6 @@ info:
   license:
     name: AGPL-3.0-only
     url: https://github.com/studio-saelix/sencho/blob/main/LICENSE
-    url: https://github.com/studio-saelix/sencho/blob/main/LICENSE
 
 servers:
   - url: "{protocol}://{host}:{port}"
