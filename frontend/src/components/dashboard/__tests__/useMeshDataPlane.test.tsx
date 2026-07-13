@@ -12,6 +12,11 @@ vi.mock('@/context/LicenseContext', () => ({
   useLicense: () => useLicenseMock(),
 }));
 
+const useExperimentalMock = vi.fn(() => ({ experimental: true, experimentalReady: true }));
+vi.mock('@/hooks/useExperimental', () => ({
+  useExperimental: () => useExperimentalMock(),
+}));
+
 vi.mock('@/lib/utils', async () => {
   const actual = await vi.importActual<typeof import('@/lib/utils')>('@/lib/utils');
   return {
@@ -39,6 +44,8 @@ function statusJson(status: number, payload: unknown = {}): Response {
 beforeEach(() => {
   apiFetchMock.mockReset();
   useLicenseMock.mockReset();
+  useExperimentalMock.mockReset();
+  useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
 });
 
 afterEach(() => {
@@ -90,5 +97,25 @@ describe('useMeshDataPlane', () => {
 
     expect(result.current.status).toBeNull();
     expect(result.current.loading).toBe(false);
+  });
+it('does not fetch when paid but experimental discovery is off', async () => {
+    useLicenseMock.mockReturnValue({ isPaid: true });
+    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
+    const { result } = renderHook(() => useMeshDataPlane());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(apiFetchMock).not.toHaveBeenCalled();
+    expect(result.current.status).toBeNull();
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('does not fetch while experimental metadata is still loading', async () => {
+    useLicenseMock.mockReturnValue({ isPaid: true });
+    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: false });
+    const { result } = renderHook(() => useMeshDataPlane());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(apiFetchMock).not.toHaveBeenCalled();
+    expect(result.current.status).toBeNull();
   });
 });

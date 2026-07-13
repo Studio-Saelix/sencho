@@ -4,7 +4,7 @@ description: Cross-node container networking. Reach any meshed service on any no
 ---
 
 <Note>
-  Sencho Mesh requires an [Admiral license](/features/licensing).
+  Sencho Mesh is a limited-availability surface. When it is enabled on an instance, it requires an [Admiral license](/features/licensing).
 </Note>
 
 Sencho Mesh gives a multi-node fleet the network topology of a single machine. Once a stack opts in, every service it exposes becomes reachable from any other meshed stack on the fleet by a stable hostname. Cross-node traffic rides the same authenticated channel Sencho already uses to manage the fleet, so a node behind NAT or a residential firewall participates exactly like a public VPS.
@@ -33,7 +33,7 @@ The user-facing effect is `psql -h db.api.opsix.sencho` from a container on any 
 
 ## Prerequisites
 
-- An Admiral license on the central Sencho.
+- Mesh enabled on the instance, with an Admiral license on the central Sencho.
 - At least one [enrolled remote node](/features/multi-node) (Pilot Agent or Distributed API Proxy).
 - Functioning `sencho_mesh` data plane on every node that should participate. The Routing tab shows a red banner if a node's data plane did not come up; the troubleshooting section below covers each cause.
 - Per-stack opt-in. Enabling mesh on a node does not automatically place every stack into the mesh; each stack is opted in individually.
@@ -42,13 +42,13 @@ App-layer authentication is **not** in scope. Postgres still needs a password, R
 
 ## Enable the mesh
 
-Mesh lives under **Fleet → Routing**. Managing it (the per-node mesh toggle and stack opt-in or opt-out) requires an administrator; non-admin users see the Routing tab as read-only.
+When Mesh is enabled, it lives under **Fleet → Routing**. Managing it (the per-node mesh toggle and stack opt-in or opt-out) requires an administrator; non-admin users see the Routing tab as read-only.
 
 <Frame caption="Fleet → Routing, Table view. Each node card shows mesh stack count, published aliases, per-alias Test probe, and an Add stack to mesh action.">
   <img src="/images/sencho-mesh/routing-tab-overview.png" alt="Sencho Mesh Routing tab Table view with node cards" />
 </Frame>
 
-1. Open **Fleet → Routing**.
+1. Open **Fleet → Routing** (when that tab is available on the instance).
 2. Flip the mesh toggle (`ON` / `OFF`) on each node that should participate.
 3. Click **Add stack to mesh** on a node and confirm one or more stacks.
 
@@ -328,6 +328,6 @@ These are the explicit boundaries of the v1 mesh.
     Steer blueprint placement across the same fleet Mesh networks together.
   </Card>
   <Card title="Licensing" icon="key" href="/features/licensing">
-    Mesh requires an Admiral plan today. See [Licensing](/features/licensing) for Community and Admiral plan details.
+    Mesh is limited-availability and, when enabled, requires an Admiral plan. See [Licensing](/features/licensing) for Community and Admiral plan details.
   </Card>
 </CardGroup>
