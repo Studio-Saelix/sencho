@@ -5,6 +5,7 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
+import { useExperimental } from '@/hooks/useExperimental';
 import { DEFAULT_SETTINGS } from './types';
 import type { PatchableSettings } from './types';
 import { SettingsSection } from './SettingsSection';
@@ -27,6 +28,7 @@ function SectionSkeleton() {
 }
 
 type FleetMeshFields = Pick<PatchableSettings, 'mesh_auto_recreate' | 'snapshot_documentation'>;
+type SnapshotOnlyFields = Pick<PatchableSettings, 'snapshot_documentation'>;
 
 const DEFAULT_FLEET_MESH: FleetMeshFields = {
     mesh_auto_recreate: DEFAULT_SETTINGS.mesh_auto_recreate,
@@ -36,6 +38,8 @@ const DEFAULT_FLEET_MESH: FleetMeshFields = {
 export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
     const { activeNode } = useNodes();
     const { isAdmin } = useAuth();
+    const { experimental, experimentalReady } = useExperimental();
+    const showMesh = experimentalReady && experimental;
     const readOnly = !isAdmin;
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<FleetMeshFields>({ ...DEFAULT_FLEET_MESH });
     const [isLoading, setIsLoading] = useState(false);
@@ -69,7 +73,7 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
                 };
                 reset(safe);
             } catch (e) {
-                console.error('Failed to fetch fleet mesh settings', e);
+                console.error('Failed to fetch fleet settings', e);
             } finally {
                 setIsLoading(false);
             }
@@ -83,7 +87,12 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
     };
 
     const saveSettings = async () => {
-        const submitted = { ...settings };
+        // When Mesh discovery is off, never write mesh_auto_recreate: a failed
+        // settings read would otherwise push the default and overwrite a real
+        // Mesh config the operator cannot see.
+        const submitted: FleetMeshFields | SnapshotOnlyFields = showMesh
+            ? { ...settings }
+            : { snapshot_documentation: settings.snapshot_documentation };
         setIsSaving(true);
         try {
             const res = await apiFetch('/settings', {
@@ -95,7 +104,14 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
                 toast.error(err?.error || err?.message || 'Failed to save settings.');
                 return;
             }
-            markSaved(submitted);
+            if (showMesh) {
+                markSaved(submitted as FleetMeshFields);
+            } else {
+                markSaved({
+                    ...settings,
+                    snapshot_documentation: (submitted as SnapshotOnlyFields).snapshot_documentation,
+                });
+            }
             toast.success('Fleet settings saved.');
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');
@@ -108,17 +124,19 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
 
     return (
         <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
-            <SettingsSection title="Mesh data plane">
-                <SettingsField
-                    label="Auto-recreate mesh network"
-                    helper="If sencho_mesh is removed at runtime, rebuild it at the same subnet on the next 10s tick. Off by default; leave off and restart Sencho manually for the safest path."
-                >
-                    <TogglePill
-                        checked={settings.mesh_auto_recreate === '1'}
-                        onChange={(next) => onSettingChange('mesh_auto_recreate', next ? '1' : '0')}
-                    />
-                </SettingsField>
-            </SettingsSection>
+            {showMesh && (
+                <SettingsSection title="Mesh data plane">
+                    <SettingsField
+                        label="Auto-recreate mesh network"
+                        helper="If sencho_mesh is removed at runtime, rebuild it at the same subnet on the next 10s tick. Off by default; leave off and restart Sencho manually for the safest path."
+                    >
+                        <TogglePill
+                            checked={settings.mesh_auto_recreate === '1'}
+                            onChange={(next) => onSettingChange('mesh_auto_recreate', next ? '1' : '0')}
+                        />
+                    </SettingsField>
+                </SettingsSection>
+            )}
 
             <SettingsSection title="Documentation snapshots">
                 <SettingsField

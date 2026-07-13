@@ -18,6 +18,10 @@ vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ isAdmin: true }) }))
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 'local' } }) }));
 vi.mock('@/context/LicenseContext', () => ({ useLicense: vi.fn(() => ({ isPaid: true })) }));
 vi.mock('../MastheadStatsContext', () => ({ useMastheadStats: () => {} }));
+const useExperimentalMock = vi.fn(() => ({ experimental: true, experimentalReady: true }));
+vi.mock('@/hooks/useExperimental', () => ({
+    useExperimental: () => useExperimentalMock(),
+}));
 
 import { apiFetch } from '@/lib/api';
 import { useLicense } from '@/context/LicenseContext';
@@ -43,6 +47,7 @@ const FULL_SETTINGS: Record<string, string> = {
     prune_on_update: '1',
     reclaim_hero: '1',
     mesh_auto_recreate: '0',
+    snapshot_documentation: '0',
     metrics_retention_hours: '24',
     log_retention_days: '30',
     audit_retention_days: '90',
@@ -64,6 +69,7 @@ beforeEach(() => {
     mockedFetch.mockReset();
     mockedFetch.mockResolvedValue({ ok: true, json: async () => ({ ...FULL_SETTINGS }) });
     mockedLicense.mockReturnValue({ isPaid: true });
+    useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
 });
 
 describe('split section save payloads', () => {
@@ -119,13 +125,27 @@ describe('split section save payloads', () => {
         expect(patchedKeys()).toEqual(['docker_janitor_gb', 'prune_on_update', 'reclaim_hero']);
     });
 
-    it('FleetMeshSection patches only the fleet keys', async () => {
+    it('FleetMeshSection patches both fleet keys when experimental discovery is on', async () => {
+        useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
         render(<FleetMeshSection />);
         const save = await screen.findByRole('button', { name: /save settings/i });
         fireEvent.click(screen.getAllByRole('switch')[0]); // mesh_auto_recreate
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
         expect(patchedKeys()).toEqual(['mesh_auto_recreate', 'snapshot_documentation']);
+    });
+
+    it('FleetMeshSection PATCHes only snapshot_documentation when experimental discovery is off', async () => {
+        useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
+        render(<FleetMeshSection />);
+        const save = await screen.findByRole('button', { name: /save settings/i });
+        expect(screen.queryByText(/Mesh data plane/i)).toBeNull();
+        expect(screen.queryByText(/sencho_mesh/i)).toBeNull();
+        expect(screen.getByText(/Documentation snapshots/i)).toBeTruthy();
+        fireEvent.click(screen.getAllByRole('switch')[0]); // snapshot_documentation
+        fireEvent.click(save);
+        await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
+        expect(patchedKeys()).toEqual(['snapshot_documentation']);
     });
 
     it('DataRetentionSection patches only retention keys, never developer_mode', async () => {

@@ -26,6 +26,8 @@ function makeReachCtx(over: Partial<ReachabilityContext> = {}): ReachabilityCont
     containerLabelsEnabled: true,
     permissionsStatus: 'ready',
     licenseStatus: 'ready',
+    experimental: true,
+    experimentalReady: true,
     ...over,
   };
 }

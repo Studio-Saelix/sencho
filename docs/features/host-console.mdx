@@ -6,7 +6,7 @@ description: An interactive terminal on your host OS, directly in the browser - 
 The **Console** tab opens a full interactive terminal session on the machine running Sencho. It behaves exactly like an SSH session, but without needing an SSH server, client, or key management.
 
 <Note>
-  The Host Console requires a **Sencho Admiral** license and the **admin** role. [Learn more about licensing](/features/licensing).
+  The Host Console is a limited-availability operator surface. When it is enabled on an instance, it requires an **Admiral** license and the **admin** role. [Learn more about licensing](/features/licensing).
 </Note>
 
 <Frame>
@@ -75,7 +75,7 @@ Environment variables whose names suggest secrets (passwords, tokens, keys, cred
 The Host Console is one of the most powerful features in Sencho and is treated as such:
 
 - **Admin role required.** Only users with the **admin** role can open a console session.
-- **Admiral license required.** The Host Console is an Admiral feature.
+- **Admiral license required when enabled.** The Host Console is a limited-availability surface that uses an Admiral license.
 - **Browser sessions only.** Console sessions are only available from a signed-in browser session, not from API tokens.
 - **Audited.** Every console session is recorded in the audit log. Opening and closing a session each write an entry capturing the user, node, client IP, and timestamp, so shell access is fully accountable.
 
@@ -106,6 +106,6 @@ The Host Console is one of the most powerful features in Sencho and is treated a
   </Accordion>
 
   <Accordion title="Console tab is not visible">
-    The Console tab only appears for users with the **admin** role on an Admiral-licensed instance. Verify both conditions are met. If you recently activated an Admiral license, refresh the page.
+    Console appears only when the surface is enabled on the instance, and only for users with the **admin** role on an Admiral-licensed instance. Verify those conditions are met. If you recently activated an Admiral license, refresh the page.
   </Accordion>
 </AccordionGroup>
