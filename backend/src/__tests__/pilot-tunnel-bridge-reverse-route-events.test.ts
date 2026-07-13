@@ -249,8 +249,12 @@ describe('R1-B: PilotTunnelBridge.acceptReverseLocal route events', () => {
 
         // Real local server. Have it close the connection immediately after
         // accept so the bridge socket sees 'close' (and possibly 'error') on
-        // an already-connected socket.
+        // an already-connected socket. Swallow expected teardown noise so a
+        // late ECONNRESET cannot surface as an unhandled Vitest exception.
+        const accepted: net.Socket[] = [];
         const upstream = net.createServer((socket) => {
+            accepted.push(socket);
+            socket.on('error', () => { /* expected post-handshake teardown */ });
             socket.end();
         });
         await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', () => resolve()));
@@ -284,7 +288,10 @@ describe('R1-B: PilotTunnelBridge.acceptReverseLocal route events', () => {
         );
         expect(failCalls).toHaveLength(0);
 
-        upstream.close();
+        for (const socket of accepted) {
+            try { socket.destroy(); } catch { /* ignore */ }
+        }
+        await new Promise<void>((resolve) => upstream.close(() => resolve()));
         bridge.close();
     });
 });

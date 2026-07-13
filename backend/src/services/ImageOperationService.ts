@@ -33,6 +33,9 @@ export type HardenedPreflight =
   | { ok: true; preflightFingerprint: string; currentImageRef: string; allowedImageRef: string; composeFilePath: string; pinKind: ImagePinKind; localRegistryAccess: LocalRegistryAccess }
   | { ok: false; code: FailureCode | 'entitlement_denied' };
 
+const OPERATION_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export class ImageOperationService {
   private static instance: ImageOperationService;
   private claimed = false;
@@ -40,6 +43,10 @@ export class ImageOperationService {
   public static getInstance(): ImageOperationService {
     if (!ImageOperationService.instance) ImageOperationService.instance = new ImageOperationService();
     return ImageOperationService.instance;
+  }
+
+  public static isOperationId(operationId: string): boolean {
+    return OPERATION_ID_RE.test(operationId);
   }
 
   public computePreflightFingerprint(composePath: string, currentImage: string, pinKind: ImagePinKind, allowedImageRef: string): string {
@@ -165,7 +172,9 @@ export class ImageOperationService {
   }
 
   public async getOperation(operationId: string): Promise<ImageOperation | null> {
-    return this.readOperation(this.operationFile(operationId));
+    const filePath = this.operationFile(operationId);
+    if (!filePath) return null;
+    return this.readOperation(filePath);
   }
 
   public async getCurrentOperation(): Promise<ImageOperation | null> {
@@ -241,8 +250,10 @@ export class ImageOperationService {
   }
 
   private async persist(operation: ImageOperation): Promise<void> {
+    const filePath = this.operationFile(operation.operationId);
+    if (!filePath) throw new Error('Invalid image operation id');
     await fs.mkdir(this.operationsDir(), { recursive: true, mode: 0o700 });
-    await this.atomicWrite(this.operationFile(operation.operationId), JSON.stringify(operation));
+    await this.atomicWrite(filePath, JSON.stringify(operation));
     await this.atomicWrite(this.currentFile(), JSON.stringify(operation));
   }
 
@@ -251,7 +262,8 @@ export class ImageOperationService {
       return JSON.parse(await fs.readFile(filePath, 'utf8')) as ImageOperation;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      console.error('[ImageOperation] Failed to read operation:', error);
+      const code = (error as NodeJS.ErrnoException).code ?? 'unknown';
+      console.error(`[ImageOperation] Failed to read operation (${code})`);
       return null;
     }
   }
@@ -263,11 +275,22 @@ export class ImageOperationService {
     await fs.chmod(filePath, 0o600);
   }
 
-  private async writeDockerConfig(operationId: string, config: object): Promise<string> {
-    const configDir = path.join(this.dataDir(), 'image-op-docker', operationId);
+  private async writeDockerConfig(
+    operationId: string,
+    config: { auths?: Record<string, { auth?: string }> },
+  ): Promise<string> {
+    const configDir = this.resolveUnderBase(path.join(this.dataDir(), 'image-op-docker'), operationId);
+    if (!configDir) throw new Error('Invalid image operation id');
     await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
     await fs.chmod(configDir, 0o700);
-    await this.atomicWrite(path.join(configDir, 'config.json'), JSON.stringify(config));
+    // Rebuild a minimal auth map so the on-disk payload is locally constructed.
+    const auths: Record<string, { auth: string }> = {};
+    for (const [host, entry] of Object.entries(config.auths ?? {})) {
+      if (typeof host !== 'string' || host.length === 0 || host.length > 512) continue;
+      if (!entry || typeof entry.auth !== 'string' || entry.auth.length === 0) continue;
+      auths[host] = { auth: entry.auth };
+    }
+    await this.atomicWrite(path.join(configDir, 'config.json'), JSON.stringify({ auths }));
     return configDir;
   }
 
@@ -297,7 +320,8 @@ export class ImageOperationService {
       }
       return response.statusCode === 200 ? 'ready' : 'rejected';
     } catch (error) {
-      console.warn('[ImageOperation] Registry package probe failed:', error);
+      const code = (error as NodeJS.ErrnoException).code ?? 'unknown';
+      console.warn(`[ImageOperation] Registry package probe failed (${code})`);
       return 'rejected';
     }
   }
@@ -310,8 +334,21 @@ export class ImageOperationService {
     return path.join(this.dataDir(), 'image-operations');
   }
 
-  private operationFile(operationId: string): string {
-    return path.join(this.operationsDir(), `${operationId}.json`);
+  /** Resolve a path under baseDir; null if operationId is invalid or escapes the base. */
+  private resolveUnderBase(baseDir: string, operationId: string): string | null {
+    if (!ImageOperationService.isOperationId(operationId)) return null;
+    const base = path.resolve(baseDir);
+    const candidate = path.resolve(base, operationId);
+    if (candidate !== base && !candidate.startsWith(base + path.sep)) return null;
+    return candidate;
+  }
+
+  private operationFile(operationId: string): string | null {
+    if (!ImageOperationService.isOperationId(operationId)) return null;
+    const base = path.resolve(this.operationsDir());
+    const candidate = path.resolve(base, `${operationId}.json`);
+    if (!candidate.startsWith(base + path.sep)) return null;
+    return candidate;
   }
 
   private currentFile(): string {
@@ -319,6 +356,9 @@ export class ImageOperationService {
   }
 
   private successMarkerFile(operation: ImageOperation): string {
+    if (!ImageOperationService.isOperationId(operation.operationId)) {
+      throw new Error('Invalid image operation id');
+    }
     return path.join(this.dataDir(), `image-op-success-${operation.operationId}.json`);
   }
 
@@ -331,12 +371,14 @@ export class ImageOperationService {
 
   private async cleanupOperationArtifacts(operation: ImageOperation): Promise<void> {
     try {
+      const dockerDir = this.resolveUnderBase(path.join(this.dataDir(), 'image-op-docker'), operation.operationId);
       await Promise.all([
-        fs.rm(path.join(this.dataDir(), 'image-op-docker', operation.operationId), { recursive: true, force: true }),
+        dockerDir ? fs.rm(dockerDir, { recursive: true, force: true }) : Promise.resolve(),
         fs.rm(this.successMarkerFile(operation), { force: true }),
       ]);
     } catch (error) {
-      console.error('[ImageOperation] Failed to clean operation artifacts:', error);
+      const code = (error as NodeJS.ErrnoException).code ?? 'unknown';
+      console.error(`[ImageOperation] Failed to clean operation artifacts (${code})`);
     }
   }
 

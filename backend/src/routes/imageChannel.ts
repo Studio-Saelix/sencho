@@ -60,6 +60,10 @@ imageChannelRouter.post('/switch', async (req: Request, res: Response): Promise<
 imageChannelRouter.get('/operations/:operationId', async (req: Request, res: Response): Promise<void> => {
   if (!requireUserSession(req, res) || !requireAdmin(req, res)) return;
   const operationId = Array.isArray(req.params.operationId) ? req.params.operationId[0] : req.params.operationId;
+  if (!ImageOperationService.isOperationId(operationId)) {
+    res.status(400).json({ error: 'Invalid operation id' });
+    return;
+  }
   const operation = await ImageOperationService.getInstance().getOperation(operationId);
   if (!operation) {
     res.status(404).json({ error: 'Image operation not found' });
@@ -72,6 +76,10 @@ imageChannelRouter.post('/operations/:operationId/acknowledge', async (req: Requ
   if (rejectApiTokenScope(req, res, SESSION_MESSAGE)) return;
   if (!requireUserSession(req, res) || !requireAdmin(req, res)) return;
   const operationId = Array.isArray(req.params.operationId) ? req.params.operationId[0] : req.params.operationId;
+  if (!ImageOperationService.isOperationId(operationId)) {
+    res.status(400).json({ error: 'Invalid operation id' });
+    return;
+  }
   if (!await ImageOperationService.getInstance().acknowledge(operationId)) {
     res.status(409).json({ error: 'Only failed image operations can be acknowledged' });
     return;

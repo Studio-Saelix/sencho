@@ -222,8 +222,12 @@ describe('POST /api/fleet/nodes/:id/update concurrency', () => {
     mockTarget();
     mockMeta(ONLINE());
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      if (String(input).includes('api.github.com')) {
-        return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+      try {
+        if (new URL(String(input)).hostname === 'api.github.com') {
+          return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+        }
+      } catch {
+        // Non-URL fetch inputs fall through to the remote-update mock.
       }
       return new Response(JSON.stringify({
         error: 'Hardened Build updates require a signed-in admin on that node.',
@@ -250,8 +254,12 @@ describe('POST /api/fleet/update-all typed failures', () => {
     mockTarget();
     mockMeta(ONLINE());
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
-      if (String(input).includes('api.github.com')) {
-        return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+      try {
+        if (new URL(String(input)).hostname === 'api.github.com') {
+          return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+        }
+      } catch {
+        // Non-URL fetch inputs fall through to the remote-update mock.
       }
       return new Response(JSON.stringify({
         error: 'Hardened Build updates require a signed-in admin on that node.',
