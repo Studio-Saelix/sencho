@@ -25,7 +25,7 @@ backend/
   src/
     routes/       # One router per feature group (stacks, nodes, fleet, ...)
     services/     # Business logic singletons (ComposeService, DockerController, ...)
-    middleware/   # Auth, tier gates, audit log, node context
+    middleware/   # Auth, audit log, node context
     websocket/    # Upgrade handlers for log streaming, host console, proxy tunnels
 frontend/
   src/
@@ -35,7 +35,7 @@ frontend/
     lib/          # apiFetch wrapper and other utilities
 ```
 
-See the rest of this file for the most important contributor-facing standards (TypeScript, tier gates, PR process, code style). Architecture and module layout deep-dives live in the project documentation at [docs.sencho.io](https://docs.sencho.io).
+See the rest of this file for the most important contributor-facing standards (TypeScript, PR process, code style). Architecture and module layout deep-dives live in the project documentation at [docs.sencho.io](https://docs.sencho.io).
 
 ## Development
 
@@ -49,23 +49,15 @@ See the rest of this file for the most important contributor-facing standards (T
 
 The project uses `strict: true`. Write code that compiles without `any` casts or `@ts-ignore`. If a library lacks types, import `@types/...` or use `unknown` with narrowing.
 
-## Tier-Gated Features
+## Contributing to Community
 
-Sencho has two tiers: Community and Admiral. We welcome contributions to both! Often, enterprise users will contribute features they need for their own infrastructure.
+This public repository is the AGPLv3 **Community** product. Contributions here stay in Community under AGPLv3. We will not take a Community contribution and move it behind a paid gate.
 
-If your change adds a feature that belongs behind a tier gate, use the guards from `backend/src/middleware/tierGates.ts`:
+You will be required to sign our Contributor License Agreement (CLA) when you open your first Pull Request.
 
-```typescript
-if (!requirePaid(req, res)) return;    // Admiral (paid) only
-```
+## Trademarks
 
-Call the guard at the top of the route handler with an early return. Both guards handle proxy-forwarded tier headers automatically.
-
-**Note on Tiers and Monetization:** 
-- **Community Tier:** If you contribute a feature to the free/Community tier, it stays in the Community tier. We will never take your community contribution and move it behind a paywall.
-- **Commercial Tier:** By contributing to an Admiral feature, you acknowledge that your code will be part of Sencho's commercial offering. 
-
-Before writing code for a new gated feature, please open an issue to discuss it with the maintainers. You will also be required to sign our Contributor License Agreement (CLA) when you open your first Pull Request.
+Sencho and Studio Saelix names and logos are trademarks. AGPLv3 does not grant trademark rights. See [TRADEMARKS.md](TRADEMARKS.md).
 
 ## Pull Request Process
 
