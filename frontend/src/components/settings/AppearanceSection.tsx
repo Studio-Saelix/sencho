@@ -20,6 +20,7 @@ import { UI_FONT_OPTIONS, MONO_FONT_OPTIONS } from '@/components/theme/typeOptio
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsSecondaryButton } from './SettingsActions';
+import { SettingsCallout } from './SettingsCallout';
 
 const DENSITY_OPTIONS: { value: Density; label: string }[] = [
     { value: 'comfortable', label: 'Comfortable' },
@@ -240,26 +241,34 @@ export function AppearanceSection() {
             </SettingsSection>
 
             <SettingsSection title="Motion & effects" kicker="this browser">
+                {!reducedMotion ? (
+                    <SettingsCallout
+                        tone="warn"
+                        icon={<Info className="h-4 w-4" strokeWidth={1.5} />}
+                        title="Constrained graphics"
+                        subtitle="If the active Sencho tab feels heavy on integrated graphics or similar devices, turn on Reduced motion. Reduced effects and Calm alone may not be enough for that idle cost."
+                    />
+                ) : null}
+                <SettingsField
+                    label="Reduced motion"
+                    helper="Minimizes interface animations and transitions (dialogs, menus, expand and collapse). First control to try for high idle GPU use on constrained graphics. Toasts are unaffected."
+                >
+                    <TogglePill
+                        checked={reducedMotion}
+                        onChange={setReducedMotion}
+                        aria-label="Reduced motion"
+                    />
+                </SettingsField>
+
                 <SettingsField
                     label="Reduced effects"
-                    helper="Flattens card bevels, the accent glow, and chart gradients for a calmer surface."
+                    helper="Flattens card bevels, the accent glow, and chart gradients, and turns off glass blur with solid chrome fills. Optional secondary material simplification; not a substitute for Reduced motion on reported idle GPU cost."
                 >
                     <TogglePill
                         checked={effectiveReduced}
                         onChange={setReducedEffects}
                         disabled={readability}
                         aria-label="Reduced effects"
-                    />
-                </SettingsField>
-
-                <SettingsField
-                    label="Reduced motion"
-                    helper="Minimizes interface animations and transitions (dialogs, menus, expand and collapse). Toasts are unaffected."
-                >
-                    <TogglePill
-                        checked={reducedMotion}
-                        onChange={setReducedMotion}
-                        aria-label="Reduced motion"
                     />
                 </SettingsField>
 

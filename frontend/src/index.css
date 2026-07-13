@@ -436,12 +436,48 @@
   --sev-vuln:     oklch(0.660 0.100 45);
 }
 
-/* Reduced effects: flatten the material (Calm only). Charts read the reduced
-   flag from the store; here we flatten the real card top-bevel token. */
-[data-effects="reduced"] {
+/* Reduced effects: lower-overhead rendering path (Calm / Reduced effects /
+   Readability). Flatten material, drop glass blur, and solidify translucent
+   chrome so constrained GPUs are not forced to sample backdrop-filter.
+   data-theme and data-effects both live on <html>, so token overrides use
+   combined selectors. Exceptions to the blur kill need a more-specific
+   !important rule, not a normal opt-out class.
+   Charts also read the reduced flag from the store. */
+html[data-effects="reduced"] {
   --card-bevel: none;
+  --pop-a: 1;
+  /* Dim (default theme when data-theme is dim or unset on first paint) */
+  --sidebar: oklch(var(--bg) 0 0);
 }
-[data-effects="reduced"] .animate-pulse {
+html[data-theme="oled"][data-effects="reduced"] {
+  --sidebar: oklch(var(--bg) 0 0);
+}
+html[data-theme="light"][data-effects="reduced"] {
+  --sidebar: oklch(0.98 0 0);
+}
+
+/* Both properties: Chromium uses backdrop-filter; the WebKit-prefixed form
+   still appears in some engines. */
+html[data-effects="reduced"] *,
+html[data-effects="reduced"] *::before,
+html[data-effects="reduced"] *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Direct-alpha glass surfaces (bg-popover/95, color-mix tab bar, etc.) stay
+   translucent after --pop-a: 1. Mark them with data-sn-glass and solidify here. */
+html[data-effects="reduced"] [data-sn-glass="panel"] {
+  background-color: var(--popover);
+}
+html[data-effects="reduced"] [data-sn-glass="overlay"] {
+  background-color: var(--background);
+}
+html[data-effects="reduced"] [data-sn-glass="mobile-tabbar"] {
+  background-color: var(--card);
+}
+
+html[data-effects="reduced"] .animate-pulse {
   animation: none;
 }
 

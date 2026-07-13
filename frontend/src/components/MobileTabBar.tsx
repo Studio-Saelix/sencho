@@ -77,6 +77,7 @@ export function MobileTabBar({
   return (
     <nav
       aria-label="Primary mobile"
+      data-sn-glass="mobile-tabbar"
       className={cn(
         'md:hidden flex shrink-0 items-stretch',
         'border-t border-hairline',

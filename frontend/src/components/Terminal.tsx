@@ -269,12 +269,12 @@ export default function TerminalComponent({ stackName, nodeId, deploySessionId, 
           <Button variant="outline" size="sm" onClick={() => {
             setIsSearchVisible(true);
             setTimeout(() => searchInputRef.current?.focus(), 50);
-          }} className="h-8 bg-background/80 backdrop-blur-sm shadow-sm" title="Search (Ctrl+F)">
+          }} className="h-8 bg-background/80 backdrop-blur-sm shadow-sm" data-sn-glass="overlay" title="Search (Ctrl+F)">
             <Search className="w-4 h-4 mr-2" />
             Search
           </Button>
         ) : (
-          <div className="flex flex-row items-center p-1 pr-1 bg-background/95 backdrop-blur-sm border border-border shadow-md rounded-md">
+          <div className="flex flex-row items-center p-1 pr-1 bg-background/95 backdrop-blur-sm border border-border shadow-md rounded-md" data-sn-glass="overlay">
             <Input
               ref={searchInputRef}
               value={searchText}
@@ -296,7 +296,7 @@ export default function TerminalComponent({ stackName, nodeId, deploySessionId, 
           </div>
         )}
 
-        <Button variant="outline" size="sm" onClick={handleDownload} className="h-8 bg-background/80 backdrop-blur-sm shadow-sm" title="Download Logs">
+        <Button variant="outline" size="sm" onClick={handleDownload} className="h-8 bg-background/80 backdrop-blur-sm shadow-sm" data-sn-glass="overlay" title="Download Logs">
           <Download className="w-4 h-4 mr-2" />
           Download
         </Button>

@@ -45,8 +45,12 @@ The **Chart palette** sets the colors used on the Security page charts:
 
 ## Motion & effects
 
-- **Reduced effects** flattens card bevels, the accent glow, and chart gradients for a calmer, flatter surface.
+- **Reduced motion** minimizes interface animations and transitions (dialogs, menus, expand and collapse). Toasts are unaffected. On constrained graphics, this is the first control to try when the active Sencho tab feels heavy on idle.
+- When Reduced motion is off, Appearance shows a short notice about constrained graphics and points you at Reduced motion.
+- **Reduced effects** flattens card bevels, the accent glow, and chart gradients, and uses a simpler rendering path: glass blur is off and chrome fills are solid. Fresh installs get this through the default **Calm** visual style. Treat it as an optional secondary experiment for material cost; it is not a substitute for Reduced motion on the reported idle-GPU symptom. The impact varies by device, browser, and graphics configuration.
 - **Ambient glow** sets the intensity of the soft, accent-tinted glow behind the page. Slide it to zero for a completely flat background. (Reduced effects already dims it.)
+
+If the active Sencho tab feels heavy on constrained graphics, see [High GPU usage on constrained graphics](/operations/troubleshooting#high-gpu-usage-on-constrained-graphics).
 
 ## Theme
 

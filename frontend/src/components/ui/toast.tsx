@@ -126,6 +126,7 @@ const ToastItem = memo(function ToastItem({
       exit={{ opacity: 0, x: 100 }}
       transition={{ duration: 0.3 }}
       className="pointer-events-auto relative w-full max-w-sm overflow-hidden rounded-md border border-glass-border bg-popover/95 ring-1 ring-glass-border drop-shadow-xl backdrop-blur-[10px] backdrop-saturate-[1.15]"
+      data-sn-glass="panel"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       role={type === 'error' ? 'alert' : 'status'}

@@ -9,6 +9,23 @@ description: Solutions to the most common Sencho setup and runtime problems.
 
 If something has broken and you want a quick "what do I do now?" overview rather than a specific symptom, start with the [Recovery guide](/operations/recovery). It walks through getting back to a working state when Sencho, a deploy, sign-in, Docker, or a remote node fails, and links back here for the details.
 
+## High GPU usage on constrained graphics
+
+**Symptom:** With Sencho as the active browser tab, GPU use stays high on idle, and can climb further when an update or deploy dialog is open. Other sites in the same browser stay quieter. On some dual-GPU PCs the issue shows up only when the browser is forced onto integrated graphics.
+
+**What helped on the reported Windows configuration:** Turning on **Reduced motion** dropped idle iGPU use substantially (about 50% to about 7% in that report). **Calm** and **Reduced effects** alone did not. On that machine the issue did not appear when Windows selected the GPU or when Chrome used the discrete GPU.
+
+**What to try:**
+
+1. Open **Settings → Appearance → Motion & effects**.
+2. Turn on **Reduced motion**. That is the first step to try for high idle GPU use on constrained graphics.
+3. Optionally try **Reduced effects** or **Calm** as a secondary experiment (simpler glass and solid chrome). That path is unverified for this symptom.
+4. On dual-GPU Windows PCs, you can also set the browser's GPU preference to let the OS decide, or prefer a discrete GPU, if your OS exposes that control.
+
+**How to help validate a fix on your hardware:** Identify Chrome's GPU process (Shift+Esc), use Task Manager Details at High update speed on that PID's GPU column, leave the Sencho tab in the foreground for about 15 seconds, then record about ten one-second samples and take the median. Repeat for at least three independent runs (close and reopen the tab). Compare idle Home or Settings with Reduced motion off versus on. Separately compare an update or deploy dialog with Raw output hidden and visible. On Linux single-board devices, use one documented GPU or responsiveness counter for the whole matrix, and label CPU-only readings as secondary.
+
+---
+
 ## Containers won't start after deploy
 
 **Symptom:** You click Deploy and containers immediately exit or never appear.
