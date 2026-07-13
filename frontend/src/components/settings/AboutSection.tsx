@@ -2,6 +2,15 @@ import { useLicense } from '@/context/LicenseContext';
 import { TierBadge } from '@/components/TierBadge';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
+import {
+    SOURCE_URL,
+    LICENSE_URL,
+    LICENSING_DOCS_URL,
+    CHANGELOG_URL,
+} from './aboutLinks';
+
+const linkClassName =
+    'font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-brand hover:text-brand/80 transition-colors';
 
 export function AboutSection() {
     const { license } = useLicense();
@@ -15,7 +24,7 @@ export function AboutSection() {
                 <SettingsField label="Tier">
                     <TierBadge />
                 </SettingsField>
-                <SettingsField label="License status">
+                <SettingsField label="Plan status">
                     <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-value">
                         {license?.status ?? 'community'}
                     </span>
@@ -34,16 +43,55 @@ export function AboutSection() {
 
             <SettingsSection title="Links">
                 <SettingsField
+                    label="Source code"
+                    helper="Browse the AGPLv3 repository on GitHub."
+                >
+                    <a
+                        href={SOURCE_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={linkClassName}
+                    >
+                        github.com/studio-saelix/sencho →
+                    </a>
+                </SettingsField>
+                <SettingsField
+                    label="AGPLv3 License"
+                    helper="Copyright (c) 2026 Studio Saelix. Full license text."
+                >
+                    <a
+                        href={LICENSE_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={linkClassName}
+                    >
+                        LICENSE →
+                    </a>
+                </SettingsField>
+                <SettingsField
+                    label="Licensing documentation"
+                    helper="Community and Admiral plans."
+                >
+                    <a
+                        href={LICENSING_DOCS_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={linkClassName}
+                    >
+                        docs.sencho.io/features/licensing →
+                    </a>
+                </SettingsField>
+                <SettingsField
                     label="Changelog"
                     helper="See what shipped, when, and why."
                 >
                     <a
-                        href="https://github.com/studio-saelix/sencho/blob/main/CHANGELOG.md"
+                        href={CHANGELOG_URL}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-brand hover:text-brand/80 transition-colors"
+                        className={linkClassName}
                     >
-                        github.com/studio-saelix/sencho →
+                        CHANGELOG.md →
                     </a>
                 </SettingsField>
             </SettingsSection>

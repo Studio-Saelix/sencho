@@ -17,7 +17,7 @@
   [![Latest release](https://img.shields.io/github/v/release/studio-saelix/sencho?label=release)](https://github.com/studio-saelix/sencho/releases)
   [![Docker Pulls](https://img.shields.io/docker/pulls/saelix/sencho)](https://hub.docker.com/r/saelix/sencho)
   [![CI](https://github.com/studio-saelix/sencho/actions/workflows/ci.yml/badge.svg)](https://github.com/studio-saelix/sencho/actions/workflows/ci.yml)
-  [![License](https://img.shields.io/badge/license-BSL--1.1-blue)](LICENSE)
+  [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
   [![Discussions](https://img.shields.io/github/discussions/studio-saelix/sencho)](https://github.com/studio-saelix/sencho/discussions)
 </div>
 
@@ -197,7 +197,7 @@ Sencho does not emit telemetry, analytics, or crash reports. The only outbound t
 - **Community:** [GitHub Discussions](https://github.com/studio-saelix/sencho/discussions)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
 - **Security:** [SECURITY.md](SECURITY.md). Do not open public issues for security vulnerabilities.
-- **License:** [Business Source License 1.1](LICENSE). Free for most self-hosted production use under the BSL Additional Use Grant; see [LICENSE](LICENSE) and the [license FAQ](https://sencho.io/license-faq) for exact terms. Converts to [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) on **2030-03-25**.
+- **License:** [GNU Affero General Public License v3.0](LICENSE) (`AGPL-3.0-only`). Copyright (c) 2026 Studio Saelix. Sencho is free software; see [LICENSE](LICENSE) and [Licensing](https://docs.sencho.io/features/licensing) for terms. Studio Saelix trademarks are described in [TRADEMARKS.md](TRADEMARKS.md).
 
 ---
 

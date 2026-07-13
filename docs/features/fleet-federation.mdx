@@ -199,6 +199,6 @@ Federation is one tab in a larger Fleet view, and it focuses on a narrow slice o
 | [Fleet Actions](/features/fleet-actions) | Bulk operations across labelled nodes (restart, stop). | Fleet Actions runs imperative operations on existing deployments; Federation steers declarative placement decisions. |
 | [Fleet Sync](/features/fleet-sync) | Push-only replication of security policies (scan policies, CVE suppressions) from a control instance to replica instances. | Fleet Sync replicates *security state*, not placement; the two features do not interact. |
 | [Blueprints](/features/blueprint-model) | The declarative deployment model whose reconciler Federation steers. | Required reading: without Blueprints, Federation has nothing to do. |
-| [Licensing](/features/licensing) | The full tier matrix and what each tier unlocks. | The single source of truth for which fleet capabilities require Admiral. |
+| [Licensing](/features/licensing) | Community and Admiral plans. | How fleet capabilities relate to plans. |
 
 Federation is not Fleet Sync, not Mesh, and not the remote-node proxy. The cordon flag affects only declarative blueprint deployments, not manually deployed stacks. If you are looking for a way to take an entire node fully out of service (existing deployments included), see the deployment table's withdraw flow on each affected blueprint; cordon by itself is intentionally non-destructive.

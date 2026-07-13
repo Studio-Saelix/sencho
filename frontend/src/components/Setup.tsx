@@ -174,7 +174,7 @@ export function Setup({ onComplete, className, ...props }: SetupProps & React.Co
           <AuthStepHeader
             kicker="SENCHO · INITIALIZE"
             hero="Cold start"
-            caption="Create the Admiral account to unlock the console."
+            caption="Create the initial administrator account for this control plane."
           />
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-5">

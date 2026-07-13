@@ -93,14 +93,14 @@ export function LicenseSection() {
                     label={getTierDisplayName(license?.tier, license?.status)}
                     helper={
                         license?.status === 'expired'
-                            ? 'Your license has expired. Renew to restore paid features.'
+                            ? 'Your Admiral license has expired. Renew to restore Admiral plan benefits.'
                             : license?.status === 'disabled'
                                 ? 'Your license has been disabled. Contact support for assistance.'
                                 : license?.status === 'trial' && license.trialDaysRemaining !== null
                                     ? `Trial: ${license.trialDaysRemaining} day${license.trialDaysRemaining !== 1 ? 's' : ''} remaining.`
                                     : isPaid
                                         ? 'Active license on this control plane.'
-                                        : 'Free tier with the core experience.'
+                                        : 'Community plan. Full AGPLv3 self-hosted control plane.'
                     }
                     tone={
                         license?.status === 'expired' || license?.status === 'disabled'
@@ -137,7 +137,7 @@ export function LicenseSection() {
                 {license?.status === 'expired' ? (
                     <SettingsField
                         label="Status"
-                        helper="Renew to restore paid features."
+                        helper="Renew to restore Admiral plan benefits."
                         tone="error"
                     >
                         <div className="flex items-center gap-2 text-destructive">
@@ -150,7 +150,7 @@ export function LicenseSection() {
                 {license?.status === 'trial' && license.trialDaysRemaining !== null ? (
                     <SettingsField
                         label="Trial countdown"
-                        helper="Activate before the trial ends to keep paid features."
+                        helper="Activate before the trial ends to keep Admiral plan benefits."
                         tone="warn"
                     >
                         <div className="flex items-center gap-2">

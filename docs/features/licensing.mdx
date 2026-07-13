@@ -4,7 +4,7 @@ sidebarTitle: Licensing
 description: How Sencho licensing works, including trials, activation, and subscription management.
 ---
 
-Sencho uses an open-core model. **Community** is the complete self-hosted control plane, free forever with unlimited nodes. **Admiral** adds governance, security, and fleet control for teams.
+Sencho is [AGPLv3](https://github.com/studio-saelix/sencho/blob/main/LICENSE) open source. **Community** is the complete self-hosted Compose-first control plane, free forever with unlimited nodes. **Admiral** is Studio Saelix business assurance (priority support, managed continuity, governance depth, and release assurance) delivered as a paid plan.
 
 <Tip>
   *Our tier names are inspired by the meaning of Sencho (船長), because you're the captain of your container fleet.*
@@ -21,7 +21,7 @@ See [the pricing page](https://sencho.io/pricing) for current pricing.
 
 ### Feature breakdown
 
-**Community** is the complete self-hosted control plane. It includes:
+**Community** is the complete AGPLv3 self-hosted control plane. It includes:
 
 - Unlimited nodes, the Monaco compose editor, the full stack file explorer (browse, view, edit, upload, download, rename, chmod, delete; admin role for writes), and the App Store with 199+ one-click templates
 - Real-time container stats, global logs, the interactive network topology graph (Hub, Grouped, and Free layouts), node labels, and stack labels
@@ -47,17 +47,17 @@ See [the pricing page](https://sencho.io/pricing) for current pricing.
 - Two-factor authentication (TOTP plus backup codes)
 - Single sign-on with Custom OIDC (Authelia, Keycloak, Authentik, Zitadel, Pocket ID, or any spec-compliant OIDC provider) and preset providers for Google, GitHub, and Okta
 
-**Admiral** adds governance, security, and fleet control for teams. It includes everything in Community, plus:
+**Admiral** is the official business assurance plan from Studio Saelix. It includes everything in Community, plus:
 
+- **Assurance and support:** priority email support and Studio Saelix–backed continuity for production fleets
 - **Governance:** advanced RBAC roles (Deployer, Node Admin, Auditor), scoped permissions per stack or node, and audit log export (CSV, JSON), anomaly detection, and configurable retention beyond the recent window
-- **Security:** Fleet Secrets, AWS ECR registry credentials, and LDAP / Active Directory authentication
-- **Fleet operations:** Sencho Mesh (cross-node container networking)
 - **Managed continuity:** Sencho Cloud Backup (a managed, off-site snapshot allowance)
-- **Operator access:** the Host Console (a browser-based terminal on the Sencho host)
+- **Directory integration:** LDAP / Active Directory authentication
+- **Current plan availability:** some product surfaces (including Fleet Secrets, AWS ECR credentials, Sencho Mesh, and the Host Console) still require an Admiral plan today. That access rule is temporary availability, not the reason Admiral exists.
 
 ## Free trial
 
-Sencho offers a **14-day Admiral trial** so you can evaluate the flagship features (Host Console, Sencho Mesh, LDAP / Active Directory, audit log, advanced RBAC) with your real infrastructure before committing. The trial is offered on the monthly and annual Admiral plans.
+Sencho offers a **14-day Admiral trial** so you can evaluate Admiral assurance (priority support path, managed Cloud Backup, governance depth including advanced RBAC, LDAP / Active Directory, and audit export) with your real infrastructure before committing. The trial is offered on the monthly and annual Admiral plans.
 
 To start a trial:
 
@@ -85,7 +85,7 @@ Open **Settings → License** in the Sencho dashboard. When the license is not a
 1. Paste your key into the **License key** field.
 2. Click **Activate**.
 
-Sencho validates the key and unlocks your tier. If activation fails, the toast surfaces the verbatim error; common causes are an invalid key, a typo, or an activation limit reached on a previous instance.
+Sencho validates the key and activates your plan. If activation fails, the toast surfaces the verbatim error; common causes are an invalid key, a typo, or an activation limit reached on a previous instance.
 
 ## The Plan section
 
@@ -132,16 +132,16 @@ The License page renders differently depending on the license status:
 
 | Status | Plan section | Activate section | Pricing section |
 |--------|--------------|------------------|-----------------|
-| **Community** | `Sencho Community` with "Free tier with the core experience." | Visible | Visible |
+| **Community** | `Sencho Community` with "Community plan. Full AGPLv3 self-hosted control plane." | Visible | Visible |
 | **Trial** | `Sencho Admiral (Trial)` with a countdown chip | Visible (so a paid key can replace the trial) | Hidden |
 | **Active subscription** | Tier name with Customer, Product, License key, plus `Manage subscription` and `Deactivate` | Hidden | Hidden |
-| **Expired** | `Sencho Community` with "Your license has expired. Renew to restore paid features." and a destructive **Status: Expired** field | Visible | Visible |
+| **Expired** | `Sencho Community` with "Your Admiral license has expired. Renew to restore Admiral plan benefits." and a destructive **Status: Expired** field | Visible | Visible |
 | **Disabled** | `Sencho Community` with "Your license has been disabled. Contact support for assistance." | Visible | Visible |
 
 The **Pricing** section, when visible, holds a single **See pricing** button that opens [the pricing page](https://sencho.io/pricing) in a new tab so you can pick a tier and billing cadence.
 
 <Frame>
-  <img src="/images/licensing/license-community.png" alt="License page on a Community-tier instance, with the masthead showing SCOPE operator and PLAN community, then the Plan section reading 'Sencho Community · Free tier with the core experience.', the Activate section with the License key input, and the Pricing section with the See pricing button" />
+  <img src="/images/licensing/license-community.png" alt="License page on a Community-tier instance, with the masthead showing SCOPE operator and PLAN community, then the Plan section reading 'Sencho Community · Community plan. Full AGPLv3 self-hosted control plane.', the Activate section with the License key input, and the Pricing section with the See pricing button" />
 </Frame>
 
 ## Multi-node license enforcement
