@@ -128,6 +128,8 @@ export function buildSelfUpdateComposeCmd(
   errorFile: string,
   pruneOnUpdate: boolean,
   composeCopy?: ComposeCopy,
+  successMarkerFile?: string,
+  successMarkerContent = '{"ok":true}',
 ): string {
   const recreate = ['docker compose', ...fFlags.map(shQuote), 'up -d --force-recreate', shQuote(serviceName), `2>${stderrTmp}`].join(' ');
   const copyStep = composeCopy
@@ -141,6 +143,9 @@ export function buildSelfUpdateComposeCmd(
     `if [ $ec -ne 0 ]; then { echo "exit=$ec"; cat ${stderrTmp}; } > ${errorFile} 2>/dev/null; fi`,
     ...(pruneOnUpdate
       ? [`if [ $ec -eq 0 ]; then docker image prune -f >/dev/null 2>&1 || true; fi`]
+      : []),
+    ...(successMarkerFile
+      ? [`if [ $ec -eq 0 ]; then printf %s ${shQuote(successMarkerContent)} > ${shQuote(successMarkerFile)}; fi`]
       : []),
     `cat ${stderrTmp} >&2 2>/dev/null`,
     'exit $ec',
@@ -322,6 +327,15 @@ class SelfUpdateService {
     return { pinKind: resolved.pinKind, composeImageRef: resolved.imageRef, filePath: resolved.filePath };
   }
 
+  /** Fresh compose image resolution for guarded image-channel operations. */
+  async getResolvedComposeImageForUpdate(): Promise<ResolvedComposeImage | null> {
+    return this.resolveComposeImage(true);
+  }
+
+  getComposeServiceName(): string | null {
+    return this.composeContext?.serviceName ?? null;
+  }
+
   /**
    * Preflight the route layer runs before responding, so a blocked update fails
    * fast with a 409 instead of returning 202 and stalling the reconnect overlay.
@@ -401,9 +415,18 @@ class SelfUpdateService {
    * target; when omitted this keeps the legacy behavior of pulling the running
    * image and recreating from the on-disk compose.
    */
-  async triggerUpdate(options?: { targetVersion?: string }): Promise<void> {
+  async triggerUpdate(options?: {
+    targetVersion?: string;
+    targetImageRef?: string;
+    dockerConfigPath?: string;
+    successMarkerFile?: string;
+    successMarkerContent?: string;
+  }): Promise<void> {
     if (!this.composeContext) return;
-    const env = this.buildEnv();
+    const env = {
+      ...this.buildEnv(),
+      ...(options?.dockerConfigPath ? { DOCKER_CONFIG: options.dockerConfigPath } : {}),
+    };
     this.lastUpdateError = null;
 
     try { fs.unlinkSync(UPDATE_ERROR_FILE); } catch { /* absent is the steady state */ }
@@ -411,27 +434,30 @@ class SelfUpdateService {
 
     const { imageName, serviceName, dataDirHost } = this.composeContext;
     const targetVersion = options?.targetVersion;
+    const targetImageRef = options?.targetImageRef;
 
     let pullRef = imageName;
     let repin: { resolved: ResolvedComposeImage; ref: string } | null = null;
 
-    if (targetVersion) {
+    if (targetVersion || targetImageRef) {
       const resolved = await this.resolveComposeImage(true);
       const pinKind = resolved?.pinKind ?? 'unknown';
       // Defense in depth: the route preflight already rejected these, but the
       // compose file could change between preflight and this last-breath call.
-      if (!resolved || isRepinBlocked(pinKind)) {
+      if (!resolved || (!targetImageRef && isRepinBlocked(pinKind))) {
         this.lastUpdateError = resolved ? UPDATE_BLOCKED_REASON : UPDATE_READ_FAILED_REASON;
         console.error('[SelfUpdate] Update blocked:', this.lastUpdateError);
         return;
       }
-      pullRef = pinKind === 'semver' ? buildTargetImageRef(resolved.imageRef, targetVersion) : resolved.imageRef;
+      pullRef = targetImageRef ?? (pinKind === 'semver'
+        ? buildTargetImageRef(resolved.imageRef, targetVersion!)
+        : resolved.imageRef);
       if (!isValidImageRef(pullRef)) {
         this.lastUpdateError = 'Aborting update: the computed image reference is invalid.';
         console.error('[SelfUpdate] Update blocked:', this.lastUpdateError, pullRef);
         return;
       }
-      if (pinKind === 'semver') {
+      if (pinKind === 'semver' || targetImageRef) {
         if (!dataDirHost) {
           this.lastUpdateError =
             'Cannot rewrite the pinned compose image: the data directory needed for the update handoff is not mounted. Change the image tag manually and update again.';
@@ -477,7 +503,7 @@ class SelfUpdateService {
       }
     }
 
-    this.spawnHelper(env, composeCopy);
+    this.spawnHelper(env, composeCopy, options?.successMarkerFile, options?.successMarkerContent);
   }
 
   /**
@@ -486,7 +512,12 @@ class SelfUpdateService {
    * Runs attached (no -d): if the recreate fails before it kills us, execFile's
    * callback receives the helper's exit code and stderr directly.
    */
-  private spawnHelper(env: NodeJS.ProcessEnv, composeCopy?: ComposeCopy): void {
+  private spawnHelper(
+    env: NodeJS.ProcessEnv,
+    composeCopy?: ComposeCopy,
+    successMarkerFile?: string,
+    successMarkerContent?: string,
+  ): void {
     if (!this.composeContext) return;
     const { workingDir, configFiles, serviceName, imageName, dataDirHost, hostBindMounts } = this.composeContext;
 
@@ -501,7 +532,16 @@ class SelfUpdateService {
     const stderrTmp = '/tmp/_sencho_err';
     const pruneOnUpdate =
       DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1';
-    const composeCmd = buildSelfUpdateComposeCmd(fFlags, serviceName, stderrTmp, UPDATE_ERROR_FILE, pruneOnUpdate, composeCopy);
+    const composeCmd = buildSelfUpdateComposeCmd(
+      fFlags,
+      serviceName,
+      stderrTmp,
+      UPDATE_ERROR_FILE,
+      pruneOnUpdate,
+      composeCopy,
+      successMarkerFile,
+      successMarkerContent,
+    );
     const args = buildSelfUpdateRunArgs({ workingDir, imageName, dataDirHost, hostBindMounts, repinWritable: !!composeCopy }, composeCmd);
 
     // Callback may never fire on success (we die mid-call during recreate);

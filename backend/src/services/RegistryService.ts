@@ -392,6 +392,24 @@ export class RegistryService {
         return { config: { auths }, warnings };
     }
 
+    /** Resolve a Docker config containing credentials for one registry host only. */
+    public async resolveDockerConfigForHost(registryHost: string): Promise<ResolvedDockerConfig> {
+        const auth = await this.getAuthForRegistry(registryHost);
+        if (!auth) return { config: { auths: {} }, warnings: [] };
+
+        const normalized = normalizeImageHost(registryHost);
+        return {
+            config: {
+                auths: {
+                    [normalized]: {
+                        auth: Buffer.from(`${auth.username}:${auth.password}`).toString('base64'),
+                    },
+                },
+            },
+            warnings: [],
+        };
+    }
+
 
     /**
      * Resolve credentials for a specific registry row by ID only.

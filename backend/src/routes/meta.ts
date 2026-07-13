@@ -46,6 +46,6 @@ metaRouter.get('/meta', async (_req: Request, res: Response): Promise<void> => {
     experimental: process.env.SENCHO_EXPERIMENTAL === 'true',
     ...(pin ? { imagePinKind: pin.pinKind } : {}),
     updateBlocked,
-    ...(updateError ? { updateError } : {}),
+    ...(updateError ? { updateError: 'update_failed' } : {}),
   });
 });

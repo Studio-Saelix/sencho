@@ -131,11 +131,18 @@ export function useFleetUpdateStatus() {
         try {
             const res = await apiFetch('/fleet/update-all', { method: 'POST', localOnly: true });
             if (res.ok) {
-                const data = await res.json();
-                if (data.updating?.length > 0) {
-                    toast.success(`Update initiated on ${data.updating.length} node${data.updating.length > 1 ? 's' : ''}.`);
+                const data = await res.json() as {
+                    updating?: string[];
+                    failed?: Array<{ name: string; error: string }>;
+                };
+                const updating = data.updating ?? [];
+                if (updating.length > 0) {
+                    toast.success(`Update initiated on ${updating.length} node${updating.length > 1 ? 's' : ''}.`);
                 } else {
                     toast.success('All nodes are up to date.');
+                }
+                if (data.failed?.length) {
+                    toast.error(`Update could not start on ${data.failed.map(node => node.name).join(', ')}: ${data.failed[0].error}`);
                 }
                 fetchUpdateStatus();
             } else {

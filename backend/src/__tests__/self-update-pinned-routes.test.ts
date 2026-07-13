@@ -59,6 +59,24 @@ afterEach(() => {
 });
 
 describe('POST /api/system/update', () => {
+  it('rejects hardened updates from node-proxy credentials', async () => {
+    mockSelfUpdateAvailable({
+      pinInfo: {
+        pinKind: 'digest',
+        composeImageRef: 'ghcr.io/studio-saelix/sencho-hardened@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        filePath: '/opt/sencho/docker-compose.yml',
+      },
+    });
+    const machineAuth = `Bearer ${jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
+
+    const res = await request(app)
+      .post('/api/system/update')
+      .set('Authorization', machineAuth);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('HARDENED_REMOTE_UPDATE_UNSUPPORTED');
+  });
+
   it('returns 400 for a supplied but invalid targetVersion', async () => {
     mockSelfUpdateAvailable();
 
@@ -99,11 +117,26 @@ describe('POST /api/system/update', () => {
     expect(res.body?.message).toMatch(/restart/i);
     // triggerUpdate runs on res finish + delay; flush the microtask queue.
     await new Promise(r => setTimeout(r, 600));
-    expect(triggerSpy).toHaveBeenCalledWith({ targetVersion: '0.99.0' });
+    expect(triggerSpy).toHaveBeenCalledWith(expect.objectContaining({
+      targetVersion: '0.99.0',
+      successMarkerFile: expect.stringMatching(/image-op-success-[\w-]+\.json$/),
+      successMarkerContent: expect.stringMatching(/"operationId":"[\w-]+"/),
+    }));
   });
 });
 
 describe('GET /api/meta pin subset', () => {
+  it('does not expose a raw update error with a private image reference', async () => {
+    mockSelfUpdateAvailable();
+    vi.spyOn(SelfUpdateService.getInstance(), 'getLastError')
+      .mockReturnValue('pull private.registry.example/internal/sencho:1.0 failed');
+
+    const res = await request(app).get('/api/meta');
+
+    expect(res.body.updateError).toBe('update_failed');
+    expect(JSON.stringify(res.body)).not.toContain('private.registry.example');
+  });
+
   it('exposes imagePinKind and updateBlocked but never composeImageRef', async () => {
     mockSelfUpdateAvailable({
       pinInfo: { pinKind: 'semver', composeImageRef: 'saelix/sencho:0.93.3', filePath: '/opt/sencho/docker-compose.yml' },

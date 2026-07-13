@@ -217,6 +217,64 @@ describe('POST /api/fleet/nodes/:id/update concurrency', () => {
     expect(res.status).toBe(409);
     expect(res.body?.error).toMatch(/already in progress/i);
   });
+
+  it('preserves a typed remote update failure in the response and tracker', async () => {
+    mockTarget();
+    mockMeta(ONLINE());
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('api.github.com')) {
+        return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        error: 'Hardened Build updates require a signed-in admin on that node.',
+        code: 'HARDENED_REMOTE_UPDATE_UNSUPPORTED',
+      }), { status: 403 });
+    });
+
+    const res = await request(app)
+      .post(`/api/fleet/nodes/${proxyNodeId}/update`)
+      .set('Authorization', adminAuth);
+
+    expect(res.status).toBe(502);
+    expect(res.body).toEqual({
+      error: 'Hardened Build updates require a signed-in admin on that node.',
+      code: 'HARDENED_REMOTE_UPDATE_UNSUPPORTED',
+    });
+    expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)?.code)
+      .toBe('HARDENED_REMOTE_UPDATE_UNSUPPORTED');
+  });
+});
+
+describe('POST /api/fleet/update-all typed failures', () => {
+  it('reports remote rejections as failed instead of skipped', async () => {
+    mockTarget();
+    mockMeta(ONLINE());
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).includes('api.github.com')) {
+        return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        error: 'Hardened Build updates require a signed-in admin on that node.',
+        code: 'HARDENED_REMOTE_UPDATE_UNSUPPORTED',
+      }), { status: 403 });
+    });
+
+    const res = await request(app)
+      .post('/api/fleet/update-all')
+      .set('Authorization', adminAuth);
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({
+      updating: [],
+      skipped: [],
+      failed: [{
+        nodeId: proxyNodeId,
+        name: 'proxy-hardening-test',
+        code: 'HARDENED_REMOTE_UPDATE_UNSUPPORTED',
+        error: 'Hardened Build updates require a signed-in admin on that node.',
+      }],
+    });
+  });
 });
 
 describe('clear-route authorization', () => {

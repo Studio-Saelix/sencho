@@ -213,8 +213,8 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
           <SectionHeader icon={HardDrive} label="Backups & Thresholds" />
           {!backup.locked && (
             <Row
-              label="Cloud Backup"
-              value={backup.provider === 'disabled' ? 'Disabled' : backup.provider === 'sencho' ? 'Sencho Cloud' : `Custom S3${backup.autoUpload ? ' (auto)' : ''}`}
+              label="Recovery Vault"
+              value={backup.provider === 'disabled' ? 'Disabled' : backup.provider === 'sencho' ? 'Recovery Vault' : `Custom S3${backup.autoUpload ? ' (auto)' : ''}`}
               onClick={open('cloud-backup')}
             />
           )}

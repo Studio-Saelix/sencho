@@ -75,8 +75,8 @@ describe('ConfigurationStatus row visibility', () => {
     expect(screen.queryByText('Scheduled tasks')).toBeNull();
     // Scan policies are free, so the row renders.
     expect(screen.getByText('Scan policies')).toBeDefined();
-    // Cloud Backup row is universal (Custom S3 is open to every tier).
-    expect(screen.getByText('Cloud Backup')).toBeDefined();
+    // Recovery Vault row is universal because Custom S3 is open to every tier.
+    expect(screen.getByText('Recovery Vault')).toBeDefined();
   });
 
   it('shows every row when the payload reports nothing locked', () => {
@@ -118,7 +118,7 @@ describe('ConfigurationStatus row visibility', () => {
     expect(screen.getByText('Webhooks')).toBeDefined();
     expect(screen.getByText('Scheduled tasks')).toBeDefined();
     expect(screen.getByText('Scan policies')).toBeDefined();
-    expect(screen.getByText('Cloud Backup')).toBeDefined();
+    expect(screen.getByText('Recovery Vault')).toBeDefined();
     // SSO label maps the provider to a friendly name.
     expect(screen.getByText('Google')).toBeDefined();
   });

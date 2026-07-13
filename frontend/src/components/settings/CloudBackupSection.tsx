@@ -62,7 +62,7 @@ const BASE_PROVIDER_OPTIONS = [
     { value: 'custom', label: 'Custom S3 (BYOB)' },
 ];
 
-const SENCHO_PROVIDER_OPTION = { value: 'sencho', label: 'Sencho Cloud Backup (included)' };
+const SENCHO_PROVIDER_OPTION = { value: 'sencho', label: 'Recovery Vault (included)' };
 
 const PANEL_CLASS = 'rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-4 space-y-3';
 
@@ -215,7 +215,7 @@ export function CloudBackupSection() {
             const res = await apiFetch('/cloud-backup/provision', { method: 'POST' });
             const data = await res.json().catch(() => ({}));
             if (!res.ok || data?.error) throw new Error(data?.error || 'Provisioning failed.');
-            toast.success('Sencho Cloud Backup activated.');
+            toast.success('Recovery Vault activated.');
             setSenchoProvisioned(true);
             await Promise.all([loadConfig(), loadUsage(), loadSnapshots()]);
         } catch (err) {
@@ -316,7 +316,7 @@ export function CloudBackupSection() {
                 <div className={PANEL_CLASS}>
                     <div className="flex items-center gap-2">
                         <Cloud className="w-4 h-4 text-muted-foreground" strokeWidth={1.5} />
-                        <span className="font-medium text-sm">Activate Sencho Cloud Backup</span>
+                        <span className="font-medium text-sm">Activate Recovery Vault</span>
                     </div>
                     <p className="text-xs text-muted-foreground">
                         Activates a 500 MB allowance backed by Cloudflare R2, scoped to this Admiral license.
@@ -333,7 +333,7 @@ export function CloudBackupSection() {
                     <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-2">
                             <CheckCircle2 className="w-4 h-4 text-success" strokeWidth={1.5} />
-                            <span className="font-medium text-sm">Sencho Cloud Backup</span>
+                            <span className="font-medium text-sm">Recovery Vault</span>
                         </div>
                         <div className="flex items-center gap-2">
                             <Button size="sm" variant="outline" onClick={handleTest} disabled={testing}>
@@ -371,7 +371,7 @@ export function CloudBackupSection() {
                     <div className="flex items-start gap-2 rounded-lg border border-glass-border bg-muted/30 px-3 py-2.5">
                         <Cloud className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" strokeWidth={1.5} />
                         <p className="text-xs text-muted-foreground">
-                            Auto-upload is on for Sencho Cloud Backup. Every fleet snapshot is replicated within seconds.
+                            Auto-upload is on for Recovery Vault. Every fleet snapshot is replicated within seconds.
                         </p>
                     </div>
                 </div>
