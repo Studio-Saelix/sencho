@@ -366,7 +366,7 @@ export function NotificationPanel({
                     <div className="max-h-[480px] overflow-y-auto border-t border-card-border/60">
                         {groups.map((group) => (
                             <div key={group.label}>
-                                <div className="sticky top-0 z-10 border-b border-card-border/40 bg-popover/95 px-[var(--density-row-x)] py-[var(--density-cell-y)] font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle backdrop-blur-[10px] backdrop-saturate-[1.15]">
+                                <div className="sticky top-0 z-10 border-b border-card-border/40 bg-popover/95 px-[var(--density-row-x)] py-[var(--density-cell-y)] font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle backdrop-blur-[10px] backdrop-saturate-[1.15]" data-sn-glass="panel">
                                     {group.label}
                                 </div>
                                 {group.items.map((notif) => (

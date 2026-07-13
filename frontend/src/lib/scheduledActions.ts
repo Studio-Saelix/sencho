@@ -183,6 +183,6 @@ export const SCHEDULED_ACTION_CATEGORIES: ScheduledActionCategoryLane[] = [
   { key: 'lifecycle', label: 'Lifecycle', color: 'var(--label-blue)', bg: 'var(--label-blue-bg)' },
   { key: 'updates', label: 'Updates', color: 'var(--success)', bg: 'oklch(from var(--success) l c h / 0.18)' },
   { key: 'security', label: 'Security', color: 'var(--label-purple)', bg: 'var(--label-purple-bg)' },
-  { key: 'maintenance', label: 'Maintenance', color: 'var(--warning)', bg: 'oklch(from var(--warning) l c h / 0.18)' },
+  { key: 'maintenance', label: 'Upkeep', color: 'var(--warning)', bg: 'oklch(from var(--warning) l c h / 0.18)' },
   { key: 'backups', label: 'Backups', color: 'var(--brand)', bg: 'oklch(from var(--brand) l c h / 0.18)' },
 ];

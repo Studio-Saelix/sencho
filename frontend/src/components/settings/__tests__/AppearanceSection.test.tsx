@@ -35,6 +35,25 @@ describe('AppearanceSection', () => {
         expect(document.documentElement.dataset.chartStyle).toBe('muted');
     });
 
+    it('shows the constrained-graphics callout when Reduced motion is off, and hides it when on', () => {
+        render(<AppearanceSection />);
+        expect(screen.getByText('Constrained graphics')).toBeTruthy();
+
+        // Reduced effects alone must not hide the Motion guidance.
+        fireEvent.click(screen.getByRole('switch', { name: 'Reduced effects' }));
+        expect(screen.getByText('Constrained graphics')).toBeTruthy();
+
+        fireEvent.click(screen.getByRole('switch', { name: 'Reduced motion' }));
+        expect(screen.queryByText('Constrained graphics', { exact: true })).toBeNull();
+
+        fireEvent.click(screen.getByRole('switch', { name: 'Reduced motion' }));
+        expect(screen.getByText('Constrained graphics')).toBeTruthy();
+
+        // Readability does not enable Motion, so the callout stays.
+        fireEvent.click(screen.getByRole('switch', { name: 'Readability mode' }));
+        expect(screen.getByText('Constrained graphics')).toBeTruthy();
+    });
+
     it('readability locks the header + chart controls and disables the glow slider', () => {
         const { container } = render(<AppearanceSection />);
         // Baseline: nothing reduced, so no slider is disabled.

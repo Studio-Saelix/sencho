@@ -55,7 +55,7 @@ export function ReconnectingOverlay({ preUpdateStartedAt }: ReconnectingOverlayP
     }, [timedOut, preUpdateStartedAt]);
 
     return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-[10px] backdrop-saturate-[1.15]">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-[10px] backdrop-saturate-[1.15]" data-sn-glass="overlay">
             <div className="text-center space-y-4">
                 {timedOut ? (
                     <>
