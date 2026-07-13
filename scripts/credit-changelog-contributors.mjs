@@ -1,13 +1,32 @@
 #!/usr/bin/env node
 
 /**
- * Post-processes CHANGELOG.md on a release-please PR branch, adding a
- * "### Thanks" section that credits external, non-bot contributors whose
- * issue or PR is referenced in the latest release block.
+ * Post-processes CHANGELOG.md on a release-please PR branch, appending an
+ * inline ", thanks @login" suffix to each logical top-level changelog bullet
+ * whose same-repo issue or PR references were opened by external, non-bot
+ * contributors. The managed suffix is written on the last line of the logical
+ * entry (the top-level bullet when single-line, otherwise the last indented
+ * non-list continuation).
+ *
+ * Logical entries: a top-level "* " / "- " bullet plus immediately following
+ * indented non-list continuation lines. Indented nested list items are copied
+ * unchanged and are not association or suffix targets. A blank line, heading,
+ * nested list item, or another top-level bullet terminates the entry.
+ *
+ * Generated suffix grammar (machine-managed only):
+ *   , thanks @login
+ *   , thanks @alice, @bob
+ * Exact manually authored suffixes of this form are indistinguishable and may
+ * be stripped or regenerated. Other prose containing "thanks" is preserved.
+ *
+ * Credits are regenerated from current API classifications each run. Stale
+ * suffixes are removed when no mapped external contributors remain. Legacy
+ * "### Thanks" blocks are removed from the latest version section only.
  *
  * Atomic: builds the complete result in memory before touching the file.
  * If any retryable lookup fails, exits nonzero without writing so the
- * existing changelog (including any prior Thanks section) is preserved.
+ * existing changelog (including any prior credits) is preserved.
+ * (Not a filesystem-level atomic rename.)
  *
  * Inputs (env):
  *   GITHUB_TOKEN      (required)  GitHub API token
@@ -40,6 +59,15 @@ const RETRY_WAITS_MS = [1000, 2000]
 const MAX_WAIT_PER_RETRY_MS = 15_000
 const TOTAL_RETRY_CAP_MS = 40_000
 
+/** Exact trailing generated suffix: ", thanks @a" or ", thanks @a, @b" */
+const INLINE_THANKS_RE = /, thanks @[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:, @[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)*\s*$/
+
+const TOP_LEVEL_BULLET_RE = /^[*-] /
+const NESTED_LIST_RE = /^\s+[*-] /
+const HEADING_RE = /^#{1,3} /
+const THANKS_HEADING_RE = /^###\s+Thanks\s*$/
+const VERSION_HEADING_RE = /^##\s+\[[\d.]+]/
+
 // ---------------------------------------------------------------------------
 // GitHub API
 // ---------------------------------------------------------------------------
@@ -62,8 +90,10 @@ async function fetchIssue(repo, number, token) {
     const err = new Error(`GitHub API ${res.status} for #${number}`)
     err.status = res.status
     err.headers = res.headers
-    // Attach body text for diagnostics but do not leak into error messages
-    try { err.body = await res.text() } catch { /* ignore */ }
+    err.body = await res.text().catch((readErr) => {
+      console.warn(`Could not read error body for #${number}: ${readErr.message}`)
+      return undefined
+    })
     throw err
   }
   return res.json()
@@ -71,13 +101,10 @@ async function fetchIssue(repo, number, token) {
 
 /** True when the HTTP status is a retryable server/rate-limit error. */
 export function shouldRetry(status, headers) {
-  if (status === 429) return true
+  if (status === 429 || status === 502 || status === 503 || status === 504) return true
   if (status === 403 && headers) {
-    const remaining = headers.get('x-ratelimit-remaining')
-    const retryAfter = headers.get('retry-after')
-    if (remaining === '0' || retryAfter !== null) return true
+    return headers.get('x-ratelimit-remaining') === '0' || headers.get('retry-after') !== null
   }
-  if (status === 502 || status === 503 || status === 504) return true
   return false
 }
 
@@ -160,10 +187,53 @@ export function classifyAuthor(response) {
 }
 
 // ---------------------------------------------------------------------------
-// Changelog parsing
+// Line splitting (LF / CRLF preserving)
 // ---------------------------------------------------------------------------
 
-const VERSION_HEADING_RE = /^##\s+\[[\d.]+]/
+/**
+ * Split text into lines preserving each line's trailing newline (or none on EOF).
+ * @returns {{ content: string, newline: string, raw: string }[]}
+ *   content = line without trailing newline; newline = '\n' | '\r\n' | '\r' | ''
+ */
+export function splitLines(text) {
+  const result = []
+  let i = 0
+  while (i < text.length) {
+    let j = i
+    while (j < text.length && text[j] !== '\n' && text[j] !== '\r') j++
+    const content = text.slice(i, j)
+    let newline = ''
+    if (j < text.length) {
+      if (text[j] === '\r' && text[j + 1] === '\n') {
+        newline = '\r\n'
+        j += 2
+      } else if (text[j] === '\r') {
+        newline = '\r'
+        j += 1
+      } else {
+        newline = '\n'
+        j += 1
+      }
+    }
+    result.push({ content, newline, raw: content + newline })
+    i = j
+  }
+  return result
+}
+
+export function joinLines(lines) {
+  return lines.map((l) => l.raw).join('')
+}
+
+/** Rebuild a split line after changing its content (preserves newline). */
+function withContent(line, content) {
+  if (content === line.content) return line
+  return { content, newline: line.newline, raw: content + line.newline }
+}
+
+// ---------------------------------------------------------------------------
+// Changelog parsing
+// ---------------------------------------------------------------------------
 
 /**
  * Locate the first version heading and return its character-index range.
@@ -171,35 +241,28 @@ const VERSION_HEADING_RE = /^##\s+\[[\d.]+]/
  * @returns {{ start: number, end: number } | null}
  */
 export function parseVersionSection(text) {
-  const lines = text.split('\n')
+  const lines = splitLines(text)
   let headingLine = -1
   for (let i = 0; i < lines.length; i++) {
-    if (VERSION_HEADING_RE.test(lines[i])) {
+    if (VERSION_HEADING_RE.test(lines[i].content)) {
       headingLine = i
       break
     }
   }
   if (headingLine === -1) return null
 
-  // Start: character index of the heading line in the original text
-  const start = text.indexOf(lines[headingLine])
+  const start = text.indexOf(lines[headingLine].raw)
 
-  // Find end line: next version heading or EOF
   let endLine = lines.length
   for (let i = headingLine + 1; i < lines.length; i++) {
-    if (VERSION_HEADING_RE.test(lines[i])) {
+    if (VERSION_HEADING_RE.test(lines[i].content)) {
       endLine = i
       break
     }
   }
 
-  // End: if EOF, text.length; otherwise start of the next heading
-  let end
-  if (endLine === lines.length) {
-    end = text.length
-  } else {
-    end = text.indexOf(lines[endLine], start)
-  }
+  const end =
+    endLine === lines.length ? text.length : text.indexOf(lines[endLine].raw, start)
 
   return { start, end }
 }
@@ -212,32 +275,15 @@ export function parseVersionSection(text) {
 export function extractReferences(text, owner, repo) {
   const numbers = new Set()
 
-  // Match markdown links: [text](url)
-  // Patterns we capture:
-  //   ([#N](https://github.com/OWNER/REPO/issues/N))
-  //   ([#N](https://github.com/OWNER/REPO/pull/N))
-  //   closes [#N](https://github.com/OWNER/REPO/issues/N)
-  //   fixes [#N](...), resolves [#N](...)
   const linkRe = /\[#(\d+)]\(https:\/\/github\.com\/([^/]+)\/([^/]+)\/(issues|pull)\/(\d+)\)/gi
 
   let match
   while ((match = linkRe.exec(text)) !== null) {
-    const linkOwner = match[2]
-    const linkRepo = match[3]
-    const pathType = match[4]
-    const linkNumber = Number(match[5])
-    const capturedNumber = Number(match[1])
-
-    // The captured #N must match the URL number
-    if (capturedNumber !== linkNumber) continue
-
-    // Must be same repo (case-insensitive)
+    const [, capturedText, linkOwner, linkRepo, , linkPathNumber] = match
+    const linkNumber = Number(linkPathNumber)
+    if (Number(capturedText) !== linkNumber) continue
     if (linkOwner.toLowerCase() !== owner.toLowerCase()) continue
     if (linkRepo.toLowerCase() !== repo.toLowerCase()) continue
-
-    // Must be /issues/ or /pull/
-    if (pathType !== 'issues' && pathType !== 'pull') continue
-
     numbers.add(linkNumber)
   }
 
@@ -245,46 +291,68 @@ export function extractReferences(text, owner, repo) {
 }
 
 // ---------------------------------------------------------------------------
-// Thanks section
+// Inline thanks suffix
+// ---------------------------------------------------------------------------
+
+/** Sort logins case-insensitively with deterministic tie-break on original. */
+export function sortLogins(logins) {
+  return [...logins].sort((a, b) => {
+    const al = a.toLowerCase()
+    const bl = b.toLowerCase()
+    if (al !== bl) return al < bl ? -1 : 1
+    if (a !== b) return a < b ? -1 : 1
+    return 0
+  })
+}
+
+/** Deduplicate by case-insensitive key, keeping first-seen casing. */
+export function dedupeLogins(logins) {
+  const seen = new Set()
+  const out = []
+  for (const login of logins) {
+    const key = login.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(login)
+  }
+  return out
+}
+
+/**
+ * Remove only the exact trailing generated suffix from a line's content
+ * (no trailing newline). Returns content unchanged if no match.
+ */
+export function stripInlineThanks(content) {
+  return content.replace(INLINE_THANKS_RE, '')
+}
+
+/**
+ * Append ", thanks @a, @b" after stripping any existing generated suffix.
+ * Empty logins yields stripped content with no suffix.
+ */
+export function applyInlineThanks(content, logins) {
+  const base = stripInlineThanks(content)
+  const unique = sortLogins(dedupeLogins(logins))
+  if (unique.length === 0) return base
+  return `${base}, thanks ${unique.map((l) => `@${l}`).join(', ')}`
+}
+
+// ---------------------------------------------------------------------------
+// Legacy ### Thanks removal (latest section only)
 // ---------------------------------------------------------------------------
 
 /**
- * Build the "### Thanks" section from a contributor map.
- * @param {Map<string, { displayName: string, items: { kind: string, number: number, url: string }[] }>} contributors
- */
-export function buildThanksSection(contributors) {
-  if (contributors.size === 0) return ''
-
-  const sorted = [...contributors.entries()].sort(([a], [b]) =>
-    a.toLowerCase().localeCompare(b.toLowerCase()),
-  )
-
-  const lines = ['### Thanks', '']
-  for (const [login, entry] of sorted) {
-    const refs = entry.items
-      .sort((a, b) => a.number - b.number)
-      .map((item) => `[#${item.number}](${item.url})`)
-      .join(', ')
-    lines.push(`* @${entry.displayName} for ${refs}`)
-  }
-
-  return lines.join('\n')
-}
-
-const THANKS_HEADING_RE = /^###\s+Thanks\s*$/
-
-/**
  * Remove any existing "### Thanks" block from within [start, end).
- * A Thanks block starts with "### Thanks" and ends at the next "### " heading,
- * blank line before a "## " heading, or the section boundary.
+ * A Thanks block starts with "### Thanks" and ends at the next "### " heading
+ * or the section boundary.
  */
 export function removeThanksSection(text, start, end) {
   const section = text.slice(start, end)
-  const lines = section.split('\n')
+  const lines = splitLines(section)
 
   let thanksStart = -1
   for (let i = 0; i < lines.length; i++) {
-    if (THANKS_HEADING_RE.test(lines[i])) {
+    if (THANKS_HEADING_RE.test(lines[i].content)) {
       thanksStart = i
       break
     }
@@ -292,58 +360,100 @@ export function removeThanksSection(text, start, end) {
 
   if (thanksStart === -1) return text
 
-  // Find the end: next "### " heading or section boundary
   let thanksEnd = lines.length
   for (let i = thanksStart + 1; i < lines.length; i++) {
-    if (/^###\s/.test(lines[i])) {
+    if (/^###\s/.test(lines[i].content)) {
       thanksEnd = i
       break
     }
   }
 
-  // Rebuild: drop lines [thanksStart, thanksEnd), preserve trailing blank
   const before = lines.slice(0, thanksStart)
   const after = lines.slice(thanksEnd)
 
-  // Trim trailing blank lines between thanks and next subsection
-  while (after.length > 0 && after[0] === '') after.shift()
+  while (after.length > 0 && after[0].content === '') after.shift()
+  while (before.length > 0 && before[before.length - 1].content === '') {
+    before.pop()
+  }
 
-  const newSection = [...before, ...after].join('\n')
+  if (before.length > 0 && after.length > 0) {
+    const nl = before[before.length - 1].newline || after[0].newline || '\n'
+    before.push({ content: '', newline: nl, raw: nl })
+  }
+
+  const newSection = joinLines([...before, ...after])
   return text.slice(0, start) + newSection + text.slice(end)
 }
 
+// ---------------------------------------------------------------------------
+// Logical bullet entries
+// ---------------------------------------------------------------------------
+
 /**
- * Inject a Thanks section into the version block after the version heading
- * line and its trailing blank lines, before the first subsection.
+ * Credit logical top-level bullets in a version section.
+ * Strips any managed suffix from every line of the entry, then writes the
+ * regenerated suffix on the last line of the logical entry only.
+ * @param {string} sectionText latest version section only
+ * @param {Map<number, string>} loginByNumber external login per issue/PR number
+ * @param {string} owner
+ * @param {string} repo
  */
-export function injectThanksSection(text, thanksSection, start, end) {
-  const section = text.slice(start, end)
-  const lines = section.split('\n')
+export function creditChangelogEntries(sectionText, loginByNumber, owner, repo) {
+  const lines = splitLines(sectionText)
+  const out = []
+  let i = 0
 
-  // Find where the heading + trailing blanks end
-  let insertAfter = 0 // line index of the version heading
-  for (let i = 0; i < lines.length; i++) {
-    if (VERSION_HEADING_RE.test(lines[i])) {
-      insertAfter = i
-      break
+  while (i < lines.length) {
+    const line = lines[i]
+
+    if (!TOP_LEVEL_BULLET_RE.test(line.content)) {
+      out.push(line)
+      i++
+      continue
     }
+
+    // Collect logical entry: top-level bullet + indented non-list continuations
+    const entryLines = [line]
+    i++
+    while (i < lines.length) {
+      const next = lines[i]
+      if (
+        next.content === '' ||
+        HEADING_RE.test(next.content) ||
+        TOP_LEVEL_BULLET_RE.test(next.content) ||
+        NESTED_LIST_RE.test(next.content)
+      ) {
+        break
+      }
+      if (!/^\s+\S/.test(next.content)) break
+      entryLines.push(next)
+      i++
+    }
+
+    // Strip managed suffixes from every line so a prior single-line credit
+    // does not linger after a continuation is added on a later run.
+    for (let j = 0; j < entryLines.length; j++) {
+      entryLines[j] = withContent(entryLines[j], stripInlineThanks(entryLines[j].content))
+    }
+
+    const blockText = entryLines.map((l) => l.content).join('\n')
+    const numbers = extractReferences(blockText, owner, repo)
+    const logins = []
+    for (const num of numbers) {
+      const login = loginByNumber.get(num)
+      if (login) logins.push(login)
+    }
+
+    const lastIdx = entryLines.length - 1
+    entryLines[lastIdx] = withContent(
+      entryLines[lastIdx],
+      applyInlineThanks(entryLines[lastIdx].content, logins),
+    )
+
+    out.push(...entryLines)
   }
-  // Skip trailing blank lines after the heading
-  while (insertAfter + 1 < lines.length && lines[insertAfter + 1] === '') {
-    insertAfter++
-  }
 
-  const before = lines.slice(0, insertAfter + 1)
-  const after = lines.slice(insertAfter + 1)
-
-  // Ensure blank separation
-  const parts = [...before]
-  if (parts[parts.length - 1] !== '') parts.push('')
-  parts.push(thanksSection)
-  if (after.length > 0 && after[0] !== '') parts.push('')
-
-  const newSection = [...parts, ...after].join('\n')
-  return text.slice(0, start) + newSection + text.slice(end)
+  return joinLines(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -351,7 +461,6 @@ export function injectThanksSection(text, thanksSection, start, end) {
 // ---------------------------------------------------------------------------
 
 export async function main() {
-  // Validate inputs
   if (!TOKEN) {
     console.error('GITHUB_TOKEN is required')
     process.exit(1)
@@ -382,18 +491,17 @@ export async function main() {
     process.exit(1)
   }
 
-  const sectionText = text.slice(section.start, section.end)
-  const numbers = extractReferences(sectionText, owner, repoName)
-
-  if (numbers.length === 0) {
-    // No references at all -- remove any stale Thanks, exit if no change
-    const cleaned = removeThanksSection(text, section.start, section.end)
-    writeFileSync(changelogPath, cleaned, 'utf-8')
-    process.exit(0)
+  text = removeThanksSection(text, section.start, section.end)
+  const sectionAfterThanks = parseVersionSection(text)
+  if (!sectionAfterThanks) {
+    console.error('No version heading found after Thanks removal')
+    process.exit(1)
   }
 
-  // Look up every unique number
-  const contributors = new Map()
+  const sectionText = text.slice(sectionAfterThanks.start, sectionAfterThanks.end)
+  const numbers = extractReferences(sectionText, owner, repoName)
+
+  const loginByNumber = new Map()
   for (const num of numbers) {
     let response
     try {
@@ -405,50 +513,27 @@ export async function main() {
         continue
       }
       if (err.status !== undefined && !shouldRetry(err.status, err.headers)) {
-        // Non-retryable error -- fail immediately
         console.error(`Fatal error looking up #${num}: HTTP ${err.status}`)
         process.exit(1)
       }
-      // Retryable failure after all retries
       console.error(`Failed to look up #${num} after ${MAX_RETRIES} attempts: ${err.message}`)
       process.exit(1)
     }
 
     const classification = classifyAuthor(response)
     if (classification === 'external') {
-      const login = response.user.login
-      if (!contributors.has(login)) {
-        contributors.set(login, {
-          displayName: login,
-          items: [],
-        })
-      }
-      const entry = contributors.get(login)
-      const url = response.html_url
-      const kind = response.pull_request ? 'pr' : 'issue'
-      // Avoid duplicate entries for the same number
-      if (!entry.items.some((item) => item.number === num)) {
-        entry.items.push({ kind, number: num, url })
-      }
+      loginByNumber.set(num, response.user.login)
     }
   }
 
-  // Build or remove Thanks section
-  let newText
-  if (contributors.size > 0) {
-    const thanks = buildThanksSection(contributors)
-    // Remove any existing Thanks first, then inject
-    const cleaned = removeThanksSection(text, section.start, section.end)
-    newText = injectThanksSection(cleaned, thanks, section.start, section.end)
-  } else {
-    newText = removeThanksSection(text, section.start, section.end)
-  }
+  const credited = creditChangelogEntries(sectionText, loginByNumber, owner, repoName)
+  const newText =
+    text.slice(0, sectionAfterThanks.start) + credited + text.slice(sectionAfterThanks.end)
 
   writeFileSync(changelogPath, newText, 'utf-8')
   process.exit(0)
 }
 
-// Only run main() when invoked as a script, not when imported for tests.
 const runningDirectly =
   process.argv[1] &&
   (process.argv[1].endsWith('credit-changelog-contributors.mjs') ||
