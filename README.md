@@ -41,7 +41,11 @@ It runs as a single container on your hardware and gives you a UI for the work y
 
 A Sencho instance is autonomous. To manage another machine, you install a second Sencho on it and connect them with a long-lived API token; the primary dashboard then acts as an authenticated HTTP and WebSocket proxy across your fleet. Use TLS, a VPN, or a private network for any untrusted link. Each node still uses its local Docker socket (see Quick start), but Sencho does not require SSH and does not expose a remote Docker socket on the network. For nodes behind NAT or strict firewalls, the Pilot Agent establishes a single outbound WebSocket tunnel to the primary, so the remote host opens no inbound port at all.
 
-Most capabilities are free in the Community tier. A few advanced governance, security, and fleet-control features ship in the paid Admiral tier; pricing lives at [sencho.io/pricing](https://sencho.io/pricing).
+Sencho is free, open-source software under AGPLv3. Everything below is included in the Community tier with unlimited nodes and users.
+
+## Admiral
+
+**Admiral** is Studio Saelix's paid business assurance plan on top of everything in Community: priority support, managed continuity (Sencho Cloud Backup), governance depth (advanced RBAC roles, LDAP / Active Directory, full audit log export and anomaly detection), and cross-node Fleet Sync policy replication. AWS ECR registry credentials currently require Admiral as well. See [sencho.io/pricing](https://sencho.io/pricing) for current plan details.
 
 ## What Sencho is not (yet)
 
@@ -56,13 +60,12 @@ See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the current limitation list
 
 ---
 
-**Tier coverage:** All bullets below are available in the free Community tier unless marked `(Admiral)`. Full breakdown at [sencho.io/pricing](https://sencho.io/pricing).
-
 ## Capabilities
 
 ### Stacks
 - Full Compose lifecycle: create, deploy, restart, stop, pull
-- Monaco editor with diff preview before save and one-click rollback
+- Atomic deployments with automatic rollback on failure
+- Monaco editor with diff preview before save and one-click rollback to any prior deploy
 - [Health-gated updates](https://docs.sencho.io/features/health-gated-updates) that hold a rollout until health checks pass, with stalled-update detection and in-app recovery
 - [Git-sourced stacks](https://docs.sencho.io/features/git-sources) pulled and synced from any repository, with ordered multi-file Compose
 - [File explorer](https://docs.sencho.io/features/stack-file-explorer) for compose, env, and supporting files, with move and rename across directories
@@ -74,7 +77,7 @@ See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the current limitation list
 - Aggregated [log search and stream](https://docs.sencho.io/features/global-observability) across every container in the fleet
 - Live container stats, health checks, and image-update notifications on a configurable cadence, with links from each image to its registry and source
 - Threshold alerts for CPU, memory, and network
-- Read-only [audit log](https://docs.sencho.io/features/audit-log) of every action **(Admiral)**
+- Read-only [audit log](https://docs.sencho.io/features/audit-log) of every action, with a 14-day recent-activity window
 - [Network topology](https://docs.sencho.io/features/fleet-view) view of containers, networks, and nodes
 - Documentation-drift flags when a [stack dossier](https://docs.sencho.io/features/stack-dossier) diverges from the running stack
 
@@ -82,6 +85,10 @@ See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the current limitation list
 - Multi-node management via authenticated HTTP and WebSocket proxy
 - [Fleet view](https://docs.sencho.io/features/fleet-view) with grid and topology layouts
 - [Fleet snapshots](https://docs.sencho.io/features/fleet-backups) of compose and env across the fleet
+- [Fleet Federation](https://docs.sencho.io/features/fleet-federation): cordon nodes and pin Blueprints to specific hosts
+- [Fleet Actions](https://docs.sencho.io/features/fleet-actions): bulk label operations, fleet-wide stop-by-label, and fleet-wide prune
+- [Fleet Dossier](https://docs.sencho.io/features/fleet-dossier): export the whole fleet as a single browsable Markdown archive
+- Node labels and grouping
 - [Pilot Agent](https://docs.sencho.io/features/pilot-agent) for nodes behind NAT or strict firewalls
 - Node compatibility checks before deploying
 
@@ -91,22 +98,20 @@ See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the current limitation list
 - [Scheduled operations](https://docs.sencho.io/features/scheduled-operations) on cron
 - [Webhooks](https://docs.sencho.io/features/webhooks) on stack lifecycle events
 - [Blueprints](https://docs.sencho.io/features/blueprint-model): declarative fleet templates with drift detection
-- Encrypted [Fleet Secrets](https://docs.sencho.io/features/fleet-secrets) pushed to labeled nodes **(Admiral)**
 
 ### Security
-- [SSO](https://docs.sencho.io/features/sso): custom OIDC, presets for Google, GitHub, and Okta, plus LDAP and Active Directory
+- [SSO](https://docs.sencho.io/features/sso): custom OIDC and presets for Google, GitHub, and Okta
 - [Two-factor authentication](https://docs.sencho.io/features/two-factor-authentication) with TOTP and backup codes
-- [RBAC](https://docs.sencho.io/features/rbac) with admin (full control) and viewer (read-only) roles; deployer, node-admin, and auditor roles plus scoped permissions **(Admiral)**
+- [RBAC](https://docs.sencho.io/features/rbac) with admin (full control) and viewer (read-only) roles
 - [Security overview](https://docs.sencho.io/features/security) with a chart-led scan summary, sortable images, and searchable scan history
-- [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy on every tier, with on-demand node-wide scans and VEX-based suppression; SARIF export and SBOM upload **(Admiral)**
+- [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy, with on-demand node-wide scans, VEX-based suppression, SARIF export, and SBOM upload
 - [Compose network inspector](https://docs.sencho.io/features/compose-networking) with an exposure-intent guard for unintended published ports
-- Scan policy packs for reusable security rules **(Admiral)**
-- [Private registries](https://docs.sencho.io/features/private-registries) and [deploy enforcement](https://docs.sencho.io/features/deploy-enforcement) for non-compliant images **(Admiral)**
+- Scan policy packs for reusable security rules
+- [Private registries](https://docs.sencho.io/features/private-registries) for Docker Hub, GHCR, and custom registries, plus [deploy enforcement](https://docs.sencho.io/features/deploy-enforcement) for non-compliant images
 - [API tokens](https://docs.sencho.io/features/api-tokens) for automation
 
 ### Operations
-- [Host console](https://docs.sencho.io/features/host-console) in the browser **(Admiral)**
-- Off-site stack archives via custom S3 (every tier) or [Sencho Cloud Backup](https://docs.sencho.io/operations/backup) **(Admiral)** for managed storage
+- Off-site stack archives via [custom S3-compatible storage](https://docs.sencho.io/operations/backup)
 - [Notification routing](https://docs.sencho.io/features/alerts-notifications#notification-routing) to Slack, Discord, email, and webhooks
 - [Global search](https://docs.sencho.io/features/global-search) across stacks, containers, and services
 - [Resources view](https://docs.sencho.io/features/resources) for images, volumes, and networks with scoped prune actions
@@ -181,6 +186,8 @@ See the [multi-node guide](https://docs.sencho.io/features/multi-node) for the f
 |---|---|
 | ![Stacks](docs/images/stacks.png) | ![Editor](docs/images/editor.png) |
 | ![Fleet](docs/images/fleet.png) | ![Logs](docs/images/logs.png) |
+| ![Security overview](docs/images/overview/security-overview.png) | ![Blueprints and drift](docs/images/overview/blueprint-deployments.png) |
+| ![Scheduled Operations](docs/images/overview/scheduled-operations.png) | ![Compose Doctor](docs/images/overview/compose-doctor.png) |
 
 ---
 

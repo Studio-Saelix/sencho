@@ -152,7 +152,7 @@ Track mutating actions across your Sencho instance with a searchable trail: who 
 ## Fleet management
 
 <Frame>
-  <img src="/images/overview/fleet-topology.png" alt="Fleet view in grid layout: the fleet masthead showing aggregate CPU, memory, and container counts across all nodes, the tab strip (Overview, Snapshots, Status, Map, Deployments, Routing, Federation, Actions, Secrets), and the node grid with per-node container counts and CPU, RAM, and disk usage bars." />
+  <img src="/images/overview/fleet-topology.png" alt="Fleet view in grid layout: the fleet masthead showing aggregate CPU, memory, and container counts across all nodes, the tab strip (Overview, Snapshots, Status, Map, Deployments, Federation, Actions), and the node grid with per-node container counts and CPU, RAM, and disk usage bars." />
 </Frame>
 
 ### Multi-node support
@@ -165,7 +165,7 @@ Add remote nodes behind NAT, residential networks, or corporate firewalls withou
 
 ### Sencho Mesh
 
-Connect containers across nodes by hostname over the Pilot tunnel so a multi-node fleet feels like one machine. Opt a stack into the mesh and its services become reachable from any other meshed stack at a stable hostname. Admiral. [Learn more →](/features/sencho-mesh)
+Connect containers across nodes by hostname over the Pilot tunnel so a multi-node fleet feels like one machine. Opt a stack into the mesh and its services become reachable from any other meshed stack at a stable hostname. Limited availability; requires Admiral when enabled on an instance. [Learn more →](/features/sencho-mesh)
 
 ### Fleet View
 
@@ -189,7 +189,7 @@ When several Sencho instances run as a fleet, the control instance is the source
 
 ### Fleet Secrets
 
-Centralized, encrypted, versioned env-var bundles you push to labeled nodes' stacks. Every save bumps a version, and every push records a per-node diff in the audit log using overlay merge semantics. Admiral. [Learn more →](/features/fleet-secrets)
+Centralized, encrypted, versioned env-var bundles you push to labeled nodes' stacks. Every save bumps a version, and every push records a per-node diff in the audit log using overlay merge semantics. Limited availability; requires Admiral and the admin role when enabled on an instance. [Learn more →](/features/fleet-secrets)
 
 ### Fleet-wide backups
 
@@ -205,7 +205,7 @@ When you manage nodes running different Sencho versions, the dashboard detects e
 
 ### Host console
 
-Open an interactive terminal on the host OS directly in the browser with full xterm.js emulation and color support. No SSH client required; admin-only. [Learn more →](/features/host-console)
+Open an interactive terminal on the host OS directly in the browser with full xterm.js emulation and color support. No SSH client required. Limited availability; requires Admiral and the admin role when enabled on an instance. [Learn more →](/features/host-console)
 
 ## Security and access
 
