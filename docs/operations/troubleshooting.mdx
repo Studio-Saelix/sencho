@@ -18,8 +18,8 @@ If something has broken and you want a quick "what do I do now?" overview rather
 **What to try:**
 
 1. Open **Settings → Appearance → Motion & effects**.
-2. Turn on **Reduced motion**. That is the first step to try for high idle GPU use on constrained graphics.
-3. Optionally try **Reduced effects** or **Calm** as a secondary experiment (simpler glass and solid chrome). That path is unverified for this symptom.
+2. Turn on **Reduced motion**. Fresh installs that use **Calm** already enable it by default. That is the first step to try for high idle GPU use on constrained graphics.
+3. Optionally try **Reduced effects** as a secondary experiment (simpler glass, solid chrome, and quieter decorative masthead rails). That path is unverified for the idle-GPU symptom on its own.
 4. On dual-GPU Windows PCs, you can also set the browser's GPU preference to let the OS decide, or prefer a discrete GPU, if your OS exposes that control.
 
 **How to help validate a fix on your hardware:** Identify Chrome's GPU process (Shift+Esc), use Task Manager Details at High update speed on that PID's GPU column, leave the Sencho tab in the foreground for about 15 seconds, then record about ten one-second samples and take the median. Repeat for at least three independent runs (close and reopen the tab). Compare idle Home or Settings with Reduced motion off versus on. Separately compare an update or deploy dialog with Raw output hidden and visible. On Linux single-board devices, use one documented GPU or responsiveness counter for the whole matrix, and label CPU-only readings as secondary.
