@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { AboutSection, ABOUT_LINK_URLS } from '../AboutSection';
+import { AboutSection } from '../AboutSection';
+import { ABOUT_LINK_URLS } from '../aboutLinks';
 
 beforeAll(() => {
     // Vite injects this at build time; tests need a stand-in.
@@ -42,17 +43,19 @@ describe('AboutSection', () => {
         expect(screen.getByText('Plan status')).toBeTruthy();
         expect(screen.queryByText('License status')).toBeNull();
 
-        const source = screen.getByRole('link', { name: /github\.com\/studio-saelix\/sencho/i });
+        const source = screen.getByRole('link', { name: 'github.com/studio-saelix/sencho →' });
         expect(source.getAttribute('href')).toBe(ABOUT_LINK_URLS.source);
         expect(source.getAttribute('target')).toBe('_blank');
         expect(source.getAttribute('rel')).toBe('noopener noreferrer');
 
-        const license = screen.getByRole('link', { name: /LICENSE/i });
+        const license = screen.getByRole('link', { name: 'LICENSE →' });
         expect(license.getAttribute('href')).toBe(ABOUT_LINK_URLS.license);
         expect(license.getAttribute('target')).toBe('_blank');
         expect(license.getAttribute('rel')).toBe('noopener noreferrer');
 
-        const licensingDocs = screen.getByRole('link', { name: /docs\.sencho\.io\/features\/licensing/i });
+        const licensingDocs = screen.getByRole('link', {
+            name: 'docs.sencho.io/features/licensing →',
+        });
         expect(licensingDocs.getAttribute('href')).toBe(ABOUT_LINK_URLS.licensingDocs);
         expect(licensingDocs.getAttribute('target')).toBe('_blank');
         expect(licensingDocs.getAttribute('rel')).toBe('noopener noreferrer');

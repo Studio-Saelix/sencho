@@ -2,11 +2,12 @@ import { useLicense } from '@/context/LicenseContext';
 import { TierBadge } from '@/components/TierBadge';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
-
-const SOURCE_URL = 'https://github.com/studio-saelix/sencho';
-const LICENSE_URL = 'https://github.com/studio-saelix/sencho/blob/main/LICENSE';
-const LICENSING_DOCS_URL = 'https://docs.sencho.io/features/licensing';
-const CHANGELOG_URL = 'https://github.com/studio-saelix/sencho/blob/main/CHANGELOG.md';
+import {
+    SOURCE_URL,
+    LICENSE_URL,
+    LICENSING_DOCS_URL,
+    CHANGELOG_URL,
+} from './aboutLinks';
 
 const linkClassName =
     'font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-brand hover:text-brand/80 transition-colors';
@@ -97,10 +98,3 @@ export function AboutSection() {
         </div>
     );
 }
-
-export const ABOUT_LINK_URLS = {
-    source: SOURCE_URL,
-    license: LICENSE_URL,
-    licensingDocs: LICENSING_DOCS_URL,
-    changelog: CHANGELOG_URL,
-} as const;
