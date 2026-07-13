@@ -3,7 +3,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import type { useAuth } from '@/context/AuthContext';
 import { isNetworkingActionVisible } from '@/lib/networking';
 import {
-  FINDING_GROUP_LABELS, findingSourceLabel, groupFindings, type NetworkingFindingGroup,
+  FINDING_GROUP_LABELS, findingSourceLabel, groupFindings, SEVERITY_TEXT_CLASS, type NetworkingFindingGroup,
 } from '@/lib/networkingSeverity';
 import type { NetworkingFinding, NetworkingRecommendedAction } from '@/types/networking';
 
@@ -13,13 +13,6 @@ const GROUP_CLASS: Record<NetworkingFindingGroup, string> = {
   'needs-action': 'text-destructive',
   'review-recommended': 'text-warning',
   informational: 'text-stat-subtitle',
-};
-
-const SEVERITY_CLASS: Record<NetworkingFinding['severity'], string> = {
-  info: 'text-stat-subtitle',
-  medium: 'text-warning',
-  high: 'text-destructive',
-  critical: 'text-destructive',
 };
 
 export function NetworkingFindingsList({
@@ -81,7 +74,7 @@ export function NetworkingFindingsList({
                           style={{ animationDelay: `${Math.min(i * 20, 200)}ms` }}
                         >
                           <TableCell>
-                            <span className={`font-mono text-[10px] uppercase tracking-wide ${SEVERITY_CLASS[finding.severity]}`}>
+                            <span className={`font-mono text-[10px] uppercase tracking-wide ${SEVERITY_TEXT_CLASS[finding.severity]}`}>
                               {finding.severity}
                             </span>
                           </TableCell>

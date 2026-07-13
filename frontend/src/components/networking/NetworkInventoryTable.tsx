@@ -9,8 +9,8 @@ import { Badge } from '@/components/ui/badge';
 import { Eye, Search, Trash2, ExternalLink, GitBranch } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-import { filterNetworkRows, type NetworkFilter } from '@/lib/networking';
-import { isNetworkDriftFindingKind, type NetworkingFinding, type NetworkingNetworkRow, type NetworkingOwnership } from '@/types/networking';
+import { filterNetworkRows, rowHasDriftFinding, type NetworkFilter } from '@/lib/networking';
+import { type NetworkingFinding, type NetworkingFindingKind, type NetworkingNetworkRow, type NetworkingOwnership } from '@/types/networking';
 export type { NetworkingNetworkRow } from '@/types/networking';
 
 const OWNERSHIP_BADGE_CLASS: Record<NetworkingOwnership, string> = {
@@ -105,7 +105,7 @@ function FilterToggle({
   );
 }
 
-function countNetworkFilters(rows: NetworkingNetworkRow[], findingKindById: Map<string, string>): Record<NetworkFilter, number> {
+function countNetworkFilters(rows: NetworkingNetworkRow[], findingKindById: Map<string, NetworkingFindingKind>): Record<NetworkFilter, number> {
   const counts: Record<NetworkFilter, number> = {
     all: rows.length,
     managed: 0,
@@ -121,10 +121,7 @@ function countNetworkFilters(rows: NetworkingNetworkRow[], findingKindById: Map<
     if (row.ownership === 'system') counts.system += 1;
     if (row.sharedStackCount > 1) counts.shared += 1;
     if (row.exposureSummary?.broadExposureCount) counts.exposed += 1;
-    if (row.findingIds.some((id) => {
-      const kind = findingKindById.get(id);
-      return kind !== undefined && isNetworkDriftFindingKind(kind);
-    })) counts.drift += 1;
+    if (rowHasDriftFinding(row, findingKindById)) counts.drift += 1;
   }
   return counts;
 }
@@ -169,7 +166,7 @@ export function NetworkInventoryTable({
   useEffect(() => { if (searchExpanded) searchRef.current?.focus(); }, [searchExpanded]);
 
   const findingKindById = useMemo(
-    () => new Map(findings.map((f) => [f.id, f.kind as string])),
+    () => new Map(findings.map((f) => [f.id, f.kind])),
     [findings],
   );
   const counts = useMemo(() => countNetworkFilters(rows, findingKindById), [rows, findingKindById]);

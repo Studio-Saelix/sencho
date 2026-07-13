@@ -6,6 +6,8 @@ import type { DependencySnapshot } from '../DockerController';
 import { DatabaseService } from '../DatabaseService';
 import type { ExposureIntent, StackNetworkFacts } from './types';
 import { isHostNetwork } from './normalize';
+import { getErrorMessage } from '../../utils/errors';
+import { sanitizeForLog } from '../../utils/safeLog';
 import type {
   NetworkingFinding,
   NetworkingOwnership,
@@ -68,8 +70,16 @@ export function buildNetworkingTopology(
   const findingsByNetwork = indexFindingIdsByNetwork(findings);
   const aliasesByStack = new Map(stackFacts.map((facts) => [facts.stack, aliasMapForStack(facts)]));
   const intentsByStack = new Map(stackFacts.map((facts) => {
-    const intents = DatabaseService.getInstance().getStackExposureIntents(nodeId, facts.stack);
-    return [facts.stack, new Map(intents.map((intent) => [intent.service, intent.intent]))];
+    // A per-stack exposure-intent read failure must not 500 the whole topology;
+    // degrade to no intents for that stack (the badge simply reads "unknown").
+    try {
+      const intents = DatabaseService.getInstance().getStackExposureIntents(nodeId, facts.stack);
+      return [facts.stack, new Map(intents.map((intent) => [intent.service, intent.intent]))] as const;
+    } catch (error) {
+      console.warn('[Networking] Exposure intents unavailable for %s in topology:',
+        sanitizeForLog(facts.stack), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      return [facts.stack, new Map<string, ExposureIntent>()] as const;
+    }
   }));
 
   const networks: NetworkingTopologyNetwork[] = [];

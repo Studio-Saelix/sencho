@@ -124,7 +124,7 @@ describe('applyDoctorNetworkingFindings', () => {
       getLatest: vi.fn().mockReturnValue(stubReport({
         stack: 'stack1',
         findings: [
-          { ruleId: 'port-conflict-internal', severity: 'blocker', title: 'Port conflict', message: 'port 80 conflicts', service: 'web' },
+          { ruleId: 'port-conflict-internal', severity: 'warning', title: 'Port conflict', message: 'port 80 conflicts', service: 'web' },
           { ruleId: 'port-conflict-internal', severity: 'blocker', title: 'Port conflict', message: 'port 443 conflicts', service: 'web' },
         ],
       })),
@@ -136,6 +136,8 @@ describe('applyDoctorNetworkingFindings', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].doctorFindings).toHaveLength(2);
+    // Mixed severities: the merged card takes the worst (blocker -> critical).
+    expect(result[0].severity).toBe('critical');
   });
 
   it('gives distinct services distinct cards, never collapsing them together', () => {

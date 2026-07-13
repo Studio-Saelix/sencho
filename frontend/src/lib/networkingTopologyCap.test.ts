@@ -26,13 +26,20 @@ describe('countTopologyGraphSize', () => {
     expect(size.edgeCount).toBe(2);
   });
 
-  it('has sane threshold constants (animation limit below the hard render cap)', () => {
-    expect(TOPOLOGY_ANIMATION_EDGE_LIMIT).toBeLessThan(TOPOLOGY_RENDER_CAP);
+  it('lands just under the render cap at the boundary and just over one container later', () => {
+    // One network with N containers is (1 + N) nodes and N edges: total 1 + 2N.
+    const belowN = Math.floor((TOPOLOGY_RENDER_CAP - 1) / 2); // largest N with 1 + 2N <= cap
+    const below = countTopologyGraphSize([network('g', Array.from({ length: belowN }, (_, i) => container(`c${i}`)))]);
+    expect(below.nodeCount + below.edgeCount).toBeLessThanOrEqual(TOPOLOGY_RENDER_CAP);
+
+    const above = countTopologyGraphSize([network('g', Array.from({ length: belowN + 1 }, (_, i) => container(`c${i}`)))]);
+    expect(above.nodeCount + above.edgeCount).toBeGreaterThan(TOPOLOGY_RENDER_CAP);
   });
 
-  it('a graph with many distinct containers exceeds the render cap', () => {
-    const networks = [network('big', Array.from({ length: 400 }, (_, i) => container(`c${i}`)))];
-    const size = countTopologyGraphSize(networks);
-    expect(size.nodeCount + size.edgeCount).toBeGreaterThan(TOPOLOGY_RENDER_CAP);
+  it('crosses the animation edge limit exactly one edge past the threshold', () => {
+    const atLimit = countTopologyGraphSize([network('g', Array.from({ length: TOPOLOGY_ANIMATION_EDGE_LIMIT }, (_, i) => container(`c${i}`)))]);
+    expect(atLimit.edgeCount).toBe(TOPOLOGY_ANIMATION_EDGE_LIMIT);
+    const over = countTopologyGraphSize([network('g', Array.from({ length: TOPOLOGY_ANIMATION_EDGE_LIMIT + 1 }, (_, i) => container(`c${i}`)))]);
+    expect(over.edgeCount).toBeGreaterThan(TOPOLOGY_ANIMATION_EDGE_LIMIT);
   });
 });

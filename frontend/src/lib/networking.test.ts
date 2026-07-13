@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   adaptNetworkingOverview, buildExternalNetworkSnippet, filterNetworkRows, getNetworkingPosture,
 } from './networking';
-import type { NetworkingNetworkRow } from '@/types/networking';
+import type { NetworkingFinding, NetworkingFindingKind, NetworkingNetworkRow, NodeNetworkingOverview } from '@/types/networking';
 
 const rows: NetworkingNetworkRow[] = [
   {
@@ -19,7 +19,7 @@ const rows: NetworkingNetworkRow[] = [
   },
 ];
 
-const findingKindById = new Map([['drift', 'network-missing']]);
+const findingKindById = new Map<string, NetworkingFindingKind>([['drift', 'network-missing']]);
 
 describe('networking view helpers', () => {
   it('filters ownership, dependencies, and findings independently', () => {
@@ -31,7 +31,7 @@ describe('networking view helpers', () => {
   });
 
   it('drift filter requires a drift-kind finding, not just any finding', () => {
-    const nonDriftKindById = new Map([['drift', 'shared-network']]);
+    const nonDriftKindById = new Map<string, NetworkingFindingKind>([['drift', 'shared-network']]);
     expect(filterNetworkRows(rows, 'drift', '', nonDriftKindById)).toHaveLength(0);
   });
 
@@ -44,6 +44,32 @@ describe('networking view helpers', () => {
     expect(adapted.isLegacy).toBe(true);
     expect(adapted.findings).toEqual([]);
     expect(adapted.runtimeAvailable).toBe(false);
+  });
+
+  it('adapts a schema-2 response: derives ownership counts and fills new-field defaults', () => {
+    // A schema-2 remote sends partial rows/findings (no serviceNames, no
+    // sources/doctorFindings); the envelope type models the schema-3 ideal, so
+    // the partial wire shape is cast to mirror what actually arrives.
+    const adapted = adaptNetworkingOverview({
+      schemaVersion: 2,
+      runtimeAvailable: true,
+      overview: { networkCount: 2 } as NodeNetworkingOverview,
+      networks: [
+        { id: 'a', name: 'a', ownership: 'sencho-managed', isExternalDependency: false },
+        { id: 'b', name: 'b', ownership: 'unmanaged', isExternalDependency: true },
+      ] as unknown as NetworkingNetworkRow[],
+      findings: [{ id: 'f1', kind: 'network-missing', severity: 'high', title: 't', message: 'm' }] as unknown as NetworkingFinding[],
+    });
+    expect(adapted.isLegacy).toBe(false);
+    expect(adapted.runtimeAvailable).toBe(true);
+    // The schema-2 envelope omits ownership counts, so they are derived from the rows.
+    expect(adapted.overview?.senchoManagedNetworkCount).toBe(1);
+    expect(adapted.overview?.unmanagedNetworkCount).toBe(1);
+    expect(adapted.overview?.externalDependencyNetworkCount).toBe(1);
+    // Fields new in schema 3 get safe defaults rather than undefined.
+    expect(adapted.networks[0].serviceNames).toEqual([]);
+    expect(adapted.findings[0].sources).toEqual(['live']);
+    expect(adapted.findings[0].doctorFindings).toEqual([]);
   });
 
   it('builds an external network snippet only for safe names', () => {

@@ -40,7 +40,7 @@ export async function buildNodeNetworkingAggregate(
     () => buildStackNetworkFacts(nodeId, stack, snapshot),
   ));
 
-  // Pipeline order matters (H4b): live findings, then cached Doctor adaptation
+  // Pipeline order matters: live findings, then cached Doctor adaptation
   // and merge, BEFORE inventory enrichment / overview / topology all consume
   // the same unified list, so counts and findingIds never disagree.
   const liveFindings = buildNodeNetworkingFindings(nodeId, snapshot, stackFacts, baseRows);

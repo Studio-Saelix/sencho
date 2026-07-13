@@ -1,5 +1,3 @@
-export const NETWORKING_SCHEMA_VERSION = 3 as const;
-
 export type NetworkingOwnership = 'system' | 'sencho-managed' | 'compose-managed' | 'unmanaged';
 export type NetworkingFindingSeverity = 'critical' | 'high' | 'medium' | 'info';
 
@@ -27,8 +25,9 @@ export type NetworkingFindingKind =
   | 'reverse-proxy-undocumented'
   | 'new-network';
 
-/** Single source of truth for what counts as "drift" across the Networks table,
- *  Topology filters/badges, and Overview drift count. */
+/** The finding kinds that count as "drift", shared by the Networks-table drift
+ *  filter/count and the Overview drift metric so the two never diverge. (Topology
+ *  drift is keyed off each container's own driftFlags, not this list.) */
 export const NETWORK_DRIFT_FINDING_KINDS: readonly NetworkingFindingKind[] = [
   'network-undeclared',
   'network-missing',
@@ -37,7 +36,7 @@ export const NETWORK_DRIFT_FINDING_KINDS: readonly NetworkingFindingKind[] = [
   'external-network-missing',
 ];
 
-export function isNetworkDriftFindingKind(kind: string): boolean {
+export function isNetworkDriftFindingKind(kind: NetworkingFindingKind): boolean {
   return (NETWORK_DRIFT_FINDING_KINDS as readonly string[]).includes(kind);
 }
 
@@ -206,7 +205,9 @@ export interface NetworkingActivity {
 }
 
 export interface NetworkingEnvelope {
-  schemaVersion: typeof NETWORKING_SCHEMA_VERSION;
+  /** Wire value from the responding node; older remotes send 1 or 2, so the
+   *  frontend treats it as an open number and adapts, never a fixed literal. */
+  schemaVersion: number;
   runtimeAvailable: boolean;
   generatedAt: string;
 }

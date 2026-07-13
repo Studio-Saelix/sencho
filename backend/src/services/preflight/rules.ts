@@ -666,6 +666,8 @@ const exposureUnclassified: PreflightRule = {
   id: 'exposure-unclassified',
   run(ctx) {
     if (!ctx.model) return [];
+    // A read failure leaves every intent null; do not read that as "unclassified".
+    if (!ctx.exposureAvailable) return [];
     const publishing = ctx.model.services.filter(s => s.ports.length > 0);
     if (publishing.length === 0) return [];
     // Fire only when a publishing service is still effectively unclassified: a
@@ -712,6 +714,9 @@ const reverseProxyUndocumented: PreflightRule = {
   id: 'reverse-proxy-undocumented',
   run(ctx) {
     if (!ctx.model) return [];
+    // A read failure hides both the intent and any documented access URLs; do not
+    // interpret that absence as an undocumented reverse proxy.
+    if (!ctx.exposureAvailable) return [];
     // Already documented or intentionally reverse-proxied at the stack level.
     if (ctx.hasAccessUrls || ctx.stackIntent === 'reverse-proxy') return [];
     const findings: PreflightFinding[] = [];

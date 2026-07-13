@@ -37,7 +37,7 @@ export interface NetworkingNetworkRow extends NetworkingNetworkBase {
   sharedStackCount: number;
   exposureSummary: NetworkingExposureSummary | null;
   findingIds: string[];
-  /** Compose service names publishing on this network, from the dependency snapshot only (never labels). */
+  /** Compose service names attached to this network, from the dependency snapshot only (never labels). */
   serviceNames: string[];
 }
 
@@ -68,20 +68,6 @@ export const NETWORKING_FINDING_KINDS = [
 ] as const;
 
 export type NetworkingFindingKind = typeof NETWORKING_FINDING_KINDS[number];
-
-/** Kinds a Networking finding may be counted as "drift" under. Single source of truth
- *  reused by network rows, topology, badges, and the overview drift count. */
-export const NETWORK_DRIFT_FINDING_KINDS: readonly NetworkingFindingKind[] = [
-  'network-undeclared',
-  'network-missing',
-  'declared-network-unused',
-  'foreign-network-attachment',
-  'external-network-missing',
-];
-
-export function isNetworkDriftFindingKind(kind: NetworkingFindingKind): boolean {
-  return (NETWORK_DRIFT_FINDING_KINDS as readonly string[]).includes(kind);
-}
 
 export type NetworkingFindingSeverity = 'critical' | 'high' | 'medium' | 'info';
 

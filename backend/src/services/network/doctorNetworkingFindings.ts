@@ -16,6 +16,7 @@ import type { DependencySnapshot } from '../DockerController';
 import type { StackNetworkFacts } from './types';
 import { getErrorMessage } from '../../utils/errors';
 import { sanitizeForLog } from '../../utils/safeLog';
+import { NETWORKING_SEVERITY_RANK } from './networkingSeverity';
 import type {
   DoctorFindingMetadata,
   NetworkingFinding,
@@ -107,20 +108,17 @@ function toMetadata(ruleId: string, ranAt: number | null, f: PreflightFinding): 
   };
 }
 
-/** Rule-specific recommended actions for a Doctor-only finding card (H6). */
+/** Rule-specific recommended actions for a Doctor-only finding card. Each rule
+ *  keeps its Doctor link and adds the destination most useful for that rule. */
 function doctorOnlyActions(kind: NetworkingFindingKind, stack: string): NetworkingRecommendedAction[] {
   const doctorAction: NetworkingRecommendedAction = { kind: 'open-stack-doctor', label: 'Open Doctor', stack };
   switch (kind) {
     case 'port-conflict-node':
     case 'port-conflict-internal':
       return [doctorAction, { kind: 'open-stack-editor', label: 'Open stack editor', stack }];
-    case 'sensitive-service-broad-exposure':
-      return [doctorAction, { kind: 'open-stack-networking', label: 'Open stack networking', stack }];
     case 'exposure-port-vs-dossier':
     case 'reverse-proxy-undocumented':
       return [doctorAction, { kind: 'open-stack-dossier', label: 'Open Dossier', stack }];
-    case 'new-network':
-      return [doctorAction, { kind: 'open-stack-networking', label: 'Open stack networking', stack }];
     default:
       return [doctorAction, { kind: 'open-stack-networking', label: 'Open stack networking', stack }];
   }
@@ -192,7 +190,7 @@ export function applyDoctorNetworkingFindings(
   }
 
   // Doctor-only groups: same (mergeKind, stack, service-or-network) collapse
-  // into ONE card carrying every matched occurrence (H2 one-to-many); distinct
+  // into ONE card carrying every matched occurrence; distinct
   // services/networks/stacks always get distinct cards.
   const doctorOnlyGroups = new Map<string, { kind: NetworkingFindingKind; stack: string; service?: string; network?: string; entries: DoctorFindingMetadata[] }>();
   let ordinal = 0;
@@ -249,10 +247,10 @@ export function applyDoctorNetworkingFindings(
 
   const doctorOnlyFindings: NetworkingFinding[] = [];
   for (const group of doctorOnlyGroups.values()) {
-    const worstSeverity = group.entries.reduce<NetworkingFindingSeverity>((worst, entry) => {
-      const rank: Record<NetworkingFindingSeverity, number> = { info: 0, medium: 1, high: 2, critical: 3 };
-      return rank[entry.severity] > rank[worst] ? entry.severity : worst;
-    }, 'info');
+    const worstSeverity = group.entries.reduce<NetworkingFindingSeverity>(
+      (worst, entry) => (NETWORKING_SEVERITY_RANK[entry.severity] > NETWORKING_SEVERITY_RANK[worst] ? entry.severity : worst),
+      'info',
+    );
     const idPayload = [group.kind, group.stack, group.service ?? '', group.entries.map((e) => e.ruleId).join(',')].join('\0');
     doctorOnlyFindings.push({
       id: createHash('sha256').update(idPayload).digest('hex').slice(0, 16),

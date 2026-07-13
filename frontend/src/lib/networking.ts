@@ -1,6 +1,6 @@
 import {
   isNetworkDriftFindingKind,
-  type NetworkingFinding, type NetworkingNetworkRow, type NetworkingOverviewEnvelope,
+  type NetworkingFinding, type NetworkingFindingKind, type NetworkingNetworkRow, type NetworkingOverviewEnvelope,
   type NetworkingRecommendedAction, type NodeNetworkingOverview,
 } from '@/types/networking';
 
@@ -16,12 +16,23 @@ export function isNetworkingActionVisible(
   return true;
 }
 
-// findingIds on a row are opaque hash IDs; the drift filter needs each finding's
-// kind, so the caller supplies a lookup built from the full findings list.
+// findingIds on a row are opaque hash IDs; drift classification needs each
+// finding's kind, so callers supply a lookup built from the full findings list.
+// Shared by the Networks-table drift filter and its count so they never diverge.
+export function rowHasDriftFinding(
+  row: NetworkingNetworkRow,
+  findingKindById: Map<string, NetworkingFindingKind>,
+): boolean {
+  return row.findingIds.some((id) => {
+    const kind = findingKindById.get(id);
+    return kind !== undefined && isNetworkDriftFindingKind(kind);
+  });
+}
+
 function matchesNetworkFilter(
   row: NetworkingNetworkRow,
   filter: NetworkFilter,
-  findingKindById: Map<string, string>,
+  findingKindById: Map<string, NetworkingFindingKind>,
 ): boolean {
   switch (filter) {
     case 'managed':
@@ -35,10 +46,7 @@ function matchesNetworkFilter(
     case 'exposed':
       return Boolean(row.exposureSummary?.broadExposureCount);
     case 'drift':
-      return row.findingIds.some((id) => {
-        const kind = findingKindById.get(id);
-        return kind !== undefined && isNetworkDriftFindingKind(kind);
-      });
+      return rowHasDriftFinding(row, findingKindById);
     case 'all':
     default:
       return true;
@@ -49,7 +57,7 @@ export function filterNetworkRows(
   rows: NetworkingNetworkRow[],
   filter: NetworkFilter,
   search: string,
-  findingKindById: Map<string, string> = new Map(),
+  findingKindById: Map<string, NetworkingFindingKind> = new Map(),
 ): NetworkingNetworkRow[] {
   const query = search.trim().toLowerCase();
   return rows.filter((row) => {
@@ -160,9 +168,7 @@ export function adaptNetworkingOverview(body: Partial<NetworkingOverviewEnvelope
   findings: NetworkingFinding[];
   recentActivity: NetworkingOverviewEnvelope['recentActivity'];
 } {
-  // A remote node's actual schemaVersion may be older than the type literal this
-  // build declares (3); widen it to a plain number for the compatibility checks.
-  const schemaVersion = body.schemaVersion as unknown as number | undefined;
+  const schemaVersion = body.schemaVersion;
 
   // Schema 1 / absent: fully legacy, no usable shape at all.
   const isLegacy = schemaVersion === undefined || schemaVersion < 2;

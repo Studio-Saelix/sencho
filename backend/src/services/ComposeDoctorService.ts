@@ -266,7 +266,7 @@ export class ComposeDoctorService {
 
     const { nodePorts, existingNetworkNames, existingVolumeNames, existingContainers, nodeStateAvailable } = await this.nodeState(nodeId, fsSvc, stackName);
     const bindChecks = model ? await this.resolveBindChecks(model, baseDir) : [];
-    const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls } = this.exposureState(nodeId, stackName);
+    const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls, exposureAvailable } = this.exposureState(nodeId, stackName);
     const selfStack = await isSelfStack(stackName);
 
     return {
@@ -290,6 +290,7 @@ export class ComposeDoctorService {
       serviceIntents,
       accessUrlPorts,
       hasAccessUrls,
+      exposureAvailable,
       isSelfStack: selfStack,
     };
   }
@@ -307,16 +308,18 @@ export class ComposeDoctorService {
     serviceIntents: Record<string, ExposureIntent>;
     accessUrlPorts: Set<number>;
     hasAccessUrls: boolean;
+    exposureAvailable: boolean;
   } {
     const context = getExposureContext(nodeId, stackName);
     if (!context.available) {
-      return { stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false };
+      return { stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false, exposureAvailable: false };
     }
     return {
       stackIntent: context.stackIntent,
       serviceIntents: context.serviceIntents,
       accessUrlPorts: context.accessUrlPorts,
       hasAccessUrls: context.hasAccessUrls,
+      exposureAvailable: true,
     };
   }
 

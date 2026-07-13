@@ -22,7 +22,7 @@ export const DEFAULT_TOPOLOGY_FILTERS: NetworkingTopologyFilters = {
   sharedOnly: false,
 };
 
-/** Large-topology strategy (Workstream D): edges stop animating above this count,
+/** Large-topology strategy: edges stop animating above this count,
  *  and the graph refuses to render (falling back to the Networks table) above
  *  the combined node+edge cap. The cap check runs on FILTERED, already-deduped
  *  counts so narrowing a filter can bring an over-cap graph back under it. */

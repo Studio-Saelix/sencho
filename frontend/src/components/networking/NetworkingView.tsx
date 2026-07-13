@@ -27,7 +27,8 @@ import {
   adaptNetworkingOverview, buildExternalNetworkSnippet, canUseNetworkName, getNetworkingPosture,
   isNetworkingActionVisible,
 } from '@/lib/networking';
-import { rankFindings } from '@/lib/networkingSeverity';
+import { rankFindings, SEVERITY_TEXT_CLASS } from '@/lib/networkingSeverity';
+import { isNetworkDriftFindingKind } from '@/types/networking';
 import type {
   NetworkingFinding, NetworkingOverviewEnvelope, NetworkingRecommendedAction,
   NetworkingNetworkRow, NodeNetworkingOverview,
@@ -158,6 +159,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
         setRecentActivity(adapted.recentActivity);
       } catch (error) {
         if (!stale && !(error instanceof DOMException && error.name === 'AbortError')) {
+          console.error('[Networking] Failed to load overview:', error);
           toast.error('Failed to load networking data.');
         }
       } finally {
@@ -248,11 +250,12 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
   const mobileTone = MOBILE_MASTHEAD_TONE[POSTURE_TONE[posture.tone]];
   const needsActionCount = findings.filter((f) => f.severity === 'critical' || f.severity === 'high').length;
   const reviewCount = findings.filter((f) => f.severity === 'medium').length;
+  const driftCount = findings.filter((f) => isNetworkDriftFindingKind(f.kind)).length;
 
   const mastheadMetadata: MastheadMetadataItem[] | undefined = overview ? [
     { label: 'NEEDS ACTION', value: String(needsActionCount), tone: needsActionCount > 0 ? 'error' : 'value' },
     { label: 'REVIEW', value: String(reviewCount), tone: reviewCount > 0 ? 'warn' : 'value' },
-    { label: 'DRIFT', value: String(overview.networkCount === null ? '—' : findings.filter((f) => f.kind === 'network-missing' || f.kind === 'network-undeclared' || f.kind === 'declared-network-unused' || f.kind === 'foreign-network-attachment').length) },
+    { label: 'DRIFT', value: overview.networkCount === null ? '—' : String(driftCount) },
   ] : undefined;
 
   const masthead = isMobile ? (
@@ -344,7 +347,7 @@ export function NetworkingView({ headerActions }: NetworkingViewProps) {
                   return (
                     <TableRow key={finding.id}>
                       <TableCell className="w-20">
-                        <span className={`font-mono text-[10px] uppercase tracking-wide ${finding.severity === 'info' ? 'text-stat-subtitle' : finding.severity === 'medium' ? 'text-warning' : 'text-destructive'}`}>
+                        <span className={`font-mono text-[10px] uppercase tracking-wide ${SEVERITY_TEXT_CLASS[finding.severity]}`}>
                           {finding.severity}
                         </span>
                       </TableCell>

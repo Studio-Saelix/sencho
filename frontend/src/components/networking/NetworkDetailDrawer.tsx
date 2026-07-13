@@ -37,13 +37,22 @@ export function NetworkDetailDrawer({
         if (!res.ok) throw new Error('inspect failed');
         const body = await res.json() as NetworkingEnvelope & { network: Partial<SanitizedNetworkInspect> };
         if (!cancelled) {
+          // An older remote may omit the newer array fields; backfill every array
+          // the drawer renders so a partial shape cannot crash the component.
+          const n = body.network;
           setDetail({
-            ...body.network,
-            connectedContainers: body.network.connectedContainers ?? [],
+            ...n,
+            labelKeys: n.labelKeys ?? [],
+            subnets: n.subnets ?? [],
+            gateways: n.gateways ?? [],
+            connectedContainers: n.connectedContainers ?? [],
           } as SanitizedNetworkInspect);
         }
-      } catch {
-        if (!cancelled) toast.error('Failed to load network details.');
+      } catch (error) {
+        if (!cancelled) {
+          console.error('[Networking] Failed to inspect network:', error);
+          toast.error('Failed to load network details.');
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -52,7 +61,9 @@ export function NetworkDetailDrawer({
     return () => { cancelled = true; };
   }, [networkId]);
 
-  const containerCount = detail?.connectedContainers.length ?? detail?.connectedCount ?? 0;
+  // connectedContainers is always an array after backfill; fall back to the count
+  // field so an older remote (empty array, populated count) still shows the total.
+  const containerCount = detail ? (detail.connectedContainers.length || detail.connectedCount) : 0;
   const meta = detail
     ? `${detail.driver} · ${detail.scope}${detail.subnets[0] ? ` · ${detail.subnets[0]}` : ''} · ${containerCount} container${containerCount === 1 ? '' : 's'}`
     : '';

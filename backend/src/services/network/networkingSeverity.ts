@@ -25,11 +25,3 @@ export function compareFindingsForRanking(a: NetworkingFinding, b: NetworkingFin
 export function rankFindings(findings: NetworkingFinding[]): NetworkingFinding[] {
   return [...findings].sort(compareFindingsForRanking);
 }
-
-export type NetworkingFindingGroup = 'needs-action' | 'review-recommended' | 'informational';
-
-export function groupForSeverity(severity: NetworkingFindingSeverity): NetworkingFindingGroup {
-  if (severity === 'critical' || severity === 'high') return 'needs-action';
-  if (severity === 'medium') return 'review-recommended';
-  return 'informational';
-}

@@ -11,6 +11,7 @@ import DockerController from '../services/DockerController';
 import { ComposeService } from '../services/ComposeService';
 import { DatabaseService } from '../services/DatabaseService';
 import { evaluateNetworkDeleteGuard } from '../services/network/networkDeleteGuards';
+import SelfIdentityService from '../services/SelfIdentityService';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -193,5 +194,60 @@ describe('evaluateNetworkDeleteGuard', () => {
     ]);
     expect(guard.blocked).toBe(true);
     expect(guard.code).toBe('stack-declaration-unknown');
+  });
+
+  it('blocks a system network ahead of every other reason', () => {
+    const snapshot = {
+      containers: [], volumes: [],
+      networks: [{ id: 'sys', name: 'bridge', driver: 'bridge', scope: 'local', isSystem: true, composeProject: null, stack: null }],
+    };
+    expect(evaluateNetworkDeleteGuard('sys', snapshot, []).code).toBe('system-network');
+  });
+
+  it('blocks a Sencho-owned network', () => {
+    const spy = vi.spyOn(SelfIdentityService.getInstance(), 'isOwnNetwork').mockReturnValue(true);
+    try {
+      const snapshot = {
+        containers: [], volumes: [],
+        networks: [{ id: 'own', name: 'sencho_mesh', driver: 'bridge', scope: 'local', isSystem: false, composeProject: null, stack: null }],
+      };
+      expect(evaluateNetworkDeleteGuard('own', snapshot, []).code).toBe('sencho-owned');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('blocks a network that still has an attached container', () => {
+    const snapshot = {
+      volumes: [],
+      containers: [{ id: 'c1', name: 'web', service: 'web', composeProject: STACK, stack: STACK, state: 'running', image: 'img', networks: [{ name: 'app_net', id: 'n1', ip: '' }], volumes: [], ports: [] }],
+      networks: [{ id: 'n1', name: 'app_net', driver: 'bridge', scope: 'local', isSystem: false, composeProject: STACK, stack: STACK }],
+    };
+    expect(evaluateNetworkDeleteGuard('n1', snapshot, []).code).toBe('attached');
+  });
+
+  it('blocks a network a renderable stack declares', () => {
+    const snapshot = {
+      containers: [], volumes: [],
+      networks: [{ id: 'n1', name: 'app_net', driver: 'bridge', scope: 'local', isSystem: false, composeProject: STACK, stack: STACK }],
+    };
+    const guard = evaluateNetworkDeleteGuard('n1', snapshot, [
+      { stack: STACK, renderable: true, renderError: null, runtime: 'available',
+        networks: [{ key: 'app_net', name: 'app_net', external: false, internal: false, createdByStack: true }],
+        services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] } },
+    ]);
+    expect(guard.code).toBe('stack-declared');
+  });
+
+  it('allows deleting an unattached, undeclared network', () => {
+    const snapshot = {
+      containers: [], volumes: [],
+      networks: [{ id: 'n1', name: 'orphan_net', driver: 'bridge', scope: 'local', isSystem: false, composeProject: null, stack: null }],
+    };
+    expect(evaluateNetworkDeleteGuard('n1', snapshot, [])).toEqual({ blocked: false });
+  });
+
+  it('does not block when the network is absent from the snapshot', () => {
+    expect(evaluateNetworkDeleteGuard('ghost', { containers: [], networks: [], volumes: [] }, [])).toEqual({ blocked: false });
   });
 });

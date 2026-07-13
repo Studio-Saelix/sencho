@@ -48,10 +48,11 @@ function effectiveIntent(service: string, stackIntent: ExposureIntent | null, by
 
 /** Host-mode severity matrix, parameterized by documented Dossier access.
  *  Internal/same-node are a contradiction regardless of documentation: high. Unset
- *  and unknown are unclassified exposure with the network gone entirely: high.
+ *  and unknown are unclassified exposure under host networking (no network
+ *  isolation): high.
  *  Everything else (lan/public/reverse-proxy/temporary) is medium undocumented,
  *  info when a Dossier access URL documents the exposure. */
-function hostModeSeverity(intent: ExposureIntent | null, hasAccessUrls: boolean): NetworkingFinding['severity'] {
+export function hostModeSeverity(intent: ExposureIntent | null, hasAccessUrls: boolean): NetworkingFinding['severity'] {
   if (intent === 'internal' || intent === 'same-node') return 'high';
   if (intent === null || intent === 'unknown') return 'high';
   return hasAccessUrls ? 'info' : 'medium';

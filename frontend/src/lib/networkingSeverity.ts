@@ -7,6 +7,14 @@ export const NETWORKING_SEVERITY_RANK: Record<NetworkingFindingSeverity, number>
   critical: 3,
 };
 
+/** Text color per severity, shared by the Overview attention list and the Findings tab. */
+export const SEVERITY_TEXT_CLASS: Record<NetworkingFindingSeverity, string> = {
+  info: 'text-stat-subtitle',
+  medium: 'text-warning',
+  high: 'text-destructive',
+  critical: 'text-destructive',
+};
+
 /** Severity descending; at equal severity a live-sourced finding ranks ahead of a
  *  Doctor-only finding, mirroring the backend ranking helper. */
 export function compareFindingsForRanking(a: NetworkingFinding, b: NetworkingFinding): number {
@@ -47,7 +55,7 @@ export function groupFindings(findings: NetworkingFinding[]): Record<NetworkingF
   return groups;
 }
 
-/** Label for a finding's source provenance, per H5 cached-state honesty. */
+/** Label for a finding's source provenance, so cached Doctor findings never read as current runtime facts. */
 export function findingSourceLabel(finding: Pick<NetworkingFinding, 'sources' | 'doctorFindings'>): string | null {
   const isLive = finding.sources.includes('live');
   const isDoctor = finding.sources.includes('doctor');
