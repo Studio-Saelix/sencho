@@ -63,7 +63,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          RELEASE_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          # fromJSON must tolerate empty pr: env is evaluated even when if: skips
+          # (publish runs leave pr unset). Empty object yields empty RELEASE_BRANCH.
+          RELEASE_BRANCH: ${{ fromJSON(steps.release.outputs.pr || '{}').headBranchName || '' }}
           MAINTAINER_LOGINS: ""
         run: |
           if [ -z "$RELEASE_BRANCH" ]; then
