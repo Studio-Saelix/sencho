@@ -43,21 +43,6 @@ A Sencho instance is autonomous. To manage another machine, you install a second
 
 Sencho is free, open-source software under AGPLv3. Everything below is included in the Community tier with unlimited nodes and users.
 
-## Admiral
-
-**Admiral** is Studio Saelix's paid business assurance plan on top of everything in Community: priority support, managed continuity (Sencho Cloud Backup), governance depth (advanced RBAC roles, LDAP / Active Directory, full audit log export and anomaly detection), and cross-node Fleet Sync policy replication. AWS ECR registry credentials currently require Admiral as well. See [sencho.io/pricing](https://sencho.io/pricing) for current plan details.
-
-## What Sencho is not (yet)
-
-Sencho is a Docker Compose control plane focused on homelab and small-fleet operators. It is intentionally not:
-
-- A Kubernetes scheduler or replacement.
-- A reverse proxy. Front Sencho with your existing proxy (Caddy, Traefik, nginx) for TLS and authentication on the public edge.
-- A monitoring stack. Sencho surfaces container and host metrics in the dashboard but does not replace Prometheus, Grafana, or your existing alerting pipeline.
-- A CI / CD pipeline. Use webhooks, the API, or Git-sourced stacks to connect Sencho to your build system.
-
-See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for the current limitation list.
-
 ---
 
 ## Capabilities
@@ -193,13 +178,20 @@ See the [multi-node guide](https://docs.sencho.io/features/multi-node) for the f
 
 ## Telemetry and data handling
 
-Sencho does not emit telemetry, analytics, or crash reports. The only outbound traffic is license validation against Lemon Squeezy, and only when a paid license key is activated. Community-tier instances make no outbound calls to Sencho-controlled endpoints. Stack metadata, container inventory, and user activity never leave your instance.
+Sencho does not emit telemetry, analytics, or crash reports, and makes no outbound calls to Sencho-controlled endpoints. Stack metadata, container inventory, and user activity never leave your instance.
+
+---
+
+## Admiral
+
+**Admiral** is Studio Saelix's paid business assurance plan on top of everything in Community: priority support, managed continuity (Sencho Cloud Backup), governance depth (advanced RBAC roles, LDAP / Active Directory, full audit log export and anomaly detection), and cross-node Fleet Sync policy replication. AWS ECR registry credentials currently require Admiral as well. See [sencho.io/pricing](https://sencho.io/pricing) for current plan details.
 
 ---
 
 ## Documentation, community, and license
 
 - **Documentation:** [docs.sencho.io](https://docs.sencho.io)
+- **Known limitations:** [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)
 - **If something breaks:** the [Recovery guide](https://docs.sencho.io/operations/recovery) covers getting back to a working state when Sencho, a deploy, sign-in, Docker, or a node fails.
 - **Community:** [GitHub Discussions](https://github.com/studio-saelix/sencho/discussions)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
