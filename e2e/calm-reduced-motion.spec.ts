@@ -27,7 +27,9 @@ const SIGNATURE_STATE = {
 
 async function seedAppearance(page: Page, state: Record<string, unknown> | null) {
   await page.addInitScript(
-    ({ key, legacy, payload }) => {
+    ({ key, legacy, payload, skipKey }) => {
+      // Tests that mutate appearance mid-run set this so reload is not overwritten.
+      if (sessionStorage.getItem(skipKey) === '1') return;
       if (payload === null) {
         localStorage.removeItem(key);
         localStorage.removeItem(legacy);
@@ -36,7 +38,7 @@ async function seedAppearance(page: Page, state: Record<string, unknown> | null)
         localStorage.removeItem(legacy);
       }
     },
-    { key: STORAGE_KEY, legacy: LEGACY_KEY, payload: state },
+    { key: STORAGE_KEY, legacy: LEGACY_KEY, payload: state, skipKey: 'sencho.e2e.skipThemeSeed' },
   );
 }
 
@@ -127,7 +129,9 @@ test.describe('Calm reduced motion defaults', () => {
     await waitForStacksLoaded(page);
     await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduced');
 
+    // Stop init-script reseeding so the false write is what theme-init reads next.
     await page.evaluate((key) => {
+      sessionStorage.setItem('sencho.e2e.skipThemeSeed', '1');
       const raw = localStorage.getItem(key);
       const parsed = raw ? JSON.parse(raw) : {};
       parsed.reducedMotion = false;
