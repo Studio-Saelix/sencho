@@ -172,11 +172,16 @@ test.describe('Reduced-effects glass', () => {
     await expectTranslucent(sidebar);
 
     await openAppearance(page);
-    await expect(page.getByText('Constrained rendering devices', { exact: true })).toBeVisible();
+    await expect(page.getByText('Constrained graphics', { exact: true })).toBeVisible();
 
     await page.getByRole('switch', { name: 'Reduced effects' }).click();
     await expect(page.locator('html')).toHaveAttribute('data-effects', 'reduced');
-    await expect(page.getByText('Constrained rendering devices', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('Constrained graphics', { exact: true })).toBeVisible();
+
+    await page.getByRole('switch', { name: 'Reduced motion' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-effects', 'reduced');
+    await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduced');
+    await expect(page.getByText('Constrained graphics', { exact: true })).toHaveCount(0);
     await expectNoBlur(topbar);
     await expectNoBlur(sidebar);
     await expectOpaque(sidebar);
@@ -188,11 +193,14 @@ test.describe('Reduced-effects glass', () => {
     await expectOpaque(popover);
     await page.keyboard.press('Escape');
 
+    await page.getByRole('switch', { name: 'Reduced motion' }).click();
+    await expect(page.locator('html')).not.toHaveAttribute('data-motion', 'reduced');
+    await expect(page.getByText('Constrained graphics', { exact: true })).toBeVisible();
+
     await page.getByRole('switch', { name: 'Reduced effects' }).click();
     await expect(page.locator('html')).not.toHaveAttribute('data-effects', 'reduced');
     await expectHasBlur(topbar);
     await expectTranslucent(sidebar);
-    await expect(page.getByText('Constrained rendering devices', { exact: true })).toBeVisible();
   });
 
   test('dialog toast and overlay glass flip with Reduced effects both ways', async ({ page }) => {
@@ -297,15 +305,15 @@ test.describe('Reduced-effects glass', () => {
     await expectOpaque(tabBar);
   });
 
-  test('Readability hides the constrained-device callout', async ({ page }) => {
+  test('Reduced motion hides the constrained-graphics callout', async ({ page }) => {
     await seedAppearance(page, SIGNATURE_STATE);
     await loginAs(page);
     await waitForStacksLoaded(page);
     await openAppearance(page);
 
-    await expect(page.getByText('Constrained rendering devices', { exact: true })).toBeVisible();
-    await page.getByRole('switch', { name: 'Readability mode' }).click();
-    await expect(page.locator('html')).toHaveAttribute('data-effects', 'reduced');
-    await expect(page.getByText('Constrained rendering devices', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('Constrained graphics', { exact: true })).toBeVisible();
+    await page.getByRole('switch', { name: 'Reduced motion' }).click();
+    await expect(page.locator('html')).toHaveAttribute('data-motion', 'reduced');
+    await expect(page.getByText('Constrained graphics', { exact: true })).toHaveCount(0);
   });
 });
