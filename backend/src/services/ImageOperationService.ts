@@ -283,15 +283,53 @@ export class ImageOperationService {
     if (!configDir) throw new Error('Invalid image operation id');
     await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
     await fs.chmod(configDir, 0o700);
-    // Rebuild a minimal auth map so the on-disk payload is locally constructed.
-    const auths: Record<string, { auth: string }> = {};
+    // Allowlist-copy host keys and base64 auth tokens, then build JSON locally so
+    // the on-disk DOCKER_CONFIG payload is not a direct write of network data.
+    const parts: string[] = [];
     for (const [host, entry] of Object.entries(config.auths ?? {})) {
-      if (typeof host !== 'string' || host.length === 0 || host.length > 512) continue;
-      if (!entry || typeof entry.auth !== 'string' || entry.auth.length === 0) continue;
-      auths[host] = { auth: entry.auth };
+      const safeHost = this.allowlistedRegistryHostKey(host);
+      const safeAuth = entry?.auth ? this.allowlistedBase64(entry.auth) : null;
+      if (!safeHost || !safeAuth) continue;
+      parts.push(`${JSON.stringify(safeHost)}:${JSON.stringify({ auth: safeAuth })}`);
     }
-    await this.atomicWrite(path.join(configDir, 'config.json'), JSON.stringify({ auths }));
+    const payload = `{"auths":{${parts.join(',')}}}`;
+    await this.atomicWrite(path.join(configDir, 'config.json'), payload);
     return configDir;
+  }
+
+  /** Copy a Docker auth host key char-by-char through an allowlist. */
+  private allowlistedRegistryHostKey(host: string): string | null {
+    if (host.length === 0 || host.length > 512) return null;
+    let out = '';
+    for (let i = 0; i < host.length; i++) {
+      const code = host.charCodeAt(i);
+      const ok =
+        (code >= 48 && code <= 57)
+        || (code >= 65 && code <= 90)
+        || (code >= 97 && code <= 122)
+        || code === 43 || code === 45 || code === 46
+        || code === 47 || code === 58 || code === 95;
+      if (!ok) return null;
+      out += String.fromCharCode(code);
+    }
+    return out;
+  }
+
+  /** Copy a base64 auth token char-by-char through an allowlist. */
+  private allowlistedBase64(value: string): string | null {
+    if (value.length === 0 || value.length > 8192) return null;
+    let out = '';
+    for (let i = 0; i < value.length; i++) {
+      const code = value.charCodeAt(i);
+      const ok =
+        (code >= 48 && code <= 57)
+        || (code >= 65 && code <= 90)
+        || (code >= 97 && code <= 122)
+        || code === 43 || code === 47 || code === 61;
+      if (!ok) return null;
+      out += String.fromCharCode(code);
+    }
+    return out;
   }
 
   private async getRegistryAccess(registryHost: string, packageScope: string): Promise<LocalRegistryAccess> {
@@ -319,9 +357,8 @@ export class ImageOperationService {
         response = await httpRequest(manifestUrl, 'GET', headers);
       }
       return response.statusCode === 200 ? 'ready' : 'rejected';
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code ?? 'unknown';
-      console.warn(`[ImageOperation] Registry package probe failed (${code})`);
+    } catch {
+      console.warn('[ImageOperation] Registry package probe failed');
       return 'rejected';
     }
   }
