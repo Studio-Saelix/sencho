@@ -180,6 +180,44 @@ describe('ImageOperationService', () => {
     });
   });
 
+  it('does not let recreating persist overwrite a concurrent helper-exit failure', async () => {
+    let helperExit: ((error: string | null) => void) | undefined;
+    vi.spyOn(SelfUpdateService.getInstance(), 'getResolvedComposeImageForUpdate').mockResolvedValue(null);
+    vi.spyOn(SelfUpdateService.getInstance(), 'getComposeServiceName').mockReturnValue('sencho');
+    vi.spyOn(SelfUpdateService.getInstance(), 'onceHelperExit').mockImplementation((listener) => {
+      helperExit = listener;
+    });
+    vi.spyOn(SelfUpdateService.getInstance(), 'triggerUpdate').mockResolvedValue(undefined);
+    vi.spyOn(SelfUpdateService.getInstance(), 'getLastError').mockReturnValue(null);
+
+    const service = ImageOperationService.getInstance();
+    const proto = Object.getPrototypeOf(service) as {
+      persist: (operation: unknown) => Promise<void>;
+    };
+    const realPersist = proto.persist.bind(service);
+    vi.spyOn(service as unknown as { persist: (operation: { state: string }) => Promise<void> }, 'persist')
+      .mockImplementation(async (operation) => {
+        if (operation.state === 'recreating' && helperExit) {
+          const exit = helperExit;
+          helperExit = undefined;
+          const failPromise = Promise.resolve().then(() => {
+            exit('Helper container exited without restarting Sencho');
+          });
+          await realPersist(operation);
+          await failPromise;
+          return;
+        }
+        return realPersist(operation);
+      });
+
+    await service.runCommunityUpdate();
+    await vi.waitFor(async () => {
+      const current = await service.getCurrentOperation();
+      expect(current?.state).toBe('failed');
+      expect(current?.failureCode).toBe('update_failed');
+    });
+  });
+
   it('replays a pending helper exit to a late onceHelperExit listener', async () => {
     const svc = SelfUpdateService.getInstance();
     const internal = svc as unknown as { pendingHelperExitError: string | undefined };

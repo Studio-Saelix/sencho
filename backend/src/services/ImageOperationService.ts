@@ -39,6 +39,7 @@ const OPERATION_ID_RE =
 export class ImageOperationService {
   private static instance: ImageOperationService;
   private claimed = false;
+  private stateWriteQueue: Promise<void> = Promise.resolve();
 
   public static getInstance(): ImageOperationService {
     if (!ImageOperationService.instance) ImageOperationService.instance = new ImageOperationService();
@@ -128,6 +129,10 @@ export class ImageOperationService {
       }
       operation.state = 'recreating';
       await this.persist(operation);
+      if (selfUpdate.getLastError()) {
+        await this.fail(operation, 'update_failed');
+        return { ok: false, code: 'update_failed' };
+      }
       return { ok: true };
     } catch (error) {
       console.error('[ImageOperation] Hardened switch failed:', error);
@@ -184,6 +189,10 @@ export class ImageOperationService {
       }
       operation.state = 'recreating';
       await this.persist(operation);
+      if (selfUpdate.getLastError()) {
+        await this.fail(operation, 'update_failed');
+        return { ok: false, failureCode: 'update_failed' };
+      }
       return { ok: true };
     } catch (error) {
       console.error('[ImageOperation] Community update failed:', error);
@@ -297,6 +306,12 @@ export class ImageOperationService {
     }
   }
 
+  private enqueueStateWrite<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.stateWriteQueue.then(fn, fn);
+    this.stateWriteQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
   private async fail(operation: ImageOperation, failureCode: FailureCode): Promise<void> {
     operation.state = 'failed';
     operation.failureCode = failureCode;
@@ -306,11 +321,26 @@ export class ImageOperationService {
   }
 
   private async persist(operation: ImageOperation): Promise<void> {
-    const filePath = this.operationFile(operation.operationId);
-    if (!filePath) throw new Error('Invalid image operation id');
-    await fs.mkdir(this.operationsDir(), { recursive: true, mode: 0o700 });
-    await this.atomicWrite(filePath, JSON.stringify(operation));
-    await this.atomicWrite(this.currentFile(), JSON.stringify(operation));
+    await this.enqueueStateWrite(async () => {
+      const current = await this.readOperation(this.currentFile());
+      const incomingTerminal = operation.state === 'failed' || operation.state === 'succeeded';
+      const currentTerminal = current?.state === 'failed' || current?.state === 'succeeded';
+      // Do not let a late non-terminal write (e.g. recreating) overwrite a
+      // concurrent helper-exit failure for the same operation.
+      if (
+        current
+        && current.operationId === operation.operationId
+        && currentTerminal
+        && !incomingTerminal
+      ) {
+        return;
+      }
+      const filePath = this.operationFile(operation.operationId);
+      if (!filePath) throw new Error('Invalid image operation id');
+      await fs.mkdir(this.operationsDir(), { recursive: true, mode: 0o700 });
+      await this.atomicWrite(filePath, JSON.stringify(operation));
+      await this.atomicWrite(this.currentFile(), JSON.stringify(operation));
+    });
   }
 
   private async readOperation(filePath: string): Promise<ImageOperation | null> {
