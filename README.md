@@ -184,7 +184,7 @@ Sencho does not emit telemetry, analytics, or crash reports, and makes no outbou
 
 ## Admiral
 
-**Admiral** is Studio Saelix's paid business assurance plan on top of everything in Community: priority support, managed continuity (Sencho Cloud Backup), governance depth (advanced RBAC roles, LDAP / Active Directory, full audit log export and anomaly detection), and cross-node Fleet Sync policy replication. AWS ECR registry credentials currently require Admiral as well. See [sencho.io/pricing](https://sencho.io/pricing) for current plan details.
+**Admiral** is Studio Saelix's paid business assurance plan on top of everything in Community: Hardened Build, Recovery Vault (managed off-site snapshots), priority support, and governance depth (advanced RBAC roles, LDAP / Active Directory, full audit log export and anomaly detection). Fleet Sync policy replication and AWS ECR registry credentials currently require Admiral as well; those access rules are temporary availability, not the reason Admiral exists. See [sencho.io/pricing](https://sencho.io/pricing) for current plan details.
 
 ---
 

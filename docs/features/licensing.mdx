@@ -4,7 +4,7 @@ sidebarTitle: Licensing
 description: How Sencho licensing works, including trials, activation, and subscription management.
 ---
 
-Sencho is [AGPLv3](https://github.com/studio-saelix/sencho/blob/main/LICENSE) open source. **Community** is the complete self-hosted Compose-first control plane, free forever with unlimited nodes. **Admiral** is Studio Saelix business assurance (priority support, managed continuity, governance depth, and release assurance) delivered as a paid plan.
+Sencho is [AGPLv3](https://github.com/studio-saelix/sencho/blob/main/LICENSE) open source. **Community** is the complete self-hosted Compose-first control plane, free forever with unlimited nodes. **Admiral** is Studio Saelix business assurance (priority support, managed continuity, governance depth, and Hardened Build) delivered as a paid plan.
 
 <Tip>
   *Our tier names are inspired by the meaning of Sencho (船長), because you're the captain of your container fleet.*
@@ -49,12 +49,14 @@ See [the pricing page](https://sencho.io/pricing) for current pricing.
 
 **Admiral** is the official business assurance plan from Studio Saelix. It includes everything in Community, plus:
 
+- **Hardened Build:** an Admiral image channel with published supply-chain assurance artifacts
+- **Managed continuity:** Recovery Vault (a managed, off-site snapshot allowance)
 - **Assurance and support:** priority email support and Studio Saelix-backed continuity for production fleets
 - **Governance:** advanced RBAC roles (Deployer, Node Admin, Auditor), scoped permissions per stack or node, and audit log export (CSV, JSON), anomaly detection, and configurable retention beyond the recent window
-- **Managed continuity:** Recovery Vault (a managed, off-site snapshot allowance)
-- **Hardened Build:** an Admiral image channel with published supply-chain assurance artifacts
 - **Directory integration:** LDAP / Active Directory authentication
-- **Current plan availability:** some product surfaces (including AWS ECR credentials) still require an Admiral plan today. That access rule is temporary availability, not the reason Admiral exists. Other operator surfaces may be limited-availability on a given instance and are documented on their own feature pages when enabled.
+- **Current plan availability:** some product surfaces (including AWS ECR credentials and Fleet Sync policy replication) still require an Admiral plan today. That access rule is temporary availability, not the reason Admiral exists. Other operator surfaces may be limited-availability on a given instance and are documented on their own feature pages when enabled.
+
+**Planned assurance services** (not available today; no delivery date committed): Release Safety Channel, Production Assurance Reports, and Fleet Beacon.
 
 ## Free trial
 
@@ -136,7 +138,7 @@ The License page renders differently depending on the license status:
 | **Community** | `Sencho Community` with "Community plan. Full AGPLv3 self-hosted control plane." | Visible | Visible |
 | **Trial** | `Sencho Admiral (Trial)` with a countdown chip | Visible (so a paid key can replace the trial) | Hidden |
 | **Active subscription** | Tier name with Customer, Product, License key, plus `Manage subscription` and `Deactivate` | Hidden | Hidden |
-| **Expired** | `Sencho Community` with "Your Admiral license has expired. Renew to restore Admiral plan benefits." and a destructive **Status: Expired** field | Visible | Visible |
+| **Expired** | `Sencho Community` with "Your Admiral license has expired. Renew to restore Admiral assurance (priority support, Recovery Vault, Hardened Build, and governance)." and a destructive **Status: Expired** field | Visible | Visible |
 | **Disabled** | `Sencho Community` with "Your license has been disabled. Contact support for assistance." | Visible | Visible |
 
 The **Pricing** section, when visible, holds a single **See pricing** button that opens [the pricing page](https://sencho.io/pricing) in a new tab so you can pick a tier and billing cadence.
