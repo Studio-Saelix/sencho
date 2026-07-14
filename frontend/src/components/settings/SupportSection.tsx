@@ -64,7 +64,7 @@ export function SupportSection() {
                         <ResourceLink
                             icon={<Mail className="w-4 h-4" />}
                             title="Priority email support"
-                            blurb="Direct support with responses within 24 hours"
+                            blurb="Monday to Friday, 09:00 to 17:00 America/New_York. We aim to first-respond within one business day. This is not a contractual SLA or 24/7 service."
                             href="mailto:support@sencho.io"
                             external={false}
                         />
@@ -75,8 +75,8 @@ export function SupportSection() {
             {!isPaid && (
                 <SettingsCallout
                     icon={<Crown className="h-4 w-4" />}
-                    title="Need faster support?"
-                    subtitle="Admiral includes direct email support and priority issue handling."
+                    title="Need direct support?"
+                    subtitle="Admiral includes priority email support during published support hours."
                     action={
                         <SettingsPrimaryButton
                             size="sm"

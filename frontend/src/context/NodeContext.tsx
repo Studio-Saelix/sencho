@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { apiFetch } from '@/lib/api';
+import { beginNodeSession, markMilestone } from '@/lib/hydrationTiming';
 import type { Capability } from '@/lib/capabilities';
 
 export type NodeMode = 'proxy' | 'pilot_agent';
@@ -55,6 +56,18 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
   activeNodeRef.current = activeNode;
   const nodeMetaRef = useRef<Map<number, NodeMeta>>(nodeMeta);
   nodeMetaRef.current = nodeMeta;
+
+  // Open a fresh hydration-timing session the moment the active node id changes,
+  // during render (guarded by a ref to fire once per id). This must precede the
+  // shell's stack-list refresh so its attempt binds to the new node session:
+  // child effects (EditorLayout's node-switch effect that calls refreshStacks)
+  // run before this provider's effects, so an effect here would begin the
+  // session too late and the list milestone would never commit.
+  const hydrationNodeRef = useRef<number | null>(null);
+  if (activeNode && hydrationNodeRef.current !== activeNode.id) {
+    hydrationNodeRef.current = activeNode.id;
+    beginNodeSession(activeNode.id);
+  }
 
   const fetchNodeMeta = useCallback(async (nodeId: number, force = false) => {
     const cached = nodeMetaRef.current.get(nodeId);
@@ -156,6 +169,13 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
     window.addEventListener('node-not-found', handleNodeNotFound);
     return () => window.removeEventListener('node-not-found', handleNodeNotFound);
   }, [refreshNodes]);
+
+  // One-shot boot milestone: nodes have finished loading and an active node is
+  // resolved. Deduped by the store, so a later re-run is a no-op.
+  useEffect(() => {
+    if (isLoading || !activeNode) return;
+    markMilestone('nodes_resolved');
+  }, [isLoading, activeNode]);
 
   const activeNodeMeta = useMemo(() => {
     if (!activeNode) return null;

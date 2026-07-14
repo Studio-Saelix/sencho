@@ -505,7 +505,6 @@ describe('MonitorService - host_alerts_enabled toggle', () => {
     mockGetLatestVersionInfo.mockResolvedValue({ version: '0.46.0', publishPending: false });
 
     const svc = MonitorService.getInstance();
-    (svc as any).lastVersionCheckAt = 0;
     await (svc as any).evaluateGlobalSettings({ host_alerts_enabled: '0' });
 
     expect(mockGetLatestVersionInfo).toHaveBeenCalled();
@@ -1096,13 +1095,22 @@ describe('MonitorService - restart_count metric', () => {
 // ── Sencho version update check ───────────────────────────────────────
 
 describe('MonitorService - Sencho version check', () => {
-  /** Stateful system_state backing for tests that need getSystemState to
-   *  reflect setSystemState writes within the same evaluation. */
+  /** In-memory system_state so get/set round-trip within one evaluation. */
   function wireStatefulSystemState(seed: Record<string, string> = {}) {
     const store: Record<string, string> = { ...seed };
     mockGetSystemState.mockImplementation((key: string) => store[key] ?? null);
     mockSetSystemState.mockImplementation((key: string, value: string) => { store[key] = value; });
     return store;
+  }
+
+  async function runEvaluate(): Promise<void> {
+    await (MonitorService.getInstance() as any).evaluate();
+  }
+
+  function updateAvailabilityCalls(): unknown[][] {
+    return mockDispatchAlert.mock.calls.filter(
+      (args: unknown[]) => args[1] === 'node_update_available',
+    );
   }
 
   beforeEach(() => {
@@ -1114,15 +1122,11 @@ describe('MonitorService - Sencho version check', () => {
   it('dispatches notification when newer version available', async () => {
     mockGetSenchoVersion.mockReturnValue('0.45.0');
     mockGetLatestVersionInfo.mockResolvedValue({ version: '0.46.0', publishPending: false });
-    mockGetSystemState.mockReturnValue(null); // No previous notification
+    mockGetSystemState.mockReturnValue(null);
 
-    const svc = MonitorService.getInstance();
-    // Reset the version check timer so it runs immediately
-    (svc as any).lastVersionCheckAt = 0;
-    await (svc as any).evaluate();
+    await runEvaluate();
 
     expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.46.0'));
-    // Message must include the real running version, not "0.0.0".
     expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('currently running 0.45.0'));
     expect(mockSetSystemState).toHaveBeenCalledWith('last_sencho_update_notified_version', '0.46.0');
   });
@@ -1130,126 +1134,92 @@ describe('MonitorService - Sencho version check', () => {
   it('does not re-notify for the same version', async () => {
     mockGetSenchoVersion.mockReturnValue('0.45.0');
     mockGetLatestVersionInfo.mockResolvedValue({ version: '0.46.0', publishPending: false });
-    // Running version < last notified, so self-heal does NOT clear the key.
+    // Running < last notified: self-heal leaves the dedup key alone.
     mockGetSystemState.mockReturnValue('0.46.0');
 
-    const svc = MonitorService.getInstance();
-    (svc as any).lastVersionCheckAt = 0;
-    await (svc as any).evaluate();
+    await runEvaluate();
 
     expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.46.0'));
   });
 
-  it('handles version check failure gracefully', async () => {
-    mockGetSenchoVersion.mockReturnValue('0.45.0');
-    mockGetLatestVersionInfo.mockResolvedValue(null); // CacheService failed + no stale
-
-    const svc = MonitorService.getInstance();
-    (svc as any).lastVersionCheckAt = 0;
-
-    // Should not throw
-    await expect((svc as any).evaluate()).resolves.toBeUndefined();
-    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('available'));
-  });
-
-  it('respects the 6-hour cooldown interval', async () => {
-    mockGetSenchoVersion.mockReturnValue('0.45.0');
-    mockGetLatestVersionInfo.mockResolvedValue({ version: '0.46.0', publishPending: false });
-    mockGetSystemState.mockReturnValue(null);
-
-    const svc = MonitorService.getInstance();
-    // Simulate the check ran 1 hour ago (within 6-hour window)
-    (svc as any).lastVersionCheckAt = Date.now() - 1 * 60 * 60 * 1000;
-    await (svc as any).evaluate();
-
-    // getLatestVersionInfo should not have been called since we're within cooldown
-    expect(mockGetLatestVersionInfo).not.toHaveBeenCalled();
-  });
-
-  it('skips version check when getSenchoVersion returns null', async () => {
-    // Simulates the production-Docker scenario that previously leaked "0.0.0"
-    mockGetSenchoVersion.mockReturnValue(null);
-    mockGetLatestVersionInfo.mockResolvedValue({ version: '0.46.0', publishPending: false });
-    mockGetSystemState.mockReturnValue(null);
-
-    const svc = MonitorService.getInstance();
-    (svc as any).lastVersionCheckAt = 0;
-    await (svc as any).evaluate();
-
-    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.46.0'));
-    expect(mockSetSystemState).not.toHaveBeenCalledWith('last_sencho_update_notified_version', expect.anything());
-    // Should not have even attempted the lookup.
-    expect(mockGetLatestVersionInfo).not.toHaveBeenCalled();
-  });
-
-  // ── Regression coverage for PR: cooldown leak + dedup self-heal ───────
-
-  it('does NOT advance cooldown when getLatestVersionInfo returns null (retries next cycle)', async () => {
+  it('handles version check failure gracefully and retries next cycle', async () => {
     mockGetSenchoVersion.mockReturnValue('0.45.0');
     mockGetLatestVersionInfo.mockResolvedValue(null);
     mockGetSystemState.mockReturnValue(null);
 
-    const svc = MonitorService.getInstance();
-    (svc as any).lastVersionCheckAt = 0;
+    await expect(runEvaluate()).resolves.toBeUndefined();
+    await expect(runEvaluate()).resolves.toBeUndefined();
 
-    await (svc as any).evaluate();
-    await (svc as any).evaluate();
-
-    // Both evals should attempt the lookup since failures do not lock cooldown.
     expect(mockGetLatestVersionInfo).toHaveBeenCalledTimes(2);
-    expect((svc as any).lastVersionCheckAt).toBe(0);
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('available'));
   });
 
-  it('does NOT advance cooldown while a GitHub release is pending registry publish', async () => {
+  it('skips version check when getSenchoVersion returns null', async () => {
+    mockGetSenchoVersion.mockReturnValue(null);
+    mockGetLatestVersionInfo.mockResolvedValue({ version: '0.46.0', publishPending: false });
+    mockGetSystemState.mockReturnValue(null);
+
+    await runEvaluate();
+
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.46.0'));
+    expect(mockSetSystemState).not.toHaveBeenCalledWith('last_sencho_update_notified_version', expect.anything());
+    expect(mockGetLatestVersionInfo).not.toHaveBeenCalled();
+  });
+
+  it('retries while a GitHub release is pending registry publish without notifying', async () => {
     mockGetSenchoVersion.mockReturnValue('0.93.0');
     mockGetLatestVersionInfo.mockResolvedValue({ version: '0.93.0', publishPending: true });
     mockGetSystemState.mockReturnValue(null);
 
-    const svc = MonitorService.getInstance();
-    (svc as any).lastVersionCheckAt = 0;
-
-    await (svc as any).evaluate();
-    await (svc as any).evaluate();
+    await runEvaluate();
+    await runEvaluate();
 
     expect(mockGetLatestVersionInfo).toHaveBeenCalledTimes(2);
-    expect((svc as any).lastVersionCheckAt).toBe(0);
     expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('available'));
   });
 
-  it('DOES advance cooldown on a successful lookup (prevents re-fetch inside window)', async () => {
+  it('notifies on the next eval after an up-to-date success when a newer version appears', async () => {
+    const store = wireStatefulSystemState();
     mockGetSenchoVersion.mockReturnValue('0.45.0');
-    mockGetLatestVersionInfo.mockResolvedValue({ version: '0.46.0', publishPending: false });
-    mockGetSystemState.mockReturnValue(null);
+    mockGetLatestVersionInfo
+      .mockResolvedValueOnce({ version: '0.45.0', publishPending: false })
+      .mockResolvedValue({ version: '0.46.0', publishPending: false });
 
-    const svc = MonitorService.getInstance();
-    (svc as any).lastVersionCheckAt = 0;
+    await runEvaluate();
+    expect(mockGetLatestVersionInfo).toHaveBeenCalledTimes(1);
+    expect(updateAvailabilityCalls()).toHaveLength(0);
+    expect(store.last_sencho_update_notified_version).toBeUndefined();
 
-    await (svc as any).evaluate();
-    const firstCooldown = (svc as any).lastVersionCheckAt;
-    expect(firstCooldown).toBeGreaterThan(0);
+    await runEvaluate();
+    expect(mockGetLatestVersionInfo).toHaveBeenCalledTimes(2);
+    const afterSecond = updateAvailabilityCalls();
+    expect(afterSecond).toHaveLength(1);
+    expect(afterSecond[0][2]).toContain('0.46.0');
+    expect(store.last_sencho_update_notified_version).toBe('0.46.0');
 
-    // Second eval immediately after: cooldown gate should block it.
-    mockGetLatestVersionInfo.mockClear();
-    await (svc as any).evaluate();
+    await runEvaluate();
+    expect(mockGetLatestVersionInfo).toHaveBeenCalledTimes(3);
+    expect(updateAvailabilityCalls()).toHaveLength(1);
+  });
 
-    expect(mockGetLatestVersionInfo).not.toHaveBeenCalled();
-    // Exactly one dispatch across both evals.
-    const availabilityDispatches = mockDispatchAlert.mock.calls.filter(
-      (args: unknown[]) => typeof args[2] === 'string' && args[2].includes('available'),
-    );
-    expect(availabilityDispatches).toHaveLength(1);
+  it('notifies a newer release after a prior notify while still on the old version', async () => {
+    const store = wireStatefulSystemState({ last_sencho_update_notified_version: '0.46.0' });
+    mockGetSenchoVersion.mockReturnValue('0.45.0');
+    mockGetLatestVersionInfo.mockResolvedValue({ version: '0.47.0', publishPending: false });
+
+    await runEvaluate();
+
+    expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.47.0'));
+    expect(store.last_sencho_update_notified_version).toBe('0.47.0');
   });
 
   it('self-heals dedup after user upgrades to the previously-notified version', async () => {
-    // Prior notification stored "0.46.0" back when the user was on 0.45.0.
-    // User has now upgraded to 0.46.0; a new release (0.47.0) just dropped.
+    // Notified for 0.46.0 while on 0.45.0; now running 0.46.0 with 0.47.0 out.
     const store = wireStatefulSystemState({ last_sencho_update_notified_version: '0.46.0' });
     mockGetSenchoVersion.mockReturnValue('0.46.0');
     mockGetLatestVersionInfo.mockResolvedValue({ version: '0.47.0', publishPending: false });
 
-    const svc = MonitorService.getInstance();
-    (svc as any).lastVersionCheckAt = 0;
-    await (svc as any).evaluate();
+    await runEvaluate();
 
     expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.47.0'));
     expect(store.last_sencho_update_notified_version).toBe('0.47.0');
@@ -1259,15 +1229,12 @@ describe('MonitorService - Sencho version check', () => {
     mockGetSenchoVersion.mockReturnValue('0.93.0');
     mockGetSystemState.mockReturnValue(null);
 
-    const svc = MonitorService.getInstance();
-    (svc as any).lastVersionCheckAt = 0;
-
     mockGetLatestVersionInfo.mockResolvedValueOnce({ version: '0.93.0', publishPending: true });
-    await (svc as any).evaluate();
+    await runEvaluate();
     expect(mockDispatchAlert).not.toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.94.0'));
 
     mockGetLatestVersionInfo.mockResolvedValueOnce({ version: '0.94.0', publishPending: false });
-    await (svc as any).evaluate();
+    await runEvaluate();
     expect(mockDispatchAlert).toHaveBeenCalledWith('info', 'node_update_available', expect.stringContaining('0.94.0'));
   });
 });
@@ -1486,7 +1453,7 @@ describe('MonitorService - janitor cycle and circuit breaker', () => {
     expect(mockGetDiskUsage).not.toHaveBeenCalled();
   });
 
-  it('dispatches an alert when reclaimable exceeds the threshold', async () => {
+  it('dispatches a node-neutral janitor alert', async () => {
     mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
     mockGetDiskUsage.mockResolvedValue(RECLAIMABLE_3GB);
     mockGetSystemState.mockReturnValue('0'); // No prior alert; cooldown elapsed.
@@ -1495,7 +1462,10 @@ describe('MonitorService - janitor cycle and circuit breaker', () => {
     await (svc as any).evaluateJanitor();
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
-      'info', 'system', expect.stringContaining('3.0 GB'), { stackName: undefined, actor: 'system:monitor' },
+      'info',
+      'system',
+      'This node has accumulated 3.0 GB of unused Docker data. Open Resources to reclaim space, or set up a Prune Node Resources schedule.',
+      { stackName: undefined, actor: 'system:monitor' },
     );
   });
 

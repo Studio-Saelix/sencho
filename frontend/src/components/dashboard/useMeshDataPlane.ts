@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { apiFetch } from '@/lib/api';
 import { useLicense } from '@/context/LicenseContext';
+import { useExperimental } from '@/hooks/useExperimental';
 import { visibilityInterval } from '@/lib/utils';
 import type { MeshDataPlaneStatus } from '@/types/mesh';
 
@@ -11,14 +12,17 @@ export interface MeshDataPlaneResult {
 
 /**
  * Poll `/mesh/status` for the local data-plane health so dashboard surfaces
- * can flag a down mesh without opening the Routing tab. The endpoint is
- * paid-gated, so the hook short-circuits on the free tier (no request
- * fired, no banner rendered). On the rare 403 from a paid tier (token
- * race during downgrade) we leave `status` at null. 30 s cadence matches
- * `useFleetHeartbeat` so the dashboard refresh feel is consistent.
+ * can flag a down mesh without opening the Routing tab. Discovery requires
+ * SENCHO_EXPERIMENTAL and an Admiral license; the hook short-circuits when
+ * either gate is off (no request fired, no banner rendered). On the rare
+ * 403 from a paid tier (token race during downgrade) we leave `status` at
+ * null. 30 s cadence matches `useFleetHeartbeat` so the dashboard refresh
+ * feel is consistent.
  */
 export function useMeshDataPlane(): MeshDataPlaneResult {
     const { isPaid } = useLicense();
+    const { experimental, experimentalReady } = useExperimental();
+    const canDiscover = experimentalReady && experimental && isPaid;
     const [status, setStatus] = useState<MeshDataPlaneStatus | null>(null);
     const [loading, setLoading] = useState(true);
 
@@ -41,14 +45,14 @@ export function useMeshDataPlane(): MeshDataPlaneResult {
     }, []);
 
     useEffect(() => {
-        if (!isPaid) {
+        if (!canDiscover) {
             setStatus(null);
             setLoading(false);
             return;
         }
         void fetchStatus();
         return visibilityInterval(() => { void fetchStatus(); }, 30_000);
-    }, [isPaid, fetchStatus]);
+    }, [canDiscover, fetchStatus]);
 
     return { status, loading };
 }

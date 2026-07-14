@@ -58,6 +58,9 @@ import { deriveMobileSurface, type MobileView } from './EditorLayout/mobile-surf
 import { BESPOKE_MOBILE_VIEWS } from './EditorLayout/mobile-treatments';
 import { CapabilityGate } from './CapabilityGate';
 import { HubOnlyGate } from './HubOnlyGate';
+import { HydrationTimingPanel } from './HydrationTimingPanel';
+import { useDeveloperMode } from '@/hooks/useDeveloperMode';
+import { markMilestone } from '@/lib/hydrationTiming';
 import type { SectionId } from './settings/types';
 import type { NotificationItem } from './dashboard/types';
 
@@ -151,6 +154,14 @@ export default function EditorLayout() {
   const { nodes, activeNode, setActiveNode, hasCapability, activeNodeMeta, isLoading: nodesLoading } = useNodes();
   const canOfferVolumeRemoval =
     activeNodeMeta?.capabilities.includes(STACK_DOWN_REMOVE_VOLUMES_CAPABILITY) === true;
+
+  // One-shot boot milestone: the app shell has mounted. Developer mode gates the
+  // hydration-timing overlay for the active node; it follows node switches.
+  useEffect(() => {
+    markMilestone('shell_committed');
+  }, []);
+  const developerMode = useDeveloperMode(activeNode?.id);
+  const hydrationOverlay = developerMode ? <HydrationTimingPanel /> : null;
 
   // Mirror activeNode.id in a ref so async handlers (e.g. CreateStackDialog's
   // post-create handoff) can detect a node switch that happened mid-flight.
@@ -1175,6 +1186,7 @@ export default function EditorLayout() {
             />
             {adoptDialogEl}
             {shellOverlaysEl}
+            {hydrationOverlay}
           </div>
         );
       }
@@ -1192,6 +1204,7 @@ export default function EditorLayout() {
           </div>
           {adoptDialogEl}
           {shellOverlaysEl}
+          {hydrationOverlay}
         </div>
       );
     })()}

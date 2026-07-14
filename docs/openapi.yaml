@@ -31,7 +31,7 @@ info:
     name: Sencho
     url: https://sencho.io
   license:
-    name: BSL 1.1
+    name: AGPL-3.0-only
     url: https://github.com/studio-saelix/sencho/blob/main/LICENSE
 
 servers:

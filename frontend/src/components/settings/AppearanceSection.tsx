@@ -251,7 +251,7 @@ export function AppearanceSection() {
                 ) : null}
                 <SettingsField
                     label="Reduced motion"
-                    helper="Minimizes interface animations and transitions (dialogs, menus, expand and collapse). First control to try for high idle GPU use on constrained graphics. Toasts are unaffected."
+                    helper="Minimizes interface animations and transitions (dialogs, menus, expand and collapse). Calm turns this on by default; choosing Signature turns it off. You can still toggle it independently afterward. First control to try for high idle GPU use on constrained graphics. Toasts are unaffected."
                 >
                     <TogglePill
                         checked={reducedMotion}
@@ -262,7 +262,7 @@ export function AppearanceSection() {
 
                 <SettingsField
                     label="Reduced effects"
-                    helper="Flattens card bevels, the accent glow, and chart gradients, and turns off glass blur with solid chrome fills. Optional secondary material simplification; not a substitute for Reduced motion on reported idle GPU cost."
+                    helper="Flattens card bevels, the accent glow, and chart gradients, and turns off glass blur with solid chrome fills. Also stops the decorative masthead rail animations even if Reduced motion is off. Optional secondary material simplification; not a substitute for Reduced motion on reported idle GPU cost."
                 >
                     <TogglePill
                         checked={effectiveReduced}

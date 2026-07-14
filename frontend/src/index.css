@@ -481,6 +481,14 @@ html[data-effects="reduced"] .animate-pulse {
   animation: none;
 }
 
+/* Decorative masthead rails: tied to reduced material effects (Calm, Readability,
+   or manual Reduced effects), not to data-motion. Motion remains independently
+   toggleable; turning Motion off does not restore these rails while effects are reduced. */
+html[data-effects="reduced"] .masthead-rail-glow,
+html[data-effects="reduced"] .masthead-rail-shimmer {
+  animation: none;
+}
+
 /* Heading utility: every operational title routes through this. Base sets only
    family + style (Signature parity); the Calm-only descendant rule lifts weight
    and tightens tracking for the sans face, beating any single tracking or weight

@@ -78,7 +78,7 @@ The table paginates at eight rows; chevrons appear in the header along with an `
 The Configuration Status card is the at-a-glance audit of every toggleable automation and security feature on the active node, so nothing is silently off when you expect it to be on.
 
 <Frame>
-  <img src="/images/dashboard/configuration-status.png" alt="Configuration Status card with four sections: Notifications (Notification agents, Alert rules, Notification routing all reading None), Automation (Auto-heal None, Auto-update '1 / 1', Webhooks None, Scheduled tasks '2 actives'), Security (MFA Off, SSO Off, Vulnerability scanning None), and Backups & Thresholds (Cloud Backup 'Sencho Cloud', Alert thresholds 'CPU 100% · RAM 100% · Disk 100%', Crash detection On)." />
+  <img src="/images/dashboard/configuration-status.png" alt="Configuration Status card with four sections: Notifications (Notification agents, Alert rules, Notification routing all reading None), Automation (Auto-heal None, Auto-update '1 / 1', Webhooks None, Scheduled tasks '2 actives'), Security (MFA Off, SSO Off, Vulnerability scanning None), and Backups & Thresholds (Recovery Vault active, Alert thresholds 'CPU 100% · RAM 100% · Disk 100%', Crash detection On)." />
 </Frame>
 
 The card is divided into four sections.
@@ -112,7 +112,7 @@ The card is divided into four sections.
 
 | Row | What it shows |
 |-----|---------------|
-| **Cloud Backup** | The active cloud backup target: `Sencho Cloud` (Admiral only), `Custom S3` (with ` (auto)` appended when auto-upload is enabled), or `Disabled` |
+| **Recovery Vault** | The active recovery target: `Recovery Vault` (Admiral), `Custom S3` (with ` (auto)` appended when auto-upload is enabled), or `Disabled` |
 | **Alert thresholds** | The current host thresholds, formatted `CPU x% · RAM y% · Disk z%`, or `Off` when host threshold alerts are disabled |
 | **Crash detection** | `On` when global container-crash notifications are enabled, `Off` otherwise |
 

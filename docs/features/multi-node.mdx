@@ -197,7 +197,7 @@ When you select a remote node in the switcher, the Settings hub filters to the p
 | Support | Per browser | Diagnostics bundle, docs links, contact channels. |
 | About | Per browser | Build metadata for whichever instance the page is loaded from. |
 
-Panels that manage control-plane concerns (Account, License, Users, SSO, API Tokens, Registries, Cloud Backup, Nodes, Routing, Webhooks) are hidden when a remote node is active.
+Panels that manage control-plane concerns (Account, Admiral Account, Users, SSO, API Tokens, Registries, Recovery Vault, Nodes, Routing, Webhooks) are hidden when a remote node is active.
 
 ## License enforcement across nodes
 
@@ -325,6 +325,6 @@ Sencho takes the opposite approach: infrastructure-level encryption (VPN, revers
     The control instance's license tier is authoritative for proxied requests, so a Community control plane gates Admiral features on every remote, even if the remote itself has its own Admiral license. Activate an Admiral license on the control instance to lift the gate fleet-wide. The reverse case (Admiral control plane, Community remote) works automatically because the control plane's tier is what the remote trusts.
   </Accordion>
   <Accordion title="Settings panels disappear when I switch to a remote">
-    That is intentional. Account, License, Users, SSO, API Tokens, Registries, Cloud Backup, Nodes, Routing, and Webhooks are control-plane concerns and are hidden while a remote node is selected. Switch back to **Local** from the node switcher to manage them. The full list of which panels are per-node, per-browser, and control-plane-only lives in the [What Settings apply per node](#what-settings-apply-per-node) table above.
+    That is intentional. Account, Admiral Account, Users, SSO, API Tokens, Registries, Recovery Vault, Nodes, Routing, and Webhooks are control-plane concerns and are hidden while a remote node is selected. Switch back to **Local** from the node switcher to manage them. The full list of which panels are per-node, per-browser, and control-plane-only lives in the [What Settings apply per node](#what-settings-apply-per-node) table above.
   </Accordion>
 </AccordionGroup>

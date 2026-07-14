@@ -22,6 +22,7 @@ import { springs } from '@/lib/motion';
 import { useLicense } from '@/context/LicenseContext';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
+import { useExperimental } from '@/hooks/useExperimental';
 import { PaidGate } from './PaidGate';
 import FleetSnapshots from './FleetSnapshots';
 import { FleetConfiguration } from './fleet/FleetConfiguration';
@@ -61,10 +62,14 @@ export function FleetView({
     fleetActiveTab: controlledTab,
     onFleetActiveTabChange,
 }: FleetViewProps) {
-    const { isPaid } = useLicense();
+    const { isPaid, licenseStatus } = useLicense();
     const { isAdmin } = useAuth();
     const { hasCapability } = useNodes();
+    const { experimental, experimentalReady } = useExperimental();
     const containerLabelsEnabled = hasCapability('container-label-inventory');
+    // Visual fail-closed while /meta loads; paid/admin gates still apply when on.
+    const canDiscoverRouting = experimentalReady && experimental && isPaid;
+    const canDiscoverSecrets = experimentalReady && experimental && isPaid && isAdmin;
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
@@ -90,6 +95,32 @@ export function FleetView({
         onFleetActiveTabChange?.(tab);
         if (controlledTab === undefined) setInternalTab(tab);
     };
+
+    // Fall back only after experimental readiness settles. When experimental is
+    // on, also wait for license (and admin for secrets) so a paid deep link is
+    // not rewritten to Overview while isPaid is still the cold-load false.
+    useEffect(() => {
+        if (!experimentalReady) return;
+        if (activeTab === 'routing') {
+            if (!experimental) {
+                setActiveTab('overview');
+                return;
+            }
+            if (licenseStatus !== 'ready') return;
+            if (!isPaid) setActiveTab('overview');
+            return;
+        }
+        if (activeTab === 'secrets') {
+            if (!experimental) {
+                setActiveTab('overview');
+                return;
+            }
+            if (licenseStatus !== 'ready') return;
+            if (!isPaid || !isAdmin) setActiveTab('overview');
+        }
+    // setActiveTab closes over onFleetActiveTabChange; listing deps explicitly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [experimentalReady, experimental, licenseStatus, isPaid, isAdmin, activeTab]);
 
     useEffect(() => {
         if (fleetUpdatesIntent) {
@@ -161,7 +192,7 @@ export function FleetView({
                                         <Send className="w-4 h-4 mr-1.5" />Deployments
                                     </TabsTrigger>
                                 </TabsHighlightItem>
-                            {isPaid && (
+                            {canDiscoverRouting && (
                                 <TabsHighlightItem value="routing">
                                     <TabsTrigger value="routing">
                                         <ArrowLeftRight className="w-4 h-4 mr-1.5" />Routing
@@ -178,7 +209,7 @@ export function FleetView({
                                     <Wrench className="w-4 h-4 mr-1.5" />Actions
                                 </TabsTrigger>
                             </TabsHighlightItem>
-                            {isPaid && isAdmin && (
+                            {canDiscoverSecrets && (
                                 <TabsHighlightItem value="secrets">
                                     <TabsTrigger value="secrets">
                                         <KeyRound className="w-4 h-4 mr-1.5" />Secrets
@@ -286,7 +317,7 @@ export function FleetView({
                 <TabsContent value="deployments">
                         <DeploymentsTab />
                     </TabsContent>
-                {isPaid && (
+                {canDiscoverRouting && (
                     <TabsContent value="routing">
                         <PaidGate>
                             <RoutingTab canManage={isAdmin} />
@@ -301,7 +332,7 @@ export function FleetView({
                         unfiltered node list rather than the overview-filtered view. */}
                     <FleetActionsTab nodes={overview.nodes} />
                 </TabsContent>
-                {isPaid && isAdmin && (
+                {canDiscoverSecrets && (
                     <TabsContent value="secrets">
                         <SecretsTab />
                     </TabsContent>

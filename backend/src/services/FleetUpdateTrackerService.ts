@@ -3,6 +3,8 @@ export interface UpdateTracker {
   startedAt: number;
   previousVersion: string | null;
   error?: string;
+  /** Machine-readable failure code returned by a remote update request. */
+  code?: string;
   /** Process start time of the remote node before the update was triggered. */
   previousProcessStart: number | null;
   /** True when the node became unreachable at least once during the update window. */
@@ -65,6 +67,7 @@ export class FleetUpdateTrackerService {
     previousVersion: string | null,
     previousProcessStart: number | null,
     error?: string,
+    code?: string,
   ): UpdateTracker {
     const now = Date.now();
     return {
@@ -74,6 +77,7 @@ export class FleetUpdateTrackerService {
       previousProcessStart,
       wasOffline: false,
       error,
+      code,
       resolvedAt: status !== 'updating' ? now : undefined,
     };
   }

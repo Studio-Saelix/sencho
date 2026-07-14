@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import axios from 'axios';
 import { DatabaseService } from './DatabaseService';
+import { HardenedEntitlementService } from './HardenedEntitlementService';
 import type {
     LicenseInfo,
     LicenseStatus,
@@ -231,6 +232,7 @@ export class LicenseService {
     private setLicenseStatus(status: LicenseStatus): void {
         DatabaseService.getInstance().setSystemState('license_status', status);
         this.cachedProxyHeaders = null;
+        HardenedEntitlementService.getInstance().invalidateCache();
     }
 
     /**

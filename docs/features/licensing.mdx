@@ -4,7 +4,7 @@ sidebarTitle: Licensing
 description: How Sencho licensing works, including trials, activation, and subscription management.
 ---
 
-Sencho uses an open-core model. **Community** is the complete self-hosted control plane, free forever with unlimited nodes. **Admiral** adds governance, security, and fleet control for teams.
+Sencho is [AGPLv3](https://github.com/studio-saelix/sencho/blob/main/LICENSE) open source. **Community** is the complete self-hosted Compose-first control plane, free forever with unlimited nodes. **Admiral** is Studio Saelix business assurance (priority support, managed continuity, governance depth, and release assurance) delivered as a paid plan.
 
 <Tip>
   *Our tier names are inspired by the meaning of Sencho (船長), because you're the captain of your container fleet.*
@@ -21,7 +21,7 @@ See [the pricing page](https://sencho.io/pricing) for current pricing.
 
 ### Feature breakdown
 
-**Community** is the complete self-hosted control plane. It includes:
+**Community** is the complete AGPLv3 self-hosted control plane. It includes:
 
 - Unlimited nodes, the Monaco compose editor, the full stack file explorer (browse, view, edit, upload, download, rename, chmod, delete; admin role for writes), and the App Store with 199+ one-click templates
 - Real-time container stats, global logs, the interactive network topology graph (Hub, Grouped, and Free layouts), node labels, and stack labels
@@ -47,17 +47,18 @@ See [the pricing page](https://sencho.io/pricing) for current pricing.
 - Two-factor authentication (TOTP plus backup codes)
 - Single sign-on with Custom OIDC (Authelia, Keycloak, Authentik, Zitadel, Pocket ID, or any spec-compliant OIDC provider) and preset providers for Google, GitHub, and Okta
 
-**Admiral** adds governance, security, and fleet control for teams. It includes everything in Community, plus:
+**Admiral** is the official business assurance plan from Studio Saelix. It includes everything in Community, plus:
 
+- **Assurance and support:** priority email support and Studio Saelix-backed continuity for production fleets
 - **Governance:** advanced RBAC roles (Deployer, Node Admin, Auditor), scoped permissions per stack or node, and audit log export (CSV, JSON), anomaly detection, and configurable retention beyond the recent window
-- **Security:** Fleet Secrets, AWS ECR registry credentials, and LDAP / Active Directory authentication
-- **Fleet operations:** Sencho Mesh (cross-node container networking)
-- **Managed continuity:** Sencho Cloud Backup (a managed, off-site snapshot allowance)
-- **Operator access:** the Host Console (a browser-based terminal on the Sencho host)
+- **Managed continuity:** Recovery Vault (a managed, off-site snapshot allowance)
+- **Hardened Build:** an Admiral image channel with published supply-chain assurance artifacts
+- **Directory integration:** LDAP / Active Directory authentication
+- **Current plan availability:** some product surfaces (including AWS ECR credentials) still require an Admiral plan today. That access rule is temporary availability, not the reason Admiral exists. Other operator surfaces may be limited-availability on a given instance and are documented on their own feature pages when enabled.
 
 ## Free trial
 
-Sencho offers a **14-day Admiral trial** so you can evaluate the flagship features (Host Console, Sencho Mesh, LDAP / Active Directory, audit log, advanced RBAC) with your real infrastructure before committing. The trial is offered on the monthly and annual Admiral plans.
+Sencho offers a **14-day Admiral trial** so you can evaluate Admiral assurance (priority support path, Recovery Vault, Hardened Build, governance depth including advanced RBAC, LDAP / Active Directory, and audit export) with your real infrastructure before committing. The trial is offered on the monthly and annual Admiral plans.
 
 To start a trial:
 
@@ -68,7 +69,7 @@ To start a trial:
 5. Your license key is emailed to you within a few minutes.
 6. Activate the key in the Sencho dashboard as described in [Activating your license](#activating-your-license).
 
-When your trial ends, the card you provided is automatically charged and your plan continues as a paid Admiral subscription. To avoid being charged, cancel from the **Manage subscription** button in **Settings → License** (or from your receipt email) any time before day 14.
+When your trial ends, the card you provided is automatically charged and your plan continues as a paid Admiral subscription. To avoid being charged, cancel from the **Manage subscription** button in **Settings → Admiral Account** (or from your receipt email) any time before day 14.
 
 <Tip>
   Fresh installs land on the **Community** tier until you activate a license key. All Community features (unlimited nodes, compose editor, global logs, alerts, Custom OIDC, and more) are available immediately.
@@ -76,7 +77,7 @@ When your trial ends, the card you provided is automatically charged and your pl
 
 ## Activating your license
 
-Open **Settings → License** in the Sencho dashboard. When the license is not active, the **Activate** section sits below the Plan card:
+Open **Settings → Admiral Account** in the Sencho dashboard. When the license is not active, the **Activate** section sits below the Plan card:
 
 <Frame>
   <img src="/images/licensing/license-activate-section.png" alt="The Activate section of the License page on a Community-tier instance, with a License key input field and an Activate button on the right" />
@@ -85,11 +86,11 @@ Open **Settings → License** in the Sencho dashboard. When the license is not a
 1. Paste your key into the **License key** field.
 2. Click **Activate**.
 
-Sencho validates the key and unlocks your tier. If activation fails, the toast surfaces the verbatim error; common causes are an invalid key, a typo, or an activation limit reached on a previous instance.
+Sencho validates the key and activates your plan. If activation fails, the toast surfaces the verbatim error; common causes are an invalid key, a typo, or an activation limit reached on a previous instance.
 
 ## The Plan section
 
-When a license is active, **Settings → License** opens on the **Plan** section. The page masthead at the top exposes three stat pills, and the section below lists the metadata for the active license.
+When a license is active, **Settings → Admiral Account** opens on the **Plan** section. The page masthead at the top exposes three stat pills, and the section below lists the metadata for the active license.
 
 <Frame>
   <img src="/images/licensing/license-admiral-active.png" alt="License page showing an active Sencho Admiral license, with the Plan section listing the Customer, Product, and masked License key fields and a Deactivate button" />
@@ -132,16 +133,16 @@ The License page renders differently depending on the license status:
 
 | Status | Plan section | Activate section | Pricing section |
 |--------|--------------|------------------|-----------------|
-| **Community** | `Sencho Community` with "Free tier with the core experience." | Visible | Visible |
+| **Community** | `Sencho Community` with "Community plan. Full AGPLv3 self-hosted control plane." | Visible | Visible |
 | **Trial** | `Sencho Admiral (Trial)` with a countdown chip | Visible (so a paid key can replace the trial) | Hidden |
 | **Active subscription** | Tier name with Customer, Product, License key, plus `Manage subscription` and `Deactivate` | Hidden | Hidden |
-| **Expired** | `Sencho Community` with "Your license has expired. Renew to restore paid features." and a destructive **Status: Expired** field | Visible | Visible |
+| **Expired** | `Sencho Community` with "Your Admiral license has expired. Renew to restore Admiral plan benefits." and a destructive **Status: Expired** field | Visible | Visible |
 | **Disabled** | `Sencho Community` with "Your license has been disabled. Contact support for assistance." | Visible | Visible |
 
 The **Pricing** section, when visible, holds a single **See pricing** button that opens [the pricing page](https://sencho.io/pricing) in a new tab so you can pick a tier and billing cadence.
 
 <Frame>
-  <img src="/images/licensing/license-community.png" alt="License page on a Community-tier instance, with the masthead showing SCOPE operator and PLAN community, then the Plan section reading 'Sencho Community · Free tier with the core experience.', the Activate section with the License key input, and the Pricing section with the See pricing button" />
+  <img src="/images/licensing/license-community.png" alt="License page on a Community-tier instance, with the masthead showing SCOPE operator and PLAN community, then the Plan section reading 'Sencho Community · Community plan. Full AGPLv3 self-hosted control plane.', the Activate section with the License key input, and the Pricing section with the See pricing button" />
 </Frame>
 
 ## Multi-node license enforcement
@@ -154,7 +155,7 @@ For details on how this works, see [License enforcement across nodes](/features/
 
 To transfer your license to a different instance:
 
-1. Go to **Settings → License**.
+1. Go to **Settings → Admiral Account**.
 2. Click **Deactivate** in the Plan section.
 3. On your new instance, paste the same license key into **License key** and click **Activate**.
 

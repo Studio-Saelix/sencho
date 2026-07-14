@@ -173,9 +173,6 @@ export class MonitorService {
     // causal classification). MonitorService no longer polls for container
     // exits; see backend/src/services/DockerEventService.ts.
 
-    // Sencho version check cooldown (6 hours between external API calls)
-    private lastVersionCheckAt = 0;
-    private static readonly VERSION_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
     private static readonly SENCHO_UPDATE_NOTIFIED_KEY = 'last_sencho_update_notified_version';
 
     private constructor() { }
@@ -342,7 +339,7 @@ export class MonitorService {
         // 3. (Decoupled) Docker janitor disk-usage check runs on its own
         //    slow cadence in evaluateJanitor(); see start() and F-6.
 
-        // 4. Sencho version update check (runs once per VERSION_CHECK_INTERVAL_MS)
+        // 4. Sencho version update check (cache-backed; dedup prevents re-notify)
         await this.checkSenchoVersion();
     }
 
@@ -442,15 +439,14 @@ export class MonitorService {
             const MIN_RECLAIMABLE_GB = 0.1;
 
             if (reclaimGb >= janitorLimitGb && reclaimGb >= MIN_RECLAIMABLE_GB) {
-                const registry = NodeRegistry.getInstance();
-                const localNode = registry.getNode(registry.getDefaultNodeId());
-                const nodeLabel = localNode?.name ?? 'this node';
+                // Node-neutral body: the hub bell badge attributes remotes.
+                // Embedding the local seed name ("Local") made fleet alerts look wrong.
                 await this.dispatchWithCooldown(
                     HOST_ALERT_KEYS.janitor,
                     JANITOR_COOLDOWN_MS,
                     'info',
                     'system',
-                    `Node "${nodeLabel}" has accumulated ${reclaimGb.toFixed(1)} GB of unused Docker data. Open Resources to reclaim space, or set up a Prune Node Resources schedule.`,
+                    `This node has accumulated ${reclaimGb.toFixed(1)} GB of unused Docker data. Open Resources to reclaim space, or set up a Prune Node Resources schedule.`,
                 );
             }
         } finally {
@@ -536,28 +532,15 @@ export class MonitorService {
     }
 
     /**
-     * Check GitHub/Docker Hub for a newer Sencho release and dispatch a
-     * one-shot notification. Uses getLatestVersionInfo() which wraps CacheService
-     * (30 min TTL when published, shorter while a GitHub release awaits registry
-     * publish + inflight dedup) so transient network blips do not cause gaps,
-     * and the check stays consistent with the Fleet update banner.
-     *
-     * The 6-hour cooldown gate prevents bell spam: it is only advanced on a
-     * SUCCESSFUL lookup. A failed lookup retries on the next eval cycle
-     * (30 seconds) instead of locking for 6 hours.
+     * Notify when a newer Sencho release is published. Shares Fleet's
+     * getLatestVersionInfo() cache (30 min published / 3 min publish-pending,
+     * plus inflight dedup). Dedup key last_sencho_update_notified_version
+     * prevents re-notify; lookup failures and publishPending skip so the
+     * next eval can retry.
      */
     private async checkSenchoVersion(): Promise<void> {
-        const sinceLast = Date.now() - this.lastVersionCheckAt;
-        if (sinceLast <= MonitorService.VERSION_CHECK_INTERVAL_MS) {
-            if (isDebugEnabled()) {
-                const nextInMs = MonitorService.VERSION_CHECK_INTERVAL_MS - sinceLast;
-                console.debug(`[Monitor:diag] Sencho version check in cooldown (next in ~${Math.round(nextInMs / 60000)}m)`);
-            }
-            return;
-        }
-
-        // Resolve from the packaged manifest: process.env.npm_package_version is
-        // only set by npm scripts, so it is undefined in Docker (node dist/index.js).
+        // getSenchoVersion() reads the packaged manifest; npm_package_version
+        // is unset under `node dist/index.js` (Docker).
         const currentVersion = getSenchoVersion();
         if (!isValidVersion(currentVersion)) {
             if (isDebugEnabled()) console.debug('[Monitor:diag] Sencho version unresolvable; skipping update notification');
@@ -566,55 +549,44 @@ export class MonitorService {
 
         const versionInfo = await getLatestVersionInfo();
         if (!versionInfo || !isValidVersion(versionInfo.version)) {
-            // Network failure (GitHub + Docker Hub both down, no stale cache).
-            // Do NOT advance the cooldown so the next eval retries.
             if (isDebugEnabled()) console.debug('[Monitor:diag] Latest Sencho version unresolvable; will retry next cycle');
             return;
         }
-
         if (versionInfo.publishPending) {
-            // GitHub announced a release before the image is pullable. Retry on
-            // the next eval cycle without advancing the 6-hour cooldown.
             if (isDebugEnabled()) console.debug('[Monitor:diag] Sencho release pending registry publish; will retry next cycle');
             return;
         }
 
-        this.lastVersionCheckAt = Date.now();
         const latest = versionInfo.version;
-
         const db = DatabaseService.getInstance();
         const stateKey = MonitorService.SENCHO_UPDATE_NOTIFIED_KEY;
-        const storedLastNotified = db.getSystemState(stateKey) || '';
+        let lastNotified = db.getSystemState(stateKey) || '';
 
-        // Self-heal: if the user has reached the previously-notified version,
-        // clear the dedup so future releases always trigger a fresh notification.
-        // This also recovers from stale state left over by the pre-586 "0.0.0" bug.
-        let effectiveLastNotified = storedLastNotified;
-        if (storedLastNotified && isValidVersion(storedLastNotified) && semver.gte(currentVersion, storedLastNotified)) {
-            if (isDebugEnabled()) console.debug(`[Monitor:diag] Clearing stale dedup key (running ${currentVersion} >= last notified ${storedLastNotified})`);
+        // Once running >= last notified, clear dedup so a later release can fire.
+        if (lastNotified && isValidVersion(lastNotified) && semver.gte(currentVersion, lastNotified)) {
+            if (isDebugEnabled()) console.debug(`[Monitor:diag] Clearing stale dedup key (running ${currentVersion} >= last notified ${lastNotified})`);
             db.setSystemState(stateKey, '');
-            effectiveLastNotified = '';
+            lastNotified = '';
         }
 
         if (!semver.gt(latest, currentVersion)) {
             if (isDebugEnabled()) console.debug(`[Monitor:diag] Running ${currentVersion} is up-to-date with latest ${latest}`);
             return;
         }
-
-        if (effectiveLastNotified === latest) {
+        if (lastNotified === latest) {
             if (isDebugEnabled()) console.debug(`[Monitor:diag] Already notified for Sencho ${latest}`);
             return;
         }
 
         try {
-            const notifier = NotificationService.getInstance();
-            await notifier.dispatchAlert('info', 'node_update_available',
-                `Sencho ${latest} is available (currently running ${currentVersion}). Visit the Fleet dashboard to update.`);
+            await NotificationService.getInstance().dispatchAlert(
+                'info',
+                'node_update_available',
+                `Sencho ${latest} is available (currently running ${currentVersion}). Visit the Fleet dashboard to update.`,
+            );
             db.setSystemState(stateKey, latest);
             if (isDebugEnabled()) console.debug(`[Monitor:diag] Dispatched version notification: ${currentVersion} -> ${latest}`);
         } catch (e) {
-            // dispatchAlert normally catches channel errors internally, but the
-            // history insert or WebSocket broadcast can throw on an unhealthy DB.
             console.error('[MonitorService] Failed to dispatch Sencho version notification:', e);
         }
     }

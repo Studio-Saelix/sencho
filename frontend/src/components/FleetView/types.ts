@@ -59,6 +59,8 @@ export interface NodeUpdateStatus {
     updateBlocked?: boolean;
     /** Human-readable block reason. Local node only. */
     updateBlockedReason?: string | null;
+    /** Coarse image channel from meta/update-status. Hardened digests still POST. */
+    imageChannel?: 'community' | 'hardened' | 'unknown' | null;
 }
 
 export type ViewMode = 'grid' | 'topology';

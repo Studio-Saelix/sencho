@@ -18,6 +18,7 @@ import { buildPolicyGateOptions } from '../helpers/policyGate';
 import { summarizeBlockReasons } from '../utils/policy-risk';
 import { isValidStackName } from '../utils/validation';
 import { sanitizeForLog } from '../utils/safeLog';
+import { logDebugTiming } from '../utils/requestTiming';
 import { getErrorMessage } from '../utils/errors';
 
 // Fleet aggregation cache: 2-minute TTL, shared across dashboard tabs.
@@ -41,12 +42,26 @@ imageUpdatesRouter.get('/', authMiddleware, (req: Request, res: Response): void 
 // readiness view. Auth-only, matching GET /; the boolean GET / is left intact so
 // the cross-version fleet aggregation contract is unaffected.
 imageUpdatesRouter.get('/detail', authMiddleware, (req: Request, res: Response): void => {
+  const startedAt = Date.now();
+  let outcome: 'ok' | 'error' = 'ok';
+  let count = 0;
   try {
     const nodeId = req.nodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
-    res.json(DatabaseService.getInstance().getStackUpdateDetail(nodeId));
+    const detail = DatabaseService.getInstance().getStackUpdateDetail(nodeId);
+    count = Object.keys(detail).length;
+    res.json(detail);
   } catch (error) {
+    outcome = 'error';
     console.error('Failed to fetch image update detail:', error);
     res.status(500).json({ error: 'Failed to fetch image update detail' });
+  } finally {
+    logDebugTiming('[ImageUpdates:debug]', {
+      route: 'GET /detail',
+      nodeId: req.nodeId,
+      count,
+      elapsedMs: Date.now() - startedAt,
+      outcome,
+    });
   }
 });
 
@@ -66,8 +81,23 @@ imageUpdatesRouter.post('/refresh', authMiddleware, (req: Request, res: Response
   }
 });
 
-imageUpdatesRouter.get('/status', authMiddleware, (_req: Request, res: Response): void => {
-  res.json(ImageUpdateService.getInstance().getStatus());
+imageUpdatesRouter.get('/status', authMiddleware, (req: Request, res: Response): void => {
+  const startedAt = Date.now();
+  let outcome: 'ok' | 'error' = 'ok';
+  try {
+    res.json(ImageUpdateService.getInstance().getStatus());
+  } catch (error) {
+    outcome = 'error';
+    console.error('Failed to fetch image update status:', error);
+    res.status(500).json({ error: 'Failed to fetch image update status' });
+  } finally {
+    logDebugTiming('[ImageUpdates:debug]', {
+      route: 'GET /status',
+      nodeId: req.nodeId,
+      elapsedMs: Date.now() - startedAt,
+      outcome,
+    });
+  }
 });
 
 /**

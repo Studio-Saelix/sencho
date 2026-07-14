@@ -1,11 +1,18 @@
 import { useEffect, useState } from 'react';
 import { apiFetch } from '@/lib/api';
 
+export interface ExperimentalDiscovery {
+  /** True when SENCHO_EXPERIMENTAL === 'true' on the gateway. */
+  experimental: boolean;
+  /** True once /meta has settled (success or fail-closed). */
+  experimentalReady: boolean;
+}
+
 // Module-scope cache: read once at boot, do not invalidate. The
 // SENCHO_EXPERIMENTAL flag is read from the gateway node's process
 // env at request time, so it cannot flip mid-session without a
 // restart. If the initial fetch fails the value sticks at false until
-// a full reload; that is acceptable for a dev-only flag.
+// a full reload; that is acceptable for a discovery-only flag.
 let cached: boolean | null = null;
 let inflight: Promise<boolean> | null = null;
 
@@ -37,16 +44,28 @@ async function fetchExperimental(): Promise<boolean> {
   return inflight;
 }
 
-export function useExperimental(): boolean {
-  const [value, setValue] = useState<boolean>(cached ?? false);
+/** Test-only: reset the module cache between vitest cases. */
+export function __resetExperimentalCacheForTests(): void {
+  cached = null;
+  inflight = null;
+}
+
+export function useExperimental(): ExperimentalDiscovery {
+  const [state, setState] = useState<ExperimentalDiscovery>(() =>
+    cached !== null
+      ? { experimental: cached, experimentalReady: true }
+      : { experimental: false, experimentalReady: false },
+  );
+
   useEffect(() => {
     let active = true;
     fetchExperimental().then((next) => {
-      if (active) setValue(next);
+      if (active) setState({ experimental: next, experimentalReady: true });
     });
     return () => {
       active = false;
     };
   }, []);
-  return value;
+
+  return state;
 }

@@ -37,7 +37,7 @@ const META_ONLINE_OUTDATED: RemoteMeta = {
   updateError: null,
   online: true,
   imagePinKind: null,
-  updateBlocked: false,
+  updateBlocked: false, imageChannel: null,
 };
 
 const META_OFFLINE: RemoteMeta = {
@@ -47,7 +47,7 @@ const META_OFFLINE: RemoteMeta = {
   updateError: null,
   online: false,
   imagePinKind: null,
-  updateBlocked: false,
+  updateBlocked: false, imageChannel: null,
 };
 
 const META_NO_SELF_UPDATE: RemoteMeta = {
@@ -255,7 +255,7 @@ describe('GET /api/fleet/update-status (remote-meta cache invalidation)', () => 
     mockTargetForPilot();
     mockCompareTargetFetch();
     // Remote now reports a different version than before the update (signal 1).
-    mockMeta({ version: '0.99.0', capabilities: ['stacks'], startedAt: 2, updateError: null, online: true, imagePinKind: null, updateBlocked: false });
+    mockMeta({ version: '0.99.0', capabilities: ['stacks'], startedAt: 2, updateError: null, online: true, imagePinKind: null, updateBlocked: false, imageChannel: null });
 
     const tracker = FleetUpdateTrackerService.getInstance();
     tracker.set(proxyNodeId, tracker.create('updating', '0.83.0', null));
@@ -272,7 +272,7 @@ describe('GET /api/fleet/update-status (remote-meta cache invalidation)', () => 
   it('does not drop the cache on a steady-state completed poll (transition guard)', async () => {
     mockTargetForPilot();
     mockCompareTargetFetch();
-    mockMeta({ version: '0.99.0', capabilities: ['stacks'], startedAt: 2, updateError: null, online: true, imagePinKind: null, updateBlocked: false });
+    mockMeta({ version: '0.99.0', capabilities: ['stacks'], startedAt: 2, updateError: null, online: true, imagePinKind: null, updateBlocked: false, imageChannel: null });
 
     // Already completed before this poll: no transition, so no invalidation.
     const tracker = FleetUpdateTrackerService.getInstance();

@@ -22,6 +22,7 @@ import {
   normalizeHiddenView,
   type ReachabilityContext,
 } from '@/lib/routing/reachability';
+import { useExperimental } from '@/hooks/useExperimental';
 
 export type { ActiveView };
 export { HUB_ONLY_VIEWS };
@@ -44,6 +45,7 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
   const { isPaid, licenseStatus } = useLicense();
   const { activeNode } = useNodes();
   const isRemote = activeNode?.type === 'remote';
+  const { experimental, experimentalReady } = useExperimental();
 
   const initialRoute = readUrlRouteState();
 
@@ -65,7 +67,9 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     containerLabelsEnabled,
     permissionsStatus,
     licenseStatus,
-  }), [isAdmin, isPaid, can, isRemote, hasFleetCapability, containerLabelsEnabled, permissionsStatus, licenseStatus]);
+    experimental,
+    experimentalReady,
+  }), [isAdmin, isPaid, can, isRemote, hasFleetCapability, containerLabelsEnabled, permissionsStatus, licenseStatus, experimental, experimentalReady]);
 
   const handleOpenSettings = useCallback((section?: SectionId) => {
     if (section) setSettingsSection(section);
@@ -142,14 +146,17 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     if (!isViewHidden('scheduled-ops', reachCtx)) {
       items.push({ value: 'scheduled-ops', label: 'Schedules', icon: Clock });
     }
-    if (!isViewHidden('host-console', reachCtx)) {
+    // Visual discovery fail-closed: omit Console until /meta settles and the
+    // flag is on. URL normalization still waits on experimentalReady inside
+    // isViewHidden so enabled deep links are not rewritten during cold load.
+    if (experimentalReady && experimental && !isViewHidden('host-console', reachCtx)) {
       items.push({ value: 'host-console', label: 'Console', icon: Terminal });
     }
     if (!isViewHidden('audit-log', reachCtx)) {
       items.push({ value: 'audit-log', label: 'Audit', icon: ScrollText });
     }
     return items;
-  }, [reachCtx]);
+  }, [reachCtx, experimentalReady, experimental]);
 
   useEffect(() => {
     if (!authzReady(reachCtx)) return;

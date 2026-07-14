@@ -1,6 +1,7 @@
 import { Suspense, lazy, type ReactNode } from 'react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/context/AuthContext';
+import { useExperimental } from '@/hooks/useExperimental';
 import { PaidGate } from '../PaidGate';
 import { CapabilityGate } from '../CapabilityGate';
 import { HubOnlyGate } from '../HubOnlyGate';
@@ -143,6 +144,7 @@ export function ViewRouter({
     isFileLoading,
 }: ViewRouterProps): ReactNode {
     const { can } = useAuth();
+    const { experimental, experimentalReady } = useExperimental();
     if (activeView === 'settings') {
         return (
             <SettingsPage
@@ -178,9 +180,11 @@ export function ViewRouter({
         );
     }
     if (activeView === 'host-console') {
-        // Mirror the backend RBAC gate (system:console, admin-only). The nav
-        // item is already admin-gated; this stops a non-admin who reaches the
-        // view another way from mounting a console that the server will 403.
+        // Discovery + paid/RBAC: hide until experimental discovery is on,
+        // then mirror backend gates (system:console admin-only + PaidGate +
+        // capability). Nav is already gated the same way; this stops a
+        // deep link from mounting a console the operator cannot use.
+        if (!experimentalReady || !experimental) return null;
         if (!can('system:console')) return null;
         return (
             <PaidGate>

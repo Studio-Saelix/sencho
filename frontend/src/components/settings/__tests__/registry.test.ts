@@ -55,9 +55,11 @@ describe('settings registry', () => {
         }
     });
 
-    it('gates the Fleet Mesh section to admins so the sidebar entry and panel both hide', () => {
+    it('gates the Fleet section to admins so the sidebar entry and panel both hide', () => {
         const fleetMesh = SETTINGS_ITEMS.find(i => i.id === 'fleet-mesh');
         expect(fleetMesh?.adminOnly).toBe(true);
+        expect(fleetMesh?.description?.toLowerCase()).not.toContain('mesh');
+        expect(fleetMesh?.keywords?.some(k => /mesh|sencho_mesh|routing/i.test(k))).toBe(false);
     });
 
     it('splits Developer into Developer Diagnostics and Data Retention under Operations', () => {

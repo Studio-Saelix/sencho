@@ -19,11 +19,11 @@ export type AccentId =
 export type UiFont = 'Geist' | 'IBM Plex Sans' | 'Hanken Grotesk';
 export type MonoFont = 'Geist Mono' | 'IBM Plex Mono' | 'Fira Code';
 
-// Calm / Readability refresh. `visualStyle` is a macro that writes the three
-// sub-axes below; `readability` is an independent sticky master that forces the
-// calm resolution at apply time without mutating the stored sub-axes. The member
-// tuples are the single source of truth for both the union and its runtime guard
-// (mirrors the THEME_MODES/ACCENTS convention below).
+// Calm / Readability refresh. `visualStyle` is a macro that writes heading,
+// chart, reducedEffects, and reducedMotion; `readability` is an independent
+// sticky master that forces the calm resolution at apply time without mutating
+// the stored sub-axes. The member tuples are the single source of truth for both
+// the union and its runtime guard (mirrors the THEME_MODES/ACCENTS convention).
 const VISUAL_STYLES = ['calm', 'signature'] as const;
 const HEADING_STYLES = ['clean', 'signature'] as const;
 const CHART_STYLES = ['muted', 'heat', 'signature'] as const;
@@ -44,8 +44,9 @@ export interface ThemeState {
     headingStyle: HeadingStyle;
     chartStyle: ChartStyle;
     reducedEffects: boolean;
-    /** Independent of reducedEffects (surface flattening): minimizes UI motion
-     *  (dialogs, menus, overlays, transitions). Not part of a visual-style preset. */
+    /** Minimizes UI motion (dialogs, menus, overlays, transitions). Written by
+     *  Calm/Signature visual-style preset apply (true/false); still independently
+     *  toggleable afterward and excluded from activeVisualStyle card matching. */
     reducedMotion: boolean;
     readability: boolean;
 }
@@ -102,17 +103,19 @@ export const TYPE_SIZES: { id: string; scale: number; px: number }[] = [
 const STORAGE_KEY = 'sencho.appearance.theme';
 const LEGACY_KEY = 'sencho-theme';
 
-// The five appearance axes the Calm/Signature refresh adds, as two presets.
-// `setVisualStyle` writes the macro + the three sub-axes (not readability);
-// migration fills missing fields on an existing stored object from SIGNATURE so
-// returning users look unchanged, while a fresh user gets CALM via DEFAULT_STATE.
+// Appearance axes the Calm/Signature macros write (not readability).
+// `setVisualStyle` applies heading, chart, reducedEffects, and reducedMotion.
+// Card matching (activeVisualStyle) still ignores reducedMotion so toggling
+// Motion alone does not deselect Calm/Signature. Migration fills missing fields
+// on an existing stored object from SIGNATURE so returning users look unchanged;
+// a fresh user gets CALM via DEFAULT_STATE (including reducedMotion: true).
 export const CALM_PRESET = {
     visualStyle: 'calm', headingStyle: 'clean', chartStyle: 'muted',
-    reducedEffects: true, readability: false,
+    reducedEffects: true, reducedMotion: true, readability: false,
 } as const;
 export const SIGNATURE_PRESET = {
     visualStyle: 'signature', headingStyle: 'signature', chartStyle: 'signature',
-    reducedEffects: false, readability: false,
+    reducedEffects: false, reducedMotion: false, readability: false,
 } as const;
 
 /** Which visual-style preset the stored sub-axes currently match, or null for a
@@ -139,9 +142,6 @@ const DEFAULT_STATE: ThemeState = {
     theme: 'dim', accent: 'cyan', borderBoost: 0, glow: 0.16, contrast: 0,
     uiFont: 'Geist', monoFont: 'Geist Mono', typeScale: 1,
     ...CALM_PRESET,
-    // Independent of the visual-style presets; defaults off so the OS
-    // prefers-reduced-motion still governs via MotionConfig's 'user' mode.
-    reducedMotion: false,
 };
 
 const MODE_IDS = new Set<string>(THEME_MODES.map((m) => m.id));
@@ -206,7 +206,7 @@ function readStored(): ThemeState {
                     headingStyle: isHeadingStyle(p.headingStyle) ? p.headingStyle : SIGNATURE_PRESET.headingStyle,
                     chartStyle: isChartStyle(p.chartStyle) ? p.chartStyle : SIGNATURE_PRESET.chartStyle,
                     reducedEffects: isBool(p.reducedEffects) ? p.reducedEffects : SIGNATURE_PRESET.reducedEffects,
-                    reducedMotion: isBool(p.reducedMotion) ? p.reducedMotion : false,
+                    reducedMotion: isBool(p.reducedMotion) ? p.reducedMotion : SIGNATURE_PRESET.reducedMotion,
                     readability: isBool(p.readability) ? p.readability : SIGNATURE_PRESET.readability,
                 };
             }
@@ -373,8 +373,9 @@ export function useTheme() {
     const setUiFont = useCallback((uiFont: UiFont) => setState({ uiFont }), []);
     const setMonoFont = useCallback((monoFont: MonoFont) => setState({ monoFont }), []);
     const setTypeScale = useCallback((typeScale: number) => setState({ typeScale }), []);
-    // Macro: writes visualStyle + the three sub-axes from the preset. It does
-    // NOT touch readability, which stays a sticky master the user releases by hand.
+    // Macro: writes visualStyle + preset sub-axes including reducedMotion.
+    // Does NOT touch readability (sticky master the user releases by hand).
+    // Re-applying Signature clears Motion; re-applying Calm enables it.
     const setVisualStyle = useCallback((visualStyle: VisualStyle) => {
         const preset = visualStyle === 'calm' ? CALM_PRESET : SIGNATURE_PRESET;
         setState({
@@ -382,6 +383,7 @@ export function useTheme() {
             headingStyle: preset.headingStyle,
             chartStyle: preset.chartStyle,
             reducedEffects: preset.reducedEffects,
+            reducedMotion: preset.reducedMotion,
         });
     }, []);
     const setHeadingStyle = useCallback((headingStyle: HeadingStyle) => setState({ headingStyle }), []);
