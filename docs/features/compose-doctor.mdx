@@ -5,7 +5,7 @@ description: Run a preflight check on a stack before you deploy. Compose Doctor 
 
 The **Doctor** tab in the right-hand **Anatomy** panel answers one question before you apply a change: *what will Docker actually run, and is it safe on this node?* Compose Doctor renders the effective Compose model (the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied) and then runs a set of deterministic checks against it and the live Docker state on the node it would deploy to.
 
-The check is advisory. It never blocks a deploy and never changes a stack. It runs on demand: press **run preflight** and Sencho renders the model, runs all 31 checks, and stores the result so the tab still shows it the next time you open the stack.
+The check is advisory: on its own it never blocks a deploy or changes a stack. (One rule is the exception: see [Self-management](#self-management) below for the one case where Sencho actively blocks an action, independent of this report.) It runs on demand: press **run preflight** and Sencho renders the model, runs all 32 checks, and stores the result so the tab still shows it the next time you open the stack.
 
 ## Where to find it
 
@@ -24,7 +24,7 @@ Every preflight run follows three steps:
 
 1. **Render** the effective model. Sencho calls `docker compose config` on the stack, which resolves all variable interpolation, `include` directives, profile overrides, and `env_file` references into a single, normalized model.
 2. **Snapshot** live Docker state. Sencho reads which host ports are in use, which containers are running, and which named networks and volumes exist on the target node.
-3. **Run 31 deterministic rules** against the combination. Each rule is pure and produces zero or more findings with a severity, a message, and a suggested fix.
+3. **Run 32 deterministic rules** against the combination. Each rule is pure and produces zero or more findings with a severity, a message, and a suggested fix.
 
 Sencho stores exactly one run per stack per node, so a new run immediately overwrites the previous one; there is no history.
 
@@ -54,14 +54,15 @@ The summary card at the top of the Doctor tab reflects the overall outcome of th
 | **No run yet** | Preflight has never been triggered for this stack on this node | Placeholder with "no preflight yet" and a Stethoscope icon |
 | **All clear** | Model rendered; no findings | Green card with "No issues found in the effective model." |
 | **Cannot render** | `docker compose config` failed | Red card with the (redacted) render error message |
-| **Blocker** | Highest finding is a blocker | Red card with a count of findings by severity |
-| **High risk** | Highest finding is high risk | Amber card with a count of findings by severity |
-| **Warning** | Highest finding is a warning | Blue card with a count of findings by severity |
-| **Info** | All findings are informational | Muted card with a count of findings by severity |
+| **Blocker** | Highest active finding is a blocker | Red card with a count of active findings by severity |
+| **High risk** | Highest active finding is high risk | Amber card with a count of active findings by severity |
+| **Warning** | Highest active finding is a warning | Blue card with a count of active findings by severity |
+| **Info** | All active findings are informational | Muted card with a count of active findings by severity |
+| **Acknowledged** | Every finding from the last run has been acknowledged | Muted card noting all findings are acknowledged |
 
-The summary card also shows when the run happened and who triggered it: "ran 5 minutes ago by admin".
+The summary card also shows when the run happened and who triggered it: "ran 5 minutes ago by admin". If any findings are acknowledged, the line adds a count: "3 active (1 blocker · 2 warning) · 2 acknowledged".
 
-A small colored dot appears on the **Doctor** tab label when the last run found blockers (red) or high-risk issues (amber). Opening the tab removes neither the dot nor the findings; run preflight again after fixing the issues to clear them.
+A small colored dot appears on the **Doctor** tab label when the last run's active findings include a blocker (red) or a high-risk finding (amber). Click the **X** on the summary card to dismiss it; this also clears the tab dot. The dismissal is remembered per stack and node, and clears itself automatically the moment the finding set changes (a rule clearing, a new rule firing, or a severity change), so a stale dismissal can never hide a genuinely new problem. It never clears just by opening the tab or re-running preflight to the same result, and it does not sync across browsers or teammates: it is stored in your browser only.
 
 <Frame>
   <img
@@ -72,7 +73,7 @@ A small colored dot appears on the **Doctor** tab label when the last run found 
 
 ## What it checks
 
-All 31 rules are listed below, organized by topic.
+All 32 rules are listed below, organized by topic.
 
 ### Model rendering
 
@@ -154,20 +155,34 @@ These rules activate when the stack publishes at least one host port. They use t
 | Published port not in documented access URLs | Warning | A host port is not referenced by any access URL recorded in the Stack Dossier; the documentation may be stale. |
 | Has reverse-proxy labels but no documented URL | Warning | A service carries Traefik, Caddy, or similar reverse-proxy labels but has no documented access URL or reverse-proxy intent set. |
 
+### Self-protection
+
+| Rule | Severity | What it detects |
+|------|----------|----------------|
+| This stack is the running Sencho instance | Warning | Sencho discovered its own compose project among the managed stacks. See [Self-management](#self-management) below. |
+
 ## Exposure intent checks
 
-Five of the 30 rules cross-reference the stack's exposure intent and the access URLs documented in the Stack Dossier. These rules only fire when the stack publishes at least one host port.
+Five of the 32 rules cross-reference the stack's exposure intent and the access URLs documented in the Stack Dossier. These rules only fire when the stack publishes at least one host port.
 
 To resolve exposure-related findings:
 
-- **Set an exposure intent** in the [Compose Networking](/features/compose-networking) tab. Options are: internal (no host access), same-node (loopback only), LAN, reverse proxy (traffic arrives via a proxy), and public.
+- **Set an exposure intent** in the [Compose Networking](/features/compose-networking) tab. Options are: internal (no host access), same-node (loopback only), LAN, reverse proxy (traffic arrives via a proxy), temporary (a short-lived exposure, tracked but not otherwise enforced), and public.
 - **Document access URLs** in the [Stack Dossier](/features/stack-dossier). When a dossier URL references a host port, the port-vs-dossier rule uses that to confirm the port is intentional and expected.
 
 Once an intent and access URLs are set, Sencho can detect when the configuration contradicts the documented intent, making future runs more precise.
 
+## Self-management
+
+Sencho recognizes when the stack it is checking is its own running compose project, and adds a warning finding: **This stack is the running Sencho instance**.
+
+This is the one place Compose Doctor's findings connect to an enforcement that is not advisory. Independent of this report, and independent of whether the finding is acknowledged, Sencho refuses generic **deploy, update, stop, down, and delete** actions on its own compose project, because any of them could recreate or remove the dashboard you are using to manage it. Attempting one of those actions returns an error explaining why; Compose Doctor's finding is the heads-up that surfaces the same fact before you try.
+
+To update Sencho itself, use **Fleet -> Node Update** instead of the stack's own update action. To manage the stack normally (for example, to deliberately restructure it), move its compose project outside the node's configured Compose directory first.
+
 ## Node-state checks and graceful degradation
 
-Six of the 30 rules require live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision) and one is "Host port is already in use" in Port conflicts. All six are skipped when the Docker daemon is unreachable.
+Six of the 32 rules require live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision) and one is "Host port is already in use" in Port conflicts. All six are skipped when the Docker daemon is unreachable.
 
 When the daemon is unreachable:
 
@@ -180,13 +195,15 @@ A partial run (where node-state checks were skipped) is stored and displayed lik
 
 ## Health-Gated Updates
 
-The last stored preflight result feeds directly into the [Health-Gated Updates](/features/health-gated-updates) readiness check. When you trigger **Update** from a stack, Sencho opens a readiness dialog before pulling anything. The dialog reads your most recent preflight result:
+The last stored preflight result feeds directly into the [Health-Gated Updates](/features/health-gated-updates) readiness check as one of several signals. When you trigger **Update** from a stack, Sencho opens a readiness dialog before pulling anything. The dialog reads your most recent preflight result (active findings only; acknowledged findings are excluded):
 
-- A blocker finding sets the update verdict to **Blocked**.
-- One or more high-risk findings set the verdict to **Review required**.
-- Preflight that has never run is noted in the dialog without dragging the verdict down.
+- A blocker finding sets the update verdict to **blocked**.
+- A model that failed to render, or one or more high-risk findings, sets the verdict to **review required**.
+- Warning-only findings do not block the verdict on their own, but keep it from reading a clean **ready**; combined with an otherwise clean update they surface as **ready with warnings**.
+- A clean pass (no active findings, or only info-level ones) contributes a positive signal toward **ready**.
+- Preflight that has never run is noted in the dialog as **unknown** for that signal, without dragging the overall verdict down by itself.
 
-Running preflight before updating gives the readiness check the most accurate signal. A clean pass after resolving findings contributes a positive readiness signal for that stack.
+Other signals (current container health, the pending image change, the rollback backup, and disk space) are combined with this one; the dialog's overall verdict reflects the worst signal across all of them, not preflight alone. Running preflight before updating gives the readiness check the most accurate signal for this stack.
 
 ## Running preflight
 
@@ -224,7 +241,7 @@ Acknowledgements are stored per node, stack, rule, and service. They do not sync
 <Frame>
   <img
     src="/images/compose-doctor/compose-doctor-findings.png"
-    alt="The Doctor tab showing an amber high-risk summary card with counts for high-risk and warning findings, followed by grouped finding rows each showing a service tag, title, explanation, suggested fix, and source file path"
+    alt="The Doctor tab showing an amber high-risk summary card with a dismiss X button, run time, and counts for high-risk and warning findings, followed by grouped finding rows each showing a service tag, title, explanation, suggested fix, and an acknowledge button, grouped under HIGH RISK and WARNING section headers"
   />
 </Frame>
 
@@ -236,7 +253,8 @@ There is no tier gate: Compose Doctor is available on all plans.
 
 ## Limitations
 
-- **Advisory only.** Compose Doctor never blocks a deploy or changes any stack configuration. Act on findings or ignore them; the choice is always yours.
+- **Advisory only, with one exception.** Compose Doctor's report never blocks a deploy or changes any stack configuration; act on findings or ignore them. The one exception is the self-management guard: Sencho refuses generic deploy, update, stop, down, and delete actions on its own compose project regardless of whether that finding is acknowledged. See [Self-management](#self-management).
+- **Dismissing the summary is local to your browser.** The **X** on the summary card and the Doctor tab dot share a per-stack, per-node dismissal stored in your browser's local storage. It is not synced across devices or between teammates, so a dismissal you make is invisible to anyone else looking at the same stack.
 - **Bind-mount checks are scoped.** Only paths that resolve inside the node's Compose base directory can be checked for existence and ownership. Absolute host paths outside that directory (such as `/mnt/media`) are not reported as missing.
 - **Healthcheck rule cannot see image-level healthchecks.** The no-healthcheck rule fires when the Compose model does not declare a healthcheck. Many images define one internally that Sencho cannot see from the rendered model; treat the finding as a prompt to confirm the image provides one.
 - **One run stored per node.** There is no history. Each new run overwrites the previous one for that stack on that node.
@@ -273,6 +291,12 @@ There is no tier gate: Compose Doctor is available on all plans.
   </Accordion>
   <Accordion title="I want to see who ran preflight last">
     The summary card shows the username and relative time: "ran 5 minutes ago by admin". This reflects the most recent run stored for this stack on the currently active node.
+  </Accordion>
+  <Accordion title="The report warns that this stack is the running Sencho instance">
+    Sencho detected that the stack you are checking is its own compose project. Generic deploy, update, stop, down, and delete actions are refused for this stack no matter what the preflight report says, because any of them could recreate or remove the dashboard you are using right now. Update Sencho from **Fleet -> Node Update** instead. See [Self-management](#self-management).
+  </Accordion>
+  <Accordion title="I dismissed a finding but it still shows on another machine or for a teammate">
+    Dismissing the summary card (the **X** button) is stored in your browser's local storage, keyed to the stack and node. It does not sync across devices, browsers, or user accounts, so a dismissal on your machine has no effect on what anyone else sees.
   </Accordion>
 </AccordionGroup>
 
