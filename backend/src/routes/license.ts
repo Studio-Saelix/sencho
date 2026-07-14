@@ -167,11 +167,11 @@ systemUpdateRouter.post('/update', async (req: Request, res: Response): Promise<
     return;
   }
   res.status(202).json({ message: 'Update initiated. The server will restart shortly.' });
-  res.on('finish', () => {
-    setTimeout(() => {
-      ImageOperationService.getInstance().executeClaimedCommunityUpdate({ targetVersion }).catch(error => {
-        console.error('[ImageOperation] Unexpected community update failure:', error);
-      });
-    }, 500);
-  });
+  // Schedule unconditionally: client abort can fire only `close` without `finish`,
+  // which would otherwise leave the claimed operation stuck in pending_pull.
+  setTimeout(() => {
+    ImageOperationService.getInstance().executeClaimedCommunityUpdate({ targetVersion }).catch(error => {
+      console.error('[ImageOperation] Unexpected community update failure:', error);
+    });
+  }, 500);
 });

@@ -210,6 +210,8 @@ class SelfUpdateService {
   private canSelfUpdate = false;
   private composeContext: ComposeContext | null = null;
   private lastUpdateError: string | null = null;
+  /** Stashed when the helper exits before any onceHelperExit listener is registered. */
+  private pendingHelperExitError: string | undefined = undefined;
   private helperExitListeners: Array<(error: string | null) => void> = [];
   private pinCache: { info: ResolvedComposeImage | null; at: number } | null = null;
 
@@ -313,6 +315,18 @@ class SelfUpdateService {
 
   /** Register a one-shot listener for the helper container's execFile callback. */
   onceHelperExit(listener: (error: string | null) => void): void {
+    if (this.pendingHelperExitError !== undefined) {
+      const error = this.pendingHelperExitError;
+      this.pendingHelperExitError = undefined;
+      queueMicrotask(() => {
+        try {
+          listener(error);
+        } catch (listenerError) {
+          console.error('[SelfUpdate] Helper exit listener failed:', listenerError);
+        }
+      });
+      return;
+    }
     this.helperExitListeners.push(listener);
   }
 
@@ -434,6 +448,7 @@ class SelfUpdateService {
       ...(options?.dockerConfigPath ? { DOCKER_CONFIG: options.dockerConfigPath } : {}),
     };
     this.lastUpdateError = null;
+    this.pendingHelperExitError = undefined;
 
     try { fs.unlinkSync(UPDATE_ERROR_FILE); } catch { /* absent is the steady state */ }
     try { fs.unlinkSync(STAGED_PATCH_FILE); } catch { /* absent is the steady state */ }
@@ -552,13 +567,21 @@ class SelfUpdateService {
 
     // Callback may never fire on success (we die mid-call during recreate);
     // that is fine because the restart itself is the success signal.
+    // Surviving a clean helper exit means recreate did not take over this process.
     execFile('docker', args, { env }, (err, _stdout, stderr) => {
       if (err) {
         const stderrText = stderr?.toString().trim();
         this.lastUpdateError = stderrText || err.message || 'Helper container failed';
         console.error('[SelfUpdate] Helper container failed:', this.lastUpdateError);
+      } else if (!this.lastUpdateError) {
+        this.lastUpdateError = 'Helper container exited without restarting Sencho';
+        console.error('[SelfUpdate] Helper container exited cleanly without restarting Sencho');
       }
       const listeners = this.helperExitListeners.splice(0);
+      if (listeners.length === 0) {
+        this.pendingHelperExitError = this.lastUpdateError!;
+        return;
+      }
       for (const listener of listeners) {
         try {
           listener(this.lastUpdateError);

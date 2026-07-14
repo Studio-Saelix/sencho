@@ -19,6 +19,12 @@ beforeAll(async () => {
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  const selfUpdate = SelfUpdateService.getInstance() as unknown as {
+    pendingHelperExitError: string | undefined;
+    helperExitListeners: Array<(error: string | null) => void>;
+  };
+  selfUpdate.pendingHelperExitError = undefined;
+  selfUpdate.helperExitListeners = [];
   await fs.rm(path.join(tmpDir, 'image-operation-current.json'), { force: true });
   await fs.rm(path.join(tmpDir, 'image-operations'), { recursive: true, force: true });
 });
@@ -140,6 +146,51 @@ describe('ImageOperationService', () => {
     expect(current?.state).toBe('failed');
     expect(markerFile).toBe(path.join(tmpDir, `image-op-success-${current?.operationId}.json`));
     expect(markerContent).toBe(JSON.stringify({ ok: true, operationId: current?.operationId }));
+  });
+
+
+  it('fails a recreating community op when the helper exits after handoff', async () => {
+    let helperExit: ((error: string | null) => void) | undefined;
+    const callOrder: string[] = [];
+    vi.spyOn(SelfUpdateService.getInstance(), 'getResolvedComposeImageForUpdate').mockResolvedValue(null);
+    vi.spyOn(SelfUpdateService.getInstance(), 'getComposeServiceName').mockReturnValue('sencho');
+    vi.spyOn(SelfUpdateService.getInstance(), 'onceHelperExit').mockImplementation((listener) => {
+      callOrder.push('watch');
+      helperExit = listener;
+    });
+    vi.spyOn(SelfUpdateService.getInstance(), 'triggerUpdate').mockImplementation(async () => {
+      callOrder.push('trigger');
+    });
+    vi.spyOn(SelfUpdateService.getInstance(), 'getLastError').mockReturnValue(null);
+
+    const service = ImageOperationService.getInstance();
+    const result = await service.runCommunityUpdate();
+    const mid = await service.getCurrentOperation();
+
+    expect(result).toEqual({ ok: true });
+    expect(mid?.state).toBe('recreating');
+    expect(callOrder).toEqual(['watch', 'trigger']);
+    expect(helperExit).toBeTypeOf('function');
+
+    helperExit!('Helper container exited without restarting Sencho');
+    await vi.waitFor(async () => {
+      const current = await service.getCurrentOperation();
+      expect(current?.state).toBe('failed');
+      expect(current?.failureCode).toBe('update_failed');
+    });
+  });
+
+  it('replays a pending helper exit to a late onceHelperExit listener', async () => {
+    const svc = SelfUpdateService.getInstance();
+    const internal = svc as unknown as { pendingHelperExitError: string | undefined };
+    internal.pendingHelperExitError = 'Helper container exited without restarting Sencho';
+
+    const seen = new Promise<string | null>((resolve) => {
+      svc.onceHelperExit(resolve);
+    });
+
+    await expect(seen).resolves.toBe('Helper container exited without restarting Sencho');
+    expect(internal.pendingHelperExitError).toBeUndefined();
   });
 
   it('changes the fingerprint when a preflight value changes', () => {

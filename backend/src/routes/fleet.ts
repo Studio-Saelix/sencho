@@ -1497,13 +1497,13 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       }
       updateTracker.set(nodeId, updateTracker.create('updating', getSenchoVersion(), null));
       res.status(202).json({ message: 'Update initiated on local node. The server will restart shortly.' });
-      res.on('finish', () => {
-        setTimeout(() => {
-          ImageOperationService.getInstance().executeClaimedCommunityUpdate({ targetVersion: resolvedTarget }).catch(error => {
-            console.error('[ImageOperation] Unexpected community update failure:', error);
-          });
-        }, 500);
-      });
+      // Schedule unconditionally: client abort can fire only `close` without `finish`,
+      // which would otherwise leave the claimed operation stuck in pending_pull.
+      setTimeout(() => {
+        ImageOperationService.getInstance().executeClaimedCommunityUpdate({ targetVersion: resolvedTarget }).catch(error => {
+          console.error('[ImageOperation] Unexpected community update failure:', error);
+        });
+      }, 500);
       return;
     }
 

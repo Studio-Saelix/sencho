@@ -114,6 +114,8 @@ export class ImageOperationService {
       const configDir = await this.writeDockerConfig(operation.operationId, config.config);
       operation.state = 'pulling';
       await this.persist(operation);
+      // Register before triggerUpdate so a fast helper exit cannot drain listeners first.
+      this.watchHelperExit(operation);
       await selfUpdate.triggerUpdate({
         targetImageRef: operation.targetImageRef!,
         dockerConfigPath: configDir,
@@ -126,7 +128,6 @@ export class ImageOperationService {
       }
       operation.state = 'recreating';
       await this.persist(operation);
-      this.watchHelperExit(operation);
       return { ok: true };
     } catch (error) {
       console.error('[ImageOperation] Hardened switch failed:', error);
@@ -170,6 +171,8 @@ export class ImageOperationService {
     try {
       operation.state = 'pulling';
       await this.persist(operation);
+      // Register before triggerUpdate so a fast helper exit cannot drain listeners first.
+      this.watchHelperExit(operation);
       await selfUpdate.triggerUpdate({
         ...options,
         successMarkerFile: this.successMarkerFile(operation),
@@ -181,7 +184,6 @@ export class ImageOperationService {
       }
       operation.state = 'recreating';
       await this.persist(operation);
-      this.watchHelperExit(operation);
       return { ok: true };
     } catch (error) {
       console.error('[ImageOperation] Community update failed:', error);
@@ -246,11 +248,14 @@ export class ImageOperationService {
 
   private watchHelperExit(operation: ImageOperation): void {
     SelfUpdateService.getInstance().onceHelperExit((error) => {
-      if (!error) return;
+      // Surviving the helper callback means recreate did not take over; treat
+      // a null payload the same as an explicit survival failure.
+      const exitError = error ?? 'Helper container exited without restarting Sencho';
       void (async () => {
         const current = await this.getCurrentOperation();
         if (!current || current.operationId !== operation.operationId) return;
         if (!['pending_pull', 'pulling', 'patching', 'recreating'].includes(current.state)) return;
+        console.error('[ImageOperation] Helper exit while operation active:', exitError);
         await this.fail(current, 'update_failed');
       })().catch((listenerError) => {
         console.error('[ImageOperation] Helper exit terminalization failed:', listenerError);
