@@ -200,22 +200,24 @@ describe('ImageOperationService', () => {
         if (operation.state === 'recreating' && helperExit) {
           const exit = helperExit;
           helperExit = undefined;
-          const failPromise = Promise.resolve().then(() => {
-            exit('Helper container exited without restarting Sencho');
+          // Fail must land on disk before the recreating write runs. That is the
+          // overwrite order without CAS: helper-exit failed, then late recreating.
+          exit('Helper container exited without restarting Sencho');
+          await vi.waitFor(async () => {
+            const current = await service.getCurrentOperation();
+            expect(current?.state).toBe('failed');
+            expect(current?.failureCode).toBe('update_failed');
           });
           await realPersist(operation);
-          await failPromise;
           return;
         }
         return realPersist(operation);
       });
 
     await service.runCommunityUpdate();
-    await vi.waitFor(async () => {
-      const current = await service.getCurrentOperation();
-      expect(current?.state).toBe('failed');
-      expect(current?.failureCode).toBe('update_failed');
-    });
+    const current = await service.getCurrentOperation();
+    expect(current?.state).toBe('failed');
+    expect(current?.failureCode).toBe('update_failed');
   });
 
   it('replays a pending helper exit to a late onceHelperExit listener', async () => {
