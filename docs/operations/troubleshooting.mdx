@@ -181,11 +181,11 @@ To re-test connectivity after making changes, open **Profile > Settings > Nodes*
 
 ## License tier shows the wrong name
 
-**Symptom:** The license card in **Settings > License** shows a tier that does not match what you purchased.
+**Symptom:** The license card in **Settings → Admiral Account** shows a tier that does not match what you purchased.
 
 **Cause:** The tier is read from your license at validation time. A stale cached value can show after the key was activated but before the next validation cycle ran.
 
-**Fix:** Deactivate and re-activate the key in **Settings > License**, then restart the Sencho container. The tier is re-read on the next validation and the correct name appears automatically. If it still does not match, email `licensing@sencho.io` with your order ID.
+**Fix:** Deactivate and re-activate the key in **Settings → Admiral Account**, then restart the Sencho container. The tier is re-read on the next validation and the correct name appears automatically. If it still does not match, email `licensing@sencho.io` with your order ID.
 
 ---
 
@@ -202,15 +202,15 @@ To re-test connectivity after making changes, open **Profile > Settings > Nodes*
 
 ---
 
-## Admiral plan features are still locked after activation
+## Admiral assurance is still unavailable after activation
 
-**Symptom:** Features remain locked even though you activated a valid license key.
+**Symptom:** Admiral assurance surfaces remain unavailable even though you activated a valid license key.
 
 **Checks in order:**
 
-1. Open **Settings > License** and verify it shows your license as **active** with the correct tier name.
+1. Open **Settings → Admiral Account** and verify it shows your license as **active** with the correct tier name.
 2. If the tier name does not match what you purchased, see [License tier shows the wrong name](#license-tier-shows-the-wrong-name) above.
-3. If the tier shows correctly but features are still locked, restart the Sencho container.
+3. If the tier shows correctly but assurance surfaces are still unavailable, restart the Sencho container.
 
 ---
 
@@ -224,13 +224,13 @@ To re-test connectivity after making changes, open **Profile > Settings > Nodes*
 
 ---
 
-## Admiral plan features return 403 on remote nodes
+## Admiral assurance returns 403 on remote nodes
 
-**Symptom:** An Admiral feature works on the local node but returns a 403 error when you switch to a remote node.
+**Symptom:** An Admiral assurance surface works on the local node but returns a 403 error when you switch to a remote node.
 
 **Checks in order:**
 
-1. **Is your primary instance licensed?** Open **Profile > Settings > License** on the primary instance and verify it shows an active Admiral license. Remote nodes inherit the primary's tier; if the primary is on Community, all remote nodes will be Community too.
+1. **Is your primary instance licensed?** Open **Settings → Admiral Account** on the primary instance and verify it shows an active Admiral license. Remote nodes inherit the primary's tier; if the primary is on Community, all remote nodes will be Community too.
 2. **Is the remote node's token valid?** An expired or revoked token prevents the license tier from being transmitted. Regenerate the token on the remote instance and update the node config on the primary.
 3. **Is the remote node running an up-to-date version of Sencho?** Distributed license enforcement requires both the primary and remote instances to be on a compatible version. Update the remote node if it's outdated.
 4. **Are you accessing the remote node directly?** If you navigate directly to the remote Sencho instance's URL (bypassing the primary), it uses its own local license. License inheritance only works through the primary's proxy.
