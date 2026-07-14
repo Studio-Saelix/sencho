@@ -2,6 +2,10 @@
  * EditorView save-and-deploy: a failed PUT must abort the deploy. Verified by
  * intercepting the PUT with a forced 500 and asserting that no POST to /deploy
  * is observed, plus a "Failed to save file" toast surfaces.
+ *
+ * Empty-stack create opens an editable compose workspace immediately
+ * (startInComposeEdit), so this spec waits for Save & Deploy rather than
+ * clicking Anatomy "Edit compose".
  */
 import { test, expect } from '@playwright/test';
 import { loginAs, waitForStacksLoaded } from './helpers';
@@ -20,6 +24,8 @@ async function createTestStack(page: import('@playwright/test').Page) {
   await page.locator('#create-stack-name').fill(TEST_STACK);
   await page.locator('[role="dialog"]').getByRole('button', { name: 'Create' }).click();
   await expect(page.getByRole('dialog')).toBeHidden({ timeout: 8_000 });
+  // Empty create auto-opens compose edit; wait for that before asserting.
+  await expect(page.getByRole('button', { name: 'Save & Deploy', exact: true })).toBeVisible({ timeout: 10_000 });
 }
 
 test.describe('EditorView save-and-deploy', () => {
@@ -32,8 +38,6 @@ test.describe('EditorView save-and-deploy', () => {
     await loginAs(page);
     await waitForStacksLoaded(page);
     await createTestStack(page);
-    // Open the new stack in the editor.
-    await page.locator('[role="listbox"]').getByText(TEST_STACK, { exact: true }).click();
   });
 
   test.afterEach(async ({ page }) => {
@@ -56,11 +60,6 @@ test.describe('EditorView save-and-deploy', () => {
       if (req.method() === 'POST') deployAttempts += 1;
       await route.continue();
     });
-
-    // One click on Anatomy "Edit compose" opens an immediately editable Monaco
-    // workspace with Save & Deploy visible (no second Edit gate).
-    await page.getByTestId('anatomy-edit-compose-btn').click();
-    await expect(page.getByRole('button', { name: 'Save & Deploy', exact: true })).toBeVisible({ timeout: 5_000 });
 
     // No need to modify Monaco content: saveFile fires the PUT regardless of
     // dirty state. The route interceptor forces it to 500; the gated handler

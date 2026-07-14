@@ -123,18 +123,26 @@ describe('useTheme', () => {
         expect(b.result.current.accent).toBe('lime');
     });
 
-    it('setVisualStyle("calm") writes the three calm sub-axes, applies them, and persists', () => {
+    it('setVisualStyle("calm") writes calm sub-axes including motion, applies them, and persists', () => {
         const { result } = renderHook(() => useTheme());
         act(() => result.current.setVisualStyle('calm'));
         expect(result.current.visualStyle).toBe('calm');
         expect(result.current.headingStyle).toBe('clean');
         expect(result.current.chartStyle).toBe('muted');
         expect(result.current.reducedEffects).toBe(true);
+        expect(result.current.reducedMotion).toBe(true);
         const root = document.documentElement;
         expect(root.dataset.headings).toBe('clean');
         expect(root.dataset.chartStyle).toBe('muted');
         expect(root.dataset.effects).toBe('reduced');
+        expect(root.dataset.motion).toBe('reduced');
         expect(readBlob().chartStyle).toBe('muted');
+        expect(readBlob().reducedMotion).toBe(true);
+
+        act(() => result.current.setVisualStyle('signature'));
+        expect(result.current.reducedMotion).toBe(false);
+        expect(document.documentElement.dataset.motion).toBeUndefined();
+        expect(readBlob().reducedMotion).toBe(false);
     });
 
     it('useChartStyle resolves the effective palette and memoizes a stable result', () => {
