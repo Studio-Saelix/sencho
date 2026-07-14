@@ -206,7 +206,7 @@ export function LicenseSection() {
                     label={getTierDisplayName(license?.tier, license?.status)}
                     helper={
                         license?.status === 'expired'
-                            ? 'Your Admiral license has expired. Renew to restore Admiral plan benefits.'
+                            ? 'Your Admiral license has expired. Renew to restore Admiral assurance (priority support, Recovery Vault, Hardened Build, and governance).'
                             : license?.status === 'disabled'
                                 ? 'Your license has been disabled. Contact support for assistance.'
                                 : license?.status === 'trial' && license.trialDaysRemaining !== null
@@ -299,7 +299,7 @@ export function LicenseSection() {
                 {license?.status === 'expired' ? (
                     <SettingsField
                         label="Status"
-                        helper="Renew to restore Admiral plan benefits."
+                        helper="Renew to restore Admiral assurance (priority support, Recovery Vault, Hardened Build, and governance)."
                         tone="error"
                     >
                         <div className="flex items-center gap-2 text-destructive">
@@ -312,7 +312,7 @@ export function LicenseSection() {
                 {license?.status === 'trial' && license.trialDaysRemaining !== null ? (
                     <SettingsField
                         label="Trial countdown"
-                        helper="Activate before the trial ends to keep Admiral plan benefits."
+                        helper="Activate before the trial ends to keep Admiral assurance (priority support, Recovery Vault, Hardened Build, and governance)."
                         tone="warn"
                     >
                         <div className="flex items-center gap-2">

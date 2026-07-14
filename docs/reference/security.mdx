@@ -61,7 +61,7 @@ Every self-hosted instance includes the full security stack. Some advanced gover
 </Card>
 
 <Card title="Fleet Secrets" icon="key-skeleton" href="/features/fleet-secrets">
-  Encrypted, versioned env-var bundles pushed to labeled nodes' stacks. Sealed with the same data key as MFA and registry credentials.
+  Limited-availability encrypted, versioned env-var bundles pushed to labeled nodes' stacks when the surface is present. Sealed with the same data key as MFA and registry credentials.
 </Card>
 
 <Card title="Webhook signatures" icon="signature" href="/features/webhooks">
@@ -91,9 +91,8 @@ Every Sencho instance includes the foundational security stack. Advanced access-
 | API tokens (scoped, expiring) | ✓ | ✓ |
 | SBOM generation (SPDX, CycloneDX) | ✓ | ✓ |
 | Recent-activity audit log (14-day window) | ✓ | ✓ |
-| Scan policies (`block_on_deploy`) | | ✓ |
-| SARIF export | | ✓ |
-| Fleet Secrets (encrypted env-var bundles, limited availability) | | ✓ |
+| Scan policies (`block_on_deploy`) | ✓ | ✓ |
+| SARIF export (admin) | ✓ | ✓ |
 | Advanced RBAC (Deployer, Node Admin, Auditor) | | ✓ |
 | Scoped permissions (per-stack, per-node) | | ✓ |
 | Audit log export, anomaly detection, and extended retention | | ✓ |

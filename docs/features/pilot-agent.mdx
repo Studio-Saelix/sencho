@@ -3,13 +3,9 @@ title: Pilot Agent
 description: Connect a remote Sencho node to your control instance through a single outbound WebSocket tunnel. No inbound ports, no TLS certificates, no public URL on the remote host.
 ---
 
-Pilot Agent is one of Sencho's two remote-node modes. A small agent container runs on the remote host, dials your control instance over a single outbound WebSocket, and holds that connection open. Every request the control instance sends to that node rides through the same tunnel, whether it's HTTP, WebSocket, or Sencho Mesh TCP. The remote host never opens an inbound port and never needs a TLS certificate of its own.
+Pilot Agent is one of Sencho's two remote-node modes. A small agent container runs on the remote host, dials your control instance over a single outbound WebSocket, and holds that connection open. Every request the control instance sends to that node rides through the same tunnel (HTTP, WebSocket, and, when that limited-availability surface is present, mesh TCP). The remote host never opens an inbound port and never needs a TLS certificate of its own.
 
 This page is the architecture-and-operations reference for Pilot Agent. For the step-by-step UI walkthrough that adds a remote node, see [Multi-Node Management](/features/multi-node).
-
-<Card title="Sencho Mesh" icon="link" href="/features/sencho-mesh">
-  Once a node is enrolled, you can wire stacks across nodes by hostname using Sencho Mesh. Mesh traffic rides on the same pilot tunnel.
-</Card>
 
 ## How Pilot Agent fits Sencho
 
@@ -288,7 +284,7 @@ These are the boundaries operators should know about before designing a fleet ar
 
 ## Sencho Mesh on Pilot Agent
 
-Sencho Mesh works identically across both remote modes. On a Pilot Agent node, mesh traffic rides the existing long-lived tunnel instead of opening a separate connection. Stack opt-in to the mesh is per stack per node and is not affected by the transport choice. See [Sencho Mesh](/features/sencho-mesh) for the full mesh model.
+When the limited-availability Mesh surface is present, mesh TCP can ride the existing pilot tunnel instead of opening a separate connection. Stack opt-in is per stack per node and is not affected by the transport choice. See [Sencho Mesh](/features/sencho-mesh) for the full mesh model.
 
 ## Troubleshooting
 

@@ -67,7 +67,7 @@ tags:
   - name: Scheduled Tasks
     description: Configure recurring automated operations (admin role required)
   - name: Registries
-    description: Manage private container registry credentials (Admiral license required). These endpoints are only accessible via browser sessions — API tokens receive `SCOPE_DENIED`.
+    description: Manage private container registry credentials. Docker Hub, GHCR, and custom registries are available on every tier; AWS ECR requires Admiral. These endpoints are only accessible via browser sessions. API tokens receive `SCOPE_DENIED`.
   - name: Image Updates
     description: Check for available container image updates across stacks
 
