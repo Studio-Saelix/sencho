@@ -220,6 +220,36 @@ describe('ImageOperationService', () => {
     expect(current?.failureCode).toBe('update_failed');
   });
 
+  it('does not let acknowledging a stale failure replace an active current operation', async () => {
+    vi.spyOn(SelfUpdateService.getInstance(), 'getResolvedComposeImageForUpdate').mockResolvedValue(null);
+    vi.spyOn(SelfUpdateService.getInstance(), 'getComposeServiceName').mockReturnValue('sencho');
+    vi.spyOn(SelfUpdateService.getInstance(), 'triggerUpdate').mockResolvedValue(undefined);
+    vi.spyOn(SelfUpdateService.getInstance(), 'getLastError').mockReturnValue('pull failed');
+
+    const service = ImageOperationService.getInstance();
+    await service.runCommunityUpdate();
+    const failedA = await service.getCurrentOperation();
+    expect(failedA?.state).toBe('failed');
+    const operationAId = failedA!.operationId;
+
+    const claimB = await service.claimCommunityUpdate();
+    expect(claimB).toEqual({ ok: true });
+    const currentB = await service.getCurrentOperation();
+    expect(currentB?.state).toBe('pending_pull');
+    expect(currentB?.operationId).not.toBe(operationAId);
+
+    expect(await service.acknowledge(operationAId)).toBe(true);
+    const stillB = await service.getCurrentOperation();
+    expect(stillB?.operationId).toBe(currentB!.operationId);
+    expect(stillB?.state).toBe('pending_pull');
+
+    const ackedA = await service.getOperation(operationAId);
+    expect(ackedA?.acknowledgedAt).toBeTruthy();
+
+    const claimC = await service.claimCommunityUpdate();
+    expect(claimC).toEqual({ ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT' });
+  });
+
   it('replays a pending helper exit to a late onceHelperExit listener', async () => {
     const svc = SelfUpdateService.getInstance();
     const internal = svc as unknown as { pendingHelperExitError: string | undefined };

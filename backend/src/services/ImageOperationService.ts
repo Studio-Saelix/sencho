@@ -221,7 +221,19 @@ export class ImageOperationService {
     const operation = await this.getOperation(operationId);
     if (!operation || operation.state !== 'failed') return false;
     operation.acknowledgedAt = new Date().toISOString();
-    await this.persist(operation);
+    // Write the history file always; only refresh the global current pointer when
+    // this operation is still current. Otherwise acknowledging a stale failure can
+    // replace an active claim and bypass single-flight locking.
+    await this.enqueueStateWrite(async () => {
+      const filePath = this.operationFile(operation.operationId);
+      if (!filePath) throw new Error('Invalid image operation id');
+      await fs.mkdir(this.operationsDir(), { recursive: true, mode: 0o700 });
+      await this.atomicWrite(filePath, JSON.stringify(operation));
+      const current = await this.readOperation(this.currentFile());
+      if (current?.operationId === operation.operationId) {
+        await this.atomicWrite(this.currentFile(), JSON.stringify(operation));
+      }
+    });
     return true;
   }
 
