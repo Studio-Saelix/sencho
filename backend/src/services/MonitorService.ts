@@ -439,15 +439,14 @@ export class MonitorService {
             const MIN_RECLAIMABLE_GB = 0.1;
 
             if (reclaimGb >= janitorLimitGb && reclaimGb >= MIN_RECLAIMABLE_GB) {
-                const registry = NodeRegistry.getInstance();
-                const localNode = registry.getNode(registry.getDefaultNodeId());
-                const nodeLabel = localNode?.name ?? 'this node';
+                // Node-neutral body: the hub bell badge attributes remotes.
+                // Embedding the local seed name ("Local") made fleet alerts look wrong.
                 await this.dispatchWithCooldown(
                     HOST_ALERT_KEYS.janitor,
                     JANITOR_COOLDOWN_MS,
                     'info',
                     'system',
-                    `Node "${nodeLabel}" has accumulated ${reclaimGb.toFixed(1)} GB of unused Docker data. Open Resources to reclaim space, or set up a Prune Node Resources schedule.`,
+                    `This node has accumulated ${reclaimGb.toFixed(1)} GB of unused Docker data. Open Resources to reclaim space, or set up a Prune Node Resources schedule.`,
                 );
             }
         } finally {
