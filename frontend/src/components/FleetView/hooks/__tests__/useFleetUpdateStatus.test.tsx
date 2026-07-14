@@ -147,6 +147,20 @@ describe('useFleetUpdateStatus', () => {
     expect(toastSuccess).toHaveBeenCalledWith(expect.stringContaining('2 nodes'));
   });
 
+  it('reports failed remote nodes separately after an update-all request', async () => {
+    apiFetchMock.mockResolvedValue(okJson({
+      updating: [],
+      skipped: [],
+      failed: [{ name: 'Edge', error: 'Hardened Build updates require a signed-in admin on that node.' }],
+    }));
+    const { result } = renderHook(() => useFleetUpdateStatus());
+
+    await act(async () => { await result.current.triggerUpdateAll(); });
+
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining('Edge'));
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining('Hardened Build'));
+  });
+
   it('triggerNodeUpdate on a blocked node toasts and does not POST', async () => {
     apiFetchMock.mockResolvedValue(okJson({ nodes: [...STATUSES, BLOCKED_STATUS] }));
     const { result } = renderHook(() => useFleetUpdateStatus());

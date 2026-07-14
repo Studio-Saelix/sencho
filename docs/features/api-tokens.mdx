@@ -189,7 +189,7 @@ Regardless of scope, every API token is rejected from the following routes with 
 | **Registry credentials** | View, create, update, delete, test registry creds |
 | **Host-console session token** | Mint the short-lived ticket the browser console uses |
 | **API token self-management** | Create, list, revoke API tokens |
-| **Cloud Backup** | Configure or trigger Sencho Cloud Backup |
+| **Recovery Vault** | Configure or trigger Recovery Vault |
 
 The rationale is the same in every case: a programmatic credential should not be able to grant itself more authority, change the trust roots that issued it, or open an interactive shell. Those actions require a live human user logged into a browser.
 

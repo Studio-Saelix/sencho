@@ -16,7 +16,7 @@ Open the Settings Hub by clicking the **Profile** icon in the top bar and select
 |-------|----------------|
 | **Personal** | Account, Appearance |
 | **Access** | License, Users, SSO, API Tokens |
-| **Infrastructure** | Nodes, Fleet, Registries, Cloud Backup, App Store, Stacks |
+| **Infrastructure** | Nodes, Fleet, Registries, Recovery Vault, App Store, Stacks |
 | **Monitoring** | Host Alerts, Container Alerts, Docker & Storage |
 | **Notifications** | Channels, Notification Routing |
 | **Automation** | Image update checks, Webhooks |
@@ -37,7 +37,7 @@ Every section renders inside the same masthead-and-sidebar layout. The masthead 
 | **SCOPE** `operator` / `browser` / `global` | Setting applies to your account (`operator`), to this browser only (`browser`, for browser-local sections such as Appearance), or to the whole instance (`global`, every other non-node group) |
 | **NODE** `<node name>` | Setting is per-node and is currently being edited against this node |
 | **EDITED** `<count>` pending / `saved` | The current section has unsaved changes |
-| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (License); `OPERATORS` (Users); `CHANNELS` (Channels); `ROUTES` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `PROVIDER`, `USED`, `SNAPSHOTS` (Cloud Backup); `DEV MODE` (Developer Diagnostics) |
+| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (Admiral Account); `OPERATORS` (Users); `CHANNELS` (Channels); `ROUTES` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `PROVIDER`, `USED`, `SNAPSHOTS` (Recovery Vault); `DEV MODE` (Developer Diagnostics) |
 
 ### Quick search
 
@@ -328,18 +328,18 @@ See [Private Registries](/features/private-registries) for the full walkthrough.
 
 ---
 
-## Cloud Backup
+## Recovery Vault
 
 <Note>
-  Custom S3-compatible storage is available on every tier. Sencho Cloud Backup is an Admiral feature.
+  Custom S3-compatible storage is available on every tier. Recovery Vault is an Admiral feature.
 </Note>
 
 **Scope:** Global, admin-only
 
-Mirror fleet snapshots to Sencho Cloud Backup or any S3-compatible storage so a control-plane loss does not take the recovery history with it. The masthead publishes a **PROVIDER** pill (`sencho` / `s3` / `disabled`), a **USED** pill showing storage consumption, and a **SNAPSHOTS** pill with the cloud object count.
+Mirror fleet snapshots to Recovery Vault or any S3-compatible storage so a control-plane loss does not take the recovery history with it. The masthead publishes a **PROVIDER** pill (`sencho` / `s3` / `disabled`), a **USED** pill showing storage consumption, and a **SNAPSHOTS** pill with the cloud object count.
 
 <Frame>
-  <img src="/images/settings/settings-cloud-backup.png" alt="Cloud Backup section with Sencho Cloud Backup mode selected" />
+  <img src="/images/settings/settings-cloud-backup.png" alt="Recovery Vault section with Recovery Vault mode selected" />
 </Frame>
 
 ### Storage modes
@@ -347,7 +347,7 @@ Mirror fleet snapshots to Sencho Cloud Backup or any S3-compatible storage so a 
 | Mode | When to pick it |
 |------|-----------------|
 | **Disabled** | Snapshots stay on the control plane's local disk only. Default for fresh installs. |
-| **Sencho Cloud Backup (included)** | Replicate snapshots to managed storage that ships with the Admiral subscription. On first selection, click **Activate** to provision the 500 MB allowance (backed by Cloudflare R2, scoped to this Admiral license). Auto-upload is always on for this mode. The **Test** and **Reprovision** buttons appear on the activated card if you need to verify connectivity or replace the credentials. |
+| **Recovery Vault (included)** | Replicate snapshots to managed storage that ships with the Admiral subscription. On first selection, click **Activate** to provision the 500 MB allowance. Auto-upload is always on for this mode. The **Test** and **Reprovision** buttons appear on the activated card if you need to verify connectivity or replace the credentials. |
 | **Custom S3 (BYOB)** | Point Sencho at your own S3-compatible bucket (AWS S3, Cloudflare R2, MinIO, Backblaze B2). Required fields: **Endpoint URL**, **Region**, **Bucket**, **Path Prefix** (default `sencho/`), **Access Key ID**, **Secret Access Key**. The secret access key is masked after save. Use **Test connection** to verify credentials, then toggle **Auto-upload** to start replicating snapshots. |
 
 The **Cloud Snapshots** list at the bottom of the section is an inventory of objects currently in the configured destination. Each row exposes a **Download** icon and a **Delete** icon.
@@ -691,7 +691,7 @@ Links to help resources, with an additional channel for Admiral operators.
 
 | Channel | Tier | Description |
 |---------|------|-------------|
-| **Priority Email Support** | Admiral | Direct email support with responses within 24 hours. |
+| **Priority Email Support** | Admiral | Direct email support during business hours (Mon–Fri 09:00–17:00 America/New_York). We aim to first-respond within one business day. This is an operational target, not an SLA. |
 
 Community operators see an upgrade callout with a link to the pricing page in place of the support channels.
 

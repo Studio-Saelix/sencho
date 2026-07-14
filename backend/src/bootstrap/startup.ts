@@ -6,6 +6,7 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { DatabaseService } from '../services/DatabaseService';
 import { LicenseService } from '../services/LicenseService';
 import SelfUpdateService from '../services/SelfUpdateService';
+import { ImageOperationService } from '../services/ImageOperationService';
 import SelfIdentityService from '../services/SelfIdentityService';
 import { MonitorService } from '../services/MonitorService';
 import { AutoHealService } from '../services/AutoHealService';
@@ -165,6 +166,9 @@ export async function startServer(server: Server): Promise<void> {
     })(),
     TrivyService.getInstance().initialize(),
   ]);
+  void ImageOperationService.getInstance().reconcileOnStartup().catch((error) => {
+    console.error('[ImageOperation] Startup reconciliation failed:', error);
+  });
 
   // Fire-and-forget housekeeping; logged but never awaited.
   sweepStaleGitTempDirs().catch((err) => {

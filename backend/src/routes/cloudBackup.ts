@@ -163,7 +163,7 @@ cloudBackupRouter.post('/provision', async (req: Request, res: Response): Promis
         res.json({ success: true, quota_bytes: result.quotaBytes });
     } catch (error) {
         console.error('[CloudBackup] provision error:', error);
-        res.status(500).json({ error: 'Failed to provision Sencho Cloud Backup' });
+        res.status(500).json({ error: 'Failed to provision Recovery Vault' });
     }
 });
 
@@ -173,7 +173,7 @@ cloudBackupRouter.get('/usage', async (req: Request, res: Response): Promise<voi
     try {
         const svc = CloudBackupService.getInstance();
         if (svc.getProvider() !== 'sencho') {
-            res.status(400).json({ error: 'Usage is only available for Sencho Cloud Backup' });
+            res.status(400).json({ error: 'Usage is only available for Recovery Vault' });
             return;
         }
         const usage = await svc.getSenchoCloudBackupUsage();

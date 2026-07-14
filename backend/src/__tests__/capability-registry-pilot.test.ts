@@ -62,7 +62,7 @@ describe('fetchRemoteMeta Authorization header', () => {
       updateError: null,
       online: false,
       imagePinKind: null,
-      updateBlocked: false,
+      updateBlocked: false, imageChannel: null,
     });
   });
 });

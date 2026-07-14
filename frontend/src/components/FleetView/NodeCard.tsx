@@ -228,12 +228,12 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                                         onDismiss={isAdmin && onDismissUpdate ? () => onDismissUpdate(node.id) : undefined}
                                     />
                                 )}
-                                {updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !updateStatus?.updateBlocked && (
+                                {updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && (
                                     <Badge className="text-[10px] px-1.5 py-0 h-4 bg-warning/15 text-warning border-warning/30 shrink-0">
                                         Update available
                                     </Badge>
                                 )}
-                                {updateStatus?.updateBlocked && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && (
+                                {(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && (
                                     <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} />
                                 )}
                                 {updateStatus?.skipActive && (
@@ -314,7 +314,7 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                 )}
 
                 {/* Update button (mutating action: admin only, matches the requireAdmin route guard) */}
-                {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !updateStatus?.updateBlocked && onUpdate && isAdmin && (
+                {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && onUpdate && isAdmin && (
                     <div className="mt-3 pt-3 border-t border-border/50">
                         <Button
                             variant="outline"

@@ -1,14 +1,18 @@
 import { Router, type Request, type Response } from 'express';
 import { LicenseService } from '../services/LicenseService';
 import SelfUpdateService from '../services/SelfUpdateService';
-import { requireAdmin } from '../middleware/tierGates';
+import { requireAdmin, requireUserSession } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { parseRequestedTargetVersion } from '../utils/targetVersion';
 import type { SelfUpdatePreflight } from '../services/SelfUpdateService';
+import { classifyImageChannel } from '../helpers/imageChannel';
+import { ImageOperationService } from '../services/ImageOperationService';
+import { imageChannelRouter } from './imageChannel';
 
 const LICENSE_SCOPE_MESSAGE = 'API tokens cannot manage licenses.';
 
 export const licenseRouter = Router();
+licenseRouter.use('/image-channel', imageChannelRouter);
 
 licenseRouter.get('/', (_req: Request, res: Response): void => {
   try {
@@ -125,8 +129,49 @@ systemUpdateRouter.post('/update', async (req: Request, res: Response): Promise<
   }
   const targetVersion = parseRequestedTargetVersion(req, res);
   if (targetVersion === null) return; // invalid supplied value; 400 already sent
+  const pin = await selfUpdate.getPinInfo({ fresh: true });
+  const channel = pin ? classifyImageChannel(pin.composeImageRef) : 'unknown';
+  const machineCredential = req.user?.userId === 0 || !!req.apiTokenScope;
+  if (channel === 'hardened') {
+    if (machineCredential) {
+      res.status(403).json({
+        error: 'Hardened images can only be updated from an admin session.',
+        code: 'HARDENED_REMOTE_UPDATE_UNSUPPORTED',
+      });
+      return;
+    }
+    if (!requireUserSession(req, res)) return;
+    const preflight = await ImageOperationService.getInstance().preflightSwitch();
+    if (!preflight.ok) {
+      res.status(403).json({ error: 'Hardened image access is unavailable', code: preflight.code });
+      return;
+    }
+    const result = await ImageOperationService.getInstance().switchToHardened(
+      preflight.preflightFingerprint,
+      'update',
+    );
+    if (!result.ok) {
+      res.status(result.code === 'IMAGE_OPERATION_IN_FLIGHT' ? 409 : 500)
+        .json({ error: 'Hardened update could not start', code: result.code });
+      return;
+    }
+    res.status(202).json({ message: 'Update initiated. The server will restart shortly.' });
+    return;
+  }
   // Fail fast on a pin we cannot repin (digest/unknown) so the caller gets a
   // 409 instead of a 202 that would later fail after the reconnect overlay.
   if (!respondSelfUpdatePreflight(res, await selfUpdate.canSelfUpdateTarget(targetVersion))) return;
-  scheduleLocalUpdate(res, 'Update initiated. The server will restart shortly.', targetVersion);
+  const claim = await ImageOperationService.getInstance().claimCommunityUpdate({ targetVersion });
+  if (!claim.ok) {
+    res.status(409).json({ error: 'An image operation is already in progress.', code: claim.failureCode });
+    return;
+  }
+  res.status(202).json({ message: 'Update initiated. The server will restart shortly.' });
+  // Schedule unconditionally: client abort can fire only `close` without `finish`,
+  // which would otherwise leave the claimed operation stuck in pending_pull.
+  setTimeout(() => {
+    ImageOperationService.getInstance().executeClaimedCommunityUpdate({ targetVersion }).catch(error => {
+      console.error('[ImageOperation] Unexpected community update failure:', error);
+    });
+  }, 500);
 });
