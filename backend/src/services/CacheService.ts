@@ -26,6 +26,24 @@ interface CacheEntry<T> {
   expiresAt: number;
 }
 
+/**
+ * Observational outcome of a single getOrFetchWithMeta call. Truthful under
+ * concurrency: an `inflight` join is never reported as a `hit`.
+ *
+ *   - hit:      fresh entry returned without waiting
+ *   - computed: this caller ran the fetcher and it succeeded
+ *   - inflight: joined an existing in-flight promise (this caller did not run
+ *               the fetcher)
+ *   - stale:    the fetcher this caller ran failed and a stale entry was
+ *               returned instead
+ */
+export type CacheFetchOutcome = 'hit' | 'computed' | 'inflight' | 'stale';
+
+export interface CacheFetchResult<T> {
+  value: T;
+  outcome: CacheFetchOutcome;
+}
+
 interface NamespaceStats {
   hits: number;
   misses: number;
@@ -61,26 +79,51 @@ export class CacheService {
    *
    * On fetcher rejection: if a stale entry exists, return it (counted as
    * `stale`); otherwise propagate the error.
+   *
+   * Thin wrapper over getOrFetchWithMeta that discards the outcome; all
+   * stats / TTL / inflight-dedup / stale-on-error semantics are identical.
    */
   public async getOrFetch<T>(
     key: string,
     ttlMs: number,
     fetcher: () => Promise<T>,
   ): Promise<T> {
+    const { value } = await this.getOrFetchWithMeta(key, ttlMs, fetcher);
+    return value;
+  }
+
+  /**
+   * Same behaviour as getOrFetch, but also reports how the value was obtained
+   * (see CacheFetchOutcome). Intended for diagnostic logging that must not
+   * mislabel an in-flight join as a cache hit. The stats counters, TTL, cap,
+   * and stale-on-error fallback are recorded exactly as getOrFetch does: one
+   * miss per in-flight join, one stale per failed computation.
+   */
+  public async getOrFetchWithMeta<T>(
+    key: string,
+    ttlMs: number,
+    fetcher: () => Promise<T>,
+  ): Promise<CacheFetchResult<T>> {
     const ns = namespaceOf(key);
     const now = Date.now();
     const existing = this.store.get(key) as CacheEntry<T> | undefined;
 
     if (existing && existing.expiresAt > now) {
       this.recordHit(ns);
-      return existing.value;
+      return { value: existing.value, outcome: 'hit' };
     }
 
     this.recordMiss(ns);
 
     const inflight = this.inflight.get(key) as Promise<T> | undefined;
-    if (inflight) return inflight;
+    if (inflight) {
+      const value = await inflight;
+      return { value, outcome: 'inflight' };
+    }
 
+    // This caller owns the computation; the closure records whether it ended
+    // as a fresh compute or a stale fallback, read after the promise settles.
+    let outcome: CacheFetchOutcome = 'computed';
     const promise = (async () => {
       try {
         const value = await fetcher();
@@ -89,6 +132,7 @@ export class CacheService {
       } catch (err) {
         if (existing) {
           this.recordStale(ns);
+          outcome = 'stale';
           return existing.value;
         }
         throw err;
@@ -98,7 +142,8 @@ export class CacheService {
     })();
 
     this.inflight.set(key, promise);
-    return promise;
+    const value = await promise;
+    return { value, outcome };
   }
 
   /**

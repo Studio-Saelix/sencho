@@ -22,6 +22,7 @@ import { getErrorMessage } from '../utils/errors';
 import { toPublicNode } from '../helpers/publicNode';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
+import { logDebugTiming } from '../utils/requestTiming';
 
 const NODE_SCOPE_MESSAGE = 'API tokens cannot manage nodes.';
 const REMOTE_META_CACHE_TTL = 3 * 60 * 1000;
@@ -116,11 +117,25 @@ function mintPilotEnrollment(nodeId: number, req: Request): { token: string; exp
 export const nodesRouter = Router();
 
 nodesRouter.get('/', async (req: Request, res: Response) => {
+  const startedAt = Date.now();
+  let outcome: 'ok' | 'error' = 'ok';
+  let count = 0;
   try {
     const nodes = DatabaseService.getInstance().getNodes();
+    count = nodes.length;
     res.json(nodes.map(toPublicNode));
   } catch (error) {
+    outcome = 'error';
     res.status(500).json({ error: 'Failed to fetch nodes' });
+  } finally {
+    // Gateway-owned: /api/nodes is proxy-exempt, so this always runs on the
+    // control instance and gates on the gateway's developer_mode.
+    logDebugTiming('[Nodes:debug]', {
+      route: 'GET /nodes',
+      count,
+      elapsedMs: Date.now() - startedAt,
+      outcome,
+    });
   }
 });
 
@@ -577,14 +592,19 @@ nodesRouter.post('/:id/test', async (req: Request, res: Response) => {
 });
 
 nodesRouter.get('/:id/meta', authMiddleware, async (req: Request, res: Response) => {
+  const startedAt = Date.now();
+  let outcome: 'ok' | 'error' = 'ok';
+  let id = NaN;
+  let nodeType = 'unknown';
   try {
-    const id = parseInt(req.params.id as string);
+    id = parseInt(req.params.id as string);
     const node = DatabaseService.getInstance().getNode(id);
     if (!node) {
+      outcome = 'error';
       res.status(404).json({ error: 'Node not found' });
       return;
     }
-    if (isDebugEnabled()) console.log(`[Nodes:diag] meta node=${id} type=${node.type}`);
+    nodeType = node.type;
 
     if (node.type === 'local') {
       res.json({ version: getSenchoVersion(), capabilities: getActiveCapabilities() });
@@ -606,8 +626,19 @@ nodesRouter.get('/:id/meta', authMiddleware, async (req: Request, res: Response)
 
     res.json(meta);
   } catch (error: unknown) {
+    outcome = 'error';
     console.error('Failed to fetch node meta:', error);
     const message = getErrorMessage(error, 'Failed to fetch node metadata');
     res.status(500).json({ error: message });
+  } finally {
+    // Gateway-owned: the frontend fetches meta with localOnly, so this runs on
+    // the control instance and gates on the gateway's developer_mode.
+    logDebugTiming('[Nodes:debug]', {
+      route: 'GET /nodes/:id/meta',
+      node: id,
+      type: nodeType,
+      elapsedMs: Date.now() - startedAt,
+      outcome,
+    });
   }
 });

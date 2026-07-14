@@ -4,7 +4,7 @@
  * the entry-cap safety guard, and singleton identity.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { CacheService } from '../services/CacheService';
+import { CacheService, type CacheFetchOutcome } from '../services/CacheService';
 
 describe('CacheService', () => {
   let cache: CacheService;
@@ -68,6 +68,107 @@ describe('CacheService', () => {
       await cache.getOrFetch('obj:key', 60_000, async () => obj);
       const out = await cache.getOrFetch<typeof obj>('obj:key', 60_000, async () => ({ a: 99, b: [] }));
       expect(out).toEqual(obj);
+    });
+  });
+
+  // ─── getOrFetchWithMeta: observational outcomes ──────────────────────
+
+  describe('getOrFetchWithMeta', () => {
+    it('reports "computed" when this caller runs the fetcher', async () => {
+      const fetcher = vi.fn().mockResolvedValue('fresh');
+      const res = await cache.getOrFetchWithMeta('ns:key', 60_000, fetcher);
+      expect(res).toEqual({ value: 'fresh', outcome: 'computed' });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(cache.getStats().ns).toEqual({ hits: 0, misses: 1, stale: 0, size: 1 });
+    });
+
+    it('reports "hit" for a fresh entry without waiting or re-running the fetcher', async () => {
+      await cache.getOrFetchWithMeta('ns:key', 60_000, async () => 'cached');
+      const fetcher = vi.fn().mockResolvedValue('should-not-run');
+      const res = await cache.getOrFetchWithMeta('ns:key', 60_000, fetcher);
+      expect(res).toEqual({ value: 'cached', outcome: 'hit' });
+      expect(fetcher).not.toHaveBeenCalled();
+      // First call: 1 miss (computed). Second call: 1 hit.
+      expect(cache.getStats().ns).toMatchObject({ hits: 1, misses: 1, stale: 0 });
+    });
+
+    it('reports "inflight" for a caller that joins an existing in-flight promise', async () => {
+      let resolveFetch!: (value: string) => void;
+      const fetcher = vi.fn(() => new Promise<string>((resolve) => {
+        resolveFetch = resolve;
+      }));
+
+      const p1 = cache.getOrFetchWithMeta('ns:key', 60_000, fetcher);
+      const p2 = cache.getOrFetchWithMeta('ns:key', 60_000, fetcher);
+      const p3 = cache.getOrFetchWithMeta('ns:key', 60_000, fetcher);
+
+      resolveFetch('shared');
+      const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
+
+      expect(r1).toEqual({ value: 'shared', outcome: 'computed' });
+      expect(r2).toEqual({ value: 'shared', outcome: 'inflight' });
+      expect(r3).toEqual({ value: 'shared', outcome: 'inflight' });
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      // Every caller that did not hit a fresh entry recorded exactly one miss,
+      // including the two in-flight joins: 3 misses, no hits.
+      expect(cache.getStats().ns).toMatchObject({ hits: 0, misses: 3, stale: 0 });
+    });
+
+    it('reports "stale" when the fetcher rejects but a stale entry exists', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const fetcher = vi.fn()
+        .mockResolvedValueOnce('original')
+        .mockRejectedValueOnce(new Error('upstream down'));
+
+      const first = await cache.getOrFetchWithMeta('ns:key', 1_000, fetcher);
+      expect(first).toEqual({ value: 'original', outcome: 'computed' });
+
+      await vi.advanceTimersByTimeAsync(1_100);
+
+      const stale = await cache.getOrFetchWithMeta('ns:key', 1_000, fetcher);
+      expect(stale).toEqual({ value: 'original', outcome: 'stale' });
+      expect(cache.getStats().ns).toMatchObject({ stale: 1 });
+    });
+
+    it('propagates the error (no outcome) when the fetcher rejects with no stale entry', async () => {
+      const fetcher = vi.fn().mockRejectedValue(new Error('no fallback'));
+      await expect(cache.getOrFetchWithMeta('ns:key', 60_000, fetcher)).rejects.toThrow('no fallback');
+    });
+
+    it('narrows to the CacheFetchOutcome union', async () => {
+      const { outcome } = await cache.getOrFetchWithMeta('ns:key', 60_000, async () => 1);
+      const accepted: CacheFetchOutcome[] = ['hit', 'computed', 'inflight', 'stale'];
+      expect(accepted).toContain(outcome);
+    });
+  });
+
+  // ─── getOrFetch delegates to getOrFetchWithMeta (parity) ─────────────
+
+  describe('getOrFetch parity with getOrFetchWithMeta', () => {
+    it('returns only the value and records identical hit/miss counters', async () => {
+      const fetcher = vi.fn().mockResolvedValue('v');
+      const first = await cache.getOrFetch('ns:key', 60_000, fetcher);
+      const second = await cache.getOrFetch('ns:key', 60_000, fetcher);
+      expect(first).toBe('v');
+      expect(second).toBe('v');
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      // One miss (compute) + one hit, matching the meta variant's accounting.
+      expect(cache.getStats().ns).toMatchObject({ hits: 1, misses: 1, stale: 0 });
+    });
+
+    it('records one miss per in-flight join, exactly as the meta variant', async () => {
+      let resolveFetch!: (value: string) => void;
+      const fetcher = vi.fn(() => new Promise<string>((resolve) => {
+        resolveFetch = resolve;
+      }));
+
+      const p1 = cache.getOrFetch('ns:key', 60_000, fetcher);
+      const p2 = cache.getOrFetch('ns:key', 60_000, fetcher);
+      resolveFetch('shared');
+      await Promise.all([p1, p2]);
+
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(cache.getStats().ns).toMatchObject({ hits: 0, misses: 2, stale: 0 });
     });
   });
 

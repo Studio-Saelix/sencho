@@ -547,6 +547,12 @@ Debug diagnostics for this node. Most operators can leave this off. The masthead
 |---------|---------|-------------|
 | **Developer mode** | Off | Enables real-time metrics streams and verbose debug diagnostics in the UI. Does not affect [Global Observability](/features/global-observability) streaming, which is always on. |
 
+<Note>
+  With Developer mode on, reload the dashboard to capture the startup timeline. A small timing chip appears in the lower corner showing how long the stack list took to become visible from boot; click it to expand the full phase report, which you can copy as JSON. The overlay follows the active node, so switching nodes starts a fresh timeline.
+
+  For the matching server-side timings, filter the backend logs for `[Stacks:debug]` (stack list, statuses, and per-container timing, including the Docker call duration), `[Nodes:debug]`, and `[Proxy:debug]`. When the active node is remote, the `[Nodes:debug]` and `[Proxy:debug]` lines, along with the overlay's proxy note, depend on Developer mode being enabled on the gateway you sign in to, while the destination route logs and the overlay itself follow Developer mode on the active node.
+</Note>
+
 Click **Save settings** to apply.
 
 ---
