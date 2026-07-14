@@ -6,7 +6,7 @@ description: Real-time system health, stack load, configuration overview, fleet 
 The **Home** tab is the first thing you see after logging in. It surfaces the active node's overall health, live system metrics, the load on every stack, the on/off state of every automation and security feature, a fleet- or restart-activity panel, and the running alert tape, all on a single scrollable page.
 
 <Frame>
-  <img src="/images/dashboard/dashboard-overview.png" alt="Sencho Home dashboard showing the Critical state masthead, four-tile resource gauge strip, paginated stack health table, Configuration Status card paired with Fleet Heartbeat, and the Recent Alerts feed." />
+  <img src="/images/dashboard/dashboard-overview.png" alt="Sencho Home dashboard showing the Healthy state masthead with its left-edge accent rail, four-tile resource gauge strip, paginated stack health table with Source and Port columns, Configuration Status card paired with Fleet Heartbeat, and the Recent Alerts feed." />
 </Frame>
 
 ## Status masthead
@@ -14,17 +14,17 @@ The **Home** tab is the first thing you see after logging in. It surfaces the ac
 The masthead at the top of the dashboard is the single place to read the node's current condition.
 
 <Frame>
-  <img src="/images/dashboard/status-masthead.png" alt="Status masthead in the Critical state with the editorial state word, the meta line 'LOCAL · 4 NODES · LAST SYNC 1S', the reasons line 'RAM 94% · 18 unread errors', the RUNNING / CPU / MEM stat tiles, and a 92-alerts counter." />
+  <img src="/images/dashboard/status-masthead.png" alt="Status masthead in the Healthy state with a teal left-edge accent rail, the editorial state word, the meta line 'LOCAL · 4 NODES · LAST SYNC 0S', the reasons line 'All systems nominal', the RUNNING / CPU / MEM stat tiles, and an 8-alerts counter." />
 </Frame>
 
 It carries:
 
 - A **state word** (Healthy, Degraded, or Critical) set in the editorial display face so the reader sees it first.
-- A **pulsing dot** that mirrors the state color: green when nominal, amber when degraded, rose when critical. The dot is solid (no pulse) when Healthy.
+- A thin **accent rail** down the card's left edge that mirrors the state color: brand teal when Healthy, amber when Degraded, rose when Critical. The rail shimmers when Healthy and glows steadily otherwise.
 - A **meta line** in uppercase mono tracking with the active node's name, the number of nodes registered to this Sencho instance, and the time since the last successful poll, for example `LOCAL · 4 NODES · LAST SYNC 1S`.
 - A **reasons line** that names exactly which signals moved the state away from Healthy, for example `RAM 95% · 18 unread errors`. When the state is Healthy the reasons line reads `All systems nominal`.
-- Three quick stat tiles on the right edge of the bar: **RUNNING** (`active/total`), **CPU**, and **MEM**.
-- An alerts counter pinned to the far right, showing the number of unread notifications next to a bell icon. The icon and count tint amber while at least one alert is unread.
+- Three quick stat tiles on the right edge of the bar, hidden below the `md` breakpoint: **RUNNING** (`active/total`), **CPU**, and **MEM**.
+- An alerts counter pinned to the far right, showing the number of unread notifications next to a bell icon and the word `alert` or `alerts`. The bell and count tint amber while at least one alert is unread.
 
 The masthead's CPU stat tile tints amber once host CPU crosses 80% and stays amber even at 90% or higher. The MEM and RUNNING values stay neutral; the reasons line and the gauge strip below are where you read severity.
 
@@ -33,7 +33,7 @@ The masthead's CPU stat tile tints amber once host CPU crosses 80% and stays amb
 A single rail of four tiles shows the numbers that change minute-to-minute.
 
 <Frame>
-  <img src="/images/dashboard/resource-gauges.png" alt="Four-tile resource gauge strip: a CPU hero tile at 0.3% with the 'avg 0% last 10m · peak 0% @ 03:05 PM' caption and a 10-minute sparkline; a MEMORY tile at 94% with the gauge bar in destructive red and '14.7 GB / 15.6 GB' below; a DISK tile at 57% in brand cyan with '93.6 GB / 173.6 GB'; and a NETWORK tile reading '8.8 KB/s' with the rx/tx split and a rhythm sparkline." />
+  <img src="/images/dashboard/resource-gauges.png" alt="Four-tile resource gauge strip: a CPU hero tile at 0.4% with the 'avg 0% last 10m · peak 0% @ 08:05 PM' caption and a 10-minute sparkline; a MEMORY tile at 15% in brand cyan with '2.4 GB / 15.6 GB' below; a DISK tile at 59% in brand cyan with '165.6 GB / 291.7 GB'; and a NETWORK tile reading '3.3 KB/s' with the rx/tx split and a rhythm sparkline." />
 </Frame>
 
 | Tile | What it shows |
@@ -56,20 +56,22 @@ While the dashboard is loading the CPU tile reads `--` and the caption shows `co
 A mono table of every stack discovered in the active node's `COMPOSE_DIR`, sorted so the stacks demanding attention sit at the top.
 
 <Frame>
-  <img src="/images/dashboard/stack-health.png" alt="Stack health table titled 'Stack health · 15 STACKS · SORTED BY LOAD' with pagination chevrons reading 1 / 2, listing eight stacks (profilarr, cloudflared, tautulli, swag, plex, bazarr, radarr, prowlarr) with a green status dot, host 'Local', uptime, current CPU and MEM, and a 10-minute CPU sparkline per row." />
+  <img src="/images/dashboard/stack-health.png" alt="Stack health table titled 'Stack health · 15 STACKS · SORTED BY LOAD' with pagination chevrons reading 1 / 2 and STACK / SOURCE / PORT / UP / CPU / MEM / CPU · 10m column headers, listing eight stacks (cloudflared, swag, plex, bazarr, radarr, sonarr, prowlarr, tautulli) each with a row tint, Local source, published port, uptime, current CPU and MEM, and a 10-minute CPU sparkline." />
 </Frame>
+
+The row itself carries the health tint (see below); there is no separate status-dot column. The columns are:
 
 | Column | Description |
 |--------|-------------|
-| **Status dot** | Green when the stack is running and its 10-minute peak CPU is under 80%, amber when peak CPU is at or above 80%, rose when any container has exited or peak CPU is at or above 90% |
-| **STACK** | Stack name with an orange "Update available" badge when a newer image has been detected. The badge appears regardless of the sidebar indicator setting. |
-| **HOST** | Active node this stack belongs to |
-| **UP** | How long the oldest running container has been up, in compact units (`s` / `m` / `h` / `d`); a stopped or never-started stack reads `--` |
-| **CPU** | Latest aggregate CPU across the stack's containers |
-| **MEM** | Latest aggregate memory across the stack's containers, formatted in MB or GB |
+| **STACK** | Stack name with an orange "Update available" badge when a newer image has been detected. The badge appears regardless of the sidebar indicator setting. Sortable. |
+| **SOURCE** | `Git` when the stack is linked to a [Git source](/features/git-sources), `Local` otherwise |
+| **PORT** | The stack's main published port, or `--` when it does not publish one |
+| **UP** | How long the oldest running container has been up, in compact units (`s` / `m` / `h` / `d`); a stopped or never-started stack reads `--`. Sortable. |
+| **CPU** | Latest aggregate CPU across the stack's containers. Sortable. |
+| **MEM** | Latest aggregate memory across the stack's containers, formatted in MB or GB. Sortable. |
 | **CPU · 10m** | Per-stack 10-minute sparkline tinted to match the row state; warn and error rows mark the peak with a contrasting accent color |
 
-Rows sort first by state (errors → warnings → healthy) and then by 10-minute peak CPU descending, so an exited stack always rises to the top and the noisiest healthy stacks float above the quiet ones. Warning rows pick up a subtle amber wash; critical rows pick up a rose wash. Click any row, or focus it and press <kbd>Enter</kbd> or <kbd>Space</kbd>, to jump to that stack's editor.
+By default, rows sort by state (errors → warnings → healthy) and then by 10-minute peak CPU descending, so an exited stack always rises to the top and the noisiest healthy stacks float above the quiet ones (the header reads `sorted by load`). Click the **STACK**, **UP**, **CPU**, or **MEM** column header to sort by that column instead; the `sorted by load` label disappears once you do. Click the same header again to flip between ascending and descending. A row is tinted amber when its 10-minute peak CPU is at or above 80% or the stack is partially down (some but not all containers exited), or rose when the stack is fully exited or its peak CPU is at or above 90%. Click any row, or focus it and press <kbd>Enter</kbd> or <kbd>Space</kbd>, to jump to that stack's editor.
 
 The table paginates at eight rows; chevrons appear in the header along with an `N / M` indicator when there is more than one page. When the active node has no stacks at all the card renders an empty state with a layered-disks glyph and the message `No stacks found. Create one from the sidebar.`
 
@@ -78,7 +80,7 @@ The table paginates at eight rows; chevrons appear in the header along with an `
 The Configuration Status card is the at-a-glance audit of every toggleable automation and security feature on the active node, so nothing is silently off when you expect it to be on.
 
 <Frame>
-  <img src="/images/dashboard/configuration-status.png" alt="Configuration Status card with four sections: Notifications (Notification agents, Alert rules, Notification routing all reading None), Automation (Auto-heal None, Auto-update '1 / 1', Webhooks None, Scheduled tasks '2 actives'), Security (MFA Off, SSO Off, Vulnerability scanning None), and Backups & Thresholds (Cloud Backup 'Sencho Cloud', Alert thresholds 'CPU 100% · RAM 100% · Disk 100%', Crash detection On)." />
+  <img src="/images/dashboard/configuration-status.png" alt="Configuration Status card with four sections: Notifications (Channels 'Discord', Alert rules None, Routing None, Mute Rules None), Automation (Auto-heal policies '1 / 1 active', Auto-update schedules '1 / 1 active', Webhooks None, Scheduled tasks '1 active'), Security (MFA Off, SSO Off, Trivy installed Installed, Scan policies None), and Backups & Thresholds (Cloud Backup 'Sencho Cloud', Alert thresholds Off, Crash detection On)." />
 </Frame>
 
 The card is divided into four sections.
@@ -87,9 +89,10 @@ The card is divided into four sections.
 
 | Row | What it shows |
 |-----|---------------|
-| **Notification agents** | The list of enabled delivery agents from `Discord`, `Slack`, `Webhook`, joined by commas; reads `None` when no agent is enabled |
+| **Channels** | The list of enabled delivery agents from `Discord`, `Slack`, `Webhook`, joined by commas; reads `None` when no agent is enabled |
 | **Alert rules** | Total per-stack alert rules in effect, formatted `<n> rules` |
-| **Notification routing** | Number of enabled routing rules that direct categories to specific agents, formatted `<n> routes` |
+| **Routing** | Number of enabled routing rules that direct categories to specific agents, formatted `<n> routes` |
+| **Mute Rules** | Number of enabled notification-suppression rules, formatted `<n> rules`. See [Mute Rules](/features/alerts-notifications#mute-rules). |
 
 ### Automation
 
@@ -106,7 +109,8 @@ The card is divided into four sections.
 |-----|---------------|
 | **MFA** | `On` when TOTP is configured for the signed-in operator, `Off` when configured but disabled, `Not set up` when there is no MFA secret on file |
 | **SSO** | The active SSO provider name (`OIDC`, `Google`, `GitHub`, `Okta`, `LDAP`); reads `Off` when SSO is not enabled |
-| **Vulnerability scanning** | Count of enabled scan policies on the active node; reads `None` when no policy is enabled |
+| **Trivy installed** | `Installed` when a Trivy scanner binary is available on this node, `Not installed` otherwise |
+| **Scan policies** | Count of enabled vulnerability scan policies on the active node, formatted `<n> policies`; reads `None` when no policy is enabled |
 
 ### Backups & Thresholds
 
@@ -116,21 +120,21 @@ The card is divided into four sections.
 | **Alert thresholds** | The current host thresholds, formatted `CPU x% · RAM y% · Disk z%`, or `Off` when host threshold alerts are disabled |
 | **Crash detection** | `On` when global container-crash notifications are enabled, `Off` otherwise |
 
-Click any row to jump directly to the settings section that manages it. Rows that require a higher tier than the active license are not rendered. The section headers (Notifications, Automation, Security, Backups & Thresholds) only render when at least one of their rows is visible.
+Click any row to jump directly to the settings section that manages it.
 
-The data refreshes automatically every 60 seconds and immediately on any container start/stop/restart event broadcast over the live notification stream, so the card stays in lockstep with what the rest of the UI shows.
+The card refreshes automatically every 60 seconds. It also refreshes immediately whenever a scheduled task is created, edited, toggled, or deleted, so the **Scheduled tasks** row (and the rest of the card) reflects that change within a second. Other changes covered by this card, such as switching the cloud backup provider or enabling SSO, update on the next 60-second tick.
 
 ## Activity panel
 
-To the right of Configuration Status, the dashboard shows one of two activity panels depending on whether you have remote nodes registered:
+To the right of Configuration Status, the dashboard shows one of two activity panels:
 
-- **Fleet Heartbeat** when at least one remote node is configured.
-- **Stack Restarts (7d)** when this Sencho instance manages only the local node.
+- **Fleet Heartbeat** when at least one remote node is registered and your role has the `node:read` permission.
+- **Stack Restarts (7d)** when this Sencho instance manages only the local node, or when your role lacks `node:read` (so a deployer-level role never sees a fleet card it cannot load).
 
 ### Fleet Heartbeat
 
 <Frame>
-  <img src="/images/dashboard/fleet-heartbeat.png" alt="Fleet Heartbeat card with the radio-tower kicker '4 NODES' on the right, listing four entries with status dots: Local with the brand 'LOCAL' pill and 16 containers; Opsix with 6 containers and 91 ms latency; Pitt-Moba with 5 containers and 52 ms latency; sencho-pilot-test with no container count and 'n/a' latency." />
+  <img src="/images/dashboard/fleet-heartbeat.png" alt="Fleet Heartbeat card with the radio-tower kicker '4 NODES' on the right, listing four entries with green status dots: Local with the brand 'LOCAL' pill and 16 containers; Opsix with 4 containers and 75 ms latency; Pitt-Moba with 3 containers and 65 ms latency; SLX-Mars with 4 containers and 243 ms latency." />
 </Frame>
 
 The header carries a radio-tower icon, the total node count, and a `<n> unreachable` callout in destructive red whenever any node is offline. Each row shows:
@@ -159,7 +163,7 @@ Stacks with zero restarts are not listed individually; they are summarized in a 
 The bottom-most card on the dashboard collects every triggered notification on the active node, sorted by recency.
 
 <Frame>
-  <img src="/images/dashboard/recent-alerts.png" alt="Recent Alerts card with pagination chevrons reading 1 / 12, listing eight rows tagged 'sencho-pilot-test' with severity icons (warning triangle for the threshold breach, info circles for deploys, destructive octagons for the two crash-detected entries), each carrying a relative timestamp, and a 'Clear All Notifications' button anchored at the bottom right." />
+  <img src="/images/dashboard/recent-alerts.png" alt="Recent Alerts card listing eight local, unbadged info-level rows about stack image updates and auto-update runs for plex, radarr, and swag, each carrying a relative timestamp such as '4h ago', with a 'Clear All Notifications' button anchored at the bottom right. No pagination chevrons appear because the feed holds exactly eight entries." />
 </Frame>
 
 Each row shows:
@@ -173,7 +177,17 @@ A **Clear All Notifications** button is anchored at the bottom right of the card
 
 The list paginates at eight rows; chevrons and an `N / M` indicator appear in the header when there is more than one page.
 
-Alert rules and severity routing are configured per stack in **Settings · Notifications · Channels**. See [Alerts and notifications](/features/alerts-notifications) for channel setup, per-stack rules, and the routing engine.
+Per-stack alert rules live on each stack's **Monitor** sheet; delivery channels and severity routing are configured in **Settings · Notifications**. See [Alerts and notifications](/features/alerts-notifications) for channel setup, per-stack rules, mute rules, and the routing engine.
+
+## On a phone
+
+<Frame>
+  <img src="/images/dashboard/dashboard-mobile.png" alt="Mobile dashboard masthead reading 'Healthy' with a status dot, node switcher, and '15 stacks · 15 up · 0 dn · sync 0s' meta line, followed by a CPU hero card, a mem/disk/net three-up strip, and a Stack Health list of six rows with a 'view all' link." />
+</Frame>
+
+The phone layout condenses the dashboard to what fits a single thumb-scroll: the masthead (state word, status dot, and a compact `<n> stacks · <n> up · <n> dn · sync <age>` meta line), the CPU hero card with its sparkline, a three-up memory/disk/network strip, and a **Stack Health** list capped at six rows with a **view all →** link to the full stack list. Rows show only the stack name, its host, a 10-minute sparkline, and current CPU; tap a row to open that stack's editor.
+
+Configuration Status, the Fleet Heartbeat / Stack Restarts panel, and Recent Alerts are desktop-only; open Sencho on a wider screen to see them. Notifications stay reachable from the bell icon in the mobile masthead.
 
 ## How health is derived
 
@@ -201,7 +215,7 @@ The dashboard is built from several independent polling loops so that fast-movin
 | Stack Restarts (7d) | 5 minutes |
 | Recent Alerts | Pushed live over the notifications WebSocket, with a 60-second safety-net reconcile poll |
 
-In addition, every Docker container event (start, stop, die, restart, health-status change) on the active node fires a `sencho:state-invalidate` browser event that immediately refetches container counts, system stats, stack statuses, and the Configuration Status card so the masthead and the table react in well under a second instead of waiting for the next polling tick.
+In addition, every Docker container event (start, stop, die, restart, health-status change) on the active node fires a `sencho:state-invalidate` browser event that immediately refetches container counts, system stats, and stack statuses, so the masthead, gauges, and stack health table react in well under a second instead of waiting for the next polling tick. The Configuration Status card ignores these container-level events; it only reacts early to scheduled-task changes (see the section above), so it stays on its 60-second cadence for everything else.
 
 When you switch the active node from the node switcher, the dashboard resets every panel to its loading state and starts a new round of fetches against the new node so you never see stale data from the previous one.
 
