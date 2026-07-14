@@ -1453,7 +1453,7 @@ describe('MonitorService - janitor cycle and circuit breaker', () => {
     expect(mockGetDiskUsage).not.toHaveBeenCalled();
   });
 
-  it('dispatches an alert when reclaimable exceeds the threshold', async () => {
+  it('dispatches a node-neutral janitor alert', async () => {
     mockGetGlobalSettings.mockReturnValue({ docker_janitor_gb: '0.5' });
     mockGetDiskUsage.mockResolvedValue(RECLAIMABLE_3GB);
     mockGetSystemState.mockReturnValue('0'); // No prior alert; cooldown elapsed.
@@ -1462,7 +1462,10 @@ describe('MonitorService - janitor cycle and circuit breaker', () => {
     await (svc as any).evaluateJanitor();
 
     expect(mockDispatchAlert).toHaveBeenCalledWith(
-      'info', 'system', expect.stringContaining('3.0 GB'), { stackName: undefined, actor: 'system:monitor' },
+      'info',
+      'system',
+      'This node has accumulated 3.0 GB of unused Docker data. Open Resources to reclaim space, or set up a Prune Node Resources schedule.',
+      { stackName: undefined, actor: 'system:monitor' },
     );
   });
 
