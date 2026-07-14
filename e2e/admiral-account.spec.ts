@@ -9,10 +9,10 @@ test.describe('Admiral Account', () => {
   test('Community settings show AGPLv3 source and image channel fields', async ({ page }) => {
     await loginAs(page);
 
-    await page.goto('/settings/license');
+    await page.goto('/nodes/local/settings/license');
     await page.waitForTimeout(1_000);
 
-    // Section may still route as /settings/license with Admiral Account label.
+    // Admiral Account section under the local-node settings route.
     await expect(page.getByText(/Sencho Community|Community plan/i).first()).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole('link', { name: /View source/i })).toBeVisible();
     await expect(page.getByText(/^Channel$/i).first()).toBeVisible();
@@ -24,7 +24,7 @@ test.describe('Admiral Account', () => {
 
   test('Support section uses bounded business-day wording', async ({ page }) => {
     await loginAs(page);
-    await page.goto('/settings/support');
+    await page.goto('/nodes/local/settings/support');
     await page.waitForTimeout(1_000);
 
     // Community sees self-serve; Admiral may see priority email with business-day target.

@@ -435,13 +435,13 @@ export function NodeUpdatesSheet({
                                                 Unskip
                                             </Button>
                                         )}
-                                        {s.updateBlocked && s.updateAvailable && !s.updateStatus && !s.skipActive && (
+                                        {(s.updateBlocked && s.imageChannel !== 'hardened') && s.updateAvailable && !s.updateStatus && !s.skipActive && (
                                             <PinnedUpdateBadge
                                                 reason={s.updateBlockedReason}
                                                 className="text-[10px] px-1.5 py-0 h-5 bg-muted text-muted-foreground border-card-border/40"
                                             />
                                         )}
-                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && !s.updateBlocked && isAdmin && (
+                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && !(s.updateBlocked && s.imageChannel !== 'hardened') && isAdmin && (
                                             <Button
                                                 variant="outline"
                                                 size="sm"
@@ -467,7 +467,7 @@ export function NodeUpdatesSheet({
                                                 Skip
                                             </Button>
                                         )}
-                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && !s.updateBlocked && !isAdmin && (
+                                        {s.updateAvailable && !s.updateStatus && !s.skipActive && !(s.updateBlocked && s.imageChannel !== 'hardened') && !isAdmin && (
                                             <Badge className="text-[10px] px-1.5 py-0 h-5 bg-warning/15 text-warning border-warning/30">
                                                 <CircleAlert className="w-2.5 h-2.5 mr-0.5" /> Available
                                             </Badge>

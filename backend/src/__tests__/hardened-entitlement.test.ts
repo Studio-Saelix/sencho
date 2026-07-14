@@ -1,14 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockGetSystemState, mockPost } = vi.hoisted(() => ({
+const { mockGetSystemState, mockPost, mockGetTier } = vi.hoisted(() => ({
     mockGetSystemState: vi.fn(),
     mockPost: vi.fn(),
+    mockGetTier: vi.fn((): 'paid' | 'community' => 'paid'),
 }));
 
 vi.mock('../services/DatabaseService', () => ({
     DatabaseService: {
         getInstance: () => ({
             getSystemState: mockGetSystemState,
+        }),
+    },
+}));
+
+vi.mock('../services/LicenseService', () => ({
+    LicenseService: {
+        getInstance: () => ({
+            getTier: mockGetTier,
         }),
     },
 }));
@@ -42,6 +51,7 @@ const entitlementFixture = {
 beforeEach(() => {
     vi.clearAllMocks();
     HardenedEntitlementService.getInstance().invalidateCache();
+    mockGetTier.mockReturnValue('paid');
     mockGetSystemState.mockImplementation((key: string) => ({
         license_key: 'license-for-test',
         instance_id: 'instance-for-test',
@@ -66,6 +76,29 @@ describe('allowed Hardened image references', () => {
 });
 
 describe('HardenedEntitlementService', () => {
+    it('rejects entitlement checks when the tier is not paid', async () => {
+        mockGetTier.mockReturnValue('community');
+        process.env.SENCHO_ASSURANCE_ENTITLEMENT_STUB = 'entitled';
+
+        await expect(HardenedEntitlementService.getInstance().getEntitlement('status'))
+            .resolves.toEqual({ success: false, code: 'unauthorized' });
+    });
+
+    it('ignores the entitlement stub in production', async () => {
+        const previous = process.env.NODE_ENV;
+        process.env.NODE_ENV = 'production';
+        process.env.SENCHO_ASSURANCE_ENTITLEMENT_STUB = 'entitled';
+        mockPost.mockResolvedValue({ status: 200, data: entitlementFixture });
+
+        try {
+            await expect(HardenedEntitlementService.getInstance().getEntitlement('status'))
+                .resolves.toMatchObject({ success: true, entitlement: entitlementFixture });
+            expect(mockPost).toHaveBeenCalledTimes(1);
+        } finally {
+            process.env.NODE_ENV = previous;
+        }
+    });
+
     it('returns the entitled stub response', async () => {
         process.env.SENCHO_ASSURANCE_ENTITLEMENT_STUB = 'entitled';
 

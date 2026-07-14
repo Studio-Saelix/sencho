@@ -118,6 +118,11 @@ export interface RemoteMeta {
   imagePinKind: ImagePinKind | null;
   /** True when the remote reports its update is blocked (digest/unknown pin). */
   updateBlocked: boolean;
+  /**
+   * Coarse image channel from the remote public meta. Null when the remote is
+   * older than this field or offline. Safe to expose (no private repository path).
+   */
+  imageChannel: 'community' | 'hardened' | 'unknown' | null;
 }
 
 // Runtime capability overrides; services call disableCapability() during init.
@@ -166,7 +171,13 @@ export const OFFLINE_META: RemoteMeta = {
   online: false,
   imagePinKind: null,
   updateBlocked: false,
+  imageChannel: null,
 };
+
+function parseImageChannel(value: unknown): RemoteMeta['imageChannel'] {
+  if (value === 'community' || value === 'hardened' || value === 'unknown') return value;
+  return null;
+}
 
 /** Strip any `user:pass@` userinfo from a URL so credentials never reach the logs. */
 function redactUrlCredentials(url: string): string {
@@ -190,6 +201,7 @@ export async function fetchRemoteMeta(baseUrl: string, apiToken: string): Promis
       online: true,
       imagePinKind: parseImagePinKind(res.data.imagePinKind),
       updateBlocked: res.data.updateBlocked === true,
+      imageChannel: parseImageChannel(res.data.imageChannel),
     };
     if (isDebugEnabled()) {
       // Diagnostic aid for "why is this feature gated?": log the resolved version

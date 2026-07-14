@@ -161,10 +161,15 @@ systemUpdateRouter.post('/update', async (req: Request, res: Response): Promise<
   // Fail fast on a pin we cannot repin (digest/unknown) so the caller gets a
   // 409 instead of a 202 that would later fail after the reconnect overlay.
   if (!respondSelfUpdatePreflight(res, await selfUpdate.canSelfUpdateTarget(targetVersion))) return;
+  const claim = await ImageOperationService.getInstance().claimCommunityUpdate({ targetVersion });
+  if (!claim.ok) {
+    res.status(409).json({ error: 'An image operation is already in progress.', code: claim.failureCode });
+    return;
+  }
   res.status(202).json({ message: 'Update initiated. The server will restart shortly.' });
   res.on('finish', () => {
     setTimeout(() => {
-      ImageOperationService.getInstance().runCommunityUpdate({ targetVersion }).catch(error => {
+      ImageOperationService.getInstance().executeClaimedCommunityUpdate({ targetVersion }).catch(error => {
         console.error('[ImageOperation] Unexpected community update failure:', error);
       });
     }, 500);

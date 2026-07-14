@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
-import { requireAdmin, requireUserSession } from '../middleware/tierGates';
+import { requireAdmin, requirePaid, requireUserSession } from '../middleware/tierGates';
 import { classifyImageChannel } from '../helpers/imageChannel';
 import SelfUpdateService from '../services/SelfUpdateService';
 import { ImageOperationService } from '../services/ImageOperationService';
@@ -32,6 +32,7 @@ imageChannelRouter.get('/status', async (req: Request, res: Response): Promise<v
 imageChannelRouter.post('/preflight', async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, SESSION_MESSAGE)) return;
   if (!requireUserSession(req, res) || !requireAdmin(req, res)) return;
+  if (!requirePaid(req, res)) return;
   const result = await ImageOperationService.getInstance().preflightSwitch();
   if (!result.ok) {
     res.status(403).json({ error: 'Hardened image access is unavailable', code: result.code });
@@ -43,6 +44,7 @@ imageChannelRouter.post('/preflight', async (req: Request, res: Response): Promi
 imageChannelRouter.post('/switch', async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, SESSION_MESSAGE)) return;
   if (!requireUserSession(req, res) || !requireAdmin(req, res)) return;
+  if (!requirePaid(req, res)) return;
   const fingerprint = req.body?.preflightFingerprint;
   if (typeof fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(fingerprint)) {
     res.status(400).json({ error: 'A valid preflight fingerprint is required' });

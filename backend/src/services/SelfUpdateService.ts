@@ -210,6 +210,7 @@ class SelfUpdateService {
   private canSelfUpdate = false;
   private composeContext: ComposeContext | null = null;
   private lastUpdateError: string | null = null;
+  private helperExitListeners: Array<(error: string | null) => void> = [];
   private pinCache: { info: ResolvedComposeImage | null; at: number } | null = null;
 
   public static getInstance(): SelfUpdateService {
@@ -308,6 +309,11 @@ class SelfUpdateService {
   /** Returns the error message from the last failed update attempt, or null. */
   getLastError(): string | null {
     return this.lastUpdateError;
+  }
+
+  /** Register a one-shot listener for the helper container's execFile callback. */
+  onceHelperExit(listener: (error: string | null) => void): void {
+    this.helperExitListeners.push(listener);
   }
 
   /** Clears the stored update error (call after reading it). */
@@ -551,6 +557,14 @@ class SelfUpdateService {
         const stderrText = stderr?.toString().trim();
         this.lastUpdateError = stderrText || err.message || 'Helper container failed';
         console.error('[SelfUpdate] Helper container failed:', this.lastUpdateError);
+      }
+      const listeners = this.helperExitListeners.splice(0);
+      for (const listener of listeners) {
+        try {
+          listener(this.lastUpdateError);
+        } catch (listenerError) {
+          console.error('[SelfUpdate] Helper exit listener failed:', listenerError);
+        }
       }
     });
     // No code after this point is guaranteed to run: the helper recreates this container.

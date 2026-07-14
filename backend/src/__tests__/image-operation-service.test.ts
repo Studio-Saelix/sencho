@@ -53,14 +53,9 @@ describe('ImageOperationService', () => {
     let signalLookupStarted: (() => void) | undefined;
     const lookupStarted = new Promise<void>(resolve => { signalLookupStarted = resolve; });
     let lookups = 0;
-    let triggered = 0;
     const service = ImageOperationService.getInstance();
     vi.spyOn(SelfUpdateService.getInstance(), 'getResolvedComposeImageForUpdate').mockResolvedValue(null);
     vi.spyOn(SelfUpdateService.getInstance(), 'getComposeServiceName').mockReturnValue('sencho');
-    vi.spyOn(SelfUpdateService.getInstance(), 'getLastError').mockReturnValue(null);
-    vi.spyOn(SelfUpdateService.getInstance(), 'triggerUpdate').mockImplementation(async () => {
-      triggered += 1;
-    });
     vi.spyOn(service, 'getCurrentOperation').mockImplementation(async () => {
       lookups += 1;
       if (lookups === 1) {
@@ -70,14 +65,13 @@ describe('ImageOperationService', () => {
       return null;
     });
 
-    const first = service.runCommunityUpdate();
+    const first = service.claimCommunityUpdate();
     await lookupStarted;
-    const second = await service.runCommunityUpdate();
+    const second = await service.claimCommunityUpdate();
     releaseLookup!();
 
     await expect(first).resolves.toEqual({ ok: true });
     expect(second).toEqual({ ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT' });
-    expect(triggered).toBe(1);
   });
 
   it('persists a terminal failure when the update helper reports an error', async () => {

@@ -39,6 +39,11 @@ export class HardenedEntitlementService {
         purpose: HardenedEntitlementPurpose,
         requestedVersion?: string,
     ): Promise<HardenedEntitlementResult> {
+        // Dynamic import avoids a circular dependency: LicenseService imports this service.
+        const { LicenseService } = await import('./LicenseService');
+        if (LicenseService.getInstance().getTier() !== 'paid') {
+            return { success: false, code: 'unauthorized' };
+        }
         const db = DatabaseService.getInstance();
         const licenseKey = db.getSystemState('license_key');
         const instanceId = db.getSystemState('instance_id');
@@ -101,6 +106,8 @@ export class HardenedEntitlementService {
     }
 
     private getStubResponse(): HardenedEntitlementResult | null {
+        // Stub is non-production/test-only; ignore it entirely in production.
+        if (process.env.NODE_ENV === 'production') return null;
         const stub = process.env.SENCHO_ASSURANCE_ENTITLEMENT_STUB;
         if (!stub) return null;
         if (stub === '1' || stub === 'entitled') {

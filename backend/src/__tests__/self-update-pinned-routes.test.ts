@@ -137,7 +137,7 @@ describe('GET /api/meta pin subset', () => {
     expect(JSON.stringify(res.body)).not.toContain('private.registry.example');
   });
 
-  it('exposes imagePinKind and updateBlocked but never composeImageRef', async () => {
+  it('exposes imagePinKind, updateBlocked, and imageChannel but never composeImageRef', async () => {
     mockSelfUpdateAvailable({
       pinInfo: { pinKind: 'semver', composeImageRef: 'saelix/sencho:0.93.3', filePath: '/opt/sencho/docker-compose.yml' },
     });
@@ -147,19 +147,21 @@ describe('GET /api/meta pin subset', () => {
     expect(res.status).toBe(200);
     expect(res.body.imagePinKind).toBe('semver');
     expect(res.body.updateBlocked).toBe(false);
+    expect(res.body.imageChannel).toBe('community');
     expect(res.body).not.toHaveProperty('composeImageRef');
     expect(res.body).not.toHaveProperty('targetImageRef');
   });
 
   it('reports updateBlocked=true for a digest pin', async () => {
     mockSelfUpdateAvailable({
-      pinInfo: { pinKind: 'digest', composeImageRef: 'saelix/sencho@sha256:abc', filePath: '/opt/sencho/docker-compose.yml' },
+      pinInfo: { pinKind: 'digest', composeImageRef: 'ghcr.io/studio-saelix/sencho-hardened@sha256:abc', filePath: '/opt/sencho/docker-compose.yml' },
     });
 
     const res = await request(app).get('/api/meta');
 
     expect(res.body.imagePinKind).toBe('digest');
     expect(res.body.updateBlocked).toBe(true);
+    expect(res.body.imageChannel).toBe('hardened');
   });
 });
 

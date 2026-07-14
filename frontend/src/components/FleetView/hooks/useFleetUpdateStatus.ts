@@ -21,7 +21,9 @@ function parseUpdateError(err: Record<string, unknown>, fallback: string): strin
 }
 
 function toastIfUpdateBlocked(status: NodeUpdateStatus | undefined): boolean {
-    if (!status?.updateBlocked) return false;
+    // Hardened digests report updateBlocked but still accept a POST so the typed
+    // HARDENED_REMOTE_UPDATE_UNSUPPORTED path can surface.
+    if (!status?.updateBlocked || status.imageChannel === 'hardened') return false;
     toast.error(status.updateBlockedReason ?? PINNED_UPDATE_BLOCKED_FALLBACK);
     return true;
 }

@@ -126,6 +126,7 @@ export class ImageOperationService {
       }
       operation.state = 'recreating';
       await this.persist(operation);
+      this.watchHelperExit(operation);
       return { ok: true };
     } catch (error) {
       console.error('[ImageOperation] Hardened switch failed:', error);
@@ -136,7 +137,9 @@ export class ImageOperationService {
     }
   }
 
-  public async runCommunityUpdate(options?: { targetVersion?: string }): Promise<{ ok: boolean; failureCode?: string }> {
+  public async claimCommunityUpdate(options?: { targetVersion?: string }): Promise<
+    { ok: true } | { ok: false; failureCode: 'IMAGE_OPERATION_IN_FLIGHT' }
+  > {
     const selfUpdate = SelfUpdateService.getInstance();
     const resolved = await selfUpdate.getResolvedComposeImageForUpdate();
     const operation = this.newOperation(
@@ -146,7 +149,24 @@ export class ImageOperationService {
       resolved?.filePath ?? null,
       selfUpdate.getComposeServiceName(),
     );
-    if (!await this.tryClaim(operation)) return { ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT' };
+    if (!await this.tryClaim(operation)) {
+      return { ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT' };
+    }
+    // Disk non-terminal state is the concurrency lock; clear the in-memory mutex
+    // so a later claim can observe the persisted pending operation.
+    this.claimed = false;
+    return { ok: true };
+  }
+
+  public async executeClaimedCommunityUpdate(options?: { targetVersion?: string }): Promise<{ ok: boolean; failureCode?: string }> {
+    const operation = await this.getCurrentOperation();
+    if (!operation || operation.kind !== 'community_update') {
+      return { ok: false, failureCode: 'update_failed' };
+    }
+    if (!['pending_pull', 'pulling', 'patching', 'recreating'].includes(operation.state)) {
+      return { ok: false, failureCode: 'update_failed' };
+    }
+    const selfUpdate = SelfUpdateService.getInstance();
     try {
       operation.state = 'pulling';
       await this.persist(operation);
@@ -161,14 +181,19 @@ export class ImageOperationService {
       }
       operation.state = 'recreating';
       await this.persist(operation);
+      this.watchHelperExit(operation);
       return { ok: true };
     } catch (error) {
       console.error('[ImageOperation] Community update failed:', error);
       await this.fail(operation, 'update_failed');
       return { ok: false, failureCode: 'update_failed' };
-    } finally {
-      this.claimed = false;
     }
+  }
+
+  public async runCommunityUpdate(options?: { targetVersion?: string }): Promise<{ ok: boolean; failureCode?: string }> {
+    const claim = await this.claimCommunityUpdate(options);
+    if (!claim.ok) return claim;
+    return this.executeClaimedCommunityUpdate(options);
   }
 
   public async getOperation(operationId: string): Promise<ImageOperation | null> {
@@ -194,17 +219,43 @@ export class ImageOperationService {
     if (!operation || !['pending_pull', 'pulling', 'patching', 'recreating'].includes(operation.state)) return;
     const markerPath = this.successMarkerFile(operation);
     for (let elapsed = 0; elapsed < 30_000; elapsed += 1_000) {
-      const pinMatchesTarget = (await SelfUpdateService.getInstance().getPinInfo({ fresh: true }))?.composeImageRef === operation.targetImageRef;
-      if (await this.isSuccessMarkerForOperation(markerPath, operation.operationId) && pinMatchesTarget) {
-        operation.state = 'succeeded';
-        operation.resolvedAt = new Date().toISOString();
-        await this.persist(operation);
-        await this.cleanupOperationArtifacts(operation);
-        return;
+      const markerOk = await this.isSuccessMarkerForOperation(markerPath, operation.operationId);
+      if (operation.kind === 'community_update') {
+        // Community success is the marker alone; floating tags may not equal targetImageRef.
+        if (markerOk) {
+          operation.state = 'succeeded';
+          operation.resolvedAt = new Date().toISOString();
+          await this.persist(operation);
+          await this.cleanupOperationArtifacts(operation);
+          return;
+        }
+      } else {
+        const pinMatchesTarget = (await SelfUpdateService.getInstance().getPinInfo({ fresh: true }))?.composeImageRef === operation.targetImageRef;
+        if (markerOk && pinMatchesTarget) {
+          operation.state = 'succeeded';
+          operation.resolvedAt = new Date().toISOString();
+          await this.persist(operation);
+          await this.cleanupOperationArtifacts(operation);
+          return;
+        }
       }
       await new Promise(resolve => setTimeout(resolve, 1_000));
     }
     await this.fail(operation, 'interrupted_by_restart');
+  }
+
+  private watchHelperExit(operation: ImageOperation): void {
+    SelfUpdateService.getInstance().onceHelperExit((error) => {
+      if (!error) return;
+      void (async () => {
+        const current = await this.getCurrentOperation();
+        if (!current || current.operationId !== operation.operationId) return;
+        if (!['pending_pull', 'pulling', 'patching', 'recreating'].includes(current.state)) return;
+        await this.fail(current, 'update_failed');
+      })().catch((listenerError) => {
+        console.error('[ImageOperation] Helper exit terminalization failed:', listenerError);
+      });
+    });
   }
 
   private newOperation(kind: ImageOperationKind, previousImageRef: string | null, targetImageRef: string | null, composeFilePath: string | null, serviceName: string | null, preflightFingerprint?: string): ImageOperation {

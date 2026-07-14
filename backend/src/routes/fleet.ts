@@ -70,6 +70,7 @@ const EMPTY_PIN_STATUS = {
   targetImageRef: null,
   updateBlocked: false,
   updateBlockedReason: null,
+  imageChannel: null,
 } as const;
 
 function localPinStatusFields(
@@ -89,6 +90,7 @@ function localPinStatusFields(
         : null,
     updateBlocked,
     updateBlockedReason: updateBlocked ? blockedReason : null,
+    imageChannel: classifyImageChannel(pin.composeImageRef),
   };
 }
 // Throttle the forced latest-version refresh so a caller cannot loop the recheck
@@ -1118,6 +1120,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         let remoteOnline = false;
         let remoteImagePinKind: ImagePinKind | null = null;
         let remoteUpdateBlocked = false;
+        let remoteImageChannel: 'community' | 'hardened' | 'unknown' | null = null;
         if (node.type === 'local') {
           version = gatewayVersion;
         } else {
@@ -1128,6 +1131,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           remoteOnline = meta.online;
           remoteImagePinKind = meta.imagePinKind;
           remoteUpdateBlocked = meta.updateBlocked;
+          remoteImageChannel = meta.imageChannel;
         }
 
         if (tracker?.status === 'updating') {
@@ -1259,15 +1263,17 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         let targetImageRef: string | null = null;
         let updateBlocked = false;
         let updateBlockedReason: string | null = null;
+        let imageChannel: 'community' | 'hardened' | 'unknown' | null = null;
         if (node.type === 'local') {
           const pin = await SelfUpdateService.getInstance().getPinInfo();
           if (pin) {
-            ({ imagePinKind, composeImageRef, targetImageRef, updateBlocked, updateBlockedReason } =
+            ({ imagePinKind, composeImageRef, targetImageRef, updateBlocked, updateBlockedReason, imageChannel } =
               localPinStatusFields(pin, compareVersion, compareValid, REPIN_BLOCKED_REASON));
           }
         } else {
           imagePinKind = remoteImagePinKind;
           updateBlocked = remoteUpdateBlocked;
+          imageChannel = remoteImageChannel;
         }
 
         return {
@@ -1286,6 +1292,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           targetImageRef,
           updateBlocked,
           updateBlockedReason,
+          imageChannel,
         };
       }),
     );
@@ -1483,11 +1490,16 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
         return;
       }
       if (!respondSelfUpdatePreflight(res, await selfUpdate.canSelfUpdateTarget(resolvedTarget))) return;
+      const claim = await ImageOperationService.getInstance().claimCommunityUpdate({ targetVersion: resolvedTarget });
+      if (!claim.ok) {
+        res.status(409).json({ error: 'An image operation is already in progress.', code: claim.failureCode });
+        return;
+      }
       updateTracker.set(nodeId, updateTracker.create('updating', getSenchoVersion(), null));
       res.status(202).json({ message: 'Update initiated on local node. The server will restart shortly.' });
       res.on('finish', () => {
         setTimeout(() => {
-          ImageOperationService.getInstance().runCommunityUpdate({ targetVersion: resolvedTarget }).catch(error => {
+          ImageOperationService.getInstance().executeClaimedCommunityUpdate({ targetVersion: resolvedTarget }).catch(error => {
             console.error('[ImageOperation] Unexpected community update failure:', error);
           });
         }, 500);
@@ -1513,7 +1525,9 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       res.status(503).json({ error: 'Remote node does not support self-update. It may need to be updated manually first.' });
       return;
     }
-    if (meta.updateBlocked) {
+    // Hardened peers are digest-pinned (updateBlocked) but must still reach
+    // /api/system/update so machine creds get HARDENED_REMOTE_UPDATE_UNSUPPORTED.
+    if (meta.updateBlocked && meta.imageChannel !== 'hardened') {
       res.status(409).json({ error: REPIN_BLOCKED_REASON, code: 'update_blocked' });
       return;
     }
@@ -1585,7 +1599,7 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
       if (!meta.capabilities.includes('self-update')) {
         return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
-      if (meta.updateBlocked) {
+      if (meta.updateBlocked && meta.imageChannel !== 'hardened') {
         return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
       if (isValidVersion(meta.version) && compareValid && !semver.lt(meta.version, compareVersion!)) {
