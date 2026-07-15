@@ -51,6 +51,13 @@ function stubDockerControllerNoops() {
     removeNetwork: vi.fn().mockResolvedValue(undefined),
     removeVolume: vi.fn().mockResolvedValue(undefined),
     removeContainers: vi.fn().mockResolvedValue([]),
+    getDependencySnapshot: vi.fn().mockResolvedValue({
+      containers: [],
+      networks: [
+        { id: OTHER_NETWORK, name: 'other_net', driver: 'bridge', scope: 'local', isSystem: false, composeProject: null, stack: null },
+      ],
+      volumes: [],
+    }),
   };
   vi.spyOn(DockerController, 'getInstance').mockReturnValue(fake as unknown as ReturnType<typeof DockerController.getInstance>);
   return fake;

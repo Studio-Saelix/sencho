@@ -1,0 +1,79 @@
+---
+title: Networking
+description: Node-scoped Compose network inventory, topology, inspect, and findings on a dedicated operator page.
+---
+
+The **Networking** page is a first-class operator view for the active node. It answers how Docker networks on that node relate to your Sencho stacks: what exists, what is connected, where Compose intent and runtime disagree, and which issues deserve attention next.
+
+This page is distinct from the stack editor **Networking** tab, which stays stack-scoped and models one deployment at a time. Use the operator page for node-wide inventory and hygiene; use the stack tab when you are editing or validating a single stack's compose model. See [Compose Networking](/features/compose-networking) for the stack tab.
+
+Networking follows whichever node is selected in the top bar. Remote nodes load through the same distributed API proxy as other node views.
+
+## Overview
+
+The overview masthead summarizes the node at a glance and derives its posture from findings: action needed, review, contained, partial networking data, or runtime unavailable. Stat cards break down network counts by ownership (Sencho-managed, external dependency, system) alongside exposed stacks, unknown exposure, missing externals, and name collisions; each links to the relevant inventory or findings view.
+
+The **operator attention** list ranks the top findings needing review, with a one-click primary action per row and a link to the full Findings tab. Three Compose-first sections round out the page: external network dependencies, networks shared across stacks, and services publishing without a classified exposure intent. The activity band below shows recent node-wide stack work, linked back to the owning stack.
+
+Use **Refresh** to re-fetch live Docker state and Compose facts in one pass.
+
+## Topology
+
+The **Topology** tab reuses Sencho's interactive network graph: networks on top, containers below, animated edges, pan and zoom, and a mini-map.
+
+- **Network nodes** show the network name and driver, color-coded by managed, external, or system status.
+- **Container nodes** show the container name, state, stack badge, image, and IPv4 on each attachment.
+- **Click-to-logs** on a running container opens its log stream.
+- **Show system networks** toggles `bridge`, `host`, and `none` into the graph when you need to debug default-bridge attachments.
+
+Data comes from `GET /api/networking/topology` on the active node. Missing external dependencies appear as a distinct graph node when Docker is available. These synthetic nodes cannot be inspected or deleted, but link back to the declaring stack.
+
+## Networks
+
+The **Networks** tab distinguishes runtime ownership from Compose dependency intent. Ownership identifies system, Sencho-managed, Compose-managed, or unmanaged networks. An external dependency is a separate signal: a network can be owned by a stack and still be declared as external by another stack. Filter chips cover managed, external dependencies, system, shared, exposed, and drift signals.
+
+Click the eye icon on a row to open the detail drawer. Inspect is sanitized: structural fields and label **keys** only, never secret values interpolated into names or options.
+
+### Create network
+
+Admins can open **Create network** from the page header. The dialog matches the fields documented in [Compose Networking → Creating networks](/features/compose-networking#creating-networks). Creating a network here does not attach it to a stack; add it to the Compose file with `external: true` and redeploy when you are ready to use it.
+
+## Findings
+
+The **Findings** tab lists Compose-first networking issues Sencho derives from the effective model plus one live Docker snapshot per refresh, grouped into **Needs action**, **Review recommended**, and **Informational**. Examples include missing external networks, duplicate network names across stacks, host-network exposure mismatches, and stacks whose model could not be rendered.
+
+Findings also fold in the networking-relevant results from your last Compose Doctor run on each stack. A finding both engines detect shows **Live · also found by Doctor**; a finding only Doctor caught (Doctor checks a few things the live engine does not, such as host port conflicts) shows **Last Doctor run** with the timestamp of that run. Doctor's contribution is always the cached result of the last run on that stack, not a fresh check, so run Doctor again on a stack if you want its findings current. An active acknowledgement on a Doctor finding excludes it here too.
+
+Each finding includes a severity, evidence, and the actions that are appropriate for the current operator. Depending on permissions and the finding, this can open the affected stack, its Networking, Doctor, Dossier, or Drift tab, filter topology, inspect a network, create a missing network, copy a safe Compose snippet, or refresh the data.
+
+## Resources and cleanup
+
+Day-to-day network cleanup stays on [Resources](/features/resources): **Quick Clean → Prune Dead Networks** removes unused networks that are safe to prune under the scope you choose. The Resources page also links here when you need the full inventory or topology view.
+
+## Deep links and search
+
+- URL: `/nodes/local/networking` for the default local node (remote nodes use their stable slug).
+- Global search (`Ctrl+K` / `Cmd+K`) lists **Networking** under **Pages** alongside Home, Resources, and the other top-level views.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="The Networking page says it is not available on this node">
+    The node must expose the Compose Networking capability. Older remote agents that have not been updated show a lock card instead of the operator page. Update the node to the current Sencho version and try again.
+  </Accordion>
+  <Accordion title="I expected network list or topology under Resources">
+    Network inventory, topology, inspect, and findings moved to this page. Resources still handles images, volumes, unmanaged containers, reclaim, and **Prune Dead Networks**. Pick **Networking** from the top navigation to find them.
+  </Accordion>
+  <Accordion title="Findings mention a stack that failed to render">
+    Sencho compares live Docker state against each stack's effective Compose model. When `docker compose config` fails for a stack, that stack is listed under render failures on the overview and related findings may be incomplete until the Compose file is fixed.
+  </Accordion>
+  <Accordion title="The overview says runtime unavailable">
+    Sencho could not reach Docker on this node. Compose-model findings remain visible, while runtime-only inventory, drift, missing external checks, and inspect are unavailable until Docker responds again.
+  </Accordion>
+  <Accordion title="The overview says partial networking data">
+    The selected remote node supports the earlier networking response format. Inventory fields may be available, but Sencho does not infer a healthy posture or show enriched finding actions. Update that node to use the complete operator view.
+  </Accordion>
+  <Accordion title="A network is marked as an external dependency">
+    This means one or more Compose stacks expect the network to exist before deployment. It does not imply that the network is unmanaged. Review the ownership and declaring stacks together before changing or deleting it.
+  </Accordion>
+</AccordionGroup>

@@ -9,7 +9,7 @@ import { DatabaseService } from './DatabaseService';
 import { computeStackHashes } from './DriftLedgerService';
 import { parseComposeDependencies } from '../helpers/composeDependencyParse';
 import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
-import { parseAccessUrlPorts } from './network/normalize';
+import { getExposureContext } from './network/exposureContext';
 import type { ExposureIntent } from './network/types';
 import { runRules, SEVERITY_RANK, RULE_IDS, RENDER_FAILED_RULE_ID } from './preflight/rules';
 import type {
@@ -266,7 +266,7 @@ export class ComposeDoctorService {
 
     const { nodePorts, existingNetworkNames, existingVolumeNames, existingContainers, nodeStateAvailable } = await this.nodeState(nodeId, fsSvc, stackName);
     const bindChecks = model ? await this.resolveBindChecks(model, baseDir) : [];
-    const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls } = this.exposureState(nodeId, stackName);
+    const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls, exposureAvailable } = this.exposureState(nodeId, stackName);
     const selfStack = await isSelfStack(stackName);
 
     return {
@@ -290,6 +290,7 @@ export class ComposeDoctorService {
       serviceIntents,
       accessUrlPorts,
       hasAccessUrls,
+      exposureAvailable,
       isSelfStack: selfStack,
     };
   }
@@ -297,6 +298,8 @@ export class ComposeDoctorService {
   /**
    * The user's stored exposure intent (resolved into stack-level + per-service)
    * and the dossier's documented access-URL ports, for the exposure rules.
+   * Delegates to the shared exposure-context helper (also used by the live
+   * Networking findings engine) so both engines can never diverge on severity.
    * Fail-soft: a read error defaults to unset/empty so the rules simply do not
    * fire rather than the whole preflight failing.
    */
@@ -305,26 +308,19 @@ export class ComposeDoctorService {
     serviceIntents: Record<string, ExposureIntent>;
     accessUrlPorts: Set<number>;
     hasAccessUrls: boolean;
+    exposureAvailable: boolean;
   } {
-    try {
-      const db = DatabaseService.getInstance();
-      const rows = db.getStackExposureIntents(nodeId, stackName);
-      const stackIntent = rows.find(r => r.service === '')?.intent ?? null;
-      const serviceIntents: Record<string, ExposureIntent> = {};
-      for (const r of rows) if (r.service !== '') serviceIntents[r.service] = r.intent;
-
-      const accessUrls = db.getStackDossier(nodeId, stackName)?.access_urls ?? '';
-      return {
-        stackIntent,
-        serviceIntents,
-        accessUrlPorts: parseAccessUrlPorts(accessUrls),
-        hasAccessUrls: accessUrls.trim().length > 0,
-      };
-    } catch (error) {
-      console.warn('[ComposeDoctor] Exposure state unavailable for %s; exposure rules skipped:',
-        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
-      return { stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false };
+    const context = getExposureContext(nodeId, stackName);
+    if (!context.available) {
+      return { stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false, exposureAvailable: false };
     }
+    return {
+      stackIntent: context.stackIntent,
+      serviceIntents: context.serviceIntents,
+      accessUrlPorts: context.accessUrlPorts,
+      hasAccessUrls: context.hasAccessUrls,
+      exposureAvailable: true,
+    };
   }
 
   /** Snapshot the node's ports/networks/volumes/containers. Degrades to empty if Docker is unreachable. */

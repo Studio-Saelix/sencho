@@ -37,6 +37,10 @@ import { getNodeCpu, getNodeMem, getNodeDisk, isCritical } from './nodeUtils';
 export interface NodeCardProps {
     node: FleetNode;
     onNavigate: (nodeId: number, stackName: string) => void;
+    /** Switches to this node and opens its Networking page. */
+    onOpenNetworking?: (nodeId: number) => void;
+    /** Networking posture signal from computeNodeNetworkingSummary, if loaded. */
+    networkingSignal?: { exposed: boolean; unknown: boolean; drift: boolean };
     labelMap?: Record<string, StackLabel[]>;
     updateStatus?: NodeUpdateStatus;
     onUpdate?: (nodeId: number) => void;
@@ -64,7 +68,7 @@ function UsageBar({ percent, color }: { percent: number; color: string }) {
 
 // --- Main Export ---
 
-export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill }: NodeCardProps) {
+export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill }: NodeCardProps) {
     const [expanded, setExpanded] = useState(false);
     const [stacks, setStacks] = useState<string[] | null>(node.stacks);
     const [loadingStacks, setLoadingStacks] = useState(false);
@@ -253,6 +257,17 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                                         title={node.cordoned_reason ?? 'Unschedulable: new blueprint deployments skip this node'}
                                     >
                                         <Ban className="w-2.5 h-2.5 mr-0.5" /> Cordoned
+                                    </Badge>
+                                )}
+                                {onOpenNetworking && networkingSignal && (networkingSignal.exposed || networkingSignal.unknown || networkingSignal.drift) && (
+                                    <Badge
+                                        variant="outline"
+                                        className="text-[10px] px-1.5 py-0 h-4 shrink-0 cursor-pointer bg-warning/10 text-warning border-warning/30 hover:bg-warning/20"
+                                        onClick={(event) => { event.stopPropagation(); onOpenNetworking(node.id); }}
+                                        title="Open this node's Networking page"
+                                    >
+                                        Networking ·
+                                        {networkingSignal.drift ? ' drift' : networkingSignal.exposed ? ' exposed' : ' unknown exposure'}
                                     </Badge>
                                 )}
                             </div>

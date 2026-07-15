@@ -29,6 +29,8 @@ interface OverviewTabProps {
     fleetStackLabelMap: Record<number, Record<string, StackLabel[]>>;
     updateStatusMap: Map<number, NodeUpdateStatus>;
     onNavigateToNode: (nodeId: number, stackName: string) => void;
+    onOpenNodeNetworking: (nodeId: number) => void;
+    networkingByNode: Map<number, { exposed: boolean; unknown: boolean; drift: boolean }>;
     onUpdate?: (nodeId: number) => void;
     updatingNodeId: number | null;
     onRetryUpdate?: (nodeId: number) => void;
@@ -65,6 +67,8 @@ export function OverviewTab({
     fleetStackLabelMap,
     updateStatusMap,
     onNavigateToNode,
+    onOpenNodeNetworking,
+    networkingByNode,
     onUpdate,
     updatingNodeId,
     onRetryUpdate,
@@ -143,6 +147,8 @@ export function OverviewTab({
                                     key={node.id}
                                     node={node}
                                     onNavigate={onNavigateToNode}
+                                    onOpenNetworking={onOpenNodeNetworking}
+                                    networkingSignal={networkingByNode.get(node.id)}
                                     labelMap={fleetStackLabelMap[node.id] ?? {}}
                                     updateStatus={updateStatusMap.get(node.id)}
                                     onUpdate={onUpdate}

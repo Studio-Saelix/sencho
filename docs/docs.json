@@ -102,6 +102,7 @@
                   "features/editor",
                   "features/stack-file-explorer",
                   "features/resources",
+                  "features/networking",
                   "features/dashboard",
                   "features/app-store",
                   "features/global-search",

@@ -72,6 +72,7 @@ const AutoUpdateReadinessView = lazy(() => import('./AutoUpdateReadinessView'));
 const AppStoreView = lazy(() => import('./AppStoreView').then(m => ({ default: m.AppStoreView })));
 const AuditLogView = lazy(() => import('./AuditLogView').then(m => ({ default: m.AuditLogView })));
 const ResourcesView = lazy(() => import('./ResourcesView'));
+const NetworkingView = lazy(() => import('./networking/NetworkingView').then(m => ({ default: m.NetworkingView })));
 const GlobalObservabilityView = lazy(() => import('./GlobalObservabilityView').then(m => ({ default: m.GlobalObservabilityView })));
 
 export default function EditorLayout() {
@@ -312,6 +313,12 @@ export default function EditorLayout() {
     pendingStackLoadRef,
     pendingLogsRef,
   } = stackActions;
+  // Pending-intent target for a cross-node "open this node's Networking page"
+  // request (e.g. a Fleet networking signal). Mirrors pendingStackLoadRef:
+  // setActiveNode first, then the node-settled effect below navigates once
+  // activeNode actually reflects the target, so Networking never briefly
+  // mounts and fetches against the previous node.
+  const pendingNetworkingNodeRef = useRef<number | null>(null);
 
   const panelStartedAt = usePanelSessionStartedAt(panelState);
 
@@ -342,6 +349,7 @@ export default function EditorLayout() {
   // Optimistically flip to the detail surface the instant a row is tapped,
   // before loadFile's fetch resolves selectedFile; cleared once it settles.
   const [pendingDetailStack, setPendingDetailStack] = useState<string | null>(null);
+  const [pendingAnatomyTab, setPendingAnatomyTab] = useState<'networking' | 'doctor' | 'dossier' | 'drift' | undefined>();
   const [fleetUpdatesIntent, setFleetUpdatesIntent] = useState<{ tab: 'nodes' | 'changelog' } | null>(null);
 
   const handleFleetUpdatesIntentConsumed = useCallback(() => setFleetUpdatesIntent(null), []);
@@ -411,6 +419,14 @@ export default function EditorLayout() {
     }
   }, [pendingDetailStack, detailReady, isFileLoading, stacksLoadStatus, urlHydratingStack, routeDetailError]);
 
+  useEffect(() => {
+    if (pendingAnatomyTab && selectedFile && !isFileLoading) {
+      const timer = window.setTimeout(() => setPendingAnatomyTab(undefined), 0);
+      return () => window.clearTimeout(timer);
+    }
+    return undefined;
+  }, [isFileLoading, pendingAnatomyTab, selectedFile]);
+
   // A phone shows one surface at a time, so every mobile navigation tears down
   // the current detail and switches surfaces, guarding a dirty editor first.
   // `then` runs the destination-specific work (navigate to a view, open
@@ -446,9 +462,20 @@ export default function EditorLayout() {
   // is already active, else stash it and switch nodes (the node-switch effect
   // loads the pending stack once the registry settles). Mobile shows the
   // optimistic detail surface immediately.
-  const handleFleetNavigateToNode = (nodeId: number, stackName: string) => {
+  const handleFleetNavigateToNode = (
+    nodeId: number,
+    stackName: string,
+    destination: SenchoOpenStackDetail['destination'] = 'stack',
+  ) => {
     const node = nodes.find(n => n.id === nodeId);
     if (!node) return;
+    setPendingAnatomyTab(
+      destination === 'anatomy-networking' ? 'networking'
+        : destination === 'doctor' ? 'doctor'
+        : destination === 'dossier' ? 'dossier'
+        : destination === 'drift' ? 'drift'
+        : undefined,
+    );
     if (isMobile) setPendingDetailStack(stackName);
     if (activeNode?.id === nodeId) {
       void stackActions.loadFile(stackName);
@@ -467,11 +494,27 @@ export default function EditorLayout() {
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<SenchoOpenStackDetail>).detail;
-      if (detail) openStackFromEventRef.current(detail.nodeId, detail.stackName);
+      if (detail) openStackFromEventRef.current(detail.nodeId, detail.stackName, detail.destination);
     };
     window.addEventListener(SENCHO_OPEN_STACK_EVENT, handler);
     return () => window.removeEventListener(SENCHO_OPEN_STACK_EVENT, handler);
   }, []);
+
+  // Open a node's Networking page from a Fleet card's networking signal.
+  // Pending-intent gated (see pendingNetworkingNodeRef above): if the node is
+  // already active, navigate immediately; otherwise switch nodes first and let
+  // the node-settled effect complete the navigation once activeNode reflects
+  // the switch.
+  const handleOpenNodeNetworking = (nodeId: number) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node) return;
+    if (activeNode?.id === nodeId) {
+      setActiveView('networking');
+      return;
+    }
+    pendingNetworkingNodeRef.current = nodeId;
+    setActiveNode(node);
+  };
 
   // "Inspect" a node from the mobile Fleet screen: switch to it and land on its
   // stack list.
@@ -536,6 +579,7 @@ export default function EditorLayout() {
   const renderEditor = (headerActions?: ReactNode) => (
     <EditorView
       headerActions={headerActions}
+      requestedAnatomyTab={pendingAnatomyTab}
       stackName={stackName}
       isDarkMode={isDarkMode}
       containers={containers}
@@ -659,6 +703,8 @@ export default function EditorLayout() {
 
     const pendingStack = pendingStackLoadRef.current;
     pendingStackLoadRef.current = null;
+    const pendingNetworkingNodeId = pendingNetworkingNodeRef.current;
+    pendingNetworkingNodeRef.current = null;
 
     stackActions.resetEditorState();
     // Stack filenames can repeat across nodes; drop the previous node's failure
@@ -667,6 +713,8 @@ export default function EditorLayout() {
 
     if (pendingStack) {
       void stackActions.loadFile(pendingStack);
+    } else if (pendingNetworkingNodeId === activeNode.id) {
+      setActiveView('networking');
     } else if (isRealSwitch) {
       setActiveView('dashboard');
     }
@@ -892,6 +940,7 @@ export default function EditorLayout() {
             }}
             onHostConsoleClose={() => setActiveView(selectedFile ? 'editor' : 'dashboard')}
             onFleetNavigateToNode={handleFleetNavigateToNode}
+            onOpenNodeNetworking={handleOpenNodeNetworking}
             filterNodeId={filterNodeId}
             onClearScheduledOpsFilter={() => setFilterNodeId(null)}
             schedulePrefill={schedulePrefill}
@@ -1037,6 +1086,12 @@ export default function EditorLayout() {
             return (
               <Suspense fallback={lazyFallback}>
                 <ResourcesView headerActions={mobileMastheadActions} />
+              </Suspense>
+            );
+          case 'networking':
+            return (
+              <Suspense fallback={lazyFallback}>
+                <NetworkingView headerActions={mobileMastheadActions} />
               </Suspense>
             );
           case 'global-observability':

@@ -171,6 +171,8 @@ When Compose Doctor is available on the active node, a prompt at the bottom of t
 
 See [Compose Doctor](/features/compose-doctor) for the complete check set and severity levels.
 
+A **View node networking** link near the bottom of the tab opens the node-wide [Networking](/features/networking) page, for when you want to see this stack's networks in the context of every other stack sharing them.
+
 ## Creating networks
 
 <Frame>
@@ -180,7 +182,7 @@ See [Compose Doctor](/features/compose-doctor) for the complete check set and se
   />
 </Frame>
 
-Admins can create a new Docker network directly from the Networking tab using the **create network** button in the panel header. This is the same action available from the Resources Hub Networks tab.
+Admins can create a new Docker network from the stack **Networking** tab or from the node [Networking](/features/networking) operator page using the **create network** button in the panel header.
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -199,7 +201,7 @@ After the network is created, the Networking tab refreshes automatically. The ne
 
 ## Limitations
 
-- **No modify or delete.** Sencho can create networks (via the create network dialog) but never modifies or deletes existing networks from this tab. Cleanup is handled by `docker compose down` or the Resources Hub prune actions.
+- **No modify or delete from the stack tab.** Sencho can create networks (via the create network dialog on the stack tab or the operator Networking page) but never modifies or deletes existing networks from the stack tab. Cleanup is handled by `docker compose down`, the operator [Networking](/features/networking) page for inventory, or Resources prune actions.
 - **Structural fields only.** Environment variable values and label values are never returned. Secrets interpolated into structural fields (network `name:`, ports, `extra_hosts`) are resolved and do appear.
 - **Runtime drift requires Docker reachability.** When the node is not reachable, the tab shows the declared model but cannot compare against the live state.
 - **Capability-gated tab.** The Networking tab only appears when the active node reports that it supports Compose Networking. Older nodes hide the tab until they are updated.

@@ -32,6 +32,7 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
     nodePorts: [], existingNetworkNames: new Set(), existingVolumeNames: new Set(),
     existingContainers: [], nodeStateAvailable: true, bindChecks: [],
     stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
+    exposureAvailable: true,
     isSelfStack: false, ...over,
   };
 }
@@ -353,6 +354,15 @@ describe('exposure-intent rules', () => {
   });
   it('does not warn unclassified when no port is published', () => {
     expect(ids(runRules(ctx({ model: model([svc()]), stackIntent: null })), 'exposure-unclassified')).toHaveLength(0);
+  });
+  it('does not fabricate intent findings when the exposure context is unavailable', () => {
+    // A DB read failure leaves every intent null and no access URLs; the
+    // interpretation rules must stay silent rather than read that as unclassified
+    // or undocumented.
+    const rp = model([svc({ name: 'web', labelKeys: ['traefik.enable'], ports: [{ startPort: 8080, endPort: 8080, hostIp: '0.0.0.0', protocol: 'tcp' }] })]);
+    const f = runRules(ctx({ model: rp, exposureAvailable: false }));
+    expect(ids(f, 'exposure-unclassified')).toHaveLength(0);
+    expect(ids(f, 'reverse-proxy-undocumented')).toHaveLength(0);
   });
   it('flags a published port absent from the documented access URLs', () => {
     const f = runRules(ctx({ model: withPort(), hasAccessUrls: true, accessUrlPorts: new Set([443]) }));

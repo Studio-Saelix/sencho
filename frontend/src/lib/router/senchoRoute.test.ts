@@ -157,4 +157,12 @@ describe('senchoRoute', () => {
     expect(parsed.view).toBe('editor');
     expect(parsed.editorTab).toBeNull();
   });
+
+  it('round-trips the networking view', () => {
+    const path = buildPath({ ...base, activeView: 'networking' });
+    expect(path).toBe('/nodes/local/networking');
+    const parsed = parsePath(path, '');
+    expect(parsed.view).toBe('networking');
+    expect(parsed.nodeSlug).toBe('local');
+  });
 });

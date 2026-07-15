@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
     ReactFlow,
     Background,
@@ -22,24 +22,31 @@ import { TogglePill } from '@/components/ui/toggle-pill';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import {
+    DEFAULT_TOPOLOGY_FILTERS, filterTopologyNetworks, isMissingTopologyNetwork, normalizeTopologyResponse,
+    TOPOLOGY_ANIMATION_EDGE_LIMIT, TOPOLOGY_RENDER_CAP, countTopologyGraphSize,
+    type NetworkingTopologyFilters,
+} from '@/lib/networkingTopology';
+import type {
+    NetworkingTopologyContainerDetail, NetworkingTopologyNetwork,
+} from '@/types/networking';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface TopologyContainer {
-    id: string;
+type TopologyNetwork = NetworkingTopologyNetwork;
+
+interface ContainerAggregate {
     name: string;
-    ip: string;
+    attachments: { network: string; ip: string }[];
     state: string;
     image: string;
     stack: string | null;
-}
-
-interface TopologyNetwork {
-    Id: string;
-    Name: string;
-    Driver: string;
-    managedStatus: 'managed' | 'unmanaged' | 'system';
-    containers: TopologyContainer[];
+    service: string | null;
+    composeAliases: string[];
+    publishedPorts: NetworkingTopologyContainerDetail['publishedPorts'];
+    exposureIntent: NetworkingTopologyContainerDetail['exposureIntent'];
+    findingIds: string[];
+    driftFlags: string[];
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -54,16 +61,34 @@ function stateColor(state: string): string {
     }
 }
 
+/** Aggregates containers across networks the same way for both the cheap
+ *  pre-layout size counter and the real dagre layout, so the render cap is
+ *  evaluated against the same node/edge counts the graph will actually use. */
+function aggregateContainers(networksList: TopologyNetwork[]): Map<string, ContainerAggregate> {
+    const containerMap = new Map<string, ContainerAggregate>();
+    for (const net of networksList) {
+        for (const c of net.containers) {
+            if (!containerMap.has(c.id)) {
+                containerMap.set(c.id, {
+                    name: c.name, attachments: [],
+                    state: c.state, image: c.image, stack: c.stack, service: c.service,
+                    composeAliases: c.composeAliases, publishedPorts: c.publishedPorts,
+                    exposureIntent: c.exposureIntent,
+                    findingIds: c.findingIds, driftFlags: c.driftFlags,
+                });
+            }
+            containerMap.get(c.id)!.attachments.push({ network: net.name, ip: c.ip });
+        }
+    }
+    return containerMap;
+}
+
 // ── Custom Nodes ──────────────────────────────────────────────────────────────
 
-interface ContainerNodeData {
+interface ContainerNodeData extends ContainerAggregate {
     label: string;
     containerId: string;
-    networks: string[];
-    ipAddresses: Record<string, string>;
-    state: string;
-    image: string;
-    stack: string | null;
+    onStackClick?: (stack: string) => void;
 }
 
 function ContainerNodeComponent({ data }: { data: ContainerNodeData }) {
@@ -71,7 +96,6 @@ function ContainerNodeComponent({ data }: { data: ContainerNodeData }) {
         <div
             className={cn(
                 'rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel px-3 py-2 min-w-[160px]',
-                (!data.state || data.state === 'running') && 'cursor-pointer hover:border-t-card-border-hover',
             )}
         >
             <Handle type="target" position={Position.Top} className="!bg-muted-foreground !w-2 !h-2" />
@@ -81,15 +105,24 @@ function ContainerNodeComponent({ data }: { data: ContainerNodeData }) {
                 <span className="text-xs font-medium truncate max-w-[140px]">{data.label}</span>
             </div>
             {data.stack && (
-                <Badge variant="outline" className="text-[9px] h-4 px-1 font-mono mb-1">{data.stack}</Badge>
+                <Badge
+                    variant="outline"
+                    className="text-[9px] h-4 px-1 font-mono mb-1 cursor-pointer hover:bg-muted"
+                    onClick={(event) => {
+                        event.stopPropagation();
+                        data.onStackClick?.(data.stack!);
+                    }}
+                >
+                    {data.stack}
+                </Badge>
             )}
-            {data.networks.length > 0 && (
+            {data.attachments.length > 0 && (
                 <div className="space-y-0.5">
-                    {data.networks.map(netName => (
-                        <div key={netName} className="flex items-center justify-between gap-2">
-                            <span className="text-[10px] text-muted-foreground truncate max-w-[100px]">{netName}</span>
+                    {data.attachments.map(({ network, ip }) => (
+                        <div key={network} className="flex items-center justify-between gap-2">
+                            <span className="text-[10px] text-muted-foreground truncate max-w-[100px]">{network}</span>
                             <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
-                                {data.ipAddresses[netName]?.replace(/\/\d+$/, '') || ''}
+                                {ip?.replace(/\/\d+$/, '') || ''}
                             </span>
                         </div>
                     ))}
@@ -103,13 +136,14 @@ function ContainerNodeComponent({ data }: { data: ContainerNodeData }) {
     );
 }
 
-function NetworkNodeComponent({ data }: { data: { label: string; driver: string; status: string } }) {
-    const statusColor = data.status === 'managed' ? 'text-success' : data.status === 'system' ? 'text-muted-foreground' : 'text-warning';
+function NetworkNodeComponent({ data }: { data: { label: string; driver: string; ownership: NetworkingTopologyNetwork['ownership']; missing: boolean; exposed: boolean; drift: boolean } }) {
+    const statusColor = data.ownership === 'sencho-managed' ? 'text-success' : data.ownership === 'system' ? 'text-muted-foreground' : data.missing ? 'text-destructive' : 'text-warning';
     return (
         <div className={cn(
             'rounded-lg border-2 border-dashed px-4 py-2.5 min-w-[140px] text-center',
-            data.status === 'managed' ? 'border-success/30 bg-success/5' :
-                data.status === 'system' ? 'border-muted-foreground/20 bg-muted/20' :
+            data.missing ? 'border-destructive/40 bg-destructive/5 cursor-pointer' :
+            data.ownership === 'sencho-managed' ? 'border-success/30 bg-success/5 cursor-pointer' :
+                data.ownership === 'system' ? 'border-muted-foreground/20 bg-muted/20 cursor-pointer' :
                     'border-warning/30 bg-warning/5'
         )}>
             <Handle type="target" position={Position.Top} className="!bg-transparent !border-none !w-0 !h-0" />
@@ -118,6 +152,11 @@ function NetworkNodeComponent({ data }: { data: { label: string; driver: string;
                 <span className="text-xs font-medium">{data.label}</span>
             </div>
             <Badge variant="outline" className="text-[9px] h-4">{data.driver}</Badge>
+            {(data.exposed || data.drift || data.missing) && (
+                <div className="mt-1 font-mono text-[9px] uppercase text-stat-subtitle">
+                    {data.missing ? 'missing external' : data.drift ? 'drift' : 'exposed'}
+                </div>
+            )}
             <Handle type="source" position={Position.Bottom} className="!bg-transparent !border-none !w-0 !h-0" />
         </div>
     );
@@ -140,72 +179,62 @@ const EDGE_COLORS = [
     'oklch(0.70 0.10 340)', // pink
 ];
 
-// ── Layout Helper (dagre) ────────────────────────────────────���───────────────
+const TOPOLOGY_LEGEND: { label: string; swatchClass: string }[] = [
+    { label: 'Sencho-managed', swatchClass: 'bg-success/60 border-success' },
+    { label: 'External / unmanaged', swatchClass: 'bg-warning/60 border-warning' },
+    { label: 'System', swatchClass: 'bg-muted-foreground/40 border-muted-foreground' },
+    { label: 'Missing external', swatchClass: 'bg-destructive/60 border-destructive' },
+];
+
+// ── Layout Helper (dagre) ────────────────────────────────────────────────────
 
 function layoutGraph(
     networksList: TopologyNetwork[],
+    onStackClick?: (stack: string) => void,
 ): { nodes: Node[]; edges: Edge[] } {
     const g = new dagre.graphlib.Graph();
     g.setGraph({ rankdir: 'TB', ranksep: 120, nodesep: 60 });
     g.setDefaultEdgeLabel(() => ({}));
 
-    // Deduplicate containers across networks
-    const containerMap = new Map<string, {
-        name: string;
-        networks: string[];
-        ipAddresses: Record<string, string>;
-        state: string;
-        image: string;
-        stack: string | null;
-    }>();
-    for (const net of networksList) {
-        for (const c of net.containers) {
-            if (!containerMap.has(c.id)) {
-                containerMap.set(c.id, {
-                    name: c.name, networks: [], ipAddresses: {},
-                    state: c.state, image: c.image, stack: c.stack,
-                });
-            }
-            const entry = containerMap.get(c.id)!;
-            entry.networks.push(net.Name);
-            entry.ipAddresses[net.Name] = c.ip;
-        }
-    }
+    const containerMap = aggregateContainers(networksList);
 
-    // Add nodes to dagre graph
     for (const net of networksList) {
-        g.setNode(`net-${net.Id}`, { width: 160, height: 60 });
+        g.setNode(`net-${net.id}`, { width: 160, height: 60 });
     }
     for (const [id] of containerMap) {
         g.setNode(`ctr-${id}`, { width: 200, height: 100 });
     }
 
-    // Add edges and collect for React Flow
     const seenEdges = new Set<string>();
     const edgeList: { netId: string; ctrId: string; color: string }[] = [];
     networksList.forEach((net, ni) => {
         const color = EDGE_COLORS[ni % EDGE_COLORS.length];
         for (const c of net.containers) {
-            const edgeKey = `${net.Id}-${c.id}`;
+                const edgeKey = `${net.id}-${c.id}`;
             if (!seenEdges.has(edgeKey)) {
                 seenEdges.add(edgeKey);
-                g.setEdge(`net-${net.Id}`, `ctr-${c.id}`);
-                edgeList.push({ netId: net.Id, ctrId: c.id, color });
+                g.setEdge(`net-${net.id}`, `ctr-${c.id}`);
+                edgeList.push({ netId: net.id, ctrId: c.id, color });
             }
         }
     });
 
     dagre.layout(g);
 
-    // Convert dagre positions (center-based) to React Flow positions (top-left)
     const flowNodes: Node[] = [];
     for (const net of networksList) {
-        const pos = g.node(`net-${net.Id}`);
+        const pos = g.node(`net-${net.id}`);
         flowNodes.push({
-            id: `net-${net.Id}`,
+            id: `net-${net.id}`,
             type: 'network',
             position: { x: pos.x - pos.width / 2, y: pos.y - pos.height / 2 },
-            data: { label: net.Name, driver: net.Driver, status: net.managedStatus },
+            data: {
+                label: net.name, driver: net.driver, ownership: net.ownership,
+                missing: isMissingTopologyNetwork(net),
+                exposed: net.containers.some((container) => container.publishedPorts.length > 0),
+                drift: net.findingIds.length > 0 || net.containers.some((container) => container.findingIds.length > 0 || container.driftFlags.length > 0),
+                network: net,
+            },
             draggable: true,
         });
     }
@@ -218,21 +247,28 @@ function layoutGraph(
             data: {
                 label: ctr.name,
                 containerId: id,
-                networks: ctr.networks,
-                ipAddresses: ctr.ipAddresses,
+                attachments: ctr.attachments,
                 state: ctr.state,
                 image: ctr.image,
                 stack: ctr.stack,
+                service: ctr.service,
+                composeAliases: ctr.composeAliases,
+                publishedPorts: ctr.publishedPorts,
+                exposureIntent: ctr.exposureIntent,
+                findingIds: ctr.findingIds,
+                driftFlags: ctr.driftFlags,
+                onStackClick,
             },
             draggable: true,
         });
     }
 
+    const animated = edgeList.length <= TOPOLOGY_ANIMATION_EDGE_LIMIT;
     const flowEdges: Edge[] = edgeList.map(({ netId, ctrId, color }) => ({
         id: `edge-${netId}-${ctrId}`,
         source: `net-${netId}`,
         target: `ctr-${ctrId}`,
-        animated: true,
+        animated,
         style: { stroke: color, strokeWidth: 1.5 },
     }));
 
@@ -242,41 +278,112 @@ function layoutGraph(
 // ── Main Component ────────────────────────────────────────────────────────────
 
 interface NetworkTopologyViewProps {
-    onContainerClick?: (containerId: string, containerName: string) => void;
+    onContainerSelect?: (container: NetworkingTopologyContainerDetail) => void;
+    onNetworkClick?: (network: NetworkingTopologyNetwork) => void;
+    onStackClick?: (stack: string) => void;
+    /** API path for topology data. Defaults to the Resources maintenance route. */
+    endpoint?: string;
+    /** When false, hides the include-system toggle (caller controls scope). */
+    showSystemToggle?: boolean;
+    /** Controlled include-system value when showSystemToggle is false. */
+    includeSystem?: boolean;
+    filters?: NetworkingTopologyFilters;
 }
 
-export default function NetworkTopologyView({ onContainerClick }: NetworkTopologyViewProps) {
+export default function NetworkTopologyView({
+    onContainerSelect,
+    onNetworkClick,
+    onStackClick,
+    endpoint = '/system/networks/topology',
+    showSystemToggle = true,
+    includeSystem: controlledIncludeSystem,
+    filters,
+}: NetworkTopologyViewProps) {
     const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
     const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
     const [loading, setLoading] = useState(true);
-    const [includeSystem, setIncludeSystem] = useState(false);
-    const onContainerClickRef = useRef(onContainerClick);
-    onContainerClickRef.current = onContainerClick;
+    const [internalIncludeSystem, setInternalIncludeSystem] = useState(false);
+    const includeSystem = controlledIncludeSystem ?? internalIncludeSystem;
+    const onContainerSelectRef = useRef(onContainerSelect);
+    onContainerSelectRef.current = onContainerSelect;
+    const onNetworkClickRef = useRef(onNetworkClick);
+    onNetworkClickRef.current = onNetworkClick;
+    const onStackClickRef = useRef(onStackClick);
+    onStackClickRef.current = onStackClick;
+    const [runtimeAvailable, setRuntimeAvailable] = useState(true);
+    const [loadError, setLoadError] = useState(false);
+    // Raw (unfiltered) networks from the last fetch; filters are applied
+    // client-side so toggling them never triggers a new request (Workstream J).
+    const [rawNetworks, setRawNetworks] = useState<TopologyNetwork[]>([]);
+    const [overCap, setOverCap] = useState(false);
 
     const fetchTopology = useCallback(async () => {
         setLoading(true);
+        setLoadError(false);
         try {
-            const res = await apiFetch(`/system/networks/topology?includeSystem=${includeSystem}`);
+            const res = await apiFetch(`${endpoint}?includeSystem=${includeSystem}`);
             if (!res.ok) throw new Error('Failed to fetch topology');
-            const inspected = await res.json();
-
-            const { nodes: layoutNodes, edges: layoutEdges } = layoutGraph(inspected);
-            setNodes(layoutNodes);
-            setEdges(layoutEdges);
+            const inspected: unknown = await res.json();
+            const topology = normalizeTopologyResponse(inspected);
+            setRuntimeAvailable(topology.runtimeAvailable);
+            setRawNetworks(topology.networks);
         } catch (error) {
             const err = error as Record<string, unknown>;
             toast.error(String(err?.message || err?.error || 'Something went wrong.'));
+            setLoadError(true);
+            setRawNetworks([]);
         } finally {
             setLoading(false);
         }
-    }, [setNodes, setEdges, includeSystem]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [includeSystem, endpoint]);
 
     useEffect(() => { fetchTopology(); }, [fetchTopology]);
 
-    const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
-        if (node.type === 'container' && (!node.data.state || node.data.state === 'running')) {
-            onContainerClickRef.current?.(node.data.containerId as string, node.data.label as string);
+    // Filters, the cheap size count, the cap check, and layout all run client-side
+    // against the cached raw response (no refetch per filter/search keystroke).
+    const networksList = useMemo(() => filterTopologyNetworks(
+        rawNetworks.filter((network) => includeSystem || !network.isSystem),
+        filters ?? DEFAULT_TOPOLOGY_FILTERS,
+    ), [rawNetworks, includeSystem, filters]);
+
+    useEffect(() => {
+        const size = countTopologyGraphSize(networksList);
+        if (size.nodeCount + size.edgeCount > TOPOLOGY_RENDER_CAP) {
+            setOverCap(true);
+            setNodes([]);
+            setEdges([]);
+            return;
         }
+        setOverCap(false);
+        const { nodes: layoutNodes, edges: layoutEdges } = layoutGraph(networksList, onStackClickRef.current);
+        setNodes(layoutNodes);
+        setEdges(layoutEdges);
+    }, [networksList, setNodes, setEdges]);
+
+    const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
+        if (node.type === 'network') {
+            onNetworkClickRef.current?.(node.data.network as NetworkingTopologyNetwork);
+        }
+        if (node.type === 'container') {
+            onContainerSelectRef.current?.({
+                id: node.data.containerId as string,
+                name: node.data.label as string,
+                attachments: node.data.attachments as { network: string; ip: string }[],
+                state: node.data.state as string,
+                image: node.data.image as string,
+                stack: node.data.stack as string | null,
+                service: node.data.service as string | null,
+                composeAliases: node.data.composeAliases as string[],
+                publishedPorts: node.data.publishedPorts as NetworkingTopologyContainerDetail['publishedPorts'],
+                exposureIntent: node.data.exposureIntent as NetworkingTopologyContainerDetail['exposureIntent'],
+                findingIds: node.data.findingIds as string[],
+                driftFlags: node.data.driftFlags as string[],
+            });
+        }
+        // Node click opens the drawer only; viewing logs is an explicit action
+        // inside the container drawer (previously this also auto-opened logs,
+        // which raced the drawer for the user's attention).
     }, []);
 
     if (loading) {
@@ -288,15 +395,33 @@ export default function NetworkTopologyView({ onContainerClick }: NetworkTopolog
         );
     }
 
+    if (overCap) {
+        return (
+            <div className="flex flex-col items-center justify-center h-[400px] text-muted-foreground gap-3">
+                <Network className="w-8 h-8 opacity-40" strokeWidth={1.5} />
+                <p className="text-sm">This graph is too large to render.</p>
+                <p className="text-xs opacity-70">Narrow the filters to bring it under {TOPOLOGY_RENDER_CAP} nodes and edges, or use the Networks table instead.</p>
+            </div>
+        );
+    }
+
     if (nodes.length === 0) {
         return (
             <div className="flex flex-col items-center justify-center h-[400px] text-muted-foreground gap-3">
                 <Network className="w-8 h-8 opacity-40" strokeWidth={1.5} />
                 <p className="text-sm">
-                    {includeSystem ? 'No networks found.' : 'No user-created networks found.'}
+                    {loadError
+                      ? 'Could not load topology for this node.'
+                      : !runtimeAvailable
+                        ? 'Docker runtime unavailable.'
+                        : includeSystem
+                          ? 'No networks found.'
+                          : 'No user-created networks found.'}
                 </p>
                 <p className="text-xs opacity-70">
-                    {includeSystem
+                    {!runtimeAvailable
+                        ? 'Topology is unavailable until Docker responds on this node.'
+                        : includeSystem
                         ? 'No Docker networks are available on this node.'
                         : 'Create a network or deploy stacks with custom networks to see the topology.'}
                 </p>
@@ -306,11 +431,23 @@ export default function NetworkTopologyView({ onContainerClick }: NetworkTopolog
 
     return (
         <div className="rounded-lg border border-card-border bg-card shadow-card-bevel overflow-hidden">
-            <div className="flex items-center gap-2 px-3 py-2 border-b border-card-border">
-                <TogglePill id="show-system" checked={includeSystem} onChange={setIncludeSystem} />
-                <Label htmlFor="show-system" className="text-xs cursor-pointer">
-                    Show system networks
-                </Label>
+            <div className="flex flex-wrap items-center gap-3 px-3 py-2 border-b border-card-border">
+                {showSystemToggle && (
+                  <>
+                    <TogglePill id="show-system" checked={includeSystem} onChange={setInternalIncludeSystem} />
+                    <Label htmlFor="show-system" className="text-xs cursor-pointer">
+                        Show system networks
+                    </Label>
+                  </>
+                )}
+                <div className="flex flex-wrap items-center gap-2">
+                    {TOPOLOGY_LEGEND.map((entry) => (
+                        <span key={entry.label} className="flex items-center gap-1 font-mono text-[10px] text-stat-subtitle">
+                            <span className={cn('h-2 w-2 rounded-full border', entry.swatchClass)} />
+                            {entry.label}
+                        </span>
+                    ))}
+                </div>
                 <Button
                     variant="ghost"
                     size="icon"
