@@ -4,7 +4,8 @@
  * getRemoteDigest's HEAD-first lookup with GET fallback, and getRemoteDigestResult's
  * status-to-reason mapping.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createHash } from 'crypto';
 import { EventEmitter } from 'events';
 
 // ── Configurable https mock ───────────────────────────────────────────────
@@ -17,11 +18,14 @@ interface FakeResp { statusCode: number; headers: Record<string, string>; body?:
 const calls: { url: string; method: string }[] = [];
 let route: (url: string, method: string) => FakeResp;
 
-function fakeRequest(url: string, options: { method?: string }, cb: (res: EventEmitter & { statusCode: number; headers: Record<string, string> }) => void) {
+function fakeRequest(url: string, options: { method?: string }, cb: (res: EventEmitter & { statusCode: number; headers: Record<string, string>; destroy: () => void }) => void) {
   const method = options?.method ?? 'GET';
   calls.push({ url, method });
   const resp = route(url, method);
-  const res = Object.assign(new EventEmitter(), { statusCode: resp.statusCode, headers: resp.headers });
+  // `destroy` is a no-op stub: httpGetCapped calls it when a response exceeds
+  // the streaming size cap, which the fake response otherwise lacks (a real
+  // http.IncomingMessage is a Readable stream and always has it).
+  const res = Object.assign(new EventEmitter(), { statusCode: resp.statusCode, headers: resp.headers, destroy: () => {} });
   const req = Object.assign(new EventEmitter(), {
     setTimeout: () => {},
     destroy: () => {},
@@ -39,7 +43,23 @@ function fakeRequest(url: string, options: { method?: string }, cb: (res: EventE
 vi.mock('https', () => ({ default: { request: (...args: unknown[]) => fakeRequest(...(args as Parameters<typeof fakeRequest>)) } }));
 vi.mock('http', () => ({ default: { request: (...args: unknown[]) => fakeRequest(...(args as Parameters<typeof fakeRequest>)) } }));
 
-import { repoDigestMatchesRef, getRemoteDigest, getRemoteDigestResult, getAuthToken, listRegistryTagsResult, parseImageRef } from '../services/registry-api';
+import {
+  repoDigestMatchesRef,
+  getRemoteDigest,
+  getRemoteDigestResult,
+  getAuthToken,
+  listRegistryTagsResult,
+  parseImageRef,
+  selectLocalRepoDigest,
+  compareLocalToRemoteTag,
+  MANIFEST_CLASSIFICATION_CACHE_TTL_MS,
+  MANIFEST_INDEX_DESCRIPTOR_CAP,
+} from '../services/registry-api';
+import { CacheService } from '../services/CacheService';
+
+beforeEach(() => {
+  CacheService.getInstance().flush();
+});
 
 const TOKEN_BODY = JSON.stringify({ token: 'test-token' });
 const REMOTE = 'sha256:remote000000000000000000000000000000000000000000000000000000';
@@ -225,6 +245,15 @@ describe('getRemoteDigestResult failure reasons', () => {
     expect(await get()).toEqual({ ok: false, reason: `Authentication failed for ${REF}` });
   });
 
+  it('succeeds from the digest header even when the manifest body is malformed (no index expansion on this path)', async () => {
+    route = (url, method) => tokenOk(url) ?? (
+      method === 'HEAD'
+        ? { statusCode: 405, headers: {} }
+        : { statusCode: 200, headers: { 'docker-content-digest': REMOTE }, body: 'not-json-at-all{{{' }
+    );
+    expect(await get()).toEqual({ ok: true, digest: REMOTE });
+  });
+
   it('fails when both HEAD and GET are 200 but omit the digest header', async () => {
     route = (url, method) => tokenOk(url) ?? (method === 'HEAD' ? { statusCode: 200, headers: {} } : { statusCode: 200, headers: {} });
     expect(await get()).toEqual({ ok: false, reason: `Registry returned no digest for ${REF}` });
@@ -315,5 +344,558 @@ describe('listRegistryTagsResult', () => {
     const huge = '{"tags":["' + 'x'.repeat(2 * 1024 * 1024) + '"]}';
     route = authThenTags({ statusCode: 200, headers: {}, body: huge });
     await expectFailure('REGISTRY_INVALID_RESPONSE', 'Registry tag list response too large');
+  });
+});
+
+// ─── selectLocalRepoDigest ───────────────────────────────────────────────
+
+describe('selectLocalRepoDigest', () => {
+  const parsed = (ref: string) => {
+    const p = parseImageRef(ref);
+    if (!p) throw new Error(`unparseable ${ref}`);
+    return p;
+  };
+  const DIGEST_A = `sha256:${'a'.repeat(64)}`;
+  const DIGEST_B = `sha256:${'b'.repeat(64)}`;
+
+  it('picks the entry matching the parsed ref among multiple valid digests', () => {
+    const repoDigests = [`redis@${DIGEST_B}`, `nginx@${DIGEST_A}`];
+    expect(selectLocalRepoDigest(repoDigests, parsed('nginx:latest'))).toBe(DIGEST_A);
+  });
+
+  it('falls back to the sole valid entry when nothing matches the ref', () => {
+    const repoDigests = [`ghcr.io/other/image@${DIGEST_A}`];
+    expect(selectLocalRepoDigest(repoDigests, parsed('nginx:latest'))).toBe(DIGEST_A);
+  });
+
+  it('returns null when multiple valid entries exist and none matches the ref', () => {
+    const repoDigests = [`redis@${DIGEST_A}`, `postgres@${DIGEST_B}`];
+    expect(selectLocalRepoDigest(repoDigests, parsed('nginx:latest'))).toBeNull();
+  });
+
+  it('returns null for a truncated (non-64-hex) digest even as the sole entry', () => {
+    expect(selectLocalRepoDigest(['nginx@sha256:abc123'], parsed('nginx:latest'))).toBeNull();
+  });
+
+  it('returns null for an entry with no @ separator', () => {
+    expect(selectLocalRepoDigest(['nginx:latest'], parsed('nginx:latest'))).toBeNull();
+  });
+
+  it('returns null for an empty list', () => {
+    expect(selectLocalRepoDigest([], parsed('nginx:latest'))).toBeNull();
+  });
+
+  it('ignores a malformed entry when picking among multiple, still finds the ref match', () => {
+    const repoDigests = ['nginx@sha256:tooshort', `nginx@${DIGEST_A}`];
+    expect(selectLocalRepoDigest(repoDigests, parsed('nginx:latest'))).toBe(DIGEST_A);
+  });
+
+  it('is case-insensitive for hex digit casing', () => {
+    const upper = `sha256:${'A'.repeat(64)}`;
+    expect(selectLocalRepoDigest([`nginx@${upper}`], parsed('nginx:latest'))).toBe(upper);
+  });
+});
+
+// ─── compareLocalToRemoteTag ─────────────────────────────────────────────
+//
+// Reproduces and fixes the false-positive multi-arch update: a local
+// RepoDigest can be a platform child manifest while the registry's tag
+// resolves to the parent index digest. These tests drive the HEAD/GET
+// transport and the index-expansion classification directly.
+
+describe('compareLocalToRemoteTag', () => {
+  const REGISTRY = 'registry-1.docker.io';
+  const REPO = 'someorg/someapp';
+  const TAG = 'latest';
+  const MANIFEST_URL_TAG = `https://${REGISTRY}/v2/${REPO}/manifests/${TAG}`;
+  const manifestDigestUrl = (digest: string, repo: string = REPO) => `https://${REGISTRY}/v2/${repo}/manifests/${digest}`;
+
+  const CHILD_AMD64 = `sha256:${'c'.repeat(64)}`;
+  const CHILD_ARM64 = `sha256:${'b'.repeat(64)}`;
+  const SINGLE_DIGEST = `sha256:${'d'.repeat(64)}`;
+
+  const AMD64 = { os: 'linux', architecture: 'amd64' };
+  const ARM64 = { os: 'linux', architecture: 'arm64' };
+
+  const INDEX_CONTENT_TYPE = 'application/vnd.oci.image.index.v1+json';
+
+  interface DescriptorSpec {
+    digest: string;
+    os: string;
+    architecture: string;
+    variant?: string;
+    annotations?: Record<string, string>;
+  }
+
+  function indexBody(entries: DescriptorSpec[]): string {
+    return JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: entries.map((e) => ({
+        digest: e.digest,
+        mediaType: 'application/vnd.oci.image.manifest.v1+json',
+        platform: { os: e.os, architecture: e.architecture, ...(e.variant ? { variant: e.variant } : {}) },
+        ...(e.annotations ? { annotations: e.annotations } : {}),
+      })),
+    });
+  }
+
+  function contentDigest(body: string): string {
+    return `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}`;
+  }
+
+  const STANDARD_INDEX_BODY = indexBody([
+    { digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' },
+    { digest: CHILD_ARM64, os: 'linux', architecture: 'arm64' },
+  ]);
+  // Content-addressed: digest-pinned GETs verify sha256(body) === requested digest.
+  const INDEX_DIGEST = contentDigest(STANDARD_INDEX_BODY);
+
+  beforeEach(() => {
+    calls.length = 0;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('returns match with no expansion GET when the local digest equals the primary digest from HEAD', async () => {
+    route = (url, method) => tokenOk(url) ?? (
+      method === 'HEAD'
+        ? { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } }
+        : { statusCode: 500, headers: {} }
+    );
+    const result = await compareLocalToRemoteTag(INDEX_DIGEST, REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+    expect(calls.filter((c) => c.url.includes('/manifests/'))).toHaveLength(1);
+  });
+
+  it('expands the index with a single digest-pinned GET and matches a runnable child descriptor', async () => {
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+    expect(calls.filter((c) => c.url.includes('/manifests/'))).toEqual([
+      { url: MANIFEST_URL_TAG, method: 'HEAD' },
+      { url: manifestDigestUrl(INDEX_DIGEST), method: 'GET' },
+    ]);
+  });
+
+  it('never re-fetches the mutable tag: the expansion GET targets the primary digest from HEAD, not a second tag lookup', async () => {
+    const DIVERGED_DIGEST = `sha256:${'e'.repeat(64)}`;
+    let tagCallCount = 0;
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG) {
+        tagCallCount++;
+        if (method === 'HEAD') {
+          return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+        }
+        // A hypothetical second tag lookup racing to a different digest; the
+        // resolver must never issue this call once a primary digest is set.
+        return { statusCode: 200, headers: { 'docker-content-digest': DIVERGED_DIGEST } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+    expect(tagCallCount).toBe(1);
+  });
+
+  it('reports update without a body fetch when the mismatched primary has a known single-manifest media type', async () => {
+    route = (url, method) => tokenOk(url) ?? (
+      method === 'HEAD'
+        ? { statusCode: 200, headers: { 'docker-content-digest': SINGLE_DIGEST, 'content-type': 'application/vnd.docker.distribution.manifest.v2+json' } }
+        : { statusCode: 500, headers: {} }
+    );
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'update' });
+    expect(calls.filter((c) => c.url.includes('/manifests/'))).toHaveLength(1);
+  });
+
+  it('classifies from the HEAD-fallback GET body without a second expansion request (HEAD 405)', async () => {
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG) {
+        if (method === 'HEAD') return { statusCode: 405, headers: {} };
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag(CHILD_ARM64, REGISTRY, REPO, TAG, ARM64);
+    expect(result).toEqual({ kind: 'match' });
+    expect(calls.filter((c) => c.url.includes('/manifests/'))).toEqual([
+      { url: MANIFEST_URL_TAG, method: 'HEAD' },
+      { url: MANIFEST_URL_TAG, method: 'GET' },
+    ]);
+  });
+
+  it('returns an error with no tag retry when the digest-pinned GET 404s on a cold cache', async () => {
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 404, headers: {} };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result.kind).toBe('error');
+    expect(calls.filter((c) => c.url === MANIFEST_URL_TAG)).toHaveLength(1);
+  });
+
+  it('does not cache a rejected classification as success: a repeat comparison retries the fetch', async () => {
+    let digestGetCount = 0;
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        digestGetCount++;
+        return { statusCode: 500, headers: {} };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const first = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(first.kind).toBe('error');
+    const second = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(second.kind).toBe('error');
+    expect(digestGetCount).toBe(2);
+  });
+
+  it('falls back to the stale cached classification when the digest GET fails after the cache entry expires', async () => {
+    vi.useFakeTimers();
+    let digestGetCount = 0;
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        digestGetCount++;
+        if (digestGetCount === 1) {
+          return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+        }
+        return { statusCode: 500, headers: {} };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+
+    const first = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(first).toEqual({ kind: 'match' });
+
+    await vi.advanceTimersByTimeAsync(MANIFEST_CLASSIFICATION_CACHE_TTL_MS + 1000);
+
+    const second = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(second).toEqual({ kind: 'match' });
+    expect(digestGetCount).toBe(2);
+  });
+
+  it('reuses the cached classification for a second comparison of the same primary digest (no second GET)', async () => {
+    let digestGetCount = 0;
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        digestGetCount++;
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    await compareLocalToRemoteTag(CHILD_ARM64, REGISTRY, REPO, TAG, ARM64);
+    expect(digestGetCount).toBe(1);
+  });
+
+  it('deduplicates concurrent comparisons for the same primary digest into one classification fetch', async () => {
+    let digestGetCount = 0;
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        digestGetCount++;
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const [a, b] = await Promise.all([
+      compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64),
+      compareLocalToRemoteTag(CHILD_ARM64, REGISTRY, REPO, TAG, ARM64),
+    ]);
+    expect(a).toEqual({ kind: 'match' });
+    expect(b).toEqual({ kind: 'match' });
+    expect(digestGetCount).toBe(1);
+  });
+
+  it('misses the cache when the primary digest changes (new manifest, new immutable key)', async () => {
+    const INDEX_BODY_2 = indexBody([{ digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' }]);
+    const INDEX_DIGEST_2 = contentDigest(INDEX_BODY_2);
+    let headDigest = INDEX_DIGEST;
+    let digestGetCount = 0;
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': headDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        digestGetCount++;
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST_2) && method === 'GET') {
+        digestGetCount++;
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST_2 }, body: INDEX_BODY_2 };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const first = await compareLocalToRemoteTag(CHILD_ARM64, REGISTRY, REPO, TAG, ARM64);
+    expect(first).toEqual({ kind: 'match' });
+
+    headDigest = INDEX_DIGEST_2;
+    const second = await compareLocalToRemoteTag(CHILD_ARM64, REGISTRY, REPO, TAG, ARM64);
+    expect(second).toEqual({ kind: 'update' });
+    expect(digestGetCount).toBe(2);
+  });
+
+  it('isolates the classification cache by registry and repository, not just the digest', async () => {
+    let digestGetCount = 0;
+    const routeFor = (repo: string) => (url: string, method: string): FakeResp => {
+      const token = tokenOk(url);
+      if (token) return token;
+      const tagUrl = `https://${REGISTRY}/v2/${repo}/manifests/${TAG}`;
+      if (url === tagUrl && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST, repo) && method === 'GET') {
+        digestGetCount++;
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+
+    route = routeFor(REPO);
+    await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(digestGetCount).toBe(1);
+
+    route = routeFor('otherorg/otherapp');
+    await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, 'otherorg/otherapp', TAG, AMD64);
+    expect(digestGetCount).toBe(2);
+  });
+
+  it('matches a local digest against any runnable descriptor sharing os+architecture across variants', async () => {
+    const VARIANT_V6 = `sha256:${'1'.repeat(64)}`;
+    const VARIANT_V7 = `sha256:${'2'.repeat(64)}`;
+    const body = indexBody([
+      { digest: VARIANT_V6, os: 'linux', architecture: 'arm', variant: 'v6' },
+      { digest: VARIANT_V7, os: 'linux', architecture: 'arm', variant: 'v7' },
+    ]);
+    const primary = contentDigest(body);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': primary, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(primary) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': primary }, body };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag(VARIANT_V7, REGISTRY, REPO, TAG, { os: 'linux', architecture: 'arm' });
+    expect(result).toEqual({ kind: 'match' });
+  });
+
+  it('ignores unknown/unknown placeholder descriptors and attestation-manifest annotations', async () => {
+    const ATTESTATION_UNKNOWN = `sha256:${'3'.repeat(64)}`;
+    const ATTESTATION_ANNOTATED = `sha256:${'4'.repeat(64)}`;
+    const body = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [
+        { digest: CHILD_AMD64, mediaType: 'application/vnd.oci.image.manifest.v1+json', platform: { os: 'linux', architecture: 'amd64' } },
+        { digest: ATTESTATION_UNKNOWN, mediaType: 'application/vnd.oci.image.manifest.v1+json', platform: { os: 'unknown', architecture: 'unknown' } },
+        {
+          digest: ATTESTATION_ANNOTATED,
+          mediaType: 'application/vnd.oci.image.manifest.v1+json',
+          platform: { os: 'linux', architecture: 'amd64' },
+          annotations: { 'vnd.docker.reference.type': 'attestation-manifest' },
+        },
+      ],
+    });
+    const primary = contentDigest(body);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': primary, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(primary) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': primary }, body };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+
+    // A local digest equal to the filtered-out annotated-attestation entry must
+    // never match, since that descriptor is dropped before the membership check.
+    const filtered = await compareLocalToRemoteTag(ATTESTATION_ANNOTATED, REGISTRY, REPO, TAG, AMD64);
+    expect(filtered).toEqual({ kind: 'update' });
+
+    // The real platform descriptor still matches normally (cache hit reuses the
+    // same parsed classification from the previous call).
+    const realMatch = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(realMatch).toEqual({ kind: 'match' });
+  });
+
+  it('errors when the raw manifests array exceeds the 256-descriptor cap', async () => {
+    const manifests = Array.from({ length: MANIFEST_INDEX_DESCRIPTOR_CAP + 1 }, (_, i) => ({
+      digest: `sha256:${i.toString(16).padStart(64, '0')}`,
+      mediaType: 'application/vnd.oci.image.manifest.v1+json',
+      platform: { os: 'linux', architecture: 'amd64' },
+    }));
+    const body = JSON.stringify({ schemaVersion: 2, manifests });
+    const primary = contentDigest(body);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': primary, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(primary) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': primary }, body };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result.kind).toBe('error');
+  });
+
+  it('errors when the digest-pinned manifest body is not valid JSON', async () => {
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: 'not json{{' };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result.kind).toBe('error');
+  });
+
+  it('errors when the digest-pinned GET returns a docker-content-digest that disagrees with the requested digest', async () => {
+    const WRONG_DIGEST = `sha256:${'5'.repeat(64)}`;
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': WRONG_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('mismatched digest') });
+  });
+
+  it('errors when the digest-pinned GET omits docker-content-digest and the body hash does not match', async () => {
+    // Body looks like a matching index for the local digest, but its sha256 is not INDEX_DIGEST.
+    const fakeMatchBody = indexBody([{ digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' }]);
+    expect(contentDigest(fakeMatchBody)).not.toBe(INDEX_DIGEST);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 200, headers: {}, body: fakeMatchBody };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('does not match the requested digest') });
+  });
+
+  it('errors without a speculative match when the local platform os/architecture is unknown', async () => {
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, { os: '', architecture: '' });
+    expect(result.kind).toBe('error');
+  });
+
+  it('rejects a truncated local digest as an error, never as a speculative update', async () => {
+    route = () => ({ statusCode: 500, headers: {} }); // must never be reached
+    const result = await compareLocalToRemoteTag('sha256:tooshort', REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'error', reason: 'Local digest is malformed or truncated' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('degrades to an uncached comparison (not an error) when the classification cache is at capacity', async () => {
+    const cache = CacheService.getInstance();
+    for (let i = 0; i < 1000; i++) cache.set(`filler:${i}`, { kind: 'single' as const }, 3_600_000);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    let digestGetCount = 0;
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        digestGetCount++;
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+
+    const first = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const second = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+
+    expect(first).toEqual({ kind: 'match' });
+    expect(second).toEqual({ kind: 'match' });
+    expect(digestGetCount).toBe(2);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

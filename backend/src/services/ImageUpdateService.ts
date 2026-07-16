@@ -8,7 +8,7 @@ import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
-import { parseImageRef, getRemoteDigestResult, repoDigestMatchesRef } from './registry-api';
+import { parseImageRef, selectLocalRepoDigest, compareLocalToRemoteTag } from './registry-api';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -766,8 +766,9 @@ export class ImageUpdateService {
             console.log(`[ImageUpdateService] ${imageRef}: credentials ${credentials ? 'found' : 'none'}`);
         }
 
-        // Get local digest from RepoDigests
-        let localDigest: string | null = null;
+        // Get local digest and platform from RepoDigests / Os+Architecture
+        let localDigest: string | null;
+        let platform: { os: string; architecture: string };
         try {
             const inspect = await withTimeout(docker.getDocker().getImage(imageRef).inspect(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'inspect');
             const repoDigests: string[] = inspect.RepoDigests ?? [];
@@ -776,15 +777,8 @@ export class ImageUpdateService {
             // status does not apply.
             if (repoDigests.length === 0) return { hasUpdate: false, notCheckable: true };
 
-            for (const rd of repoDigests) {
-                if (!rd.includes('@sha256:')) continue;
-                const [, digest] = rd.split('@');
-
-                if (repoDigestMatchesRef(rd, parsed) || repoDigests.length === 1) {
-                    localDigest = digest;
-                    break;
-                }
-            }
+            localDigest = selectLocalRepoDigest(repoDigests, parsed);
+            platform = { os: inspect.Os, architecture: inspect.Architecture };
         } catch {
             return { hasUpdate: false, error: `Failed to inspect local image "${imageRef}"` };
         }
@@ -795,17 +789,13 @@ export class ImageUpdateService {
             return { hasUpdate: false, error: `Could not resolve a local registry digest for "${imageRef}"` };
         }
 
-        const remote = await getRemoteDigestResult(parsed.registry, parsed.repo, parsed.tag, credentials);
-        if (!remote.ok) {
-            return { hasUpdate: false, error: remote.reason };
+        const comparison = await compareLocalToRemoteTag(localDigest, parsed.registry, parsed.repo, parsed.tag, platform, credentials);
+        if (comparison.kind === 'error') {
+            return { hasUpdate: false, error: comparison.reason };
         }
-        const remoteDigest = remote.digest;
 
-        const hasUpdate = localDigest !== remoteDigest;
-        console.log(
-            `[ImageUpdateService] ${imageRef}: ` +
-            `local=${localDigest.slice(0, 27)}... remote=${remoteDigest.slice(0, 27)}... update=${hasUpdate}`
-        );
+        const hasUpdate = comparison.kind === 'update';
+        console.log(`[ImageUpdateService] ${imageRef}: local=${localDigest.slice(0, 27)}... update=${hasUpdate}`);
         return { hasUpdate };
     }
 }

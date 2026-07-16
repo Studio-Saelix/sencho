@@ -7,7 +7,15 @@ import {
     buildSummary,
     isMovingTag,
     type ComputePreviewDeps,
+    type LocalDigestInfo,
 } from '../services/UpdatePreviewService';
+import type { DigestComparisonResult } from '../services/registry-api';
+
+const PLATFORM = { os: 'linux', architecture: 'amd64' };
+
+function localDigest(digest: string | null): LocalDigestInfo {
+    return { digest, platform: PLATFORM };
+}
 
 describe('parseSemverTag', () => {
     it('parses bare semver', () => {
@@ -87,18 +95,18 @@ describe('computeSemverBump', () => {
 function makeDeps(overrides: Partial<ComputePreviewDeps> = {}): ComputePreviewDeps {
     return {
         getCredentials: vi.fn().mockResolvedValue(null),
-        getLocalDigest: vi.fn().mockResolvedValue(null),
-        getRemoteDigest: vi.fn().mockResolvedValue(null),
+        getLocalDigest: vi.fn().mockResolvedValue(localDigest(null)),
+        compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'not configured' } satisfies DigestComparisonResult),
         listRegistryTags: vi.fn().mockResolvedValue([]),
         ...overrides,
     };
 }
 
 describe('computeImagePreview', () => {
-    it('reports no update when digests match and no higher tag exists', async () => {
+    it('reports no update when the comparison resolver matches and no higher tag exists', async () => {
         const deps = makeDeps({
-            getLocalDigest: vi.fn().mockResolvedValue('sha256:aaa'),
-            getRemoteDigest: vi.fn().mockResolvedValue('sha256:aaa'),
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'match' }),
             listRegistryTags: vi.fn().mockResolvedValue(['1.2.3']),
         });
         const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
@@ -107,10 +115,10 @@ describe('computeImagePreview', () => {
         expect(result.next_tag).toBeNull();
     });
 
-    it('reports digest rebuild as patch when tag is unchanged but digest differs', async () => {
+    it('reports digest rebuild as patch when tag is unchanged but the resolver classifies an update', async () => {
         const deps = makeDeps({
-            getLocalDigest: vi.fn().mockResolvedValue('sha256:aaa'),
-            getRemoteDigest: vi.fn().mockResolvedValue('sha256:bbb'),
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'update' }),
             listRegistryTags: vi.fn().mockResolvedValue([]),
         });
         const result = await computeImagePreview('web', 'nginx:latest', deps);
@@ -122,8 +130,8 @@ describe('computeImagePreview', () => {
 
     it('reports higher semver tag when available', async () => {
         const deps = makeDeps({
-            getLocalDigest: vi.fn().mockResolvedValue('sha256:aaa'),
-            getRemoteDigest: vi.fn().mockResolvedValue('sha256:aaa'),
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'match' }),
             listRegistryTags: vi.fn().mockResolvedValue(['27.1.4', '27.1.5', '27.2.0']),
         });
         const result = await computeImagePreview('engine', 'docker.io/library/docker:27.1.4', deps);
@@ -134,13 +142,60 @@ describe('computeImagePreview', () => {
 
     it('flags major semver jumps', async () => {
         const deps = makeDeps({
-            getLocalDigest: vi.fn().mockResolvedValue('sha256:aaa'),
-            getRemoteDigest: vi.fn().mockResolvedValue('sha256:aaa'),
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'match' }),
             listRegistryTags: vi.fn().mockResolvedValue(['1.2.3', '2.0.0']),
         });
         const result = await computeImagePreview('db', 'postgres:1.2.3', deps);
         expect(result.next_tag).toBe('2.0.0');
         expect(result.semver_bump).toBe('major');
+    });
+
+    it('fails soft (no digest-based update) when the comparison resolver errors, but a higher tag still surfaces', async () => {
+        const deps = makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' }),
+            listRegistryTags: vi.fn().mockResolvedValue(['1.2.3', '1.2.4']),
+        });
+        const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
+        expect(result.has_update).toBe(true);
+        expect(result.next_tag).toBe('1.2.4');
+        expect(result.semver_bump).toBe('patch');
+    });
+
+    it('fails soft to no-update when the comparison resolver errors and no higher tag exists', async () => {
+        const deps = makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' }),
+            listRegistryTags: vi.fn().mockResolvedValue([]),
+        });
+        const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
+        expect(result.has_update).toBe(false);
+        expect(result.next_tag).toBeNull();
+        expect(result.semver_bump).toBe('none');
+    });
+
+    it('never calls the comparison resolver when no local digest is resolvable', async () => {
+        const compareDigest = vi.fn().mockResolvedValue({ kind: 'update' });
+        const deps = makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest(null)),
+            compareDigest,
+            listRegistryTags: vi.fn().mockResolvedValue([]),
+        });
+        const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
+        expect(compareDigest).not.toHaveBeenCalled();
+        expect(result.has_update).toBe(false);
+    });
+
+    it('passes the local digest, tag, and platform through to the comparison resolver', async () => {
+        const compareDigest = vi.fn().mockResolvedValue({ kind: 'match' });
+        const deps = makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest,
+            listRegistryTags: vi.fn().mockResolvedValue([]),
+        });
+        await computeImagePreview('web', 'ghcr.io/linuxserver/radarr:latest', deps);
+        expect(compareDigest).toHaveBeenCalledWith('sha256:aaa', 'ghcr.io', 'linuxserver/radarr', 'latest', PLATFORM, null);
     });
 });
 
