@@ -15,7 +15,7 @@ Click any stack in the left sidebar, then switch to the **Storage** tab in the A
 <Frame>
   <img
     src="/images/compose-storage/storage-tab.png"
-    alt="The Anatomy panel with the Storage tab selected, showing the STORAGE PORTABILITY label, a node-bound verdict card with the reason that a bind path outside the stack directory must exist on every target node, and a SNAPSHOT COVERAGE section below"
+    alt="The Anatomy panel tab strip with Storage selected, showing the STORAGE PORTABILITY label, a node-bound verdict card with the reason that a bind path outside the stack directory must exist on every target node, the mount row for that bind, and a SNAPSHOT COVERAGE section with a warning and Take a fleet snapshot link"
   />
 </Frame>
 
@@ -55,7 +55,7 @@ A few things worth knowing:
 <Frame>
   <img
     src="/images/compose-storage/storage-node-bound.png"
-    alt="The Storage panel for a stack that mounts the Docker socket, showing a node-bound verdict card with the reason 'Service mounts the Docker socket, tying the stack to this host's Docker engine', followed by the socket mount row with SOCKET, RW, and external chips and the path /var/run/docker.sock"
+    alt="The Storage panel for a stack that mounts the Docker socket, showing a node-bound verdict card with the reason the service mounts the Docker socket tying the stack to this host's Docker engine, followed by the socket mount row with SOCKET, RW, and external chips and the path /var/run/docker.sock"
   />
 </Frame>
 
@@ -113,8 +113,8 @@ See [Compose Doctor](/features/compose-doctor) for the full rule reference and h
   <Card title="Fleet Snapshots" icon="camera" href="/features/fleet-backups">
     Back up Compose and env files across all nodes in one action. Covers configuration, not volume data.
   </Card>
-  <Card title="Files and Volumes" icon="folder-open" href="/features/stack-file-explorer">
-    Browse and edit the files inside a stack directory and read the contents of named volumes.
+  <Card title="Stack File Explorer" icon="folder-open" href="/features/stack-file-explorer">
+    Browse and edit the files inside a stack's directory and its mounted volumes from the Files tab.
   </Card>
   <Card title="Environment Guardrails" icon="key" href="/features/environment-guardrails">
     Keep secrets out of mount paths so they are not exposed in the storage inventory.
