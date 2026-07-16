@@ -1045,7 +1045,7 @@ describe('compareLocalToRemoteTag', () => {
   it('returns error (not update) when index nesting exceeds the depth limit', async () => {
     // Build a chain primary -> d1 -> d2 -> ... of length MANIFEST_INDEX_MAX_DEPTH + 1.
     const bodies: { digest: string; body: string }[] = [];
-    let leafBody = indexBody([{ digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' }]);
+    const leafBody = indexBody([{ digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' }]);
     let leafDigest = contentDigest(leafBody);
     bodies.push({ digest: leafDigest, body: leafBody });
 
