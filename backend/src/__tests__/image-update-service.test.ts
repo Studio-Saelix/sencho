@@ -296,7 +296,7 @@ services:
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
     const service = ImageUpdateService.getInstance();
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', false, expect.any(Number), 'ok', null);
     expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
@@ -308,7 +308,7 @@ services:
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'error', reason: 'Failed to classify remote manifest for ghcr.io/linuxserver/radarr:latest' });
     const service = ImageUpdateService.getInstance();
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockRecordStackCheckFailure).toHaveBeenCalledWith(
       1, 'stackA', expect.stringContaining('Failed to classify remote manifest'), expect.any(Number),
