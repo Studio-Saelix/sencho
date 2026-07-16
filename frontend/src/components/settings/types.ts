@@ -79,7 +79,8 @@ export type SectionId =
     | 'about';
 
 export interface Agent {
-    type: 'discord' | 'slack' | 'webhook';
+    type: 'discord' | 'slack' | 'webhook' | 'apprise';
     url: string;
     enabled: boolean;
+    config?: { mode?: 'keyed' | 'stateless'; tags?: string; urls?: string; has_urls?: boolean; providers?: string[]; url_count?: number } | null;
 }

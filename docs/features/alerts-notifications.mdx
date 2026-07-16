@@ -1,23 +1,23 @@
 ---
 title: Alerts & Notifications
 sidebarTitle: Alerts and notifications
-description: Threshold and event alerts for your fleet, dispatched to Discord, Slack, or any webhook, with per-stack rules and channel routing.
+description: Threshold and event alerts for your fleet, dispatched to Discord, Slack, Apprise, or any webhook, with per-stack rules and channel routing.
 ---
 
-Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and one of three external channels you configure. This page covers everything from configuring channels to writing per-stack threshold rules, routing alerts to dedicated channels with routing rules, and tuning retention.
+Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and an external channel you configure. This page covers everything from configuring channels to writing per-stack threshold rules, routing alerts to dedicated channels with routing rules, and tuning retention.
 
 <Frame>
-  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel showing the Discord, Slack, and Webhook tabs with the masthead breadcrumb, the CHANNELS 3/3 stat, the active Discord tab with its Enabled toggle on, the Webhook URL input, and the Test and Save actions." />
+  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel showing the Discord, Slack, Webhook, and Apprise tabs with the masthead breadcrumb, the CHANNELS 4/4 stat, the active Discord tab with its Enabled toggle on, the Webhook URL input, and the Test and Save actions." />
 </Frame>
 
 ## Notification channels
 
-Open **Settings · Notifications · Channels** to configure the three channel types. Each channel is per-node, so switching the active node via the node picker reloads the panel against that node's stored settings. The masthead carries a `CHANNELS` stat showing how many of the three slots are enabled.
+Open **Settings · Notifications · Channels** to configure Discord, Slack, custom webhook, and Apprise channels. Each channel is per-node, so switching the active node via the node picker reloads the panel against that node's stored settings. The masthead carries a `CHANNELS` stat showing how many of the four slots are enabled.
 
-Each tab carries the same controls: an **Enabled** toggle (helper: `Send Sencho events to this <name> channel.`), a **Webhook URL** input (placeholder `https://...`, helper: `Sencho posts JSON payloads here. Use a private channel.`), and the **Test** and **Save** buttons. The kicker on each tab toggles between `enabled` and `off` so you can see at a glance which slots are wired up.
+Each Discord, Slack, and Webhook tab carries an **Enabled** toggle, a **Webhook URL** input (HTTPS only), and **Test** / **Save**. The Apprise tab uses an **Apprise endpoint** instead: keyed `/notify/{key}` shows optional **Tags**; stateless `/notify` shows **Destination URLs**. The kicker on each tab toggles between `enabled` and `off` so you can see at a glance which slots are wired up.
 
 <Note>
-  Webhook URLs must use HTTPS. Sencho rejects `http://` and any string that does not parse as a URL. The same rule applies to test sends and to routing-rule URLs.
+  Discord, Slack, and webhook URLs must use HTTPS. Apprise endpoints may use HTTP or HTTPS. Every endpoint must parse as a URL.
 </Note>
 
 ### Discord
@@ -42,6 +42,12 @@ Use the Generic Webhook tab when you have your own receiver: a Mattermost or Tea
 ```
 
 `level` is one of `info`, `warning`, `error`. `source` is always the literal string `sencho`. `timestamp` is ISO-8601 with millisecond precision.
+
+### Apprise
+
+Use a keyed Apprise endpoint ending in `/notify/<key>` with optional tags, or a stateless endpoint ending in `/notify` with one or more destination URLs. Separate stateless destination URLs with commas or whitespace. Apprise endpoints may use HTTP for a local gateway.
+
+Sencho sends the alert title, body, severity, and either tags or destination URLs to Apprise. An HTTP 204 response means Apprise accepted no delivery and is reported as a failed test or dispatch. Configuration reads expose only destination provider names and counts, never destination URLs or endpoint keys.
 
 ### Test sends and delivery semantics
 
@@ -84,7 +90,7 @@ Open **Settings · Notifications · Notification Routing** and click **+ Add Rou
 | **Stacks** *(optional)* | A combobox of stacks on the active node. Selected stacks appear as removable pills. Empty matches any stack. |
 | **Labels** *(optional)* | A combobox of stack labels on the active node. Empty matches any label. |
 | **Categories** *(optional)* | A combobox of notification categories. The helper line reads `Leave blank to match all categories. All non-empty filters must match (AND).` |
-| **Channel** | Tabs for Discord, Slack, and Webhook with a URL input below. URL must use HTTPS. |
+| **Channel** | Tabs for Discord, Slack, Webhook, and Apprise. Discord, Slack, and Webhook require HTTPS. Apprise accepts HTTP or HTTPS. |
 | **Priority** | A number used to sort the rule list. Lower numbers appear higher up. Priority does not gate dispatch: when multiple rules match the same alert, every matching rule fires concurrently. |
 | **Enabled** | Toggle the rule on or off without deleting it. |
 
@@ -164,7 +170,7 @@ Each stack carries its own set of threshold rules that fire when a metric stays 
 Open the rules editor by right-clicking a stack in the sidebar and choosing **Alerts**, or by pressing `A` while focused on a stack.
 
 <Frame>
-  <img src="/images/alerts-notifications/alert-panel.png" alt="The Stack › PLEX › MONITOR sheet with the Alerts tab active, a green 'Notifications active via Discord, Slack, Webhook' banner under the NOTIFICATION CHANNELS heading, an ACTIVE RULES section listing 'CPU Usage (%) > 80' with the secondary line 'Trigger after 5m • Cooldown 60m', and an ADD NEW RULE form with Metric, Operator, Threshold, Duration, Cooldown fields and an Add Rule submit button." />
+  <img src="/images/alerts-notifications/alert-panel.png" alt="The Stack › PLEX › MONITOR sheet with the Alerts tab active, a green notification-channel banner under the NOTIFICATION CHANNELS heading, an ACTIVE RULES section listing 'CPU Usage (%) > 80' with the secondary line 'Trigger after 5m • Cooldown 60m', and an ADD NEW RULE form with Metric, Operator, Threshold, Duration, Cooldown fields and an Add Rule submit button." />
 </Frame>
 
 ### Alert fields
@@ -196,7 +202,7 @@ The **NOTIFICATION CHANNELS** banner above the rules list reflects what dispatch
 
 - **Loading** is a spinner with `Checking notification channels...` while Sencho asks the target node for its agent state.
 - **Remote node** is a blue banner reading `Remote node: <name>`, with the body `Alert rules are stored and evaluated on this remote instance. Notifications are dispatched using that node's configured channels.` A sub-line reports whether the remote has any channels configured.
-- **No channels** is an amber banner reading `No notification channels configured`, body `Alert rules will be saved and evaluated, but no notifications will be dispatched. Configure Discord, Slack, or a webhook in Settings → Notifications → Channels.`
+- **No channels** is an amber banner reading `No notification channels configured`, body `Alert rules will be saved and evaluated, but no notifications will be dispatched. Configure Discord, Slack, Apprise, or a webhook in Settings → Notifications → Channels.`
 - **Active** is a green banner reading `Notifications active via Discord, Slack, …` with the configured channels listed.
 
 <Frame>
@@ -433,8 +439,8 @@ Switching the active node tears down per-stack rule editors and reloads channel 
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="Notifications never arrive in Discord, Slack, or my webhook">
-    Check three things in order. First, the channel toggle in **Settings · Notifications · Channels** must be on; the kicker on each tab reads `enabled` or `off`. Second, the URL must use HTTPS; the form rejects plain `http://` outright. Third, a routing rule with empty `Stacks`, `Labels`, and `Categories` matchers will intercept every alert and skip the global channels. Use the per-channel **Test** button to issue a one-shot dispatch and watch your endpoint for the literal message `🔌 Test Notification from Sencho!` Sencho records the failure reason in `notification_history.dispatch_error` when delivery throws, so a row that appears in the bell with no follow-up at the endpoint usually means a 4xx or timeout at the receiver.
+  <Accordion title="Notifications never arrive">
+    Check three things in order. First, the channel toggle in **Settings · Notifications · Channels** must be on; the kicker on each tab reads `enabled` or `off`. Second, Discord, Slack, and webhook URLs must use HTTPS (the form rejects plain `http://` for those channels); Apprise endpoints may use HTTP or HTTPS. Third, a routing rule with empty `Stacks`, `Labels`, and `Categories` matchers will intercept every alert and skip the global channels. Use the per-channel **Test** button to issue a one-shot dispatch and watch your endpoint for the literal message `🔌 Test Notification from Sencho!` Sencho records the failure reason in `notification_history.dispatch_error` when delivery throws, so a row that appears in the bell with no follow-up at the endpoint usually means a 4xx or timeout at the receiver.
   </Accordion>
   <Accordion title="An alert rule never fires even when the threshold is breached">
     Three causes account for almost every case. First, the rule's **Duration** has not elapsed yet: the breach must persist for the full duration before the rule fires. Second, the rule is still in cooldown after a previous fire. Third, the panel's banner is not green: a remote-node banner means the rule was saved on a remote whose channels you may not have configured, and an amber `No notification channels configured` banner means the rule evaluates fine but Sencho has nowhere to send the alert. The evaluator runs on a 30-second tick, so expect up to 30 seconds of latency between the breach starting and the timer engaging.

@@ -115,11 +115,12 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
   const { notifications, automation, security, thresholds, backup } = status;
 
   const agentSummary = (() => {
-    const { discord, slack, webhook } = notifications.agents;
+    const { discord, slack, webhook, apprise } = notifications.agents;
     const active = [
       discord.enabled ? 'Discord' : null,
       slack.enabled ? 'Slack' : null,
       webhook.enabled ? 'Webhook' : null,
+      apprise.enabled ? 'Apprise' : null,
     ].filter(Boolean);
     return active.length === 0 ? 'None' : active.join(', ');
   })();

@@ -31,8 +31,9 @@ interface NotificationRoute {
     stack_patterns: string[];
     label_ids: number[] | null;
     categories: NotificationCategory[] | null;
-    channel_type: 'discord' | 'slack' | 'webhook';
+    channel_type: 'discord' | 'slack' | 'webhook' | 'apprise';
     channel_url: string;
+    config: { mode: 'keyed' | 'stateless'; tags?: string; has_urls: boolean; providers?: string[]; url_count?: number } | null;
     priority: number;
     enabled: boolean;
     created_at: number;
@@ -43,13 +44,20 @@ const CHANNEL_LABELS: Record<string, string> = {
     discord: 'Discord',
     slack: 'Slack',
     webhook: 'Webhook',
+    apprise: 'Apprise',
 };
 
 const CHANNEL_PLACEHOLDERS: Record<string, string> = {
     discord: 'https://discord.com/api/webhooks/...',
     slack: 'https://hooks.slack.com/services/...',
     webhook: 'https://example.com/webhook',
+    apprise: 'http://apprise.local/notify',
 };
+
+/** Client-side mirror of the backend's stateless (`/notify`) classification, used only to pick which form field to show. */
+function isStatelessAppriseChannelUrl(url: string): boolean {
+    return url.replace(/\/$/, '').endsWith('/notify');
+}
 
 export function NotificationRoutingSection() {
     const { nodes } = useNodes();
@@ -70,8 +78,14 @@ export function NotificationRoutingSection() {
     const [formStacks, setFormStacks] = useState<string[]>([]);
     const [formLabelIds, setFormLabelIds] = useState<number[]>([]);
     const [formCategories, setFormCategories] = useState<NotificationCategory[]>([]);
-    const [formChannelType, setFormChannelType] = useState<'discord' | 'slack' | 'webhook'>('discord');
+    const [formChannelType, setFormChannelType] = useState<'discord' | 'slack' | 'webhook' | 'apprise'>('discord');
     const [formChannelUrl, setFormChannelUrl] = useState('');
+    const [formAppriseUrls, setFormAppriseUrls] = useState('');
+    const [formAppriseTags, setFormAppriseTags] = useState('');
+    const [appriseEndpointDirty, setAppriseEndpointDirty] = useState(false);
+    const [appriseConfigDirty, setAppriseConfigDirty] = useState(false);
+    /** True when the route being edited was already stateless; gates the preserve hint. */
+    const [editAppriseWasStateless, setEditAppriseWasStateless] = useState(false);
     const [formPriority, setFormPriority] = useState(0);
     const [formEnabled, setFormEnabled] = useState(true);
 
@@ -123,6 +137,11 @@ export function NotificationRoutingSection() {
         setFormCategories([]);
         setFormChannelType('discord');
         setFormChannelUrl('');
+        setFormAppriseUrls('');
+        setFormAppriseTags('');
+        setAppriseEndpointDirty(false);
+        setAppriseConfigDirty(false);
+        setEditAppriseWasStateless(false);
         setFormPriority(0);
         setFormEnabled(true);
         setEditingId(null);
@@ -138,6 +157,11 @@ export function NotificationRoutingSection() {
         setFormCategories(route.categories ? [...route.categories] : []);
         setFormChannelType(route.channel_type);
         setFormChannelUrl(route.channel_url);
+        setFormAppriseTags(route.config?.tags ?? '');
+        setFormAppriseUrls('');
+        setAppriseEndpointDirty(false);
+        setAppriseConfigDirty(false);
+        setEditAppriseWasStateless(route.channel_type === 'apprise' && route.config?.mode === 'stateless');
         setFormPriority(route.priority);
         setFormEnabled(route.enabled);
         setShowForm(true);
@@ -145,8 +169,17 @@ export function NotificationRoutingSection() {
 
     const handleSave = async () => {
         if (!formName.trim()) { toast.error('Name is required.'); return; }
-        if (!formChannelUrl.trim() || !formChannelUrl.startsWith('https://')) {
-            toast.error('Channel URL must be a valid HTTPS URL.');
+        if (!formChannelUrl.trim() || (formChannelType !== 'apprise' && !formChannelUrl.startsWith('https://'))) {
+            toast.error(formChannelType === 'apprise' ? 'Enter a valid Apprise endpoint.' : 'Channel URL must be a valid HTTPS URL.');
+            return;
+        }
+        if (
+            formChannelType === 'apprise'
+            && isStatelessAppriseChannelUrl(formChannelUrl)
+            && !editingId
+            && !formAppriseUrls.trim()
+        ) {
+            toast.error('Destination URLs are required for a stateless Apprise endpoint.');
             return;
         }
 
@@ -159,7 +192,12 @@ export function NotificationRoutingSection() {
                 label_ids: formLabelIds.length > 0 ? formLabelIds : null,
                 categories: formCategories.length > 0 ? formCategories : null,
                 channel_type: formChannelType,
-                channel_url: formChannelUrl.trim(),
+                ...(formChannelType !== 'apprise' || !editingId || appriseEndpointDirty
+                    ? { channel_url: formChannelUrl.trim() }
+                    : {}),
+                ...(formChannelType === 'apprise' && (!editingId || appriseConfigDirty)
+                    ? { config: isStatelessAppriseChannelUrl(formChannelUrl) ? { urls: formAppriseUrls } : { tags: formAppriseTags } }
+                    : {}),
                 priority: formPriority,
                 enabled: formEnabled,
             };
@@ -287,6 +325,7 @@ export function NotificationRoutingSection() {
             ],
     );
 
+    const isAppriseStateless = isStatelessAppriseChannelUrl(formChannelUrl);
     const availableStackOptions = stackOptions.filter(o => !formStacks.includes(o.value));
     const availableLabelOptions = useMemo<ComboboxOption[]>(
         () => labelOptions.filter(l => !formLabelIds.includes(l.id)).map(l => ({ value: String(l.id), label: l.name })),
@@ -431,8 +470,8 @@ export function NotificationRoutingSection() {
 
                             <div className="space-y-2">
                                 <Label>Channel</Label>
-                                <Tabs value={formChannelType} onValueChange={(v) => setFormChannelType(v as 'discord' | 'slack' | 'webhook')}>
-                                    <TabsList className="w-full grid grid-cols-3">
+                                <Tabs value={formChannelType} onValueChange={(v) => setFormChannelType(v as 'discord' | 'slack' | 'webhook' | 'apprise')}>
+                                    <TabsList className="w-full grid grid-cols-4">
                                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                                             <TabsHighlightItem value="discord">
                                                 <TabsTrigger value="discord">Discord</TabsTrigger>
@@ -443,14 +482,36 @@ export function NotificationRoutingSection() {
                                             <TabsHighlightItem value="webhook">
                                                 <TabsTrigger value="webhook">Webhook</TabsTrigger>
                                             </TabsHighlightItem>
+                                            <TabsHighlightItem value="apprise">
+                                                <TabsTrigger value="apprise">Apprise</TabsTrigger>
+                                            </TabsHighlightItem>
                                         </TabsHighlight>
                                     </TabsList>
                                 </Tabs>
                                 <Input
                                     placeholder={CHANNEL_PLACEHOLDERS[formChannelType]}
                                     value={formChannelUrl}
-                                    onChange={e => setFormChannelUrl(e.target.value)}
+                                    onChange={e => {
+                                        setFormChannelUrl(e.target.value);
+                                        if (formChannelType === 'apprise') setAppriseEndpointDirty(true);
+                                    }}
                                 />
+                                {formChannelType === 'apprise' && (
+                                    <>
+                                        <Input
+                                            placeholder={isAppriseStateless ? 'Destination URLs, required for stateless mode' : 'Optional tags for keyed mode'}
+                                            value={isAppriseStateless ? formAppriseUrls : formAppriseTags}
+                                            onChange={e => {
+                                                if (isAppriseStateless) setFormAppriseUrls(e.target.value);
+                                                else setFormAppriseTags(e.target.value);
+                                                setAppriseConfigDirty(true);
+                                            }}
+                                        />
+                                        {editingId !== null && isAppriseStateless && editAppriseWasStateless && !formAppriseUrls && (
+                                            <p className="text-xs text-stat-subtitle">Leave destination URLs blank to preserve the configured destinations.</p>
+                                        )}
+                                    </>
+                                )}
                             </div>
 
                             <div className="grid grid-cols-2 gap-4">
@@ -594,7 +655,7 @@ export function NotificationRoutingSection() {
                                 <span className="text-muted-foreground/50 text-[10px]">Matches all alerts</span>
                             )}
                             <span className="text-muted-foreground/50">|</span>
-                            <span className="font-mono truncate max-w-[200px]" title={route.channel_url}>
+                            <span className="font-mono truncate max-w-[200px]" title={route.channel_type === 'apprise' ? undefined : route.channel_url}>
                                 {route.channel_url}
                             </span>
                             {route.priority !== 0 && (

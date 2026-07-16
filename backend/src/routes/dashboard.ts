@@ -16,7 +16,7 @@ interface AgentStatus {
 export interface ConfigurationStatus {
   tier: LicenseTier;
   notifications: {
-    agents: { discord: AgentStatus; slack: AgentStatus; webhook: AgentStatus };
+    agents: { discord: AgentStatus; slack: AgentStatus; webhook: AgentStatus; apprise: AgentStatus };
     alertRules: number;
     routingRules: { count: number; enabledCount: number; locked: boolean };
     suppressionRules: { total: number; enabledCount: number };
@@ -57,7 +57,7 @@ export function buildLocalConfigurationStatus(
   const db = DatabaseService.getInstance();
 
   const agents = db.getAgents(nodeId);
-  const agentByType = (type: 'discord' | 'slack' | 'webhook'): AgentStatus => {
+  const agentByType = (type: 'discord' | 'slack' | 'webhook' | 'apprise'): AgentStatus => {
     const a = agents.find(ag => ag.type === type);
     return { configured: !!a?.url, enabled: a?.enabled ?? false };
   };
@@ -96,6 +96,7 @@ export function buildLocalConfigurationStatus(
         discord: agentByType('discord'),
         slack: agentByType('slack'),
         webhook: agentByType('webhook'),
+        apprise: agentByType('apprise'),
       },
       alertRules,
       // Notification routing is available on every tier.

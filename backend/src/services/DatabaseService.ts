@@ -16,9 +16,10 @@ function isPilotMode(): boolean {
 
 export interface Agent {
     id?: number;
-    type: 'discord' | 'slack' | 'webhook';
+    type: 'discord' | 'slack' | 'webhook' | 'apprise';
     url: string;
     enabled: boolean;
+    config?: string | null;
 }
 
 export interface GlobalSetting {
@@ -613,8 +614,9 @@ export interface NotificationRoute {
     stack_patterns: string[];
     label_ids: number[] | null;
     categories: string[] | null;
-    channel_type: 'discord' | 'slack' | 'webhook';
+    channel_type: 'discord' | 'slack' | 'webhook' | 'apprise';
     channel_url: string;
+    config?: string | null;
     priority: number;
     enabled: boolean;
     created_at: number;
@@ -909,6 +911,7 @@ export class DatabaseService {
         this.migrateNotificationRoutes();
         this.migrateNotificationRoutesNodeId();
         this.migrateNotificationRoutesMatchers();
+        this.migrateNotificationChannelConfig();
         this.migrateNotificationSuppressionRules();
         this.migrateNotificationHistoryContext();
         this.migrateScanPolicyFleetColumns();
@@ -1907,6 +1910,11 @@ export class DatabaseService {
         this.tryAddColumn('notification_routes', 'categories', 'TEXT NULL');
     }
 
+    private migrateNotificationChannelConfig(): void {
+        this.tryAddColumn('agents', 'config', 'TEXT NULL');
+        this.tryAddColumn('notification_routes', 'config', 'TEXT NULL');
+    }
+
     private migrateNotificationSuppressionRules(): void {
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS notification_suppression_rules (
@@ -2299,7 +2307,8 @@ export class DatabaseService {
         const stmt = this.db.prepare('SELECT * FROM agents WHERE node_id = ?');
         return stmt.all(nodeId).map((row: any) => ({
             ...row,
-            enabled: row.enabled === 1
+            enabled: row.enabled === 1,
+            config: row.config ?? null,
         }));
     }
 
@@ -2307,18 +2316,19 @@ export class DatabaseService {
         const stmt = this.db.prepare('SELECT * FROM agents WHERE node_id = ? AND enabled = 1');
         return stmt.all(nodeId).map((row: any) => ({
             ...row,
-            enabled: row.enabled === 1
+            enabled: row.enabled === 1,
+            config: row.config ?? null,
         }));
     }
 
     public upsertAgent(nodeId: number, agent: Agent): void {
         const existing = this.db.prepare('SELECT id FROM agents WHERE node_id = ? AND type = ?').get(nodeId, agent.type) as any;
         if (existing) {
-            const stmt = this.db.prepare('UPDATE agents SET url = ?, enabled = ? WHERE node_id = ? AND type = ?');
-            stmt.run(agent.url, agent.enabled ? 1 : 0, nodeId, agent.type);
+            const stmt = this.db.prepare('UPDATE agents SET url = ?, enabled = ?, config = ? WHERE node_id = ? AND type = ?');
+            stmt.run(agent.url, agent.enabled ? 1 : 0, agent.config, nodeId, agent.type);
         } else {
-            const stmt = this.db.prepare('INSERT INTO agents (node_id, type, url, enabled) VALUES (?, ?, ?, ?)');
-            stmt.run(nodeId, agent.type, agent.url, agent.enabled ? 1 : 0);
+            const stmt = this.db.prepare('INSERT INTO agents (node_id, type, url, enabled, config) VALUES (?, ?, ?, ?, ?)');
+            stmt.run(nodeId, agent.type, agent.url, agent.enabled ? 1 : 0, agent.config);
         }
     }
 
@@ -2332,8 +2342,9 @@ export class DatabaseService {
             stack_patterns: JSON.parse(row.stack_patterns as string) as string[],
             label_ids: row.label_ids ? JSON.parse(row.label_ids as string) as number[] : null,
             categories: row.categories ? JSON.parse(row.categories as string) as string[] : null,
-            channel_type: row.channel_type as 'discord' | 'slack' | 'webhook',
+            channel_type: row.channel_type as 'discord' | 'slack' | 'webhook' | 'apprise',
             channel_url: row.channel_url as string,
+            config: row.config as string | null ?? null,
             priority: row.priority as number,
             enabled: row.enabled === 1,
             created_at: row.created_at as number,
@@ -2367,7 +2378,7 @@ export class DatabaseService {
 
     public createNotificationRoute(route: Omit<NotificationRoute, 'id'>): NotificationRoute {
         const result = this.db.prepare(
-            'INSERT INTO notification_routes (name, node_id, stack_patterns, label_ids, categories, channel_type, channel_url, priority, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO notification_routes (name, node_id, stack_patterns, label_ids, categories, channel_type, channel_url, config, priority, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         ).run(
             route.name,
             route.node_id ?? null,
@@ -2376,6 +2387,7 @@ export class DatabaseService {
             route.categories ? JSON.stringify(route.categories) : null,
             route.channel_type,
             route.channel_url,
+            route.config,
             route.priority,
             route.enabled ? 1 : 0,
             route.created_at,
@@ -2395,6 +2407,7 @@ export class DatabaseService {
         if ('categories' in updates) { fields.push('categories = ?'); values.push(updates.categories ? JSON.stringify(updates.categories) : null); }
         if (updates.channel_type !== undefined) { fields.push('channel_type = ?'); values.push(updates.channel_type); }
         if (updates.channel_url !== undefined) { fields.push('channel_url = ?'); values.push(updates.channel_url); }
+        if ('config' in updates) { fields.push('config = ?'); values.push(updates.config ?? null); }
         if (updates.priority !== undefined) { fields.push('priority = ?'); values.push(updates.priority); }
         if (updates.enabled !== undefined) { fields.push('enabled = ?'); values.push(updates.enabled ? 1 : 0); }
         if (updates.updated_at !== undefined) { fields.push('updated_at = ?'); values.push(updates.updated_at); }

@@ -170,7 +170,7 @@ describe('POST /api/agents - validation', () => {
       .set('Cookie', authCookie)
       .send({ type: 'telegram', url: 'https://example.com/hook', enabled: true });
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('discord, slack, webhook');
+    expect(res.body.error).toContain('discord, slack, webhook, apprise');
   });
 
   it('rejects non-HTTPS url', async () => {
@@ -346,7 +346,7 @@ describe('POST /api/notification-routes - validation', () => {
       .set('Cookie', authCookie)
       .send({ name: 'test', stack_patterns: ['app'], channel_type: 'telegram', channel_url: 'https://example.com' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('discord, slack, webhook');
+    expect(res.body.error).toContain('discord, slack, webhook, apprise');
   });
 
   it('rejects non-HTTPS channel_url', async () => {
@@ -461,6 +461,182 @@ describe('POST /api/notification-routes/:id/test', () => {
       .post('/api/notification-routes/abc/test')
       .set('Cookie', authCookie);
     expect(res.status).toBe(400);
+  });
+});
+
+describe('Apprise notification routes - redaction and preserve-on-write', () => {
+  const keyedUrl = 'http://apprise.local/notify/route-key-secret';
+  const serviceUrl = 'mailto://user:pass@smtp.example.com?to=ops@example.com';
+  let routeId: number;
+
+  beforeAll(async () => {
+    const res = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'Apprise route',
+        stack_patterns: ['app'],
+        channel_type: 'apprise',
+        channel_url: keyedUrl,
+        config: { tags: 'ops' },
+        enabled: true,
+      });
+    expect(res.status).toBe(201);
+    routeId = res.body.id;
+  });
+
+  it('POST 201 and GET redact the keyed endpoint path', async () => {
+    const created = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'Apprise create redact',
+        stack_patterns: [],
+        channel_type: 'apprise',
+        channel_url: keyedUrl,
+        config: { tags: 'night' },
+      });
+    expect(created.status).toBe(201);
+    expect(created.body.channel_url).toBe('http://apprise.local/notify/<redacted>');
+    expect(created.body.config).toMatchObject({ mode: 'keyed', tags: 'night', has_urls: false });
+    expect(JSON.stringify(created.body)).not.toContain('route-key-secret');
+
+    const listed = await request(app).get('/api/notification-routes').set('Cookie', authCookie);
+    const row = listed.body.find((r: { id: number }) => r.id === created.body.id);
+    expect(row.channel_url).toBe('http://apprise.local/notify/<redacted>');
+    expect(JSON.stringify(row)).not.toContain('route-key-secret');
+
+    await request(app).delete(`/api/notification-routes/${created.body.id}`).set('Cookie', authCookie);
+  });
+
+  it('POST 201 for stateless mode returns providers and url_count only', async () => {
+    const res = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'Apprise stateless',
+        stack_patterns: [],
+        channel_type: 'apprise',
+        channel_url: 'http://apprise.local/notify',
+        config: { urls: serviceUrl },
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.channel_url).toBe('http://apprise.local/notify');
+    expect(res.body.config).toMatchObject({
+      mode: 'stateless',
+      has_urls: true,
+      providers: ['mailto'],
+      url_count: 1,
+    });
+    expect(JSON.stringify(res.body)).not.toContain('pass@');
+    expect(JSON.stringify(res.body)).not.toContain('ops@example.com');
+
+    const stored = DatabaseService.getInstance().getNotificationRoute(res.body.id);
+    expect(stored?.channel_url).toBe('http://apprise.local/notify');
+    expect(stored?.config).toContain(serviceUrl);
+
+    await request(app).delete(`/api/notification-routes/${res.body.id}`).set('Cookie', authCookie);
+  });
+
+  it('PUT preserves secrets when channel_url and config are omitted', async () => {
+    const res = await request(app)
+      .put(`/api/notification-routes/${routeId}`)
+      .set('Cookie', authCookie)
+      .send({ name: 'Apprise route renamed', enabled: false });
+    expect(res.status).toBe(200);
+    expect(res.body.name).toBe('Apprise route renamed');
+    expect(res.body.channel_url).toBe('http://apprise.local/notify/<redacted>');
+    expect(JSON.stringify(res.body)).not.toContain('route-key-secret');
+
+    const stored = DatabaseService.getInstance().getNotificationRoute(routeId);
+    expect(stored?.channel_url).toBe(keyedUrl);
+    expect(stored?.config).toBe(JSON.stringify({ tags: 'ops' }));
+  });
+
+  it('PUT rejects a redacted channel_url', async () => {
+    const res = await request(app)
+      .put(`/api/notification-routes/${routeId}`)
+      .set('Cookie', authCookie)
+      .send({ channel_url: 'http://apprise.local/notify/<redacted>' });
+    expect(res.status).toBe(400);
+  });
+
+  it('PUT rejects public DTO config shapes', async () => {
+    const res = await request(app)
+      .put(`/api/notification-routes/${routeId}`)
+      .set('Cookie', authCookie)
+      .send({
+        channel_url: keyedUrl,
+        config: { mode: 'keyed', has_urls: false, providers: [] },
+      });
+    expect(res.status).toBe(400);
+  });
+
+  it('stored-route test uses raw config and returns sanitized 204 errors', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const ok = await request(app)
+        .post(`/api/notification-routes/${routeId}/test`)
+        .set('Cookie', authCookie);
+      expect(ok.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledWith(
+        keyedUrl,
+        expect.objectContaining({
+          body: JSON.stringify({
+            title: 'Sencho Alert [INFO]',
+            body: '🔌 Test Notification from Sencho!',
+            type: 'info',
+            tag: 'ops',
+          }),
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 204 }));
+    try {
+      const fail = await request(app)
+        .post(`/api/notification-routes/${routeId}/test`)
+        .set('Cookie', authCookie);
+      expect(fail.status).toBe(500);
+      expect(JSON.stringify(fail.body)).toContain('HTTP 204');
+      expect(JSON.stringify(fail.body)).not.toContain('route-key-secret');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('stored-route test fails closed on malformed config without fetch', async () => {
+    const broken = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'Broken Apprise',
+        stack_patterns: [],
+        channel_type: 'apprise',
+        channel_url: 'http://apprise.local/notify/broken-key',
+        config: { tags: 'x' },
+      });
+    expect(broken.status).toBe(201);
+    const id = broken.body.id as number;
+    DatabaseService.getInstance().updateNotificationRoute(id, { config: '{not-json' });
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const res = await request(app)
+        .post(`/api/notification-routes/${id}/test`)
+        .set('Cookie', authCookie);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/invalid/i);
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(JSON.stringify(res.body)).not.toContain('broken-key');
+    } finally {
+      vi.unstubAllGlobals();
+      await request(app).delete(`/api/notification-routes/${id}`).set('Cookie', authCookie);
+    }
   });
 });
 

@@ -7,9 +7,15 @@ import { authMiddleware } from '../middleware/auth';
 import { requireAdmin, requireNodeProxy } from '../middleware/tierGates';
 import {
   NOTIFICATION_CHANNEL_TYPES,
-  validateHttpsUrl,
+  serializePublicNotificationRoute,
+  validateNotificationChannel,
   cleanStackPatterns,
   maskWebhookUrl,
+  normalizeAppriseStoredJson,
+  parseStoredAppriseConfig,
+  redactedChannelWriteError,
+  resolvePreservedAppriseConfig,
+  storedAppriseToWriteConfig,
 } from '../helpers/notificationChannels';
 import {
   deleteSuppressionRuleFromFleet,
@@ -246,14 +252,14 @@ notificationsRouter.delete('/', authMiddleware, async (req: Request, res: Respon
 notificationsRouter.post('/test', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
-    const { type, url } = req.body;
+    const { type, url, config } = req.body;
     if (!type || !(NOTIFICATION_CHANNEL_TYPES as readonly string[]).includes(type)) {
       res.status(400).json({ error: `type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}` });
       return;
     }
-    const urlErr = validateHttpsUrl(url);
-    if (urlErr) { res.status(400).json({ error: `url ${urlErr}` }); return; }
-    await NotificationService.getInstance().testDispatch(type, url);
+    const channelErr = validateNotificationChannel(type, url, config);
+    if (channelErr) { res.status(400).json({ error: `url ${channelErr}` }); return; }
+    await NotificationService.getInstance().testDispatch(type, url, config);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Test failed', details: getErrorMessage(error, String(error)) });
@@ -266,7 +272,7 @@ notificationRoutesRouter.get('/', authMiddleware, (req: Request, res: Response):
   if (!requireAdmin(req, res)) return;
   try {
     const routes = DatabaseService.getInstance().getNotificationRoutes();
-    res.json(routes);
+    res.json(routes.map(serializePublicNotificationRoute));
   } catch (error) {
     console.error('Failed to fetch notification routes:', error);
     res.status(500).json({ error: 'Failed to fetch notification routes' });
@@ -276,7 +282,7 @@ notificationRoutesRouter.get('/', authMiddleware, (req: Request, res: Response):
 notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
-    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, channel_type, channel_url, priority, enabled } = req.body;
+    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, channel_type, channel_url, config, priority, enabled } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       res.status(400).json({ error: 'Name is required' });
@@ -299,7 +305,7 @@ notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Res
       res.status(400).json({ error: `channel_type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}` });
       return;
     }
-    const channelUrlErr = validateHttpsUrl(channel_url);
+    const channelUrlErr = validateNotificationChannel(channel_type, channel_url, config);
     if (channelUrlErr) { res.status(400).json({ error: `channel_url ${channelUrlErr}` }); return; }
     if (priority !== undefined && (typeof priority !== 'number' || !Number.isFinite(priority))) {
       res.status(400).json({ error: 'priority must be a finite number' });
@@ -315,6 +321,7 @@ notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Res
       categories: Array.isArray(categories) && categories.length > 0 ? (categories as NotificationCategory[]) : null,
       channel_type,
       channel_url: channel_url.trim(),
+      config: channel_type === 'apprise' ? normalizeAppriseStoredJson(channel_url.trim(), config) : null,
       priority: typeof priority === 'number' ? priority : 0,
       enabled: enabled !== false,
       created_at: now,
@@ -322,7 +329,7 @@ notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Res
     });
     console.log(`[Routes] Route "${sanitizeForLog(route.name)}" created (id=${route.id})`);
     if (isDebugEnabled()) console.log(`[Routes:diag] Route "${sanitizeForLog(route.name)}" created with patterns=[${sanitizeForLog(cleanedPatterns.join(', '))}], channel=${channel_type}`);
-    res.status(201).json(route);
+    res.status(201).json(serializePublicNotificationRoute(route));
   } catch (error) {
     console.error('Failed to create notification route:', error);
     res.status(500).json({ error: 'Failed to create notification route' });
@@ -338,7 +345,7 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
     const existing = DatabaseService.getInstance().getNotificationRoute(id);
     if (!existing) { res.status(404).json({ error: 'Route not found' }); return; }
 
-    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, channel_type, channel_url, priority, enabled } = req.body;
+    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, channel_type, channel_url, config, priority, enabled } = req.body;
 
     if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
       res.status(400).json({ error: 'Name must be a non-empty string' });
@@ -368,10 +375,18 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
       res.status(400).json({ error: `channel_type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}` });
       return;
     }
-    if (channel_url !== undefined) {
-      const urlErr = validateHttpsUrl(channel_url);
-      if (urlErr) { res.status(400).json({ error: `channel_url ${urlErr}` }); return; }
+    const effectiveType = channel_type ?? existing.channel_type;
+    const effectiveUrl = channel_url ?? existing.channel_url;
+    let effectiveConfig: unknown = config ?? null;
+    if (effectiveType === 'apprise' && config === undefined) {
+      const resolved = resolvePreservedAppriseConfig(effectiveUrl, existing.config);
+      if (!resolved.ok) { res.status(400).json({ error: resolved.error }); return; }
+      effectiveConfig = resolved.config;
     }
+    const redactedErr = redactedChannelWriteError(effectiveType, effectiveUrl, effectiveConfig, config);
+    if (redactedErr) { res.status(400).json({ error: redactedErr }); return; }
+    const urlErr = validateNotificationChannel(effectiveType, effectiveUrl, effectiveConfig);
+    if (urlErr) { res.status(400).json({ error: `channel_url ${urlErr}` }); return; }
     if (priority !== undefined && (typeof priority !== 'number' || !Number.isFinite(priority))) {
       res.status(400).json({ error: 'priority must be a finite number' });
       return;
@@ -389,6 +404,8 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
     if ('categories' in req.body) updates.categories = Array.isArray(categories) && categories.length > 0 ? categories : null;
     if (channel_type !== undefined) updates.channel_type = channel_type;
     if (channel_url !== undefined) updates.channel_url = channel_url.trim();
+    if (effectiveType === 'apprise') updates.config = normalizeAppriseStoredJson(effectiveUrl.trim(), effectiveConfig);
+    else if (channel_type !== undefined) updates.config = null;
     if (priority !== undefined) updates.priority = priority;
     if (enabled !== undefined) updates.enabled = enabled;
 
@@ -397,7 +414,7 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
     const updated = db.getNotificationRoute(id);
     console.log(`[Routes] Route ${id} updated`);
     if (isDebugEnabled()) console.log(`[Routes:diag] Route ${id} update fields: ${Object.keys(updates).filter(k => k !== 'updated_at')}`);
-    res.json(updated);
+    res.json(serializePublicNotificationRoute(updated!));
   } catch (error) {
     console.error('Failed to update notification route:', error);
     res.status(500).json({ error: 'Failed to update notification route' });
@@ -430,7 +447,18 @@ notificationRoutesRouter.post('/:id/test', authMiddleware, async (req: Request, 
     if (!route) { res.status(404).json({ error: 'Route not found' }); return; }
 
     if (isDebugEnabled()) console.log(`[Routes:diag] Test dispatch for route ${id} (${route.channel_type} -> ${maskWebhookUrl(route.channel_url)})`);
-    await NotificationService.getInstance().testDispatch(route.channel_type, route.channel_url);
+    let testConfig: unknown;
+    if (route.channel_type === 'apprise') {
+      const stored = parseStoredAppriseConfig(route.channel_url, route.config);
+      if (!stored.ok) {
+        res.status(400).json({ error: stored.reason });
+        return;
+      }
+      testConfig = storedAppriseToWriteConfig(stored);
+    } else {
+      testConfig = route.config ? JSON.parse(route.config) : undefined;
+    }
+    await NotificationService.getInstance().testDispatch(route.channel_type, route.channel_url, testConfig);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: 'Test failed', details: getErrorMessage(error, String(error)) });

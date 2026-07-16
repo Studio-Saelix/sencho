@@ -120,6 +120,7 @@ function NodeCard({ node, policySyncState }: {
     notifications.agents.discord.enabled,
     notifications.agents.slack.enabled,
     notifications.agents.webhook.enabled,
+    notifications.agents.apprise.enabled,
   ].filter(Boolean).length;
 
   return (

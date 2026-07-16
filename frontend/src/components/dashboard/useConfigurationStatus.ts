@@ -15,7 +15,7 @@ interface AgentStatus {
 export interface ConfigurationStatus {
   tier: 'community' | 'paid';
   notifications: {
-    agents: { discord: AgentStatus; slack: AgentStatus; webhook: AgentStatus };
+    agents: { discord: AgentStatus; slack: AgentStatus; webhook: AgentStatus; apprise: AgentStatus };
     alertRules: number;
     routingRules: { count: number; enabledCount: number; locked: boolean };
     suppressionRules: { total: number; enabledCount: number };

@@ -14,17 +14,50 @@ import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
 
+type ChannelType = 'discord' | 'slack' | 'webhook' | 'apprise';
+
+function classifyAppriseEndpoint(url: string): 'keyed' | 'stateless' | null {
+    let path: string;
+    try {
+        path = new URL(url).pathname.replace(/\/$/, '');
+    } catch {
+        path = url.replace(/\/$/, '');
+        if (path.endsWith('/notify')) return 'stateless';
+        return /\/notify\/[^/]+$/.test(path) ? 'keyed' : null;
+    }
+    if (path === '/notify') return 'stateless';
+    return /^\/notify\/[^/]+$/.test(path) ? 'keyed' : null;
+}
+
+function isStatelessAppriseEndpoint(url: string): boolean {
+    return classifyAppriseEndpoint(url) === 'stateless';
+}
+
+function isKeyedAppriseEndpoint(url: string): boolean {
+    return classifyAppriseEndpoint(url) === 'keyed';
+}
+
+function appriseWriteConfig(agent: Agent): { urls: string } | { tags: string } {
+    if (isStatelessAppriseEndpoint(agent.url)) {
+        return { urls: agent.config?.urls ?? '' };
+    }
+    return { tags: agent.config?.tags ?? '' };
+}
+
 export function NotificationsSection() {
     const { activeNode } = useNodes();
 
-    const [notifTab, setNotifTab] = useState<'discord' | 'slack' | 'webhook'>('discord');
+    const [notifTab, setNotifTab] = useState<ChannelType>('discord');
     const [agents, setAgents] = useState<Record<string, Agent>>({
         discord: { type: 'discord', url: '', enabled: false },
         slack: { type: 'slack', url: '', enabled: false },
         webhook: { type: 'webhook', url: '', enabled: false },
+        apprise: { type: 'apprise', url: '', enabled: false, config: null },
     });
     const [isSavingAgent, setIsSavingAgent] = useState<Record<string, boolean>>({});
     const [isTestingAgent, setIsTestingAgent] = useState<Record<string, boolean>>({});
+    const [appriseUrlDirty, setAppriseUrlDirty] = useState(false);
+    const [appriseConfigDirty, setAppriseConfigDirty] = useState(false);
 
     const fetchAgents = async () => {
         try {
@@ -36,6 +69,8 @@ export function NotificationsSection() {
                     data.forEach(a => { next[a.type] = a; });
                     return next;
                 });
+                setAppriseUrlDirty(false);
+                setAppriseConfigDirty(false);
             }
         } catch (e) {
             console.error('Failed to fetch agents', e);
@@ -48,7 +83,7 @@ export function NotificationsSection() {
     useMastheadStats([
         {
             label: 'CHANNELS',
-            value: `${enabledCount}/3`,
+            value: `${enabledCount}/4`,
             tone: enabledCount > 0 ? 'value' : 'subtitle',
         },
     ]);
@@ -60,15 +95,44 @@ export function NotificationsSection() {
         }));
     };
 
+    const handleAppriseConfigPatch = (patch: { urls?: string; tags?: string }) => {
+        setAppriseConfigDirty(true);
+        setAgents(prev => ({
+            ...prev,
+            apprise: { ...prev.apprise, config: { ...prev.apprise.config, ...patch } },
+        }));
+    };
+
     const saveAgent = async (type: string) => {
         setIsSavingAgent(prev => ({ ...prev, [type]: true }));
         try {
+            const agent = agents[type];
+            const body: Record<string, unknown> = {
+                type: agent.type,
+                enabled: agent.enabled,
+            };
+
+            if (type !== 'apprise') {
+                body.url = agent.url;
+            } else {
+                const urlRedacted = agent.url.includes('<redacted>');
+                if (appriseUrlDirty || !urlRedacted) {
+                    body.url = agent.url.trim();
+                }
+                // Send config whenever the raw endpoint is being written (create/replace)
+                // or when Tags / Destination URLs were edited. Preserve-on-write omits both.
+                if (appriseConfigDirty || typeof body.url === 'string') {
+                    body.config = appriseWriteConfig(agent);
+                }
+            }
+
             const res = await apiFetch('/agents', {
                 method: 'POST',
-                body: JSON.stringify(agents[type]),
+                body: JSON.stringify(body),
             });
             if (res.ok) {
                 toast.success(`${type.charAt(0).toUpperCase() + type.slice(1)} settings saved.`);
+                await fetchAgents();
             } else {
                 const err = await res.json().catch(() => ({}));
                 toast.error(err?.error || err?.message || 'Something went wrong.');
@@ -80,16 +144,33 @@ export function NotificationsSection() {
         }
     };
 
+    const appriseCanTest = (() => {
+        const agent = agents.apprise;
+        if (!agent.url.trim() || agent.url.includes('<redacted>')) return false;
+        if (isStatelessAppriseEndpoint(agent.url)) {
+            return Boolean(agent.config?.urls?.trim());
+        }
+        return true;
+    })();
+
     const testAgent = async (type: string) => {
+        if (type === 'apprise' && !appriseCanTest) {
+            toast.error('Enter a raw Apprise endpoint (and destination URLs for /notify) before testing.');
+            return;
+        }
         if (!agents[type].url) {
             toast.error('Please enter a webhook URL first.');
             return;
         }
         setIsTestingAgent(prev => ({ ...prev, [type]: true }));
         try {
+            const body: Record<string, unknown> = { type, url: agents[type].url };
+            if (type === 'apprise') {
+                body.config = appriseWriteConfig(agents.apprise);
+            }
             const res = await apiFetch('/notifications/test', {
                 method: 'POST',
-                body: JSON.stringify({ type, url: agents[type].url }),
+                body: JSON.stringify(body),
             });
             if (res.ok) {
                 toast.success('Test notification sent!');
@@ -104,7 +185,7 @@ export function NotificationsSection() {
         }
     };
 
-    const renderAgentTab = (type: 'discord' | 'slack' | 'webhook', title: string) => (
+    const renderAgentTab = (type: ChannelType, title: string) => (
         <SettingsSection title={title} kicker={agents[type].enabled ? 'enabled' : 'off'}>
             <SettingsField
                 label="Enabled"
@@ -117,19 +198,57 @@ export function NotificationsSection() {
                 />
             </SettingsField>
             <SettingsField
-                label="Webhook URL"
-                helper="Sencho posts JSON payloads here. Use a private channel."
+                label={type === 'apprise' ? 'Apprise endpoint' : 'Webhook URL'}
+                helper={type === 'apprise' ? 'Use /notify/{key} for keyed delivery or /notify with destination URLs below.' : 'Sencho posts JSON payloads here. Use a private channel.'}
                 htmlFor={`${type}-url`}
             >
                 <Input
                     id={`${type}-url`}
-                    placeholder="https://..."
+                    placeholder={type === 'apprise' ? 'http://apprise.local/notify' : 'https://...'}
                     value={agents[type].url}
-                    onChange={(e) => handleAgentChange(type, 'url', e.target.value)}
+                    onChange={(e) => {
+                        if (type === 'apprise') setAppriseUrlDirty(true);
+                        handleAgentChange(type, 'url', e.target.value);
+                    }}
                 />
             </SettingsField>
+            {type === 'apprise' && isStatelessAppriseEndpoint(agents.apprise.url) && (
+                <SettingsField
+                    label="Destination URLs"
+                    helper="Required for a /notify endpoint. Separate Apprise URLs with commas or whitespace. Leave blank when editing to keep stored destinations."
+                    htmlFor="apprise-urls"
+                >
+                    <Input
+                        id="apprise-urls"
+                        placeholder={agents.apprise.config?.has_urls ? 'Configured destinations are preserved until replaced.' : 'discord://...'}
+                        value={agents.apprise.config?.urls ?? ''}
+                        onChange={(e) => handleAppriseConfigPatch({ urls: e.target.value })}
+                    />
+                </SettingsField>
+            )}
+            {type === 'apprise' && isKeyedAppriseEndpoint(agents.apprise.url) && (
+                <SettingsField label="Tags" helper="Optional tags for a keyed /notify/{key} endpoint." htmlFor="apprise-tags">
+                    <Input
+                        id="apprise-tags"
+                        value={agents.apprise.config?.tags ?? ''}
+                        onChange={(e) => handleAppriseConfigPatch({ tags: e.target.value })}
+                    />
+                </SettingsField>
+            )}
+            {type === 'apprise' && agents.apprise.url.trim() && !isKeyedAppriseEndpoint(agents.apprise.url) && !isStatelessAppriseEndpoint(agents.apprise.url) && (
+                <p className="text-xs text-stat-subtitle">
+                    Enter an endpoint ending in /notify or /notify/&#123;key&#125; to configure Apprise.
+                </p>
+            )}
             <SettingsActions>
-                <Button variant="outline" onClick={() => testAgent(type)} disabled={isTestingAgent[type]}>
+                <Button
+                    variant="outline"
+                    onClick={() => testAgent(type)}
+                    disabled={isTestingAgent[type] || (type === 'apprise' && !appriseCanTest)}
+                    title={type === 'apprise' && !appriseCanTest
+                        ? 'Enter a raw Apprise endpoint (and destination URLs for /notify) before testing.'
+                        : undefined}
+                >
                     {isTestingAgent[type] ? (
                         <>
                             <RefreshCw className="w-4 h-4 animate-spin" />
@@ -150,13 +269,18 @@ export function NotificationsSection() {
                     )}
                 </SettingsPrimaryButton>
             </SettingsActions>
+            {type === 'apprise' && !appriseCanTest && agents.apprise.url.includes('<redacted>') && (
+                <p className="text-xs text-stat-subtitle">
+                    Replace the redacted endpoint with the real URL to send a test. Unchanged secrets are preserved on Save.
+                </p>
+            )}
         </SettingsSection>
     );
 
     return (
         <div className="flex flex-col gap-6">
-            <Tabs value={notifTab} onValueChange={(v) => setNotifTab(v as 'discord' | 'slack' | 'webhook')} className="w-full">
-                <TabsList className="w-full mb-4 grid grid-cols-3">
+            <Tabs value={notifTab} onValueChange={(v) => setNotifTab(v as ChannelType)} className="w-full">
+                <TabsList className="w-full mb-4 grid grid-cols-4">
                     <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                         <TabsHighlightItem value="discord">
                             <TabsTrigger value="discord">Discord</TabsTrigger>
@@ -167,11 +291,15 @@ export function NotificationsSection() {
                         <TabsHighlightItem value="webhook">
                             <TabsTrigger value="webhook">Webhook</TabsTrigger>
                         </TabsHighlightItem>
+                        <TabsHighlightItem value="apprise">
+                            <TabsTrigger value="apprise">Apprise</TabsTrigger>
+                        </TabsHighlightItem>
                     </TabsHighlight>
                 </TabsList>
                 <TabsContent value="discord">{renderAgentTab('discord', 'Discord')}</TabsContent>
                 <TabsContent value="slack">{renderAgentTab('slack', 'Slack')}</TabsContent>
                 <TabsContent value="webhook">{renderAgentTab('webhook', 'Custom Webhook')}</TabsContent>
+                <TabsContent value="apprise">{renderAgentTab('apprise', 'Apprise')}</TabsContent>
             </Tabs>
         </div>
     );
