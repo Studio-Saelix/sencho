@@ -22,6 +22,7 @@ import {
 import type {
   NetworkDriftFacts, NetworkFactNetwork, NetworkFactService, NetworkRuntimeState, StackNetworkFacts,
 } from './types';
+import { classifyMissingExternalNetworks, type MissingExternalNetwork } from './missingExternalNetworks';
 
 import { getErrorMessage } from '../../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
@@ -46,7 +47,16 @@ export function assembleStackNetworkFacts(
   const runtime: NetworkRuntimeState = snapshot ? 'available' : 'unavailable';
 
   if (!model) {
-    return { stack: stackName, renderable: false, renderError, runtime, networks: [], services: [], drift: EMPTY_DRIFT };
+    return {
+      stack: stackName,
+      renderable: false,
+      renderError,
+      runtime,
+      networks: [],
+      services: [],
+      drift: EMPTY_DRIFT,
+      missingExternalNetworks: [],
+    };
   }
 
   const networks: NetworkFactNetwork[] = Object.entries(model.networks).map(([key, res]) => ({
@@ -73,8 +83,23 @@ export function assembleStackNetworkFacts(
   }));
 
   const drift = snapshot ? compareStackNetworks(fromEffectiveModel(model), snapshot, stackName) : EMPTY_DRIFT;
+  const missingExternalNetworks: MissingExternalNetwork[] = snapshot
+    ? classifyMissingExternalNetworks(
+      model,
+      new Set(snapshot.networks.map((n) => n.name)),
+    )
+    : [];
 
-  return { stack: stackName, renderable: true, renderError: null, runtime, networks, services, drift };
+  return {
+    stack: stackName,
+    renderable: true,
+    renderError: null,
+    runtime,
+    networks,
+    services,
+    drift,
+    missingExternalNetworks,
+  };
 }
 
 /** Render the effective model and assemble facts, optionally reusing a snapshot. */

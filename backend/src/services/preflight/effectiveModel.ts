@@ -70,12 +70,43 @@ export interface EffService {
   labelKeys: string[];
 }
 
+/**
+ * Display-safe driver classification. Arbitrary interpolated driver strings
+ * (which can carry resolved .env values) are collapsed to `custom` and never
+ * retained as raw text on the model.
+ */
+export type EffDriverKind =
+  | 'default'
+  | 'bridge'
+  | 'overlay'
+  | 'macvlan'
+  | 'ipvlan'
+  | 'host'
+  | 'none'
+  | 'custom';
+
 export interface EffResource {
   /** Resolved docker name (compose config fills this in). */
   name: string;
   external: boolean;
   /** Top-level `internal: true` (no outbound/host connectivity for the network). */
   internal: boolean;
+  /**
+   * Bounded driver kind; never a raw interpolated driver string.
+   * Absent on older hand-built test fixtures; treated as `default`.
+   */
+  driverKind?: EffDriverKind;
+  /** True when `driver_opts` is a non-empty object. */
+  hasDriverOpts?: boolean;
+  /** True when IPAM has a non-empty driver, config, or options (empty `{}` is safe). */
+  hasCustomIpam?: boolean;
+  attachable?: boolean;
+  /** False only when `enable_ipv4` is explicitly false. Absent means enabled. */
+  ipv4Enabled?: boolean;
+  /** True only when `enable_ipv6` is explicitly true. Absent means disabled. */
+  ipv6Enabled?: boolean;
+  /** True when `labels` is a non-empty object (values are never retained). */
+  hasLabels?: boolean;
 }
 
 export interface EffectiveModel {
@@ -293,12 +324,53 @@ function parseExtraHosts(extraHosts: unknown): string[] {
   return [];
 }
 
+const KNOWN_DRIVER_KINDS: ReadonlySet<string> = new Set([
+  'bridge', 'overlay', 'macvlan', 'ipvlan', 'host', 'none',
+]);
+
+function toDriverKind(raw: string | undefined): EffDriverKind {
+  if (raw === undefined || raw === '') return 'default';
+  const lower = raw.toLowerCase();
+  if (KNOWN_DRIVER_KINDS.has(lower)) return lower as EffDriverKind;
+  return 'custom';
+}
+
+function isNonEmptyObject(value: unknown): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value as Record<string, unknown>).length > 0;
+}
+
+/** Empty `ipam: {}` is a Compose-normalized default; only non-empty IPAM blocks. */
+function hasCustomIpam(ipam: unknown): boolean {
+  if (!ipam || typeof ipam !== 'object' || Array.isArray(ipam)) return false;
+  const o = ipam as Record<string, unknown>;
+  if (typeof o.driver === 'string' && o.driver.trim() !== '') return true;
+  if (Array.isArray(o.config) && o.config.length > 0) return true;
+  if (isNonEmptyObject(o.options)) return true;
+  return false;
+}
+
+function parseResourceEntry(key: string, entry: unknown): EffResource {
+  const o = (entry ?? {}) as Record<string, unknown>;
+  return {
+    name: str(o.name) ?? key,
+    external: o.external === true,
+    internal: o.internal === true,
+    driverKind: toDriverKind(str(o.driver)),
+    hasDriverOpts: isNonEmptyObject(o.driver_opts),
+    hasCustomIpam: hasCustomIpam(o.ipam),
+    attachable: o.attachable === true,
+    ipv4Enabled: o.enable_ipv4 !== false,
+    ipv6Enabled: o.enable_ipv6 === true,
+    hasLabels: isNonEmptyObject(o.labels),
+  };
+}
+
 function parseResources(value: unknown): Record<string, EffResource> {
   const out: Record<string, EffResource> = {};
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-      const o = (entry ?? {}) as Record<string, unknown>;
-      out[key] = { name: str(o.name) ?? key, external: o.external === true, internal: o.internal === true };
+      out[key] = parseResourceEntry(key, entry);
     }
   }
   return out;

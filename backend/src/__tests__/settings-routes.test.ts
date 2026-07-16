@@ -377,6 +377,45 @@ describe('env_block_deploy_on_missing_required setting', () => {
   });
 });
 
+describe('auto_create_missing_external_networks setting', () => {
+  it('seeds to "0" (opt-in) in a fresh database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().auto_create_missing_external_networks).toBe('0');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.auto_create_missing_external_networks).toBeDefined();
+  });
+
+  it('rejects a non-admin write with 403', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', viewerCookie)
+      .send({ key: 'auto_create_missing_external_networks', value: '1' });
+    expect(res.status).toBe(403);
+  });
+
+  it('accepts a well-formed write and rejects a non-enum value', async () => {
+    const ok = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'auto_create_missing_external_networks', value: '1' });
+    expect(ok.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().auto_create_missing_external_networks).toBe('1');
+
+    const bad = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'auto_create_missing_external_networks', value: 'banana' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('Validation failed');
+    expect(DatabaseService.getInstance().getGlobalSettings().auto_create_missing_external_networks).toBe('1');
+
+    DatabaseService.getInstance().updateGlobalSetting('auto_create_missing_external_networks', '0');
+  });
+});
+
 describe('host_alerts_enabled toggle', () => {
   it('seeds to "0" (off) in a fresh database', () => {
     expect(DatabaseService.getInstance().getGlobalSettings().host_alerts_enabled).toBe('0');

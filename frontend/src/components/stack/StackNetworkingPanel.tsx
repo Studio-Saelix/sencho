@@ -35,6 +35,13 @@ interface StackNetworkFacts {
   networks: NetworkFactNetwork[];
   services: NetworkFactService[];
   drift: NetworkDriftFacts;
+  missingExternalNetworks?: Array<{
+    name: string;
+    keys: string[];
+    safe: boolean;
+    blockReason?: string;
+    unsupportedFeatures: string[];
+  }>;
 }
 interface IntentEntry { service: string; intent: ExposureIntent }
 

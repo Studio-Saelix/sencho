@@ -19,7 +19,7 @@ import {
   loginAsTestAdmin,
   TEST_JWT_SECRET,
 } from './helpers/setupTestDb';
-import { PROXY_ROLE_HEADER } from '../services/license-headers';
+import { PROXY_ROLE_HEADER, PROXY_DEPLOY_SOURCE_HEADER, PROXY_DEPLOY_ACTOR_HEADER } from '../services/license-headers';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -221,5 +221,18 @@ describe('remote proxy gateway - actor role header forwarding', () => {
       .set('x-node-id', String(remoteNodeId));
     expect(res.status).toBe(200);
     expect(captured?.[PROXY_ROLE_HEADER]).toBe('viewer');
+  });
+
+  it('strips smuggled deploy provenance and overwrites interactive manual + username', async () => {
+    captured = null;
+    const res = await request(app)
+      .get(READ_ONLY)
+      .set('Authorization', `Bearer ${viewerBearer}`)
+      .set('x-node-id', String(remoteNodeId))
+      .set(PROXY_DEPLOY_SOURCE_HEADER, 'scheduler')
+      .set(PROXY_DEPLOY_ACTOR_HEADER, 'system:scheduler');
+    expect(res.status).toBe(200);
+    expect(captured?.[PROXY_DEPLOY_SOURCE_HEADER]).toBe('manual');
+    expect(captured?.[PROXY_DEPLOY_ACTOR_HEADER]).toBe(VIEWER_USER);
   });
 });

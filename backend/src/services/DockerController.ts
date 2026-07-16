@@ -27,6 +27,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { isValidDockerNetworkName } from './network/dockerNetworkName';
 
 export type {
   PruneItemOutcome,
@@ -1418,7 +1419,7 @@ class DockerController {
   }
 
   public async createNetwork(options: CreateNetworkOptions) {
-    if (!options.Name || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(options.Name)) {
+    if (!options.Name || !isValidDockerNetworkName(options.Name)) {
       throw new Error('Invalid network name. Use alphanumeric characters, hyphens, underscores, and dots.');
     }
     return await this.docker.createNetwork(options);

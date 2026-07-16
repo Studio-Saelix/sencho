@@ -1048,7 +1048,12 @@ stacksRouter.post('/from-git', async (req: Request, res: Response) => {
         deployError = describePolicyBlock(gate.policy, gate.violations);
       } else {
         try {
-          await ComposeService.getInstance(req.nodeId).deployStack(stack_name);
+          await ComposeService.getInstance(req.nodeId).deployStack(
+            stack_name,
+            undefined,
+            undefined,
+            req.deployContext ?? { source: 'from_git', actor: req.user?.username ?? null },
+          );
           deployed = true;
           invalidateNodeCaches(req.nodeId);
         } catch (e) {
@@ -1325,6 +1330,20 @@ stacksRouter.get('/:stackName/preflight', async (req: Request, res: Response) =>
     console.error('[Stacks] Failed to load preflight for %s:', sanitizeForLog(stackName),
       sanitizeForLog(inspect(error, { depth: 4 })));
     res.status(500).json({ error: 'Failed to load preflight report' });
+  }
+});
+
+stacksRouter.get('/:stackName/missing-external-networks', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    const { resolveMissingExternalNetworks } = await import('../services/network/resolveMissingExternalNetworks');
+    res.json(await resolveMissingExternalNetworks(req.nodeId, stackName));
+  } catch (error) {
+    console.error('[Stacks] Failed to resolve missing external networks for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to check external networks' });
   }
 });
 
@@ -1695,7 +1714,12 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     const debug = isDebugEnabled();
     const atomic = true;
     if (debug) console.debug('[Stacks:debug] Deploy starting', { stackName, atomic, nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
+    await ComposeService.getInstance(req.nodeId).deployStack(
+      stackName,
+      getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+      atomic,
+      req.deployContext ?? { source: 'manual', actor: req.user?.username ?? null },
+    );
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Deploy completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
@@ -1710,6 +1734,21 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     }
   } catch (error: unknown) {
     console.error('[Stacks] Deploy failed: %s', sanitizeForLog(stackName), error);
+    const { isMissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
+    if (isMissingExternalNetworksError(error)) {
+      const status = error.kind === 'unavailable' ? 503 : error.kind === 'create_failed' ? 500 : 409;
+      if (!res.headersSent) {
+        res.status(status).json({
+          error: error.message,
+          code: error.code,
+          kind: error.kind,
+          networks: error.networks,
+          createdNames: error.createdNames,
+          remainingNames: error.remainingNames,
+        });
+      }
+      return;
+    }
     const rollbackInfo = getComposeRollbackInfo(error);
     const rolledBack = rollbackInfo?.rolledBack ?? false;
     if (rolledBack) {
@@ -2033,6 +2072,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
   // the same project. Lock held below: all early-returns stay inside the try so
   // finally fires.
   if (!tryAcquireStackOpLock(req, res, stackName, 'rollback')) return;
+  let revertRestore: (() => Promise<void>) | null = null;
   try {
     const fsSvc = FileSystemService.getInstance(req.nodeId);
     const backupInfo = await fsSvc.getBackupInfo(stackName);
@@ -2045,7 +2085,7 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
     // the restored target can be undone: restoreStackFiles commits to disk, and
     // without this a blocked rollback would leave disk rolled back while the
     // deployed state is unchanged.
-    const revertRestore = await fsSvc.snapshotStackFiles(stackName);
+    revertRestore = await fsSvc.snapshotStackFiles(stackName);
     await fsSvc.restoreStackFiles(stackName);
     if (!(await runPolicyGate(req, res, stackName, req.nodeId))) {
       try {
@@ -2059,13 +2099,39 @@ stacksRouter.post('/:stackName/rollback', async (req: Request, res: Response) =>
       }
       return;
     }
-    await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), false);
+    await ComposeService.getInstance(req.nodeId).deployStack(
+      stackName,
+      getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+      false,
+      req.deployContext ?? { source: 'rollback', actor: req.user?.username ?? null },
+    );
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Rollback completed: ${sanitizeForLog(stackName)}`);
     res.json({ message: 'Stack rolled back: compose and env files restored.' });
     notifyActionSuccess('deploy_success', `${stackName} rolled back`, stackName, req.user?.username ?? 'system');
   } catch (error: unknown) {
     console.error('[Stacks] Rollback failed: %s', sanitizeForLog(stackName), error);
+    const { isMissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
+    if (isMissingExternalNetworksError(error)) {
+      if (revertRestore) {
+        try {
+          await revertRestore();
+        } catch (revertError) {
+          console.error('[Stacks] Failed to revert files after a network-blocked rollback: %s', sanitizeForLog(stackName), revertError);
+          notifyActionFailure('rollback', stackName, revertError, req.user?.username ?? 'system');
+        }
+      }
+      const status = error.kind === 'unavailable' ? 503 : error.kind === 'create_failed' ? 500 : 409;
+      if (!res.headersSent) {
+        res.status(status).json({
+          error: error.message,
+          code: error.code,
+          kind: error.kind,
+          networks: error.networks,
+        });
+      }
+      return;
+    }
     const message = getErrorMessage(error, 'Rollback failed.');
     notifyActionFailure('rollback', stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {

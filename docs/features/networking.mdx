@@ -40,7 +40,7 @@ Admins can open **Create network** from the page header. The dialog matches the 
 
 ## Findings
 
-The **Findings** tab lists Compose-first networking issues Sencho derives from the effective model plus one live Docker snapshot per refresh, grouped into **Needs action**, **Review recommended**, and **Informational**. Examples include missing external networks, duplicate network names across stacks, host-network exposure mismatches, and stacks whose model could not be rendered.
+The **Findings** tab lists Compose-first networking issues Sencho derives from the effective model plus one live Docker snapshot per refresh, grouped into **Needs action**, **Review recommended**, and **Informational**. Examples include missing external networks, duplicate network names across stacks, host-network exposure mismatches, and stacks whose model could not be rendered. Missing external findings only offer create actions when the declaration is a safe default bridge network.
 
 Findings also fold in the networking-relevant results from your last Compose Doctor run on each stack. A finding both engines detect shows **Live · also found by Doctor**; a finding only Doctor caught (Doctor checks a few things the live engine does not, such as host port conflicts) shows **Last Doctor run** with the timestamp of that run. Doctor's contribution is always the cached result of the last run on that stack, not a fresh check, so run Doctor again on a stack if you want its findings current. An active acknowledgement on a Doctor finding excludes it here too.
 

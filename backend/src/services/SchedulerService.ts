@@ -2,7 +2,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService } from './DatabaseService';
 import type { ScheduledTask } from './DatabaseService';
 import { LicenseService } from './LicenseService';
-import { PROXY_TIER_HEADER } from './license-headers';
+import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
 import { StackOpLockService, stackOpSkipMessage as skipMessage } from './StackOpLockService';
@@ -561,7 +561,11 @@ export class SchedulerService {
         // that node's scan-policy gate against the images it actually holds. The
         // hub-side enforceSchedulerPolicyGate below is for local nodes only.
         if (this.isRemoteNode(task.node_id)) {
-            await this.postToRemoteStack(task.node_id, `${encodeURIComponent(task.target_id)}/deploy`);
+            await this.postToRemoteStack(
+                task.node_id,
+                `${encodeURIComponent(task.target_id)}/deploy`,
+                deployProvenanceHeaders('scheduler', 'system:scheduler'),
+            );
             return `Started stack "${task.target_id}" on remote node`;
         }
         await this.enforceSchedulerPolicyGate(
@@ -573,7 +577,12 @@ export class SchedulerService {
         const localNodeId = task.node_id ?? NodeRegistry.getInstance().getDefaultNodeId();
         const lock = await StackOpLockService.getInstance().runExclusive(
             localNodeId, task.target_id, 'deploy', 'system',
-            () => ComposeService.getInstance(localNodeId).deployStack(task.target_id),
+            () => ComposeService.getInstance(localNodeId).deployStack(
+                task.target_id,
+                undefined,
+                undefined,
+                { source: 'scheduler', actor: 'system:scheduler' },
+            ),
         );
         if (!lock.ran) throw new Error(skipMessage(task.target_id, lock.existing.action));
         return `Started stack "${task.target_id}"`;
@@ -984,7 +993,11 @@ export class SchedulerService {
         }
     }
 
-    private async postToRemoteStack(nodeId: number, routeSuffix: string): Promise<void> {
+    private async postToRemoteStack(
+        nodeId: number,
+        routeSuffix: string,
+        extraHeaders?: Record<string, string>,
+    ): Promise<void> {
         const proxyTarget = this.requireRemoteProxyTarget(nodeId);
         const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
@@ -998,6 +1011,7 @@ export class SchedulerService {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${proxyTarget.apiToken}`,
                     [PROXY_TIER_HEADER]: proxyHeaders.tier,
+                    ...extraHeaders,
                 },
                 signal: AbortSignal.timeout(300_000),
             });

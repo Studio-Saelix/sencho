@@ -21,6 +21,9 @@ const {
   mockGetGlobalSettings, mockPruneDanglingImages, mockGetBindMounts,
   mockGetStackContent, mockGetEnvContent,
   mockLoadStackBuildServices,
+  mockResolveMissingExternalNetworks,
+  mockCreateNetwork,
+  mockAddNotificationHistory,
 } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
@@ -46,6 +49,15 @@ const {
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockResolvedValue(''),
   mockLoadStackBuildServices: vi.fn().mockResolvedValue([]),
+  mockResolveMissingExternalNetworks: vi.fn().mockResolvedValue({
+    status: 'ok',
+    autoCreateEnabled: false,
+    stackName: 'my-stack',
+    networks: [],
+    declaredExternalCount: 0,
+  }),
+  mockCreateNetwork: vi.fn().mockResolvedValue({ id: 'net-1' }),
+  mockAddNotificationHistory: vi.fn(),
 }));
 
 vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
@@ -79,6 +91,7 @@ vi.mock('../services/DockerController', () => ({
       getLegacyOrphanContainersByStack: mockGetLegacyOrphanContainersByStack,
       removeContainers: mockRemoveContainers,
       pruneDanglingImages: mockPruneDanglingImages,
+      createNetwork: mockCreateNetwork,
       getDocker: () => ({
         listContainers: mockListContainers,
         getContainer: () => ({
@@ -97,6 +110,7 @@ vi.mock('../services/DatabaseService', () => ({
       getGlobalSettings: mockGetGlobalSettings,
       getGitSource: () => undefined,
       getStackProjectEnvFiles: () => [],
+      addNotificationHistory: mockAddNotificationHistory,
     }),
   },
 }));
@@ -145,6 +159,10 @@ vi.mock('../services/SelfIdentityService', () => ({
 vi.mock('../services/ImageUpdateService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../services/ImageUpdateService')>()),
   loadStackBuildServices: (...args: unknown[]) => mockLoadStackBuildServices(...args),
+}));
+
+vi.mock('../services/network/resolveMissingExternalNetworks', () => ({
+  resolveMissingExternalNetworks: (...args: unknown[]) => mockResolveMissingExternalNetworks(...args),
 }));
 
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
@@ -221,6 +239,14 @@ beforeEach(() => {
   mockEnsureStackOverride.mockResolvedValue(null);
   mockGetBindMounts.mockResolvedValue(null);
   mockLoadStackBuildServices.mockResolvedValue([]);
+  mockResolveMissingExternalNetworks.mockResolvedValue({
+    status: 'ok',
+    autoCreateEnabled: false,
+    stackName: 'my-stack',
+    networks: [],
+    declaredExternalCount: 0,
+  });
+  mockCreateNetwork.mockResolvedValue({ id: 'net-1' });
   delete process.env.SENCHO_MODE;
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
@@ -703,6 +729,102 @@ describe('ComposeService - deployStack', () => {
     await promise;
 
     expect(mockBackupStackFiles).toHaveBeenCalledWith('my-stack');
+  });
+
+  it('blocks deploy before backup when missing external networks need a prompt', async () => {
+    const { MissingExternalNetworksError } = await import('../services/network/missingExternalNetworksError');
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'ok',
+      autoCreateEnabled: false,
+      stackName: 'my-stack',
+      networks: [{
+        name: 'arr-net',
+        keys: ['arr'],
+        declarations: [{ key: 'arr', driverKind: 'bridge', unsupportedFeatures: [] }],
+        safe: true,
+        unsupportedFeatures: [],
+        creationSpec: { driver: 'bridge', options: 'default' },
+      }],
+      declaredExternalCount: 1,
+    });
+
+    const svc = ComposeService.getInstance(1);
+    await expect(svc.deployStack('my-stack', undefined, true)).rejects.toBeInstanceOf(MissingExternalNetworksError);
+    expect(mockBackupStackFiles).not.toHaveBeenCalled();
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(mockAddNotificationHistory).not.toHaveBeenCalled();
+  });
+
+  it('auto-creates safe missing networks and records history-only activity', async () => {
+    const missing = [{
+      name: 'arr-net',
+      keys: ['arr'],
+      declarations: [{ key: 'arr', driverKind: 'bridge' as const, unsupportedFeatures: [] as const }],
+      safe: true,
+      unsupportedFeatures: [] as const,
+      creationSpec: { driver: 'bridge' as const, options: 'default' as const },
+    }];
+    mockResolveMissingExternalNetworks
+      .mockResolvedValueOnce({
+        status: 'ok',
+        autoCreateEnabled: true,
+        stackName: 'my-stack',
+        networks: missing,
+        declaredExternalCount: 1,
+      })
+      .mockResolvedValueOnce({
+        status: 'ok',
+        autoCreateEnabled: true,
+        stackName: 'my-stack',
+        networks: [],
+        declaredExternalCount: 1,
+      });
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.deployStack(
+      'my-stack',
+      undefined,
+      true,
+      { source: 'scheduler', actor: 'system:scheduler' },
+    );
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(mockCreateNetwork).toHaveBeenCalledWith({ Name: 'arr-net', Driver: 'bridge' });
+    expect(mockAddNotificationHistory).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        category: 'network_auto_created',
+        level: 'info',
+        actor_username: 'system:scheduler',
+        stack_name: 'my-stack',
+      }),
+    );
+    expect(mockBackupStackFiles).toHaveBeenCalled();
+  });
+
+  it('does not wrap a missing-external prompt in ComposeRollbackError when atomic', async () => {
+    mockResolveMissingExternalNetworks.mockResolvedValue({
+      status: 'ok',
+      autoCreateEnabled: false,
+      stackName: 'my-stack',
+      networks: [{
+        name: 'arr-net',
+        keys: ['arr'],
+        declarations: [{ key: 'arr', driverKind: 'bridge', unsupportedFeatures: [] }],
+        safe: true,
+        unsupportedFeatures: [],
+        creationSpec: { driver: 'bridge', options: 'default' },
+      }],
+      declaredExternalCount: 1,
+    });
+
+    const svc = ComposeService.getInstance(1);
+    const error = await svc.deployStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
+    expect(getComposeRollbackInfo(error)).toBeNull();
+    expect(error?.name).toBe('MissingExternalNetworksError');
   });
 
   it('aborts atomic deploy before docker side effects when backup fails', async () => {

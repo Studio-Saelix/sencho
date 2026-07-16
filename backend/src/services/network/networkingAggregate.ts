@@ -112,9 +112,7 @@ function buildOverview(
     });
     if (hasUnclassifiedPublish) unknownExposureStackCount += 1;
 
-    missingExternalCount += facts.networks.filter((network) =>
-      network.external && facts.drift.missingFromRuntime.includes(network.name),
-    ).length;
+    missingExternalCount += facts.missingExternalNetworks.length;
   }
 
   const connectedContainerCount = snapshot

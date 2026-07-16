@@ -239,7 +239,12 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
             // deploy/update/rollback/backup on the same stack and node.
             const lock = await StackOpLockService.getInstance().runExclusive(
               req.nodeId, stackName, 'deploy', 'system',
-              () => ComposeService.getInstance(req.nodeId).deployStack(stackName, undefined, false),
+              () => ComposeService.getInstance(req.nodeId).deployStack(
+                stackName,
+                undefined,
+                false,
+                req.deployContext ?? { source: 'labels', actor: req.user?.username ?? null },
+              ),
             );
             if (!lock.ran) {
               results.push({ stackName, success: false, error: stackOpSkipMessage(stackName, lock.existing.action) });

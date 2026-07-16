@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER, PROXY_DEPLOY_SOURCE_HEADER, PROXY_DEPLOY_ACTOR_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
@@ -120,6 +120,16 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         proxyReq.removeHeader(PROXY_ROLE_HEADER);
         if (req.user?.role) {
           proxyReq.setHeader(PROXY_ROLE_HEADER, req.user.role);
+        }
+        // Deploy provenance: always strip client-supplied values, then set
+        // interactive manual + authenticated username for proxied browser/API
+        // deploys. Background machine callers do not go through this gateway
+        // with browser credentials; they set headers on direct machine HTTP.
+        proxyReq.removeHeader(PROXY_DEPLOY_SOURCE_HEADER);
+        proxyReq.removeHeader(PROXY_DEPLOY_ACTOR_HEADER);
+        proxyReq.setHeader(PROXY_DEPLOY_SOURCE_HEADER, 'manual');
+        if (req.user?.username) {
+          proxyReq.setHeader(PROXY_DEPLOY_ACTOR_HEADER, req.user.username);
         }
         // Strip the ?nodeId= query param so the remote's nodeContextMiddleware
         // doesn't reject the request with 404 ("Node X not found") - the remote

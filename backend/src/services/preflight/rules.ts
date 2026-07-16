@@ -2,6 +2,7 @@ import type { PreflightContext, PreflightFinding, PreflightSeverity, NodePortBin
 import type { EffService, EffPortSpec } from './effectiveModel';
 import type { ExposureIntent } from '../network/types';
 import { isLoopback, runtimeResourceName } from '../network/normalize';
+import { classifyMissingExternalNetworks } from '../network/missingExternalNetworks';
 
 /** Higher number = more severe. Used to derive a run's overall status. */
 export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warning: 1, high: 2, blocker: 3 };
@@ -434,19 +435,37 @@ const externalNetworkMissing: PreflightRule = {
   id: 'external-network-missing',
   run(ctx) {
     if (!ctx.model || !ctx.nodeStateAvailable) return [];
-    const findings: PreflightFinding[] = [];
-    for (const [key, net] of Object.entries(ctx.model.networks)) {
-      if (!net.external || ctx.existingNetworkNames.has(net.name)) continue;
-      findings.push({
+    return classifyMissingExternalNetworks(ctx.model, ctx.existingNetworkNames).map((group) => {
+      const keysLabel = group.keys.map((k) => `networks.${k}`).join(', ');
+      if (group.safe) {
+        return {
+          ruleId: 'external-network-missing',
+          severity: 'blocker' as const,
+          title: 'External network not found',
+          message: `The model requires the external network "${group.name}" (Compose keys: ${group.keys.join(', ')}), which does not exist on this node. The deploy will fail.`,
+          sourcePath: keysLabel,
+          remediation: `Create it with: docker network create ${group.name}`,
+        };
+      }
+      const reasons = [
+        group.blockReason === 'unsupported_driver'
+          ? `unsupported driver kind(s): ${[...new Set(group.declarations.map((d) => d.driverKind))].join(', ')}`
+          : null,
+        group.unsupportedFeatures.length > 0
+          ? `unsupported options: ${group.unsupportedFeatures.join(', ')}`
+          : null,
+        group.blockReason === 'invalid_name' ? 'invalid Docker network name' : null,
+        group.blockReason === 'reserved_system' ? 'reserved system network name' : null,
+      ].filter(Boolean).join('; ');
+      return {
         ruleId: 'external-network-missing',
-        severity: 'blocker',
+        severity: 'blocker' as const,
         title: 'External network not found',
-        message: `The model requires the external network "${net.name}", which does not exist on this node. The deploy will fail.`,
-        sourcePath: `networks.${key}`,
-        remediation: `Create it with: docker network create ${net.name}`,
-      });
-    }
-    return findings;
+        message: `The model requires the external network "${group.name}" (Compose keys: ${group.keys.join(', ')}), which does not exist on this node. Sencho cannot create it automatically (${reasons}).`,
+        sourcePath: keysLabel,
+        remediation: 'Create this network outside Sencho with the required driver and options, or simplify the Compose declaration to a plain external bridge network.',
+      };
+    });
   },
 };
 

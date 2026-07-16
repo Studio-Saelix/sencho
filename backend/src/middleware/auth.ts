@@ -8,7 +8,8 @@ import {
   type ApiTokenScope,
 } from '../services/DatabaseService';
 import { getErrorMessage } from '../utils/errors';
-import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER, PROXY_DEPLOY_SOURCE_HEADER, PROXY_DEPLOY_ACTOR_HEADER, isDeploySourceHeader } from '../services/license-headers';
+import type { DeployInvocationContext } from '../services/network/missingExternalNetworksError';
 import { isLicenseTier, normalizeTier } from '../services/license-normalize';
 import { isDebugEnabled } from '../utils/debug';
 import {
@@ -121,6 +122,7 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
         role = isUserRole(forwardedRole) ? forwardedRole : 'viewer';
       }
       req.user = { username: 'node-proxy', role, userId: 0 };
+      req.machineAuthScope = decoded.scope;
 
       // Distributed License Enforcement: trust tier headers only from authenticated node proxy requests.
       // Browser sessions and API tokens cannot set these; only a valid node_proxy JWT (signed with
@@ -129,6 +131,22 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
       if (isLicenseTier(tierHeader)) {
         req.proxyTier = normalizeTier(tierHeader);
       }
+
+      // Deploy provenance: only trust headers on this machine-auth path. The
+      // gateway strips client values and overwrites interactive deploys with
+      // manual + username; background callers set their own mapping.
+      const sourceHeader = req.headers[PROXY_DEPLOY_SOURCE_HEADER];
+      const actorHeader = req.headers[PROXY_DEPLOY_ACTOR_HEADER];
+      if (isDeploySourceHeader(sourceHeader)) {
+        const ctx: DeployInvocationContext = {
+          source: sourceHeader,
+          actor: typeof actorHeader === 'string' && actorHeader.trim()
+            ? actorHeader.trim()
+            : null,
+        };
+        req.deployContext = ctx;
+      }
+
       next();
       return;
     }
