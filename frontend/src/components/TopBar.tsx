@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode, useMemo } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import { Ellipsis, Menu, MoreHorizontal, Plus } from 'lucide-react';
+import { Menu, MoreHorizontal, Plus } from 'lucide-react';
 import { Button } from './ui/button';
 import { Sheet, SheetContent, SheetTrigger } from './ui/sheet';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
@@ -299,51 +299,24 @@ function CompactQuickLink({
   onRemove: (value: string) => void;
 }) {
   const Icon = item.icon;
-  const remove = () => onRemove(item.value);
-
-  const group = (
-    <div className="relative inline-flex h-full shrink-0 items-stretch">
-      <button
-        type="button"
-        onClick={() => onNavigate(item.value)}
-        aria-label={item.label}
-        aria-current={isActive ? 'page' : undefined}
-        className={cn(navButtonClass(isActive), 'pr-1')}
-      >
-        <Icon className="w-4 h-4 shrink-0" strokeWidth={1.5} />
-        <span className="inline">{item.label}</span>
-        <ActiveUnderline active={isActive} />
-      </button>
-      <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            aria-label={`Actions for ${item.label}`}
-            className={cn(
-              'relative inline-flex h-full shrink-0 items-center px-1.5',
-              'text-muted-foreground transition-colors hover:text-foreground',
-              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50',
-            )}
-          >
-            <Ellipsis className="size-3.5" strokeWidth={1.5} />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" sideOffset={4}>
-          <DropdownMenuItem onSelect={remove}>
-            Remove
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </div>
-  );
 
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <div className="inline-flex h-full">{group}</div>
+        <button
+          type="button"
+          onClick={() => onNavigate(item.value)}
+          aria-label={item.label}
+          aria-current={isActive ? 'page' : undefined}
+          className={cn('relative inline-flex h-full shrink-0 items-stretch', navButtonClass(isActive))}
+        >
+          <Icon className="w-4 h-4 shrink-0" strokeWidth={1.5} />
+          <span className="inline">{item.label}</span>
+          <ActiveUnderline active={isActive} />
+        </button>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onSelect={remove}>Remove</ContextMenuItem>
+        <ContextMenuItem onSelect={() => onRemove(item.value)}>Remove</ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -432,7 +405,7 @@ function CompactStrip({
 
       <div
         data-sn-quick-link-rail
-        className="flex min-w-0 flex-1 self-stretch items-stretch overflow-x-auto [scrollbar-width:none]"
+        className="flex min-w-0 self-stretch items-stretch overflow-x-auto [scrollbar-width:none]"
       >
         {quickLinks.map((item) => (
           <CompactQuickLink
