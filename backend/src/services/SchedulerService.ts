@@ -184,8 +184,7 @@ export class SchedulerService {
      * and the offending images, then throw so the caller records the outcome:
      * the auto-update loop catches per stack and continues the rest of the run,
      * while a single-stack auto-start surfaces as a task failure. The gate
-     * fails open when Trivy is missing and is evaluation-only when the node's
-     * local tier is unpaid.
+     * fails open when Trivy is missing.
      */
     private async enforceSchedulerPolicyGate(
         stackName: string,

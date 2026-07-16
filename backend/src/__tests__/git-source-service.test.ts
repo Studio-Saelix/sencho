@@ -1216,12 +1216,10 @@ describe('GitSourceService.apply', () => {
         const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
         const { FileSystemService } = await import('../services/FileSystemService');
         const { ComposeService } = await import('../services/ComposeService');
-        const { LicenseService } = await import('../services/LicenseService');
         const TrivyService = (await import('../services/TrivyService')).default;
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
         const listImagesSpy = vi.spyOn(ComposeService.prototype, 'listStackImages').mockResolvedValue(['nginx:bad']);
         const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue();
-        const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
         const trivy = TrivyService.getInstance();
         const trivyAvailableSpy = vi.spyOn(trivy, 'isTrivyAvailable').mockReturnValue(true);
         const scanSpy = vi.spyOn(trivy, 'scanImagePreflight').mockResolvedValue({
@@ -1267,13 +1265,13 @@ describe('GitSourceService.apply', () => {
         expect(result.applied).toBe(true);
         expect(result.deployed).toBe(false);
         expect(result.deployError).toContain('Policy "block-high" blocked deploy');
+        expect(scanSpy).toHaveBeenCalled();
         expect(deploySpy).not.toHaveBeenCalled();
 
         validateSpy.mockRestore();
         saveSpy.mockRestore();
         listImagesSpy.mockRestore();
         deploySpy.mockRestore();
-        tierSpy.mockRestore();
         trivyAvailableSpy.mockRestore();
         scanSpy.mockRestore();
     });
