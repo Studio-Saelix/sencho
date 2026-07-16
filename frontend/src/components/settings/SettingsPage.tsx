@@ -28,6 +28,7 @@ import type { MuteRuleDraft } from '@/lib/muteRules';
 import { SettingsSidebar } from './SettingsSidebar';
 import { SettingsSectionContent } from './SettingsSectionContent';
 import { MastheadStatsProvider, useMastheadStatsValue } from './MastheadStatsContext';
+import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 
 interface SettingsPageProps {
     currentSection: SectionId;
@@ -35,6 +36,7 @@ interface SettingsPageProps {
     muteRulePrefill?: MuteRuleDraft | null;
     onMutePrefillConsumed?: () => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
+    quickLinkCandidates?: NavDestination[];
 }
 
 export function SettingsPage(props: SettingsPageProps) {
@@ -51,6 +53,7 @@ function SettingsPageInner({
     muteRulePrefill = null,
     onMutePrefillConsumed,
     onOpenMuteRulesWithPrefill,
+    quickLinkCandidates,
 }: SettingsPageProps) {
     const { isAdmin } = useAuth();
     const { isPaid } = useLicense();
@@ -210,6 +213,7 @@ function SettingsPageInner({
                                 muteRulePrefill={muteRulePrefill}
                                 onMutePrefillConsumed={onMutePrefillConsumed}
                                 onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
+                                quickLinkCandidates={quickLinkCandidates}
                             />
                         </div>
                     </ScrollArea>

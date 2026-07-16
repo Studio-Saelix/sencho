@@ -18,6 +18,7 @@ import type { ActiveView } from './hooks/useViewNavigationState';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
 import type { SecurityTab, FleetTab } from '@/lib/events';
 import { isStackEditorDeepLink } from '@/lib/router/readUrlRouteState';
+import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 
 // Paid-tier views are loaded on demand. Their internal PaidGate /
 // CapabilityGate wrappers render
@@ -109,6 +110,7 @@ export interface ViewRouterProps {
     stackUpdates: Record<string, StackUpdateInfo>;
     urlHydratingStack: string | null;
     isFileLoading: boolean;
+    quickLinkCandidates?: NavDestination[];
 }
 
 export function ViewRouter({
@@ -142,6 +144,7 @@ export function ViewRouter({
     stackUpdates,
     urlHydratingStack,
     isFileLoading,
+    quickLinkCandidates,
 }: ViewRouterProps): ReactNode {
     const { can } = useAuth();
     const { experimental, experimentalReady } = useExperimental();
@@ -153,6 +156,7 @@ export function ViewRouter({
                 muteRulePrefill={muteRulePrefill}
                 onMutePrefillConsumed={onMutePrefillConsumed}
                 onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
+                quickLinkCandidates={quickLinkCandidates}
             />
         );
     }

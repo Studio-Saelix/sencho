@@ -7,6 +7,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { Home, Radar } from 'lucide-react';
 import { TopBar, type TopBarNavItem } from '../TopBar';
 
@@ -141,7 +142,7 @@ describe('TopBar smart and compact modes', () => {
     expect(screen.getByRole('button', { name: 'More navigation' })).toHaveTextContent('More');
   });
 
-  it('opens the More menu with the keyboard and keeps overflow labels', async () => {
+  it('opens the More menu with masthead chrome and keeps overflow labels', async () => {
     const onNavigate = vi.fn();
     renderTopBar({
       navMode: 'smart',
@@ -154,36 +155,148 @@ describe('TopBar smart and compact modes', () => {
     const more = screen.getByRole('button', { name: 'More navigation' });
     more.focus();
     fireEvent.keyDown(more, { key: 'Enter' });
+    expect(await screen.findByText('More', { selector: '.font-heading' })).toBeInTheDocument();
     expect(await screen.findByRole('menuitem', { name: /Logs/i })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('menuitem', { name: /Logs/i }));
     expect(onNavigate).toHaveBeenCalledWith('global-observability');
   });
 
-  it('exposes launcher and add-quick-link accessible names and routes Settings via onOpenSettings', async () => {
-    const onOpenSettings = vi.fn();
+  it('renders Compact pins with always-inline labels and a trailing Add control', async () => {
+    const user = userEvent.setup();
+    const onNavigate = vi.fn();
     const onAddQuickLink = vi.fn();
+    const onRemoveQuickLink = vi.fn();
+    const onOpenSettings = vi.fn();
     renderTopBar({
       navMode: 'compact',
       activeView: 'dashboard',
-      canAddQuickLink: true,
+      onNavigate,
       onAddQuickLink,
+      onRemoveQuickLink,
       onOpenSettings,
-      quickLinks: [],
+      persistedQuickLinkIds: ['dashboard'],
+      quickLinks: [{ value: 'dashboard', label: 'Home', icon: Home }],
       navModel: {
         ...emptyModel,
         launcherGroups,
+        quickLinkCandidates: [
+          { value: 'dashboard' as const, label: 'Home', icon: Home },
+          { value: 'fleet' as const, label: 'Fleet', icon: Radar },
+        ],
       },
     });
-    expect(screen.getByRole('button', { name: 'Open navigation launcher' })).toHaveAttribute(
-      'aria-current',
-      'page',
-    );
-    fireEvent.click(screen.getByRole('button', { name: 'Add current page to quick links' }));
-    expect(onAddQuickLink).toHaveBeenCalled();
 
-    const launcher = screen.getByRole('button', { name: 'Open navigation launcher' });
-    fireEvent.keyDown(launcher, { key: 'Enter' });
-    fireEvent.click(await screen.findByRole('menuitem', { name: /Settings/i }));
+    const home = screen.getByRole('button', { name: 'Home' });
+    expect(home.querySelector('span.inline')).toBeTruthy();
+    expect(home.querySelector('span.hidden')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Add quick link' }));
+    await user.click(await screen.findByRole('menuitem', { name: /Fleet/i }));
+    expect(onAddQuickLink).toHaveBeenCalledWith('fleet');
+
+    await user.click(screen.getByRole('button', { name: 'Home' }));
+    expect(onNavigate).toHaveBeenCalledWith('dashboard');
+
+    await user.click(screen.getByRole('button', { name: 'Actions for Home' }));
+    await user.click(await screen.findByRole('menuitem', { name: /^Remove$/i }));
+    expect(onRemoveQuickLink).toHaveBeenCalledWith('dashboard');
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole('button', { name: 'Open navigation launcher' }));
+    expect(await screen.findByText('Navigate', { selector: '.font-heading' })).toBeInTheDocument();
+    await user.click(await screen.findByRole('menuitem', { name: /Settings/i }));
     expect(onOpenSettings).toHaveBeenCalled();
+  });
+
+  it('disables Add when persisted capacity is full even if fewer pins are visible', () => {
+    renderTopBar({
+      navMode: 'compact',
+      persistedQuickLinkIds: ['dashboard', 'fleet', 'resources', 'security', 'networking'],
+      quickLinks: [{ value: 'dashboard', label: 'Home', icon: Home }],
+      navModel: {
+        ...emptyModel,
+        launcherGroups,
+        quickLinkCandidates: emptyModel.quickLinkCandidates,
+      },
+    });
+    expect(screen.getByRole('button', { name: 'Add quick link' })).toBeDisabled();
+  });
+
+  it('offers Compact launcher context Add for unpinned destinations', async () => {
+    const user = userEvent.setup();
+    const onAddQuickLink = vi.fn();
+    const compactLauncher = [
+      {
+        group: 'overview' as const,
+        label: 'Overview',
+        items: [
+          { value: 'dashboard' as const, label: 'Home', icon: Home },
+          { value: 'fleet' as const, label: 'Fleet', icon: Radar },
+        ],
+      },
+    ];
+    renderTopBar({
+      navMode: 'compact',
+      onAddQuickLink,
+      persistedQuickLinkIds: ['dashboard'],
+      quickLinks: [{ value: 'dashboard', label: 'Home', icon: Home }],
+      navModel: {
+        ...emptyModel,
+        launcherGroups: compactLauncher,
+        quickLinkCandidates: [
+          { value: 'dashboard' as const, label: 'Home', icon: Home },
+          { value: 'fleet' as const, label: 'Fleet', icon: Radar },
+        ],
+      },
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Open navigation launcher' }));
+    fireEvent.contextMenu(await screen.findByRole('menuitem', { name: /Fleet/i }));
+    await user.click(await screen.findByRole('menuitem', { name: /Add to quick links/i }));
+    expect(onAddQuickLink).toHaveBeenCalledWith('fleet');
+  });
+
+  it('hides Compact launcher context Add for already-pinned destinations', async () => {
+    const user = userEvent.setup();
+    const compactLauncher = [
+      {
+        group: 'overview' as const,
+        label: 'Overview',
+        items: [
+          { value: 'dashboard' as const, label: 'Home', icon: Home },
+          { value: 'fleet' as const, label: 'Fleet', icon: Radar },
+        ],
+      },
+    ];
+    renderTopBar({
+      navMode: 'compact',
+      onAddQuickLink: vi.fn(),
+      persistedQuickLinkIds: ['dashboard'],
+      quickLinks: [{ value: 'dashboard', label: 'Home', icon: Home }],
+      navModel: {
+        ...emptyModel,
+        launcherGroups: compactLauncher,
+      },
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Open navigation launcher' }));
+    fireEvent.contextMenu(await screen.findByRole('menuitem', { name: /Home/i }));
+    expect(screen.queryByRole('menuitem', { name: /Add to quick links/i })).toBeNull();
+  });
+
+  it('does not offer Add to quick links on Smart More', async () => {
+    const user = userEvent.setup();
+    renderTopBar({
+      navMode: 'smart',
+      onAddQuickLink: vi.fn(),
+      navModel: {
+        ...emptyModel,
+        primaryItems: [{ value: 'dashboard' as const, label: 'Home', icon: Home }],
+        overflowGroups,
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'More navigation' }));
+    fireEvent.contextMenu(await screen.findByRole('menuitem', { name: /Logs/i }));
+    expect(screen.queryByRole('menuitem', { name: /Add to quick links/i })).toBeNull();
   });
 });

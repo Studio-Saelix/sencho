@@ -10,8 +10,10 @@ import { useLogChipColorMode, type LogChipColorMode } from '@/hooks/use-log-chip
 import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { useTopNavAlign, type TopNavAlign } from '@/hooks/use-top-nav-align';
 import { useTopNavMode, type TopNavMode } from '@/hooks/use-top-nav-mode';
-import { useTopNavQuickLinks } from '@/hooks/use-top-nav-quick-links';
+import { useTopNavQuickLinks, MAX_QUICK_LINKS } from '@/hooks/use-top-nav-quick-links';
 import { getAppNavItem } from '@/lib/navigation/appNavRegistry';
+import type { NavDestination } from '@/lib/navigation/appNavRegistry';
+import type { ActiveView } from '@/lib/router/routeTypes';
 import {
     useTheme, activeVisualStyle, THEME_MODE_OPTIONS, ACCENTS, CONTRAST, BORDER_BOOST, GLOW, TYPE_SCALE,
     type VisualStyle, type HeadingStyle, type ChartStyle,
@@ -143,7 +145,11 @@ function VisualCard({
     );
 }
 
-export function AppearanceSection() {
+export function AppearanceSection({
+    quickLinkCandidates = [],
+}: {
+    quickLinkCandidates?: NavDestination[];
+}) {
     const [density, setDensity] = useDensity();
     const [chipColorMode, setChipColorMode] = useLogChipColorMode();
     const [topNavLabels, setTopNavLabels] = useTopNavLabels();
@@ -151,9 +157,21 @@ export function AppearanceSection() {
     const [topNavMode, setTopNavMode] = useTopNavMode();
     const {
         persistedIds: quickLinkIds,
+        addQuickLink,
         removeQuickLink,
         resetQuickLinks,
     } = useTopNavQuickLinks();
+    const persistedSet = new Set(quickLinkIds);
+    const unpinnedCandidates = quickLinkCandidates.filter((item) => !persistedSet.has(item.value));
+    const atCapacity = quickLinkIds.length >= MAX_QUICK_LINKS;
+    const addEnabled = !atCapacity && unpinnedCandidates.length > 0;
+    const addDisabledReason = atCapacity
+        ? 'Remove a pin or reset to free a slot'
+        : 'No more destinations available on this node';
+    const addOptions = unpinnedCandidates.map((item) => ({
+        value: item.value,
+        label: item.label,
+    }));
     const {
         theme, accent, borderBoost, glow, contrast, uiFont, monoFont, typeScale,
         headingStyle, chartStyle, reducedEffects, reducedMotion, readability,
@@ -479,7 +497,7 @@ export function AppearanceSection() {
                 {topNavMode === 'compact' && (
                     <SettingsField
                         label="Quick links"
-                        helper="Up to four pinned destinations on the top bar. Remove a pin here, or reset to the recommended set."
+                        helper="Up to five pinned destinations on the top bar. Defaults are a starting set; add reachable destinations here or with the trailing + on the Compact bar."
                     >
                         <div className="flex w-full flex-col gap-2">
                             {quickLinkIds.length === 0 ? (
@@ -509,6 +527,23 @@ export function AppearanceSection() {
                                     })}
                                 </ul>
                             )}
+                            <div className="flex flex-col gap-1.5">
+                                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
+                                    Add quick link
+                                </span>
+                                {addEnabled ? (
+                                    <Combobox
+                                        options={addOptions}
+                                        value=""
+                                        onValueChange={(value) => {
+                                            if (value) addQuickLink(value as ActiveView);
+                                        }}
+                                        placeholder="Choose a destination"
+                                    />
+                                ) : (
+                                    <p className="font-mono text-[11px] text-stat-subtitle">{addDisabledReason}</p>
+                                )}
+                            </div>
                             <SettingsActions>
                                 <SettingsSecondaryButton type="button" onClick={resetQuickLinks}>
                                     Reset to defaults

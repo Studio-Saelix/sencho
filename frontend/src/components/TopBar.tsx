@@ -1,6 +1,6 @@
 import { Fragment, type ReactNode, useMemo } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import { Menu, MoreHorizontal, Plus } from 'lucide-react';
+import { Ellipsis, Menu, MoreHorizontal, Plus } from 'lucide-react';
 import { Button } from './ui/button';
 import { Sheet, SheetContent, SheetTrigger } from './ui/sheet';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
@@ -12,8 +12,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from './ui/context-menu';
 import type { TopNavAlign } from '@/hooks/use-top-nav-align';
 import type { TopNavMode } from '@/hooks/use-top-nav-mode';
+import { MAX_QUICK_LINKS } from '@/hooks/use-top-nav-quick-links';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 import type { NavGroupBucket, ReachableNavigationModel } from '@/lib/navigation/buildNavigationModel';
 import { cn } from '@/lib/utils';
@@ -41,8 +48,10 @@ interface TopBarProps {
   navModel?: ReachableNavigationModel;
   /** Visible (reachable) quick links for Compact mode. */
   quickLinks?: NavDestination[];
-  canAddQuickLink?: boolean;
-  onAddQuickLink?: () => void;
+  /** Persisted pin IDs (including temporarily unreachable). Capacity is length. */
+  persistedQuickLinkIds?: readonly string[];
+  onAddQuickLink?: (value: string) => void;
+  onRemoveQuickLink?: (value: string) => void;
   onOpenSettings?: () => void;
 }
 
@@ -61,6 +70,33 @@ function ActiveUnderline({ active }: { active: boolean }) {
       aria-hidden
       className="pointer-events-none absolute inset-x-0 -bottom-px h-[2px] bg-brand"
     />
+  );
+}
+
+function TopBarMenuMasthead({ title }: { title: string }) {
+  return (
+    <div className="relative overflow-hidden">
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-r from-brand/[0.05] via-transparent to-transparent" />
+      <div className="absolute inset-y-0 left-0 w-[2px] bg-brand/60" />
+      <div className="relative flex items-center px-[var(--density-row-x)] py-[var(--density-tile-y)]">
+        <span className="font-heading text-xl leading-none text-stat-value">{title}</span>
+      </div>
+    </div>
+  );
+}
+
+function PanelMenuContent({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <DropdownMenuContent align="start" sideOffset={8} className="w-56 overflow-hidden rounded-md p-0">
+      <TopBarMenuMasthead title={title} />
+      <div className="border-t border-card-border/60 p-1">{children}</div>
+    </DropdownMenuContent>
   );
 }
 
@@ -102,10 +138,17 @@ function GroupedMenuItems({
   groups,
   activeView,
   onSelect,
+  onAddQuickLink,
+  persistedIds,
+  atCapacity,
 }: {
   groups: NavGroupBucket[];
   activeView: string;
   onSelect: (value: string) => void;
+  /** When set, Compact launcher rows get a context Add action. */
+  onAddQuickLink?: (value: string) => void;
+  persistedIds?: ReadonlySet<string>;
+  atCapacity?: boolean;
 }) {
   return (
     <>
@@ -118,7 +161,13 @@ function GroupedMenuItems({
           {group.items.map((item) => {
             const Icon = item.icon;
             const isActive = activeView === item.value;
-            return (
+            const canContextAdd =
+              Boolean(onAddQuickLink)
+              && item.value !== 'settings'
+              && !persistedIds?.has(item.value)
+              && !atCapacity;
+
+            const menuItem = (
               <DropdownMenuItem
                 key={item.value}
                 onSelect={() => onSelect(item.value)}
@@ -131,6 +180,21 @@ function GroupedMenuItems({
                 <Icon className="size-4 shrink-0" strokeWidth={1.5} />
                 {item.label}
               </DropdownMenuItem>
+            );
+
+            if (!canContextAdd) return menuItem;
+
+            return (
+              <ContextMenu key={item.value}>
+                <ContextMenuTrigger asChild>{menuItem}</ContextMenuTrigger>
+                <ContextMenuContent>
+                  <ContextMenuItem
+                    onSelect={() => onAddQuickLink?.(item.value)}
+                  >
+                    Add to quick links
+                  </ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             );
           })}
         </Fragment>
@@ -210,34 +274,100 @@ function SmartStrip({
               <ActiveUnderline active={moreActive} />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-56">
+          <PanelMenuContent title="More">
             <GroupedMenuItems
               groups={overflowGroups}
               activeView={activeView}
               onSelect={onNavigate}
             />
-          </DropdownMenuContent>
+          </PanelMenuContent>
         </DropdownMenu>
       )}
     </>
   );
 }
 
+function CompactQuickLink({
+  item,
+  isActive,
+  onNavigate,
+  onRemove,
+}: {
+  item: NavDestination;
+  isActive: boolean;
+  onNavigate: (value: string) => void;
+  onRemove: (value: string) => void;
+}) {
+  const Icon = item.icon;
+  const remove = () => onRemove(item.value);
+
+  const group = (
+    <div className="relative inline-flex h-full shrink-0 items-stretch">
+      <button
+        type="button"
+        onClick={() => onNavigate(item.value)}
+        aria-label={item.label}
+        aria-current={isActive ? 'page' : undefined}
+        className={cn(navButtonClass(isActive), 'pr-1')}
+      >
+        <Icon className="w-4 h-4 shrink-0" strokeWidth={1.5} />
+        <span className="inline">{item.label}</span>
+        <ActiveUnderline active={isActive} />
+      </button>
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label={`Actions for ${item.label}`}
+            className={cn(
+              'relative inline-flex h-full shrink-0 items-center px-1.5',
+              'text-muted-foreground transition-colors hover:text-foreground',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50',
+            )}
+          >
+            <Ellipsis className="size-3.5" strokeWidth={1.5} />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" sideOffset={4}>
+          <DropdownMenuItem onSelect={remove}>
+            Remove
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>
+        <div className="inline-flex h-full">{group}</div>
+      </ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuItem onSelect={remove}>Remove</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
 function CompactStrip({
   launcherGroups,
   quickLinks,
+  quickLinkCandidates,
+  persistedQuickLinkIds,
   activeView,
-  canAddQuickLink,
   onNavigate,
   onAddQuickLink,
+  onRemoveQuickLink,
   onOpenSettings,
 }: {
   launcherGroups: NavGroupBucket[];
   quickLinks: NavDestination[];
+  quickLinkCandidates: NavDestination[];
+  persistedQuickLinkIds: readonly string[];
   activeView: string;
-  canAddQuickLink: boolean;
   onNavigate: (value: string) => void;
-  onAddQuickLink?: () => void;
+  onAddQuickLink?: (value: string) => void;
+  onRemoveQuickLink?: (value: string) => void;
   onOpenSettings?: () => void;
 }) {
   const launcherValues = useMemo(
@@ -248,6 +378,20 @@ function CompactStrip({
     () => new Set<string>(quickLinks.map((i) => i.value)),
     [quickLinks],
   );
+  const persistedSet = useMemo(
+    () => new Set<string>(persistedQuickLinkIds),
+    [persistedQuickLinkIds],
+  );
+  const atCapacity = persistedQuickLinkIds.length >= MAX_QUICK_LINKS;
+  const unpinnedCandidates = useMemo(
+    () => quickLinkCandidates.filter((item) => !persistedSet.has(item.value)),
+    [quickLinkCandidates, persistedSet],
+  );
+  const addEnabled = !atCapacity && unpinnedCandidates.length > 0;
+  const addDisabledReason = atCapacity
+    ? 'Remove a quick link to free a slot'
+    : 'No more destinations available';
+
   const launcherActive =
     launcherValues.has(activeView) && !quickValues.has(activeView);
 
@@ -260,7 +404,7 @@ function CompactStrip({
   };
 
   return (
-    <>
+    <div className="flex min-w-0 flex-1 self-stretch items-stretch">
       <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <button
@@ -274,36 +418,87 @@ function CompactStrip({
             <ActiveUnderline active={launcherActive} />
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-56">
+        <PanelMenuContent title="Navigate">
           <GroupedMenuItems
             groups={launcherGroups}
             activeView={activeView}
             onSelect={selectDestination}
+            onAddQuickLink={onAddQuickLink}
+            persistedIds={persistedSet}
+            atCapacity={atCapacity}
           />
-        </DropdownMenuContent>
+        </PanelMenuContent>
       </DropdownMenu>
 
-      {canAddQuickLink && (
-        <button
-          type="button"
-          aria-label="Add current page to quick links"
-          onClick={() => onAddQuickLink?.()}
-          className={navButtonClass(false)}
-        >
-          <Plus className="w-4 h-4 shrink-0" strokeWidth={1.5} />
-        </button>
-      )}
+      <div
+        data-sn-quick-link-rail
+        className="flex min-w-0 flex-1 self-stretch items-stretch overflow-x-auto [scrollbar-width:none]"
+      >
+        {quickLinks.map((item) => (
+          <CompactQuickLink
+            key={item.value}
+            item={item}
+            isActive={activeView === item.value}
+            onNavigate={onNavigate}
+            onRemove={(value) => onRemoveQuickLink?.(value)}
+          />
+        ))}
+      </div>
 
-      {quickLinks.map((item) => (
-        <DesktopNavButton
-          key={item.value}
-          item={item}
-          isActive={activeView === item.value}
-          showLabels={false}
-          onNavigate={onNavigate}
-        />
-      ))}
-    </>
+      {addEnabled ? (
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              aria-label="Add quick link"
+              className={navButtonClass(false)}
+            >
+              <Plus className="w-4 h-4 shrink-0" strokeWidth={1.5} />
+            </button>
+          </DropdownMenuTrigger>
+          <PanelMenuContent title="Add quick link">
+            {unpinnedCandidates.map((item) => {
+              const Icon = item.icon;
+              const isCurrent = item.value === activeView;
+              return (
+                <DropdownMenuItem
+                  key={item.value}
+                  onSelect={() => onAddQuickLink?.(item.value)}
+                  className={cn(
+                    'gap-2 font-mono text-[11px] uppercase tracking-[0.14em]',
+                    isCurrent && 'bg-accent text-accent-foreground',
+                  )}
+                >
+                  <Icon className="size-4 shrink-0" strokeWidth={1.5} />
+                  {item.label}
+                </DropdownMenuItem>
+              );
+            })}
+          </PanelMenuContent>
+        </DropdownMenu>
+      ) : (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              tabIndex={0}
+              className="inline-flex h-full shrink-0 items-stretch"
+              title={addDisabledReason}
+            >
+              <button
+                type="button"
+                aria-label="Add quick link"
+                aria-disabled="true"
+                disabled
+                className={cn(navButtonClass(false), 'pointer-events-none opacity-40')}
+              >
+                <Plus className="w-4 h-4 shrink-0" strokeWidth={1.5} />
+              </button>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">{addDisabledReason}</TooltipContent>
+        </Tooltip>
+      )}
+    </div>
   );
 }
 
@@ -322,8 +517,9 @@ export function TopBar({
   navMode = 'smart',
   navModel,
   quickLinks = [],
-  canAddQuickLink = false,
+  persistedQuickLinkIds = [],
   onAddQuickLink,
+  onRemoveQuickLink,
   onOpenSettings,
 }: TopBarProps) {
   const stripLabels = navMode !== 'compact' && showLabels;
@@ -332,6 +528,7 @@ export function TopBar({
   const primaryItems = navModel?.primaryItems ?? navItems;
   const overflowGroups = navModel?.overflowGroups ?? [];
   const launcherGroups = navModel?.launcherGroups ?? [];
+  const quickLinkCandidates = navModel?.quickLinkCandidates ?? [];
 
   return (
     <div
@@ -351,6 +548,7 @@ export function TopBar({
           className={cn(
             'hidden md:flex self-stretch items-stretch',
             stripLabels && 'min-w-0 flex-1 overflow-x-auto [scrollbar-width:none]',
+            navMode === 'compact' && 'min-w-0 flex-1 overflow-x-visible',
             !stripLabels && centered && 'shrink-0',
           )}
         >
@@ -375,10 +573,12 @@ export function TopBar({
             <CompactStrip
               launcherGroups={launcherGroups}
               quickLinks={quickLinks}
+              quickLinkCandidates={quickLinkCandidates}
+              persistedQuickLinkIds={persistedQuickLinkIds}
               activeView={activeView}
-              canAddQuickLink={canAddQuickLink}
               onNavigate={onNavigate}
               onAddQuickLink={onAddQuickLink}
+              onRemoveQuickLink={onRemoveQuickLink}
               onOpenSettings={onOpenSettings}
             />
           )}
@@ -388,7 +588,8 @@ export function TopBar({
       <div
         className={cn(
           'flex items-center justify-end gap-2',
-          centered ? 'flex-1 min-w-0' : stripLabels ? 'relative z-10 shrink-0' : 'flex-1 min-w-0',
+          centered ? 'flex-1 min-w-0' : 'relative z-10 shrink-0',
+          !centered && !stripLabels && navMode !== 'compact' && 'flex-1 min-w-0',
         )}
       >
         {search}

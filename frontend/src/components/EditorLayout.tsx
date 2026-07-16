@@ -45,7 +45,7 @@ import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-e
 import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { useTopNavAlign } from '@/hooks/use-top-nav-align';
 import { useTopNavMode } from '@/hooks/use-top-nav-mode';
-import { useTopNavQuickLinks, MAX_QUICK_LINKS } from '@/hooks/use-top-nav-quick-links';
+import { useTopNavQuickLinks } from '@/hooks/use-top-nav-quick-links';
 import { getAppNavItem } from '@/lib/navigation/appNavRegistry';
 import { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import { toast } from '@/components/ui/toast-store';
@@ -199,7 +199,7 @@ export default function EditorLayout() {
   const [topNavLabels] = useTopNavLabels();
   const [topNavAlign] = useTopNavAlign();
   const [topNavMode] = useTopNavMode();
-  const { persistedIds: quickLinkIds, addQuickLink } = useTopNavQuickLinks();
+  const { persistedIds: quickLinkIds, addQuickLink, removeQuickLink } = useTopNavQuickLinks();
 
   // Use a ref to break the circular dependency:
   // useViewNavigationState needs onNavigateToDashboard -> resetEditorState
@@ -240,13 +240,6 @@ export default function EditorLayout() {
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
   }, [quickLinkIds, navModel.quickLinkCandidates]);
-
-  const canAddQuickLink = useMemo(() => {
-    if (topNavMode !== 'compact') return false;
-    if (quickLinkIds.length >= MAX_QUICK_LINKS) return false;
-    if (quickLinkIds.includes(activeView as typeof quickLinkIds[number])) return false;
-    return navModel.quickLinkCandidates.some((item) => item.value === activeView);
-  }, [topNavMode, quickLinkIds, activeView, navModel.quickLinkCandidates]);
 
   const {
     notifications,
@@ -935,8 +928,9 @@ export default function EditorLayout() {
           navMode={topNavMode}
           navModel={navModel}
           quickLinks={visibleQuickLinks}
-          canAddQuickLink={canAddQuickLink}
-          onAddQuickLink={() => addQuickLink(activeView as typeof quickLinkIds[number])}
+          persistedQuickLinkIds={quickLinkIds}
+          onAddQuickLink={(value) => addQuickLink(value as typeof quickLinkIds[number])}
+          onRemoveQuickLink={(value) => removeQuickLink(value as typeof quickLinkIds[number])}
           onOpenSettings={() => openSettings()}
         />
       );
@@ -992,6 +986,7 @@ export default function EditorLayout() {
             stackUpdates={stackUpdates}
             urlHydratingStack={urlHydratingStack}
             isFileLoading={isFileLoading}
+            quickLinkCandidates={navModel.quickLinkCandidates}
           />
         </div>
       );
@@ -1063,6 +1058,7 @@ export default function EditorLayout() {
                 headerActions={mobileMastheadActions}
                 selectedSection={mobileSettingsSection}
                 onSelectedSectionChange={setMobileSettingsSection}
+                quickLinkCandidates={navModel.quickLinkCandidates}
               />
             );
           case 'security':

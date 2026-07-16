@@ -31,7 +31,7 @@ describe('useTopNavQuickLinks', () => {
     expect(result.current.persistedIds).toEqual([]);
   });
 
-  it('sanitizes unknown, ineligible, and duplicate IDs and caps at four', () => {
+  it('sanitizes unknown, ineligible, and duplicate IDs and caps at five', () => {
     expect(
       sanitizeQuickLinkIds([
         'dashboard',
@@ -44,9 +44,17 @@ describe('useTopNavQuickLinks', () => {
         'networking',
         'templates',
       ]),
-    ).toEqual(['dashboard', 'fleet', 'security', 'resources']);
-    expect(sanitizeQuickLinkIds(['dashboard', 'fleet', 'security', 'resources', 'networking']).length)
-      .toBe(MAX_QUICK_LINKS);
+    ).toEqual(['dashboard', 'fleet', 'security', 'resources', 'networking']);
+    expect(
+      sanitizeQuickLinkIds([
+        'dashboard',
+        'fleet',
+        'security',
+        'resources',
+        'networking',
+        'templates',
+      ]).length,
+    ).toBe(MAX_QUICK_LINKS);
   });
 
   it('reset writes recommendedQuickLinkIds', () => {
@@ -70,11 +78,23 @@ describe('useTopNavQuickLinks', () => {
     expect(JSON.parse(localStorage.getItem(TOP_NAV_QUICK_LINKS_KEY)!)).toEqual([]);
   });
 
-  it('add refuses beyond the persisted max of four', () => {
+  it('add refuses beyond the persisted max of five', () => {
     const { result } = renderHook(() => useTopNavQuickLinks());
-    act(() => result.current.setPersistedIds(['dashboard', 'fleet', 'security', 'resources']));
-    act(() => result.current.addQuickLink('networking'));
-    expect(result.current.persistedIds).toEqual(['dashboard', 'fleet', 'security', 'resources']);
+    act(() => result.current.setPersistedIds([
+      'dashboard',
+      'fleet',
+      'security',
+      'resources',
+      'networking',
+    ]));
+    act(() => result.current.addQuickLink('templates'));
+    expect(result.current.persistedIds).toEqual([
+      'dashboard',
+      'fleet',
+      'security',
+      'resources',
+      'networking',
+    ]);
   });
 
   it('syncs a second hook in the same tab', () => {

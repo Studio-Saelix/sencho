@@ -1,6 +1,6 @@
 /**
- * Desktop navigation styles: Smart default, mode persistence, Smart More,
- * Compact launcher, and Compact quick-link add/persist/render.
+ * Desktop navigation styles: Smart default, Compact quick-link picker,
+ * labeled pins, and persistence.
  */
 import { test, expect } from '@playwright/test';
 import { loginAs, waitForStacksLoaded } from './helpers';
@@ -21,9 +21,6 @@ async function setTopNavMode(page: import('@playwright/test').Page, mode: 'class
 
 test.describe('Desktop navigation styles', () => {
   test.beforeEach(async ({ page }) => {
-    // One-shot clear before the first login only. Do not use addInitScript to
-    // clear these keys: it re-runs on every reload and would wipe values the
-    // persistence tests write just before reload.
     await page.goto('/');
     await page.evaluate(() => {
       window.localStorage.removeItem('sencho.appearance.topNavMode');
@@ -46,6 +43,7 @@ test.describe('Desktop navigation styles', () => {
     await setTopNavMode(page, 'smart');
     await expect(page.locator('[data-sn-chrome="topbar"]')).toHaveAttribute('data-sn-nav-mode', 'smart');
     await page.getByRole('button', { name: 'More navigation' }).click();
+    await expect(page.locator('.font-heading').filter({ hasText: 'More' })).toBeVisible();
     await page.getByRole('menuitem', { name: /Logs/i }).click();
     await expect(page.locator('body')).toContainText(/Logs|Central|Observability/i);
   });
@@ -58,8 +56,8 @@ test.describe('Desktop navigation styles', () => {
     await expect(page.getByText('Appearance', { exact: true }).first()).toBeVisible({ timeout: 10_000 });
   });
 
-  test('Compact quick link add persists and renders after reload', async ({ page }) => {
-    // Empty JSON array (not a missing key): missing falls back to recommended pins.
+  test('Compact trailing + adds a labeled pin that survives reload', async ({ page }) => {
+    await page.setViewportSize({ width: 1100, height: 800 });
     await page.evaluate(() => {
       window.localStorage.setItem('sencho.appearance.topNavQuickLinks', '[]');
     });
@@ -68,25 +66,21 @@ test.describe('Desktop navigation styles', () => {
     const topbar = page.locator('[data-sn-chrome="topbar"]');
     await expect(topbar).toHaveAttribute('data-sn-nav-mode', 'compact');
 
-    // Home is the default view and is quick-link eligible.
-    const add = page.getByRole('button', { name: 'Add current page to quick links' });
-    await expect(add).toBeVisible();
-    await add.click();
+    await page.getByRole('button', { name: 'Add quick link' }).click();
+    await page.getByRole('menuitem', { name: /Networking/i }).click();
 
-    await expect(topbar.getByRole('button', { name: 'Home' })).toBeVisible();
-    await expect(add).toHaveCount(0);
+    const pin = topbar.getByRole('button', { name: 'Networking' });
+    await expect(pin).toBeVisible();
+    await expect(pin.locator('span.inline')).toBeVisible();
 
     const stored = await page.evaluate(() => window.localStorage.getItem('sencho.appearance.topNavQuickLinks'));
-    expect(stored).toBe(JSON.stringify(['dashboard']));
+    expect(stored).toContain('networking');
 
     await page.reload();
     await loginAs(page);
     await waitForStacksLoaded(page);
 
-    await expect(topbar).toHaveAttribute('data-sn-nav-mode', 'compact');
-    await expect(topbar.getByRole('button', { name: 'Home' })).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Add current page to quick links' })).toHaveCount(0);
-    const storedAfterReload = await page.evaluate(() => window.localStorage.getItem('sencho.appearance.topNavQuickLinks'));
-    expect(storedAfterReload).toBe(JSON.stringify(['dashboard']));
+    await expect(page.locator('[data-sn-chrome="topbar"]').getByRole('button', { name: 'Networking' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Add quick link' })).toBeVisible();
   });
 });
