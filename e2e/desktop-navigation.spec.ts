@@ -1,6 +1,6 @@
 /**
- * Desktop navigation styles: Smart default, mode persistence, Smart More and
- * Compact launcher navigation.
+ * Desktop navigation styles: Smart default, mode persistence, Smart More,
+ * Compact launcher, and Compact quick-link add/persist/render.
  */
 import { test, expect } from '@playwright/test';
 import { loginAs, waitForStacksLoaded } from './helpers';
@@ -56,5 +56,37 @@ test.describe('Desktop navigation styles', () => {
     await page.getByRole('button', { name: 'Open navigation launcher' }).click();
     await page.getByRole('menuitem', { name: /^Settings$/i }).click();
     await expect(page.getByText('Appearance', { exact: true }).first()).toBeVisible({ timeout: 10_000 });
+  });
+
+  test('Compact quick link add persists and renders after reload', async ({ page }) => {
+    // Empty JSON array (not a missing key): missing falls back to recommended pins.
+    await page.evaluate(() => {
+      window.localStorage.setItem('sencho.appearance.topNavQuickLinks', '[]');
+    });
+    await setTopNavMode(page, 'compact');
+
+    const topbar = page.locator('[data-sn-chrome="topbar"]');
+    await expect(topbar).toHaveAttribute('data-sn-nav-mode', 'compact');
+
+    // Home is the default view and is quick-link eligible.
+    const add = page.getByRole('button', { name: 'Add current page to quick links' });
+    await expect(add).toBeVisible();
+    await add.click();
+
+    await expect(topbar.getByRole('button', { name: 'Home' })).toBeVisible();
+    await expect(add).toHaveCount(0);
+
+    const stored = await page.evaluate(() => window.localStorage.getItem('sencho.appearance.topNavQuickLinks'));
+    expect(stored).toBe(JSON.stringify(['dashboard']));
+
+    await page.reload();
+    await loginAs(page);
+    await waitForStacksLoaded(page);
+
+    await expect(topbar).toHaveAttribute('data-sn-nav-mode', 'compact');
+    await expect(topbar.getByRole('button', { name: 'Home' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Add current page to quick links' })).toHaveCount(0);
+    const storedAfterReload = await page.evaluate(() => window.localStorage.getItem('sencho.appearance.topNavQuickLinks'));
+    expect(storedAfterReload).toBe(JSON.stringify(['dashboard']));
   });
 });
