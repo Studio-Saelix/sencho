@@ -87,3 +87,103 @@ describe('TopBar showLabels', () => {
     expect(screen.getByRole('navigation', { name: 'Primary' }).previousElementSibling).toBeNull();
   });
 });
+
+describe('TopBar smart and compact modes', () => {
+  const overflowGroups = [
+    {
+      group: 'operations' as const,
+      label: 'Operations',
+      items: [{ value: 'global-observability' as const, label: 'Logs', icon: Home }],
+    },
+  ];
+  const launcherGroups = [
+    {
+      group: 'overview' as const,
+      label: 'Overview',
+      items: [{ value: 'dashboard' as const, label: 'Home', icon: Home }],
+    },
+    {
+      group: 'settings' as const,
+      label: 'Settings',
+      items: [{ value: 'settings' as const, label: 'Settings', icon: Radar }],
+    },
+  ];
+  const emptyModel = {
+    allPageItems: [
+      { value: 'dashboard' as const, label: 'Home', icon: Home },
+      { value: 'fleet' as const, label: 'Fleet', icon: Radar },
+    ],
+    primaryItems: [
+      { value: 'dashboard' as const, label: 'Home', icon: Home },
+      { value: 'fleet' as const, label: 'Fleet', icon: Radar },
+    ],
+    overflowGroups: [] as typeof overflowGroups,
+    launcherGroups: [] as typeof launcherGroups,
+    quickLinkCandidates: [
+      { value: 'dashboard' as const, label: 'Home', icon: Home },
+      { value: 'fleet' as const, label: 'Fleet', icon: Radar },
+    ],
+  };
+
+  it('marks More with aria-current when the active page is in overflow', () => {
+    renderTopBar({
+      navMode: 'smart',
+      activeView: 'global-observability',
+      navModel: {
+        ...emptyModel,
+        overflowGroups,
+      },
+    });
+    expect(screen.getByRole('button', { name: 'More navigation' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    expect(screen.getByRole('button', { name: 'More navigation' })).toHaveTextContent('More');
+  });
+
+  it('opens the More menu with the keyboard and keeps overflow labels', async () => {
+    const onNavigate = vi.fn();
+    renderTopBar({
+      navMode: 'smart',
+      onNavigate,
+      navModel: {
+        ...emptyModel,
+        overflowGroups,
+      },
+    });
+    const more = screen.getByRole('button', { name: 'More navigation' });
+    more.focus();
+    fireEvent.keyDown(more, { key: 'Enter' });
+    expect(await screen.findByRole('menuitem', { name: /Logs/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('menuitem', { name: /Logs/i }));
+    expect(onNavigate).toHaveBeenCalledWith('global-observability');
+  });
+
+  it('exposes launcher and add-quick-link accessible names and routes Settings via onOpenSettings', async () => {
+    const onOpenSettings = vi.fn();
+    const onAddQuickLink = vi.fn();
+    renderTopBar({
+      navMode: 'compact',
+      activeView: 'dashboard',
+      canAddQuickLink: true,
+      onAddQuickLink,
+      onOpenSettings,
+      quickLinks: [],
+      navModel: {
+        ...emptyModel,
+        launcherGroups,
+      },
+    });
+    expect(screen.getByRole('button', { name: 'Open navigation launcher' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Add current page to quick links' }));
+    expect(onAddQuickLink).toHaveBeenCalled();
+
+    const launcher = screen.getByRole('button', { name: 'Open navigation launcher' });
+    fireEvent.keyDown(launcher, { key: 'Enter' });
+    fireEvent.click(await screen.findByRole('menuitem', { name: /Settings/i }));
+    expect(onOpenSettings).toHaveBeenCalled();
+  });
+});

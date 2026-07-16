@@ -1,9 +1,9 @@
 ---
 title: Appearance
-description: Personalize Sencho's look. Choose a visual style, tune readability and the security charts, pick a theme and accent, swap the interface and data fonts, and set the text size. Every choice is saved to the current browser.
+description: Personalize Sencho's look. Choose a visual style, tune the security charts and readability, pick a theme and accent, swap the interface and data fonts, and set the text size. Every choice is saved to the current browser.
 ---
 
-**Settings → Appearance** is where you make Sencho look the way you want. Choose between the Calm and Signature visual styles, dial in readability, set how the security charts are colored, pick a theme and accent, choose the interface and data fonts, and scale the text. A live preview reflects every change as you make it.
+**Settings → Appearance** is where you make Sencho look the way you want. Choose between the Calm and Signature visual styles, set how the security charts are colored, dial in readability, pick a theme and accent, choose the interface and data fonts, and scale the text. A live preview reflects every change as you make it.
 
 <Frame>
   <img src="/images/settings/appearance-overview.png" alt="The Settings → Appearance page showing the Visual Style section with two preview cards: Calm (selected, with upright Critical heading and muted severity-color dots) and Signature (with italic serif Critical heading and saturated dots). Below are the Security Visualization chart-palette control with Muted selected, and the Readability section with its mode toggle, header-style control, and contrast slider." />
@@ -26,14 +26,7 @@ The **Visual style** is the master switch for how intense the interface feels:
 - **Calm** (the default) keeps headings upright in the interface font, colors the security charts with a muted palette, and reduces material effects. It is the most readable setting.
 - **Signature** uses italic Instrument Serif headings and the fully saturated chart palette for a more editorial look.
 
-Picking a style sets the heading, chart, and effects controls below in one move. You are free to adjust any of them afterward to build your own combination. When **Readability mode** is on it overrides these until you turn it off.
-
-## Readability
-
-**Readability mode** is a single switch for the most legible result: upright headings, the muted chart palette, reduced effects, and a small contrast lift, all at once. While it is on, the heading and chart controls are locked to their calm values. Turn it off to set them by hand.
-
-- **Header style** chooses **Clean** (the upright interface face) or **Signature** (italic Instrument Serif). Decorative moments such as the Sencho wordmark stay in the serif either way.
-- **Contrast** is a master control that spreads the page tone, every border, and the text tiers together. Higher contrast darkens the page, brightens borders, and crisps up secondary text. Pairing high contrast with the OLED theme gives the sharpest reading on a true-black panel.
+Picking a style sets the chart, header, and effects controls below in one move. You are free to adjust any of them afterward to build your own combination. When **Readability mode** is on it overrides these until you turn it off.
 
 ## Security visualization
 
@@ -43,16 +36,30 @@ The **Chart palette** sets the colors used on the Security page charts:
 - **Heat** is a single warm ramp from a deep red through amber, with no competing hues.
 - **Signature** is the saturated severity set.
 
+## Readability
+
+**Readability mode** is a single switch for the most legible result: upright headings, the muted chart palette, reduced effects, and a small contrast lift, all at once. While it is on, the heading and chart controls are locked to their calm values. Turn it off to set them by hand.
+
+- **Header style** chooses **Clean** (the upright interface face) or **Signature** (italic Instrument Serif). Decorative moments such as the Sencho wordmark stay in the serif either way.
+- **Contrast** is a master control that spreads the page tone, every border, and the text tiers together. Higher contrast darkens the page, brightens borders, and crisps up secondary text. Pairing high contrast with the OLED theme gives the sharpest reading on a true-black panel.
+
 ## Motion & effects
 
-- **Reduced motion** minimizes interface animations and transitions (dialogs, menus, expand and collapse). Toasts are unaffected. The **Calm** visual style turns this on by default; choosing **Signature** turns it off. You can still toggle it independently afterward without changing which visual-style card is selected. On constrained graphics, this is the first control to try when the active Sencho tab feels heavy on idle.
-- When Reduced motion is off, Appearance shows a short notice about constrained graphics and points you at Reduced motion.
-- **Reduced effects** flattens card bevels, the accent glow, and chart gradients, and uses a simpler rendering path: glass blur is off and chrome fills are solid. It also stops the decorative masthead rail animations even if Reduced motion is off. Fresh installs get this through the default **Calm** visual style. Treat it as an optional secondary experiment for material cost; it is not a substitute for Reduced motion on the reported idle-GPU symptom. The impact varies by device, browser, and graphics configuration.
-- **Ambient glow** sets the intensity of the soft, accent-tinted glow behind the page. Slide it to zero for a completely flat background. (Reduced effects already dims it.)
+<Frame>
+  <img src="/images/settings/appearance-motion-effects.png" alt="The Appearance Motion & effects section with a Constrained graphics callout above Reduced motion (off) and Reduced effects (on, with its full helper text about flattening bevels and disabling glass blur), an Ambient glow slider at 0.16 with a Reset to default button, and the start of the Theme section's live preview card below it." />
+</Frame>
+
+- Appearance shows a **Constrained graphics** callout whenever Reduced motion is off, pointing you at it as the first thing to try if the active Sencho tab feels heavy on integrated graphics or similar devices.
+- **Reduced motion** minimizes interface animations and transitions (dialogs, menus, expand and collapse). Toasts are unaffected. This is the first control to try for high idle GPU use on constrained graphics.
+- **Reduced effects** flattens card bevels, the accent glow, and chart gradients, and uses a simpler rendering path: glass blur is off and chrome fills are solid. Fresh installs get this through the default **Calm** visual style. Treat it as an optional secondary experiment for material cost; it is not a substitute for Reduced motion on the reported idle-GPU symptom. The impact varies by device, browser, and graphics configuration.
+- **Ambient glow** sets the intensity of the soft, accent-tinted glow behind the page. Slide it to zero for a completely flat background. (Reduced effects already dims it and disables the slider.)
+- A **Reset to default** button returns the Visual style to Calm. It is disabled while Readability mode is on.
 
 If the active Sencho tab feels heavy on constrained graphics, see [High GPU usage on constrained graphics](/operations/troubleshooting#high-gpu-usage-on-constrained-graphics).
 
 ## Theme
+
+The Theme section opens with a live preview card that mirrors a real fleet-health card (sample value, title, subtitle, and icon swatches plus page/card/band/well surface tones and outline/primary buttons), updating instantly as you adjust the controls below it so you can see a change before committing to it.
 
 The **Mode** control sets the overall surface palette:
 
@@ -61,7 +68,7 @@ The **Mode** control sets the overall surface palette:
 - **Light** is the bright theme, with the same directional, opaque borders inverted for a white surface.
 - **Auto** follows your operating system, switching between Dim and Light as your OS does, and re-resolving live when the OS flips.
 
-The **accent** is Sencho's one data color. It drives charts, sparklines, progress bars, focus rings, active states, the masthead and sidebar rails, and the ambient page glow, so changing it recolors the whole product cohesively. Eight well-spaced hues are available: **Cyan** (the default and the signature), **Blue**, **Violet**, **Magenta**, **Orange**, **Amber**, **Lime**, and **Steel** (a deliberate near-neutral). Status colors (green for healthy, amber for warning, rose for error) stay constant regardless of accent so state always reads the same.
+The **accent** is Sencho's one data color. It drives charts, sparklines, progress bars, focus rings, active states, the masthead and sidebar rails, and the ambient page glow, so changing it recolors the whole product cohesively. Eight well-spaced hues are available: **Orange**, **Amber**, **Lime**, **Cyan** (the default and the signature), **Blue**, **Violet**, **Magenta**, and **Steel** (a deliberate near-neutral). Status colors (green for healthy, amber for warning, rose for error) stay constant regardless of accent so state always reads the same.
 
 **Border brightness** lifts or softens every hairline on its own, so the separation between cards reads exactly how you like it. A **Reset fine-tune** button returns contrast, border brightness, and ambient glow to their defaults.
 
@@ -79,15 +86,25 @@ Sencho uses three type contexts. The interface and data faces are yours to chang
 
 ## Display
 
-The **Display** group holds the remaining per-browser preferences:
+The **Display** group holds layout and log-chip preferences for this browser:
 
 - **Density** switches between **Comfortable** (roomy rows, the default) and **Compact** (tighter rows and tiles that fit more on screen for dense dashboards).
-- **Top navigation labels** shows text labels beside the top navigation icons. Turn it off for an icon-only bar; the destinations stay reachable by hover tooltip, accessible name, and the command palette. On the phone layout the navigation always keeps its labels. With labels off, **Top navigation alignment** chooses whether the icon-only bar sits to the left or centered.
 - **Log chip color** controls how service chips are colored in log views. **Unified** uses the accent color for all service chips. **Per service** assigns each service a stable label color for faster visual scanning when following multiple services at once.
 
 <Frame>
-  <img src="/images/settings/appearance-display.png" alt="The Appearance Display section with a Density selector set to Comfortable, a Top navigation labels toggle turned off revealing a Top navigation alignment control with Left selected and Center, and a Log chip color control with Unified selected alongside Per service." />
+  <img src="/images/settings/appearance-display.png" alt="The Appearance Display section with a Density selector and a Log chip color control." />
 </Frame>
+
+## Navigation
+
+The **Navigation** group chooses how the desktop top bar presents page destinations. Phone navigation is unchanged.
+
+- **Navigation style**
+  - **Smart bar** (recommended default): keeps a short set of primary destinations visible and moves the rest into a grouped **More** menu.
+  - **Classic bar**: shows the full horizontal destination strip.
+  - **Compact launcher**: puts destinations in a left-side launcher menu and optionally pins up to four **quick links** on the bar.
+- **Top navigation labels** (Classic and Smart): shows text beside top navigation icons. Turn it off for an icon-only bar; destinations stay reachable by tooltip, accessible name, and the command palette. Phone layout always keeps labels. With labels off, **Top navigation alignment** places the icon-only bar left or centered.
+- **Quick links** (Compact launcher): lists pinned destinations, lets you remove them, and can reset to the recommended set. Use the **+** control on the top bar to pin the current eligible page when fewer than four pins are stored.
 
 Deploy-progress behavior and the diff-preview-before-save step are stack workflow preferences, so they live in **Settings → Infrastructure → Stacks**, not here.
 

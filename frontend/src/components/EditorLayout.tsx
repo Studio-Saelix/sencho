@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button } from './ui/button';
 import { Plus, Loader2, ChevronLeft, AlertCircle, RefreshCw } from 'lucide-react';
 import { UserProfileDropdown } from './UserProfileDropdown';
@@ -44,6 +44,9 @@ import type { SidebarActivityAction } from '@/components/sidebar/SidebarActivity
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
 import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { useTopNavAlign } from '@/hooks/use-top-nav-align';
+import { useTopNavMode } from '@/hooks/use-top-nav-mode';
+import { useTopNavQuickLinks, MAX_QUICK_LINKS } from '@/hooks/use-top-nav-quick-links';
+import { getAppNavItem } from '@/lib/navigation/appNavRegistry';
 import { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import { toast } from '@/components/ui/toast-store';
 import { useIsMobile } from '@/hooks/use-is-mobile';
@@ -195,6 +198,8 @@ export default function EditorLayout() {
   const [diffPreviewEnabled] = useComposeDiffPreviewEnabled();
   const [topNavLabels] = useTopNavLabels();
   const [topNavAlign] = useTopNavAlign();
+  const [topNavMode] = useTopNavMode();
+  const { persistedIds: quickLinkIds, addQuickLink } = useTopNavQuickLinks();
 
   // Use a ref to break the circular dependency:
   // useViewNavigationState needs onNavigateToDashboard -> resetEditorState
@@ -220,9 +225,28 @@ export default function EditorLayout() {
     handleMutePrefillConsumed,
     handleNavigate,
     navItems,
+    navModel,
     openMuteRulesWithPrefill,
     reachCtx,
   } = navState;
+
+  const visibleQuickLinks = useMemo(() => {
+    const candidateSet = new Set(navModel.quickLinkCandidates.map((item) => item.value));
+    return quickLinkIds
+      .filter((id) => candidateSet.has(id))
+      .map((id) => {
+        const item = getAppNavItem(id);
+        return item ? { value: item.value, label: item.label, icon: item.icon } : null;
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+  }, [quickLinkIds, navModel.quickLinkCandidates]);
+
+  const canAddQuickLink = useMemo(() => {
+    if (topNavMode !== 'compact') return false;
+    if (quickLinkIds.length >= MAX_QUICK_LINKS) return false;
+    if (quickLinkIds.includes(activeView as typeof quickLinkIds[number])) return false;
+    return navModel.quickLinkCandidates.some((item) => item.value === activeView);
+  }, [topNavMode, quickLinkIds, activeView, navModel.quickLinkCandidates]);
 
   const {
     notifications,
@@ -908,6 +932,12 @@ export default function EditorLayout() {
           userMenu={userMenuEl}
           showLabels={topNavLabels}
           navAlign={topNavAlign}
+          navMode={topNavMode}
+          navModel={navModel}
+          quickLinks={visibleQuickLinks}
+          canAddQuickLink={canAddQuickLink}
+          onAddQuickLink={() => addQuickLink(activeView as typeof quickLinkIds[number])}
+          onOpenSettings={() => openSettings()}
         />
       );
 

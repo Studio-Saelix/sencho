@@ -3,21 +3,22 @@ title: Global Search
 description: Jump to any page, node, or stack from anywhere in the app with a single keystroke.
 ---
 
-The **global search palette** lets you move around Sencho without reaching for the mouse. It covers the destinations the top bar exposes for your tier and role, every configured node, and every stack on every online node in your fleet.
+The **global search palette** lets you move around Sencho without reaching for the mouse. It covers the reachable page destinations for your tier and role (the same page list Classic top navigation, Smart primary and More, and mobile navigation use), every configured node, and every stack on every online node in your fleet. Compact launcher can also open **Settings** from its menu; Settings is not a palette page row.
 
 <Frame>
-  <img src="/images/global-search/palette-pages.png" alt="Sencho global search palette open with no query, the Pages group listing Home, Fleet, Resources, Networking, App Store, Logs, and Auto-Update each with a leading icon." />
+  <img src="/images/global-search/palette-pages.png" alt="Sencho global search palette open with no query, the Pages group listing Home, Fleet, Resources, Security, App Store, and Logs each with a leading icon." />
 </Frame>
 
 ## Opening the palette
 
-Three ways to open it:
+Two ways to open it:
 
 - Press <kbd>Ctrl</kbd> + <kbd>K</kbd> (or <kbd>Cmd</kbd> + <kbd>K</kbd> on macOS) from anywhere in the app.
-- Click the search icon in the top bar, left of the notification bell.
-- Press <kbd>Esc</kbd> to close it at any time.
+- Click the search icon in the top bar, left of the theme switch and notification bell. On a phone, the top bar is replaced by the **More** menu; see [On a phone](#on-a-phone) below.
 
-The shortcut works from the dashboard, editor, fleet view, resources, and every other screen.
+Press <kbd>Esc</kbd> to close it at any time, or click outside the dialog.
+
+The shortcut works from the dashboard, editor, fleet view, resources, and every other screen, as long as focus isn't inside a text field. See the Troubleshooting section below if the shortcut seems unresponsive.
 
 ## What you can find
 
@@ -25,14 +26,14 @@ The palette groups results into three sections.
 
 | Group | What it contains | What happens when you pick one |
 |-------|------------------|--------------------------------|
-| **Pages** | The same set of destinations the top bar shows you. Home, Fleet, Resources, Networking, App Store, and Logs always appear; Update and Schedules appear for admins; Console appears for admins when that limited-availability surface is present; Audit appears on Admiral for roles with the audit permission (the full Audit view, statistics, export, anomalies, and extended retention). Community keeps a rolling 14-day recent-activity audit API window without the Audit view in navigation. | Navigates to that page |
+| **Pages** | The reachable page destinations for your tier and role (the same set Classic / Smart / mobile navigation use). **Home**, **Resources**, **Networking**, **Security**, and **App Store** always appear; **Fleet** appears when your role holds the `node:read` permission; **Logs**, **Update**, and **Schedules** appear for admins; **Console** is a limited-availability operator surface shown when enabled on an instance; **Audit** appears on Admiral for any role with the `system:audit` permission. See [RBAC & User Management](/features/rbac) for the full permission matrix. | Navigates to that page |
 | **Nodes** | Every node in your fleet, with a green dot for online and a grey dot for offline. The currently active node carries a small **ACTIVE** chip on the right. | Switches the active node without leaving the current page |
 | **Stacks** | Every compose stack on every online node, matched on the compose filename (extension included). | Switches to the stack's node and opens it in the editor |
 
-Each stack row shows a status dot on the left (green for running, grey for exited, faded grey for unknown) and the node name as a mono tag on the right. That way you always know which host a match lives on before you pick it.
+Each stack row shows a status dot on the left (green for running, grey for exited, faded grey for unknown, amber for partial) and the node name as a mono tag on the right. Partial means some of the stack's containers are up and some are not, the same state the sidebar shows as `PT`. That way you always know which host a match lives on, and roughly what state it's in, before you pick it.
 
 <Frame>
-  <img src="/images/global-search/palette-nodes.png" alt="Global search palette scrolled to the Nodes group, with the active node showing a small ACTIVE chip on the right and a green online dot to the left of each node name." />
+  <img src="/images/global-search/palette-nodes.png" alt="Global search palette scrolled to the Nodes group, listing four nodes each with a green online dot, and the active Local node showing a small ACTIVE chip on the right." />
 </Frame>
 
 ## Typing to filter
@@ -44,7 +45,7 @@ Start typing and the results narrow in real time. Pages and nodes filter instant
 - `db` lists every stack with "db" in its filename, showing which node each one lives on.
 
 <Frame>
-  <img src="/images/global-search/palette-stacks.png" alt="Global search palette with the query 'saelix' producing three Stacks rows, each with a green status dot on the left and a mono OPSIX node tag on the right." />
+  <img src="/images/global-search/palette-stacks.png" alt="Global search palette with the query 'db' producing two Stacks rows on different nodes: saelix-db with a green status dot and an OPSIX node tag, and db-compose with a grey status dot and an SLX-MARS node tag." />
 </Frame>
 
 When a query matches stacks on a remote node, selecting one switches the active node and opens the editor on that stack in a single action.
@@ -69,6 +70,20 @@ Once the palette is open:
 
 Offline nodes show as greyed-out and are not selectable.
 
+## On a phone
+
+The top bar that hosts the search icon is dropped on a phone; every screen leads with its own masthead instead. Open the **More** menu (the menu icon in the top-right corner of any mobile screen) and tap **Search** at the top of the list to open the same palette.
+
+<Frame>
+  <img src="/images/global-search/mobile-more-menu.png" alt="Sencho mobile More menu open on a phone, with Search listed above the full set of navigation destinations." />
+</Frame>
+
+The palette itself renders as a full-width sheet instead of a centered dialog, but the Pages, Nodes, and Stacks groups, the debounced fleet-wide stack search, and the keyboard-free tap-to-select behavior all work the same as on desktop.
+
+<Frame>
+  <img src="/images/global-search/mobile-palette.png" alt="Global search palette open on a phone, showing the Pages group as a full-width list." />
+</Frame>
+
 ## Troubleshooting
 
 <AccordionGroup>
@@ -81,10 +96,10 @@ Offline nodes show as greyed-out and are not selectable.
   <Accordion title="A stack I just created on another node does not show up">
     The fleet-wide stack list is gathered once when you begin a search and reused while you keep typing, so a stack created on a remote node after you started typing will not appear yet. Clear the query and search again to pull a fresh list from the fleet.
   </Accordion>
-  <Accordion title="A stack row shows a faded grey status dot">
-    The dot reflects the stack's run state: green for running, grey for exited, faded grey for unknown. Unknown means the node listed the stack but its status could not be read at that moment, usually a transient hiccup talking to that host's Docker engine. The stack is still selectable; open it to see its real state in the editor.
+  <Accordion title="A stack row shows a faded grey or amber status dot">
+    The dot reflects the stack's run state: green for running, grey for exited, faded grey for unknown, amber for partial. Partial means some of the stack's containers are up and some are not. Unknown means the node listed the stack but its status could not be read at that moment, usually a transient hiccup talking to that host's Docker engine. The stack is still selectable; open it to see its real state in the editor.
   </Accordion>
   <Accordion title="Ctrl+K does not open the palette">
-    The shortcut is handled at the window level, so it works from any screen, but a focused element that captures the keystroke first (for example a terminal in the host console) can intercept it. Click outside that element, or use the search icon in the top bar to open the palette instead.
+    The shortcut is handled at the window level, so it works from any screen, but it deliberately does nothing while focus is inside a text field: a text input, a text area, or the compose editor. This avoids hijacking a keystroke you're using to type (on macOS, Ctrl+K is also the native "delete to end of line" shortcut inside a field). Click outside the field first, or use the search icon in the top bar to open the palette instead.
   </Accordion>
 </AccordionGroup>
