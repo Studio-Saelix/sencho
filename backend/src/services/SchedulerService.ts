@@ -299,7 +299,15 @@ export class SchedulerService {
             if (task.node_id != null && task.action !== 'snapshot') {
                 const node = db.getNode(task.node_id);
                 if (!node) throw new Error(`Target node (id=${task.node_id}) no longer exists`);
-                if (node.status === 'offline') throw new Error(`Target node "${node.name}" is offline`);
+                if (node.status === 'offline') {
+                    // Local seed name ("Local") must not reach fleet-aggregated alerts;
+                    // remote roster names stay for diagnosis.
+                    throw new Error(
+                        node.type === 'local'
+                            ? 'Target node is offline'
+                            : `Target node "${node.name}" is offline`,
+                    );
+                }
             }
 
             if (isDebugEnabled()) console.log(`[SchedulerService:debug] Task ${task.id} pre-checks passed, executing ${task.action}`);
@@ -814,8 +822,12 @@ export class SchedulerService {
      * segment.
      */
     private containerNotFoundMessage(containerName: string, nodeId: number): string {
-        const nodeName = NodeRegistry.getInstance().getNode(nodeId)?.name ?? String(nodeId);
-        return `Container "${containerName}" not found on node "${nodeName}". It may have been renamed or removed.`;
+        const node = NodeRegistry.getInstance().getNode(nodeId);
+        // Only an explicit local node is neutralized; missing lookup keeps the id fallback.
+        const location = node?.type === 'local'
+            ? 'on this node'
+            : `on node "${node?.name ?? String(nodeId)}"`;
+        return `Container "${containerName}" not found ${location}. It may have been renamed or removed.`;
     }
 
     /** Hub target tag used for startsWith rethrow guards (no trailing detail). */

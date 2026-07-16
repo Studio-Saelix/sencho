@@ -2159,3 +2159,97 @@ describe('SchedulerService - delete_after_run', () => {
     expect(mockUpdateScheduledTask).toHaveBeenCalledWith(300, expect.objectContaining({ last_status: 'success' }));
   });
 });
+
+// ── Node-neutral failure alerts (local vs remote) ──────────────────────
+
+describe('SchedulerService - node-neutral failure alerts', () => {
+  function makeContainerTask(overrides: Partial<ScheduledTask> & { id: number; name: string }) {
+    return {
+      action: 'restart',
+      target_type: 'container',
+      target_id: 'web',
+      cron_expression: '0 * * * *',
+      enabled: true,
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+      ...overrides,
+    };
+  }
+
+  it('dispatches local offline failure without the seed node name', async () => {
+    mockGetScheduledTask.mockReturnValue(makeContainerTask({ id: 400, name: 'offline-local', node_id: 1 }));
+    mockGetNode.mockReturnValue({ id: 1, name: 'Local', type: 'local', status: 'offline' });
+
+    await SchedulerService.getInstance().triggerTask(400);
+
+    expect(mockDispatchAlert).toHaveBeenCalledWith(
+      'error',
+      'system',
+      'Scheduled task "offline-local" (restart) failed: Target node is offline',
+      { stackName: 'web', actor: 'system:scheduler' },
+    );
+  });
+
+  it('dispatches remote offline failure with the authoritative node name', async () => {
+    mockGetScheduledTask.mockReturnValue(makeContainerTask({ id: 401, name: 'offline-remote', node_id: 2 }));
+    mockGetNode.mockReturnValue({ id: 2, name: 'sencho-test-02', type: 'remote', status: 'offline' });
+
+    await SchedulerService.getInstance().triggerTask(401);
+
+    expect(mockDispatchAlert).toHaveBeenCalledWith(
+      'error',
+      'system',
+      'Scheduled task "offline-remote" (restart) failed: Target node "sencho-test-02" is offline',
+      { stackName: 'web', actor: 'system:scheduler' },
+    );
+  });
+
+  it('dispatches local missing-container failure with this-node wording', async () => {
+    mockGetScheduledTask.mockReturnValue(makeContainerTask({ id: 402, name: 'missing-local', node_id: 1 }));
+    mockGetNode.mockReturnValue({ id: 1, name: 'Local', type: 'local', status: 'online' });
+    mockFindContainerByName.mockResolvedValue(null);
+
+    await SchedulerService.getInstance().triggerTask(402);
+
+    expect(mockDispatchAlert).toHaveBeenCalledWith(
+      'error',
+      'system',
+      'Scheduled task "missing-local" (restart) failed: Container "web" not found on this node. It may have been renamed or removed.',
+      { stackName: 'web', actor: 'system:scheduler' },
+    );
+  });
+
+  it('dispatches remote missing-container failure with the authoritative node name', async () => {
+    mockGetScheduledTask.mockReturnValue(makeContainerTask({ id: 403, name: 'missing-remote', node_id: 2 }));
+    mockGetNode.mockReturnValue({ id: 2, name: 'sencho-test-02', type: 'remote', status: 'online' });
+    mockGetProxyTarget.mockReturnValue({
+      apiUrl: 'http://remote:1852',
+      apiToken: 'test-token',
+    });
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ([]),
+    });
+    vi.stubGlobal('fetch', mockFetch);
+
+    await SchedulerService.getInstance().triggerTask(403);
+
+    expect(mockDispatchAlert).toHaveBeenCalledWith(
+      'error',
+      'system',
+      'Scheduled task "missing-remote" (restart) failed: Container "web" not found on node "sencho-test-02". It may have been renamed or removed.',
+      { stackName: 'web', actor: 'system:scheduler' },
+    );
+  });
+
+  it('missing node lookup keeps the id fallback, not this-node wording', () => {
+    mockGetNode.mockReturnValue(undefined);
+    const svc = SchedulerService.getInstance() as unknown as {
+      containerNotFoundMessage: (containerName: string, nodeId: number) => string;
+    };
+    expect(svc.containerNotFoundMessage('web', 99)).toBe(
+      'Container "web" not found on node "99". It may have been renamed or removed.',
+    );
+  });
+});

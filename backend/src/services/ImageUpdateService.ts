@@ -523,7 +523,7 @@ export class ImageUpdateService {
             for (const node of db.getNodes()) {
                 if (node.type !== 'local' || !node.id) continue;
                 try {
-                    await this.checkNode(node.id, node.name, db);
+                    await this.checkNode(node.id, db);
                 } catch (e) {
                     console.error(`[ImageUpdateService] Error on node ${node.name}:`, e);
                 }
@@ -536,7 +536,7 @@ export class ImageUpdateService {
         }
     }
 
-    private async checkNode(nodeId: number, nodeName: string, db: DatabaseService) {
+    private async checkNode(nodeId: number, db: DatabaseService) {
         const docker = DockerController.getInstance(nodeId);
         const fs = FileSystemService.getInstance(nodeId);
         const composeDir = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
@@ -708,7 +708,8 @@ export class ImageUpdateService {
                     await notifier.dispatchAlert(
                         'info',
                         'image_update_available',
-                        `[Node: ${nodeName}] Stack "${stackName}" has image updates available.`,
+                        // Node-neutral body: the hub bell badge attributes remotes.
+                        `Stack "${stackName}" has image updates available.`,
                         { stackName, actor: 'system:image-update' },
                     );
                 } catch (e) {
@@ -722,7 +723,7 @@ export class ImageUpdateService {
                             level: 'error',
                             category: 'system',
                             message: sanitizeNotificationMessage(
-                                `[Node: ${nodeName}] Failed to notify about image updates for stack "${stackName}": ${getErrorMessage(e, String(e))}`,
+                                `Failed to notify about image updates for stack "${stackName}": ${getErrorMessage(e, String(e))}`,
                                 { composeDir: NodeRegistry.getInstance().getComposeDir(localNodeId) },
                             ),
                             timestamp: Date.now(),
