@@ -13,7 +13,13 @@ import { EventEmitter } from 'events';
 // mock routes by URL + method so each test controls the manifest response while
 // the token request always succeeds.
 
-interface FakeResp { statusCode: number; headers: Record<string, string>; body?: string; }
+interface FakeResp {
+  statusCode: number;
+  headers: Record<string, string>;
+  body?: string;
+  /** When set, emitted as separate data events (for UTF-8 chunk-boundary tests). */
+  bodyChunks?: Buffer[];
+}
 
 const calls: { url: string; method: string }[] = [];
 let route: (url: string, method: string) => FakeResp;
@@ -32,7 +38,11 @@ function fakeRequest(url: string, options: { method?: string }, cb: (res: EventE
     end: () => {
       cb(res);
       queueMicrotask(() => {
-        if (resp.body) res.emit('data', Buffer.from(resp.body));
+        if (resp.bodyChunks) {
+          for (const chunk of resp.bodyChunks) res.emit('data', chunk);
+        } else if (resp.body) {
+          res.emit('data', Buffer.from(resp.body));
+        }
         res.emit('end');
       });
     },
@@ -54,6 +64,7 @@ import {
   compareLocalToRemoteTag,
   MANIFEST_CLASSIFICATION_CACHE_TTL_MS,
   MANIFEST_INDEX_DESCRIPTOR_CAP,
+  MANIFEST_INDEX_MAX_DEPTH,
 } from '../services/registry-api';
 import { CacheService } from '../services/CacheService';
 
@@ -444,6 +455,29 @@ describe('compareLocalToRemoteTag', () => {
     return `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}`;
   }
 
+  /** HEAD the tag for `primary`, then serve digest-pinned GET bodies (or custom FakeResp). */
+  function routePrimaryDigest(
+    primary: string,
+    digests: Record<string, string | FakeResp>,
+  ): (url: string, method: string) => FakeResp {
+    return (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': primary, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (method === 'GET') {
+        for (const [digest, payload] of Object.entries(digests)) {
+          if (url !== manifestDigestUrl(digest)) continue;
+          return typeof payload === 'string'
+            ? { statusCode: 200, headers: { 'docker-content-digest': digest }, body: payload }
+            : payload;
+        }
+      }
+      return { statusCode: 500, headers: {} };
+    };
+  }
+
   const STANDARD_INDEX_BODY = indexBody([
     { digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' },
     { digest: CHILD_ARM64, os: 'linux', architecture: 'arm64' },
@@ -796,14 +830,16 @@ describe('compareLocalToRemoteTag', () => {
   });
 
   it('errors when the digest-pinned manifest body is not valid JSON', async () => {
+    const badBody = 'not json{{';
+    const primary = contentDigest(badBody);
     route = (url, method) => {
       const token = tokenOk(url);
       if (token) return token;
       if (url === MANIFEST_URL_TAG && method === 'HEAD') {
-        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+        return { statusCode: 200, headers: { 'docker-content-digest': primary, 'content-type': INDEX_CONTENT_TYPE } };
       }
-      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
-        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: 'not json{{' };
+      if (url === manifestDigestUrl(primary) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': primary }, body: badBody };
       }
       return { statusCode: 500, headers: {} };
     };
@@ -897,5 +933,235 @@ describe('compareLocalToRemoteTag', () => {
     expect(digestGetCount).toBe(2);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it('preserves UTF-8 integrity when a multibyte code point is split across data events', async () => {
+    // 🚢 is F0 9F 9A A2; split after two bytes so naïve per-chunk toString corrupts it.
+    const ship = '🚢';
+    const body = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      annotations: { 'org.opencontainers.image.description': `QA-${ship}-manifest` },
+      manifests: [
+        {
+          digest: CHILD_AMD64,
+          mediaType: 'application/vnd.oci.image.manifest.v1+json',
+          platform: { os: 'linux', architecture: 'amd64' },
+        },
+      ],
+    });
+    const primary = contentDigest(body);
+    const raw = Buffer.from(body, 'utf8');
+    const shipOffset = raw.indexOf(Buffer.from(ship, 'utf8'));
+    expect(shipOffset).toBeGreaterThan(0);
+    const splitAt = shipOffset + 2;
+
+    route = routePrimaryDigest(primary, {
+      [primary]: {
+        statusCode: 200,
+        headers: { 'docker-content-digest': primary },
+        bodyChunks: [raw.subarray(0, splitAt), raw.subarray(splitAt)],
+      },
+    });
+
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+  });
+
+  it('matches a leaf under a nested index via digest-pinned recursion', async () => {
+    const nestedBody = indexBody([
+      { digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' },
+      { digest: CHILD_ARM64, os: 'linux', architecture: 'arm64' },
+    ]);
+    const nestedDigest = contentDigest(nestedBody);
+    const outerBody = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [
+        {
+          digest: nestedDigest,
+          mediaType: INDEX_CONTENT_TYPE,
+          platform: { os: 'linux', architecture: 'amd64' },
+        },
+      ],
+    });
+    const outerDigest = contentDigest(outerBody);
+
+    route = routePrimaryDigest(outerDigest, {
+      [outerDigest]: outerBody,
+      [nestedDigest]: nestedBody,
+    });
+
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+    expect(calls.filter((c) => c.method === 'GET' && c.url.includes('/manifests/'))).toHaveLength(2);
+  });
+
+  it('returns error (not update) when a nested index digest is unavailable', async () => {
+    const nestedDigest = `sha256:${'a'.repeat(64)}`;
+    const outerBody = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [
+        { digest: nestedDigest, mediaType: INDEX_CONTENT_TYPE },
+        {
+          digest: CHILD_ARM64,
+          mediaType: 'application/vnd.oci.image.manifest.v1+json',
+          platform: { os: 'linux', architecture: 'arm64' },
+        },
+      ],
+    });
+    const outerDigest = contentDigest(outerBody);
+
+    route = routePrimaryDigest(outerDigest, {
+      [outerDigest]: outerBody,
+      [nestedDigest]: { statusCode: 404, headers: {} },
+    });
+
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result.kind).toBe('error');
+  });
+
+  it('matches a runnable descriptor that omits optional platform metadata by exact digest', async () => {
+    const body = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [
+        { digest: CHILD_AMD64, mediaType: 'application/vnd.oci.image.manifest.v1+json' },
+        {
+          digest: CHILD_ARM64,
+          mediaType: 'application/vnd.oci.image.manifest.v1+json',
+          platform: { os: 'linux', architecture: 'arm64' },
+        },
+      ],
+    });
+    const primary = contentDigest(body);
+    route = routePrimaryDigest(primary, { [primary]: body });
+
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+  });
+
+  it('returns error (not update) when index nesting exceeds the depth limit', async () => {
+    // Build a chain primary -> d1 -> d2 -> ... of length MANIFEST_INDEX_MAX_DEPTH + 1.
+    const bodies: { digest: string; body: string }[] = [];
+    let leafBody = indexBody([{ digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' }]);
+    let leafDigest = contentDigest(leafBody);
+    bodies.push({ digest: leafDigest, body: leafBody });
+
+    for (let depth = 0; depth < MANIFEST_INDEX_MAX_DEPTH; depth++) {
+      const parentBody = JSON.stringify({
+        schemaVersion: 2,
+        mediaType: INDEX_CONTENT_TYPE,
+        manifests: [{ digest: leafDigest, mediaType: INDEX_CONTENT_TYPE }],
+      });
+      const parentDigest = contentDigest(parentBody);
+      bodies.push({ digest: parentDigest, body: parentBody });
+      leafDigest = parentDigest;
+    }
+    const outerDigest = leafDigest;
+    const digests: Record<string, string> = {};
+    for (const { digest, body } of bodies) digests[digest] = body;
+
+    route = routePrimaryDigest(outerDigest, digests);
+
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result.kind).toBe('error');
+    if (result.kind === 'error') {
+      expect(result.reason).toMatch(/depth/i);
+    }
+  });
+
+  it('returns error (not update) for a descriptor with an unrecognized media type', async () => {
+    const body = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [
+        {
+          digest: CHILD_AMD64,
+          mediaType: 'application/vnd.example.weird-manifest+json',
+          platform: { os: 'linux', architecture: 'amd64' },
+        },
+      ],
+    });
+    const primary = contentDigest(body);
+    route = routePrimaryDigest(primary, { [primary]: body });
+
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result.kind).toBe('error');
+  });
+
+  it('still expands a nested index descriptor even when its platform is unknown/unknown', async () => {
+    const nestedBody = indexBody([{ digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' }]);
+    const nestedDigest = contentDigest(nestedBody);
+    const outerBody = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [
+        {
+          digest: nestedDigest,
+          mediaType: INDEX_CONTENT_TYPE,
+          platform: { os: 'unknown', architecture: 'unknown' },
+        },
+      ],
+    });
+    const outerDigest = contentDigest(outerBody);
+    route = routePrimaryDigest(outerDigest, {
+      [outerDigest]: outerBody,
+      [nestedDigest]: nestedBody,
+    });
+
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+  });
+
+  it('returns error (not update) for a nested descriptor with a non-digest string', async () => {
+    const outerBody = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [
+        { digest: '../other/manifests/evil', mediaType: INDEX_CONTENT_TYPE },
+        {
+          digest: CHILD_ARM64,
+          mediaType: 'application/vnd.oci.image.manifest.v1+json',
+          platform: { os: 'linux', architecture: 'arm64' },
+        },
+      ],
+    });
+    const outerDigest = contentDigest(outerBody);
+    route = routePrimaryDigest(outerDigest, { [outerDigest]: outerBody });
+
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result.kind).toBe('error');
+    expect(calls.some((c) => c.url.includes('../') || c.url.includes('/evil'))).toBe(false);
+  });
+
+  it('returns error (not update) when a descriptor is missing its digest', async () => {
+    const body = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [
+        { mediaType: 'application/vnd.oci.image.manifest.v1+json', platform: { os: 'linux', architecture: 'amd64' } },
+      ],
+    });
+    const primary = contentDigest(body);
+    route = routePrimaryDigest(primary, { [primary]: body });
+
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result.kind).toBe('error');
+  });
+
+  it('returns error (not update) when Content-Type is an index but the body has no manifests array', async () => {
+    const body = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      config: { digest: CHILD_AMD64, mediaType: 'application/vnd.oci.image.config.v1+json', size: 1 },
+      layers: [],
+    });
+    const primary = contentDigest(body);
+    route = routePrimaryDigest(primary, { [primary]: body });
+
+    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    expect(result.kind).toBe('error');
   });
 });

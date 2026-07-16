@@ -96,8 +96,12 @@ export function httpGet(
     return httpRequest(url, 'GET', headers, timeoutMs);
 }
 
-export interface CappedHttpResult extends HttpResult {
-    /** True when the response exceeded the cap and was aborted mid-stream; `body` is empty in that case. */
+export interface CappedHttpResult {
+    statusCode: number;
+    headers: Record<string, string | string[] | undefined>;
+    /** Raw response bytes. Empty when truncated. Decoded only after integrity checks. */
+    bodyBytes: Buffer;
+    /** True when the response exceeded the cap and was aborted mid-stream. */
     truncated: boolean;
 }
 
@@ -107,6 +111,10 @@ export interface CappedHttpResult extends HttpResult {
  * unbounded body and checking its size afterward. Used for manifest bodies
  * fetched for index-expansion classification, where a hostile or
  * misbehaving registry could otherwise return an arbitrarily large payload.
+ *
+ * Chunks are kept as Buffers and concatenated once. Decoding per chunk would
+ * corrupt multibyte UTF-8 sequences that straddle TCP boundaries and break
+ * content-addressed digest verification.
  */
 export function httpGetCapped(
     url: string,
@@ -123,29 +131,25 @@ export function httpGetCapped(
             fn();
         };
         const req = lib.request(url, { method: 'GET', headers }, (res) => {
-            let body = '';
+            const chunks: Buffer[] = [];
             let received = 0;
+            const cappedResult = (bodyBytes: Buffer, truncated: boolean): CappedHttpResult => ({
+                statusCode: res.statusCode ?? 0,
+                headers: res.headers as Record<string, string | string[] | undefined>,
+                bodyBytes,
+                truncated,
+            });
             res.on('data', (chunk: Buffer) => {
                 if (settled) return;
                 received += chunk.length;
                 if (received > capBytes) {
-                    finish(() => resolve({
-                        statusCode: res.statusCode ?? 0,
-                        headers: res.headers as Record<string, string | string[] | undefined>,
-                        body: '',
-                        truncated: true,
-                    }));
+                    finish(() => resolve(cappedResult(Buffer.alloc(0), true)));
                     res.destroy();
                     return;
                 }
-                body += chunk.toString();
+                chunks.push(chunk);
             });
-            res.on('end', () => finish(() => resolve({
-                statusCode: res.statusCode ?? 0,
-                headers: res.headers as Record<string, string | string[] | undefined>,
-                body,
-                truncated: false,
-            })));
+            res.on('end', () => finish(() => resolve(cappedResult(Buffer.concat(chunks, received), false))));
             res.on('error', (err) => finish(() => reject(err)));
         });
         req.on('error', (err) => finish(() => reject(err)));
@@ -292,8 +296,8 @@ const MANIFEST_EXPANSION_BODY_CAP_BYTES = 1024 * 1024; // 1 MiB streaming abort
 interface ManifestProbeSuccess {
     digest: string;
     contentType: string | undefined;
-    /** Body already read in this probe (the GET fallback on HEAD 405/501/missing-digest), or null when a HEAD 200 with a digest header was all that was needed. */
-    body: string | null;
+    /** Raw body from the GET fallback on HEAD 405/501/missing-digest, or null when a HEAD 200 with a digest header was all that was needed. */
+    body: Buffer | null;
     /**
      * Accept + optional Bearer token used for this probe. Reused for a same-repo
      * digest-pinned expansion GET so it does not re-authenticate. Never returned
@@ -370,7 +374,7 @@ async function probeManifestForRef(
                         // A truncated body cannot be classified; treat it as absent so a
                         // caller that needs it (the comparison resolver) re-fetches by
                         // digest and hits the same oversize condition explicitly.
-                        body: res.truncated ? null : res.body,
+                        body: res.truncated ? null : res.bodyBytes,
                         authHeaders,
                     },
                 };
@@ -443,7 +447,12 @@ interface ManifestPlatformDescriptor {
 
 type ManifestClassification =
     | { kind: 'single' }
-    | { kind: 'index'; descriptors: ManifestPlatformDescriptor[] };
+    | {
+        kind: 'index';
+        descriptors: ManifestPlatformDescriptor[];
+        /** Leaf digests with no platform metadata; matched by exact digest membership only. */
+        exactDigests: string[];
+    };
 
 /** Result of comparing a local image digest to the registry's current manifest for a tag. */
 export type DigestComparisonResult =
@@ -453,6 +462,8 @@ export type DigestComparisonResult =
 
 export const MANIFEST_CLASSIFICATION_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const MANIFEST_INDEX_DESCRIPTOR_CAP = 256;
+/** Max nested index documents in a chain (primary + nested). Exceeding this fails closed. */
+export const MANIFEST_INDEX_MAX_DEPTH = 3;
 
 const MANIFEST_CLASSIFICATION_CACHE_NAMESPACE = 'img-upd-idx';
 
@@ -461,6 +472,11 @@ const SINGLE_MANIFEST_MEDIA_TYPES = new Set([
     'application/vnd.docker.distribution.manifest.v2+json',
     'application/vnd.docker.distribution.manifest.v1+json',
     'application/vnd.oci.image.manifest.v1+json',
+]);
+
+const INDEX_MANIFEST_MEDIA_TYPES = new Set([
+    'application/vnd.oci.image.index.v1+json',
+    'application/vnd.docker.distribution.manifest.list.v2+json',
 ]);
 
 /**
@@ -475,13 +491,26 @@ function manifestClassificationCacheKey(registry: string, repo: string, primaryD
     return `${MANIFEST_CLASSIFICATION_CACHE_NAMESPACE}:${canonicalRegistry(registry)}/${repoHash}@${primaryDigest}`;
 }
 
+/** One parsed index document before nested digests are expanded. */
+interface IndexParseSlice {
+    kind: 'slice';
+    descriptors: ManifestPlatformDescriptor[];
+    exactDigests: string[];
+    nestedDigests: string[];
+}
+
+function indexSliceSize(slice: IndexParseSlice): number {
+    return slice.descriptors.length + slice.exactDigests.length + slice.nestedDigests.length;
+}
+
 /**
- * Parse a manifest body into a classification. Throws (never resolves a
- * typed error value) on malformed JSON or an oversize descriptor array, so
- * CacheService's stale-on-error fallback, not a false cached success, is
- * what a bad body produces.
+ * Parse one index/manifest-list body into platform descriptors, exact-digest
+ * leaf candidates (no platform), and nested index digests to fetch. Throws on
+ * malformed JSON, an oversize descriptor array, or a non-attestation descriptor
+ * whose media type is neither a known leaf nor a known index (fail closed so
+ * compare never treats incomplete classification as a definite update).
  */
-function parseManifestClassification(body: string): ManifestClassification {
+function parseIndexBody(body: string): { kind: 'single' } | IndexParseSlice {
     let parsed: unknown;
     try {
         parsed = JSON.parse(body);
@@ -501,26 +530,60 @@ function parseManifestClassification(body: string): ManifestClassification {
     }
 
     const descriptors: ManifestPlatformDescriptor[] = [];
+    const exactDigests: string[] = [];
+    const nestedDigests: string[] = [];
+
     for (const entry of rawManifests) {
-        if (!entry || typeof entry !== 'object') continue;
+        if (!entry || typeof entry !== 'object') {
+            throw new Error('Manifest index has a malformed descriptor entry');
+        }
         const e = entry as Record<string, unknown>;
-        const digest = typeof e.digest === 'string' ? e.digest : null;
+        const digest = typeof e.digest === 'string' && e.digest.length > 0 ? e.digest : null;
+        if (!digest) {
+            throw new Error('Manifest index descriptor is missing a digest');
+        }
+        if (!SHA256_DIGEST_RE.test(digest)) {
+            throw new Error('Manifest index descriptor has a malformed digest');
+        }
+
+        const annotations = e.annotations as Record<string, unknown> | undefined;
+        if (annotations?.['vnd.docker.reference.type'] === 'attestation-manifest') continue;
+
+        const mediaType = typeof e.mediaType === 'string' ? e.mediaType : '';
+        if (!mediaType) {
+            throw new Error('Manifest index descriptor is missing a media type');
+        }
+        // Nested indexes must be queued before unknown/unknown filtering: OCI allows
+        // platform on index descriptors, and skipping them would yield a false update.
+        if (INDEX_MANIFEST_MEDIA_TYPES.has(mediaType)) {
+            nestedDigests.push(digest);
+            continue;
+        }
+        if (!SINGLE_MANIFEST_MEDIA_TYPES.has(mediaType)) {
+            throw new Error(`Manifest index has an unrecognized descriptor media type (${mediaType})`);
+        }
+
         const platform = e.platform as Record<string, unknown> | undefined;
         const os = platform && typeof platform.os === 'string' ? platform.os : null;
         const architecture = platform && typeof platform.architecture === 'string' ? platform.architecture : null;
-        if (!digest || !os || !architecture) continue;
-        if (os === 'unknown' && architecture === 'unknown') continue; // attestation / provenance placeholders
-        const annotations = e.annotations as Record<string, unknown> | undefined;
-        if (annotations?.['vnd.docker.reference.type'] === 'attestation-manifest') continue;
-        const variant = platform && typeof platform.variant === 'string' ? platform.variant : undefined;
-        descriptors.push(variant ? { digest, os, architecture, variant } : { digest, os, architecture });
+        if (os === 'unknown' && architecture === 'unknown') continue;
+
+        if (os && architecture) {
+            const variant = platform && typeof platform.variant === 'string' ? platform.variant : undefined;
+            descriptors.push(variant ? { digest, os, architecture, variant } : { digest, os, architecture });
+        } else {
+            // OCI allows platform to be omitted on a runnable descriptor. Keep the
+            // digest for exact membership; do not invent a platform match.
+            exactDigests.push(digest);
+        }
     }
-    return { kind: 'index', descriptors };
+
+    return { kind: 'slice', descriptors, exactDigests, nestedDigests };
 }
 
-/** Content-addressable digest of a UTF-8 manifest body (`sha256:` + hex). */
-function contentDigestOfBody(body: string): string {
-    return `sha256:${crypto.createHash('sha256').update(body, 'utf8').digest('hex')}`;
+/** Content-addressable digest of raw response bytes (`sha256:` + hex). */
+function contentDigestOfBytes(buf: Buffer): string {
+    return `sha256:${crypto.createHash('sha256').update(buf).digest('hex')}`;
 }
 
 /**
@@ -530,14 +593,18 @@ function contentDigestOfBody(body: string): string {
  * mismatched docker-content-digest header, a body whose sha256 does not
  * equal the requested digest, or a truncated (oversize) body, so a bad
  * fetch can never resolve as a cacheable classification.
+ * Returns verified raw bytes; callers decode to UTF-8 only after this check.
  */
-async function fetchManifestBodyByDigest(
+async function fetchManifestBytesByDigest(
     registry: string,
     repo: string,
     digest: string,
     authHeaders: Record<string, string>,
     ref: string,
-): Promise<string> {
+): Promise<Buffer> {
+    if (!SHA256_DIGEST_RE.test(digest)) {
+        throw new Error(`Manifest digest is malformed for ${ref}`);
+    }
     const url = `https://${registry}/v2/${repo}/manifests/${digest}`;
     const res = await httpGetCapped(url, authHeaders, MANIFEST_EXPANSION_BODY_CAP_BYTES);
     if (res.statusCode !== 200) {
@@ -550,13 +617,75 @@ async function fetchManifestBodyByDigest(
     if (typeof returned === 'string' && returned !== digest) {
         throw new Error(`Registry returned a mismatched digest for ${ref}`);
     }
-    // Always verify the body itself. Trusting only the response header would
+    // Always verify the raw body. Trusting only the response header would
     // skip integrity when the header is absent and would accept a
     // header/body pair that a cache or proxy fabricated.
-    if (contentDigestOfBody(res.body) !== digest) {
+    if (contentDigestOfBytes(res.bodyBytes) !== digest) {
         throw new Error(`Registry response body does not match the requested digest for ${ref}`);
     }
-    return res.body;
+    return res.bodyBytes;
+}
+
+/**
+ * Flatten an index (and nested indexes) into platform + exact-digest membership
+ * lists. Digest-pinned only; never re-GETs a mutable tag. Depth, visited-digest,
+ * and per-index descriptor caps fail closed as thrown errors.
+ */
+async function resolveIndexClassification(
+    primaryBody: string,
+    primaryDigest: string,
+    registry: string,
+    repo: string,
+    authHeaders: Record<string, string>,
+    ref: string,
+    contentType: string | undefined,
+): Promise<ManifestClassification> {
+    const first = parseIndexBody(primaryBody);
+    if (first.kind === 'single') {
+        // Index Content-Type with a non-index body is incomplete classification.
+        // Fail closed rather than treating the mismatch as a definite update.
+        if (contentType && INDEX_MANIFEST_MEDIA_TYPES.has(contentType)) {
+            throw new Error(`Manifest Content-Type is an image index but the body has no manifests array for ${ref}`);
+        }
+        return first;
+    }
+
+    const descriptors: ManifestPlatformDescriptor[] = [...first.descriptors];
+    const exactDigests = new Set<string>(first.exactDigests);
+    const visited = new Set<string>([primaryDigest]);
+    const queue: { digest: string; depth: number }[] = first.nestedDigests.map((digest) => ({ digest, depth: 1 }));
+    let totalDescriptors = indexSliceSize(first);
+
+    while (queue.length > 0) {
+        const item = queue.shift();
+        if (!item) break;
+        const { digest, depth } = item;
+        if (visited.has(digest)) continue;
+        if (depth >= MANIFEST_INDEX_MAX_DEPTH) {
+            throw new Error(`Manifest index nesting exceeds the depth limit of ${MANIFEST_INDEX_MAX_DEPTH} for ${ref}`);
+        }
+        visited.add(digest);
+
+        const nestedBytes = await fetchManifestBytesByDigest(registry, repo, digest, authHeaders, ref);
+        const nested = parseIndexBody(nestedBytes.toString('utf8'));
+        if (nested.kind === 'single') {
+            // A digest advertised as an index media type resolved to a non-index body.
+            throw new Error(`Nested manifest at ${digest} is not an image index`);
+        }
+        totalDescriptors += indexSliceSize(nested);
+        if (totalDescriptors > MANIFEST_INDEX_DESCRIPTOR_CAP) {
+            throw new Error(`Manifest index expansion exceeds the ${MANIFEST_INDEX_DESCRIPTOR_CAP} descriptor cap`);
+        }
+        descriptors.push(...nested.descriptors);
+        for (const d of nested.exactDigests) exactDigests.add(d);
+        for (const nestedDigest of nested.nestedDigests) {
+            if (!visited.has(nestedDigest)) {
+                queue.push({ digest: nestedDigest, depth: depth + 1 });
+            }
+        }
+    }
+
+    return { kind: 'index', descriptors, exactDigests: [...exactDigests] };
 }
 
 /**
@@ -572,7 +701,7 @@ async function classifyManifest(
     repo: string,
     primaryDigest: string,
     contentType: string | undefined,
-    probeBody: string | null,
+    probeBody: Buffer | null,
     authHeaders: Record<string, string>,
     ref: string,
 ): Promise<ManifestClassification> {
@@ -589,16 +718,24 @@ async function classifyManifest(
         // If the fallback GET already returned a body, classify that only when
         // its content digest matches the primary digest from the probe. Never
         // re-fetch the floating tag.
-        let body: string;
+        let bodyBytes: Buffer;
         if (probeBody !== null) {
-            if (contentDigestOfBody(probeBody) !== primaryDigest) {
+            if (contentDigestOfBytes(probeBody) !== primaryDigest) {
                 throw new Error(`Registry response body does not match the requested digest for ${ref}`);
             }
-            body = probeBody;
+            bodyBytes = probeBody;
         } else {
-            body = await fetchManifestBodyByDigest(registry, repo, primaryDigest, authHeaders, ref);
+            bodyBytes = await fetchManifestBytesByDigest(registry, repo, primaryDigest, authHeaders, ref);
         }
-        return parseManifestClassification(body);
+        return resolveIndexClassification(
+            bodyBytes.toString('utf8'),
+            primaryDigest,
+            registry,
+            repo,
+            authHeaders,
+            ref,
+            contentType,
+        );
     });
 }
 
@@ -640,6 +777,8 @@ export async function compareLocalToRemoteTag(
     }
 
     if (classification.kind === 'single') return { kind: 'update' };
+
+    if (classification.exactDigests.includes(localDigest)) return { kind: 'match' };
 
     if (!platform.os || !platform.architecture) {
         return { kind: 'error', reason: `Local image platform is unknown; cannot verify multi-arch membership for ${ref}` };
