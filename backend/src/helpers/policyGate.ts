@@ -5,8 +5,6 @@ import { DatabaseService } from '../services/DatabaseService';
 import type { ScanPolicy } from '../services/DatabaseService';
 import { NotificationService } from '../services/NotificationService';
 import TrivyService, { DIGEST_CACHE_TTL_MS } from '../services/TrivyService';
-import { LicenseService } from '../services/LicenseService';
-import { effectiveTier } from '../middleware/tierGates';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { summarizeBlockReasons } from '../utils/policy-risk';
@@ -38,7 +36,6 @@ export function buildPolicyGateOptions(
   return {
     bypass: overrides.bypass ?? defaultBypass,
     actor: overrides.actor ?? req.user?.username ?? 'unknown',
-    blockingEnabled: effectiveTier(req) === 'paid',
     ip: (req.ip ?? req.socket.remoteAddress ?? '') as string,
     auditMethod: req.method,
     auditPath: req.originalUrl || req.url,
@@ -47,12 +44,11 @@ export function buildPolicyGateOptions(
 
 export function buildSystemPolicyGateOptions(
   actor: string,
-  overrides: { bypass?: boolean; blockingEnabled?: boolean; auditPath?: string; auditMethod?: string } = {},
+  overrides: { bypass?: boolean; auditPath?: string; auditMethod?: string } = {},
 ): PolicyEnforcementOptions {
   return {
     bypass: overrides.bypass ?? false,
     actor,
-    blockingEnabled: overrides.blockingEnabled ?? LicenseService.getInstance().getTier() === 'paid',
     auditMethod: overrides.auditMethod ?? 'POST',
     auditPath: overrides.auditPath,
   };
