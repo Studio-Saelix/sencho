@@ -69,7 +69,7 @@ test.describe('Desktop navigation styles', () => {
     await page.getByRole('button', { name: 'Add quick link' }).click();
     await page.getByRole('menuitem', { name: /Networking/i }).click();
 
-    const pin = topbar.getByRole('button', { name: 'Networking' });
+    const pin = topbar.getByRole('button', { name: 'Networking', exact: true });
     await expect(pin).toBeVisible();
     await expect(pin.locator('span.inline')).toBeVisible();
 
@@ -80,7 +80,7 @@ test.describe('Desktop navigation styles', () => {
     await loginAs(page);
     await waitForStacksLoaded(page);
 
-    await expect(page.locator('[data-sn-chrome="topbar"]').getByRole('button', { name: 'Networking' })).toBeVisible();
+    await expect(page.locator('[data-sn-chrome="topbar"]').getByRole('button', { name: 'Networking', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Add quick link' })).toBeVisible();
   });
 });
