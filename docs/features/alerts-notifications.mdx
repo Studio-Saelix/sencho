@@ -35,7 +35,7 @@ Use the Generic Webhook tab when you have your own receiver: a Mattermost or Tea
 ```json
 {
   "level": "warning",
-  "message": "[Node: Local] The cpu_percent for plex has exceeded your threshold of 80% (Currently: 91%).",
+  "message": "The **CPU usage** for **plex** has exceeded your threshold of **80%** (Currently: 91%).",
   "timestamp": "2026-05-08T22:14:09.812Z",
   "source": "sencho"
 }
@@ -287,13 +287,13 @@ The bell aggregates across the entire fleet by hitting `/api/notifications` agai
 
 Per-stack alert rules and channel configuration are **stored on the node where the stack runs**. To configure a rule on a remote, switch the active node via the picker, open the stack's **Monitor** sheet, and the form's POST is forwarded to the remote.
 
-Crash detection runs only on local Docker; remote nodes run their own copy of `DockerEventService` and emit through the proxy. Each emitted message is prefixed with `[Node: <nodeName>]` so the source is unambiguous in the channel.
+Crash detection runs only on local Docker; remote nodes run their own copy of `DockerEventService` and emit through the proxy. On a multi-node fleet the bell attributes remotes with a node-name badge rather than embedding the satellite-local name in the message. External channel payloads (Slack, Discord, custom webhook) receive the same sanitized body with no structured source-node id.
 
 Switching the active node only affects per-stack rule editing and the Settings panels. The bell aggregates every node regardless of which one is active.
 
 ## Alerts emitted by the system
 
-Sencho dispatches notifications from many code paths. The list below covers every emitter in current code, organized by source. Each message is prefixed with `[Node: <nodeName>]` when emitted by a node-scoped service.
+Sencho dispatches notifications from many code paths. The list below covers every emitter in current code, organized by source. Message bodies are node-neutral for local targets so fleet aggregation does not contradict the bell badge; remote-target names stay when a hub names an authoritative remote.
 
 ### Container crash and health
 
@@ -332,7 +332,7 @@ The entire host threshold evaluation can be silenced per node from **Settings ·
 
 ### Image update availability
 
-`info`/`image_update_available`: `Stack "<name>" has image updates available.` Polled every 6 hours, with a 2-minute startup delay and a 2-minute cooldown on manual refresh. Notifies on **state transition only**; pre-existing `has_update` rows are backfilled silently on first run.
+`info`/`image_update_available`: `Stack "<name>" has image updates available.` By default, checks every two hours in interval mode, with a two-minute startup delay. The cadence can be changed or replaced with a cron schedule. Manual refresh carries a two-minute cooldown. Notifies on **state transition only**; the first run also emits catch-up notifications for stacks already known to have updates.
 
 ### Auto-update execution
 
@@ -362,14 +362,16 @@ See [Vulnerability scanning](/features/vulnerability-scanning).
 - `error`/`system`: `Scheduled task "<name>" (<action>) failed: <err>`
 - `info`/`system` recovery: `Scheduled task "<name>" (<action>) recovered successfully`
 
+Local-target failure reasons stay node-neutral (`Target node is offline`, `Container "<n>" not found on this node. ...`). When the task targets a remote node, the failure reason keeps that node's roster name.
+
 ### Recovery Vault upload failure
 
 `warning`/`system`: `Cloud backup failed for scheduled snapshot <id>: <message>`. See [Fleet backups](/features/fleet-backups).
 
 ### Blueprints
 
-- `warning`/`blueprint_drift_detected`: `Blueprint "<n>" drifted on node "<n2>": <reason>` (suggest mode), with stateful-safeguard variants when enforce mode declines to redeploy.
-- `error`/`blueprint_drift_correction_failed`: `Auto-fix for "<n>" on node "<n2>" failed: <err>`.
+- `warning`/`blueprint_drift_detected`: `Blueprint "<n>" drifted on this node: <reason>` for a local target, or `Blueprint "<n>" drifted on node "<remote>": <reason>` for a remote. Stateful marker-loss uses the same local/remote clause.
+- `error`/`blueprint_drift_correction_failed`: `Auto-fix for "<n>" on this node failed: <err>` (local) or `Auto-fix for "<n>" on node "<remote>" failed: <err>` (remote).
 
 See [Blueprints](/features/blueprint-model).
 
@@ -459,6 +461,6 @@ Switching the active node tears down per-stack rule editors and reloads channel 
     Fleet and the notification path share the same version lookup. When a newer published release is in that cache, Monitor dispatches a single `info`/`node_update_available` alert and records it under `last_sencho_update_notified_version`, so each release produces one alert per node. If you already upgraded to (or past) that version, the dedup self-heals and the alert does not fire. Check **Settings · Notifications · Mute Rules** for a rule that mutes `node_update_available` in the bell. A newly published release may take up to the cache TTL (about 30 minutes when published, or about 3 minutes while registry publish is still pending) before Fleet and the bell both observe it.
   </Accordion>
   <Accordion title="A stack shows the blue update indicator but no notification was received">
-    The image-update service emits on **state transitions only**. The first run of the service backfills a flag against rows that already had `has_update: true` so they do not all re-fire on first install. Once the flag is set, only the false-to-true transition triggers an alert. If a stack was already showing the indicator before backfill ran, a notification will only appear the next time it goes from up-to-date back to behind.
+    The image-update service emits on **state transitions only** after its first run. The first run also emits catch-up notifications for stacks already known to have updates, then sets a backfill flag. Once that flag is set, only a false-to-true transition triggers another alert. If you dismissed the catch-up notification, a new one appears the next time the stack goes from up-to-date back to behind.
   </Accordion>
 </AccordionGroup>

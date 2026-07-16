@@ -895,7 +895,12 @@ describe('MonitorService - breach state machine', () => {
     const svc = MonitorService.getInstance();
     await (svc as any).evaluate();
 
-    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('CPU'), { stackName: 'my-stack', actor: 'system:monitor' });
+    expect(mockDispatchAlert).toHaveBeenCalledWith(
+      'warning',
+      'monitor_alert',
+      'The **CPU usage** for **my-stack** has exceeded your threshold of **80%** (Currently: 90%).',
+      { stackName: 'my-stack', actor: 'system:monitor' },
+    );
     expect(mockUpdateStackAlertLastFired).toHaveBeenCalledWith(1, expect.any(Number));
   });
 

@@ -29,6 +29,11 @@ function diagnosticLog(message: string, fields: Record<string, string | number |
     console.info(`[BlueprintReconciler:diag] ${message}`, safeFields);
 }
 
+/** Local seed name must not reach fleet alerts; remote roster names stay. */
+function nodeLocationClause(node: Node): string {
+    return node.type === 'local' ? 'on this node' : `on node "${node.name}"`;
+}
+
 export interface ReconcileDecision {
     deploy: Node[];
     withdraw: Node[];
@@ -287,7 +292,7 @@ export class BlueprintReconciler {
                 notifications.dispatchAlert(
                     'warning',
                     'blueprint_drift_detected',
-                    `Blueprint "${blueprint.name}" drifted on node "${node.name}": ${reason}`,
+                    `Blueprint "${blueprint.name}" drifted ${nodeLocationClause(node)}: ${reason}`,
                     { stackName: blueprint.name, actor: 'system:blueprint' },
                 );
                 return;
@@ -301,7 +306,7 @@ export class BlueprintReconciler {
                         notifications.dispatchAlert(
                             'warning',
                             'blueprint_drift_detected',
-                            `Blueprint "${blueprint.name}" lost its marker on node "${node.name}"; auto-fix declined to avoid stomping unowned data. Reason: ${reason}`,
+                            `Blueprint "${blueprint.name}" lost its marker ${nodeLocationClause(node)}; auto-fix declined to avoid stomping unowned data. Reason: ${reason}`,
                             { stackName: blueprint.name, actor: 'system:blueprint' },
                         );
                         return;
@@ -318,7 +323,7 @@ export class BlueprintReconciler {
                     notifications.dispatchAlert(
                         'error',
                         'blueprint_drift_correction_failed',
-                        `Auto-fix for "${blueprint.name}" on node "${node.name}" failed: ${result.error ?? 'unknown error'}`,
+                        `Auto-fix for "${blueprint.name}" ${nodeLocationClause(node)} failed: ${result.error ?? 'unknown error'}`,
                         { stackName: blueprint.name, actor: 'system:blueprint' },
                     );
                 }

@@ -765,7 +765,8 @@ export class MonitorService {
                                 const safeCurrent = typeof currentValue === 'number' ? Number(currentValue.toFixed(2)) : currentValue;
                                 const safeThreshold = typeof rule.threshold === 'number' ? Number(rule.threshold.toFixed(2)) : rule.threshold;
 
-                                const message = `[Node: ${node.name}] The **${metricName}** for **${rule.stack_name}** ${operatorPhrase} **${safeThreshold}${unit}** (Currently: ${safeCurrent}${unit}).`;
+                                // Node-neutral body: the hub bell badge attributes remotes.
+                                const message = `The **${metricName}** for **${rule.stack_name}** ${operatorPhrase} **${safeThreshold}${unit}** (Currently: ${safeCurrent}${unit}).`;
 
                                 console.log(`[MonitorService] Alert fired: rule ${ruleId} on stack "${rule.stack_name}": ${metricName} ${operatorPhrase} ${safeThreshold}${unit}`);
                                 await NotificationService.getInstance().dispatchAlert(

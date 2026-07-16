@@ -193,6 +193,27 @@ describe('useNotifications', () => {
     await waitFor(() => expect(fetchForNode).toHaveBeenCalledWith('/notifications', 2));
   });
 
+  it('stamps roster nodeName on remote REST notifications without rewriting the body', async () => {
+    const remote = makeRemoteNode('online', { id: 2, name: 'sencho-sat-qa' });
+    const neutralBody =
+      'Scheduled task "qa-missing-container" (restart) failed: Container "web" not found on this node. It may have been renamed or removed.';
+    (apiFetch as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, json: async () => [] });
+    (fetchForNode as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: true,
+      json: async () => [{ id: 9, level: 'error', message: neutralBody, timestamp: 2000, is_read: 0 }],
+    });
+
+    const { result } = renderHook(() =>
+      useNotifications({ nodes: [localNode, remote], onStateInvalidate: vi.fn(), onImageUpdatesChange: vi.fn() }),
+    );
+
+    await waitFor(() => expect(result.current.notifications).toHaveLength(1));
+    expect(result.current.notifications[0].message).toBe(neutralBody);
+    expect(result.current.notifications[0].nodeId).toBe(2);
+    expect(result.current.notifications[0].nodeName).toBe('sencho-sat-qa');
+    expect(result.current.notifications[0].message).not.toMatch(/\[Node:|Local/);
+  });
+
   it('subscribes to the online node and skips the offline one in a mixed fleet', async () => {
     renderHook(() =>
       useNotifications({

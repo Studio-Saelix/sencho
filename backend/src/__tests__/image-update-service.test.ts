@@ -452,13 +452,13 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, true);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'info',
       'image_update_available',
-      expect.stringContaining('stackA'),
+      'Stack "stackA" has image updates available.',
       { stackName: 'stackA', actor: 'system:image-update' },
     );
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'ok', null);
@@ -469,7 +469,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, true);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockDispatchAlert).not.toHaveBeenCalled();
   });
@@ -483,7 +483,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, true);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
     const dispatched = mockDispatchAlert.mock.calls.map(call => (call[3] as any)?.stackName);
@@ -497,7 +497,7 @@ services:
     mockGetStackUpdateStatus.mockReturnValue({ stackA: true, stackB: true });
     stubCheckImage(service, true);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockDispatchAlert).not.toHaveBeenCalled();
   });
@@ -508,11 +508,11 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, true);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockAddNotificationHistory).toHaveBeenCalledWith(1, expect.objectContaining({
       level: 'error',
-      message: expect.stringContaining('webhook timeout'),
+      message: 'Failed to notify about image updates for stack "stackA": webhook timeout',
     }));
   });
 });
@@ -567,7 +567,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImageByRef(service, { 'nginx:latest': { hasUpdate: false, error: 'Registry unreachable for registry-1.docker.io/library/nginx:latest' } });
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockRecordStackCheckFailure).toHaveBeenCalledWith(1, 'stackA', expect.stringContaining('Registry unreachable'), expect.any(Number));
     expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
@@ -584,7 +584,7 @@ services:
       'postgres:15': { hasUpdate: false, error: 'Registry unreachable for registry-1.docker.io/library/postgres:15' },
     });
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'partial', expect.stringContaining('Registry unreachable'));
     expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
@@ -605,7 +605,7 @@ services:
       'postgres:15': { hasUpdate: false },
     });
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'partial', expect.stringContaining('Registry unreachable'));
     expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
@@ -619,7 +619,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImageByRef(service, { 'nginx:latest': { hasUpdate: false, notCheckable: true } });
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', false, expect.any(Number), 'ok', null);
     expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
@@ -665,7 +665,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, false);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockEnvExists).toHaveBeenCalledWith('stackA');
     expect(mockGetEnvContent).not.toHaveBeenCalled();
@@ -677,7 +677,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, false);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockEnvExists).toHaveBeenCalledWith('stackA');
     expect(mockGetEnvContent).toHaveBeenCalledWith('stackA');
@@ -689,7 +689,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, false);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     // Should not throw; should still complete and write status
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalled();
@@ -1070,7 +1070,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, false);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockClearStackUpdateStatus).toHaveBeenCalledWith(1, 'stackB');
   });
@@ -1080,7 +1080,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, false);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockClearStackUpdateStatus).not.toHaveBeenCalled();
   });
@@ -1125,7 +1125,7 @@ services:
     const checkImageSpy = vi.fn().mockResolvedValue({ hasUpdate: false });
     (service as any).checkImage = checkImageSpy;
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     // Should check both the compose image and the container image
     const checkedImages = checkImageSpy.mock.calls.map((c: any[]) => c[1]);
@@ -1143,7 +1143,7 @@ services:
     const checkImageSpy = vi.fn().mockResolvedValue({ hasUpdate: false });
     (service as any).checkImage = checkImageSpy;
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     const checkedImages = checkImageSpy.mock.calls.map((c: any[]) => c[1]);
     expect(checkedImages).not.toContain('someapp:v2');

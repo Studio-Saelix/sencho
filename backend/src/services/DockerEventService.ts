@@ -721,7 +721,7 @@ export class DockerEventService {
     }
 
     // ========================================================================
-    // Notification wrappers (prefix with node name for multi-node clarity)
+    // Notification wrappers (node-neutral bodies; hub bell badges remotes)
     // ========================================================================
 
     private buildAlertOptions(
@@ -735,19 +735,15 @@ export class DockerEventService {
     }
 
     private async emitError(category: NotificationCategory, message: string, stackName?: string, containerName?: string, systemOnly = false): Promise<void> {
-        return this.notifier.dispatchAlert('error', category, this.prefix(message), this.buildAlertOptions(stackName, containerName, systemOnly));
+        return this.notifier.dispatchAlert('error', category, message, this.buildAlertOptions(stackName, containerName, systemOnly));
     }
 
     private async emitWarning(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
-        return this.notifier.dispatchAlert('warning', category, this.prefix(message), this.buildAlertOptions(stackName, containerName));
+        return this.notifier.dispatchAlert('warning', category, message, this.buildAlertOptions(stackName, containerName));
     }
 
     private async emitInfo(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
-        return this.notifier.dispatchAlert('info', category, this.prefix(message), this.buildAlertOptions(stackName, containerName));
-    }
-
-    private prefix(message: string): string {
-        return `[Node: ${this.nodeName}] ${message}`;
+        return this.notifier.dispatchAlert('info', category, message, this.buildAlertOptions(stackName, containerName));
     }
 
     // ========================================================================

@@ -137,7 +137,7 @@ describe('DockerEventService - die classification', () => {
         expect(mockDispatchAlert).toHaveBeenCalledWith(
             'error',
             'monitor_alert',
-            expect.stringContaining('Container Crash Detected'),
+            'Container Crash Detected: web exited unexpectedly (Code: 1).',
             expect.objectContaining({ containerName: 'web' }),
         );
     });
@@ -588,8 +588,8 @@ describe('DockerEventService - reconnect', () => {
 
         const warn = mockDispatchAlert.mock.calls.find(c => c[0] === 'warning');
         const info = mockDispatchAlert.mock.calls.find(c => c[0] === 'info');
-        expect(warn?.[2]).toContain('Lost connection');
-        expect(info?.[2]).toContain('Reconnected');
+        expect(warn?.[2]).toBe('Lost connection to Docker daemon; monitoring paused.');
+        expect(info?.[2]).toBe('Reconnected to Docker daemon.');
     });
 
     it('shutdown cancels pending reconnect', async () => {
