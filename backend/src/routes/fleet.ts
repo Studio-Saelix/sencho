@@ -50,7 +50,7 @@ import { collectFleetLabelSummaries } from '../helpers/fleetLabelSummary';
 import { runLocalLabelAssign, validateLabelTemplate, validateRemoteAssignResults, failAllAssign, type AssignNodeResult } from '../helpers/fleetLabelAssign';
 import { MAX_ASSIGNMENTS } from '../helpers/constants';
 import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashboard';
-import { normalizeConfigurationAgents } from '../helpers/configurationStatus';
+import { normalizeRemoteConfigurationStatus } from '../helpers/configurationStatus';
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
 import { buildNodeLabelInventory, VALID_LABEL_SOURCES, type NodeLabelInventory } from '../services/LabelInventoryService';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
@@ -689,15 +689,7 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
             },
           );
           const raw = resp.ok ? (await resp.json() as ConfigurationStatus) : null;
-          const configuration = raw
-            ? {
-                ...raw,
-                notifications: {
-                  ...raw.notifications,
-                  agents: normalizeConfigurationAgents(raw.notifications.agents),
-                },
-              }
-            : null;
+          const configuration = raw ? normalizeRemoteConfigurationStatus(raw) : null;
           return {
             id: node.id,
             name: node.name,
