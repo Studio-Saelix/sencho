@@ -7,8 +7,10 @@ description: "Block deploys that violate a scan policy before docker compose up 
 Deploy enforcement is the pre-flight half of Sencho's vulnerability workflow. When a [scan policy](/features/vulnerability-scanning#scan-policies) with **Block on deploy** enabled matches a stack, Sencho scans every image referenced by the stack's compose file before starting any container. A policy gates on exploitation risk: a known-exploited CVE (CISA KEV), a fixable Critical/High finding, or a raw severity threshold. If any image matches an enabled condition, the deploy is rejected and the stack never starts. Detection always continues post-deploy and on a schedule, so images that develop new vulnerabilities after the initial deploy still surface through alerts.
 
 <Note>
-  Deploy enforcement and scan policies require an **Admiral** license.
+  Deploy enforcement and scan policies are available on every tier.
 </Note>
+
+The **Security** page's Overview tab carries a **Deploy enforcement** summary card showing the count of enabled block policies and the current Honor suppressions state. The card is read-only; manage policies from the **Policies** tab.
 
 ## Configuring a block policy
 
@@ -21,7 +23,7 @@ Policies are managed on the **Security** page → **Policies** tab. The **Add po
 The editor exposes the fields that govern enforcement:
 
 <Frame>
-  <img src="/images/deploy-enforcement/policy-edit-modal.png" alt="New policy modal with kicker SECURITY · NEW POLICY and title New policy. Fields shown: Name filled with 'Production block on critical', Stack pattern (optional) empty, Block conditions section with Severity threshold toggled ON and the Critical severity dropdown visible, Known-exploited (KEV) ON, Fixable Critical/High ON, Block on deploy OFF, Enabled ON. Cancel and Create buttons at the bottom." />
+  <img src="/images/deploy-enforcement/policy-edit-modal.png" alt="New policy modal with kicker SECURITY · NEW POLICY and title New policy. Fields shown: Name filled with 'Production block on critical', Stack pattern (optional) filled with 'prod-*', Block conditions section with Severity threshold toggled ON and the Critical severity dropdown visible, Known-exploited (KEV) ON, Fixable Critical/High ON, Block on deploy ON, Enabled ON. Cancel and Create buttons at the bottom." />
 </Frame>
 
 | Field | Purpose |
@@ -38,7 +40,7 @@ The editor sets the pattern, the block conditions, and the toggles. Per-node sco
 
 ### Honor suppressions
 
-The **Honor suppressions in deploy blocks** toggle sits at the bottom of the **Policies** tab, below the policy list. When on, a [suppressed CVE](/features/cve-suppressions) no longer counts toward a block-on-deploy policy, so an accepted finding will not stop a deploy on this instance. When off (the default), policies evaluate the raw scan result and block on any finding that matches a condition, including those you have suppressed elsewhere.
+The **Honor suppressions in deploy blocks** toggle sits at the bottom of the **Policies** tab, below the policy list. When on, a [suppressed CVE](/features/cve-suppressions) no longer counts toward a block-on-deploy policy, so an accepted finding will not stop a deploy on this instance. Off by default, policies block on the raw scan result, including findings you have suppressed elsewhere.
 
 ## How enforcement runs
 
@@ -68,8 +70,10 @@ Pre-flight scans use the same 24-hour digest cache as on-demand scans, so the se
 
 ## What the block dialog shows
 
+This is a hard gate: the deploy is rejected and cannot proceed without an admin bypass. It is a different dialog from the optional [pre-deploy scan advisory](/features/vulnerability-scanning#pre-deploy-scan-advisory), which only shows scan results for review on a manual deploy and never blocks.
+
 <Frame>
-  <img src="/images/deploy-enforcement/block-dialog.png" alt="Deploy blocked dialog with kicker PROFILARR · SCAN POLICY · BLOCKED, title 'Deploy blocked by security policy', a description naming the policy and block conditions, a violation row for santiagosayshey/profilarr:latest with 16 CRITICAL · 111 HIGH · 59 FIXABLE counts and Severity and Fixable reason badges and a CRITICAL severity chip, and Close and Deploy anyway buttons." />
+  <img src="/images/deploy-enforcement/block-dialog.png" alt="Deploy blocked dialog with kicker PROFILARR · SCAN POLICY · BLOCKED, title 'Deploy blocked by security policy', a description naming the policy and block conditions, a violation row for santiagosayshey/profilarr:latest with 20 CRITICAL · 150 HIGH · 73 FIXABLE counts and Severity and Fixable reason badges and a CRITICAL severity chip, and Close and Deploy anyway buttons." />
 </Frame>
 
 The dialog shows:
