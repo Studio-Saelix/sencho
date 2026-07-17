@@ -13,35 +13,20 @@ import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { classifyAppriseEndpoint, isKeyedAppriseEndpoint, isStatelessAppriseEndpoint } from '@/lib/appriseEndpoint';
 
 type ChannelType = 'discord' | 'slack' | 'webhook' | 'apprise';
-
-function classifyAppriseEndpoint(url: string): 'keyed' | 'stateless' | null {
-    let path: string;
-    try {
-        path = new URL(url).pathname.replace(/\/$/, '');
-    } catch {
-        path = url.replace(/\/$/, '');
-        if (path.endsWith('/notify')) return 'stateless';
-        return /\/notify\/[^/]+$/.test(path) ? 'keyed' : null;
-    }
-    if (path === '/notify') return 'stateless';
-    return /^\/notify\/[^/]+$/.test(path) ? 'keyed' : null;
-}
-
-function isStatelessAppriseEndpoint(url: string): boolean {
-    return classifyAppriseEndpoint(url) === 'stateless';
-}
-
-function isKeyedAppriseEndpoint(url: string): boolean {
-    return classifyAppriseEndpoint(url) === 'keyed';
-}
 
 function appriseWriteConfig(agent: Agent): { urls: string } | { tags: string } {
     if (isStatelessAppriseEndpoint(agent.url)) {
         return { urls: agent.config?.urls ?? '' };
     }
     return { tags: agent.config?.tags ?? '' };
+}
+
+function hasStoredAppriseAgent(agent: Agent): boolean {
+    // Stateless public URLs are not redacted; treat a public mode summary (or keyed redaction) as stored.
+    return Boolean(agent.config?.mode) || agent.url.includes('<redacted>');
 }
 
 export function NotificationsSection() {
@@ -115,13 +100,16 @@ export function NotificationsSection() {
             if (type !== 'apprise') {
                 body.url = agent.url;
             } else {
-                const urlRedacted = agent.url.includes('<redacted>');
-                if (appriseUrlDirty || !urlRedacted) {
+                const stored = hasStoredAppriseAgent(agent);
+                // Omit url/config on clean saves (including enable toggles) so preserve-on-write keeps destinations.
+                // URL-only edits omit config so blank destination fields do not wipe stored URLs.
+                if (appriseUrlDirty || !stored) {
                     body.url = agent.url.trim();
                 }
-                // Send config whenever the raw endpoint is being written (create/replace)
-                // or when Tags / Destination URLs were edited. Preserve-on-write omits both.
-                if (appriseConfigDirty || typeof body.url === 'string') {
+                const storedMode = agent.config?.mode ?? null;
+                const nextMode = classifyAppriseEndpoint(agent.url);
+                const modeChanged = Boolean(stored && storedMode && nextMode && storedMode !== nextMode);
+                if (appriseConfigDirty || !stored || modeChanged) {
                     body.config = appriseWriteConfig(agent);
                 }
             }

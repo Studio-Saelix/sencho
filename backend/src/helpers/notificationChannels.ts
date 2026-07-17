@@ -20,14 +20,18 @@ export type PublicAppriseConfig = {
 export type PublicAgent = Omit<Agent, 'config' | 'type'> & {
   type: NotificationChannelType;
   config: PublicAppriseConfig | null;
-  secrets_redacted: true;
+  /** True only when Apprise masking was applied; Discord/Slack/webhook still return raw URLs. */
+  secrets_redacted: boolean;
 };
 
 export type PublicNotificationRoute = Omit<NotificationRoute, 'config' | 'channel_type'> & {
   channel_type: NotificationChannelType;
   config: PublicAppriseConfig | null;
-  secrets_redacted: true;
+  secrets_redacted: boolean;
 };
+
+/** Apprise notify key: 1–128 alphanumeric, underscore, or dash (official API notes). */
+export const APPRISE_NOTIFY_KEY = /^[A-Za-z0-9_-]{1,128}$/;
 
 export type ParsedAppriseConfig =
   | { ok: true; mode: 'keyed'; tags?: string }
@@ -38,6 +42,12 @@ const APPRISE_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 const KEYED_KEYS = new Set(['tags']);
 const STATELESS_KEYS = new Set(['urls']);
 const INVALID_STORED = 'Apprise configuration is missing or invalid';
+
+/** Path segment after `/notify/` when the path is `/notify/{key}` (key not yet validated). */
+function notifyKeyFromPath(path: string): string | null {
+  const match = path.match(/^\/notify\/([^/]+)$/);
+  return match ? match[1] : null;
+}
 
 export const cleanStackPatterns = (patterns: string[]): string[] =>
   [...new Set(patterns.map(p => p.trim()).filter(Boolean))];
@@ -51,7 +61,8 @@ export function validateHttpsUrl(value: unknown): string | null {
 export function classifyAppriseEndpoint(endpoint: string): 'keyed' | 'stateless' | null {
   try {
     const path = new URL(endpoint).pathname.replace(/\/$/, '');
-    if (/^\/notify\/[^/]+$/.test(path)) return 'keyed';
+    const key = notifyKeyFromPath(path);
+    if (key !== null) return APPRISE_NOTIFY_KEY.test(key) ? 'keyed' : null;
     if (path === '/notify') return 'stateless';
     return null;
   } catch {
@@ -116,6 +127,11 @@ export function validateNotificationChannel(type: unknown, url: unknown, config?
   }
   if (isPublicAppriseConfigShape(config)) {
     return 'must use raw Apprise config ({ urls } or { tags }), not a public summary';
+  }
+  const path = parsed.pathname.replace(/\/$/, '');
+  const notifyKey = notifyKeyFromPath(path);
+  if (notifyKey !== null && !APPRISE_NOTIFY_KEY.test(notifyKey)) {
+    return 'Apprise notify key must be 1–128 characters of letters, digits, underscore, or dash';
   }
   const mode = classifyAppriseEndpoint(url);
   if (!mode) return 'must use /notify or /notify/{key} with valid configuration';
@@ -266,7 +282,9 @@ export function maskAppriseEndpoint(value: string): string {
   try {
     const parsed = new URL(value);
     const path = parsed.pathname.replace(/\/$/, '');
-    return /^\/notify\/[^/]+$/.test(path) ? `${parsed.origin}/notify/<redacted>` : `${parsed.origin}/notify`;
+    const key = notifyKeyFromPath(path);
+    if (key !== null && APPRISE_NOTIFY_KEY.test(key)) return `${parsed.origin}/notify/<redacted>`;
+    return `${parsed.origin}/notify`;
   } catch {
     return '<invalid url>';
   }
@@ -279,7 +297,7 @@ export function serializePublicAgent(agent: Agent): PublicAgent {
     type: agent.type,
     url: isApprise ? maskAppriseEndpoint(agent.url) : agent.url,
     config: isApprise ? publicAppriseConfig(agent.url, agent.config ?? null) : null,
-    secrets_redacted: true,
+    secrets_redacted: isApprise,
   };
 }
 
@@ -290,7 +308,7 @@ export function serializePublicNotificationRoute(route: NotificationRoute): Publ
     channel_type: route.channel_type,
     channel_url: isApprise ? maskAppriseEndpoint(route.channel_url) : route.channel_url,
     config: isApprise ? publicAppriseConfig(route.channel_url, route.config ?? null) : null,
-    secrets_redacted: true,
+    secrets_redacted: isApprise,
   };
 }
 

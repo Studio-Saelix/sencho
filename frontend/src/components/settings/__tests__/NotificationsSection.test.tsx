@@ -187,6 +187,124 @@ describe('NotificationsSection', () => {
         expect(screen.queryByLabelText(/^Tags$/i)).toBeNull();
     });
 
+    it('omits url and config on stateless enable-only save so destinations are preserved', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) {
+                return agentsResponse([{
+                    type: 'apprise',
+                    url: 'http://apprise.local/notify',
+                    enabled: false,
+                    secrets_redacted: true,
+                    config: {
+                        mode: 'stateless',
+                        has_urls: true,
+                        providers: ['discord'],
+                        url_count: 1,
+                    },
+                }]);
+            }
+            if (url === '/agents' && opts?.method === 'POST') {
+                return { ok: true, json: async () => ({}) };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+
+        render(<NotificationsSection />);
+        await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
+        await waitFor(() => expect(screen.getByLabelText(/Apprise endpoint/i)).toHaveValue('http://apprise.local/notify'));
+
+        await userEvent.click(screen.getByRole('switch'));
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => expect(findAgentsPost()).toBeTruthy());
+        const body = JSON.parse((findAgentsPost()![1] as { body: string }).body);
+        expect(body).toEqual({ type: 'apprise', enabled: true });
+        expect(body).not.toHaveProperty('url');
+        expect(body).not.toHaveProperty('config');
+    });
+
+    it('sends destination URLs when stateless destinations are edited', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) {
+                return agentsResponse([{
+                    type: 'apprise',
+                    url: 'http://apprise.local/notify',
+                    enabled: true,
+                    secrets_redacted: true,
+                    config: { mode: 'stateless', has_urls: true, url_count: 1, providers: ['discord'] },
+                }]);
+            }
+            if (url === '/agents' && opts?.method === 'POST') {
+                return { ok: true, json: async () => ({}) };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+
+        render(<NotificationsSection />);
+        await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
+        const dest = await screen.findByLabelText(/Destination URLs/i);
+        await userEvent.clear(dest);
+        await userEvent.type(dest, 'discord://hook');
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => expect(findAgentsPost()).toBeTruthy());
+        const body = JSON.parse((findAgentsPost()![1] as { body: string }).body);
+        expect(body).toEqual({
+            type: 'apprise',
+            enabled: true,
+            config: { urls: 'discord://hook' },
+        });
+        expect(body).not.toHaveProperty('url');
+    });
+
+    it('omits config on same-mode endpoint-only edit so destinations stay preserved', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) {
+                return agentsResponse([{
+                    type: 'apprise',
+                    url: 'http://apprise.local/notify',
+                    enabled: true,
+                    secrets_redacted: true,
+                    config: { mode: 'stateless', has_urls: true, url_count: 1, providers: ['discord'] },
+                }]);
+            }
+            if (url === '/agents' && opts?.method === 'POST') {
+                return { ok: true, json: async () => ({}) };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+
+        render(<NotificationsSection />);
+        await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
+        const endpoint = await screen.findByLabelText(/Apprise endpoint/i);
+        await userEvent.clear(endpoint);
+        await userEvent.type(endpoint, 'http://apprise.local:8080/notify');
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+        await waitFor(() => expect(findAgentsPost()).toBeTruthy());
+        const body = JSON.parse((findAgentsPost()![1] as { body: string }).body);
+        expect(body).toEqual({
+            type: 'apprise',
+            enabled: true,
+            url: 'http://apprise.local:8080/notify',
+        });
+        expect(body).not.toHaveProperty('config');
+    });
+    it('shows Destination URLs for a query-bearing stateless endpoint', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
+        const endpoint = await screen.findByLabelText(/Apprise endpoint/i);
+        await userEvent.clear(endpoint);
+        await userEvent.type(endpoint, 'http://apprise.local/notify?token=x');
+        expect(await screen.findByLabelText(/Destination URLs/i)).toBeInTheDocument();
+        expect(screen.queryByLabelText(/^Tags$/i)).toBeNull();
+    });
+
     it('disables Test when the Apprise endpoint is still redacted', async () => {
         render(<NotificationsSection />);
         await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));

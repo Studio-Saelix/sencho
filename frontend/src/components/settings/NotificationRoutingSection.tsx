@@ -23,6 +23,7 @@ import { Plus, Trash2, Pencil, RefreshCw, Zap, X, Route } from 'lucide-react';
 import { SettingsCallout } from './SettingsCallout';
 import { SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { classifyAppriseEndpoint, isStatelessAppriseEndpoint } from '@/lib/appriseEndpoint';
 
 interface NotificationRoute {
     id: number;
@@ -54,11 +55,6 @@ const CHANNEL_PLACEHOLDERS: Record<string, string> = {
     apprise: 'http://apprise.local/notify',
 };
 
-/** Client-side mirror of the backend's stateless (`/notify`) classification, used only to pick which form field to show. */
-function isStatelessAppriseChannelUrl(url: string): boolean {
-    return url.replace(/\/$/, '').endsWith('/notify');
-}
-
 export function NotificationRoutingSection() {
     const { nodes } = useNodes();
     const localNode = useMemo(() => nodes.find(n => n.type === 'local') ?? null, [nodes]);
@@ -84,8 +80,8 @@ export function NotificationRoutingSection() {
     const [formAppriseTags, setFormAppriseTags] = useState('');
     const [appriseEndpointDirty, setAppriseEndpointDirty] = useState(false);
     const [appriseConfigDirty, setAppriseConfigDirty] = useState(false);
-    /** True when the route being edited was already stateless; gates the preserve hint. */
-    const [editAppriseWasStateless, setEditAppriseWasStateless] = useState(false);
+    /** Original Apprise mode when editing; drives preserve hints and forces a config write on mode switch. */
+    const [editAppriseOriginalMode, setEditAppriseOriginalMode] = useState<'keyed' | 'stateless' | null>(null);
     const [formPriority, setFormPriority] = useState(0);
     const [formEnabled, setFormEnabled] = useState(true);
 
@@ -141,7 +137,7 @@ export function NotificationRoutingSection() {
         setFormAppriseTags('');
         setAppriseEndpointDirty(false);
         setAppriseConfigDirty(false);
-        setEditAppriseWasStateless(false);
+        setEditAppriseOriginalMode(null);
         setFormPriority(0);
         setFormEnabled(true);
         setEditingId(null);
@@ -161,7 +157,9 @@ export function NotificationRoutingSection() {
         setFormAppriseUrls('');
         setAppriseEndpointDirty(false);
         setAppriseConfigDirty(false);
-        setEditAppriseWasStateless(route.channel_type === 'apprise' && route.config?.mode === 'stateless');
+        setEditAppriseOriginalMode(
+            route.channel_type === 'apprise' ? (route.config?.mode ?? null) : null,
+        );
         setFormPriority(route.priority);
         setFormEnabled(route.enabled);
         setShowForm(true);
@@ -173,11 +171,21 @@ export function NotificationRoutingSection() {
             toast.error(formChannelType === 'apprise' ? 'Enter a valid Apprise endpoint.' : 'Channel URL must be a valid HTTPS URL.');
             return;
         }
+
+        const appriseMode = formChannelType === 'apprise' ? classifyAppriseEndpoint(formChannelUrl) : null;
+        const appriseModeChanged = Boolean(
+            editingId
+            && editAppriseOriginalMode
+            && appriseMode
+            && appriseMode !== editAppriseOriginalMode,
+        );
+        // Mode switch or dirty tags/URLs need config; endpoint-only edits omit it so blank fields preserve destinations.
+        const needsAppriseConfig = formChannelType === 'apprise'
+            && (!editingId || appriseConfigDirty || appriseModeChanged);
         if (
-            formChannelType === 'apprise'
-            && isStatelessAppriseChannelUrl(formChannelUrl)
-            && !editingId
+            appriseMode === 'stateless'
             && !formAppriseUrls.trim()
+            && (!editingId || appriseModeChanged || appriseConfigDirty)
         ) {
             toast.error('Destination URLs are required for a stateless Apprise endpoint.');
             return;
@@ -195,8 +203,12 @@ export function NotificationRoutingSection() {
                 ...(formChannelType !== 'apprise' || !editingId || appriseEndpointDirty
                     ? { channel_url: formChannelUrl.trim() }
                     : {}),
-                ...(formChannelType === 'apprise' && (!editingId || appriseConfigDirty)
-                    ? { config: isStatelessAppriseChannelUrl(formChannelUrl) ? { urls: formAppriseUrls } : { tags: formAppriseTags } }
+                ...(needsAppriseConfig
+                    ? {
+                        config: appriseMode === 'stateless'
+                            ? { urls: formAppriseUrls }
+                            : { tags: formAppriseTags },
+                    }
                     : {}),
                 priority: formPriority,
                 enabled: formEnabled,
@@ -325,7 +337,7 @@ export function NotificationRoutingSection() {
             ],
     );
 
-    const isAppriseStateless = isStatelessAppriseChannelUrl(formChannelUrl);
+    const isAppriseStateless = isStatelessAppriseEndpoint(formChannelUrl);
     const availableStackOptions = stackOptions.filter(o => !formStacks.includes(o.value));
     const availableLabelOptions = useMemo<ComboboxOption[]>(
         () => labelOptions.filter(l => !formLabelIds.includes(l.id)).map(l => ({ value: String(l.id), label: l.name })),
@@ -507,7 +519,7 @@ export function NotificationRoutingSection() {
                                                 setAppriseConfigDirty(true);
                                             }}
                                         />
-                                        {editingId !== null && isAppriseStateless && editAppriseWasStateless && !formAppriseUrls && (
+                                        {editingId !== null && isAppriseStateless && editAppriseOriginalMode === 'stateless' && !formAppriseUrls && (
                                             <p className="text-xs text-stat-subtitle">Leave destination URLs blank to preserve the configured destinations.</p>
                                         )}
                                     </>

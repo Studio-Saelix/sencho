@@ -121,4 +121,88 @@ describe('NotificationRoutingSection', () => {
         expect(JSON.stringify(body)).not.toContain('has_urls');
         expect(JSON.stringify(body)).not.toContain('providers');
     });
+
+    it('sends empty keyed config when switching a stateless route to keyed', async () => {
+        const statelessRoute = {
+            ...APPRISE_ROUTE,
+            channel_url: 'http://apprise.local/notify',
+            config: { mode: 'stateless' as const, has_urls: true, providers: ['discord'], url_count: 1 },
+        };
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return { ok: true, json: async () => [statelessRoute] };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => ['app'] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            if (url === '/notification-routes/42' && opts?.method === 'PUT') {
+                return { ok: true, json: async () => statelessRoute };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByText('Ops Apprise')).toBeInTheDocument());
+        const card = screen.getByText('Ops Apprise').closest('.rounded-lg');
+        await userEvent.click(card!.querySelector('svg.lucide-pencil')!.closest('button')!);
+
+        const urlInput = await screen.findByDisplayValue('http://apprise.local/notify');
+        await userEvent.clear(urlInput);
+        await userEvent.type(urlInput, 'http://apprise.local/notify/new-key');
+        await userEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+        await waitFor(() => expect(findRoutePut()).toBeTruthy());
+        const body = JSON.parse((findRoutePut()![1] as { body: string }).body);
+        expect(body.channel_url).toBe('http://apprise.local/notify/new-key');
+        expect(body.config).toEqual({ tags: '' });
+    });
+
+    it('omits config on same-mode endpoint-only edit so destinations stay preserved', async () => {
+        const statelessRoute = {
+            ...APPRISE_ROUTE,
+            channel_url: 'http://apprise.local/notify',
+            config: { mode: 'stateless' as const, has_urls: true, providers: ['discord'], url_count: 1 },
+        };
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return { ok: true, json: async () => [statelessRoute] };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => ['app'] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            if (url === '/notification-routes/42' && opts?.method === 'PUT') {
+                return { ok: true, json: async () => statelessRoute };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByText('Ops Apprise')).toBeInTheDocument());
+        const card = screen.getByText('Ops Apprise').closest('.rounded-lg');
+        await userEvent.click(card!.querySelector('svg.lucide-pencil')!.closest('button')!);
+
+        const urlInput = await screen.findByDisplayValue('http://apprise.local/notify');
+        await userEvent.clear(urlInput);
+        await userEvent.type(urlInput, 'http://apprise.local:8080/notify');
+        await userEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+        await waitFor(() => expect(findRoutePut()).toBeTruthy());
+        const body = JSON.parse((findRoutePut()![1] as { body: string }).body);
+        expect(body.channel_url).toBe('http://apprise.local:8080/notify');
+        expect(body).not.toHaveProperty('config');
+    });
+
+    it('classifies query-bearing and trailing-slash /notify URLs as stateless', async () => {
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByText('Ops Apprise')).toBeInTheDocument());
+        await userEvent.click(screen.getByRole('button', { name: /Add route/i }));
+        await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
+
+        const urlInput = screen.getByPlaceholderText('http://apprise.local/notify');
+        await userEvent.clear(urlInput);
+        await userEvent.type(urlInput, 'http://apprise.local/notify?x=1');
+        expect(screen.getByPlaceholderText(/Destination URLs/i)).toBeInTheDocument();
+
+        await userEvent.clear(urlInput);
+        await userEvent.type(urlInput, 'http://apprise.local/notify/');
+        expect(screen.getByPlaceholderText(/Destination URLs/i)).toBeInTheDocument();
+    });
 });

@@ -185,6 +185,39 @@ describe('Apprise channel helpers', () => {
     expect(JSON.stringify(agent)).not.toContain('super-secret-token');
   });
 
+  it('rejects Apprise notify keys outside the official alphanumeric/underscore/dash charset', () => {
+    expect(validateNotificationChannel('apprise', 'http://apprise.local/notify/bad.key')).toMatch(/notify key/);
+    expect(validateNotificationChannel('apprise', 'http://apprise.local/notify/has%20space')).toMatch(/notify key|valid configuration/);
+    expect(validateNotificationChannel('apprise', 'http://apprise.local/notify/bad!key')).toMatch(/notify key/);
+    expect(validateNotificationChannel('apprise', `http://apprise.local/notify/${'a'.repeat(129)}`)).toMatch(/notify key/);
+    expect(validateNotificationChannel('apprise', 'http://apprise.local/notify/a')).toBeNull();
+    expect(validateNotificationChannel('apprise', `http://apprise.local/notify/${'A1_-'}${'b'.repeat(124)}`)).toBeNull();
+  });
+
+  it('sets secrets_redacted only for Apprise public DTOs', () => {
+    expect(serializePublicAgent({
+      type: 'discord',
+      url: 'https://discord.com/api/webhooks/1/token',
+      enabled: true,
+    }).secrets_redacted).toBe(false);
+    expect(serializePublicAgent({
+      type: 'slack',
+      url: 'https://hooks.slack.com/services/a/b/c',
+      enabled: true,
+    }).secrets_redacted).toBe(false);
+    expect(serializePublicAgent({
+      type: 'webhook',
+      url: 'https://example.com/hook',
+      enabled: true,
+    }).secrets_redacted).toBe(false);
+    expect(serializePublicAgent({
+      type: 'apprise',
+      url: 'http://apprise.local/notify/k',
+      enabled: true,
+      config: '{}',
+    }).secrets_redacted).toBe(true);
+  });
+
   it('treats null/empty stored config as valid empty keyed', () => {
     expect(parseStoredAppriseConfig('http://apprise.local/notify/key', null)).toEqual({ ok: true, mode: 'keyed' });
     expect(parseStoredAppriseConfig('http://apprise.local/notify/key', '{}')).toEqual({ ok: true, mode: 'keyed' });

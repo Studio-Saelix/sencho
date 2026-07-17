@@ -7,7 +7,7 @@ description: Threshold and event alerts for your fleet, dispatched to Discord, S
 Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and an external channel you configure. This page covers everything from configuring channels to writing per-stack threshold rules, routing alerts to dedicated channels with routing rules, and tuning retention.
 
 <Frame>
-  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel showing the Discord, Slack, Webhook, and Apprise tabs with the masthead breadcrumb, the CHANNELS 4/4 stat, the active Discord tab with its Enabled toggle on, the Webhook URL input, and the Test and Save actions." />
+  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel with Discord, Slack, Webhook, and Apprise tabs, CHANNELS 1/4 in the masthead, the Apprise tab active with Enabled on, a redacted Apprise endpoint, an empty Tags field, and Test disabled beside Save." />
 </Frame>
 
 ## Notification channels
@@ -80,7 +80,7 @@ A route with all four matchers left empty matches every alert and intercepts glo
 Open **Settings · Notifications · Notification Routing** and click **+ Add Route**.
 
 <Frame>
-  <img src="/images/alerts-notifications/routing-modal.png" alt="The 'New routing rule' modal with the 'ROUTING · NEW RULE' kicker, a Name input filled with 'Production alerts', a Node scope select reading 'Any node', empty Stacks, Labels, and Categories combobox pickers, the helper line 'Leave blank to match all categories. All non-empty filters must match (AND).', a Channel tab strip with Discord selected and a webhook URL filled in, and Priority and Enabled fields with Cancel and CREATE actions in the footer." />
+  <img src="/images/alerts-notifications/routing-modal.png" alt="The New routing rule modal with empty Name, Node scope set to Any node, empty Stacks, Labels, and Categories fields, Channel tabs with Apprise selected, and Cancel and CREATE actions. Priority and Enabled may be scrolled out of the cropped frame." />
 </Frame>
 
 | Field | Purpose |
@@ -293,7 +293,7 @@ The bell aggregates across the entire fleet by hitting `/api/notifications` agai
 
 Per-stack alert rules and channel configuration are **stored on the node where the stack runs**. To configure a rule on a remote, switch the active node via the picker, open the stack's **Monitor** sheet, and the form's POST is forwarded to the remote.
 
-Crash detection runs only on local Docker; remote nodes run their own copy of `DockerEventService` and emit through the proxy. On a multi-node fleet the bell attributes remotes with a node-name badge rather than embedding the satellite-local name in the message. External channel payloads (Slack, Discord, custom webhook) receive the same sanitized body with no structured source-node id.
+Crash detection runs only on local Docker; remote nodes run their own copy of `DockerEventService` and emit through the proxy. On a multi-node fleet the bell attributes remotes with a node-name badge rather than embedding the satellite-local name in the message. External channel payloads (Slack, Discord, Apprise, custom webhook) receive the same sanitized body with no structured source-node id.
 
 Switching the active node only affects per-stack rule editing and the Settings panels. The bell aggregates every node regardless of which one is active.
 
