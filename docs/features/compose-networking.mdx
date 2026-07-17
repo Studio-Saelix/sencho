@@ -92,7 +92,7 @@ The Networks section lists every network the effective model declares:
 
 When a stack declares no explicit networks, the section shows **default network only**: all services share the implicit Docker bridge that Compose creates automatically.
 
-External networks that do not exist on the node are detected before Compose runs. Interactive deploy opens a guided dialog so you can create safe bridge networks, copy a Docker command or Compose snippet, cancel, or open the Networking view. Automatic creation of those safe networks is optional under Settings → Stacks. Unsupported drivers or options are never created silently; the deploy stays blocked until you fix the Compose declaration or create the network yourself. Compose Doctor also flags missing external networks before you apply a change.
+External networks that do not exist on the node are detected before Compose runs. Interactive deploy opens a guided dialog so you can create safe bridge networks, copy a terminal create command, cancel, or open the Networking view. Automatic creation of those safe networks is optional under Settings → Stacks. Unsupported drivers or options are never created silently; the deploy stays blocked until you fix the Compose declaration or create the network yourself. Compose Doctor also flags missing external networks before you apply a change.
 
 ## Services
 

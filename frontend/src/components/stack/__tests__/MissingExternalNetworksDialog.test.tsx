@@ -89,7 +89,8 @@ describe('MissingExternalNetworksDialog', () => {
     expect(screen.getByRole('button', { name: 'Create and continue' })).toBeDisabled();
   });
 
-  it('copies Docker command and Compose snippet via copyToClipboard', async () => {
+  it('exposes secondary actions under More and copies the create command', async () => {
+    const onOpenNetworking = vi.fn();
     const user = userEvent.setup();
     render(
       <MissingExternalNetworksDialog
@@ -97,16 +98,21 @@ describe('MissingExternalNetworksDialog', () => {
         payload={safePayload}
         isAdmin
         onCancel={vi.fn()}
-        onOpenNetworking={vi.fn()}
+        onOpenNetworking={onOpenNetworking}
         onCreateAndContinue={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole('button', { name: 'Copy Docker command' }));
-    expect(copyToClipboard).toHaveBeenCalledWith('docker network create arr-net');
-    expect(toast.success).toHaveBeenCalledWith('Docker command copied');
 
-    await user.click(screen.getByRole('button', { name: 'Copy Compose snippet' }));
-    expect(copyToClipboard).toHaveBeenCalledWith(expect.stringContaining('arr-net'));
-    expect(toast.success).toHaveBeenCalledWith('Compose snippet copied');
+    expect(screen.queryByRole('button', { name: 'Copy Compose snippet' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Copy Docker command' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'More' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Open Networking' }));
+    expect(onOpenNetworking).toHaveBeenCalledOnce();
+
+    await user.click(screen.getByRole('button', { name: 'More' }));
+    await user.click(await screen.findByRole('menuitem', { name: 'Copy create command' }));
+    expect(copyToClipboard).toHaveBeenCalledWith('docker network create arr-net');
+    expect(toast.success).toHaveBeenCalledWith('Create command copied');
   });
 });

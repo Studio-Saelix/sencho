@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
+import { MoreHorizontal } from 'lucide-react';
 import {
   Modal,
   ModalHeader,
@@ -6,9 +7,12 @@ import {
 } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 import {
-  buildExternalNetworksSnippet,
-  canUseNetworkName,
-} from '@/lib/networking';
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { canUseNetworkName } from '@/lib/networking';
 import { copyToClipboard } from '@/lib/clipboard';
 import { toast } from '@/components/ui/toast-store';
 
@@ -43,6 +47,33 @@ interface MissingExternalNetworksDialogProps {
   onCreateAndContinue: () => void;
 }
 
+function buildCreateCommands(networks: MissingExternalNetworkDto[]): string {
+  return networks
+    .filter((n) => n.safe && canUseNetworkName(n.name))
+    .map((n) => n.name)
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => `docker network create ${name}`)
+    .join('\n');
+}
+
+function formatUnsafeReason(net: MissingExternalNetworkDto): string {
+  const parts: string[] = [];
+  if (net.blockReason === 'unsupported_driver') {
+    const kinds = [...new Set(net.declarations.map((d) => d.driverKind))];
+    parts.push(`Driver kinds: ${kinds.join(', ')}`);
+  }
+  if (net.unsupportedFeatures.length > 0) {
+    parts.push(`Unsupported: ${net.unsupportedFeatures.join(', ')}`);
+  }
+  if (net.blockReason === 'invalid_name') {
+    parts.push('Invalid Docker network name');
+  }
+  if (net.blockReason === 'reserved_system') {
+    parts.push('Reserved system network name');
+  }
+  return parts.join(' · ');
+}
+
 export function MissingExternalNetworksDialog({
   open,
   payload,
@@ -52,39 +83,24 @@ export function MissingExternalNetworksDialog({
   onOpenNetworking,
   onCreateAndContinue,
 }: MissingExternalNetworksDialogProps) {
-  const [busyCopy, setBusyCopy] = useState<'cmd' | 'snippet' | null>(null);
+  const [copying, setCopying] = useState(false);
 
   const networks = payload?.networks ?? [];
   const allSafe = networks.length > 0 && networks.every((n) => n.safe);
   const canCreate = isAdmin && allSafe && payload?.status === 'ok';
+  const createCommands = buildCreateCommands(networks);
 
-  const snippet = useMemo(
-    () => buildExternalNetworksSnippet(
-      networks.flatMap((n) => n.keys.map((key) => ({ key, name: n.name }))),
-    ),
-    [networks],
-  );
-
-  const dockerCommands = useMemo(() => {
-    return networks
-      .filter((n) => n.safe && canUseNetworkName(n.name))
-      .map((n) => n.name)
-      .sort((a, b) => a.localeCompare(b))
-      .map((name) => `docker network create ${name}`)
-      .join('\n');
-  }, [networks]);
-
-  const copyText = async (kind: 'cmd' | 'snippet', text: string | null) => {
-    if (!text) return;
-    setBusyCopy(kind);
+  const copyCreateCommand = async () => {
+    if (!createCommands) return;
+    setCopying(true);
     try {
-      await copyToClipboard(text);
-      toast.success(kind === 'cmd' ? 'Docker command copied' : 'Compose snippet copied');
+      await copyToClipboard(createCommands);
+      toast.success('Create command copied');
     } catch (error) {
-      console.error('Failed to copy external-network text', error);
+      console.error('Failed to copy network create command', error);
       toast.error('Copy failed');
     } finally {
-      setBusyCopy(null);
+      setCopying(false);
     }
   };
 
@@ -118,16 +134,7 @@ export function MissingExternalNetworksDialog({
                   </div>
                 ) : (
                   <div className="text-xs text-destructive">
-                    {[
-                      net.blockReason === 'unsupported_driver'
-                        ? `Driver kinds: ${[...new Set(net.declarations.map((d) => d.driverKind))].join(', ')}`
-                        : null,
-                      net.unsupportedFeatures.length > 0
-                        ? `Unsupported: ${net.unsupportedFeatures.join(', ')}`
-                        : null,
-                      net.blockReason === 'invalid_name' ? 'Invalid Docker network name' : null,
-                      net.blockReason === 'reserved_system' ? 'Reserved system network name' : null,
-                    ].filter(Boolean).join(' · ')}
+                    {formatUnsafeReason(net)}
                   </div>
                 )}
               </div>
@@ -135,40 +142,43 @@ export function MissingExternalNetworksDialog({
           )}
         </div>
       </ModalBody>
-      {/* Dialog-specific responsive actions (avoid shared ModalFooter row overflow on phone). */}
-      <div className="flex flex-col-reverse gap-2 border-t border-glass-border px-4 py-3 max-md:items-stretch md:flex-row md:flex-wrap md:items-center md:justify-end">
-        <Button variant="outline" size="sm" onClick={onCancel} disabled={creating}>
-          Cancel deploy
-        </Button>
-        <Button variant="outline" size="sm" onClick={onOpenNetworking} disabled={creating}>
-          Open Networking
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={!dockerCommands || creating || busyCopy === 'cmd'}
-          onClick={() => void copyText('cmd', dockerCommands)}
-        >
-          Copy Docker command
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={!snippet || creating || busyCopy === 'snippet'}
-          onClick={() => void copyText('snippet', snippet)}
-        >
-          Copy Compose snippet
-        </Button>
-        <Button
-          size="sm"
-          disabled={!canCreate || creating}
-          onClick={(e) => {
-            e.preventDefault();
-            onCreateAndContinue();
-          }}
-        >
-          {creating ? 'Creating…' : 'Create and continue'}
-        </Button>
+      {/* Primary Cancel / Create pair; secondary actions live under More. */}
+      <div className="flex flex-col-reverse gap-2 border-t border-glass-border px-4 py-3 max-md:items-stretch md:flex-row md:items-center md:justify-between">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" size="sm" disabled={creating} className="max-md:w-full md:w-auto">
+              <MoreHorizontal className="mr-1.5 h-3.5 w-3.5" strokeWidth={1.5} aria-hidden />
+              More
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-56">
+            <DropdownMenuItem onSelect={onOpenNetworking}>
+              Open Networking
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={!createCommands || copying}
+              onSelect={() => { void copyCreateCommand(); }}
+            >
+              Copy create command
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+        <div className="flex flex-col-reverse gap-2 max-md:w-full md:flex-row md:items-center md:justify-end">
+          <Button variant="outline" size="sm" onClick={onCancel} disabled={creating} className="max-md:w-full">
+            Cancel deploy
+          </Button>
+          <Button
+            size="sm"
+            disabled={!canCreate || creating}
+            className="max-md:w-full"
+            onClick={(e) => {
+              e.preventDefault();
+              onCreateAndContinue();
+            }}
+          >
+            {creating ? 'Creating…' : 'Create and continue'}
+          </Button>
+        </div>
       </div>
     </Modal>
   );
