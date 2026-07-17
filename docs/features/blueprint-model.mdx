@@ -8,7 +8,7 @@ A **Blueprint** bundles a `docker-compose.yml` with a node selector and a drift 
 Blueprints live under **Fleet · Deployments**.
 
 <Note>
-  Blueprints are available on every tier as Sencho's Compose-first orchestration model. Creating, editing, withdrawing, and applying blueprints requires an admin role; operators and viewers can read the catalog and the detail sheet. Pinning a blueprint to a specific node lives under **Fleet · Federation** on every tier (admin role required).
+  Blueprints are Sencho's Compose-first orchestration model. Creating, editing, withdrawing, and applying blueprints requires an admin role; operators and viewers can read the catalog and the detail sheet. Pinning a blueprint to a specific node lives under **Fleet · Federation** (admin role required).
 </Note>
 
 <Frame caption="Fleet · Deployments catalog with blueprint tiles, the All / Drifted / Observe / Suggest / Enforce filter chips, and the New Blueprint action in the top-right.">
@@ -47,7 +47,6 @@ Drift detection runs on every tick for every Active deployment regardless of pol
 
 | Requirement | Detail |
 |---|---|
-| License tier | **Community** to read, create, edit, withdraw, apply, and pin blueprints. |
 | User role | **Admin** to create, edit, withdraw, accept, and apply. Operators and viewers can read the catalog and the detail sheet. Pinning requires admin. |
 | Nodes | At least one node that the selector resolves to. Remote nodes need a healthy proxy connection; see [Multi-node management](/features/multi-node) and [Pilot Agent](/features/pilot-agent) for enrollment. |
 | Compose YAML | Valid `docker-compose.yml`, 96 KiB or fewer. |
@@ -251,7 +250,7 @@ Both events route through the standard alert pipeline. Configure delivery channe
 
 ## Security and trust boundaries
 
-**Who can do what.** The license tier and the user role together determine the available actions. Reading the catalog, the detail sheet, and the deployment status is available on every tier. Creating, editing, withdrawing, accepting a stateful deploy, and applying on demand require the admin role. Pinning a blueprint requires the admin role.
+**Who can do what.** The user role determines the available actions. Reading the catalog, the detail sheet, and the deployment status is open to every role. Creating, editing, withdrawing, accepting a stateful deploy, and applying on demand require the admin role. Pinning a blueprint requires the admin role.
 
 **The marker file is the trust root.** The reconciler will only deploy into, modify, or withdraw a directory that carries a `.blueprint.json` marker whose blueprint ID matches. A pre-existing directory with no marker, or a marker referencing a different blueprint, surfaces as **Name conflict** and is never modified.
 
