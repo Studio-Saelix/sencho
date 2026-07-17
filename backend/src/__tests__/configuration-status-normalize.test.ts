@@ -39,9 +39,12 @@ describe('normalizeRemoteConfigurationStatus', () => {
         },
       },
     };
-    expect(normalizeRemoteConfigurationStatus(raw).notifications.agents.apprise).toEqual({
-      configured: false,
-      enabled: false,
+    const normalized = normalizeRemoteConfigurationStatus(raw);
+    expect(normalized.notifications.agents).toEqual({
+      discord: { configured: true, enabled: true },
+      slack: { configured: false, enabled: false },
+      webhook: { configured: false, enabled: false },
+      apprise: { configured: false, enabled: false },
     });
   });
 });
