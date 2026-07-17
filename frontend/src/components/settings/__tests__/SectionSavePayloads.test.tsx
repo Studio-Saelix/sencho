@@ -57,6 +57,7 @@ const FULL_SETTINGS: Record<string, string> = {
     health_gate_enabled: '1',
     health_gate_window_seconds: '90',
     env_block_deploy_on_missing_required: '0',
+    auto_create_missing_external_networks: '0',
 };
 
 function patchedKeys(): string[] {
@@ -110,6 +111,7 @@ describe('split section save payloads', () => {
         fireEvent.click(save);
         await waitFor(() => expect(mockedFetch.mock.calls.some(c => c[1]?.method === 'PATCH')).toBe(true));
         expect(patchedKeys()).toEqual([
+            'auto_create_missing_external_networks',
             'env_block_deploy_on_missing_required',
             'health_gate_enabled',
             'health_gate_window_seconds',

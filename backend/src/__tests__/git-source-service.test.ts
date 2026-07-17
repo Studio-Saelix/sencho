@@ -1171,15 +1171,20 @@ describe('GitSourceService.apply', () => {
         const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-git');
         const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
 
-        const result = await svc.apply('apply-deploy-gate', sha, { deploy: true });
-        expect(result.deployed).toBe(true);
-        expect(deploySpy).toHaveBeenCalledWith('apply-deploy-gate');
-        expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source');
-
-        validateSpy.mockRestore();
-        saveSpy.mockRestore();
-        deploySpy.mockRestore();
-        beginSpy.mockRestore();
+        try {
+            const result = await svc.apply('apply-deploy-gate', sha, { deploy: true });
+            expect(result.deployed).toBe(true);
+            expect(deploySpy).toHaveBeenCalledWith('apply-deploy-gate', undefined, undefined, {
+                source: 'git_apply',
+                actor: 'system:git-source',
+            });
+            expect(beginSpy).toHaveBeenCalledWith(nodeId, 'apply-deploy-gate', 'deploy', 'system:git-source');
+        } finally {
+            validateSpy.mockRestore();
+            saveSpy.mockRestore();
+            deploySpy.mockRestore();
+            beginSpy.mockRestore();
+        }
     });
 
     it('returns deployError when the deploy step fails after writing to disk', async () => {
@@ -1190,24 +1195,31 @@ describe('GitSourceService.apply', () => {
         const validateSpy = vi.spyOn(svc, 'validateCompose').mockResolvedValue({ ok: true });
         // Stub file write (FileSystemService expects a real stack dir)
         const { FileSystemService } = await import('../services/FileSystemService');
+        const { ComposeService } = await import('../services/ComposeService');
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
+        // Force deploy failure so the return shape is deterministic (no Docker / mock leakage).
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(
+            new Error('compose up failed: docker unavailable'),
+        );
 
-        // Deploy will fail organically (docker CLI unavailable in the test env).
-        // We only assert the return SHAPE: apply must not throw, deployError must
-        // carry the failure detail so the UI can surface "applied but not deployed".
-        const result = await svc.apply('apply-deploy-fail', sha, { deploy: true });
-        expect(result.applied).toBe(true);
-        expect(result.deployed).toBe(false);
-        expect(result.deployError).toBeTruthy();
+        try {
+            // Assert the return SHAPE: apply must not throw, deployError must
+            // carry the failure detail so the UI can surface "applied but not deployed".
+            const result = await svc.apply('apply-deploy-fail', sha, { deploy: true });
+            expect(result.applied).toBe(true);
+            expect(result.deployed).toBe(false);
+            expect(result.deployError).toBeTruthy();
 
-        // Disk write happened; DB was marked applied even though deploy failed.
-        expect(saveSpy).toHaveBeenCalled();
-        const row = DatabaseService.getInstance().getGitSource('apply-deploy-fail');
-        expect(row?.last_applied_commit_sha).toBe(sha);
-        expect(row?.pending_commit_sha).toBeNull();
-
-        validateSpy.mockRestore();
-        saveSpy.mockRestore();
+            // Disk write happened; DB was marked applied even though deploy failed.
+            expect(saveSpy).toHaveBeenCalled();
+            const row = DatabaseService.getInstance().getGitSource('apply-deploy-fail');
+            expect(row?.last_applied_commit_sha).toBe(sha);
+            expect(row?.pending_commit_sha).toBeNull();
+        } finally {
+            validateSpy.mockRestore();
+            saveSpy.mockRestore();
+            deploySpy.mockRestore();
+        }
     });
 
     it('returns deployError and skips compose deploy when policy blocks apply deploy', async () => {
@@ -1260,20 +1272,22 @@ describe('GitSourceService.apply', () => {
             replicated_from_control: 0,
         });
 
-        const result = await svc.apply('apply-policy-block', sha, { deploy: true });
+        try {
+            const result = await svc.apply('apply-policy-block', sha, { deploy: true });
 
-        expect(result.applied).toBe(true);
-        expect(result.deployed).toBe(false);
-        expect(result.deployError).toContain('Policy "block-high" blocked deploy');
-        expect(scanSpy).toHaveBeenCalled();
-        expect(deploySpy).not.toHaveBeenCalled();
-
-        validateSpy.mockRestore();
-        saveSpy.mockRestore();
-        listImagesSpy.mockRestore();
-        deploySpy.mockRestore();
-        trivyAvailableSpy.mockRestore();
-        scanSpy.mockRestore();
+            expect(result.applied).toBe(true);
+            expect(result.deployed).toBe(false);
+            expect(result.deployError).toContain('Policy "block-high" blocked deploy');
+            expect(scanSpy).toHaveBeenCalled();
+            expect(deploySpy).not.toHaveBeenCalled();
+        } finally {
+            validateSpy.mockRestore();
+            saveSpy.mockRestore();
+            listImagesSpy.mockRestore();
+            deploySpy.mockRestore();
+            trivyAvailableSpy.mockRestore();
+            scanSpy.mockRestore();
+        }
     });
 });
 
