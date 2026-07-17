@@ -79,15 +79,21 @@ Sencho uses three type contexts. The interface and data faces are yours to chang
 
 ## Display
 
-The **Display** group holds the remaining per-browser preferences:
+The **Display** group holds layout and log-chip preferences for this browser:
 
 - **Density** switches between **Comfortable** (roomy rows, the default) and **Compact** (tighter rows and tiles that fit more on screen for dense dashboards).
-- **Top navigation labels** shows text labels beside the top navigation icons. Turn it off for an icon-only bar; the destinations stay reachable by hover tooltip, accessible name, and the command palette. On the phone layout the navigation always keeps its labels. With labels off, **Top navigation alignment** chooses whether the icon-only bar sits to the left or centered.
 - **Log chip color** controls how service chips are colored in log views. **Unified** uses the accent color for all service chips. **Per service** assigns each service a stable label color for faster visual scanning when following multiple services at once.
 
-<Frame>
-  <img src="/images/settings/appearance-display.png" alt="The Appearance Display section with a Density selector set to Comfortable, a Top navigation labels toggle turned off revealing a Top navigation alignment control with Left selected and Center, and a Log chip color control with Unified selected alongside Per service." />
-</Frame>
+## Navigation
+
+The **Navigation** group chooses how the desktop top bar presents page destinations. Phone navigation is unchanged.
+
+- **Navigation style**
+  - **Smart bar** (recommended default): keeps a short set of primary destinations visible and moves the rest into a grouped **More** menu.
+  - **Classic bar**: shows the full horizontal destination strip.
+  - **Compact launcher**: puts destinations in a left-side launcher menu and optionally pins up to five **quick links** on the bar.
+- **Top navigation labels** (Classic and Smart): shows text beside top navigation icons. Turn it off for an icon-only bar; destinations stay reachable by tooltip, accessible name, and the command palette. Phone layout always keeps labels. With labels off, **Top navigation alignment** places the icon-only bar left or centered.
+- **Quick links** (Compact launcher): labeled pins after the launcher, with a trailing **+** that opens reachable unpinned destinations. Right-click a pin and choose Remove, or manage the full list under Appearance. Up to five pins; recommended defaults start you with four.
 
 Deploy-progress behavior and the diff-preview-before-save step are stack workflow preferences, so they live in **Settings → Infrastructure → Stacks**, not here.
 

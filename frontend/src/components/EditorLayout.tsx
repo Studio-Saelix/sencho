@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Button } from './ui/button';
 import { Plus, Loader2, ChevronLeft, AlertCircle, RefreshCw } from 'lucide-react';
 import { UserProfileDropdown } from './UserProfileDropdown';
@@ -44,6 +44,9 @@ import type { SidebarActivityAction } from '@/components/sidebar/SidebarActivity
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
 import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { useTopNavAlign } from '@/hooks/use-top-nav-align';
+import { useTopNavMode } from '@/hooks/use-top-nav-mode';
+import { useTopNavQuickLinks } from '@/hooks/use-top-nav-quick-links';
+import { getAppNavItem } from '@/lib/navigation/appNavRegistry';
 import { useStackMuteActions } from '@/hooks/useMuteRuleActions';
 import { toast } from '@/components/ui/toast-store';
 import { useIsMobile } from '@/hooks/use-is-mobile';
@@ -195,6 +198,8 @@ export default function EditorLayout() {
   const [diffPreviewEnabled] = useComposeDiffPreviewEnabled();
   const [topNavLabels] = useTopNavLabels();
   const [topNavAlign] = useTopNavAlign();
+  const [topNavMode] = useTopNavMode();
+  const { persistedIds: quickLinkIds, addQuickLink, removeQuickLink } = useTopNavQuickLinks();
 
   // Use a ref to break the circular dependency:
   // useViewNavigationState needs onNavigateToDashboard -> resetEditorState
@@ -220,9 +225,21 @@ export default function EditorLayout() {
     handleMutePrefillConsumed,
     handleNavigate,
     navItems,
+    navModel,
     openMuteRulesWithPrefill,
     reachCtx,
   } = navState;
+
+  const visibleQuickLinks = useMemo(() => {
+    const candidateSet = new Set(navModel.quickLinkCandidates.map((item) => item.value));
+    return quickLinkIds
+      .filter((id) => candidateSet.has(id))
+      .map((id) => {
+        const item = getAppNavItem(id);
+        return item ? { value: item.value, label: item.label, icon: item.icon } : null;
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+  }, [quickLinkIds, navModel.quickLinkCandidates]);
 
   const {
     notifications,
@@ -908,6 +925,13 @@ export default function EditorLayout() {
           userMenu={userMenuEl}
           showLabels={topNavLabels}
           navAlign={topNavAlign}
+          navMode={topNavMode}
+          navModel={navModel}
+          quickLinks={visibleQuickLinks}
+          persistedQuickLinkIds={quickLinkIds}
+          onAddQuickLink={(value) => addQuickLink(value as typeof quickLinkIds[number])}
+          onRemoveQuickLink={(value) => removeQuickLink(value as typeof quickLinkIds[number])}
+          onOpenSettings={() => openSettings()}
         />
       );
 
@@ -962,6 +986,7 @@ export default function EditorLayout() {
             stackUpdates={stackUpdates}
             urlHydratingStack={urlHydratingStack}
             isFileLoading={isFileLoading}
+            quickLinkCandidates={navModel.quickLinkCandidates}
           />
         </div>
       );
@@ -1033,6 +1058,7 @@ export default function EditorLayout() {
                 headerActions={mobileMastheadActions}
                 selectedSection={mobileSettingsSection}
                 onSelectedSectionChange={setMobileSettingsSection}
+                quickLinkCandidates={navModel.quickLinkCandidates}
               />
             );
           case 'security':

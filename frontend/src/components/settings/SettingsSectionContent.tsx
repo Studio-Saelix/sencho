@@ -25,6 +25,7 @@ import type { SectionId } from './index';
 import type { MuteRuleDraft } from '@/lib/muteRules';
 import LazyBoundary from '../LazyBoundary';
 import { SectionGate } from './SectionGate';
+import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 
 // Paid-tier sections are loaded on demand. SectionGate returns null for
 // Community / unentitled operators before reaching the JSX that would mount
@@ -79,10 +80,11 @@ function renderSection(
     muteRulePrefill: MuteRuleDraft | null | undefined,
     onMutePrefillConsumed: (() => void) | undefined,
     onOpenMuteRulesWithPrefill: ((draft: MuteRuleDraft) => void) | undefined,
+    quickLinkCandidates: NavDestination[] | undefined,
 ) {
     switch (sectionId) {
         case 'account': return <AccountSection />;
-        case 'appearance': return <AppearanceSection />;
+        case 'appearance': return <AppearanceSection quickLinkCandidates={quickLinkCandidates} />;
         case 'license': return <LicenseSection />;
         case 'users': return <UsersSection />;
         case 'sso': return <SSOSection />;
@@ -125,6 +127,7 @@ interface SettingsSectionContentProps {
     muteRulePrefill?: MuteRuleDraft | null;
     onMutePrefillConsumed?: () => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
+    quickLinkCandidates?: NavDestination[];
 }
 
 /**
@@ -140,11 +143,19 @@ export function SettingsSectionContent({
     muteRulePrefill,
     onMutePrefillConsumed,
     onOpenMuteRulesWithPrefill,
+    quickLinkCandidates,
 }: SettingsSectionContentProps) {
     const item = getSettingsItem(sectionId);
     const element = useMemo(
-        () => renderSection(sectionId, onDirtyChange, muteRulePrefill, onMutePrefillConsumed, onOpenMuteRulesWithPrefill),
-        [sectionId, onDirtyChange, muteRulePrefill, onMutePrefillConsumed, onOpenMuteRulesWithPrefill],
+        () => renderSection(
+            sectionId,
+            onDirtyChange,
+            muteRulePrefill,
+            onMutePrefillConsumed,
+            onOpenMuteRulesWithPrefill,
+            quickLinkCandidates,
+        ),
+        [sectionId, onDirtyChange, muteRulePrefill, onMutePrefillConsumed, onOpenMuteRulesWithPrefill, quickLinkCandidates],
     );
     return (
         <>

@@ -161,4 +161,22 @@ describe('AppearanceSection', () => {
         fireEvent.click(screen.getByRole('switch', { name: 'Readability mode' }));
         expect((screen.getByRole('button', { name: 'Reset to default' }) as HTMLButtonElement).disabled).toBe(true);
     });
+
+    it('shows Navigation style and mode-conditional controls', () => {
+        localStorage.clear();
+        render(<AppearanceSection />);
+        expect(screen.getByText('Navigation')).toBeTruthy();
+        expect(screen.getByRole('radiogroup', { name: 'Navigation style' })).toBeTruthy();
+        // Smart default shows label toggle, hides quick links.
+        expect(screen.getByText('Top navigation labels')).toBeTruthy();
+        expect(screen.queryByText('Quick links')).toBeNull();
+
+        fireEvent.click(screen.getByRole('radio', { name: 'Compact launcher' }));
+        expect(screen.getByText('Quick links')).toBeTruthy();
+        expect(screen.queryByText('Top navigation labels')).toBeNull();
+
+        fireEvent.click(screen.getByRole('radio', { name: 'Classic bar' }));
+        expect(screen.getByText('Top navigation labels')).toBeTruthy();
+        expect(screen.queryByText('Quick links')).toBeNull();
+    });
 });
