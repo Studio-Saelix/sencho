@@ -81,7 +81,7 @@ export async function resolveMissingExternalNetworks(
   stackName: string,
 ): Promise<MissingExternalNetworksEnvelope> {
   const autoCreateEnabled = isAutoCreateEnabled(nodeId);
-  const { model, renderError } = await renderModel(nodeId, stackName);
+  const { model } = await renderModel(nodeId, stackName);
   if (!model) {
     return {
       status: 'render_unavailable',
