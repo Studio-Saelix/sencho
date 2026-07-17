@@ -9,6 +9,7 @@ import {
   buildExternalNetworksSnippet,
   canUseNetworkName,
 } from '@/lib/networking';
+import { copyToClipboard } from '@/lib/clipboard';
 import { toast } from '@/components/ui/toast-store';
 
 export type MissingExternalNetworkDto = {
@@ -77,7 +78,7 @@ export function MissingExternalNetworksDialog({
     if (!text) return;
     setBusyCopy(kind);
     try {
-      await navigator.clipboard.writeText(text);
+      await copyToClipboard(text);
       toast.success(kind === 'cmd' ? 'Docker command copied' : 'Compose snippet copied');
     } catch (error) {
       console.error('Failed to copy external-network text', error);

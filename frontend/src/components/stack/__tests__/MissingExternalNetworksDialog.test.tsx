@@ -1,14 +1,18 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
-import {
-  MissingExternalNetworksDialog,
-  type MissingExternalNetworksPayload,
-} from '../MissingExternalNetworksDialog';
 
 vi.mock('@/components/ui/toast-store', () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
+vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn().mockResolvedValue(undefined) }));
+
+import {
+  MissingExternalNetworksDialog,
+  type MissingExternalNetworksPayload,
+} from '../MissingExternalNetworksDialog';
+import { copyToClipboard } from '@/lib/clipboard';
+import { toast } from '@/components/ui/toast-store';
 
 const safePayload: MissingExternalNetworksPayload = {
   status: 'ok',
@@ -83,5 +87,26 @@ describe('MissingExternalNetworksDialog', () => {
       />,
     );
     expect(screen.getByRole('button', { name: 'Create and continue' })).toBeDisabled();
+  });
+
+  it('copies Docker command and Compose snippet via copyToClipboard', async () => {
+    const user = userEvent.setup();
+    render(
+      <MissingExternalNetworksDialog
+        open
+        payload={safePayload}
+        isAdmin
+        onCancel={vi.fn()}
+        onOpenNetworking={vi.fn()}
+        onCreateAndContinue={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Copy Docker command' }));
+    expect(copyToClipboard).toHaveBeenCalledWith('docker network create arr-net');
+    expect(toast.success).toHaveBeenCalledWith('Docker command copied');
+
+    await user.click(screen.getByRole('button', { name: 'Copy Compose snippet' }));
+    expect(copyToClipboard).toHaveBeenCalledWith(expect.stringContaining('arr-net'));
+    expect(toast.success).toHaveBeenCalledWith('Compose snippet copied');
   });
 });
