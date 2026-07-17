@@ -2,15 +2,11 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNodes } from '@/context/NodeContext';
 import { apiFetch } from '@/lib/api';
 import { visibilityInterval } from '@/lib/utils';
+import { normalizeConfigurationAgents, type AgentStatus } from '@/lib/configurationStatus';
 
 // Trailing-edge debounce window for filtered settings-event refetches,
 // matching the precedent in useNextAutoUpdateRun.
 const INVALIDATE_DEBOUNCE_MS = 250;
-
-interface AgentStatus {
-  configured: boolean;
-  enabled: boolean;
-}
 
 export interface ConfigurationStatus {
   tier: 'community' | 'paid';
@@ -48,6 +44,28 @@ export interface ConfigurationStatus {
   };
 }
 
+/** Wire payload may omit `apprise` from older remotes. */
+type WireConfigurationStatus = Omit<ConfigurationStatus, 'notifications'> & {
+  notifications: Omit<ConfigurationStatus['notifications'], 'agents'> & {
+    agents: {
+      discord: AgentStatus;
+      slack: AgentStatus;
+      webhook: AgentStatus;
+      apprise?: AgentStatus;
+    };
+  };
+};
+
+function normalizeConfigurationStatus(raw: WireConfigurationStatus): ConfigurationStatus {
+  return {
+    ...raw,
+    notifications: {
+      ...raw.notifications,
+      agents: normalizeConfigurationAgents(raw.notifications.agents),
+    },
+  };
+}
+
 export function useConfigurationStatus() {
   const { activeNode } = useNodes();
   const nodeId = activeNode?.id;
@@ -61,8 +79,8 @@ export function useConfigurationStatus() {
     try {
       const res = await apiFetch('/dashboard/configuration');
       if (!res.ok) return;
-      const data = await res.json() as ConfigurationStatus;
-      setStatus(data);
+      const data = await res.json() as WireConfigurationStatus;
+      setStatus(normalizeConfigurationStatus(data));
     } catch {
       // Silent; stale data stays visible
     } finally {

@@ -1,6 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Bell, Zap, Shield, HardDrive, ChevronRight } from 'lucide-react';
 import { formatCount } from '@/lib/utils';
+import { normalizeConfigurationAgents } from '@/lib/configurationStatus';
 import { useConfigurationStatus } from './useConfigurationStatus';
 import type { SectionId } from '@/components/settings/types';
 import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
@@ -115,7 +116,7 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
   const { notifications, automation, security, thresholds, backup } = status;
 
   const agentSummary = (() => {
-    const { discord, slack, webhook, apprise } = notifications.agents;
+    const { discord, slack, webhook, apprise } = normalizeConfigurationAgents(notifications.agents);
     const active = [
       discord.enabled ? 'Discord' : null,
       slack.enabled ? 'Slack' : null,

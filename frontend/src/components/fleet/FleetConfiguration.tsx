@@ -10,6 +10,7 @@ import {
 import { useFleetSyncStatus } from '@/hooks/useFleetSyncStatus';
 import { STICKY_CONTROL_IDENTITY_MISMATCH, type FleetSyncStatus } from '@/lib/fleetSyncApi';
 import type { ConfigurationStatusPayload } from '@/components/dashboard';
+import { normalizeConfigurationAgents } from '@/lib/configurationStatus';
 
 interface FleetNodeConfiguration {
   id: number;
@@ -115,12 +116,13 @@ function NodeCard({ node, policySyncState }: {
   }
 
   const { notifications, automation, security, backup, thresholds } = node.configuration;
+  const agents = normalizeConfigurationAgents(notifications.agents);
 
   const agentCount = [
-    notifications.agents.discord.enabled,
-    notifications.agents.slack.enabled,
-    notifications.agents.webhook.enabled,
-    notifications.agents.apprise.enabled,
+    agents.discord.enabled,
+    agents.slack.enabled,
+    agents.webhook.enabled,
+    agents.apprise.enabled,
   ].filter(Boolean).length;
 
   return (

@@ -375,13 +375,24 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
       res.status(400).json({ error: `channel_type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}` });
       return;
     }
+    const typeChanged = channel_type !== undefined && channel_type !== existing.channel_type;
+    // Type changes replace credentials; never reuse a prior channel's URL/config (ciphertext or plaintext).
+    if (typeChanged && (typeof channel_url !== 'string' || !channel_url.trim())) {
+      res.status(400).json({ error: 'channel_url is required when changing channel_type' });
+      return;
+    }
     const effectiveType = channel_type ?? existing.channel_type;
-    const effectiveUrl = channel_url ?? existing.channel_url;
+    const effectiveUrl = channel_url !== undefined ? String(channel_url).trim() : existing.channel_url;
     let effectiveConfig: unknown = config ?? null;
     if (effectiveType === 'apprise' && config === undefined) {
-      const resolved = resolvePreservedAppriseConfig(effectiveUrl, existing.config);
-      if (!resolved.ok) { res.status(400).json({ error: resolved.error }); return; }
-      effectiveConfig = resolved.config;
+      if (typeChanged) {
+        // Fresh Apprise credentials: empty keyed (or stateless urls required via validate).
+        effectiveConfig = null;
+      } else {
+        const resolved = resolvePreservedAppriseConfig(effectiveUrl, existing.config);
+        if (!resolved.ok) { res.status(400).json({ error: resolved.error }); return; }
+        effectiveConfig = resolved.config;
+      }
     }
     const redactedErr = redactedChannelWriteError(effectiveType, effectiveUrl, effectiveConfig, config);
     if (redactedErr) { res.status(400).json({ error: redactedErr }); return; }
@@ -403,9 +414,9 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
     if ('label_ids' in req.body) updates.label_ids = Array.isArray(label_ids) && label_ids.length > 0 ? label_ids : null;
     if ('categories' in req.body) updates.categories = Array.isArray(categories) && categories.length > 0 ? categories : null;
     if (channel_type !== undefined) updates.channel_type = channel_type;
-    if (channel_url !== undefined) updates.channel_url = channel_url.trim();
-    if (effectiveType === 'apprise') updates.config = normalizeAppriseStoredJson(effectiveUrl.trim(), effectiveConfig);
-    else if (channel_type !== undefined) updates.config = null;
+    if (channel_url !== undefined || typeChanged) updates.channel_url = effectiveUrl;
+    if (effectiveType === 'apprise') updates.config = normalizeAppriseStoredJson(effectiveUrl, effectiveConfig);
+    else if (typeChanged || channel_type !== undefined) updates.config = null;
     if (priority !== undefined) updates.priority = priority;
     if (enabled !== undefined) updates.enabled = enabled;
 

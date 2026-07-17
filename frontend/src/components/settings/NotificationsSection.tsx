@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger, TabsHighlight, TabsHighlightItem } from '@/components/ui/tabs';
 import { springs } from '@/lib/motion';
 import { Button } from '@/components/ui/button';
@@ -17,6 +17,15 @@ import { classifyAppriseEndpoint, isKeyedAppriseEndpoint, isStatelessAppriseEndp
 
 type ChannelType = 'discord' | 'slack' | 'webhook' | 'apprise';
 
+function emptyAgents(): Record<ChannelType, Agent> {
+    return {
+        discord: { type: 'discord', url: '', enabled: false },
+        slack: { type: 'slack', url: '', enabled: false },
+        webhook: { type: 'webhook', url: '', enabled: false },
+        apprise: { type: 'apprise', url: '', enabled: false, config: null },
+    };
+}
+
 function appriseWriteConfig(agent: Agent): { urls: string } | { tags: string } {
     if (isStatelessAppriseEndpoint(agent.url)) {
         return { urls: agent.config?.urls ?? '' };
@@ -31,29 +40,28 @@ function hasStoredAppriseAgent(agent: Agent): boolean {
 
 export function NotificationsSection() {
     const { activeNode } = useNodes();
+    const activeNodeIdRef = useRef(activeNode?.id);
+    useEffect(() => { activeNodeIdRef.current = activeNode?.id; }, [activeNode?.id]);
 
     const [notifTab, setNotifTab] = useState<ChannelType>('discord');
-    const [agents, setAgents] = useState<Record<string, Agent>>({
-        discord: { type: 'discord', url: '', enabled: false },
-        slack: { type: 'slack', url: '', enabled: false },
-        webhook: { type: 'webhook', url: '', enabled: false },
-        apprise: { type: 'apprise', url: '', enabled: false, config: null },
-    });
+    const [agents, setAgents] = useState<Record<string, Agent>>(emptyAgents);
     const [isSavingAgent, setIsSavingAgent] = useState<Record<string, boolean>>({});
     const [isTestingAgent, setIsTestingAgent] = useState<Record<string, boolean>>({});
     const [appriseUrlDirty, setAppriseUrlDirty] = useState(false);
     const [appriseConfigDirty, setAppriseConfigDirty] = useState(false);
 
     const fetchAgents = async () => {
+        const requestNodeId = activeNode?.id;
         try {
             const res = await apiFetch('/agents');
             if (res.ok) {
+                if (activeNodeIdRef.current !== requestNodeId) return;
                 const data: Agent[] = await res.json();
-                setAgents(prev => {
-                    const next = { ...prev };
-                    data.forEach(a => { next[a.type] = a; });
-                    return next;
+                const next = emptyAgents();
+                data.forEach(a => {
+                    if (a.type in next) next[a.type as ChannelType] = a;
                 });
+                setAgents(next);
                 setAppriseUrlDirty(false);
                 setAppriseConfigDirty(false);
             }
@@ -62,7 +70,12 @@ export function NotificationsSection() {
         }
     };
 
-    useEffect(() => { fetchAgents(); }, [activeNode?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    useEffect(() => {
+        setAgents(emptyAgents());
+        setAppriseUrlDirty(false);
+        setAppriseConfigDirty(false);
+        void fetchAgents();
+    }, [activeNode?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const enabledCount = Object.values(agents).filter(a => a.enabled).length;
     useMastheadStats([

@@ -82,6 +82,7 @@ export function NotificationRoutingSection() {
     const [appriseConfigDirty, setAppriseConfigDirty] = useState(false);
     /** Original Apprise mode when editing; drives preserve hints and forces a config write on mode switch. */
     const [editAppriseOriginalMode, setEditAppriseOriginalMode] = useState<'keyed' | 'stateless' | null>(null);
+    const [editOriginalChannelType, setEditOriginalChannelType] = useState<'discord' | 'slack' | 'webhook' | 'apprise' | null>(null);
     const [formPriority, setFormPriority] = useState(0);
     const [formEnabled, setFormEnabled] = useState(true);
 
@@ -138,6 +139,7 @@ export function NotificationRoutingSection() {
         setAppriseEndpointDirty(false);
         setAppriseConfigDirty(false);
         setEditAppriseOriginalMode(null);
+        setEditOriginalChannelType(null);
         setFormPriority(0);
         setFormEnabled(true);
         setEditingId(null);
@@ -160,6 +162,7 @@ export function NotificationRoutingSection() {
         setEditAppriseOriginalMode(
             route.channel_type === 'apprise' ? (route.config?.mode ?? null) : null,
         );
+        setEditOriginalChannelType(route.channel_type);
         setFormPriority(route.priority);
         setFormEnabled(route.enabled);
         setShowForm(true);
@@ -172,6 +175,11 @@ export function NotificationRoutingSection() {
             return;
         }
 
+        const channelTypeChanged = Boolean(
+            editingId
+            && editOriginalChannelType
+            && formChannelType !== editOriginalChannelType,
+        );
         const appriseMode = formChannelType === 'apprise' ? classifyAppriseEndpoint(formChannelUrl) : null;
         const appriseModeChanged = Boolean(
             editingId
@@ -179,13 +187,13 @@ export function NotificationRoutingSection() {
             && appriseMode
             && appriseMode !== editAppriseOriginalMode,
         );
-        // Mode switch or dirty tags/URLs need config; endpoint-only edits omit it so blank fields preserve destinations.
+        // Mode switch, type switch, or dirty tags/URLs need config; endpoint-only edits omit it so blank fields preserve destinations.
         const needsAppriseConfig = formChannelType === 'apprise'
-            && (!editingId || appriseConfigDirty || appriseModeChanged);
+            && (!editingId || appriseConfigDirty || appriseModeChanged || channelTypeChanged);
         if (
             appriseMode === 'stateless'
             && !formAppriseUrls.trim()
-            && (!editingId || appriseModeChanged || appriseConfigDirty)
+            && (!editingId || appriseModeChanged || appriseConfigDirty || channelTypeChanged)
         ) {
             toast.error('Destination URLs are required for a stateless Apprise endpoint.');
             return;
@@ -200,7 +208,7 @@ export function NotificationRoutingSection() {
                 label_ids: formLabelIds.length > 0 ? formLabelIds : null,
                 categories: formCategories.length > 0 ? formCategories : null,
                 channel_type: formChannelType,
-                ...(formChannelType !== 'apprise' || !editingId || appriseEndpointDirty
+                ...(formChannelType !== 'apprise' || !editingId || appriseEndpointDirty || channelTypeChanged
                     ? { channel_url: formChannelUrl.trim() }
                     : {}),
                 ...(needsAppriseConfig
@@ -482,7 +490,21 @@ export function NotificationRoutingSection() {
 
                             <div className="space-y-2">
                                 <Label>Channel</Label>
-                                <Tabs value={formChannelType} onValueChange={(v) => setFormChannelType(v as 'discord' | 'slack' | 'webhook' | 'apprise')}>
+                                <Tabs
+                                    value={formChannelType}
+                                    onValueChange={(v) => {
+                                        const next = v as 'discord' | 'slack' | 'webhook' | 'apprise';
+                                        if (next !== formChannelType) {
+                                            // Type change replaces credentials; never carry a redacted prior URL across types.
+                                            setFormChannelUrl('');
+                                            setFormAppriseTags('');
+                                            setFormAppriseUrls('');
+                                            setAppriseEndpointDirty(true);
+                                            setAppriseConfigDirty(true);
+                                        }
+                                        setFormChannelType(next);
+                                    }}
+                                >
                                     <TabsList className="w-full grid grid-cols-4">
                                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                                             <TabsHighlightItem value="discord">

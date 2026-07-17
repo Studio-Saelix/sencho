@@ -7,10 +7,6 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { MastheadMetadataItem } from '@/components/ui/PageMasthead';
 
-const { masthead } = vi.hoisted(() => ({
-    masthead: { last: null as MastheadMetadataItem[] | null },
-}));
-
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({
     toast: {
@@ -22,8 +18,12 @@ vi.mock('@/components/ui/toast-store', () => ({
         dismiss: vi.fn(),
     },
 }));
+const { masthead, nodeState } = vi.hoisted(() => ({
+    masthead: { last: null as MastheadMetadataItem[] | null },
+    nodeState: { activeNode: { id: 1 } as { id: number } },
+}));
 vi.mock('@/context/NodeContext', () => ({
-    useNodes: () => ({ activeNode: { id: 'local' } }),
+    useNodes: () => ({ activeNode: nodeState.activeNode }),
 }));
 vi.mock('../MastheadStatsContext', () => ({
     useMastheadStats: (stats: MastheadMetadataItem[] | null) => {
@@ -63,6 +63,7 @@ describe('NotificationsSection', () => {
     beforeEach(() => {
         mockedFetch.mockReset();
         masthead.last = null;
+        nodeState.activeNode = { id: 1 };
         mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
             if (url === '/agents' && !opts?.method) return agentsResponse();
             if (url === '/agents' && opts?.method === 'POST') {
@@ -311,4 +312,55 @@ describe('NotificationsSection', () => {
         await waitFor(() => expect(screen.getByRole('button', { name: 'Test' })).toBeDisabled());
         expect(screen.getByText(/Replace the redacted endpoint/i)).toBeInTheDocument();
     });
+
+    it('replaces agent state when switching to a node with no agents', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) {
+                if (nodeState.activeNode.id === 1) return agentsResponse([REDACTED_APPRISE]);
+                return agentsResponse([]);
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        const { rerender } = render(<NotificationsSection />);
+        await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
+        await waitFor(() => expect(screen.getByLabelText(/Apprise endpoint/i)).toHaveValue('http://apprise.local/notify/<redacted>'));
+        expect(masthead.last?.[0]?.value).toBe('1/4');
+
+        nodeState.activeNode = { id: 2 };
+        rerender(<NotificationsSection />);
+        await waitFor(() => expect(masthead.last?.[0]?.value).toBe('0/4'));
+        await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
+        await waitFor(() => expect(screen.getByLabelText(/Apprise endpoint/i)).toHaveValue(''));
+    });
+
+    it('ignores a stale agents response after the active node changes', async () => {
+        let releaseNode1: (() => void) | undefined;
+        const node1Gate = new Promise<void>((resolve) => { releaseNode1 = resolve; });
+
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) {
+                if (nodeState.activeNode.id === 1) {
+                    await node1Gate;
+                    return agentsResponse([REDACTED_APPRISE]);
+                }
+                return agentsResponse([]);
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        const { rerender } = render(<NotificationsSection />);
+        await waitFor(() => expect(mockedFetch).toHaveBeenCalled());
+
+        nodeState.activeNode = { id: 2 };
+        rerender(<NotificationsSection />);
+        await waitFor(() => expect(masthead.last?.[0]?.value).toBe('0/4'));
+
+        releaseNode1?.();
+        await new Promise((r) => setTimeout(r, 40));
+        expect(masthead.last?.[0]?.value).toBe('0/4');
+        await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
+        expect(screen.getByLabelText(/Apprise endpoint/i)).toHaveValue('');
+    });
+
 });

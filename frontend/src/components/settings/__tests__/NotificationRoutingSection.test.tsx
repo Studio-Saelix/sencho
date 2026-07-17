@@ -205,4 +205,25 @@ describe('NotificationRoutingSection', () => {
         await userEvent.type(urlInput, 'http://apprise.local/notify/');
         expect(screen.getByPlaceholderText(/Destination URLs/i)).toBeInTheDocument();
     });
+
+    it('clears the endpoint and requires a raw URL when switching channel type on edit', async () => {
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByText('Ops Apprise')).toBeInTheDocument());
+        const card = screen.getByText('Ops Apprise').closest('.rounded-lg');
+        await userEvent.click(card!.querySelector('svg.lucide-pencil')!.closest('button')!);
+
+        await screen.findByDisplayValue('http://apprise.local/notify/<redacted>');
+        await userEvent.click(await screen.findByRole('tab', { name: 'Discord' }));
+        expect(screen.getByPlaceholderText(/discord/i)).toHaveValue('');
+
+        await userEvent.type(screen.getByPlaceholderText(/discord/i), 'https://discord.com/api/webhooks/9/new-token');
+        await userEvent.click(screen.getByRole('button', { name: 'Update' }));
+
+        await waitFor(() => expect(findRoutePut()).toBeTruthy());
+        const body = JSON.parse((findRoutePut()![1] as { body: string }).body);
+        expect(body.channel_type).toBe('discord');
+        expect(body.channel_url).toBe('https://discord.com/api/webhooks/9/new-token');
+        expect(body).not.toHaveProperty('config');
+    });
+
 });

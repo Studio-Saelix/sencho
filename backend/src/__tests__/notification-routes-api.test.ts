@@ -553,6 +553,106 @@ describe('Apprise notification routes - redaction and preserve-on-write', () => 
     expect(stored?.config).toBe(JSON.stringify({ tags: 'ops' }));
   });
 
+  it('PUT rejects channel_type change without a new channel_url and leaves the row unchanged', async () => {
+    const before = DatabaseService.getInstance().getDb()
+      .prepare('SELECT channel_type, channel_url, config FROM notification_routes WHERE id = ?')
+      .get(routeId) as { channel_type: string; channel_url: string; config: string | null };
+    expect(before.channel_type).toBe('apprise');
+    expect(before.channel_url.startsWith('enc:')).toBe(true);
+
+    const res = await request(app)
+      .put(`/api/notification-routes/${routeId}`)
+      .set('Cookie', authCookie)
+      .send({ channel_type: 'discord' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/channel_url is required when changing channel_type/i);
+
+    const after = DatabaseService.getInstance().getDb()
+      .prepare('SELECT channel_type, channel_url, config FROM notification_routes WHERE id = ?')
+      .get(routeId) as { channel_type: string; channel_url: string; config: string | null };
+    expect(after).toEqual(before);
+  });
+
+  it('PUT Apprise-to-Discord with a raw URL stores plaintext Discord credentials', async () => {
+    const created = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'Apprise leave',
+        stack_patterns: [],
+        channel_type: 'apprise',
+        channel_url: 'http://apprise.local/notify/leave-key',
+        config: { tags: 'ops' },
+      });
+    expect(created.status).toBe(201);
+    const id = created.body.id as number;
+
+    const discordUrl = 'https://discord.com/api/webhooks/1/token-secret';
+    const res = await request(app)
+      .put(`/api/notification-routes/${id}`)
+      .set('Cookie', authCookie)
+      .send({ channel_type: 'discord', channel_url: discordUrl });
+    expect(res.status).toBe(200);
+    expect(res.body.channel_type).toBe('discord');
+
+    const raw = DatabaseService.getInstance().getDb()
+      .prepare('SELECT channel_type, channel_url, config FROM notification_routes WHERE id = ?')
+      .get(id) as { channel_type: string; channel_url: string; config: string | null };
+    expect(raw.channel_type).toBe('discord');
+    expect(raw.channel_url).toBe(discordUrl);
+    expect(raw.channel_url.startsWith('enc:')).toBe(false);
+    expect(raw.config).toBeNull();
+
+    await request(app).delete(`/api/notification-routes/${id}`).set('Cookie', authCookie);
+  });
+
+  it('PUT webhook-to-Apprise seals both channel_url and config as enc: ciphertext', async () => {
+    const notifyUrl = 'https://apprise.example/notify/promote-key';
+    const created = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'Webhook promote',
+        stack_patterns: [],
+        channel_type: 'webhook',
+        channel_url: notifyUrl,
+      });
+    expect(created.status).toBe(201);
+    const id = created.body.id as number;
+
+    const before = DatabaseService.getInstance().getDb()
+      .prepare('SELECT channel_url FROM notification_routes WHERE id = ?')
+      .get(id) as { channel_url: string };
+    expect(before.channel_url).toBe(notifyUrl);
+
+    const res = await request(app)
+      .put(`/api/notification-routes/${id}`)
+      .set('Cookie', authCookie)
+      .send({
+        channel_type: 'apprise',
+        channel_url: notifyUrl,
+        config: { tags: 'fleet' },
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.channel_type).toBe('apprise');
+    expect(res.body.channel_url).toBe('https://apprise.example/notify/<redacted>');
+
+    const raw = DatabaseService.getInstance().getDb()
+      .prepare('SELECT channel_type, channel_url, config FROM notification_routes WHERE id = ?')
+      .get(id) as { channel_type: string; channel_url: string; config: string | null };
+    expect(raw.channel_type).toBe('apprise');
+    expect(raw.channel_url.startsWith('enc:')).toBe(true);
+    expect(raw.channel_url).not.toContain('promote-key');
+    expect(raw.config?.startsWith('enc:')).toBe(true);
+    expect(raw.config).not.toContain('fleet');
+
+    const stored = DatabaseService.getInstance().getNotificationRoute(id);
+    expect(stored?.channel_url).toBe(notifyUrl);
+    expect(stored?.config).toBe(JSON.stringify({ tags: 'fleet' }));
+
+    await request(app).delete(`/api/notification-routes/${id}`).set('Cookie', authCookie);
+  });
+
   it('PUT rejects a redacted channel_url', async () => {
     const res = await request(app)
       .put(`/api/notification-routes/${routeId}`)
