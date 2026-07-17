@@ -344,6 +344,20 @@ async function probeManifestForRef(
                 sanitizeForLog(cause),
             );
         }
+        // Reject tag/repo components with characters that could alter the
+        // URL structure. Docker tags are restricted to [a-zA-Z0-9._-] per the
+        // OCI distribution spec; / ? # \ and null bytes are never valid. Repo
+        // path segments are [a-z0-9]+ separator . _ -; a .. segment is never
+        // valid and would enable path traversal. The image ref originates from
+        // an admin-controlled compose file, so this guard is defense-in-depth:
+        // the admin already has code execution on the host.
+        if (/[/?#\\]/.test(tagOrDigest) || tagOrDigest.includes('\0')) {
+            return { ok: false, reason: `Invalid tag "${sanitizeForLog(tagOrDigest)}" for ${ref}` };
+        }
+        if (/\.\./.test(repo)) {
+            return { ok: false, reason: `Invalid repository path "${sanitizeForLog(repo)}" for ${ref}` };
+        }
+
         const authHeaders: Record<string, string> = { Accept: MANIFEST_ACCEPT };
         if (token) authHeaders['Authorization'] = `Bearer ${token}`;
         const url = `https://${registry}/v2/${repo}/manifests/${tagOrDigest}`;
