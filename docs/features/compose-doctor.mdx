@@ -136,7 +136,7 @@ The rules in this category (except "Node-state checks skipped" itself) read live
 | Rule | Severity | What it detects |
 |------|----------|----------------|
 | Node-state checks skipped | Info | The Docker daemon could not be reached; node-state rules did not run and this result is partial. |
-| External network not found | Blocker | A network declared `external: true` does not exist on this node. The deploy will fail. |
+| External network not found | Blocker | A network declared `external: true` does not exist on this node. Deploy is blocked until the network exists. For safe default bridge networks, Doctor may offer a create remediation; advanced drivers and custom options stay manual. |
 | External volume not found | Blocker | A volume declared `external: true` does not exist on this node. The deploy will fail. |
 | New network will be created | Info | A non-external network that does not yet exist on this node will be created on first deploy. |
 | New volume will be created | Info | A named volume that does not yet exist on this node will be created on first deploy. |

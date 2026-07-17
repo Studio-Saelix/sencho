@@ -190,7 +190,7 @@ describe('evaluateNetworkDeleteGuard', () => {
       volumes: [],
     };
     const guard = evaluateNetworkDeleteGuard('n1', snapshot, [
-      { stack: STACK, renderable: false, renderError: 'x', runtime: 'available', networks: [], services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] } },
+      { stack: STACK, renderable: false, renderError: 'x', runtime: 'available', networks: [], services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] }, missingExternalNetworks: [] },
     ]);
     expect(guard.blocked).toBe(true);
     expect(guard.code).toBe('stack-declaration-unknown');
@@ -234,7 +234,8 @@ describe('evaluateNetworkDeleteGuard', () => {
     const guard = evaluateNetworkDeleteGuard('n1', snapshot, [
       { stack: STACK, renderable: true, renderError: null, runtime: 'available',
         networks: [{ key: 'app_net', name: 'app_net', external: false, internal: false, createdByStack: true }],
-        services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] } },
+        services: [], drift: { runtimeOnlyAttachments: [], declaredButUnused: [], missingFromRuntime: [], foreignNetworkAttachments: [] },
+        missingExternalNetworks: [] },
     ]);
     expect(guard.code).toBe('stack-declared');
   });

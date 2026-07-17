@@ -1802,7 +1802,10 @@ describe('SchedulerService - lifecycle actions', () => {
   it('auto_start calls deployStack', async () => {
     mockGetScheduledTask.mockReturnValue(makeLifecycleTask('auto_start'));
     await SchedulerService.getInstance().triggerTask(300);
-    expect(mockDeployStack).toHaveBeenCalledWith('my-stack');
+    expect(mockDeployStack).toHaveBeenCalledWith('my-stack', undefined, undefined, {
+      source: 'scheduler',
+      actor: 'system:scheduler',
+    });
     expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(1, expect.objectContaining({ status: 'success' }));
   });
 

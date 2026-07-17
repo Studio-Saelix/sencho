@@ -270,6 +270,7 @@ export default function EditorLayout() {
     getLastDeployOutputLine,
     diffPreviewEnabled,
     hasUpdateGuard: hasCapability('update-guard'),
+    hasGuidedExternalNetworkPreflight: hasCapability('guided-external-network-preflight'),
     canEditStack: (stackNameOrFilename) => {
       const stackName = stackNameOrFilename.replace(/\.(ya?ml)$/, '');
       return can('stack:edit', 'stack', stackName);

@@ -114,7 +114,10 @@ describe('Stack Labels bulk actions', () => {
     expect(res.status).toBe(200);
     expect(res.body.results).toEqual([{ stackName: 'alpha', success: true }]);
     expect(enforcePolicyPreDeploy).toHaveBeenCalledWith('alpha', label.node_id, expect.any(Object));
-    expect(deployStack).toHaveBeenCalledWith('alpha', undefined, false);
+    expect(deployStack).toHaveBeenCalledWith('alpha', undefined, false, {
+      source: 'labels',
+      actor: TEST_USERNAME,
+    });
     expect(invalidateNodeCaches).toHaveBeenCalledWith(label.node_id);
   });
 
@@ -171,7 +174,10 @@ describe('Stack Labels bulk actions', () => {
     expect(beta).toEqual({ stackName: 'beta', success: true });
     // 'alpha' was skipped; only 'beta' reached ComposeService.
     expect(deployStack).toHaveBeenCalledTimes(1);
-    expect(deployStack).toHaveBeenCalledWith('beta', undefined, false);
+    expect(deployStack).toHaveBeenCalledWith('beta', undefined, false, {
+      source: 'labels',
+      actor: TEST_USERNAME,
+    });
   });
 
   it('dry-run deploy runs the policy gate and reports blocked stacks honestly', async () => {

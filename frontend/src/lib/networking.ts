@@ -3,6 +3,7 @@ import {
   type NetworkingFinding, type NetworkingFindingKind, type NetworkingNetworkRow, type NetworkingOverviewEnvelope,
   type NetworkingRecommendedAction, type NodeNetworkingOverview,
 } from '@/types/networking';
+import { stringify as stringifyYaml } from 'yaml';
 
 export type NetworkFilter = 'all' | 'managed' | 'external' | 'system' | 'shared' | 'exposed' | 'drift';
 
@@ -95,9 +96,40 @@ export function canUseNetworkName(name: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(name);
 }
 
-export function buildExternalNetworkSnippet(name: string): string | null {
-  if (!canUseNetworkName(name)) return null;
-  return `networks:\n  ${name}:\n    external: true`;
+/**
+ * Build a single valid `networks:` Compose fragment for one or more
+ * key → runtime-name mappings. Stable-sorts keys. Returns null if any
+ * runtime name is unsafe.
+ */
+export function buildExternalNetworksSnippet(
+  entries: ReadonlyArray<{ key: string; name: string }>,
+): string | null {
+  if (entries.length === 0) return null;
+  const networks: Record<string, { external: true; name?: string }> = {};
+  const sorted = [...entries].sort((a, b) => a.key.localeCompare(b.key));
+  for (const { key, name } of sorted) {
+    if (!canUseNetworkName(name)) return null;
+    networks[key] = key === name
+      ? { external: true }
+      : { external: true, name };
+  }
+  // Prefer yaml when available; fallback keeps simple unquoted keys for tests.
+  try {
+    return stringifyYaml({ networks }).trimEnd();
+  } catch {
+    const lines = ['networks:'];
+    for (const { key, name } of sorted) {
+      lines.push(`  ${key}:`);
+      lines.push('    external: true');
+      if (key !== name) lines.push(`    name: ${name}`);
+    }
+    return lines.join('\n');
+  }
+}
+
+/** @deprecated Prefer buildExternalNetworksSnippet with explicit key+name. */
+export function buildExternalNetworkSnippet(name: string, key: string = name): string | null {
+  return buildExternalNetworksSnippet([{ key, name }]);
 }
 
 /** Normalizes a network row from a schema-2 remote (no serviceNames) so the UI

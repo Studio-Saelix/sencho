@@ -135,7 +135,12 @@ templatesRouter.post('/deploy', authMiddleware, async (req: Request, res: Respon
         return;
       }
       const atomic = true;
-      await ComposeService.getInstance(req.nodeId).deployStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
+      await ComposeService.getInstance(req.nodeId).deployStack(
+        stackName,
+        getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+        atomic,
+        req.deployContext ?? { source: 'template', actor: req.user?.username ?? null },
+      );
       invalidateNodeCaches(req.nodeId);
       console.log(`[Templates] Deploy completed: ${stackName}`);
       if (debug) console.debug(`[Templates:debug] Deploy timing: ${stackName} took ${Date.now() - deployStartedAt}ms`);

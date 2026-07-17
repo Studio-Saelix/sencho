@@ -33,9 +33,10 @@ export const CAPABILITIES = [
   'compose-storage',
   'cross-node-rbac',
   'stack-down-remove-volumes',
+  'guided-external-network-preflight',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
 
-/** Must stay in sync with backend CapabilityRegistry.STACK_DOWN_REMOVE_VOLUMES_CAPABILITY */
 export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' as const satisfies Capability;
+export const GUIDED_EXTERNAL_NETWORK_PREFLIGHT_CAPABILITY = 'guided-external-network-preflight' as const satisfies Capability;

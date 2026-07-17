@@ -76,10 +76,15 @@ Every Sencho release ships with a static list of capabilities. The current list 
 | `registries` | Private registry management |
 | `self-update` | Self-update from the dashboard |
 | `vulnerability-scanning` | Image vulnerability scanning |
+| `compose-doctor` | Compose Doctor preflight |
+| `compose-networking` | Stack Networking tab and node Networking overview |
+| `guided-external-network-preflight` | Guided missing-external-network check before deploy |
 
 <Note>
   `vulnerability-scanning` is advertised only when the Trivy binary is present on the node. If a node does not have Trivy installed, it omits this capability and the scanning UI is replaced by a lock card.
 </Note>
+
+Nodes that do not advertise `guided-external-network-preflight` keep legacy deploy behavior (no guided missing-external dialog). When the capability is present but the check cannot run, deploy fails closed instead of guessing.
 
 ## Handling nodes that do not advertise metadata
 

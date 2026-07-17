@@ -25,6 +25,41 @@ import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { pathsMatch, resolveHostBindPath } from '../utils/composePathMapping';
 import { loadStackBuildServices } from './ImageUpdateService';
+import { resolveMissingExternalNetworks } from './network/resolveMissingExternalNetworks';
+import {
+  MissingExternalNetworksError,
+  type DeployInvocationContext,
+} from './network/missingExternalNetworksError';
+import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import type { NotificationCategory } from './NotificationService';
+
+function recordNetworkAutoCreatedActivity(
+  nodeId: number,
+  stackName: string,
+  createdNames: string[],
+  level: 'info' | 'warning',
+  ctx?: DeployInvocationContext,
+): void {
+  if (createdNames.length === 0) return;
+  const names = [...createdNames].sort((a, b) => a.localeCompare(b)).join(', ');
+  const source = ctx?.source ?? 'manual';
+  try {
+    DatabaseService.getInstance().addNotificationHistory(nodeId, {
+      level,
+      category: 'network_auto_created' as NotificationCategory,
+      message: `Auto-created external network(s) for ${stackName}: ${names} (source: ${source})`,
+      timestamp: Date.now(),
+      stack_name: stackName,
+      actor_username: ctx?.actor ?? null,
+    });
+  } catch (error) {
+    console.error(
+      '[ComposeService] Failed to record network_auto_created activity for %s:',
+      sanitizeForLog(stackName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')),
+    );
+  }
+}
 
 export class ComposeRollbackError extends Error {
   public readonly rollbackAttempted: boolean;
@@ -461,9 +496,117 @@ export class ComposeService {
     );
   }
 
-  async deployStack(stackName: string, ws?: WebSocket, atomic?: boolean): Promise<void> {
+  /**
+   * Missing-external gate: after env/Pilot asserts, before atomic backup.
+   * Creates safe bridge networks only when the opt-in setting is on.
+   */
+  private async ensureExternalNetworksForDeploy(
+    stackName: string,
+    ctx?: DeployInvocationContext,
+  ): Promise<void> {
+    const resolved = await resolveMissingExternalNetworks(this.nodeId, stackName);
+    if (resolved.status === 'render_unavailable') {
+      throw new MissingExternalNetworksError({
+        kind: 'unavailable',
+        message: 'Sencho could not render this stack\'s Compose model to check external networks.',
+      });
+    }
+    if (resolved.status === 'runtime_unavailable') {
+      // No declared externals: nothing to verify; proceed.
+      if (resolved.declaredExternalCount === 0) return;
+      throw new MissingExternalNetworksError({
+        kind: 'unavailable',
+        message: 'Sencho could not read Docker networking state to check external networks.',
+      });
+    }
+
+    if (resolved.networks.length === 0) return;
+
+    const unsafe = resolved.networks.filter((n) => !n.safe);
+    if (unsafe.length > 0) {
+      throw new MissingExternalNetworksError({
+        kind: 'unsupported',
+        message: 'One or more missing external networks cannot be created safely by Sencho.',
+        networks: resolved.networks,
+      });
+    }
+
+    if (!resolved.autoCreateEnabled) {
+      throw new MissingExternalNetworksError({
+        kind: 'prompt',
+        message: 'One or more external networks required by this stack are missing on this node.',
+        networks: resolved.networks,
+      });
+    }
+
+    const docker = DockerController.getInstance(this.nodeId);
+    const createdNames: string[] = [];
+    const recordCreatedNetworks = (level: 'info' | 'warning') => {
+      if (createdNames.length === 0) return;
+      invalidateNodeCaches(this.nodeId);
+      recordNetworkAutoCreatedActivity(this.nodeId, stackName, createdNames, level, ctx);
+    };
+
+    for (const network of resolved.networks) {
+      try {
+        await docker.createNetwork({ Name: network.name, Driver: 'bridge' });
+        createdNames.push(network.name);
+      } catch (createErr) {
+        // Authoritative re-check: continue only if the network now exists.
+        let exists = false;
+        try {
+          const knownStacks = await FileSystemService.getInstance(this.nodeId).getStacks();
+          const snapshot = await docker.getDependencySnapshot(knownStacks);
+          exists = snapshot.networks.some((n) => n.name === network.name);
+        } catch (snapErr) {
+          console.warn(
+            '[ComposeService] Post-create snapshot failed for %s:',
+            sanitizeForLog(network.name),
+            sanitizeForLog(getErrorMessage(snapErr, 'unknown')),
+          );
+        }
+        if (!exists) {
+          recordCreatedNetworks('warning');
+          throw new MissingExternalNetworksError({
+            kind: 'create_failed',
+            message: `Failed to create external network "${network.name}".`,
+            networks: resolved.networks,
+            createdNames,
+            remainingNames: resolved.networks
+              .map((missingNetwork) => missingNetwork.name)
+              .filter((name) => !createdNames.includes(name)),
+          });
+        }
+        // Race-existing: do not record in createdNames.
+      }
+    }
+
+    // Re-resolve before Compose.
+    const recheck = await resolveMissingExternalNetworks(this.nodeId, stackName);
+    if (recheck.status !== 'ok' || recheck.networks.length > 0) {
+      recordCreatedNetworks('warning');
+      throw new MissingExternalNetworksError({
+        kind: recheck.status === 'ok' ? 'create_failed' : 'unavailable',
+        message: 'External networks were still missing after automatic creation.',
+        networks: recheck.networks,
+        createdNames,
+        remainingNames: recheck.networks.map((n) => n.name),
+      });
+    }
+
+    recordCreatedNetworks('info');
+  }
+
+  async deployStack(
+    stackName: string,
+    ws?: WebSocket,
+    atomic?: boolean,
+    ctx?: DeployInvocationContext,
+  ): Promise<void> {
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
+    await this.ensureExternalNetworksForDeploy(stackName, ctx);
+
     const stackDir = path.join(this.baseDir, stackName);
     const debug = isDebugEnabled();
     const t0 = Date.now();

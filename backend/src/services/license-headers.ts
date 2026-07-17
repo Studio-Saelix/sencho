@@ -16,3 +16,44 @@ export const PROXY_TIER_HEADER = 'x-sencho-tier';
  * client cannot smuggle a role through.
  */
 export const PROXY_ROLE_HEADER = 'x-sencho-actor-role';
+
+/**
+ * Trusted deploy provenance for machine-to-machine / proxied deploys.
+ * The gateway always strips client-supplied values and, for interactive
+ * proxied requests, overwrites with source=manual and the signed-in username.
+ * Background callers (scheduler, fleet, blueprint, mesh) set these only on
+ * direct machine-originated HTTP after the strip boundary.
+ */
+export const PROXY_DEPLOY_SOURCE_HEADER = 'x-sencho-deploy-source';
+export const PROXY_DEPLOY_ACTOR_HEADER = 'x-sencho-deploy-actor';
+
+export const DEPLOY_SOURCES = [
+  'manual',
+  'rollback',
+  'template',
+  'from_git',
+  'git_apply',
+  'fleet_snapshot',
+  'labels',
+  'scheduler',
+  'webhook',
+  'blueprint',
+  'mesh_redeploy',
+] as const;
+
+export type DeploySourceHeader = (typeof DEPLOY_SOURCES)[number];
+
+export function isDeploySourceHeader(value: unknown): value is DeploySourceHeader {
+  return typeof value === 'string' && (DEPLOY_SOURCES as readonly string[]).includes(value);
+}
+
+/** Headers for direct machine-originated deploy HTTP (never for browser clients). */
+export function deployProvenanceHeaders(
+  source: DeploySourceHeader,
+  actor: string,
+): Record<string, string> {
+  return {
+    [PROXY_DEPLOY_SOURCE_HEADER]: source,
+    [PROXY_DEPLOY_ACTOR_HEADER]: actor,
+  };
+}

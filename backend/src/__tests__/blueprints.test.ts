@@ -412,7 +412,10 @@ describe('BlueprintService per-stack lock', () => {
         const outcome = await BlueprintService.getInstance().deployToNode(bp, node);
 
         expect(outcome.status).toBe('active');
-        expect(deploySpy).toHaveBeenCalledWith(bp.name, undefined, false);
+        expect(deploySpy).toHaveBeenCalledWith(bp.name, undefined, false, {
+            source: 'blueprint',
+            actor: 'system:blueprint',
+        });
         // Compose is written first, then the marker, both before the deploy.
         expect(writeSpy).toHaveBeenCalledTimes(2);
         expect(writeSpy.mock.calls[0][2]).toBe(bp.compose_content);

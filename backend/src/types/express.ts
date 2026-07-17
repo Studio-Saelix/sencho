@@ -21,6 +21,10 @@ declare global {
       mfaPendingSso?: boolean;
       /** Cached remote-proxy target resolved by `remoteNodeProxy`'s outer gate so the http-proxy router/proxyReq callbacks do not re-resolve. */
       proxyTarget?: { apiUrl: string; apiToken: string };
+      /** Trusted deploy provenance from machine auth or gateway overwrite. */
+      deployContext?: import('../services/network/missingExternalNetworksError').DeployInvocationContext;
+      /** Verified JWT scope for machine credentials (`node_proxy` / `pilot_tunnel`). */
+      machineAuthScope?: 'node_proxy' | 'pilot_tunnel';
     }
   }
 }

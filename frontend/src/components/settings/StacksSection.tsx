@@ -29,12 +29,13 @@ interface StacksSectionProps {
     onDirtyChange?: (dirty: boolean) => void;
 }
 
-type GuardrailFields = Pick<PatchableSettings, 'health_gate_enabled' | 'health_gate_window_seconds' | 'env_block_deploy_on_missing_required'>;
+type GuardrailFields = Pick<PatchableSettings, 'health_gate_enabled' | 'health_gate_window_seconds' | 'env_block_deploy_on_missing_required' | 'auto_create_missing_external_networks'>;
 
 const DEFAULT_GUARDRAILS: GuardrailFields = {
     health_gate_enabled: DEFAULT_SETTINGS.health_gate_enabled,
     health_gate_window_seconds: DEFAULT_SETTINGS.health_gate_window_seconds,
     env_block_deploy_on_missing_required: DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
+    auto_create_missing_external_networks: DEFAULT_SETTINGS.auto_create_missing_external_networks,
 };
 
 function GuardrailSkeleton() {
@@ -87,6 +88,7 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
                     health_gate_enabled: (nodeData.health_gate_enabled as '0' | '1') ?? DEFAULT_SETTINGS.health_gate_enabled,
                     health_gate_window_seconds: nodeData.health_gate_window_seconds ?? DEFAULT_SETTINGS.health_gate_window_seconds,
                     env_block_deploy_on_missing_required: (nodeData.env_block_deploy_on_missing_required as '0' | '1') ?? DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
+                    auto_create_missing_external_networks: (nodeData.auto_create_missing_external_networks as '0' | '1') ?? DEFAULT_SETTINGS.auto_create_missing_external_networks,
                 };
                 reset(safe);
             } catch (e) {
@@ -221,6 +223,15 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
                             <TogglePill
                                 checked={settings.env_block_deploy_on_missing_required === '1'}
                                 onChange={(next) => onGuardrailChange('env_block_deploy_on_missing_required', next ? '1' : '0')}
+                            />
+                        </SettingsField>
+                        <SettingsField
+                            label="Automatically create missing external networks during deploy"
+                            helper="When on, safe missing external bridge networks are created automatically before deploy continues. Off by default: manual deploy prompts first. Advanced drivers and custom options are never auto-created."
+                        >
+                            <TogglePill
+                                checked={settings.auto_create_missing_external_networks === '1'}
+                                onChange={(next) => onGuardrailChange('auto_create_missing_external_networks', next ? '1' : '0')}
                             />
                         </SettingsField>
                     </SettingsSection>

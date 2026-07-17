@@ -327,21 +327,36 @@ export function buildNodeNetworkingFindings(
 
     if (!snapshot) continue;
     addComposeDriftFindings(out, facts, baseNetworks);
-    for (const network of facts.networks) {
-      if (network.external && facts.drift.missingFromRuntime.includes(network.name)) {
-        const isRunning = snapshot.containers.some(container => container.stack === facts.stack && ['running', 'restarting'].includes(container.state));
-        out.push(finding(
-          'external-network-missing', isRunning ? 'critical' : 'high', 'External network not found',
-          `Stack "${facts.stack}" requires the external network "${network.name}", which is not present on this node.`,
-          { stack: facts.stack, network: network.name },
-          [
-            { kind: 'create-network', label: 'Create network', networkName: network.name, requiresAdmin: true },
-            { kind: 'copy-compose-snippet', label: 'Copy Compose snippet', snippetKind: 'external-network', networkName: network.name },
-            { kind: 'copy-docker-command', label: 'Copy Docker command', commandKind: 'network-create', networkName: network.name },
-            { kind: 'open-stack-editor', label: 'Open stack editor', stack: facts.stack },
-          ],
-        ));
+    for (const missing of facts.missingExternalNetworks) {
+      const isRunning = snapshot.containers.some(container => container.stack === facts.stack && ['running', 'restarting'].includes(container.state));
+      const actions: NetworkingRecommendedAction[] = [
+        { kind: 'open-stack-editor', label: 'Open stack editor', stack: facts.stack },
+      ];
+      if (missing.safe) {
+        actions.unshift(
+          { kind: 'create-network', label: 'Create network', networkName: missing.name, requiresAdmin: true },
+          { kind: 'copy-compose-snippet', label: 'Copy Compose snippet', snippetKind: 'external-network', networkName: missing.name },
+          { kind: 'copy-docker-command', label: 'Copy Docker command', commandKind: 'network-create', networkName: missing.name },
+        );
       }
+      const reasonSuffix = missing.safe
+        ? ''
+        : ` Sencho cannot create it automatically (${[
+          missing.blockReason === 'unsupported_driver'
+            ? `unsupported driver kind(s): ${[...new Set(missing.declarations.map((d) => d.driverKind))].join(', ')}`
+            : null,
+          missing.unsupportedFeatures.length > 0
+            ? `unsupported options: ${missing.unsupportedFeatures.join(', ')}`
+            : null,
+          missing.blockReason === 'invalid_name' ? 'invalid Docker network name' : null,
+          missing.blockReason === 'reserved_system' ? 'reserved system network name' : null,
+        ].filter(Boolean).join('; ')}).`;
+      out.push(finding(
+        'external-network-missing', isRunning ? 'critical' : 'high', 'External network not found',
+        `Stack "${facts.stack}" requires the external network "${missing.name}" (Compose keys: ${missing.keys.join(', ')}), which is not present on this node.${reasonSuffix}`,
+        { stack: facts.stack, network: missing.name },
+        actions,
+      ));
     }
   }
 

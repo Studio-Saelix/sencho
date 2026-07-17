@@ -78,11 +78,20 @@ describe('parseEffectiveModel', () => {
 
   it('resolves top-level networks and volumes with external and internal flags', () => {
     const m = parseEffectiveModel(render(), 'fallback');
-    expect(m.networks.shared).toEqual({ name: 'shared_net', external: true, internal: false });
-    expect(m.networks.default).toEqual({ name: 'myapp_default', external: false, internal: false });
-    expect(m.networks.backend).toEqual({ name: 'myapp_backend', external: false, internal: true });
-    expect(m.volumes.ext).toEqual({ name: 'shared_vol', external: true, internal: false });
-    expect(m.volumes.cache).toEqual({ name: 'myapp_cache', external: false, internal: false });
+    const emptyResourceExtras = {
+      driverKind: 'default',
+      hasDriverOpts: false,
+      hasCustomIpam: false,
+      attachable: false,
+      ipv4Enabled: true,
+      ipv6Enabled: false,
+      hasLabels: false,
+    } as const;
+    expect(m.networks.shared).toEqual({ name: 'shared_net', external: true, internal: false, ...emptyResourceExtras });
+    expect(m.networks.default).toEqual({ name: 'myapp_default', external: false, internal: false, ...emptyResourceExtras });
+    expect(m.networks.backend).toEqual({ name: 'myapp_backend', external: false, internal: true, ...emptyResourceExtras });
+    expect(m.volumes.ext).toEqual({ name: 'shared_vol', external: true, internal: false, ...emptyResourceExtras });
+    expect(m.volumes.cache).toEqual({ name: 'myapp_cache', external: false, internal: false, ...emptyResourceExtras });
   });
 
   it('parses service network membership (key-space) with aliases', () => {
@@ -224,7 +233,18 @@ describe('parseStorageMounts (storage inventory field)', () => {
       volumes: { cache: { name: 'myapp_cache' } },
     }, 'p');
     expect(m.services[0].storageMounts).toEqual([{ type: 'named', source: 'cache', target: '/c', readOnly: false }]);
-    expect(m.volumes.cache).toEqual({ name: 'myapp_cache', external: false, internal: false });
+    expect(m.volumes.cache).toEqual({
+      name: 'myapp_cache',
+      external: false,
+      internal: false,
+      driverKind: 'default',
+      hasDriverOpts: false,
+      hasCustomIpam: false,
+      attachable: false,
+      ipv4Enabled: true,
+      ipv6Enabled: false,
+      hasLabels: false,
+    });
   });
 
   it('leaves the rule-facing binds and namedVolumes byte-identical', () => {

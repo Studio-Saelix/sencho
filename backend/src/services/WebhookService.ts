@@ -156,7 +156,12 @@ export class WebhookService {
                                 nodeId,
                                 buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
                             );
-                            await compose.deployStack(stackName, undefined, atomic);
+                            await compose.deployStack(
+                                stackName,
+                                undefined,
+                                atomic,
+                                { source: 'webhook', actor: 'system:webhook' },
+                            );
                             HealthGateService.getInstance().begin(nodeId, stackName, 'deploy', 'system:webhook');
                             break;
                         case 'restart':

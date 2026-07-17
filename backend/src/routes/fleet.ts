@@ -53,7 +53,7 @@ import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashb
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
 import { buildNodeLabelInventory, VALID_LABEL_SOURCES, type NodeLabelInventory } from '../services/LabelInventoryService';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
-import { PROXY_TIER_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER, deployProvenanceHeaders } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 
 const updateTracker = FleetUpdateTrackerService.getInstance();
@@ -2734,7 +2734,12 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
   if (node.type === 'local') {
     const lock = await StackOpLockService.getInstance().runExclusive(
       node.id, stackName, 'deploy', 'system',
-      () => ComposeService.getInstance(node.id).deployStack(stackName),
+      () => ComposeService.getInstance(node.id).deployStack(
+        stackName,
+        undefined,
+        undefined,
+        { source: 'fleet_snapshot', actor: 'system:fleet-snapshot' },
+      ),
     );
     if (!lock.ran) {
       throw new Error(`Cannot redeploy "${stackName}": another operation (${lock.existing.action}) is already in progress.`);
@@ -2745,7 +2750,10 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
   if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
   const deployRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/deploy`, {
     method: 'POST',
-    headers: ctx.headers,
+    headers: {
+      ...ctx.headers,
+      ...deployProvenanceHeaders('fleet_snapshot', 'system:fleet-snapshot'),
+    },
     signal: AbortSignal.timeout(30000),
   });
   if (!deployRes.ok) throw await remoteStackError('Failed to redeploy stack', deployRes);

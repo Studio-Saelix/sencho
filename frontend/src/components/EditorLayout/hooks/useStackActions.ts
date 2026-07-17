@@ -23,6 +23,9 @@ import type { EditorTab, RouteStackLoadResult } from '@/lib/router/routeTypes';
 import type { StackAction, RecoverableAction, FailureClassification } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
+import type {
+  MissingExternalNetworksPayload,
+} from '../../stack/MissingExternalNetworksDialog';
 import type { PreDeployScanImage } from '@/types/security';
 
 interface RunResult {
@@ -31,7 +34,16 @@ interface RunResult {
   rolledBack?: boolean;
   /** Health gate run id from the success body, when the backend started one. */
   healthGateId?: string | null;
+  /**
+   * Deploy hit a missing-external-networks gate; the dialog owns deployPendingRef
+   * until the operator cancels or continues.
+   */
+  deferredNetworks?: boolean;
 }
+
+type MissingExternalNetworksEnvelope = MissingExternalNetworksPayload & {
+  declaredExternalCount: number;
+};
 
 /** healthGateId from a success body, or null when absent or unreadable. */
 const parseHealthGateId = async (response: Response): Promise<string | null> => {
@@ -138,6 +150,9 @@ interface UseStackActionsOptions {
   // the pre-update readiness dialog. Defaults to false: without the
   // capability, updates run directly with no dialog.
   hasUpdateGuard?: boolean;
+  // Active node advertises guided external-network preflight. Absent capability
+  // keeps legacy deploy (no GET). Advertised-but-broken fails closed.
+  hasGuidedExternalNetworkPreflight?: boolean;
   // Target-aware stack:edit check. Pass the loaded stack identity (folder name
   // or compose path); callers strip extensions when comparing to RBAC stack
   // names. Evaluated against the load target so post-load auto-edit is not
@@ -179,6 +194,108 @@ export async function fetchPreDeployAdvisory(
     return null;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+const MISSING_EXTERNAL_PREFLIGHT_TIMEOUT_MS = 10000;
+
+function parseMissingExternalNetworksPayload(data: unknown): MissingExternalNetworksPayload | null {
+  if (!isRecord(data)) return null;
+  if (
+    data.status !== 'ok'
+    && data.status !== 'render_unavailable'
+    && data.status !== 'runtime_unavailable'
+  ) {
+    return null;
+  }
+  if (typeof data.stackName !== 'string' || typeof data.autoCreateEnabled !== 'boolean') return null;
+  if (!Array.isArray(data.networks)) return null;
+  return {
+    status: data.status,
+    autoCreateEnabled: data.autoCreateEnabled,
+    stackName: data.stackName,
+    networks: data.networks as MissingExternalNetworksPayload['networks'],
+  };
+}
+
+/**
+ * Authoritative missing-external preflight for the captured deploy node.
+ * Returns null only when the route is missing or the body is unusable (treat
+ * as fail-closed when the capability is advertised).
+ */
+export async function fetchMissingExternalNetworks(
+  stackName: string,
+  opNodeId: number | null,
+): Promise<MissingExternalNetworksEnvelope | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MISSING_EXTERNAL_PREFLIGHT_TIMEOUT_MS);
+  try {
+    const res = await apiFetch(
+      `/stacks/${encodeURIComponent(stackName)}/missing-external-networks`,
+      { nodeId: opNodeId, signal: controller.signal },
+    );
+    if (!res.ok) return null;
+    const data: unknown = await res.json();
+    const payload = parseMissingExternalNetworksPayload(data);
+    if (!payload || !isRecord(data)) return null;
+    const declaredExternalCount = typeof data.declaredExternalCount === 'number'
+      ? data.declaredExternalCount
+      : 0;
+    return { ...payload, declaredExternalCount };
+  } catch (error) {
+    console.error('Failed to fetch missing external networks:', error);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function createSafeExternalNetworks(
+  networks: MissingExternalNetworksPayload['networks'],
+  opNodeId: number | null,
+): Promise<{ ok: boolean; errorMessage?: string }> {
+  for (const network of networks.filter((n) => n.safe)) {
+    try {
+      const res = await apiFetch('/system/networks', {
+        method: 'POST',
+        nodeId: opNodeId,
+        body: JSON.stringify({ name: network.name, driver: 'bridge' }),
+      });
+      if (res.ok || res.status === 409) continue;
+      const body: unknown = await res.json().catch(() => null);
+      const message = isRecord(body) && typeof body.error === 'string'
+        ? body.error
+        : `Failed to create network "${network.name}" (${res.status})`;
+      return { ok: false, errorMessage: message };
+    } catch (error) {
+      console.error('Failed to create external network:', error);
+      return {
+        ok: false,
+        errorMessage: error instanceof Error ? error.message : `Failed to create network "${network.name}"`,
+      };
+    }
+  }
+  return { ok: true };
+}
+
+function missingExternalBlocksDeploy(
+  envelope: MissingExternalNetworksEnvelope,
+): string | null {
+  if (envelope.status === 'render_unavailable') {
+    return 'Sencho could not render this stack\'s Compose model to check external networks.';
+  }
+  if (envelope.status === 'runtime_unavailable' && envelope.declaredExternalCount > 0) {
+    return 'Sencho could not read Docker networking state to check external networks.';
+  }
+  return null;
+}
+
+function getResponseCode(rawBody: string): string | undefined {
+  try {
+    const payload: unknown = JSON.parse(rawBody);
+    return isRecord(payload) && typeof payload.code === 'string' ? payload.code : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -261,6 +378,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     getLastDeployOutputLine,
     diffPreviewEnabled,
     hasUpdateGuard = false,
+    hasGuidedExternalNetworkPreflight = false,
     canEditStack,
     canOfferVolumeRemoval = false,
   } = options;
@@ -857,6 +975,96 @@ export function useStackActions(options: UseStackActionsOptions) {
     return null;
   };
 
+  const openMissingExternalNetworksDialog = (
+    payload: MissingExternalNetworksPayload,
+    opNodeId: number | null,
+    onContinue: () => void,
+  ) => {
+    let settled = false;
+    const finishCancel = () => {
+      if (settled) return;
+      settled = true;
+      overlayState.setMissingExternalNetworks(null);
+      deployPendingRef.current = false;
+    };
+    overlayState.setMissingExternalNetworks({
+      payload,
+      creating: false,
+      cancel: finishCancel,
+      openNetworking: () => {
+        finishCancel();
+        const node = nodes.find((n) => n.id === opNodeId);
+        if (node && activeNode?.id !== opNodeId) setActiveNode(node);
+        navState.setActiveView('networking');
+      },
+      createAndContinue: () => void createAndContinue(),
+    });
+
+    function setCreating(creating: boolean, verified?: MissingExternalNetworksPayload): void {
+      overlayState.setMissingExternalNetworks((current) => (
+        current
+          ? { ...current, creating, ...(verified ? { payload: verified } : {}) }
+          : current
+      ));
+    }
+
+    async function createAndContinue(): Promise<void> {
+      if (settled) return;
+      setCreating(true);
+
+      const created = await createSafeExternalNetworks(payload.networks, opNodeId);
+      if (!created.ok) {
+        toast.error(created.errorMessage ?? 'Failed to create external networks');
+        setCreating(false);
+        return;
+      }
+
+      const verified = await fetchMissingExternalNetworks(payload.stackName, opNodeId);
+      if (!verified || verified.status !== 'ok') {
+        toast.error('Could not verify external networks after create.');
+        setCreating(false);
+        return;
+      }
+
+      const stillMissing = payload.networks.some((needed) => (
+        verified.networks.some((network) => network.name === needed.name)
+      ));
+      if (stillMissing) {
+        toast.error('Some external networks are still missing after create.');
+        setCreating(false, verified);
+        return;
+      }
+
+      settled = true;
+      overlayState.setMissingExternalNetworks(null);
+      onContinue();
+    }
+  };
+
+  const finishSuccessfulDeploy = async (
+    response: Response,
+    stackName: string,
+    stackFile: string,
+    ignorePolicy: boolean,
+  ): Promise<RunResult> => {
+    overlayState.setPolicyBlock(null);
+    const healthGateId = await parseHealthGateId(response);
+    if (healthGateId) {
+      toast.info(ignorePolicy ? 'Stack deployed (policy bypassed). Verifying health...' : 'Stack deployed. Verifying health...');
+    } else {
+      toast.success(ignorePolicy ? 'Stack deployed (policy bypassed).' : 'Stack deployed successfully!');
+    }
+    await refreshSelectedContainers(stackName, stackFile);
+    try {
+      const backupRes = await apiFetch(`/stacks/${stackName}/backup`);
+      if (backupRes.ok) editorState.setBackupInfo(await backupRes.json());
+    } catch {
+      /* ignore */
+    }
+    stackListState.recordActionSuccess(stackFile);
+    return { ok: true, healthGateId };
+  };
+
   const runDeploy = async (
     stackName: string,
     stackFile: string,
@@ -897,27 +1105,47 @@ export function useStackActions(options: UseStackActionsOptions) {
             toast.error(message);
             return { ok: false, errorMessage: message };
           }
+          if (
+            getResponseCode(rawBody) === 'missing_external_networks'
+            && hasGuidedExternalNetworkPreflight
+          ) {
+            const envelope = await fetchMissingExternalNetworks(stackName, opNodeId ?? null);
+            if (!envelope) {
+              toast.error('Deploy needs missing external networks, but Sencho could not re-check them.');
+              return { ok: false, errorMessage: 'Missing external networks check failed' };
+            }
+            const blockMessage = missingExternalBlocksDeploy(envelope);
+            if (blockMessage) {
+              toast.error(blockMessage);
+              return { ok: false, errorMessage: blockMessage };
+            }
+            if (envelope.status === 'ok' && envelope.networks.length === 0) {
+              // Networks appeared between gate and refetch; retry once.
+              const retry = await apiFetch(
+                path,
+                withDeploySession(deploySessionId ?? '', { method: 'POST', nodeId: opNodeId }),
+              );
+              if (retry.ok) {
+                return finishSuccessfulDeploy(retry, stackName, stackFile, ignorePolicy);
+              }
+              throw parseStackActionError(await retry.text(), 'Deploy failed', retry.status);
+            }
+            openMissingExternalNetworksDialog(envelope, opNodeId ?? null, () => {
+              stackListState.setStackAction(stackFile, 'deploy');
+              void runWithLog({ stackName, action: 'deploy', nodeId: opNodeId ?? null }, (startedRetry, ds) =>
+                runDeploy(stackName, stackFile, ignorePolicy, startedRetry, ds, opNodeId),
+              ).finally(() => {
+                stackListState.clearStackAction(stackFile);
+                stackListState.refreshStacks(true);
+                deployPendingRef.current = false;
+              });
+            });
+            return { ok: false, deferredNetworks: true };
+          }
         }
         throw parseStackActionError(rawBody, 'Deploy failed', response.status);
       }
-      overlayState.setPolicyBlock(null);
-      const healthGateId = await parseHealthGateId(response);
-      // With a health gate observing, the operation finishing is not the
-      // final verdict yet; soften the toast so success is not claimed twice.
-      if (healthGateId) {
-        toast.info(ignorePolicy ? 'Stack deployed (policy bypassed). Verifying health...' : 'Stack deployed. Verifying health...');
-      } else {
-        toast.success(ignorePolicy ? 'Stack deployed (policy bypassed).' : 'Stack deployed successfully!');
-      }
-      await refreshSelectedContainers(stackName, stackFile);
-      try {
-        const backupRes = await apiFetch(`/stacks/${stackName}/backup`);
-        if (backupRes.ok) editorState.setBackupInfo(await backupRes.json());
-      } catch {
-        /* ignore */
-      }
-      stackListState.recordActionSuccess(stackFile);
-      return { ok: true, healthGateId };
+      return finishSuccessfulDeploy(response, stackName, stackFile, ignorePolicy);
     } catch (error) {
       console.error('Failed to deploy:', error);
       if (previousStatus !== undefined)
@@ -957,19 +1185,52 @@ export function useStackActions(options: UseStackActionsOptions) {
     // (not before the advisory) so cancelling the advisory leaves no stuck state.
     const runDeployFlow = async () => {
       stackListState.setStackAction(stackFile, 'deploy');
+      let deferredNetworks = false;
       try {
-        await runWithLog({ stackName, action: 'deploy', nodeId: opNodeId }, (started, ds) =>
+        const result = await runWithLog({ stackName, action: 'deploy', nodeId: opNodeId }, (started, ds) =>
           runDeploy(stackName, stackFile, false, started, ds, opNodeId),
         );
+        deferredNetworks = result.deferredNetworks === true;
       } finally {
         stackListState.clearStackAction(stackFile);
         stackListState.refreshStacks(true);
-        deployPendingRef.current = false;
+        if (!deferredNetworks) {
+          deployPendingRef.current = false;
+        }
       }
+    };
+
+    const continueAfterExternalNetworks = () => {
+      void runDeployFlow();
     };
 
     // Advisory runs before the deploy log opens (fails open: a null result means
     // setting off / timeout / older node / error, so the deploy proceeds).
+    const beginDeployAfterAdvisory = async () => {
+      if (hasGuidedExternalNetworkPreflight) {
+        const envelope = await fetchMissingExternalNetworks(stackName, opNodeId);
+        if (!envelope) {
+          toast.error('Sencho could not check external networks on this node before deploy.');
+          deployPendingRef.current = false;
+          return;
+        }
+        const blockMessage = missingExternalBlocksDeploy(envelope);
+        if (blockMessage) {
+          toast.error(blockMessage);
+          deployPendingRef.current = false;
+          return;
+        }
+        if (envelope.status === 'ok' && envelope.networks.length > 0) {
+          const allSafe = envelope.networks.every((n) => n.safe);
+          if (!(allSafe && envelope.autoCreateEnabled)) {
+            openMissingExternalNetworksDialog(envelope, opNodeId, continueAfterExternalNetworks);
+            return;
+          }
+        }
+      }
+      await runDeployFlow();
+    };
+
     const advisoryImages = await fetchPreDeployAdvisory(stackName, opNodeId);
     if (advisoryImages && advisoryImages.length > 0) {
       let settled = false;
@@ -980,7 +1241,7 @@ export function useStackActions(options: UseStackActionsOptions) {
           if (settled) return;
           settled = true;
           overlayState.setPreDeployAdvisory(null);
-          void runDeployFlow();
+          void beginDeployAfterAdvisory();
         },
         cancel: () => {
           if (settled) return;
@@ -991,7 +1252,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       });
       return;
     }
-    await runDeployFlow();
+    await beginDeployAfterAdvisory();
   };
 
   const handleSaveAndDeploy = async (e: React.MouseEvent) => {

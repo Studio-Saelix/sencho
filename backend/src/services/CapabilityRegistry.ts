@@ -55,6 +55,7 @@ export const CAPABILITIES = [
   'compose-storage',
   'cross-node-rbac',
   'stack-down-remove-volumes',
+  'guided-external-network-preflight',
 ] as const;
 
 /**

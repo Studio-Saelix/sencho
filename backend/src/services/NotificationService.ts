@@ -39,6 +39,8 @@ export type NotificationCategory =
     | 'update_started'
     | 'health_gate_passed'
     | 'health_gate_failed'
+    // Automatic external-network creation during deploy. History-only.
+    | 'network_auto_created'
     | 'node_update_available'
     | 'system';
 
@@ -56,6 +58,7 @@ export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
     ...ALL_NOTIFICATION_CATEGORIES,
     'drift_detected', 'drift_resolved',
     'update_started', 'health_gate_passed', 'health_gate_failed',
+    'network_auto_created',
 ];
 
 /** Webhook timeout: 10 seconds per external dispatch call. */
