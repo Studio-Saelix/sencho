@@ -53,18 +53,21 @@ export function NotificationsSection() {
     const fetchAgents = async () => {
         const requestNodeId = activeNode?.id;
         try {
-            const res = await apiFetch('/agents');
-            if (res.ok) {
-                if (activeNodeIdRef.current !== requestNodeId) return;
-                const data: Agent[] = await res.json();
-                const next = emptyAgents();
-                data.forEach(a => {
-                    if (a.type in next) next[a.type as ChannelType] = a;
-                });
-                setAgents(next);
-                setAppriseUrlDirty(false);
-                setAppriseConfigDirty(false);
-            }
+            const res = await apiFetch('/agents', {
+                // Bind the request to the node captured when this fetch started.
+                nodeId: typeof requestNodeId === 'number' ? requestNodeId : undefined,
+            });
+            if (!res.ok) return;
+            const data: Agent[] = await res.json();
+            // Compare after body parse so a slow json() cannot commit after a node switch.
+            if (activeNodeIdRef.current !== requestNodeId) return;
+            const next = emptyAgents();
+            data.forEach(a => {
+                if (a.type in next) next[a.type as ChannelType] = a;
+            });
+            setAgents(next);
+            setAppriseUrlDirty(false);
+            setAppriseConfigDirty(false);
         } catch (e) {
             console.error('Failed to fetch agents', e);
         }

@@ -334,15 +334,22 @@ describe('NotificationsSection', () => {
         await waitFor(() => expect(screen.getByLabelText(/Apprise endpoint/i)).toHaveValue(''));
     });
 
-    it('ignores a stale agents response after the active node changes', async () => {
-        let releaseNode1: (() => void) | undefined;
-        const node1Gate = new Promise<void>((resolve) => { releaseNode1 = resolve; });
+    it('ignores a stale agents body when json() resolves after a node switch', async () => {
+        let releaseNode1Body: (() => void) | undefined;
+        const node1BodyGate = new Promise<void>((resolve) => { releaseNode1Body = resolve; });
 
-        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string; nodeId?: number | null }) => {
             if (url === '/agents' && !opts?.method) {
-                if (nodeState.activeNode.id === 1) {
-                    await node1Gate;
-                    return agentsResponse([REDACTED_APPRISE]);
+                const targetId = opts?.nodeId ?? nodeState.activeNode.id;
+                if (targetId === 1) {
+                    // Response headers arrive immediately; body stays pending across the switch.
+                    return {
+                        ok: true,
+                        json: async () => {
+                            await node1BodyGate;
+                            return [REDACTED_APPRISE];
+                        },
+                    };
                 }
                 return agentsResponse([]);
             }
@@ -351,12 +358,16 @@ describe('NotificationsSection', () => {
 
         const { rerender } = render(<NotificationsSection />);
         await waitFor(() => expect(mockedFetch).toHaveBeenCalled());
+        expect(mockedFetch.mock.calls[0]?.[1]).toMatchObject({ nodeId: 1 });
 
         nodeState.activeNode = { id: 2 };
         rerender(<NotificationsSection />);
         await waitFor(() => expect(masthead.last?.[0]?.value).toBe('0/4'));
+        await waitFor(() =>
+            expect(mockedFetch.mock.calls.some((call) => (call[1] as { nodeId?: number } | undefined)?.nodeId === 2)).toBe(true),
+        );
 
-        releaseNode1?.();
+        releaseNode1Body?.();
         await new Promise((r) => setTimeout(r, 40));
         expect(masthead.last?.[0]?.value).toBe('0/4');
         await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
