@@ -1,6 +1,7 @@
 import BashExecModal from '../BashExecModal';
 import { PolicyBlockDialog } from '../stack/PolicyBlockDialog';
 import { PreDeployScanDialog } from '../stack/PreDeployScanDialog';
+import { MissingExternalNetworksDialog } from '../stack/MissingExternalNetworksDialog';
 import { UpdateReadinessDialog } from '../stack/UpdateReadinessDialog';
 import { SelfStackProtectedDialog } from '../stack/SelfStackProtectedDialog';
 import { DeleteStackDialog } from './DeleteStackDialog';
@@ -54,6 +55,7 @@ export function ShellOverlays({
     policyBlock, setPolicyBlock, policyBypassing,
     updateReadiness, setUpdateReadiness,
     preDeployAdvisory,
+    missingExternalNetworks, setMissingExternalNetworks,
     selfStackProtectedOpen, setSelfStackProtectedOpen,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
@@ -133,6 +135,24 @@ export function ShellOverlays({
         images={preDeployAdvisory?.images ?? []}
         onCancel={() => preDeployAdvisory?.cancel()}
         onDeploy={() => preDeployAdvisory?.proceed()}
+      />
+
+      <MissingExternalNetworksDialog
+        open={missingExternalNetworks !== null}
+        payload={missingExternalNetworks?.payload ?? null}
+        isAdmin={isAdmin}
+        creating={missingExternalNetworks?.creating ?? false}
+        onCancel={() => {
+          missingExternalNetworks?.cancel();
+          setMissingExternalNetworks(null);
+        }}
+        onOpenNetworking={() => {
+          missingExternalNetworks?.openNetworking();
+          setMissingExternalNetworks(null);
+        }}
+        onCreateAndContinue={() => {
+          void missingExternalNetworks?.createAndContinue();
+        }}
       />
 
       {/* Pre-deploy policy block */}

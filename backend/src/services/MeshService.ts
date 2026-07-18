@@ -9,7 +9,7 @@ import { DatabaseService, type NodeMode } from './DatabaseService';
 import DockerController from './DockerController';
 import { FileSystemService } from './FileSystemService';
 import { LicenseService } from './LicenseService';
-import { PROXY_TIER_HEADER } from './license-headers';
+import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import { MeshForwarder, type MeshForwarderHost } from './MeshForwarder';
 import { NodeRegistry } from './NodeRegistry';
 import { PilotTunnelManager } from './PilotTunnelManager';
@@ -2272,11 +2272,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         apiPath: string,
         body: unknown,
         timeoutMs: number,
+        extraHeaders?: Record<string, string>,
     ): Promise<Response> {
         const target = NodeRegistry.getInstance().getProxyTarget(nodeId);
         if (!target) throw new MeshError('no_target', `no proxy target for node ${nodeId}`);
         const url = `${target.apiUrl.replace(/\/$/, '')}${apiPath}`;
-        const headers: Record<string, string> = {};
+        const headers: Record<string, string> = { ...extraHeaders };
         if (body !== undefined) headers['Content-Type'] = 'application/json';
         if (target.apiToken) headers['Authorization'] = `Bearer ${target.apiToken}`;
         const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
@@ -2383,7 +2384,12 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             );
             const lock = await StackOpLockService.getInstance().runExclusive(
                 nodeId, stackName, 'deploy', 'system',
-                () => ComposeService.getInstance(nodeId).deployStack(stackName),
+                () => ComposeService.getInstance(nodeId).deployStack(
+                    stackName,
+                    undefined,
+                    undefined,
+                    { source: 'mesh_redeploy', actor: 'system:mesh' },
+                ),
             );
             if (!lock.ran) {
                 throw new Error(`Cannot redeploy "${stackName}": another operation (${lock.existing.action}) is already in progress.`);
@@ -2406,6 +2412,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             `/api/stacks/${encodeURIComponent(stackName)}/deploy`,
             {},
             10 * 60 * 1000,
+            deployProvenanceHeaders('mesh_redeploy', 'system:mesh'),
         );
         if (!res.ok) {
             const body = await res.text().catch(() => '');

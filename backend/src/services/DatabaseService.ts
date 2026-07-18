@@ -1709,6 +1709,7 @@ export class DatabaseService {
         stmt.run('image_update_check_cron', '');
         stmt.run('image_update_sidebar_indicators', '1');
         stmt.run('env_block_deploy_on_missing_required', '0');
+        stmt.run('auto_create_missing_external_networks', '0');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;
@@ -3111,6 +3112,23 @@ export class DatabaseService {
             : 'SELECT * FROM notification_history WHERE node_id = ? ORDER BY timestamp DESC LIMIT ?';
         const args: (number | string)[] = category ? [nodeId, category, limit] : [nodeId, limit];
         return (this.db.prepare(sql).all(...args) as unknown[]).map(row => this.mapNotificationRow(row as any));
+    }
+
+    public getNodeStackActivity(nodeId: number, opts: { limit: number }): NotificationHistory[] {
+        const categories = [
+            'deploy_success', 'deploy_failure', 'stack_started', 'stack_stopped', 'stack_restarted',
+            'image_update_applied', 'update_started', 'health_gate_passed', 'health_gate_failed',
+            'network_auto_created',
+        ];
+        const placeholders = categories.map(() => '?').join(', ');
+        const sql = `
+            SELECT * FROM notification_history
+            WHERE node_id = ? AND category IN (${placeholders})
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?
+        `;
+        return (this.db.prepare(sql).all(nodeId, ...categories, opts.limit) as unknown[])
+            .map(row => this.mapNotificationRow(row as any));
     }
 
     public addNotificationHistory(nodeId: number, notification: Omit<NotificationHistory, 'id' | 'is_read'>): NotificationHistory {

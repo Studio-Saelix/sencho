@@ -236,7 +236,10 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
             .send({ nodeId: LOCAL_NODE_ID, stackName: 'redeploy-web', redeploy: true });
         expect(res.status).toBe(200);
         expect(res.body.redeployed).toBe(true);
-        expect(deploySpy).toHaveBeenCalledWith('redeploy-web');
+        expect(deploySpy).toHaveBeenCalledWith('redeploy-web', undefined, undefined, {
+            source: 'fleet_snapshot',
+            actor: 'system:fleet-snapshot',
+        });
     });
 });
 
@@ -596,7 +599,10 @@ describe('Restore-all', () => {
         expect(res.status).toBe(200);
         expect(res.body.restored).toBe(1);
         expect(res.body.results[0].redeployed).toBe(true);
-        expect(deploySpy).toHaveBeenCalledWith('redeploy-all-web');
+        expect(deploySpy).toHaveBeenCalledWith('redeploy-all-web', undefined, undefined, {
+            source: 'fleet_snapshot',
+            actor: 'system:fleet-snapshot',
+        });
     });
 
     it('records a policy-blocked redeploy as a per-stack failure and still restores the rest', async () => {
@@ -622,7 +628,10 @@ describe('Restore-all', () => {
         const blocked = (res.body.results as Array<{ stackName: string; success: boolean; error?: string }>).find(r => r.stackName === 'blocked-web');
         expect(blocked?.success).toBe(false);
         expect(blocked?.error).toMatch(/blocked deploy/i);
-        expect(deploySpy).toHaveBeenCalledWith('ok-web');
-        expect(deploySpy).not.toHaveBeenCalledWith('blocked-web');
+        expect(deploySpy).toHaveBeenCalledWith('ok-web', undefined, undefined, {
+            source: 'fleet_snapshot',
+            actor: 'system:fleet-snapshot',
+        });
+        expect(deploySpy.mock.calls.map((c) => c[0])).not.toContain('blocked-web');
     });
 });

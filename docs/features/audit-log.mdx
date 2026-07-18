@@ -8,7 +8,7 @@ description: Track every mutating action on your Sencho instance with a searchab
 </Note>
 
 <Note>
-  Audit is hub-only and is hidden from the nav strip when a remote node is the active selection. See [Multi-Node Management](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active).
+  Audit is hub-only and is not shown in the nav strip when a remote node is the active selection. See [Multi-Node Management](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active).
 </Note>
 
 Sencho records every mutating action (deploy, stop, delete, settings changes, user management) with full attribution. The audit log answers the question every team eventually asks: **"Who changed what, and when?"**
@@ -66,7 +66,9 @@ Expanding a row in the Table view reveals additional detail:
 
 ## Viewing the audit log
 
-Navigate to the **Audit** tab in the top navigation. The tab itself only appears on an Admiral license; Community accounts have no navigation entry point to Audit at all, though the underlying recent-activity API stays reachable directly. On Admiral, the tab is further limited to users whose role grants the `system:audit` permission, which by default means **Admin** or **Auditor**. The feed then shows your full retained history rather than any fixed lookback window; retention defaults to 90 days and is configurable up to 365.
+The **Audit** view in navigation is an Admiral governance surface: the tab itself only appears on an Admiral license, and Community accounts have no navigation entry point to Audit at all, though the underlying recent-activity API stays reachable directly. On Admiral, the tab is further limited to users whose role grants the `system:audit` permission, which by default means **Admin** or **Auditor**.
+
+Navigate to the **Audit** tab in the top navigation when it is available for your role and plan. The feed then shows your full retained history rather than any fixed lookback window; retention defaults to 90 days and is configurable up to 365.
 
 The page has two views, toggled from the segmented control in the card header: **Stream** (default) and **Table**. The card subtitle reports the total number of entries that match the current filters.
 
@@ -188,7 +190,7 @@ Sensitive database values (such as remote node API tokens) are encrypted at rest
 
 <AccordionGroup>
   <Accordion title="The Audit tab is missing from the navigation">
-    The Audit tab only appears on an Admiral license; on Community it is not shown at all, regardless of role. On Admiral, the tab is further limited to users whose role grants the `system:audit` permission, by default **Admin** or **Auditor**. If you are on Admiral but signed in as a Deployer or Viewer, ask an admin to assign you the Auditor role from **Settings · Users**. The recent-activity API stays reachable on Community even without a navigation entry point to it.
+    The Audit tab is an Admiral governance view: it only appears on an Admiral license, and on Community it is not shown at all, regardless of role. On Admiral, the tab is further limited to users whose role grants the `system:audit` permission, by default **Admin** or **Auditor**. If you are on Admiral but signed in as a Deployer or Viewer, ask an admin to assign you the Auditor role from **Settings · Users**. The recent-activity API stays reachable on Community even without a navigation entry point to it.
   </Accordion>
   <Accordion title="Stream view shows everything but I want to filter to a specific user, action, or date">
     Filters live in **Table view only**. Toggle the segmented control in the card header from **Stream** to **Table** and the search box, method dropdown, and From / To date pickers will appear above the grid. Switching back to Stream clears the filter strip but does not remember the last filter.

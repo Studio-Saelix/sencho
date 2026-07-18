@@ -143,6 +143,14 @@ export function useOverlayState() {
     cancel: () => void;
   } | null>(null);
 
+  const [missingExternalNetworks, setMissingExternalNetworks] = useState<{
+    payload: import('../../stack/MissingExternalNetworksDialog').MissingExternalNetworksPayload;
+    creating: boolean;
+    cancel: () => void;
+    openNetworking: () => void;
+    createAndContinue: () => void;
+  } | null>(null);
+
   const [selfStackProtectedOpen, setSelfStackProtectedOpen] = useState(false);
   const openSelfStackProtected = useCallback(() => setSelfStackProtectedOpen(true), []);
   const closeSelfStackProtected = useCallback(() => setSelfStackProtectedOpen(false), []);
@@ -166,6 +174,7 @@ export function useOverlayState() {
     policyBlock, setPolicyBlock, policyBypassing, setPolicyBypassing,
     updateReadiness, setUpdateReadiness,
     preDeployAdvisory, setPreDeployAdvisory,
+    missingExternalNetworks, setMissingExternalNetworks,
     selfStackProtectedOpen, setSelfStackProtectedOpen, openSelfStackProtected, closeSelfStackProtected,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,

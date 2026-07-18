@@ -32,6 +32,7 @@ const ALLOWED_SETTING_KEYS = new Set([
   'health_gate_enabled',
   'health_gate_window_seconds',
   'env_block_deploy_on_missing_required',
+  'auto_create_missing_external_networks',
   'image_update_sidebar_indicators',
 ]);
 
@@ -63,6 +64,7 @@ const SettingsPatchSchema = z.object({
   health_gate_enabled: z.enum(['0', '1']),
   health_gate_window_seconds: z.coerce.number().int().min(15).max(600).transform(String),
   env_block_deploy_on_missing_required: z.enum(['0', '1']),
+  auto_create_missing_external_networks: z.enum(['0', '1']),
   image_update_sidebar_indicators: z.enum(['0', '1']),
 }).partial();
 

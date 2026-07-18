@@ -33,6 +33,36 @@ describe('AppearanceSection', () => {
         fireEvent.click(screen.getByRole('button', { name: /Calm/i }));
         expect(document.documentElement.dataset.headings).toBe('clean');
         expect(document.documentElement.dataset.chartStyle).toBe('muted');
+        expect(document.documentElement.dataset.effects).toBe('reduced');
+        expect(document.documentElement.dataset.motion).toBe('reduced');
+    });
+
+    it('Calm and Signature preset apply write reducedMotion; Effects alone does not', () => {
+        render(<AppearanceSection />);
+        // Baseline Signature clears Motion.
+        expect(document.documentElement.dataset.motion).toBeUndefined();
+
+        fireEvent.click(screen.getByRole('switch', { name: 'Reduced motion' }));
+        expect(document.documentElement.dataset.motion).toBe('reduced');
+        // Re-applying Signature clears a manually enabled Motion.
+        fireEvent.click(screen.getByRole('button', { name: /Today's look|Signature/i }));
+        expect(document.documentElement.dataset.motion).toBeUndefined();
+
+        fireEvent.click(screen.getByRole('button', { name: /Calm|readable default/i }));
+        expect(document.documentElement.dataset.motion).toBe('reduced');
+        fireEvent.click(screen.getByRole('switch', { name: 'Reduced motion' }));
+        expect(document.documentElement.dataset.motion).toBeUndefined();
+        // Calm card stays selected with Motion off.
+        expect(screen.getByRole('button', { name: /readable default/i }).getAttribute('aria-pressed')).toBe('true');
+        // Re-applying Calm turns Motion back on.
+        fireEvent.click(screen.getByRole('button', { name: /readable default/i }));
+        expect(document.documentElement.dataset.motion).toBe('reduced');
+
+        // Individual Effects toggle preserves Motion.
+        fireEvent.click(screen.getByRole('switch', { name: 'Reduced motion' }));
+        expect(document.documentElement.dataset.motion).toBeUndefined();
+        fireEvent.click(screen.getByRole('switch', { name: 'Reduced effects' }));
+        expect(document.documentElement.dataset.motion).toBeUndefined();
     });
 
     it('shows the constrained-graphics callout when Reduced motion is off, and hides it when on', () => {
@@ -125,9 +155,28 @@ describe('AppearanceSection', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }));
         expect(document.documentElement.dataset.headings).toBe('clean');
         expect(document.documentElement.dataset.chartStyle).toBe('muted');
+        expect(document.documentElement.dataset.motion).toBe('reduced');
         expect(screen.getByRole('button', { name: /readable default/i }).getAttribute('aria-pressed')).toBe('true');
 
         fireEvent.click(screen.getByRole('switch', { name: 'Readability mode' }));
         expect((screen.getByRole('button', { name: 'Reset to default' }) as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    it('shows Navigation style and mode-conditional controls', () => {
+        localStorage.clear();
+        render(<AppearanceSection />);
+        expect(screen.getByText('Navigation')).toBeTruthy();
+        expect(screen.getByRole('radiogroup', { name: 'Navigation style' })).toBeTruthy();
+        // Smart default shows label toggle, hides quick links.
+        expect(screen.getByText('Top navigation labels')).toBeTruthy();
+        expect(screen.queryByText('Quick links')).toBeNull();
+
+        fireEvent.click(screen.getByRole('radio', { name: 'Compact launcher' }));
+        expect(screen.getByText('Quick links')).toBeTruthy();
+        expect(screen.queryByText('Top navigation labels')).toBeNull();
+
+        fireEvent.click(screen.getByRole('radio', { name: 'Classic bar' }));
+        expect(screen.getByText('Top navigation labels')).toBeTruthy();
+        expect(screen.queryByText('Quick links')).toBeNull();
     });
 });

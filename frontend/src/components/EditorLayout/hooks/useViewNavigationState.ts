@@ -1,9 +1,4 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import {
-  Terminal, CloudDownload, Home, HardDrive, ScrollText,
-  Activity, Radar, RefreshCw, Clock, ShieldCheck,
-} from 'lucide-react';
-import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
@@ -18,20 +13,18 @@ import { HUB_ONLY_VIEWS } from '@/lib/router/routeTypes';
 import { readUrlRouteState } from '@/lib/router/readUrlRouteState';
 import {
   authzReady,
-  isViewHidden,
   normalizeHiddenView,
   type ReachabilityContext,
 } from '@/lib/routing/reachability';
 import { useExperimental } from '@/hooks/useExperimental';
+import { buildNavigationModel } from '@/lib/navigation/buildNavigationModel';
+import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 
 export type { ActiveView };
 export { HUB_ONLY_VIEWS };
 
-export interface NavItem {
-  value: ActiveView;
-  label: string;
-  icon: LucideIcon;
-}
+/** @deprecated Prefer NavDestination from appNavRegistry; alias kept for mobile/palette imports. */
+export type NavItem = NavDestination;
 
 interface UseViewNavigationStateOptions {
   onNavigateToDashboard?: () => void;
@@ -124,38 +117,8 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     return () => window.removeEventListener(SENCHO_NAVIGATE_EVENT, handler);
   }, []);
 
-  const navItems = useMemo((): NavItem[] => {
-    const items: NavItem[] = [
-      { value: 'dashboard', label: 'Home', icon: Home },
-    ];
-    if (!isViewHidden('fleet', reachCtx)) {
-      items.push({ value: 'fleet', label: 'Fleet', icon: Radar });
-    }
-    items.push(
-      { value: 'resources', label: 'Resources', icon: HardDrive },
-      { value: 'security', label: 'Security', icon: ShieldCheck },
-      { value: 'templates', label: 'App Store', icon: CloudDownload },
-    );
-    if (!isViewHidden('global-observability', reachCtx)) {
-      items.push({ value: 'global-observability', label: 'Logs', icon: Activity });
-    }
-    if (!isViewHidden('auto-updates', reachCtx)) {
-      items.push({ value: 'auto-updates', label: 'Update', icon: RefreshCw });
-    }
-    if (!isViewHidden('scheduled-ops', reachCtx)) {
-      items.push({ value: 'scheduled-ops', label: 'Schedules', icon: Clock });
-    }
-    // Visual discovery fail-closed: omit Console until /meta settles and the
-    // flag is on. URL normalization still waits on experimentalReady inside
-    // isViewHidden so enabled deep links are not rewritten during cold load.
-    if (experimentalReady && experimental && !isViewHidden('host-console', reachCtx)) {
-      items.push({ value: 'host-console', label: 'Console', icon: Terminal });
-    }
-    if (!isViewHidden('audit-log', reachCtx)) {
-      items.push({ value: 'audit-log', label: 'Audit', icon: ScrollText });
-    }
-    return items;
-  }, [reachCtx, experimentalReady, experimental]);
+  const navModel = useMemo(() => buildNavigationModel(reachCtx), [reachCtx]);
+  const navItems = navModel.allPageItems;
 
   useEffect(() => {
     if (!authzReady(reachCtx)) return;
@@ -182,6 +145,7 @@ export function useViewNavigationState(options?: UseViewNavigationStateOptions) 
     openMuteRulesWithPrefill,
     handleNavigate,
     navItems,
+    navModel,
     reachCtx,
   } as const;
 }

@@ -17,6 +17,7 @@ import { authRouter } from './routes/auth';
 import { mfaRouter } from './routes/mfa';
 import { ssoRouter } from './routes/sso';
 import { licenseRouter, systemUpdateRouter } from './routes/license';
+import { imageChannelRouter } from './routes/imageChannel';
 import { webhooksRouter } from './routes/webhooks';
 import { usersRouter } from './routes/users';
 import { gitSourcesRouter, stackGitSourceRouter } from './routes/gitSources';
@@ -106,6 +107,7 @@ app.use('/api', hubOnlyGuard);
 app.use('/api/', createRemoteProxyMiddleware());
 
 app.use('/api/license', licenseRouter);
+app.use('/api/license/image-channel', imageChannelRouter);
 app.use('/api/system', systemUpdateRouter);
 app.use('/api/permissions', permissionsRouter);
 app.use('/api/convert', convertRouter);

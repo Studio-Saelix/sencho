@@ -10,9 +10,12 @@ import {
 } from './ImageUpdateService';
 import {
     parseImageRef,
-    getRemoteDigest,
+    selectLocalRepoDigest,
+    compareLocalToRemoteTag,
     listRegistryTags,
+    type ParsedRef,
     type RegistryCredentials,
+    type DigestComparisonResult,
 } from './registry-api';
 
 export type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
@@ -161,9 +164,14 @@ async function loadStackImages(
     return extractServiceImagesFromCompose(composeContent, merged);
 }
 
+export interface LocalDigestInfo {
+    digest: string | null;
+    platform: { os: string; architecture: string };
+}
+
 export interface ComputePreviewDeps {
-    getLocalDigest: (imageRef: string) => Promise<string | null>;
-    getRemoteDigest: typeof getRemoteDigest;
+    getLocalDigest: (imageRef: string, parsed: ParsedRef) => Promise<LocalDigestInfo>;
+    compareDigest: typeof compareLocalToRemoteTag;
     listRegistryTags: typeof listRegistryTags;
     getCredentials: (registry: string) => Promise<RegistryCredentials | null>;
 }
@@ -187,15 +195,19 @@ export async function computeImagePreview(
 
     const credentials = await deps.getCredentials(parsed.registry);
 
-    // Digest-based: is a new build of the SAME tag available?
-    const [localDigest, remoteDigest] = await Promise.all([
-        deps.getLocalDigest(imageRef),
-        deps.getRemoteDigest(parsed.registry, parsed.repo, parsed.tag, credentials),
+    // Digest-based: is a new build of the SAME tag available? A comparison error
+    // (network failure, malformed manifest) fails soft: it never claims a
+    // digest-based update, it only skips it.
+    const localInfo = await deps.getLocalDigest(imageRef, parsed);
+    const [comparison, tags] = await Promise.all([
+        localInfo.digest
+            ? deps.compareDigest(localInfo.digest, parsed.registry, parsed.repo, parsed.tag, localInfo.platform, credentials)
+            : Promise.resolve<DigestComparisonResult>({ kind: 'error', reason: 'No local registry digest available' }),
+        deps.listRegistryTags(parsed.registry, parsed.repo, credentials),
     ]);
-    const digestUpdate = Boolean(localDigest && remoteDigest && localDigest !== remoteDigest);
+    const digestUpdate = comparison.kind === 'update';
 
     // Tag-based: is a higher semver tag available?
-    const tags = await deps.listRegistryTags(parsed.registry, parsed.repo, credentials);
     const nextTag = findNextTag(parsed.tag, tags);
 
     const hasUpdate = digestUpdate || nextTag !== null;
@@ -297,20 +309,16 @@ export class UpdatePreviewService {
         const docker = DockerController.getInstance(nodeId);
         const deps: ComputePreviewDeps = {
             getCredentials: (registry) => RegistryService.getInstance().getAuthForRegistry(registry),
-            getRemoteDigest,
+            compareDigest: compareLocalToRemoteTag,
             listRegistryTags,
-            getLocalDigest: async (imageRef: string) => {
+            getLocalDigest: async (imageRef: string, parsed: ParsedRef): Promise<LocalDigestInfo> => {
                 try {
                     const inspect = await docker.getDocker().getImage(imageRef).inspect();
                     const repoDigests: string[] = inspect.RepoDigests ?? [];
-                    for (const rd of repoDigests) {
-                        if (!rd.includes('@sha256:')) continue;
-                        const [, digest] = rd.split('@');
-                        return digest;
-                    }
-                    return null;
+                    const digest = selectLocalRepoDigest(repoDigests, parsed);
+                    return { digest, platform: { os: inspect.Os, architecture: inspect.Architecture } };
                 } catch {
-                    return null;
+                    return { digest: null, platform: { os: '', architecture: '' } };
                 }
             },
         };

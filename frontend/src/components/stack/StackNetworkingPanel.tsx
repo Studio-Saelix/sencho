@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { CreateNetworkDialog } from '@/components/resources/CreateNetworkDialog';
+import { SENCHO_NAVIGATE_EVENT, type SenchoNavigateDetail } from '@/components/NodeManager';
 
 // Mirrors the backend networking payload shapes (the frontend never imports
 // backend). IntentEntry intentionally keeps only the fields this panel reads.
@@ -34,6 +35,13 @@ interface StackNetworkFacts {
   networks: NetworkFactNetwork[];
   services: NetworkFactService[];
   drift: NetworkDriftFacts;
+  missingExternalNetworks?: Array<{
+    name: string;
+    keys: string[];
+    safe: boolean;
+    blockReason?: string;
+    unsupportedFeatures: string[];
+  }>;
 }
 interface IntentEntry { service: string; intent: ExposureIntent }
 
@@ -336,6 +344,17 @@ export default function StackNetworkingPanel({ stackName, canEdit, doctorEnabled
           <ArrowRight className="h-3 w-3" strokeWidth={1.5} /> deploy and security findings are in the Doctor tab
         </div>
       )}
+      <button
+        type="button"
+        onClick={() => {
+          window.dispatchEvent(new CustomEvent<SenchoNavigateDetail>(SENCHO_NAVIGATE_EVENT, {
+            detail: { view: 'networking' },
+          }));
+        }}
+        className="flex items-center gap-1 font-mono text-[10px] text-stat-subtitle hover:text-stat-value transition-colors"
+      >
+        <ArrowRight className="h-3 w-3" strokeWidth={1.5} /> view node networking
+      </button>
     </div>
   );
 }

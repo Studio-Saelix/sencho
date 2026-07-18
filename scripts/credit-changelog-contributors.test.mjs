@@ -10,16 +10,27 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-// Import pure helpers from the script
 import {
   parseVersionSection,
   extractReferences,
   classifyAuthor,
   shouldRetry,
-  buildThanksSection,
+  stripInlineThanks,
+  applyInlineThanks,
+  sortLogins,
+  dedupeLogins,
   removeThanksSection,
-  injectThanksSection,
+  creditChangelogEntries,
+  splitLines,
+  joinLines,
 } from './credit-changelog-contributors.mjs'
+
+const OWNER = 'Studio-Saelix'
+const REPO = 'sencho'
+
+function sameRepo(n, kind = 'issues') {
+  return `[#${n}](https://github.com/${OWNER}/${REPO}/${kind}/${n})`
+}
 
 // ---------------------------------------------------------------------------
 // parseVersionSection
@@ -43,9 +54,7 @@ describe('parseVersionSection', () => {
 
     const result = parseVersionSection(text)
     assert.notEqual(result, null)
-    // The 0.93.0 block starts at the "## [0.93.0]" line
     assert.ok(text.slice(result.start, result.end).includes('## [0.93.0]'))
-    // It must NOT include 0.92.0 content
     assert.ok(!text.slice(result.start, result.end).includes('## [0.92.0]'))
   })
 
@@ -65,7 +74,6 @@ describe('parseVersionSection', () => {
     const text = '## [1.0.0]\n\n### Added\n* feat\n'
     const result = parseVersionSection(text)
     assert.notEqual(result, null)
-    // The block should contain the full text (no trailing \n means end === text.length)
     assert.equal(result.end, text.length)
   })
 
@@ -73,7 +81,6 @@ describe('parseVersionSection', () => {
     const text = '# Changelog — all notable changes\n\n## [0.94.0]\n\n### Added\n* item ✓\n'
     const result = parseVersionSection(text)
     assert.notEqual(result, null)
-    // String.indexOf works at code-unit level; the block should contain the heading
     assert.ok(text.slice(result.start, result.end).startsWith('## [0.94.0]'))
   })
 
@@ -99,34 +106,29 @@ describe('parseVersionSection', () => {
 // ---------------------------------------------------------------------------
 
 describe('extractReferences', () => {
-  const OWNER = 'Studio-Saelix'
-  const REPO = 'sencho'
-
   it('extracts PR references from ([#N](.../issues/N))', () => {
-    const text =
-      '* feat: add thing ([#1442](https://github.com/Studio-Saelix/sencho/issues/1442))'
+    const text = `* feat: add thing (${sameRepo(1442)})`
     const refs = extractReferences(text, OWNER, REPO)
     assert.deepEqual(refs, [1442])
   })
 
   it('extracts linked-issue references from closes [#N](...)', () => {
     const text =
-      '* fix: clear logs ([#1448](https://github.com/Studio-Saelix/sencho/issues/1448)) ([abc](...)), closes [#1444](https://github.com/Studio-Saelix/sencho/issues/1444)'
+      `* fix: clear logs (${sameRepo(1448)}) ([abc](...)), closes ${sameRepo(1444)}`
     const refs = extractReferences(text, OWNER, REPO)
     assert.deepEqual(refs, [1444, 1448])
   })
 
   it('extracts fixes/resolves variants', () => {
     const text =
-      '* fix: a ([#1](https://github.com/Studio-Saelix/sencho/issues/1)) ([...]), fixes [#2](https://github.com/Studio-Saelix/sencho/issues/2)\n' +
-      '* fix: b ([#3](https://github.com/Studio-Saelix/sencho/issues/3)) ([...]), resolves [#4](https://github.com/Studio-Saelix/sencho/issues/4)'
+      `* fix: a (${sameRepo(1)}) ([...]), fixes ${sameRepo(2)}\n` +
+      `* fix: b (${sameRepo(3)}) ([...]), resolves ${sameRepo(4)}`
     const refs = extractReferences(text, OWNER, REPO)
     assert.deepEqual(refs, [1, 2, 3, 4])
   })
 
   it('accepts /pull/ URLs', () => {
-    const text =
-      '* feat: pr ref ([#5](https://github.com/Studio-Saelix/sencho/pull/5))'
+    const text = `* feat: pr ref (${sameRepo(5, 'pull')})`
     const refs = extractReferences(text, OWNER, REPO)
     assert.deepEqual(refs, [5])
   })
@@ -141,7 +143,6 @@ describe('extractReferences', () => {
   it('accepts pre-transfer org (AnsoCode/Sencho)', () => {
     const text =
       '* old: thing ([#583](https://github.com/AnsoCode/Sencho/issues/583))'
-    // The owner/repo must be passed as the pre-transfer ones to match
     const refs = extractReferences(text, 'AnsoCode', 'Sencho')
     assert.deepEqual(refs, [583])
   })
@@ -155,17 +156,17 @@ describe('extractReferences', () => {
 
   it('deduplicates repeated numbers', () => {
     const text =
-      '* feat: a ([#10](https://github.com/Studio-Saelix/sencho/issues/10))\n' +
-      '* feat: b ([#10](https://github.com/Studio-Saelix/sencho/issues/10))'
+      `* feat: a (${sameRepo(10)})\n` +
+      `* feat: b (${sameRepo(10)})`
     const refs = extractReferences(text, OWNER, REPO)
     assert.deepEqual(refs, [10])
   })
 
   it('returns sorted numbers', () => {
     const text =
-      '* feat: c ([#30](https://github.com/Studio-Saelix/sencho/issues/30))\n' +
-      '* feat: a ([#10](https://github.com/Studio-Saelix/sencho/issues/10))\n' +
-      '* feat: b ([#20](https://github.com/Studio-Saelix/sencho/issues/20))'
+      `* feat: c (${sameRepo(30)})\n` +
+      `* feat: a (${sameRepo(10)})\n` +
+      `* feat: b (${sameRepo(20)})`
     const refs = extractReferences(text, OWNER, REPO)
     assert.deepEqual(refs, [10, 20, 30])
   })
@@ -181,7 +182,7 @@ describe('extractReferences', () => {
     const text =
       '* feat: wrong ([#42](https://github.com/Studio-Saelix/sencho/issues/99))'
     const refs = extractReferences(text, OWNER, REPO)
-    assert.deepEqual(refs, []) // #42 != #99
+    assert.deepEqual(refs, [])
   })
 })
 
@@ -261,11 +262,7 @@ describe('classifyAuthor', () => {
     )
   })
 
-  it('respects MAINTAINER_LOGINS override', () => {
-    // MAINTAINER_LOGINS is read at module import time, so changing the env
-    // var here does not affect classifyAuthor's internal constant. This test
-    // verifies the baseline: overrideUser with NONE association is external
-    // when no maintainer logins are configured.
+  it('respects MAINTAINER_LOGINS override baseline (module-load constant)', () => {
     const prev = process.env.MAINTAINER_LOGINS
     process.env.MAINTAINER_LOGINS = 'overrideUser'
     assert.equal(
@@ -279,7 +276,6 @@ describe('classifyAuthor', () => {
   })
 
   it('case-insensitive login matching', () => {
-    // Bot pattern is case-insensitive
     assert.equal(
       classifyAuthor({
         user: { type: 'User', login: 'SomeBot[BOT]' },
@@ -334,289 +330,356 @@ describe('shouldRetry', () => {
 })
 
 // ---------------------------------------------------------------------------
-// buildThanksSection
+// Inline thanks helpers
 // ---------------------------------------------------------------------------
 
-describe('buildThanksSection', () => {
-  it('returns empty string for empty map', () => {
-    assert.equal(buildThanksSection(new Map()), '')
+describe('inline thanks helpers', () => {
+  it('strips exact trailing suffix', () => {
+    assert.equal(
+      stripInlineThanks('closes #1, thanks @auspex'),
+      'closes #1',
+    )
   })
 
-  it('builds section for a single contributor', () => {
-    const map = new Map()
-    map.set('Crosis47', {
-      displayName: 'Crosis47',
-      items: [{ kind: 'issue', number: 1444, url: 'https://github.com/Studio-Saelix/sencho/issues/1444' }],
-    })
-    const result = buildThanksSection(map)
-    assert.ok(result.startsWith('### Thanks'))
-    assert.ok(result.includes('@Crosis47'))
-    assert.ok(result.includes('[#1444](https://github.com/Studio-Saelix/sencho/issues/1444)'))
+  it('preserves near-match prose that is not the managed suffix', () => {
+    const prose = 'special thanks to everyone who filed bugs'
+    assert.equal(stripInlineThanks(prose), prose)
+    assert.equal(applyInlineThanks(prose, []), prose)
   })
 
-  it('groups multiple contributions for same login', () => {
-    const map = new Map()
-    map.set('alice', {
-      displayName: 'alice',
-      items: [
-        { kind: 'issue', number: 10, url: 'https://github.com/Studio-Saelix/sencho/issues/10' },
-        { kind: 'pr', number: 5, url: 'https://github.com/Studio-Saelix/sencho/pull/5' },
-      ],
-    })
-    const result = buildThanksSection(map)
-    assert.ok(result.includes('#5') && result.includes('#10'))
-    // Numbers sorted
-    const idx5 = result.indexOf('#5')
-    const idx10 = result.indexOf('#10')
-    assert.ok(idx5 < idx10)
+  it('dedupes case-insensitively keeping first casing', () => {
+    assert.deepEqual(dedupeLogins(['Auspex', 'auspex', 'Bob']), ['Auspex', 'Bob'])
   })
 
-  it('sorts contributors alphabetically by login', () => {
-    const map = new Map()
-    map.set('zoe', { displayName: 'zoe', items: [{ kind: 'issue', number: 1, url: 'u' }] })
-    map.set('alice', { displayName: 'alice', items: [{ kind: 'issue', number: 2, url: 'u' }] })
-    const result = buildThanksSection(map)
-    const idxA = result.indexOf('@alice')
-    const idxZ = result.indexOf('@zoe')
-    assert.ok(idxA < idxZ)
+  it('sorts case-insensitively with deterministic tie-break', () => {
+    assert.deepEqual(sortLogins(['bob', 'Alice', 'alice']), ['Alice', 'alice', 'bob'])
+  })
+
+  it('applies sorted unique suffix', () => {
+    // First-seen casing wins ('alice'); Alice is dropped as a case-insensitive dup.
+    assert.equal(
+      applyInlineThanks('line', ['bob', 'alice', 'Alice']),
+      'line, thanks @alice, @bob',
+    )
+  })
+
+  it('removes stale suffix when logins empty', () => {
+    assert.equal(
+      applyInlineThanks('line, thanks @stale', []),
+      'line',
+    )
   })
 })
 
 // ---------------------------------------------------------------------------
-// removeThanksSection
+// creditChangelogEntries
 // ---------------------------------------------------------------------------
 
-describe('removeThanksSection', () => {
-  it('removes existing Thanks from the block', () => {
+describe('creditChangelogEntries', () => {
+  it('0.95.0-style bullet: PR plus closes #1581 becomes thanks @auspex', () => {
+    const section = [
+      '## [0.95.0](...) (2026-07-12)',
+      '',
+      '### Fixed',
+      `* **drift:** resolve explicit network names that equal compose keys (${sameRepo(1588)}) ([4123793](...)), closes ${sameRepo(1581)}`,
+    ].join('\n')
+
+    const map = new Map([[1581, 'auspex']])
+    const result = creditChangelogEntries(section, map, OWNER, REPO)
+    assert.ok(result.includes(`, closes ${sameRepo(1581)}, thanks @auspex`))
+    assert.ok(!result.includes('thanks @auspex, thanks'))
+  })
+
+  it('credits reference on indented non-list continuation line', () => {
     const section = [
       '## [0.93.0]',
       '',
-      '### Thanks',
-      '',
-      '* @alice for [#1](u)',
-      '',
       '### Added',
-      '* feat',
+      `* feat (${sameRepo(1448)})`,
+      `  ([abc](...)), closes ${sameRepo(1444)}`,
     ].join('\n')
-    const text = `# Changelog\n\n${section}\n\n## [0.92.0]`
-    const parsed = parseVersionSection(text)
-    const result = removeThanksSection(text, parsed.start, parsed.end)
-    assert.ok(!result.includes('### Thanks'))
-    assert.ok(result.includes('### Added'))
-    assert.ok(result.includes('## [0.92.0]'))
+
+    const map = new Map([[1444, 'Crosis47']])
+    const result = creditChangelogEntries(section, map, OWNER, REPO)
+    assert.ok(result.includes(`closes ${sameRepo(1444)}, thanks @Crosis47`))
+    assert.ok(!result.split('\n')[3].includes('thanks'))
   })
 
-  it('is no-op when no Thanks section exists', () => {
-    const text = [
-      '## [0.93.0]',
+  it('dash top-level bullet is credited', () => {
+    const section = [
+      '## [1.0.0]',
       '',
-      '### Added',
-      '* feat',
+      `### Fixed`,
+      `- fix: thing (${sameRepo(10)})`,
     ].join('\n')
-    const parsed = parseVersionSection(text)
-    const result = removeThanksSection(text, parsed.start, parsed.end)
-    assert.equal(result, text)
+    const map = new Map([[10, 'dashUser']])
+    const result = creditChangelogEntries(section, map, OWNER, REPO)
+    assert.ok(result.includes(`- fix: thing (${sameRepo(10)}), thanks @dashUser`))
   })
 
-  it('does not touch previous release Thanks', () => {
-    const text = [
-      '## [0.94.0]',
-      '',
-      '### Added',
-      '* new feat',
-      '',
-      '## [0.93.0]',
-      '',
-      '### Thanks',
-      '',
-      '* @alice for [#1](u)',
+  it('same-repo #123 credited; cross-repo #123 on other bullet is not', () => {
+    const section = [
+      '## [1.0.0]',
       '',
       '### Fixed',
-      '* old fix',
+      `* same (${sameRepo(123)})`,
+      '* cross ([#123](https://github.com/OtherOrg/other/issues/123))',
     ].join('\n')
-    const parsed = parseVersionSection(text)
-    const result = removeThanksSection(text, parsed.start, parsed.end)
-    // Latest (0.94.0) has no Thanks, so no-op
-    assert.equal(result, text)
-    // But previous release still has its Thanks
-    assert.ok(result.includes('### Thanks'))
+    const map = new Map([[123, 'sameRepoUser']])
+    const result = creditChangelogEntries(section, map, OWNER, REPO)
+    const lines = result.split('\n')
+    assert.ok(lines[3].includes(', thanks @sameRepoUser'))
+    assert.equal(lines[4], '* cross ([#123](https://github.com/OtherOrg/other/issues/123))')
   })
-})
 
-// ---------------------------------------------------------------------------
-// injectThanksSection
-// ---------------------------------------------------------------------------
+  it('two externals on one logical bullet: sorted and deduplicated', () => {
+    const section = [
+      '## [1.0.0]',
+      '',
+      `* fix (${sameRepo(1)}) closes ${sameRepo(2)}`,
+    ].join('\n')
+    const map = new Map([
+      [1, 'zoe'],
+      [2, 'alice'],
+    ])
+    const result = creditChangelogEntries(section, map, OWNER, REPO)
+    assert.ok(result.includes(', thanks @alice, @zoe'))
+  })
 
-describe('injectThanksSection', () => {
-  it('inserts Thanks after version heading', () => {
-    const text = [
+  it('one contributor on multiple bullets credits each applicable bullet', () => {
+    const section = [
+      '## [1.0.0]',
+      '',
+      `* a (${sameRepo(1)})`,
+      `* b (${sameRepo(1)})`,
+      `* c (${sameRepo(2)})`,
+    ].join('\n')
+    const map = new Map([
+      [1, 'helper'],
+      [2, 'other'],
+    ])
+    const result = creditChangelogEntries(section, map, OWNER, REPO)
+    const lines = result.split('\n')
+    assert.ok(lines[2].endsWith(', thanks @helper'))
+    assert.ok(lines[3].endsWith(', thanks @helper'))
+    assert.ok(lines[4].endsWith(', thanks @other'))
+  })
+
+  it('second run produces byte-identical output', () => {
+    const section = [
       '## [0.93.0]',
       '',
       '### Added',
-      '* feat',
+      `* feat (${sameRepo(1448)})`,
+      `  ([abc](...)), closes ${sameRepo(1444)}`,
     ].join('\n')
-    const parsed = parseVersionSection(text)
-    const thanks = '### Thanks\n\n* @alice for [#1](u)'
-    const result = injectThanksSection(text, thanks, parsed.start, parsed.end)
-    assert.ok(result.includes('### Thanks'))
-    assert.ok(result.includes('@alice'))
-    const thanksIdx = result.indexOf('### Thanks')
-    const addedIdx = result.indexOf('### Added')
-    assert.ok(thanksIdx < addedIdx)
+    const map = new Map([[1444, 'Crosis47']])
+    const first = creditChangelogEntries(section, map, OWNER, REPO)
+    const second = creditChangelogEntries(first, map, OWNER, REPO)
+    assert.equal(second, first)
   })
 
-  it('injects into empty block (no subsections)', () => {
-    const text = '## [0.93.0]\n'
-    const parsed = parseVersionSection(text)
-    const thanks = '### Thanks\n\n* @bob for [#2](u)'
-    const result = injectThanksSection(text, thanks, parsed.start, parsed.end)
-    assert.ok(result.includes('### Thanks'))
-    assert.ok(result.includes('@bob'))
+  it('strips stale suffix from first line when a continuation is added later', () => {
+    const section = [
+      '## [1.0.0]',
+      '',
+      `* feat (${sameRepo(1)}), thanks @old`,
+      `  continuation closes ${sameRepo(2)}`,
+    ].join('\n')
+    const map = new Map([[2, 'newUser']])
+    const result = creditChangelogEntries(section, map, OWNER, REPO)
+    const lines = result.split('\n')
+    assert.equal(lines[2], `* feat (${sameRepo(1)})`)
+    assert.ok(lines[3].endsWith(', thanks @newUser'))
+    assert.ok(!lines[2].includes('thanks'))
   })
 
-  it('does not mutate content outside the block', () => {
-    const before = '# Changelog\n\n'
-    const block = '## [0.93.0]\n\n### Added\n* feat\n'
-    const after = '\n## [0.92.0]\n\n### Fixed\n* old fix\n'
-    const text = before + block + after
-    const parsed = parseVersionSection(text)
-    const thanks = '### Thanks\n\n* @carol for [#3](u)'
-    const result = injectThanksSection(text, thanks, parsed.start, parsed.end)
-    assert.ok(result.startsWith(before))
-    assert.ok(result.endsWith(after))
+  it('removes stale inline credit when login map has no matching externals', () => {
+    const section = [
+      '## [1.0.0]',
+      '',
+      `* fix (${sameRepo(1)}), thanks @stale`,
+    ].join('\n')
+    const result = creditChangelogEntries(section, new Map(), OWNER, REPO)
+    assert.equal(result.split('\n')[2], `* fix (${sameRepo(1)})`)
+  })
+
+  it('bullet with no external refs and no suffix remains byte-identical', () => {
+    const section = [
+      '## [1.0.0]',
+      '',
+      '### Added',
+      '* feat: plain entry',
+      '',
+    ].join('\n')
+    const result = creditChangelogEntries(section, new Map(), OWNER, REPO)
+    assert.equal(result, section)
+  })
+
+  it('preserves near-match thanks prose that is not the managed suffix', () => {
+    const section = [
+      '## [1.0.0]',
+      '',
+      '* feat: special thanks to reviewers',
+    ].join('\n')
+    const result = creditChangelogEntries(section, new Map(), OWNER, REPO)
+    assert.equal(result, section)
+  })
+
+  it('nested list child remains unchanged; suffix on parent', () => {
+    const section = [
+      '## [1.0.0]',
+      '',
+      `* parent with ref (${sameRepo(7)})`,
+      '  * nested child stays put',
+      '* sibling',
+    ].join('\n')
+    const map = new Map([[7, 'parentUser']])
+    const result = creditChangelogEntries(section, map, OWNER, REPO)
+    const lines = result.split('\n')
+    assert.equal(lines[2], `* parent with ref (${sameRepo(7)}), thanks @parentUser`)
+    assert.equal(lines[3], '  * nested child stays put')
+    assert.equal(lines[4], '* sibling')
+  })
+
+  it('nested list refs are excluded from parent association', () => {
+    const section = [
+      '## [1.0.0]',
+      '',
+      '* parent with no refs',
+      `  * nested closes ${sameRepo(7)}`,
+    ].join('\n')
+    const map = new Map([[7, 'nestedUser']])
+    const result = creditChangelogEntries(section, map, OWNER, REPO)
+    assert.equal(result, section)
+    assert.ok(!result.includes('thanks'))
+  })
+
+  it('blank line terminates logical entry (later prose not absorbed)', () => {
+    const section = [
+      '## [1.0.0]',
+      '',
+      `* parent (${sameRepo(1)})`,
+      '',
+      '  later prose that looks indented',
+    ].join('\n')
+    const map = new Map([[1, 'user']])
+    const result = creditChangelogEntries(section, map, OWNER, REPO)
+    const lines = result.split('\n')
+    assert.equal(lines[2], `* parent (${sameRepo(1)}), thanks @user`)
+    assert.equal(lines[3], '')
+    assert.equal(lines[4], '  later prose that looks indented')
+  })
+
+  it('preserves LF after an actual inline rewrite', () => {
+    const section = `## [1.0.0]\n\n* feat (${sameRepo(1)})\n`
+    assert.ok(!section.includes('\r'))
+    const result = creditChangelogEntries(section, new Map([[1, 'u']]), OWNER, REPO)
+    assert.ok(!result.includes('\r'))
+    assert.ok(result.includes(`* feat (${sameRepo(1)}), thanks @u\n`))
+  })
+
+  it('preserves CRLF after an actual inline rewrite', () => {
+    const section = `## [1.0.0]\r\n\r\n* feat (${sameRepo(1)})\r\n`
+    const result = creditChangelogEntries(section, new Map([[1, 'u']]), OWNER, REPO)
+    assert.ok(result.includes('## [1.0.0]\r\n'))
+    assert.ok(result.includes(`* feat (${sameRepo(1)}), thanks @u\r\n`))
+    assert.equal(result.includes('\n') && !result.includes('\r\n'), false)
   })
 })
 
 // ---------------------------------------------------------------------------
-// Bounded mutation: both releases have Thanks
+// removeThanksSection + bounded mutation
 // ---------------------------------------------------------------------------
 
-describe('bounded mutation with multiple Thanks sections', () => {
-  it('removes Thanks only from latest, leaves previous intact', () => {
+describe('removeThanksSection and bounded mutation', () => {
+  it('removes legacy Thanks from latest while preserving historical Thanks', () => {
     const text = [
-      '## [0.94.0]',
+      '# Changelog',
+      '',
+      '## [0.95.0]',
       '',
       '### Thanks',
       '',
-      '* @new for [#10](u)',
+      '* @auspex for [#1581](u)',
       '',
       '### Added',
-      '* latest feat',
+      '* feat',
       '',
-      '## [0.93.0]',
+      '## [0.94.0]',
       '',
       '### Thanks',
       '',
       '* @old for [#5](u)',
       '',
       '### Fixed',
-      '* old fix',
+      '* old',
     ].join('\n')
 
     const parsed = parseVersionSection(text)
-    assert.notEqual(parsed, null)
-
-    // Verify latest section contains Thanks
-    const latest = text.slice(parsed.start, parsed.end)
-    assert.ok(latest.includes('### Thanks'))
-    assert.ok(latest.includes('@new'))
-
-    // Remove from latest
     const result = removeThanksSection(text, parsed.start, parsed.end)
-
-    // Re-parse the result to get the new latest section boundaries
     const reparsed = parseVersionSection(result)
-    const newLatest = result.slice(reparsed.start, reparsed.end)
-    assert.ok(!newLatest.includes('### Thanks'))
-
-    // Previous release still has its Thanks
+    const latest = result.slice(reparsed.start, reparsed.end)
+    assert.ok(!latest.includes('### Thanks'))
+    assert.ok(!latest.includes('@auspex'))
     assert.ok(result.includes('@old for [#5](u)'))
   })
 
-  it('second-run idempotency: same output when run twice', () => {
-    const text = [
-      '## [0.93.0]',
+  it('content before and after latest version remains byte-identical after credit', () => {
+    const prefix = '# Changelog\n\nIntro prose.\n\n'
+    const latest = [
+      '## [1.0.0]',
       '',
       '### Added',
-      '* feat ([#1448](https://github.com/Studio-Saelix/sencho/issues/1448))',
-      '  ([abc](...)), closes [#1444](https://github.com/Studio-Saelix/sencho/issues/1444)',
+      `* feat (${sameRepo(1)})`,
+      '',
     ].join('\n')
+    const suffix = '## [0.9.0]\n\n### Fixed\n* old\n'
+    const full = prefix + latest + suffix
 
-    // First "run": no Thanks yet
-    const parsed = parseVersionSection(text)
-    const thanks = '### Thanks\n\n* @Crosis47 for [#1444](https://github.com/Studio-Saelix/sencho/issues/1444)'
-    const first = injectThanksSection(text, thanks, parsed.start, parsed.end)
+    const parsed = parseVersionSection(full)
+    const section = full.slice(parsed.start, parsed.end)
+    const credited = creditChangelogEntries(section, new Map([[1, 'x']]), OWNER, REPO)
+    const out = full.slice(0, parsed.start) + credited + full.slice(parsed.end)
 
-    // Second "run": inject same thanks into already-injected result
-    // (remove first, then inject)
-    const parsed2 = parseVersionSection(first)
-    const cleaned = removeThanksSection(first, parsed2.start, parsed2.end)
-    const second = injectThanksSection(cleaned, thanks, parsed2.start, parsed2.end)
-
-    assert.equal(second, first)
-  })
-
-  it('empty-result removal is idempotent', () => {
-    const text = [
-      '## [0.93.0]',
-      '',
-      '### Thanks',
-      '',
-      '* @stale for [#1](u)',
-      '',
-      '### Added',
-      '* feat',
-    ].join('\n')
-
-    const parsed = parseVersionSection(text)
-    const first = removeThanksSection(text, parsed.start, parsed.end)
-    const second = removeThanksSection(first, parsed.start, parsed.end)
-    assert.equal(second, first)
+    assert.equal(out.slice(0, parsed.start), prefix)
+    assert.equal(out.slice(out.length - suffix.length), suffix)
+    assert.ok(out.includes(', thanks @x'))
   })
 })
 
 // ---------------------------------------------------------------------------
-// End-to-end: no version heading
+// splitLines / joinLines round-trip
 // ---------------------------------------------------------------------------
 
-describe('missing version heading', () => {
-  it('parseVersionSection returns null, main() would exit 1', () => {
-    const text = '# Changelog\n\nNo version here.\n'
-    assert.equal(parseVersionSection(text), null)
+describe('splitLines', () => {
+  it('round-trips LF and CRLF', () => {
+    const lf = 'a\nb\n'
+    assert.equal(joinLines(splitLines(lf)), lf)
+    const crlf = 'a\r\nb\r\n'
+    assert.equal(joinLines(splitLines(crlf)), crlf)
   })
 })
 
 // ---------------------------------------------------------------------------
-// Line ending preservation (LF input)
+// Workflow expression documentation (empty vs populated pr)
 // ---------------------------------------------------------------------------
 
-describe('line ending preservation', () => {
-  it('preserves LF line endings', () => {
-    const text = '## [0.93.0]\n\n### Added\n* feat\n'
-    assert.ok(!text.includes('\r'))
-    const parsed = parseVersionSection(text)
-    const result = injectThanksSection(
-      text,
-      '### Thanks\n\n* @x for [#1](u)',
-      parsed.start,
-      parsed.end,
-    )
-    assert.ok(!result.includes('\r'))
-    // Verify the injected section separator uses LF
-    assert.ok(result.includes('\n\n### Added'))
+describe('workflow RELEASE_BRANCH expression (documented behavior)', () => {
+  it('empty pr || {} yields no headBranchName (publish-run safe)', () => {
+    // Mirrors: fromJSON(steps.release.outputs.pr || '{}').headBranchName || ''
+    const pr = ''
+    const parsed = JSON.parse(pr || '{}')
+    const branch = parsed.headBranchName || ''
+    assert.equal(branch, '')
   })
 
-  it('preserves CRLF line endings', () => {
-    const text = '## [0.93.0]\r\n\r\n### Added\r\n* feat\r\n'
-    assert.ok(text.includes('\r\n'))
-    const parsed = parseVersionSection(text)
-    const thanks = '### Thanks\n\n* @x for [#1](u)'
-    const result = injectThanksSection(text, thanks, parsed.start, parsed.end)
-    // Existing CRLF content survives; the injected section uses LF internally.
-    // The version heading and ### Added heading keep their CRLF endings.
-    assert.ok(result.includes('## [0.93.0]\r\n'))
-    assert.ok(result.includes('\r\n### Added'))
-    assert.ok(result.includes('### Thanks'))
-    assert.ok(result.includes('@x'))
+  it('populated pr JSON yields headBranchName', () => {
+    const pr = JSON.stringify({
+      headBranchName: 'release-please--branches--main--components--sencho',
+    })
+    const parsed = JSON.parse(pr || '{}')
+    const branch = parsed.headBranchName || ''
+    assert.equal(branch, 'release-please--branches--main--components--sencho')
   })
 })

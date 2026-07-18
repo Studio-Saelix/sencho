@@ -412,7 +412,10 @@ describe('BlueprintService per-stack lock', () => {
         const outcome = await BlueprintService.getInstance().deployToNode(bp, node);
 
         expect(outcome.status).toBe('active');
-        expect(deploySpy).toHaveBeenCalledWith(bp.name, undefined, false);
+        expect(deploySpy).toHaveBeenCalledWith(bp.name, undefined, false, {
+            source: 'blueprint',
+            actor: 'system:blueprint',
+        });
         // Compose is written first, then the marker, both before the deploy.
         expect(writeSpy).toHaveBeenCalledTimes(2);
         expect(writeSpy.mock.calls[0][2]).toBe(bp.compose_content);
@@ -467,5 +470,108 @@ describe('BlueprintService marker parsing + name-conflict guard', () => {
         expect(BlueprintService.parseMarker('not json')).toBeNull();
         expect(BlueprintService.parseMarker(JSON.stringify({ revision: 1 }))).toBeNull();
         expect(BlueprintService.parseMarker(JSON.stringify({ blueprintId: 'nope', revision: 1 }))).toBeNull();
+    });
+});
+
+describe('BlueprintReconciler drift alert node wording', () => {
+    type ReconcilerWithDrift = {
+        handleDrift: (blueprint: Blueprint, node: Node, reason: string) => Promise<void>;
+    };
+
+    function seedRemoteNode(name: string): number {
+        counter += 1;
+        const db = DatabaseService.getInstance().getDb();
+        const result = db.prepare(
+            `INSERT INTO nodes (name, type, mode, compose_dir, is_default, status, created_at)
+             VALUES (?, 'remote', 'proxy', '/tmp/compose', 0, 'online', ?)`
+        ).run(name, Date.now());
+        return result.lastInsertRowid as number;
+    }
+
+    it('suggest-mode local drift uses on this node', async () => {
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ name: 'drift-local', drift_mode: 'suggest', nodeIds: [nodeId] });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(bp, node, 'compose changed');
+
+        expect(dispatchSpy).toHaveBeenCalledWith(
+            'warning',
+            'blueprint_drift_detected',
+            'Blueprint "drift-local" drifted on this node: compose changed',
+            { stackName: 'drift-local', actor: 'system:blueprint' },
+        );
+    });
+
+    it('suggest-mode remote drift keeps the authoritative node name', async () => {
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+        const nodeId = seedRemoteNode('sencho-test-02');
+        const bp = seedBlueprint({ name: 'drift-remote', drift_mode: 'suggest', nodeIds: [nodeId] });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(bp, node, 'compose changed');
+
+        expect(dispatchSpy).toHaveBeenCalledWith(
+            'warning',
+            'blueprint_drift_detected',
+            'Blueprint "drift-remote" drifted on node "sencho-test-02": compose changed',
+            { stackName: 'drift-remote', actor: 'system:blueprint' },
+        );
+    });
+
+    it('stateful marker-loss on local uses on this node', async () => {
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue(null);
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'marker-local',
+            drift_mode: 'enforce',
+            classification: 'stateful',
+            nodeIds: [nodeId],
+        });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(bp, node, 'volumes diverged');
+
+        expect(dispatchSpy).toHaveBeenCalledWith(
+            'warning',
+            'blueprint_drift_detected',
+            'Blueprint "marker-local" lost its marker on this node; auto-fix declined to avoid stomping unowned data. Reason: volumes diverged',
+            { stackName: 'marker-local', actor: 'system:blueprint' },
+        );
+    });
+
+    it('enforce correction-failure on local uses on this node', async () => {
+        const { NotificationService } = await import('../services/NotificationService');
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+        vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({
+            status: 'failed',
+            error: 'compose up failed',
+        } as Awaited<ReturnType<typeof BlueprintService.prototype.deployToNode>>);
+        const nodeId = seedNode();
+        const bp = seedBlueprint({
+            name: 'fix-local',
+            drift_mode: 'enforce',
+            classification: 'stateless',
+            nodeIds: [nodeId],
+        });
+        const node = DatabaseService.getInstance().getNode(nodeId)!;
+        const reconciler = BlueprintReconciler.getInstance() as unknown as ReconcilerWithDrift;
+
+        await reconciler.handleDrift(bp, node, 'compose changed');
+
+        expect(dispatchSpy).toHaveBeenCalledWith(
+            'error',
+            'blueprint_drift_correction_failed',
+            'Auto-fix for "fix-local" on this node failed: compose up failed',
+            { stackName: 'fix-local', actor: 'system:blueprint' },
+        );
     });
 });

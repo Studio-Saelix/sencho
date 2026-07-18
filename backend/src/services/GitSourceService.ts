@@ -1325,7 +1325,12 @@ export class GitSourceService {
                 );
                 const lock = await StackOpLockService.getInstance().runExclusive(
                     nodeId, stackName, 'deploy', 'system',
-                    () => ComposeService.getInstance(nodeId).deployStack(stackName),
+                    () => ComposeService.getInstance(nodeId).deployStack(
+                        stackName,
+                        undefined,
+                        undefined,
+                        { source: 'git_apply', actor: opts.actor ?? 'system:git-source' },
+                    ),
                 );
                 if (!lock.ran) {
                     const busy = `Auto-deploy skipped: another operation (${lock.existing.action}) is already in progress for ${stackName}.`;

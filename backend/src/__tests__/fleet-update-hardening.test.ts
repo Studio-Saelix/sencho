@@ -41,6 +41,7 @@ const ONLINE = (over: Partial<RemoteMeta> = {}): RemoteMeta => ({
   online: true,
   imagePinKind: null,
   updateBlocked: false,
+  imageChannel: null,
   ...over,
 });
 
@@ -216,6 +217,108 @@ describe('POST /api/fleet/nodes/:id/update concurrency', () => {
 
     expect(res.status).toBe(409);
     expect(res.body?.error).toMatch(/already in progress/i);
+  });
+
+  it('preserves a typed remote update failure in the response and tracker', async () => {
+    mockTarget();
+    mockMeta(ONLINE());
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      try {
+        if (new URL(String(input)).hostname === 'api.github.com') {
+          return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+        }
+      } catch {
+        // Non-URL fetch inputs fall through to the remote-update mock.
+      }
+      return new Response(JSON.stringify({
+        error: 'Hardened Build updates require a signed-in admin on that node.',
+        code: 'HARDENED_REMOTE_UPDATE_UNSUPPORTED',
+      }), { status: 403 });
+    });
+
+    const res = await request(app)
+      .post(`/api/fleet/nodes/${proxyNodeId}/update`)
+      .set('Authorization', adminAuth);
+
+    expect(res.status).toBe(502);
+    expect(res.body).toEqual({
+      error: 'Hardened Build updates require a signed-in admin on that node.',
+      code: 'HARDENED_REMOTE_UPDATE_UNSUPPORTED',
+    });
+    expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)?.code)
+      .toBe('HARDENED_REMOTE_UPDATE_UNSUPPORTED');
+  });
+});
+
+
+describe('POST /api/fleet/nodes/:id/update hardened digest pin', () => {
+  it('still POSTs when updateBlocked and imageChannel is hardened', async () => {
+    mockTarget();
+    mockMeta(ONLINE({ updateBlocked: true, imageChannel: 'hardened', imagePinKind: 'digest' }));
+    let remoteUpdateCalled = false;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      try {
+        if (new URL(String(input)).hostname === 'api.github.com') {
+          return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+        }
+      } catch {
+        // Non-URL fetch inputs fall through to the remote-update mock.
+      }
+      remoteUpdateCalled = true;
+      return new Response(JSON.stringify({
+        error: 'Hardened Build updates require a signed-in admin on that node.',
+        code: 'HARDENED_REMOTE_UPDATE_UNSUPPORTED',
+      }), { status: 403 });
+    });
+
+    const res = await request(app)
+      .post(`/api/fleet/nodes/${proxyNodeId}/update`)
+      .set('Authorization', adminAuth);
+
+    expect(remoteUpdateCalled).toBe(true);
+    expect(res.status).toBe(502);
+    expect(res.body).toEqual({
+      error: 'Hardened Build updates require a signed-in admin on that node.',
+      code: 'HARDENED_REMOTE_UPDATE_UNSUPPORTED',
+    });
+    expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)?.code)
+      .toBe('HARDENED_REMOTE_UPDATE_UNSUPPORTED');
+  });
+});
+
+describe('POST /api/fleet/update-all typed failures', () => {
+  it('reports remote rejections as failed instead of skipped', async () => {
+    mockTarget();
+    mockMeta(ONLINE());
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      try {
+        if (new URL(String(input)).hostname === 'api.github.com') {
+          return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+        }
+      } catch {
+        // Non-URL fetch inputs fall through to the remote-update mock.
+      }
+      return new Response(JSON.stringify({
+        error: 'Hardened Build updates require a signed-in admin on that node.',
+        code: 'HARDENED_REMOTE_UPDATE_UNSUPPORTED',
+      }), { status: 403 });
+    });
+
+    const res = await request(app)
+      .post('/api/fleet/update-all')
+      .set('Authorization', adminAuth);
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({
+      updating: [],
+      skipped: [],
+      failed: [{
+        nodeId: proxyNodeId,
+        name: 'proxy-hardening-test',
+        code: 'HARDENED_REMOTE_UPDATE_UNSUPPORTED',
+        error: 'Hardened Build updates require a signed-in admin on that node.',
+      }],
+    });
   });
 });
 

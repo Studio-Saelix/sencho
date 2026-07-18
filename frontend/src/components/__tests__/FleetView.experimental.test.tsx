@@ -106,14 +106,14 @@ describe('FleetView experimental discovery', () => {
   });
 
   it('shows Routing and Secrets when experimental discovery is on for paid admin', () => {
-    render(<FleetView onNavigateToNode={vi.fn()} />);
+    render(<FleetView onNavigateToNode={vi.fn()} onOpenNodeNetworking={vi.fn()} />);
     expect(screen.getByRole('tab', { name: /routing/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /secrets/i })).toBeTruthy();
   });
 
   it('hides Routing and Secrets when experimental discovery is off', () => {
     useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
-    render(<FleetView onNavigateToNode={vi.fn()} />);
+    render(<FleetView onNavigateToNode={vi.fn()} onOpenNodeNetworking={vi.fn()} />);
     expect(screen.queryByRole('tab', { name: /routing/i })).toBeNull();
     expect(screen.queryByRole('tab', { name: /secrets/i })).toBeNull();
     expect(screen.getByRole('tab', { name: /deployments/i })).toBeTruthy();
@@ -127,6 +127,7 @@ describe('FleetView experimental discovery', () => {
     const { rerender } = render(
       <FleetView
         onNavigateToNode={vi.fn()}
+        onOpenNodeNetworking={vi.fn()}
         fleetActiveTab="routing"
         onFleetActiveTabChange={onTab}
       />,
@@ -138,6 +139,7 @@ describe('FleetView experimental discovery', () => {
     rerender(
       <FleetView
         onNavigateToNode={vi.fn()}
+        onOpenNodeNetworking={vi.fn()}
         fleetActiveTab="routing"
         onFleetActiveTabChange={onTab}
       />,
@@ -152,6 +154,7 @@ describe('FleetView experimental discovery', () => {
     const { rerender } = render(
       <FleetView
         onNavigateToNode={vi.fn()}
+        onOpenNodeNetworking={vi.fn()}
         fleetActiveTab="routing"
         onFleetActiveTabChange={onTab}
       />,
@@ -162,6 +165,7 @@ describe('FleetView experimental discovery', () => {
     rerender(
       <FleetView
         onNavigateToNode={vi.fn()}
+        onOpenNodeNetworking={vi.fn()}
         fleetActiveTab="routing"
         onFleetActiveTabChange={onTab}
       />,

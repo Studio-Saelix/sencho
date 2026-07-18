@@ -33,7 +33,6 @@ info:
   license:
     name: AGPL-3.0-only
     url: https://github.com/studio-saelix/sencho/blob/main/LICENSE
-    url: https://github.com/studio-saelix/sencho/blob/main/LICENSE
 
 servers:
   - url: "{protocol}://{host}:{port}"
@@ -68,7 +67,7 @@ tags:
   - name: Scheduled Tasks
     description: Configure recurring automated operations (admin role required)
   - name: Registries
-    description: Manage private container registry credentials (Admiral license required). These endpoints are only accessible via browser sessions — API tokens receive `SCOPE_DENIED`.
+    description: Manage private container registry credentials. Docker Hub, GHCR, and custom registries are available on every tier; AWS ECR requires Admiral. These endpoints are only accessible via browser sessions. API tokens receive `SCOPE_DENIED`.
   - name: Image Updates
     description: Check for available container image updates across stacks
 
@@ -1420,6 +1419,36 @@ paths:
                       when the health gate is disabled on the node.
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          description: |
+            Deploy blocked before Compose ran. Common codes include a stack
+            operation already in progress, a scan-policy block, or missing
+            external networks (`code: missing_external_networks`).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    example: missing_external_networks
+                  kind:
+                    type: string
+                    enum: [prompt, unsupported, unavailable, create_failed]
+                  networks:
+                    type: array
+                    items:
+                      type: object
+                  createdNames:
+                    type: array
+                    items:
+                      type: string
+                  remainingNames:
+                    type: array
+                    items:
+                      type: string
         "500":
           description: Deployment failed.
           content:
@@ -1435,6 +1464,77 @@ paths:
                     description: Whether the stack was automatically rolled back.
                   failure:
                     $ref: "#/components/schemas/FailureClassification"
+        "503":
+          description: |
+            Deploy blocked because Sencho could not render the Compose model or
+            read Docker networking state to verify required external networks.
+
+  /api/stacks/{stackName}/missing-external-networks:
+    get:
+      operationId: getMissingExternalNetworks
+      tags: [Stacks]
+      summary: List missing external networks for a stack
+      description: |
+        Returns whether declared `external: true` networks are missing on the
+        target node, whether automatic creation is enabled, and per-network
+        safety metadata. Requires `stack:read`. Used by interactive deploy
+        preflight when the node advertises `guided-external-network-preflight`.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Missing-external-network envelope.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, autoCreateEnabled, stackName, networks, declaredExternalCount]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, render_unavailable, runtime_unavailable]
+                  autoCreateEnabled:
+                    type: boolean
+                  stackName:
+                    type: string
+                  declaredExternalCount:
+                    type: integer
+                  networks:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, keys, declarations, safe, unsupportedFeatures, creationSpec]
+                      properties:
+                        name:
+                          type: string
+                        keys:
+                          type: array
+                          items:
+                            type: string
+                        declarations:
+                          type: array
+                          items:
+                            type: object
+                        safe:
+                          type: boolean
+                        blockReason:
+                          type: string
+                        unsupportedFeatures:
+                          type: array
+                          items:
+                            type: string
+                        creationSpec:
+                          type: object
+                          nullable: true
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Stack not found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /api/stacks/{stackName}/down:
     post:

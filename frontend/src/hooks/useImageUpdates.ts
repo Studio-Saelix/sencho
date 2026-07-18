@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiFetch } from '@/lib/api';
+import { markMilestone } from '@/lib/hydrationTiming';
 import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 import type { ImageUpdateStatus, StackUpdateInfo } from '@/types/imageUpdates';
 
@@ -30,6 +31,10 @@ export function useImageUpdates(activeNodeId: number | undefined) {
   // await is gated against it so a slow response from a previous node is
   // discarded.
   const genRef = useRef(0);
+
+  // Node the image_updates_ready milestone last fired for, so it records once
+  // per node session (re-firing after a node switch) rather than every poll.
+  const imageUpdatesReadyNodeRef = useRef<number | null | undefined>(undefined);
 
   const refresh = useCallback(async () => {
     const gen = ++genRef.current;
@@ -92,6 +97,14 @@ export function useImageUpdates(activeNodeId: number | undefined) {
     };
 
     await Promise.allSettled([fetchStatus(), fetchDetail()]);
+
+    // Background milestone: both image-update requests have settled for the
+    // active node. Fire once per node session, and only if this refresh still
+    // owns the generation (a node switch mid-flight defers to the new node).
+    if (genRef.current === gen && imageUpdatesReadyNodeRef.current !== targetNodeId) {
+      imageUpdatesReadyNodeRef.current = targetNodeId;
+      markMilestone('image_updates_ready');
+    }
   }, [activeNodeId]);
 
   // Pin the interval to the latest closure without retriggering it on

@@ -125,6 +125,10 @@ export interface PreflightContext {
   accessUrlPorts: Set<number>;
   /** Whether the dossier records any access URL (gates the port-vs-documented rule). */
   hasAccessUrls: boolean;
+  /** False when the exposure context could not be read (a DB failure), distinct
+   *  from a genuinely unset intent. Gates the intent-interpretation rules so a
+   *  transient read failure does not fabricate unclassified/undocumented findings. */
+  exposureAvailable: boolean;
   /** True when this stack is the running Sencho instance on the node. */
   isSelfStack: boolean;
 }

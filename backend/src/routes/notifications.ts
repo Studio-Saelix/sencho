@@ -16,6 +16,7 @@ import {
   syncSuppressionRuleToFleet,
 } from '../helpers/notificationSuppressionSync';
 import { isDebugEnabled } from '../utils/debug';
+import { logDebugTiming } from '../utils/requestTiming';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { parseIntParam } from '../utils/parseIntParam';
@@ -183,14 +184,27 @@ function parseSuppressionRuleBody(
 export const notificationsRouter = Router();
 
 notificationsRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  const startedAt = Date.now();
+  let outcome: 'ok' | 'error' = 'ok';
+  let count = 0;
   try {
     const nodeId = req.nodeId ?? 0;
     const category = typeof req.query.category === 'string' ? req.query.category : undefined;
     const history = DatabaseService.getInstance().getNotificationHistory(nodeId, 50, category);
+    count = history.length;
     res.json(history);
   } catch (error) {
+    outcome = 'error';
     console.error('Failed to fetch notifications:', error);
     res.status(500).json({ error: 'Failed to fetch notifications' });
+  } finally {
+    logDebugTiming('[Notifications:debug]', {
+      route: 'GET /',
+      nodeId: req.nodeId,
+      count,
+      elapsedMs: Date.now() - startedAt,
+      outcome,
+    });
   }
 });
 

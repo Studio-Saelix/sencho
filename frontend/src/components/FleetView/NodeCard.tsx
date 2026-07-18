@@ -22,7 +22,6 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatVersion } from '@/lib/version';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { useNodes, type Node } from '@/context/NodeContext';
 import { cordonNode, uncordonNode } from '@/lib/nodesApi';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
@@ -37,6 +36,10 @@ import { getNodeCpu, getNodeMem, getNodeDisk, isCritical } from './nodeUtils';
 export interface NodeCardProps {
     node: FleetNode;
     onNavigate: (nodeId: number, stackName: string) => void;
+    /** Switches to this node and opens its Networking page. */
+    onOpenNetworking?: (nodeId: number) => void;
+    /** Networking posture signal from computeNodeNetworkingSummary, if loaded. */
+    networkingSignal?: { exposed: boolean; unknown: boolean; drift: boolean };
     labelMap?: Record<string, StackLabel[]>;
     updateStatus?: NodeUpdateStatus;
     onUpdate?: (nodeId: number) => void;
@@ -64,7 +67,7 @@ function UsageBar({ percent, color }: { percent: number; color: string }) {
 
 // --- Main Export ---
 
-export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill }: NodeCardProps) {
+export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill }: NodeCardProps) {
     const [expanded, setExpanded] = useState(false);
     const [stacks, setStacks] = useState<string[] | null>(node.stacks);
     const [loadingStacks, setLoadingStacks] = useState(false);
@@ -73,15 +76,13 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
     const [cordonSubmitting, setCordonSubmitting] = useState(false);
 
     const { isAdmin, can } = useAuth();
-    const { isPaid } = useLicense();
     const { nodes: registryNodes } = useNodes();
     const registryNode = registryNodes.find(n => n.id === node.id);
     const isLastLocal = registryNode?.type === 'local' && registryNodes.filter(n => n.type === 'local').length <= 1;
     const canEdit = Boolean(isAdmin && onEdit && registryNode);
     const canDelete = Boolean(isAdmin && onDelete && registryNode && !registryNode.is_default && !isLastLocal);
-    // Cordon requires the paid tier AND node:manage, matching the backend guard
-    // (requirePermission('node:manage','node',id) + requirePaid).
-    const canCordon = isPaid && can('node:manage', 'node', String(node.id));
+    // Cordon is permission-gated only (node:manage), matching the backend route guard.
+    const canCordon = can('node:manage', 'node', String(node.id));
     const nodeMuteActions = useNodeMuteActions(
         node.id,
         node.name,
@@ -228,12 +229,12 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                                         onDismiss={isAdmin && onDismissUpdate ? () => onDismissUpdate(node.id) : undefined}
                                     />
                                 )}
-                                {updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !updateStatus?.updateBlocked && (
+                                {updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && (
                                     <Badge className="text-[10px] px-1.5 py-0 h-4 bg-warning/15 text-warning border-warning/30 shrink-0">
                                         Update available
                                     </Badge>
                                 )}
-                                {updateStatus?.updateBlocked && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && (
+                                {(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && (
                                     <PinnedUpdateBadge reason={updateStatus.updateBlockedReason} />
                                 )}
                                 {updateStatus?.skipActive && (
@@ -253,6 +254,17 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                                         title={node.cordoned_reason ?? 'Unschedulable: new blueprint deployments skip this node'}
                                     >
                                         <Ban className="w-2.5 h-2.5 mr-0.5" /> Cordoned
+                                    </Badge>
+                                )}
+                                {onOpenNetworking && networkingSignal && (networkingSignal.exposed || networkingSignal.unknown || networkingSignal.drift) && (
+                                    <Badge
+                                        variant="outline"
+                                        className="text-[10px] px-1.5 py-0 h-4 shrink-0 cursor-pointer bg-warning/10 text-warning border-warning/30 hover:bg-warning/20"
+                                        onClick={(event) => { event.stopPropagation(); onOpenNetworking(node.id); }}
+                                        title="Open this node's Networking page"
+                                    >
+                                        Networking ·
+                                        {networkingSignal.drift ? ' drift' : networkingSignal.exposed ? ' exposed' : ' unknown exposure'}
                                     </Badge>
                                 )}
                             </div>
@@ -314,7 +326,7 @@ export function NodeCard({ node, onNavigate, labelMap, updateStatus, onUpdate, u
                 )}
 
                 {/* Update button (mutating action: admin only, matches the requireAdmin route guard) */}
-                {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !updateStatus?.updateBlocked && onUpdate && isAdmin && (
+                {isOnline && updateStatus?.updateAvailable && !updateStatus.updateStatus && !updateStatus?.skipActive && !(updateStatus?.updateBlocked && updateStatus?.imageChannel !== 'hardened') && onUpdate && isAdmin && (
                     <div className="mt-3 pt-3 border-t border-border/50">
                         <Button
                             variant="outline"

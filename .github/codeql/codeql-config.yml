@@ -27,3 +27,18 @@ query-filters:
         - backend/src/utils/apiTokenFormat.ts
         - backend/src/routes/apiTokens.ts
         - backend/src/__tests__/**
+
+  # registry-api.ts resolves image references parsed from admin-controlled
+  # compose files into Docker registry manifest URLs. CodeQL traces the file
+  # data into the outbound HTTPS request and flags it as a request-forgery
+  # risk. Sencho is single-tenant and self-hosted: the admin who writes the
+  # compose files owns the server, and specifying arbitrary registries is the
+  # intended behavior. probeManifestForRef guards against URL-injection
+  # characters in tag/repo components before constructing the URL; the
+  # remaining taint path is inherent to the product's design rather than a
+  # vulnerability. Excluding this file so the query still catches real SSRF
+  # from untrusted multi-tenant or external input elsewhere.
+  - exclude:
+      id: js/request-forgery
+      paths:
+        - backend/src/services/registry-api.ts

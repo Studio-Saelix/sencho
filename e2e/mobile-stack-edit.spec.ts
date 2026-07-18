@@ -2,9 +2,10 @@
  * Mobile compose/.env editing (below the md breakpoint).
  *
  * Logs in and creates the stack at desktop width (the create dialog and stack
- * list are desktop-driven), then resizes to a phone viewport so EditorView
- * renders MobileStackDetail. Covers the acceptance-criteria flows: open on
- * mobile, edit compose, save, save-and-deploy guard, and discard dirty changes.
+ * list are desktop-driven), then resizes to a phone viewport. Empty-stack
+ * create opens compose edit immediately (startInComposeEdit); on phone that
+ * surfaces as MobileComposeEditor, so these tests wait for that editor rather
+ * than assuming an Anatomy/Compose read-only gate first.
  * Phone widths exercised: 390px and 430px. The compose/.env toggle and env-file
  * save share the same handlers and are covered by MobileStackDetail.test.tsx.
  */
@@ -27,18 +28,13 @@ async function createTestStack(page: Page) {
     await page.locator('#create-stack-name').fill(TEST_STACK);
     await page.locator('[role="dialog"]').getByRole('button', { name: 'Create' }).click();
     await expect(page.getByRole('dialog')).toBeHidden({ timeout: 8_000 });
+    // Empty create auto-opens desktop compose edit before we shrink the viewport.
+    await expect(page.getByRole('button', { name: 'Save & Deploy', exact: true })).toBeVisible({ timeout: 10_000 });
 }
 
-// Open the freshly created stack in the editor (desktop), then drop to a phone
-// viewport so the mobile detail surface renders, and select the Compose segment.
-async function openComposeOnPhone(page: Page, viewport = PHONE_390) {
-    await page.locator('[role="listbox"]').getByText(TEST_STACK, { exact: true }).click();
+/** Shrink to phone and wait for the already-open compose editor surface. */
+async function openComposeEditorOnPhone(page: Page, viewport = PHONE_390) {
     await page.setViewportSize(viewport);
-    await page.getByRole('tab', { name: 'Compose' }).click();
-}
-
-async function openEditor(page: Page) {
-    await page.getByRole('button', { name: 'edit' }).click();
     await expect(page.getByTestId('mobile-compose-editor')).toBeVisible({ timeout: 5_000 });
 }
 
@@ -59,8 +55,7 @@ test.describe('mobile stack editing', () => {
     });
 
     test('edits and saves the compose file from a phone (390px)', async ({ page }) => {
-        await openComposeOnPhone(page);
-        await openEditor(page);
+        await openComposeEditorOnPhone(page);
 
         await page.getByTestId('mobile-compose-editor').fill('services:\n  app:\n    image: nginx:1.27\n    restart: always\n');
         await page.getByTestId('mobile-editor-save').click();
@@ -89,8 +84,7 @@ test.describe('mobile stack editing', () => {
             await route.continue();
         });
 
-        await openComposeOnPhone(page);
-        await openEditor(page);
+        await openComposeEditorOnPhone(page);
         await page.getByTestId('mobile-editor-save-deploy').click();
 
         await expect(page.getByText(/failed to save file/i)).toBeVisible({ timeout: 5_000 });
@@ -99,8 +93,7 @@ test.describe('mobile stack editing', () => {
     });
 
     test('guards a dirty close and discards on confirm', async ({ page }) => {
-        await openComposeOnPhone(page);
-        await openEditor(page);
+        await openComposeEditorOnPhone(page);
 
         await page.getByTestId('mobile-compose-editor').fill('services:\n  app:\n    image: nginx:1.28\n');
         await page.getByTestId('mobile-editor-close').click();
@@ -109,14 +102,14 @@ test.describe('mobile stack editing', () => {
         await expect(dialog).toBeVisible({ timeout: 5_000 });
         await page.getByRole('button', { name: 'Discard changes' }).click();
 
-        // The editor closes back to the read-only Compose segment.
+        // The editor closes back to mobile stack detail (default Logs segment).
         await expect(page.getByTestId('mobile-compose-editor')).toBeHidden();
+        await page.getByRole('tab', { name: 'Compose' }).click();
         await expect(page.getByRole('button', { name: 'edit' })).toBeVisible();
     });
 
     test('opens a usable editor at 430px', async ({ page }) => {
-        await openComposeOnPhone(page, PHONE_430);
-        await openEditor(page);
+        await openComposeEditorOnPhone(page, PHONE_430);
 
         await expect(page.getByTestId('mobile-compose-editor')).toBeVisible();
         await expect(page.getByTestId('mobile-editor-save')).toBeVisible();

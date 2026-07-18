@@ -83,4 +83,9 @@ export interface StackNetworkFacts {
   networks: NetworkFactNetwork[];
   services: NetworkFactService[];
   drift: NetworkDriftFacts;
+  /**
+   * Missing external networks from the pure classifier. Empty when runtime is
+   * unavailable or the model is not renderable (use `runtime` / `renderable`).
+   */
+  missingExternalNetworks: import('./missingExternalNetworks').MissingExternalNetwork[];
 }

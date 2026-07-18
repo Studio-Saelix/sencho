@@ -17,9 +17,11 @@ import { StackOpLockService } from '../services/StackOpLockService';
 import SelfUpdateService, { type PinInfo } from '../services/SelfUpdateService';
 import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin, requireNodeProxy } from '../middleware/tierGates';
+import { requirePaid, requireAdmin, requireNodeProxy, requireUserSession } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
-import { respondSelfUpdatePreflight, scheduleLocalUpdate } from './license';
+import { respondSelfUpdatePreflight } from './license';
+import { ImageOperationService } from '../services/ImageOperationService';
+import { classifyImageChannel } from '../helpers/imageChannel';
 import { runPolicyGate, assertPolicyGateAllows, buildPolicyGateOptions } from '../helpers/policyGate';
 import { remoteSupportsCrossNodeRbac } from '../helpers/remoteCapabilities';
 import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentation, pickDossierFields, dossierHasContent, type SnapshotNodeData, type SnapshotDocumentation } from '../utils/snapshot-capture';
@@ -51,7 +53,7 @@ import { buildLocalConfigurationStatus, type ConfigurationStatus } from './dashb
 import { buildLocalGraph, mergeFleetGraph, isLocalDependencyGraph, type FleetNodeGraphResult } from '../services/DependencyGraphService';
 import { buildNodeLabelInventory, VALID_LABEL_SOURCES, type NodeLabelInventory } from '../services/LabelInventoryService';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
-import { PROXY_TIER_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER, deployProvenanceHeaders } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 
 const updateTracker = FleetUpdateTrackerService.getInstance();
@@ -68,6 +70,7 @@ const EMPTY_PIN_STATUS = {
   targetImageRef: null,
   updateBlocked: false,
   updateBlockedReason: null,
+  imageChannel: null,
 } as const;
 
 function localPinStatusFields(
@@ -87,6 +90,7 @@ function localPinStatusFields(
         : null,
     updateBlocked,
     updateBlockedReason: updateBlocked ? blockedReason : null,
+    imageChannel: classifyImageChannel(pin.composeImageRef),
   };
 }
 // Throttle the forced latest-version refresh so a caller cannot loop the recheck
@@ -1116,6 +1120,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         let remoteOnline = false;
         let remoteImagePinKind: ImagePinKind | null = null;
         let remoteUpdateBlocked = false;
+        let remoteImageChannel: 'community' | 'hardened' | 'unknown' | null = null;
         if (node.type === 'local') {
           version = gatewayVersion;
         } else {
@@ -1126,6 +1131,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           remoteOnline = meta.online;
           remoteImagePinKind = meta.imagePinKind;
           remoteUpdateBlocked = meta.updateBlocked;
+          remoteImageChannel = meta.imageChannel;
         }
 
         if (tracker?.status === 'updating') {
@@ -1257,15 +1263,17 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         let targetImageRef: string | null = null;
         let updateBlocked = false;
         let updateBlockedReason: string | null = null;
+        let imageChannel: 'community' | 'hardened' | 'unknown' | null = null;
         if (node.type === 'local') {
           const pin = await SelfUpdateService.getInstance().getPinInfo();
           if (pin) {
-            ({ imagePinKind, composeImageRef, targetImageRef, updateBlocked, updateBlockedReason } =
+            ({ imagePinKind, composeImageRef, targetImageRef, updateBlocked, updateBlockedReason, imageChannel } =
               localPinStatusFields(pin, compareVersion, compareValid, REPIN_BLOCKED_REASON));
           }
         } else {
           imagePinKind = remoteImagePinKind;
           updateBlocked = remoteUpdateBlocked;
+          imageChannel = remoteImageChannel;
         }
 
         return {
@@ -1284,6 +1292,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           targetImageRef,
           updateBlocked,
           updateBlockedReason,
+          imageChannel,
         };
       }),
     );
@@ -1352,6 +1361,19 @@ function postSystemUpdate(target: { apiUrl: string; apiToken: string }, targetVe
     body: JSON.stringify(targetVersion ? { targetVersion } : {}),
     signal: AbortSignal.timeout(10000),
   });
+}
+
+function parseRemoteUpdateFailure(payload: unknown): { error: string; code?: string } {
+  if (!payload || typeof payload !== 'object') {
+    return { error: 'Remote node rejected update request.' };
+  }
+  const response = payload as Record<string, unknown>;
+  return {
+    error: typeof response.error === 'string' && response.error
+      ? response.error
+      : 'Remote node rejected update request.',
+    ...(typeof response.code === 'string' && response.code ? { code: response.code } : {}),
+  };
 }
 
 // --- Skip-version endpoints ---
@@ -1446,9 +1468,42 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
         return;
       }
       const resolvedTarget = await resolveUpdateTarget(requestedTarget);
+      const pin = await selfUpdate.getPinInfo({ fresh: true });
+      if (pin && classifyImageChannel(pin.composeImageRef) === 'hardened') {
+        if (!requireUserSession(req, res)) return;
+        const preflight = await ImageOperationService.getInstance().preflightSwitch();
+        if (!preflight.ok) {
+          res.status(403).json({ error: 'Hardened image access is unavailable', code: preflight.code });
+          return;
+        }
+        const result = await ImageOperationService.getInstance().switchToHardened(
+          preflight.preflightFingerprint,
+          'update',
+        );
+        if (!result.ok) {
+          res.status(result.code === 'IMAGE_OPERATION_IN_FLIGHT' ? 409 : 500)
+            .json({ error: 'Hardened update could not start', code: result.code });
+          return;
+        }
+        updateTracker.set(nodeId, updateTracker.create('updating', getSenchoVersion(), null));
+        res.status(202).json({ message: 'Update initiated on local node. The server will restart shortly.' });
+        return;
+      }
       if (!respondSelfUpdatePreflight(res, await selfUpdate.canSelfUpdateTarget(resolvedTarget))) return;
+      const claim = await ImageOperationService.getInstance().claimCommunityUpdate({ targetVersion: resolvedTarget });
+      if (!claim.ok) {
+        res.status(409).json({ error: 'An image operation is already in progress.', code: claim.failureCode });
+        return;
+      }
       updateTracker.set(nodeId, updateTracker.create('updating', getSenchoVersion(), null));
-      scheduleLocalUpdate(res, 'Update initiated on local node. The server will restart shortly.', resolvedTarget);
+      res.status(202).json({ message: 'Update initiated on local node. The server will restart shortly.' });
+      // Schedule unconditionally: client abort can fire only `close` without `finish`,
+      // which would otherwise leave the claimed operation stuck in pending_pull.
+      setTimeout(() => {
+        ImageOperationService.getInstance().executeClaimedCommunityUpdate({ targetVersion: resolvedTarget }).catch(error => {
+          console.error('[ImageOperation] Unexpected community update failure:', error);
+        });
+      }, 500);
       return;
     }
 
@@ -1470,7 +1525,9 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       res.status(503).json({ error: 'Remote node does not support self-update. It may need to be updated manually first.' });
       return;
     }
-    if (meta.updateBlocked) {
+    // Hardened peers are digest-pinned (updateBlocked) but must still reach
+    // /api/system/update so machine creds get HARDENED_REMOTE_UPDATE_UNSUPPORTED.
+    if (meta.updateBlocked && meta.imageChannel !== 'hardened') {
       res.status(409).json({ error: REPIN_BLOCKED_REASON, code: 'update_blocked' });
       return;
     }
@@ -1479,10 +1536,9 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
     const response = await postSystemUpdate(target, resolvedTarget);
 
     if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      const errorMsg = (err as Record<string, string>)?.error || 'Remote node rejected update request.';
-      updateTracker.set(nodeId, updateTracker.create('failed', meta.version, meta.startedAt, errorMsg));
-      res.status(502).json({ error: errorMsg });
+      const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
+      updateTracker.set(nodeId, updateTracker.create('failed', meta.version, meta.startedAt, failure.error, failure.code));
+      res.status(502).json(failure);
       return;
     }
 
@@ -1515,8 +1571,8 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
     if (debug) console.debug('[Fleet:debug] Update-all compare target:', { gatewayVersion, compareVersion, compareValid });
 
     const registry = NodeRegistry.getInstance();
-    const candidates = nodes.filter(node => {
-      if (node.type === 'local') return false;
+    const remoteNodes = nodes.filter(node => node.type === 'remote');
+    const candidates = remoteNodes.filter(node => {
       const tracker = updateTracker.get(node.id);
       if (tracker?.status === 'updating') return false;
       if (registry.getProxyTarget(node.id) === null) return false;
@@ -1535,41 +1591,58 @@ fleetRouter.post('/update-all', authMiddleware, async (req: Request, res: Respon
 
     const results = await Promise.allSettled(candidates.map(async (node) => {
       const target = registry.getProxyTarget(node.id);
-      if (!target) return { name: node.name, triggered: false };
+      if (!target) return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       const meta = await registry.fetchMetaForNode(node.id);
       if (!meta.online) {
-        return { name: node.name, triggered: false };
+        return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
       if (!meta.capabilities.includes('self-update')) {
-        return { name: node.name, triggered: false };
+        return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
-      if (meta.updateBlocked) {
-        return { name: node.name, triggered: false };
+      if (meta.updateBlocked && meta.imageChannel !== 'hardened') {
+        return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
       if (isValidVersion(meta.version) && compareValid && !semver.lt(meta.version, compareVersion!)) {
-        return { name: node.name, triggered: false };
+        return { nodeId: node.id, name: node.name, kind: 'skipped' as const };
       }
       const response = await postSystemUpdate(target, updateAllTarget);
       if (response.ok) {
         updateTracker.set(node.id, updateTracker.create('updating', meta.version, meta.startedAt));
-        return { name: node.name, triggered: true };
+        return { nodeId: node.id, name: node.name, kind: 'updating' as const };
       }
-      return { name: node.name, triggered: false };
+      const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
+      updateTracker.set(node.id, updateTracker.create('failed', meta.version, meta.startedAt, failure.error, failure.code));
+      return { nodeId: node.id, name: node.name, kind: 'failed' as const, ...failure };
     }));
 
     const updating: string[] = [];
-    const skipped = nodes.filter(n => !candidates.includes(n)).map(n => n.name);
+    const skipped = remoteNodes.filter(n => !candidates.includes(n)).map(n => n.name);
+    const failed: Array<{ nodeId: number; name: string; code: string; error: string }> = [];
     for (let i = 0; i < results.length; i++) {
       const r = results[i];
       if (r.status === 'rejected') {
         console.warn(`[Fleet] Update-all failed for node ${candidates[i].name}:`, r.reason);
+        failed.push({
+          nodeId: candidates[i].id,
+          name: candidates[i].name,
+          code: 'REMOTE_UPDATE_REQUEST_FAILED',
+          error: 'Failed to reach remote node for update.',
+        });
+        continue;
       }
-      const val = r.status === 'fulfilled' ? r.value : { name: candidates[i].name, triggered: false };
-      (val.triggered ? updating : skipped).push(val.name);
+      if (r.value.kind === 'updating') updating.push(r.value.name);
+      else if (r.value.kind === 'failed') {
+        failed.push({
+          nodeId: r.value.nodeId,
+          name: r.value.name,
+          code: r.value.code ?? 'REMOTE_UPDATE_REQUEST_FAILED',
+          error: r.value.error,
+        });
+      } else skipped.push(r.value.name);
     }
 
-    if (debug) console.debug('[Fleet:debug] Update-all results:', { updating, skippedCount: skipped.length, candidateCount: candidates.length });
-    res.status(202).json({ updating, skipped });
+    if (debug) console.debug('[Fleet:debug] Update-all results:', { updating, skippedCount: skipped.length, failedCount: failed.length, candidateCount: candidates.length });
+    res.status(202).json({ updating, skipped, failed });
   } catch (error) {
     console.error('[Fleet] Update all error:', error);
     res.status(500).json({ error: 'Failed to trigger fleet update.' });
@@ -2661,7 +2734,12 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
   if (node.type === 'local') {
     const lock = await StackOpLockService.getInstance().runExclusive(
       node.id, stackName, 'deploy', 'system',
-      () => ComposeService.getInstance(node.id).deployStack(stackName),
+      () => ComposeService.getInstance(node.id).deployStack(
+        stackName,
+        undefined,
+        undefined,
+        { source: 'fleet_snapshot', actor: 'system:fleet-snapshot' },
+      ),
     );
     if (!lock.ran) {
       throw new Error(`Cannot redeploy "${stackName}": another operation (${lock.existing.action}) is already in progress.`);
@@ -2672,7 +2750,10 @@ async function redeploySnapshotStack(node: Node, stackName: string): Promise<voi
   if (!ctx) throw new SnapshotProxyTargetError(formatNoTargetError(node));
   const deployRes = await fetch(`${ctx.baseUrl}/api/stacks/${encodeURIComponent(stackName)}/deploy`, {
     method: 'POST',
-    headers: ctx.headers,
+    headers: {
+      ...ctx.headers,
+      ...deployProvenanceHeaders('fleet_snapshot', 'system:fleet-snapshot'),
+    },
     signal: AbortSignal.timeout(30000),
   });
   if (!deployRes.ok) throw await remoteStackError('Failed to redeploy stack', deployRes);

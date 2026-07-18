@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER } from '../services/license-headers';
+import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER, PROXY_DEPLOY_SOURCE_HEADER, PROXY_DEPLOY_ACTOR_HEADER } from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
@@ -9,6 +9,67 @@ import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY } from '../services/CapabilityRegi
 import { getErrorMessage } from '../utils/errors';
 import { DatabaseService } from '../services/DatabaseService';
 import { redactSensitiveText } from '../utils/safeLog';
+import { isDebugEnabled } from '../utils/debug';
+import { logDebugTiming, templatizeHydrationPath } from '../utils/requestTiming';
+
+/**
+ * Per-request hop timing for the critical hydration GETs, kept off the Request
+ * type via a WeakMap so the entry is collected with the request. `logged`
+ * enforces exactly-once finalization across the downstream finish/close events
+ * and the proxy error handler.
+ */
+type ProxyTimingOutcome = 'ok' | 'non2xx' | 'aborted' | 'error';
+
+interface ProxyTiming {
+  startedAt: number;
+  template: string;
+  logged: boolean;
+  upstreamStatus?: number;
+  ttfbMs?: number;
+}
+
+const proxyTimings = new WeakMap<Request, ProxyTiming>();
+
+/**
+ * Arm hop timing for a request that is about to be proxied. No-op unless the
+ * gateway has developer_mode on and the path is a critical hydration GET, so
+ * non-instrumented traffic pays nothing. Templates never carry a real stack
+ * name or query string.
+ */
+function beginProxyTiming(req: Request, res: Response): void {
+  if (req.method !== 'GET' || !isDebugEnabled()) return;
+  const template = templatizeHydrationPath(`/api${req.path}`);
+  if (!template) return;
+
+  const timing: ProxyTiming = { startedAt: Date.now(), template, logged: false };
+  proxyTimings.set(req, timing);
+
+  // A completed response fires 'finish' then 'close'; the logged guard lets the
+  // finish result win. A 'close' with no prior 'finish' means the downstream
+  // client aborted before the body finished streaming.
+  res.once('finish', () => {
+    const status = timing.upstreamStatus ?? res.statusCode;
+    finalizeProxyTiming(req, status >= 200 && status < 300 ? 'ok' : 'non2xx');
+  });
+  res.once('close', () => {
+    finalizeProxyTiming(req, 'aborted');
+  });
+}
+
+/** Emit the single `[Proxy:debug]` line for a request, at most once. */
+function finalizeProxyTiming(req: Request, outcome: ProxyTimingOutcome): void {
+  const timing = proxyTimings.get(req);
+  if (!timing || timing.logged) return;
+  timing.logged = true;
+  logDebugTiming('[Proxy:debug]', {
+    route: timing.template,
+    nodeId: req.nodeId,
+    outcome,
+    upstreamStatus: timing.upstreamStatus ?? null,
+    ttfbMs: timing.ttfbMs ?? null,
+    elapsedMs: Date.now() - timing.startedAt,
+  });
+}
 
 /**
  * Build the remote-node HTTP proxy middleware. Mount once at `/api/` after
@@ -60,6 +121,16 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         if (req.user?.role) {
           proxyReq.setHeader(PROXY_ROLE_HEADER, req.user.role);
         }
+        // Deploy provenance: always strip client-supplied values, then set
+        // interactive manual + authenticated username for proxied browser/API
+        // deploys. Background machine callers do not go through this gateway
+        // with browser credentials; they set headers on direct machine HTTP.
+        proxyReq.removeHeader(PROXY_DEPLOY_SOURCE_HEADER);
+        proxyReq.removeHeader(PROXY_DEPLOY_ACTOR_HEADER);
+        proxyReq.setHeader(PROXY_DEPLOY_SOURCE_HEADER, 'manual');
+        if (req.user?.username) {
+          proxyReq.setHeader(PROXY_DEPLOY_ACTOR_HEADER, req.user.username);
+        }
         // Strip the ?nodeId= query param so the remote's nodeContextMiddleware
         // doesn't reject the request with 404 ("Node X not found") - the remote
         // has no record of the gateway's node IDs and should treat the request
@@ -77,7 +148,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         // intact and http-proxy's req.pipe(proxyReq) forwards the body
         // automatically.
       },
-      proxyRes: (proxyRes) => {
+      proxyRes: (proxyRes, req) => {
         // Mark every response forwarded from a remote node with a sentinel
         // header. The frontend (apiFetch / fetchForNode) checks this before
         // firing the global 'sencho-unauthorized' event: a 401 from a remote
@@ -85,8 +156,19 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         // user's own session expired. Without this distinction, any node with
         // a bad token causes an immediate logout loop.
         proxyRes.headers['x-sencho-proxy'] = '1';
+        // Record upstream status and time-to-first-byte only; the log is
+        // finalized on the downstream finish/close so an abort mid-body is not
+        // mislabeled as success.
+        const timing = proxyTimings.get(req);
+        if (timing) {
+          timing.upstreamStatus = proxyRes.statusCode;
+          timing.ttfbMs = Date.now() - timing.startedAt;
+        }
       },
       error: (err, req, proxyRes) => {
+        // Finalize the hop timing with an error outcome before the existing
+        // 502 handling; the logged guard keeps the later finish/close a no-op.
+        finalizeProxyTiming(req, 'error');
         console.error('[Proxy] Remote node error:', getErrorMessage(err, 'unknown'));
         const path = req.originalUrl || req.url;
         if (req.method === 'POST' && /^\/api\/stacks\/[^/]+\/(?:deploy|update)(?:\?|$)/.test(path)) {
@@ -168,6 +250,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
       }
 
       req.proxyTarget = target;
+      beginProxyTiming(req, res);
       proxy(req, res, next);
     };
 

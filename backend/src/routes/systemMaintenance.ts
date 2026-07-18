@@ -19,6 +19,9 @@ import { withTimeout, TimeoutError } from '../utils/withTimeout';
 import { buildNodeLabelInventory } from '../services/LabelInventoryService';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
 import { requirePermission } from '../middleware/permissions';
+import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
+import { evaluateNetworkDeleteGuard } from '../services/network/networkDeleteGuards';
+import { loadNetworkingSnapshot } from '../services/network/networkingAggregate';
 
 // `docker system df` (the call backing estimateSystemReclaim) can take 30+
 // seconds on Docker Desktop with many volumes; 8s matches the MonitorService
@@ -469,6 +472,21 @@ systemMaintenanceRouter.post('/networks/delete', async (req: Request, res: Respo
       return res.status(400).json({ error: 'Invalid network ID format' });
     }
     if (rejectIfSelf('network', id, res)) return;
+
+    const { stacks, snapshot } = await loadNetworkingSnapshot(req.nodeId);
+    if (!snapshot) {
+      return res.status(503).json({ error: 'Docker networking runtime is unavailable' });
+    }
+    const stackFacts = await Promise.all(
+      stacks.map(stack => buildStackNetworkFacts(req.nodeId, stack, snapshot)),
+    );
+    const baseRow = DockerController.classifySnapshotNetworks(snapshot, stacks)
+      .find(n => n.id === id);
+    const guard = evaluateNetworkDeleteGuard(id, snapshot, stackFacts, baseRow);
+    if (guard.blocked) {
+      return res.status(409).json({ error: guard.error, code: guard.code });
+    }
+
     console.log(`[Resources] Delete network: ${id.substring(0, 12)}`);
     const dockerController = DockerController.getInstance(req.nodeId);
     await dockerController.removeNetwork(id);

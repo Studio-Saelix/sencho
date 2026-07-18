@@ -22,6 +22,7 @@ import {
 import type {
   NetworkDriftFacts, NetworkFactNetwork, NetworkFactService, NetworkRuntimeState, StackNetworkFacts,
 } from './types';
+import { classifyMissingExternalNetworks, type MissingExternalNetwork } from './missingExternalNetworks';
 
 import { getErrorMessage } from '../../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
@@ -46,7 +47,16 @@ export function assembleStackNetworkFacts(
   const runtime: NetworkRuntimeState = snapshot ? 'available' : 'unavailable';
 
   if (!model) {
-    return { stack: stackName, renderable: false, renderError, runtime, networks: [], services: [], drift: EMPTY_DRIFT };
+    return {
+      stack: stackName,
+      renderable: false,
+      renderError,
+      runtime,
+      networks: [],
+      services: [],
+      drift: EMPTY_DRIFT,
+      missingExternalNetworks: [],
+    };
   }
 
   const networks: NetworkFactNetwork[] = Object.entries(model.networks).map(([key, res]) => ({
@@ -73,12 +83,31 @@ export function assembleStackNetworkFacts(
   }));
 
   const drift = snapshot ? compareStackNetworks(fromEffectiveModel(model), snapshot, stackName) : EMPTY_DRIFT;
+  const missingExternalNetworks: MissingExternalNetwork[] = snapshot
+    ? classifyMissingExternalNetworks(
+      model,
+      new Set(snapshot.networks.map((n) => n.name)),
+    )
+    : [];
 
-  return { stack: stackName, renderable: true, renderError: null, runtime, networks, services, drift };
+  return {
+    stack: stackName,
+    renderable: true,
+    renderError: null,
+    runtime,
+    networks,
+    services,
+    drift,
+    missingExternalNetworks,
+  };
 }
 
-/** Render the effective model and snapshot the node, then assemble the facts. */
-export async function buildStackNetworkFacts(nodeId: number, stackName: string): Promise<StackNetworkFacts> {
+/** Render the effective model and assemble facts, optionally reusing a snapshot. */
+export async function buildStackNetworkFacts(
+  nodeId: number,
+  stackName: string,
+  sharedSnapshot?: DependencySnapshot | null,
+): Promise<StackNetworkFacts> {
   const fsSvc = FileSystemService.getInstance(nodeId);
 
   let model: EffectiveModel | null = null;
@@ -89,34 +118,33 @@ export async function buildStackNetworkFacts(nodeId: number, stackName: string):
       try {
         model = parseEffectiveModel(JSON.parse(result.rendered), stackName);
       } catch (parseErr) {
-        // JSON.parse errors carry no file content, so the message is safe to log.
         console.warn('[NetworkInspector] Effective model parse failed for %s:',
           sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(parseErr, 'unknown')));
         renderError = 'Sencho could not parse the rendered Compose model.';
       }
     } else {
-      // Raw stderr can echo file content/secrets and is never surfaced; only the
-      // names of any missing required variables, otherwise a generic nudge.
       const missing = parseMissingRequiredVars(result.stderr);
       renderError = missing.length
         ? `Required variable${missing.length > 1 ? 's' : ''} ${missing.join(', ')} ${missing.length > 1 ? 'have' : 'has'} no value, so the effective model cannot be rendered.`
         : 'Sencho could not render the effective Compose model. Check the compose and env files for a YAML syntax error, an unresolved include or merge, or a required variable with no value.';
     }
   } catch (err) {
-    // Spawn failure (docker unavailable). Redact defensively.
     renderError = redactSensitiveText(getErrorMessage(err, 'docker compose could not be started.')).slice(0, MAX_RENDER_ERROR).trim()
       || 'Sencho could not run docker compose on this node.';
   }
 
-  // A null snapshot means the runtime is unavailable (drift is then left empty),
-  // never confused with a real empty snapshot.
-  let snapshot: DependencySnapshot | null = null;
-  try {
-    const knownStacks = await fsSvc.getStacks();
-    snapshot = await DockerController.getInstance(nodeId).getDependencySnapshot(knownStacks);
-  } catch (error) {
-    console.warn('[NetworkInspector] Node snapshot unavailable for %s; runtime facts skipped:',
-      sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+  let snapshot: DependencySnapshot | null;
+  if (sharedSnapshot !== undefined) {
+    snapshot = sharedSnapshot;
+  } else {
+    try {
+      const knownStacks = await fsSvc.getStacks();
+      snapshot = await DockerController.getInstance(nodeId).getDependencySnapshot(knownStacks);
+    } catch (error) {
+      console.warn('[NetworkInspector] Node snapshot unavailable for %s; runtime facts skipped:',
+        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+      snapshot = null;
+    }
   }
 
   return assembleStackNetworkFacts(stackName, model, renderError, snapshot);

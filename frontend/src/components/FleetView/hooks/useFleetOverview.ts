@@ -255,5 +255,6 @@ export function useFleetOverview({ prefs, updatePrefs, updateStatuses }: UseFlee
         distinctNodeLabels: distinctLabels,
         activeFilterCount,
         clearFilters,
+        networkingByNode,
     };
 }

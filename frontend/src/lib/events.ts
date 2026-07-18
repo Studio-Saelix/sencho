@@ -21,6 +21,7 @@ export const SENCHO_OPEN_STACK_EVENT = 'sencho-open-stack';
 export interface SenchoOpenStackDetail {
   nodeId: number;
   stackName: string;
+  destination?: 'stack' | 'editor' | 'anatomy-networking' | 'doctor' | 'dossier' | 'drift';
 }
 
 /** Tabs of the top-level Security view. Used by the nav state and by

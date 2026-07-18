@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '@/components/ui/modal';
 import { Combobox } from '@/components/ui/combobox';
@@ -27,8 +27,8 @@ const EMPTY_FORM: CreateNetworkForm = {
 interface CreateNetworkDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Called after a network is created so the caller can refresh its view. */
-  onCreated?: () => void | Promise<void>;
+  initialName?: string;
+  onCreated?: (network: { name: string }) => void | Promise<void>;
 }
 
 /**
@@ -36,9 +36,13 @@ interface CreateNetworkDialogProps {
  * `/system/networks`, so it can be reused from the Resources Networks tab and
  * the stack-detail Networking tab without sharing parent state.
  */
-export function CreateNetworkDialog({ open, onOpenChange, onCreated }: CreateNetworkDialogProps) {
+export function CreateNetworkDialog({ open, onOpenChange, initialName, onCreated }: CreateNetworkDialogProps) {
   const [form, setForm] = useState<CreateNetworkForm>(EMPTY_FORM);
   const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    if (open) setForm((current) => ({ ...current, name: initialName ?? current.name }));
+  }, [initialName, open]);
 
   const handleCreate = async () => {
     setCreating(true);
@@ -61,7 +65,7 @@ export function CreateNetworkDialog({ open, onOpenChange, onCreated }: CreateNet
       toast.success(`Network "${form.name}" created`);
       onOpenChange(false);
       setForm(EMPTY_FORM);
-      await onCreated?.();
+      await onCreated?.({ name: form.name });
     } catch (error) {
       const err = error as Record<string, unknown>;
       toast.error(String(err?.message || err?.error || 'Something went wrong.'));

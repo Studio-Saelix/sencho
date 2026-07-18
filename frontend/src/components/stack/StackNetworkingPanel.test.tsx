@@ -152,4 +152,17 @@ describe('StackNetworkingPanel', () => {
       expect(after).toBeGreaterThan(before);
     });
   });
+
+  it('dispatches the node-navigate event to open the Networking page', async () => {
+    mockApi(facts());
+    render(<StackNetworkingPanel stackName="web" canEdit doctorEnabled />);
+    await screen.findByText('web_backend');
+    const handler = vi.fn();
+    window.addEventListener('sencho-navigate', handler);
+    fireEvent.click(screen.getByText(/view node networking/i));
+    expect(handler).toHaveBeenCalledTimes(1);
+    const detail = (handler.mock.calls[0][0] as CustomEvent).detail;
+    expect(detail).toEqual({ view: 'networking' });
+    window.removeEventListener('sencho-navigate', handler);
+  });
 });

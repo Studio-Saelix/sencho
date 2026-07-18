@@ -34,6 +34,7 @@ interface StackAnatomyPanelProps {
   canEdit: boolean;
   applying?: boolean;
   notifications?: NotificationItem[];
+  requestedTab?: 'networking' | 'doctor' | 'dossier' | 'drift';
 }
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
@@ -99,6 +100,7 @@ export default function StackAnatomyPanel({
   canEdit,
   applying = false,
   notifications,
+  requestedTab,
 }: StackAnatomyPanelProps) {
   const anatomy = useMemo(() => parseAnatomy(content), [content]);
   const envKeys = useMemo(() => parseEnvKeys(envContent), [envContent]);
@@ -138,6 +140,16 @@ export default function StackAnatomyPanel({
     attemptedAt?: number;
     errorMessage?: string | null;
   } | null>(null);
+  const [activeTab, setActiveTab] = useState('anatomy');
+
+  useEffect(() => {
+    if (requestedTab === 'networking' && networkingEnabled) setActiveTab('networking');
+    if (requestedTab === 'doctor' && doctorEnabled) setActiveTab('doctor');
+    // Dossier and Drift are unconditional base tabs (no capability gate), unlike
+    // Doctor/Networking which require a node capability.
+    if (requestedTab === 'dossier') setActiveTab('dossier');
+    if (requestedTab === 'drift') setActiveTab('drift');
+  }, [doctorEnabled, networkingEnabled, requestedTab]);
   const { dismissed: scanBannerDismissed, dismiss: dismissScanBanner } =
     useScanBannerDismiss(stackName, activeNode?.id, scanStatus);
 
@@ -397,7 +409,7 @@ export default function StackAnatomyPanel({
 
   return (
     <div className="flex h-full min-h-0 flex-col rounded-xl border border-muted bg-card/40">
-      <Tabs defaultValue="anatomy" className="flex flex-col h-full min-h-0">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-col h-full min-h-0">
       <div className="flex items-center justify-between border-b border-muted px-3 py-1.5 gap-2">
         <ScrollableTabRow surface="card" wrapperClassName="min-w-0 flex-1">
           <TabsList className="h-7 w-max gap-0.5 bg-transparent border-none p-0">

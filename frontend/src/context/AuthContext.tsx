@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
+import { markMilestone } from '@/lib/hydrationTiming';
 
 type AppStatus = 'loading' | 'needsSetup' | 'notAuthenticated' | 'mfaChallenge' | 'authenticated';
 
@@ -108,6 +109,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setAppStatus('notAuthenticated');
     }
   };
+
+  // One-shot boot milestone: the auth gate has resolved to a terminal status
+  // (setup, login, MFA, or authenticated), so the app can leave the splash.
+  useEffect(() => {
+    if (appStatus === 'loading') return;
+    markMilestone('auth_resolved');
+  }, [appStatus]);
 
   useEffect(() => {
     checkAuth();

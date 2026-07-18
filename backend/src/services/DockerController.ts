@@ -21,11 +21,13 @@ import {
   type PruneScope,
   type PruneTarget,
 } from './prunePlan';
+import type { NetworkingNetworkBase } from './network/networkingTypes';
 import { isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
+import { isValidDockerNetworkName } from './network/dockerNetworkName';
 
 export type {
   PruneItemOutcome,
@@ -220,6 +222,8 @@ export interface DependencyNetwork {
   driver: string;
   scope: string;
   isSystem: boolean;
+  ingress?: boolean;
+  enableIPv6?: boolean;
   /** Raw com.docker.compose.project label (may not map to a known stack). */
   composeProject: string | null;
   /** Resolved Sencho stack this network belongs to, or null. */
@@ -1415,7 +1419,7 @@ class DockerController {
   }
 
   public async createNetwork(options: CreateNetworkOptions) {
-    if (!options.Name || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(options.Name)) {
+    if (!options.Name || !isValidDockerNetworkName(options.Name)) {
       throw new Error('Invalid network name. Use alphanumeric characters, hyphens, underscores, and dots.');
     }
     return await this.docker.createNetwork(options);
@@ -1773,12 +1777,15 @@ class DockerController {
 
     const networks: DependencyNetwork[] = networksRaw.map((net: any) => {
       const project = net.Labels?.['com.docker.compose.project'] ?? null;
+      const ingress = net.Ingress === true;
       return {
         id: net.Id,
         name: net.Name,
         driver: net.Driver ?? 'bridge',
         scope: net.Scope ?? 'local',
-        isSystem: DockerController.SYSTEM_NETWORKS.has(net.Name),
+        isSystem: DockerController.SYSTEM_NETWORKS.has(net.Name) || ingress,
+        ingress,
+        ...(typeof net.EnableIPv6 === 'boolean' ? { enableIPv6: net.EnableIPv6 } : {}),
         composeProject: project,
         stack: DockerController.resolveProjectLabel(project ?? undefined, knownSet, projectToStack),
       };
@@ -1795,6 +1802,51 @@ class DockerController {
     });
 
     return { containers, networks, volumes };
+  }
+
+  /**
+   * Classifies snapshot networks into base inventory rows (phase A). Uses only
+   * the provided snapshot; no additional Docker API calls.
+   */
+  public static classifySnapshotNetworks(
+    snapshot: DependencySnapshot,
+    _knownStackNames: string[],
+  ): NetworkingNetworkBase[] {
+    const selfIdentity = SelfIdentityService.getInstance();
+    const connectedByNetwork = new Map<string, number>();
+    for (const c of snapshot.containers) {
+      for (const attached of c.networks) {
+        const key = attached.id || attached.name;
+        connectedByNetwork.set(key, (connectedByNetwork.get(key) ?? 0) + 1);
+        if (attached.name && attached.name !== key) {
+          connectedByNetwork.set(attached.name, (connectedByNetwork.get(attached.name) ?? 0) + 1);
+        }
+      }
+    }
+
+    return snapshot.networks.map(net => ({
+      id: net.id,
+      name: net.name,
+      driver: net.driver,
+      scope: net.scope,
+      isSystem: net.isSystem,
+      ingress: net.ingress === true,
+      enableIPv6: net.enableIPv6,
+      composeProject: net.composeProject,
+      stack: net.stack,
+      connectedCount: connectedByNetwork.get(net.id) ?? connectedByNetwork.get(net.name) ?? 0,
+      isSencho: selfIdentity.isOwnNetwork(net.id) || selfIdentity.isOwnNetwork(net.name),
+      ownership: net.isSystem || net.ingress === true
+        ? 'system'
+        : net.stack
+          ? 'sencho-managed'
+          : net.composeProject
+            ? 'compose-managed'
+            : 'unmanaged',
+      declaredByStacks: [],
+      declaredExternalByStacks: [],
+      isExternalDependency: false,
+    }));
   }
 
   /** Resolves a Docker Compose project label to a known Sencho stack name, or null. */

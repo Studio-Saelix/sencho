@@ -12,7 +12,7 @@ import { ComposeService } from './ComposeService';
 import { StackOpLockService, stackOpSkipMessage, type StackOpAction } from './StackOpLockService';
 import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
-import { PROXY_TIER_HEADER } from './license-headers';
+import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import { LicenseService } from './LicenseService';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions, describePolicyBlock, triggerPostDeployScan } from '../helpers/policyGate';
 import { enforcePolicyForImageRefs } from './PolicyEnforcement';
@@ -451,7 +451,12 @@ export class BlueprintService {
                     nodeId,
                     buildSystemPolicyGateOptions('blueprint', { auditPath }),
                 );
-                await ComposeService.getInstance(nodeId).deployStack(stackName, undefined, false);
+                await ComposeService.getInstance(nodeId).deployStack(
+                    stackName,
+                    undefined,
+                    false,
+                    { source: 'blueprint', actor: 'system:blueprint' },
+                );
             },
         );
         return lock.ran ? { ran: true } : { ran: false, existingAction: lock.existing.action };
@@ -495,6 +500,7 @@ export class BlueprintService {
             Authorization: `Bearer ${apiToken}`,
             [PROXY_TIER_HEADER]: proxy.tier,
             'Content-Type': 'application/json',
+            ...deployProvenanceHeaders('blueprint', 'system:blueprint'),
         };
     }
 

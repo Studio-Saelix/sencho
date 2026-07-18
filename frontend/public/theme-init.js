@@ -19,13 +19,13 @@
   // returning user looks unchanged. Mirrors the presets in src/hooks/use-theme.ts.
   var SIG = {
     visualStyle: 'signature', headingStyle: 'signature', chartStyle: 'signature',
-    reducedEffects: false, readability: false,
+    reducedEffects: false, reducedMotion: false, readability: false,
   };
   var DEFAULTS = {
     theme: 'dim', accent: 'cyan', borderBoost: 0, glow: 0.16, contrast: 0,
     uiFont: 'Geist', monoFont: 'Geist Mono', typeScale: 1,
     visualStyle: 'calm', headingStyle: 'clean', chartStyle: 'muted',
-    reducedEffects: true, readability: false,
+    reducedEffects: true, reducedMotion: true, readability: false,
   };
 
   function num(v, min, max, def) {
@@ -55,6 +55,7 @@
             headingStyle: HEADINGS[p.headingStyle] ? p.headingStyle : SIG.headingStyle,
             chartStyle: CHARTS[p.chartStyle] ? p.chartStyle : SIG.chartStyle,
             reducedEffects: bool(p.reducedEffects, SIG.reducedEffects),
+            reducedMotion: bool(p.reducedMotion, SIG.reducedMotion),
             readability: bool(p.readability, SIG.readability),
           };
         }
@@ -99,6 +100,7 @@
     root.dataset.headings = headings;
     root.dataset.chartStyle = chart;
     if (reduced) root.dataset.effects = 'reduced'; else delete root.dataset.effects;
+    if (s.reducedMotion) root.dataset.motion = 'reduced'; else delete root.dataset.motion;
     root.style.setProperty('--border-boost', String(rd ? 0.03 : s.borderBoost));
     root.style.setProperty('--glow', String(reduced ? s.glow * 0.4 : s.glow));
     root.style.setProperty('--contrast', String(s.contrast + (rd ? 0.18 : 0)));

@@ -14,11 +14,13 @@ import {
 import type { SectionId } from '@/components/settings';
 import { SettingsSectionContent } from '@/components/settings/SettingsSectionContent';
 import { BackChip, Kicker, Masthead } from './mobile-ui';
+import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 
 interface MobileSettingsProps {
   headerActions: ReactNode;
   selectedSection: SectionId | null;
   onSelectedSectionChange: (section: SectionId | null) => void;
+  quickLinkCandidates?: NavDestination[];
 }
 
 const NOOP = () => {};
@@ -27,6 +29,7 @@ export function MobileSettings({
   headerActions,
   selectedSection,
   onSelectedSectionChange,
+  quickLinkCandidates,
 }: MobileSettingsProps) {
   const { isAdmin } = useAuth();
   const { isPaid } = useLicense();
@@ -60,7 +63,12 @@ export function MobileSettings({
           <span className="font-heading text-[30px] leading-[34px] text-stat-value">{item.label}</span>
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden px-4 pb-8 pt-4 flex flex-col gap-6">
-          <SettingsSectionContent sectionId={activeSection} onDirtyChange={NOOP} showDescription />
+          <SettingsSectionContent
+            sectionId={activeSection}
+            onDirtyChange={NOOP}
+            showDescription
+            quickLinkCandidates={quickLinkCandidates}
+          />
         </div>
       </div>
     );

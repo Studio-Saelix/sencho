@@ -9,6 +9,11 @@ import type { Density } from '@/hooks/use-density';
 import { useLogChipColorMode, type LogChipColorMode } from '@/hooks/use-log-chip-color-mode';
 import { useTopNavLabels } from '@/hooks/use-top-nav-labels';
 import { useTopNavAlign, type TopNavAlign } from '@/hooks/use-top-nav-align';
+import { useTopNavMode, type TopNavMode } from '@/hooks/use-top-nav-mode';
+import { useTopNavQuickLinks, MAX_QUICK_LINKS } from '@/hooks/use-top-nav-quick-links';
+import { getAppNavItem } from '@/lib/navigation/appNavRegistry';
+import type { NavDestination } from '@/lib/navigation/appNavRegistry';
+import type { ActiveView } from '@/lib/router/routeTypes';
 import {
     useTheme, activeVisualStyle, THEME_MODE_OPTIONS, ACCENTS, CONTRAST, BORDER_BOOST, GLOW, TYPE_SCALE,
     type VisualStyle, type HeadingStyle, type ChartStyle,
@@ -35,6 +40,12 @@ const DENSITY_DESCRIPTIONS: Record<Density, string> = {
 const TOP_NAV_ALIGN_OPTIONS: { value: TopNavAlign; label: string }[] = [
     { value: 'left', label: 'Left' },
     { value: 'center', label: 'Center' },
+];
+
+const TOP_NAV_MODE_OPTIONS: { value: TopNavMode; label: string }[] = [
+    { value: 'classic', label: 'Classic bar' },
+    { value: 'smart', label: 'Smart bar' },
+    { value: 'compact', label: 'Compact launcher' },
 ];
 
 const CHART_STYLE_OPTIONS: { value: ChartStyle; label: string }[] = [
@@ -134,11 +145,33 @@ function VisualCard({
     );
 }
 
-export function AppearanceSection() {
+export function AppearanceSection({
+    quickLinkCandidates = [],
+}: {
+    quickLinkCandidates?: NavDestination[];
+}) {
     const [density, setDensity] = useDensity();
     const [chipColorMode, setChipColorMode] = useLogChipColorMode();
     const [topNavLabels, setTopNavLabels] = useTopNavLabels();
     const [topNavAlign, setTopNavAlign] = useTopNavAlign();
+    const [topNavMode, setTopNavMode] = useTopNavMode();
+    const {
+        persistedIds: quickLinkIds,
+        addQuickLink,
+        removeQuickLink,
+        resetQuickLinks,
+    } = useTopNavQuickLinks();
+    const persistedSet = new Set(quickLinkIds);
+    const unpinnedCandidates = quickLinkCandidates.filter((item) => !persistedSet.has(item.value));
+    const atCapacity = quickLinkIds.length >= MAX_QUICK_LINKS;
+    const addEnabled = !atCapacity && unpinnedCandidates.length > 0;
+    const addDisabledReason = atCapacity
+        ? 'Remove a pin or reset to free a slot'
+        : 'No more destinations available on this node';
+    const addOptions = unpinnedCandidates.map((item) => ({
+        value: item.value,
+        label: item.label,
+    }));
     const {
         theme, accent, borderBoost, glow, contrast, uiFont, monoFont, typeScale,
         headingStyle, chartStyle, reducedEffects, reducedMotion, readability,
@@ -251,7 +284,7 @@ export function AppearanceSection() {
                 ) : null}
                 <SettingsField
                     label="Reduced motion"
-                    helper="Minimizes interface animations and transitions (dialogs, menus, expand and collapse). First control to try for high idle GPU use on constrained graphics. Toasts are unaffected."
+                    helper="Minimizes interface animations and transitions (dialogs, menus, expand and collapse). Calm turns this on by default; choosing Signature turns it off. You can still toggle it independently afterward. First control to try for high idle GPU use on constrained graphics. Toasts are unaffected."
                 >
                     <TogglePill
                         checked={reducedMotion}
@@ -262,7 +295,7 @@ export function AppearanceSection() {
 
                 <SettingsField
                     label="Reduced effects"
-                    helper="Flattens card bevels, the accent glow, and chart gradients, and turns off glass blur with solid chrome fills. Optional secondary material simplification; not a substitute for Reduced motion on reported idle GPU cost."
+                    helper="Flattens card bevels, the accent glow, and chart gradients, and turns off glass blur with solid chrome fills. Also stops the decorative masthead rail animations even if Reduced motion is off. Optional secondary material simplification; not a substitute for Reduced motion on reported idle GPU cost."
                 >
                     <TogglePill
                         checked={effectiveReduced}
@@ -413,13 +446,41 @@ export function AppearanceSection() {
                 </SettingsField>
 
                 <SettingsField
-                    label="Top navigation labels"
-                    helper="Show text labels beside top navigation icons. Turn off for a more compact navigation bar."
+                    label="Log chip color"
+                    helper="Unified uses the accent color for all service chips. Per-service assigns each service a stable label color for faster visual scanning."
                 >
-                    <TogglePill checked={topNavLabels} onChange={setTopNavLabels} />
+                    <SegmentedControl
+                        value={chipColorMode}
+                        options={CHIP_COLOR_OPTIONS}
+                        onChange={setChipColorMode}
+                        ariaLabel="Log chip color mode"
+                    />
+                </SettingsField>
+            </SettingsSection>
+
+            <SettingsSection title="Navigation" kicker="this browser">
+                <SettingsField
+                    label="Navigation style"
+                    helper="Smart bar is the recommended default: primary destinations stay visible, and the rest live under More. Classic keeps the full horizontal strip. Compact launcher puts destinations in a menu with optional quick links."
+                >
+                    <SegmentedControl
+                        value={topNavMode}
+                        options={TOP_NAV_MODE_OPTIONS}
+                        onChange={setTopNavMode}
+                        ariaLabel="Navigation style"
+                    />
                 </SettingsField>
 
-                {!topNavLabels && (
+                {(topNavMode === 'classic' || topNavMode === 'smart') && (
+                    <SettingsField
+                        label="Top navigation labels"
+                        helper="Show text labels beside top navigation icons. Turn off for a more compact navigation bar."
+                    >
+                        <TogglePill checked={topNavLabels} onChange={setTopNavLabels} />
+                    </SettingsField>
+                )}
+
+                {(topNavMode === 'classic' || topNavMode === 'smart') && !topNavLabels && (
                     <SettingsField
                         label="Top navigation alignment"
                         helper="Place the icon-only navigation against the left edge or centered in the bar."
@@ -433,17 +494,64 @@ export function AppearanceSection() {
                     </SettingsField>
                 )}
 
-                <SettingsField
-                    label="Log chip color"
-                    helper="Unified uses the accent color for all service chips. Per-service assigns each service a stable label color for faster visual scanning."
-                >
-                    <SegmentedControl
-                        value={chipColorMode}
-                        options={CHIP_COLOR_OPTIONS}
-                        onChange={setChipColorMode}
-                        ariaLabel="Log chip color mode"
-                    />
-                </SettingsField>
+                {topNavMode === 'compact' && (
+                    <SettingsField
+                        label="Quick links"
+                        helper="Up to five pinned destinations on the top bar. Defaults are a starting set; add reachable destinations here or with the trailing + on the Compact bar."
+                    >
+                        <div className="flex w-full flex-col gap-2">
+                            {quickLinkIds.length === 0 ? (
+                                <p className="font-mono text-[11px] text-stat-subtitle">No quick links pinned.</p>
+                            ) : (
+                                <ul className="flex flex-col gap-1">
+                                    {quickLinkIds.map((id) => {
+                                        const item = getAppNavItem(id);
+                                        const label = item?.label ?? id;
+                                        return (
+                                            <li
+                                                key={id}
+                                                className="flex items-center justify-between gap-2 rounded-md border border-glass-border px-2 py-1.5"
+                                            >
+                                                <span className="font-mono text-[11px] uppercase tracking-[0.14em]">
+                                                    {label}
+                                                </span>
+                                                <SettingsSecondaryButton
+                                                    type="button"
+                                                    aria-label={`Remove ${label}`}
+                                                    onClick={() => removeQuickLink(id)}
+                                                >
+                                                    Remove
+                                                </SettingsSecondaryButton>
+                                            </li>
+                                        );
+                                    })}
+                                </ul>
+                            )}
+                            <div className="flex flex-col gap-1.5">
+                                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
+                                    Add quick link
+                                </span>
+                                {addEnabled ? (
+                                    <Combobox
+                                        options={addOptions}
+                                        value=""
+                                        onValueChange={(value) => {
+                                            if (value) addQuickLink(value as ActiveView);
+                                        }}
+                                        placeholder="Choose a destination"
+                                    />
+                                ) : (
+                                    <p className="font-mono text-[11px] text-stat-subtitle">{addDisabledReason}</p>
+                                )}
+                            </div>
+                            <SettingsActions>
+                                <SettingsSecondaryButton type="button" onClick={resetQuickLinks}>
+                                    Reset to defaults
+                                </SettingsSecondaryButton>
+                            </SettingsActions>
+                        </div>
+                    </SettingsField>
+                )}
             </SettingsSection>
 
             <p className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle/70">

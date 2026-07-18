@@ -13,7 +13,7 @@ const {
   mockGetSystemState, mockSetSystemState, mockAddNotificationHistory,
   mockDispatchAlert,
   mockGetStacks, mockGetStackContent, mockGetEnvContent, mockEnvExists,
-  mockGetAllContainers, mockGetGlobalSettings,
+  mockGetAllContainers, mockGetGlobalSettings, mockInspect,
 } = vi.hoisted(() => ({
   mockGetAuthForRegistry: vi.fn().mockResolvedValue(null),
   mockGetStackUpdateStatus: vi.fn().mockReturnValue({}),
@@ -30,6 +30,9 @@ const {
   mockEnvExists: vi.fn().mockResolvedValue(false),
   mockGetAllContainers: vi.fn().mockResolvedValue([]),
   mockGetGlobalSettings: vi.fn().mockReturnValue({ developer_mode: '0' }),
+  // Backs DockerController.getInstance().getDocker().getImage().inspect() for tests
+  // that exercise the real checkImage (rather than stubbing it) through checkNode.
+  mockInspect: vi.fn().mockResolvedValue({ RepoDigests: [] }),
 }));
 
 vi.mock('../services/RegistryService', () => ({
@@ -81,6 +84,7 @@ vi.mock('../services/DockerController', () => ({
   default: {
     getInstance: () => ({
       getAllContainers: mockGetAllContainers,
+      getDocker: () => ({ getImage: () => ({ inspect: mockInspect }) }),
     }),
   },
 }));
@@ -94,12 +98,12 @@ vi.mock('../services/NodeRegistry', () => ({
   },
 }));
 
-// getRemoteDigestResult is module-scoped inside checkImage; mock it to drive the remote
-// outcome while keeping the real parseImageRef / repoDigestMatchesRef.
-const { mockGetRemoteDigestResult } = vi.hoisted(() => ({ mockGetRemoteDigestResult: vi.fn() }));
+// compareLocalToRemoteTag is module-scoped inside checkImage; mock it to drive the
+// comparison outcome while keeping the real parseImageRef / selectLocalRepoDigest.
+const { mockCompareLocalToRemoteTag } = vi.hoisted(() => ({ mockCompareLocalToRemoteTag: vi.fn() }));
 vi.mock('../services/registry-api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/registry-api')>();
-  return { ...actual, getRemoteDigestResult: mockGetRemoteDigestResult };
+  return { ...actual, compareLocalToRemoteTag: mockCompareLocalToRemoteTag };
 });
 
 // ── Re-export internal helpers via the module ─────────────────────────
@@ -194,10 +198,12 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
   });
 });
 
-// ── checkImage surfaces the remote-digest reason ───────────────────────
+// ── checkImage surfaces the comparison resolver's outcome ──────────────
 
-describe('ImageUpdateService - checkImage surfaces the remote-digest reason', () => {
+describe('ImageUpdateService - checkImage surfaces the comparison resolver outcome', () => {
   let service: ImageUpdateService;
+
+  const LOCAL_DIGEST = `sha256:${'a'.repeat(64)}`;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -206,23 +212,109 @@ describe('ImageUpdateService - checkImage surfaces the remote-digest reason', ()
   });
 
   // One RepoDigest matching the ref so the local digest resolves and the flow reaches
-  // getRemoteDigestResult.
+  // compareLocalToRemoteTag.
   const dockerWithLocalDigest = (digest: string) => ({
     getDocker: () => ({
-      getImage: () => ({ inspect: vi.fn().mockResolvedValue({ RepoDigests: [`ghcr.io/linuxserver/radarr@${digest}`] }) }),
+      getImage: () => ({ inspect: vi.fn().mockResolvedValue({
+        RepoDigests: [`ghcr.io/linuxserver/radarr@${digest}`],
+        Os: 'linux',
+        Architecture: 'amd64',
+      }) }),
     }),
   } as any);
 
   it('surfaces the specific failure reason (not a generic "unreachable") as the check error', async () => {
-    mockGetRemoteDigestResult.mockResolvedValue({ ok: false, reason: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
-    const result = await service.checkImage(dockerWithLocalDigest('sha256:local'), 'ghcr.io/linuxserver/radarr:latest');
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'error', reason: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
+    const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
     expect(result).toEqual({ hasUpdate: false, error: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
   });
 
-  it('reports an update when the resolved remote digest differs from the local one', async () => {
-    mockGetRemoteDigestResult.mockResolvedValue({ ok: true, digest: 'sha256:remote' });
-    const result = await service.checkImage(dockerWithLocalDigest('sha256:local'), 'ghcr.io/linuxserver/radarr:latest');
+  it('reports an update when the comparison resolver classifies the remote as an update', async () => {
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'update' });
+    const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
     expect(result).toEqual({ hasUpdate: true });
+  });
+
+  it('reports no update when the comparison resolver classifies the remote as a match', async () => {
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
+    const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
+    expect(result).toEqual({ hasUpdate: false });
+  });
+
+  it('passes the local digest, platform, and parsed ref through to the comparison resolver', async () => {
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
+    await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
+    expect(mockCompareLocalToRemoteTag).toHaveBeenCalledWith(
+      LOCAL_DIGEST,
+      'ghcr.io',
+      'linuxserver/radarr',
+      'latest',
+      { os: 'linux', architecture: 'amd64' },
+      null,
+    );
+  });
+});
+
+// ── Multi-arch digest comparison persistence (end-to-end via checkNode) ─
+
+describe('ImageUpdateService - multi-arch digest comparison persistence', () => {
+  const LOCAL_DIGEST = `sha256:${'a'.repeat(64)}`;
+  const COMPOSE = `
+services:
+  app:
+    image: ghcr.io/linuxserver/radarr:latest
+`;
+
+  const fakeDb = () => ({
+    getStackUpdateStatus: mockGetStackUpdateStatus,
+    upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
+    clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
+    getSystemState: mockGetSystemState,
+    setSystemState: mockSetSystemState,
+    addNotificationHistory: mockAddNotificationHistory,
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (ImageUpdateService as any).instance = undefined;
+    mockGetSystemState.mockReturnValue('1');
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(COMPOSE);
+    mockGetAllContainers.mockResolvedValue([]);
+    mockEnvExists.mockResolvedValue(false);
+    mockGetAuthForRegistry.mockResolvedValue(null);
+    mockInspect.mockResolvedValue({
+      RepoDigests: [`ghcr.io/linuxserver/radarr@${LOCAL_DIGEST}`],
+      Os: 'linux',
+      Architecture: 'amd64',
+    });
+  });
+
+  it('clears a stored has_update=true after a successful child-manifest match (ok, no last_error, no notification)', async () => {
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: true });
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
+    const service = ImageUpdateService.getInstance();
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', false, expect.any(Number), 'ok', null);
+    expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
+  it('preserves a stored has_update=true when the comparison resolver errors (fail-soft, no false negative)', async () => {
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: true });
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'error', reason: 'Failed to classify remote manifest for ghcr.io/linuxserver/radarr:latest' });
+    const service = ImageUpdateService.getInstance();
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(mockRecordStackCheckFailure).toHaveBeenCalledWith(
+      1, 'stackA', expect.stringContaining('Failed to classify remote manifest'), expect.any(Number),
+    );
+    expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
   });
 });
 
@@ -452,13 +544,13 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, true);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'info',
       'image_update_available',
-      expect.stringContaining('stackA'),
+      'Stack "stackA" has image updates available.',
       { stackName: 'stackA', actor: 'system:image-update' },
     );
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'ok', null);
@@ -469,7 +561,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, true);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockDispatchAlert).not.toHaveBeenCalled();
   });
@@ -483,7 +575,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, true);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
     const dispatched = mockDispatchAlert.mock.calls.map(call => (call[3] as any)?.stackName);
@@ -497,7 +589,7 @@ services:
     mockGetStackUpdateStatus.mockReturnValue({ stackA: true, stackB: true });
     stubCheckImage(service, true);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockDispatchAlert).not.toHaveBeenCalled();
   });
@@ -508,11 +600,11 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, true);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockAddNotificationHistory).toHaveBeenCalledWith(1, expect.objectContaining({
       level: 'error',
-      message: expect.stringContaining('webhook timeout'),
+      message: 'Failed to notify about image updates for stack "stackA": webhook timeout',
     }));
   });
 });
@@ -567,7 +659,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImageByRef(service, { 'nginx:latest': { hasUpdate: false, error: 'Registry unreachable for registry-1.docker.io/library/nginx:latest' } });
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockRecordStackCheckFailure).toHaveBeenCalledWith(1, 'stackA', expect.stringContaining('Registry unreachable'), expect.any(Number));
     expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
@@ -584,7 +676,7 @@ services:
       'postgres:15': { hasUpdate: false, error: 'Registry unreachable for registry-1.docker.io/library/postgres:15' },
     });
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'partial', expect.stringContaining('Registry unreachable'));
     expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
@@ -605,7 +697,7 @@ services:
       'postgres:15': { hasUpdate: false },
     });
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'partial', expect.stringContaining('Registry unreachable'));
     expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
@@ -619,7 +711,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImageByRef(service, { 'nginx:latest': { hasUpdate: false, notCheckable: true } });
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', false, expect.any(Number), 'ok', null);
     expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
@@ -665,7 +757,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, false);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockEnvExists).toHaveBeenCalledWith('stackA');
     expect(mockGetEnvContent).not.toHaveBeenCalled();
@@ -677,7 +769,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, false);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockEnvExists).toHaveBeenCalledWith('stackA');
     expect(mockGetEnvContent).toHaveBeenCalledWith('stackA');
@@ -689,7 +781,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, false);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     // Should not throw; should still complete and write status
     expect(mockUpsertStackUpdateStatus).toHaveBeenCalled();
@@ -1070,7 +1162,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, false);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockClearStackUpdateStatus).toHaveBeenCalledWith(1, 'stackB');
   });
@@ -1080,7 +1172,7 @@ services:
     const service = ImageUpdateService.getInstance();
     stubCheckImage(service, false);
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     expect(mockClearStackUpdateStatus).not.toHaveBeenCalled();
   });
@@ -1125,7 +1217,7 @@ services:
     const checkImageSpy = vi.fn().mockResolvedValue({ hasUpdate: false });
     (service as any).checkImage = checkImageSpy;
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     // Should check both the compose image and the container image
     const checkedImages = checkImageSpy.mock.calls.map((c: any[]) => c[1]);
@@ -1143,7 +1235,7 @@ services:
     const checkImageSpy = vi.fn().mockResolvedValue({ hasUpdate: false });
     (service as any).checkImage = checkImageSpy;
 
-    await (service as any).checkNode(1, 'local', fakeDb());
+    await (service as any).checkNode(1, fakeDb());
 
     const checkedImages = checkImageSpy.mock.calls.map((c: any[]) => c[1]);
     expect(checkedImages).not.toContain('someapp:v2');

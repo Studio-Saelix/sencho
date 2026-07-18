@@ -137,7 +137,7 @@ The rules in this category (except "Node-state checks skipped" itself) read live
 | Rule | Severity | What it detects |
 |------|----------|----------------|
 | Node-state checks skipped | Info | The Docker daemon could not be reached; node-state rules did not run and this result is partial. |
-| External network not found | Blocker | A network declared `external: true` does not exist on this node. The deploy will fail. |
+| External network not found | Blocker | A network declared `external: true` does not exist on this node. Deploy is blocked until the network exists. For safe default bridge networks, Doctor may offer a create remediation; advanced drivers and custom options stay manual. |
 | External volume not found | Blocker | A volume declared `external: true` does not exist on this node. The deploy will fail. |
 | New network will be created | Info | A non-external network that does not yet exist on this node will be created on first deploy. |
 | New volume will be created | Info | A named volume that does not yet exist on this node will be created on first deploy. |
@@ -179,6 +179,10 @@ Sencho recognizes when the stack it is checking is its own running compose proje
 This is the one place Compose Doctor's findings connect to an enforcement that is not advisory. Independent of this report, and independent of whether the finding is acknowledged, Sencho refuses generic **deploy, update, stop, down, and delete** actions on its own compose project, because any of them could recreate or remove the dashboard you are using to manage it. Attempting one of those actions returns an error explaining why; Compose Doctor's finding is the heads-up that surfaces the same fact before you try.
 
 To update Sencho itself, use **Fleet -> Node Update** instead of the stack's own update action. To manage the stack normally (for example, to deliberately restructure it), move its compose project outside the node's configured Compose directory first.
+
+## Networking-relevant findings on the Networking page
+
+The networking-relevant rules on this page (host mode, exposure intent, port conflicts, and the exposure-intent checks above) also surface on the node-wide [Networking](/features/networking) page's Findings tab, using the result of your last run here. A finding both engines detect is merged into one card; a finding only these Doctor rules catch appears there labeled with the run's timestamp. Acknowledging a finding here also excludes it from the Networking page.
 
 ## Node-state checks and graceful degradation
 
