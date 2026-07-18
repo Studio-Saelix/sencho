@@ -863,7 +863,11 @@ export class ImageUpdateService {
         try {
             containers = await withTimeout(docker.getAllContainers(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getAllContainers');
         } catch (e) {
-            console.warn(`[ImageUpdateService] recheckStack container read failed for "${stackName}":`, e);
+            console.warn(
+                '[ImageUpdateService] recheckStack container read failed for %s: %s',
+                sanitizeForLog(stackName),
+                sanitizeForLog(getErrorMessage(e, 'unknown')),
+            );
         }
 
         const refs = new Set<string>();

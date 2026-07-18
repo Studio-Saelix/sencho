@@ -2119,7 +2119,13 @@ async function handleServiceScopedMutation(
       );
     }
   } catch (error: unknown) {
-    console.error('[Stacks] Service %s failed: %s/%s', sanitizeForLog(options.notifyFailureAction), sanitizeForLog(stackName), sanitizeForLog(serviceName), error);
+    console.error(
+      '[Stacks] Service %s failed: %s/%s: %s',
+      sanitizeForLog(options.notifyFailureAction),
+      sanitizeForLog(stackName),
+      sanitizeForLog(serviceName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')),
+    );
     notifyActionFailure(options.notifyFailureAction, stackName, error, req.user?.username ?? 'system');
     if (!res.headersSent) {
       res.status(500).json({ error: getErrorMessage(error, options.failureMessage), code: options.failureCode });
