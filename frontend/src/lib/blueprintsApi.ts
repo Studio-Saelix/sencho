@@ -34,11 +34,17 @@ export interface Blueprint {
     updated_at: number;
     created_by: string | null;
     pinned_node_id: number | null;
+    approval_status?: 'pending' | 'approved';
+    approved_at?: number | null;
+    approved_by?: string | null;
 }
+
+export type EffectiveApproval = 'pending' | 'approved' | 'reapproval_required';
 
 export interface BlueprintListItem extends Blueprint {
     deploymentCounts: Partial<Record<BlueprintDeploymentStatus, number>>;
     deploymentTotal: number;
+    effectiveApproval?: EffectiveApproval;
 }
 
 export interface BlueprintDeployment {
@@ -58,6 +64,7 @@ export interface BlueprintSummary {
     blueprint: Blueprint;
     deployments: BlueprintDeployment[];
     statusCounts: Partial<Record<BlueprintDeploymentStatus, number>>;
+    effectiveApproval?: EffectiveApproval;
 }
 
 export interface AnalyzerResult {
@@ -70,6 +77,22 @@ export interface AnalyzerResult {
     parseError?: string;
 }
 
+export type PreviewAction =
+    | 'create'
+    | 'update'
+    | 'remove'
+    | 'check_observe'
+    | 'check_enforce'
+    | 'await_state_review'
+    | 'await_evict_confirm'
+    | 'clear_stale_guard'
+    | 'clear_reversed_evict'
+    | 'in_flight_deploy'
+    | 'in_flight_correct'
+    | 'in_flight_withdraw'
+    | 'skip_cordoned'
+    | 'blocked_name_conflict';
+
 export interface BlueprintPreview {
     blueprintId: number;
     classification: BlueprintClassification;
@@ -77,6 +100,36 @@ export interface BlueprintPreview {
     plannedDeployments: Array<{ id: number; name: string }>;
     plannedDriftChecks: Array<{ id: number; name: string }>;
     plannedEvictions: number[];
+    name: string;
+    revision: number;
+    updatedAt: number;
+    driftMode: DriftMode;
+    stackName: string;
+    approvalStatus: 'pending' | 'approved';
+    effectiveApproval: EffectiveApproval;
+    planFingerprint: string;
+    generatedAt: number;
+    summary: { safe: number; warning: number; blocker: number; total: number };
+    changes: Array<{
+        nodeId: number;
+        nodeName: string;
+        action: PreviewAction;
+        severity: 'safe' | 'warning' | 'blocker';
+        kind: 'executor' | 'informational';
+        detail: string;
+    }>;
+    confirmableActions: Array<{ nodeId: number; action: PreviewAction }>;
+    executorActions: Array<{ nodeId: number; action: PreviewAction }>;
+    unauthorizedActions: Array<{ nodeId: number; action: PreviewAction }>;
+    requirements: {
+        variables: Array<{ name: string; required: boolean; hasDefault: boolean; alternate: boolean; likelySecret: boolean }>;
+        envFiles: Array<{ path: string; required: boolean }>;
+        composeSecrets: Array<{ name: string }>;
+    };
+    compatibilityWarnings: string[];
+    healthNote: string;
+    blockers: Array<{ id: string; message: string }>;
+    warnings: Array<{ id: string; message: string }>;
 }
 
 export type WithdrawConfirm = 'standard' | 'snapshot_then_evict' | 'evict_and_destroy';
@@ -168,8 +221,15 @@ export async function deleteBlueprint(id: number): Promise<void> {
 
 // ---- Apply / Withdraw / Accept / Preview ----
 
-export async function applyBlueprint(id: number): Promise<{ message: string }> {
-    const res = await apiFetch(`/blueprints/${id}/apply`, { method: 'POST', localOnly: true });
+export async function applyBlueprint(
+    id: number,
+    confirm: { planFingerprint: string; actions: Array<{ nodeId: number; action: PreviewAction }> },
+): Promise<{ message: string }> {
+    const res = await apiFetch(`/blueprints/${id}/apply`, {
+        method: 'POST',
+        body: JSON.stringify(confirm),
+        localOnly: true,
+    });
     return expectJson(res, 'Failed to apply blueprint');
 }
 

@@ -467,6 +467,11 @@ export interface Blueprint {
     updated_at: number;
     created_by: string | null;
     pinned_node_id: number | null;
+    approval_status: 'pending' | 'approved';
+    approved_intent_fingerprint: string | null;
+    approved_blast_json: string | null;
+    approved_at: number | null;
+    approved_by: string | null;
 }
 
 export interface BlueprintDeployment {
@@ -927,6 +932,7 @@ export class DatabaseService {
         this.migrateAddNodeLastContact();
         this.migrateAddNodeCordonFields();
         this.migrateAddBlueprintPinnedNode();
+        this.migrateAddBlueprintApproval();
         this.migrateAutoHealNodeId();
         this.migrateFleetSyncStickyError();
         this.migrateStackDossierHashes();
@@ -2181,6 +2187,27 @@ export class DatabaseService {
 
     private migrateAddBlueprintPinnedNode(): void {
         this.tryAddColumn('blueprints', 'pinned_node_id', 'INTEGER');
+    }
+
+    private migrateAddBlueprintApproval(): void {
+        this.tryAddColumn('blueprints', 'approval_status', "TEXT NOT NULL DEFAULT 'pending'");
+        this.tryAddColumn('blueprints', 'approved_intent_fingerprint', 'TEXT');
+        this.tryAddColumn('blueprints', 'approved_blast_json', 'TEXT');
+        this.tryAddColumn('blueprints', 'approved_at', 'INTEGER');
+        this.tryAddColumn('blueprints', 'approved_by', 'TEXT');
+        // Fail-closed backfill: any pre-existing approved-looking default stays pending.
+        try {
+            this.db.prepare(
+                `UPDATE blueprints SET approval_status = 'pending',
+                    approved_intent_fingerprint = NULL,
+                    approved_blast_json = NULL,
+                    approved_at = NULL,
+                    approved_by = NULL
+                 WHERE approval_status IS NULL OR approval_status NOT IN ('pending', 'approved')`,
+            ).run();
+        } catch (e) {
+            console.warn('[DatabaseService] blueprint approval backfill:', (e as Error).message);
+        }
     }
 
     private migrateFleetSyncStickyError(): void {
@@ -3595,9 +3622,58 @@ export class DatabaseService {
     }
 
     public setBlueprintPinnedNode(blueprintId: number, nodeId: number | null): Blueprint | undefined {
-        this.db.prepare('UPDATE blueprints SET pinned_node_id = ?, updated_at = ? WHERE id = ?')
-            .run(nodeId, Date.now(), blueprintId);
+        this.db.prepare(
+            `UPDATE blueprints SET pinned_node_id = ?, updated_at = ?,
+                approval_status = 'pending',
+                approved_intent_fingerprint = NULL,
+                approved_blast_json = NULL,
+                approved_at = NULL,
+                approved_by = NULL
+             WHERE id = ?`,
+        ).run(nodeId, Date.now(), blueprintId);
         return this.getBlueprint(blueprintId);
+    }
+
+    /** Persist approval without bumping operational updated_at. */
+    public setBlueprintApproval(
+        blueprintId: number,
+        input: {
+            intentFingerprint: string;
+            blastJson: string;
+            approvedBy: string | null;
+        },
+    ): Blueprint | undefined {
+        this.db.prepare(
+            `UPDATE blueprints SET
+                approval_status = 'approved',
+                approved_intent_fingerprint = ?,
+                approved_blast_json = ?,
+                approved_at = ?,
+                approved_by = ?
+             WHERE id = ?`,
+        ).run(input.intentFingerprint, input.blastJson, Date.now(), input.approvedBy, blueprintId);
+        return this.getBlueprint(blueprintId);
+    }
+
+    public clearBlueprintApproval(blueprintId: number): void {
+        this.db.prepare(
+            `UPDATE blueprints SET
+                approval_status = 'pending',
+                approved_intent_fingerprint = NULL,
+                approved_blast_json = NULL,
+                approved_at = NULL,
+                approved_by = NULL
+             WHERE id = ?`,
+        ).run(blueprintId);
+    }
+
+    /** True when any deployment row is not withdrawn (blocks rename). */
+    public hasNonWithdrawnBlueprintDeployments(blueprintId: number): boolean {
+        const row = this.db.prepare(
+            `SELECT 1 AS ok FROM blueprint_deployments
+             WHERE blueprint_id = ? AND status != 'withdrawn' LIMIT 1`,
+        ).get(blueprintId) as { ok: number } | undefined;
+        return !!row;
     }
 
     public updateNodeLastContact(nodeId: number): void {
@@ -6698,6 +6774,11 @@ export class DatabaseService {
             updated_at: row.updated_at as number,
             created_by: (row.created_by as string | null) ?? null,
             pinned_node_id: (row.pinned_node_id as number | null) ?? null,
+            approval_status: (row.approval_status as 'pending' | 'approved' | undefined) === 'approved' ? 'approved' : 'pending',
+            approved_intent_fingerprint: (row.approved_intent_fingerprint as string | null) ?? null,
+            approved_blast_json: (row.approved_blast_json as string | null) ?? null,
+            approved_at: (row.approved_at as number | null) ?? null,
+            approved_by: (row.approved_by as string | null) ?? null,
         };
     }
 
@@ -6780,6 +6861,18 @@ export class DatabaseService {
         if (updates.classification_reasons !== undefined) { fields.push('classification_reasons = ?'); values.push(JSON.stringify(updates.classification_reasons)); }
         if (updates.enabled !== undefined) { fields.push('enabled = ?'); values.push(updates.enabled ? 1 : 0); }
         if (updates.bumpRevision) { fields.push('revision = revision + 1'); }
+        const invalidatesApproval = updates.name !== undefined
+            || updates.compose_content !== undefined
+            || updates.selector !== undefined
+            || updates.drift_mode !== undefined
+            || updates.enabled !== undefined;
+        if (invalidatesApproval) {
+            fields.push("approval_status = 'pending'");
+            fields.push('approved_intent_fingerprint = NULL');
+            fields.push('approved_blast_json = NULL');
+            fields.push('approved_at = NULL');
+            fields.push('approved_by = NULL');
+        }
         fields.push('updated_at = ?');
         values.push(Date.now());
         values.push(id);

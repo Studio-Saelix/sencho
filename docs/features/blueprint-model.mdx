@@ -20,7 +20,7 @@ Blueprints live under **Fleet · Deployments**.
 Three moving parts cooperate per blueprint.
 
 1. **The declared spec.** A blueprint is a row in Sencho's database. It carries the compose YAML, the selector (labels or explicit node IDs), the drift policy, and a monotonic revision number. The revision auto-increments every time the compose changes.
-2. **The reconciler.** A background loop on the controlling Sencho ticks every 60 seconds (with a 5-second initial delay after startup) and on demand via **Apply now**. Each tick: resolve the selector, compare every desired-vs-live node, and queue one of five actions per node (deploy, withdraw, drift-check, request operator confirmation, or block on operator confirmation).
+2. **The reconciler.** A background loop on the controlling Sencho ticks every 60 seconds (with a 5-second initial delay after startup) and on demand after **Confirm Apply**. Each tick only mutates the fleet when the blueprint's current operational intent is approved. The tick resolves the selector, compares every desired-vs-live node, and runs only the place or remove outcomes the operator already confirmed.
 3. **The executor.** Per-node deploy and withdraw run against the local Docker socket on local nodes, and through the standard authenticated proxy to `/api/stacks` on remote nodes. Every blueprint deployment writes a `.blueprint.json` marker into the stack directory; the marker carries the blueprint ID, the revision, and the last-applied timestamp.
 
 The marker is the trust root. If a directory by the blueprint's name already exists on a node and does not carry a matching marker, the reconciler refuses to touch it and surfaces a **Name conflict** on the deployment row. A Blueprint named `nginx` will never overwrite an existing user-authored `nginx` stack on any node.
@@ -31,7 +31,7 @@ Drift detection runs on every tick for every Active deployment regardless of pol
 
 ## Key capabilities
 
-**One declaration covers many nodes.** Pick nodes by label or by node ID. The selector set is re-resolved on every reconciliation tick, so adding a node with a matching label deploys the stack within one minute. Removing a label, removing a node, or changing the selector withdraws the deployment on the same cadence (subject to the stateful-eviction safety rail).
+**One declaration covers many nodes.** Pick nodes by label or by node ID. The selector set is re-resolved on every reconciliation tick. When a new node matches after a label change, the catalog shows **reapproval required** until you confirm the updated blast radius. Removing a label, removing a node, or shrinking the selector likewise needs confirmation before withdraw outcomes run (subject to the stateful-eviction safety rail).
 
 **Drift detection always on.** Each tick compares the marker's revision against the live containers and the blueprint's current revision, then checks that all containers labeled with the compose project name are running. Drift is recorded on the deployment row whatever the policy is. **Observe** records it silently, **Suggest** also dispatches a notification, **Enforce** also redeploys.
 
@@ -51,7 +51,7 @@ Drift detection runs on every tick for every Active deployment regardless of pol
 | User role | **Admin** to create, edit, withdraw, accept, and apply. Operators and viewers can read the catalog and the detail sheet. Pinning requires admin. |
 | Nodes | At least one node that the selector resolves to. Remote nodes need a healthy proxy connection; see [Multi-node management](/features/multi-node) and [Pilot Agent](/features/pilot-agent) for enrollment. |
 | Compose YAML | Valid `docker-compose.yml`, 96 KiB or fewer. |
-| Blueprint name | 1 to 64 characters matching `^[a-z0-9][a-z0-9_-]*$`. The name doubles as the stack directory on every targeted node and is immutable after creation. |
+| Blueprint name | 1 to 64 characters matching `^[a-z0-9][a-z0-9_-]*$`. The name doubles as the stack directory on every targeted node. Rename is blocked while any non-withdrawn deployment or guard exists. |
 | Selector | A `labels` or `nodes` selector with up to 200 entries per side. An empty resolved set is allowed but produces no deployments. |
 | Compose directory | Per-node compose directory must be writable. Remote nodes must accept the controlling instance's bearer token; this is the same channel the rest of the fleet management already uses. |
 
@@ -183,13 +183,15 @@ The common paths through the status enum.
 2. Click **New Blueprint**.
 3. Fill in the name, description, compose YAML, selector, and drift policy.
 4. Watch the classification banner update as you type. It tells you whether the blueprint is portable or pinned to data.
-5. Click **Create blueprint**. Sencho immediately runs one reconciliation tick.
+5. Click **Create blueprint**. The blueprint starts with approval **pending**. No fleet mutation runs until you confirm a rollout preview.
 
 If the YAML is malformed or larger than 96 KiB, Sencho rejects the save before creating a Blueprint row.
 
 ### Apply on demand
 
-The reconciler runs every minute. To trigger it now, for example after editing the selector or the compose file, click **Apply now** on the detail sheet. The action also resurfaces a deployment that is in **Failed** status by retrying it.
+The reconciler runs every minute, but only for blueprints whose current operational intent is **approved**. To authorize or re-authorize a rollout, click **Apply now** on the detail sheet (or **Retry** on a failed row). Sencho opens a rollout preview that lists place and remove outcomes, requirements, and health notes. **Confirm Apply** stores that approval and runs the confirmed executor actions. Changing the compose, selector, name, pin, drift mode, or enabled flag clears approval back to pending. Catalog tiles show **pending** or **reapproval required** when confirmation is needed again (for example after a label change adds a new target node).
+
+Raw `POST /api/blueprints/:id/apply` clients must send `{ planFingerprint, actions }` from a fresh `GET .../preview`. A body without that confirmation is rejected.
 
 ### Edit
 
@@ -273,10 +275,10 @@ By design, Blueprints do not include:
 
 Concrete operational constraints:
 
-- **Reconciler cadence.** The tick interval is 60 seconds (5-second initial delay after startup). Use **Apply now** to force an immediate tick after a change.
+- **Reconciler cadence.** The tick interval is 60 seconds (5-second initial delay after startup). Approved blueprints reconcile on that cadence. Use **Apply now** and **Confirm Apply** after a change that clears approval.
 - **Compose size.** YAML must be 96 KiB or fewer. Split very large compose files into smaller blueprints, or move generated content out of the compose body.
 - **Selector size.** A selector accepts up to 200 entries per side (200 `nodes.ids`, or up to 200 each in `labels.any` and `labels.all`).
-- **Name.** 1 to 64 characters matching `^[a-z0-9][a-z0-9_-]*$`. Names are immutable after creation; to rename, recreate the blueprint and withdraw the old one.
+- **Name.** 1 to 64 characters matching `^[a-z0-9][a-z0-9_-]*$`. Rename is allowed only when every deployment is withdrawn (or there are none). Live placements and guards must be resolved first; rename clears approval back to pending.
 - **Snapshot semantics.** **Snapshot, then evict** captures the compose YAML only. Volume bytes are removed by `docker compose down` just as with **Evict and destroy data**.
 - **Restore from snapshot.** Reserved for the future Volume Migration feature and currently disabled in the state review dialog.
 
@@ -289,7 +291,7 @@ Sencho's compose-native lane does not include automatic volume shipping. **Snaps
 1. Stop the Blueprint deployment on node A from the deployment table. Use **Snapshot, then evict** so the compose YAML is parked in [Fleet · Snapshots](/features/fleet-backups) while you handle volumes.
 2. Use your host tooling (`docker run --rm -v <volume>:/data busybox tar -czf - /data > snapshot.tar.gz`, or app-aware tooling such as `pg_basebackup`, `mysqldump`, or `mongodump`) to capture the volume on node A.
 3. Transfer the artifact to node B and restore it into the named volume there.
-4. Update the Blueprint's selector to include node B; click **Apply now**.
+4. Update the Blueprint's selector to include node B; click **Apply now**, review the preview, and **Confirm Apply**.
 
 A future Volume Migration feature will automate this with app-aware backup tooling.
 
@@ -343,7 +345,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     By design. A pin replaces the selector entirely with the single pinned node, even if the selector resolves to other nodes. Either clear the pin in the Federation tab to restore selector-driven placement, or move the pin to a different node.
   </Accordion>
   <Accordion title="The reconciler took a minute to react to a change I just made">
-    The reconciler tick interval is one minute. To force an immediate evaluation after editing the selector, the compose, or the drift policy, click **Apply now** on the detail sheet. **Apply now** is also the recovery action for a row in **Failed** status.
+    The reconciler tick interval is one minute for approved blueprints. After editing the selector, the compose, or the drift policy, click **Apply now**, review the rollout preview, and **Confirm Apply**. The same path recovers a row in **Failed** status.
   </Accordion>
 </AccordionGroup>
 
@@ -357,7 +359,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     A Blueprint is a fleet-wide declaration: one compose YAML targeting a set of nodes. Each node where the blueprint resolves materializes as a Stack on that node, in the same compose directory layout the rest of the per-stack lane uses, with a `.blueprint.json` marker added. You can browse the materialized stack in the per-node Stacks view; the Blueprint is the source of truth that drives it.
   </Accordion>
   <Accordion title="How fast does drift get noticed?">
-    Within one minute. The reconciler ticks every 60 seconds with a 5-second initial delay after startup; **Apply now** on the detail sheet forces an immediate tick. Within Enforce mode, drift correction begins on the same tick that detects the drift.
+    After you confirm the updated rollout, the next reconciler tick (or the Confirm Apply execution itself) places or removes as approved. The reconciler ticks every 60 seconds with a 5-second initial delay after startup. Within Enforce mode, drift correction for an already-approved place outcome begins on the same tick that detects the drift.
   </Accordion>
   <Accordion title="Can I roll back to a previous revision?">
     Not through a one-click history. Blueprints intentionally do not keep a versioned revision history. To revert, paste the prior compose into the editor and save; the reconciler treats the change as a new revision and redeploys.
