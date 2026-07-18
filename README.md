@@ -48,15 +48,18 @@ Sencho is free, open-source software under AGPLv3. Everything below is included 
 ## Capabilities
 
 ### Stacks
-- Full Compose lifecycle: create, deploy, restart, stop, pull
+- Full Compose lifecycle: create, deploy, restart, stop, take down, pull
 - Atomic deployments with automatic rollback on failure
 - Monaco editor with diff preview before save and one-click rollback to any prior deploy
 - [Health-gated updates](https://docs.sencho.io/features/health-gated-updates) that hold a rollout until health checks pass, with stalled-update detection and in-app recovery
 - [Git-sourced stacks](https://docs.sencho.io/features/git-sources) pulled and synced from any repository, with ordered multi-file Compose
 - [File explorer](https://docs.sencho.io/features/stack-file-explorer) for compose, env, and supporting files, with move and rename across directories
+- [Drift detection](https://docs.sencho.io/features/stack-drift) that compares running containers against the effective Compose model and flags exactly what changed
+- [Environment and secrets guardrails](https://docs.sencho.io/features/environment-guardrails) that inventory every variable a stack uses and flag missing or duplicate values, without ever exposing a value
+- [Storage portability](https://docs.sencho.io/features/compose-storage) checks that show whether a stack's mounts can move cleanly to another node before you move it
 - [Compose Doctor](https://docs.sencho.io/features/compose-doctor) preflight checks that catch compose problems before deploy
 - [Stack labels](https://docs.sencho.io/features/stack-labels) for grouping and bulk operations
-- [App Store](https://docs.sencho.io/features/app-store) with LinuxServer.io templates
+- [App Store](https://docs.sencho.io/features/app-store) with LinuxServer.io templates by default, or any custom Portainer-compatible registry
 
 ### Observability
 - Aggregated [log search and stream](https://docs.sencho.io/features/global-observability) across every container in the fleet
@@ -73,6 +76,8 @@ Sencho is free, open-source software under AGPLv3. Everything below is included 
 - [Fleet Federation](https://docs.sencho.io/features/fleet-federation): cordon nodes and pin Blueprints to specific hosts
 - [Fleet Actions](https://docs.sencho.io/features/fleet-actions): bulk label operations, fleet-wide stop-by-label, and fleet-wide prune
 - [Fleet Dossier](https://docs.sencho.io/features/fleet-dossier): export the whole fleet as a single browsable Markdown archive
+- [Docker Label Audit](https://docs.sencho.io/features/docker-label-audit) across every node, for labels that drive external automation
+- [Remote updates](https://docs.sencho.io/features/remote-updates): pull the latest image and recreate any node in the fleet from the Fleet view, no SSH session required
 - Node labels and grouping
 - [Pilot Agent](https://docs.sencho.io/features/pilot-agent) for nodes behind NAT or strict firewalls
 - Node compatibility checks before deploying
@@ -91,21 +96,22 @@ Sencho is free, open-source software under AGPLv3. Everything below is included 
 - [Security overview](https://docs.sencho.io/features/security) with a chart-led scan summary, sortable images, and searchable scan history
 - [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy, with on-demand node-wide scans, VEX-based suppression, SARIF export, and SBOM upload
 - [Compose network inspector](https://docs.sencho.io/features/compose-networking) with an exposure-intent guard for unintended published ports
-- Scan policy packs for reusable security rules
+- Node-wide network inventory, topology, and exposure findings across every stack on a node
+- [Scan policies](https://docs.sencho.io/features/vulnerability-scanning#scan-policies) that set severity thresholds and can block a deploy
 - [Private registries](https://docs.sencho.io/features/private-registries) for Docker Hub, GHCR, and custom registries, plus [deploy enforcement](https://docs.sencho.io/features/deploy-enforcement) for non-compliant images
 - [API tokens](https://docs.sencho.io/features/api-tokens) for automation
 
 ### Operations
 - Off-site stack archives via [custom S3-compatible storage](https://docs.sencho.io/operations/backup)
-- [Notification routing](https://docs.sencho.io/features/alerts-notifications#notification-routing) to Slack, Discord, email, and webhooks
-- [Global search](https://docs.sencho.io/features/global-search) across stacks, containers, and services
+- [Notification routing](https://docs.sencho.io/features/alerts-notifications#notification-routing) to Slack, Discord, and any generic webhook
+- [Global search](https://docs.sencho.io/features/global-search) across pages, nodes, and every stack in the fleet
 - [Resources view](https://docs.sencho.io/features/resources) for images, volumes, and networks with scoped prune actions
 
 ---
 
 ### Before you install
 
-Sencho talks to Docker through the host's `/var/run/docker.sock`. Mounting this socket grants Sencho the same privilege as `sudo docker` on the host. This is the same model used by Portainer, Dockge, Komodo, and other Compose dashboards. If your threat model requires stricter isolation, see [running with a non-root container user](https://docs.sencho.io/operations/self-hosting#non-root-user) and front Sencho with a reverse proxy that enforces authentication.
+Sencho talks to Docker through the host's `/var/run/docker.sock`. Mounting this socket grants Sencho the same privilege as `sudo docker` on the host. This is the same model used by Portainer, Dockge, Komodo, and other Compose dashboards. If your threat model requires stricter isolation, see [running with a non-root container user](https://docs.sencho.io/getting-started/configuration#container-user) and front Sencho with a reverse proxy that enforces authentication.
 
 ## Quick start
 
@@ -184,7 +190,7 @@ Sencho does not emit telemetry, analytics, or crash reports, and makes no outbou
 
 ## Admiral
 
-**Admiral** is Studio Saelix's paid business assurance plan on top of everything in Community: priority support, managed continuity (Sencho Cloud Backup), governance depth (advanced RBAC roles, LDAP / Active Directory, full audit log export and anomaly detection), and cross-node Fleet Sync policy replication. AWS ECR registry credentials currently require Admiral as well. See [sencho.io/pricing](https://sencho.io/pricing) for current plan details.
+**Admiral** is Studio Saelix's paid business assurance plan on top of everything in Community: Hardened Build, Recovery Vault (managed off-site snapshots), priority support, and governance depth (advanced RBAC roles, LDAP / Active Directory, full audit log export and anomaly detection). Fleet Sync policy replication and AWS ECR registry credentials currently require Admiral as well; those access rules are temporary availability, not the reason Admiral exists. See [sencho.io/pricing](https://sencho.io/pricing) for current plan details.
 
 ---
 
