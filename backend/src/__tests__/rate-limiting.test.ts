@@ -120,19 +120,74 @@ describe('Tier 2: Standard endpoints', () => {
 });
 
 // ── Node proxy bypass ────────────────────────────────────────────────────────
+// Valid node_proxy JWTs skip both limiters. Polling paths (/api/stats) exercise
+// pollingLimiter.skip; standard paths (/api/stacks) exercise globalApiLimiter.skip
+// (global skip returns early for polling paths before consulting isNodeProxyRequest).
 
 describe('Node proxy bypass', () => {
-  it('requests with valid node_proxy token bypass all rate limiters', async () => {
-    const nodeToken = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1h' });
+  function scopedToken(
+    scope: string,
+    secret = TEST_JWT_SECRET,
+    opts: jwt.SignOptions = { expiresIn: '1h' },
+  ): string {
+    return jwt.sign({ scope }, secret, opts);
+  }
 
+  it('valid node_proxy token bypasses the polling limiter on /api/stats', async () => {
     const res = await request(app)
       .get('/api/stats')
-      .set('Authorization', `Bearer ${nodeToken}`);
+      .set('Authorization', `Bearer ${scopedToken('node_proxy')}`);
 
-    // Node proxy requests should NOT receive rate limit headers from either limiter
-    // (both skip functions return true for node_proxy tokens)
     // When skipped, express-rate-limit does not set headers
     expect(res.headers['ratelimit-limit']).toBeUndefined();
+  });
+
+  it('valid node_proxy token bypasses the global limiter on /api/stacks', async () => {
+    const res = await request(app)
+      .get('/api/stacks')
+      .set('Authorization', `Bearer ${scopedToken('node_proxy')}`);
+
+    expect(res.headers['ratelimit-limit']).toBeUndefined();
+  });
+
+  it('forged node_proxy claim (wrong secret) still hits the polling limiter', async () => {
+    const res = await request(app)
+      .get('/api/stats')
+      .set('Authorization', `Bearer ${scopedToken('node_proxy', 'wrong-secret')}`);
+
+    expect(parseInt(res.headers['ratelimit-limit'], 10)).toBe(3000);
+    expect(res.status).toBe(401);
+  });
+
+  it('forged node_proxy claim (wrong secret) still hits the global limiter', async () => {
+    const res = await request(app)
+      .get('/api/stacks')
+      .set('Authorization', `Bearer ${scopedToken('node_proxy', 'wrong-secret')}`);
+
+    expect(parseInt(res.headers['ratelimit-limit'], 10)).toBe(1000);
+    expect(res.status).toBe(401);
+  });
+
+  it('expired node_proxy token still gets rate limited (fail closed)', async () => {
+    const expired = scopedToken('node_proxy', TEST_JWT_SECRET, { expiresIn: '-1s' });
+
+    const polling = await request(app)
+      .get('/api/stats')
+      .set('Authorization', `Bearer ${expired}`);
+    expect(parseInt(polling.headers['ratelimit-limit'], 10)).toBe(3000);
+
+    const standard = await request(app)
+      .get('/api/stacks')
+      .set('Authorization', `Bearer ${expired}`);
+    expect(parseInt(standard.headers['ratelimit-limit'], 10)).toBe(1000);
+  });
+
+  it('valid pilot_tunnel token remains rate-limited (not exempt)', async () => {
+    const res = await request(app)
+      .get('/api/stacks')
+      .set('Authorization', `Bearer ${scopedToken('pilot_tunnel')}`);
+
+    expect(parseInt(res.headers['ratelimit-limit'], 10)).toBe(1000);
   });
 
   it('requests with invalid Bearer token still get rate limited', async () => {
@@ -141,12 +196,10 @@ describe('Node proxy bypass', () => {
       .set('Authorization', 'Bearer invalid-token-here');
 
     // Should still get rate limit headers (polling tier for /stats)
-    const limit = parseInt(res.headers['ratelimit-limit'], 10);
-    expect(limit).toBe(3000);
+    expect(parseInt(res.headers['ratelimit-limit'], 10)).toBe(3000);
   });
 
   it('requests with non-node_proxy Bearer token still get rate limited', async () => {
-    // A regular user JWT (not node_proxy scope) should still be rate limited
     const userToken = jwt.sign(
       { username: 'testuser', role: 'admin' },
       TEST_JWT_SECRET,
@@ -157,8 +210,7 @@ describe('Node proxy bypass', () => {
       .get('/api/stacks')
       .set('Authorization', `Bearer ${userToken}`);
 
-    const limit = parseInt(res.headers['ratelimit-limit'], 10);
-    expect(limit).toBe(1000);
+    expect(parseInt(res.headers['ratelimit-limit'], 10)).toBe(1000);
   });
 });
 
@@ -179,9 +231,12 @@ describe('Hybrid key generator', () => {
     const remaining1 = parseInt(res1.headers['ratelimit-remaining'], 10);
     const remaining2 = parseInt(res2.headers['ratelimit-remaining'], 10);
 
-    // Each should have its own budget (999 for this test since each made 1 request)
-    expect(remaining1).toBeGreaterThanOrEqual(990);
-    expect(remaining2).toBeGreaterThanOrEqual(990);
+    // Each should have its own budget. Floor is suite-aware: earlier cases in
+    // this file (including forged/expired node_proxy requests keyed by IP)
+    // already spent some of the anonymous bucket; independence still holds as
+    // long as both remain near the 1000 ceiling.
+    expect(remaining1).toBeGreaterThanOrEqual(980);
+    expect(remaining2).toBeGreaterThanOrEqual(980);
   });
 
   it('two different users get independent rate limit budgets', async () => {
