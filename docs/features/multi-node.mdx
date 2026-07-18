@@ -7,7 +7,7 @@ description: Connect multiple Sencho instances and manage every server from one 
 Sencho's multi-node feature lets you operate Docker Compose stacks on every server you run from a single browser tab. Each server runs its own Sencho instance and the control instance acts as a transparent proxy to the others.
 
 <Frame>
-  <img src="/images/multi-node/node-manager.png" alt="Settings · Infrastructure · Nodes panel showing the masthead breadcrumb, SCOPE/NODES/REMOTE stat strip, Add node button, Generate Node Token card, and a populated table of one Local row plus seven remote rows with mixed Proxy and Pilot Agent modes." />
+  <img src="/images/multi-node/node-manager.png" alt="Settings · Infrastructure · Nodes panel showing the masthead breadcrumb, SCOPE/NODES/REMOTE stat strip, Add node button, Generate Node Token card, and a populated table of one Local row plus three Proxy-mode remote rows." />
 </Frame>
 
 ## How it works
@@ -30,19 +30,19 @@ If multiple local nodes exist from an older version, the extra rows show a Delet
 
 When you add a remote node, the Mode picker offers two options. The form tells you the difference inline:
 
-> Pilot Agent requires only outbound HTTPS from the remote host. Distributed API Proxy requires the remote host to expose an inbound port.
+> Pilot Agent requires only outbound HTTPS from the remote host. Distributed API Proxy requires the remote host to expose an inbound port. Sencho Mesh works with both modes.
 
 | | Pilot Agent (default) | Distributed API Proxy |
 |---|---|---|
 | **Direction** | Remote dials the control plane (outbound only) | Control plane dials the remote (inbound to remote) |
 | **Network requirement** | Outbound HTTPS to the control instance | Inbound TCP port reachable from the control instance |
-| **What you run on the remote host** | One `docker run` command issued at enrollment | A full Sencho install reachable on a routable URL |
+| **What you run on the remote host** | A generated Compose file, brought up with `docker compose up -d` | A full Sencho install reachable on a routable URL |
 | **Token model** | One-shot enrollment token, 15-minute expiry | Long-lived bearer token, rotates on regeneration |
 | **Best for** | Hosts behind NAT, dynamic IPs, restrictive ingress, edge boxes | Servers you already expose on a stable URL with TLS termination |
 
-If you are not sure, start with **Pilot Agent**. It is the default because it works in more network shapes and the enrollment is a single command.
+If you are not sure, start with **Pilot Agent**. It is the default because it works in more network shapes and the enrollment is a single Compose file.
 
-For a deep look at how the pilot tunnel works under the hood (credential lifecycle, security model, resource limits, environment variables, and pilot-specific troubleshooting), see [Pilot Agent](/features/pilot-agent).
+For a deep look at how the pilot tunnel works under the hood (credential lifecycle, security model, resource limits, environment variables, and pilot-specific troubleshooting), see [Pilot Agent](/features/pilot-agent). Cross-node container networking (reaching a meshed service on any node by hostname) rides the same authenticated channel and works in either mode; see [Sencho Mesh](/features/sencho-mesh).
 
 ## Add a remote node: Pilot Agent
 
@@ -63,17 +63,17 @@ On the control instance, click your avatar in the top-right and choose **Setting
 
 Click **Add node**.
 
-### Step 2. Run the enrollment command on the remote host
+### Step 2. Deploy the agent on the remote host
 
-A modal opens with a single `docker run` command. Copy it and run it on the remote host as the user that owns Docker.
+A modal opens with a generated Compose file and a start command.
 
 <Frame>
-  <img src="/images/multi-node/pilot-enroll.png" alt="Enroll the pilot agent modal showing a docker run command with SENCHO_MODE=pilot, SENCHO_PRIMARY_URL pointing to the control instance, and a SENCHO_ENROLL_TOKEN. The footer reads Expires 15m from now and offers a Copy command button." />
+  <img src="/images/multi-node/pilot-enroll.png" alt="Enroll the pilot agent modal with two steps. Step 1 shows a generated compose.yaml with SENCHO_MODE=pilot, SENCHO_PRIMARY_URL pointing to the control instance, and a SENCHO_ENROLL_TOKEN. Step 2 shows the docker compose up -d start command with a copy button. The footer reads Expires 14m from now and offers a Copy compose file button." />
 </Frame>
 
-The command is one line. It pulls the `saelix/sencho:latest` image, mounts the host Docker socket, and starts a container named `sencho-agent` that opens an outbound tunnel back to the control plane.
+Save Step 1's contents as `compose.yaml` on the remote host, then run Step 2's command (`docker compose up -d`) in the same directory as the user that owns Docker. The generated file pulls the `saelix/sencho:latest` image, mounts the host Docker socket, attaches a named volume for the agent's own state so re-enrollment survives a container restart, and starts a container named `sencho-agent` that opens an outbound tunnel back to the control plane.
 
-The enrollment token in the command is **valid for 15 minutes and can only be used once**. If you wait too long, follow the regeneration steps below.
+The enrollment token embedded in the file is **valid for 15 minutes and can only be used once**. If you wait too long, follow the regeneration steps below.
 
 ### Step 3. Verify the tunnel
 
@@ -87,7 +87,7 @@ If the enrollment token expires, the container is removed, or the host is rebuil
   <img src="/images/multi-node/edit-pilot-regenerate.png" alt="Edit node modal for a Pilot Agent node. Below the Compose Directory field a bordered card explains: 'Re-enroll the agent if the container was lost or the enrollment token expired. The previous tunnel is disconnected automatically.' A Regenerate enrollment token button sits below the explanation." />
 </Frame>
 
-Click the button to mint a fresh enrollment command. The previous tunnel is disconnected automatically; run the new command on the remote host to reconnect.
+Click the button to mint a fresh enrollment Compose file. The previous tunnel is disconnected automatically; save and deploy the new file on the remote host the same way (`compose.yaml`, then `docker compose up -d`) to reconnect.
 
 ## Add a remote node: Distributed API Proxy
 
@@ -137,7 +137,7 @@ The **node switcher** sits at the top of the sidebar and acts as a persistent id
 When two or more nodes are registered, clicking the switcher opens a popover listing every connected node. Each row shows a status dot, the name, and a metadata line that joins the type chip, the last-seen timestamp (pilot agents only), and the node version with middle-dot separators (for example, `AGENT · SEEN 13H AGO · v0.76.3`). The active node is marked with a brand-coloured rail, and a filled star calls out the default node.
 
 <Frame>
-  <img src="/images/multi-node/node-switcher-dropdown.png" alt="Node switcher popover with a Connected header above an 8 NODES count. The Local row shows LOCAL · v0.76.3 with a star icon. Three Remote rows show the REMOTE chip. The sencho-pilot-test row shows AGENT · SEEN 13H AGO. A Manage nodes link sits at the bottom." />
+  <img src="/images/multi-node/node-switcher-dropdown.png" alt="Node switcher popover with a Connected header above a 4 NODES count. The Local row shows LOCAL · v0.95.0 with a star icon. Three Remote rows show the REMOTE chip. A Manage nodes link sits at the bottom." />
 </Frame>
 
 Click any row to switch. All views (dashboard, stack list, editor, resources, logs) immediately reflect the selected node. The **Manage nodes** link at the bottom of the popover opens the Settings → Nodes panel to add, edit, or remove nodes.
@@ -161,7 +161,7 @@ Node-level views (Home, Resources, App Store, Console, the editor) work as expec
 The Nodes table surfaces routing, status, and per-node automation at a glance for every node:
 
 <Frame>
-  <img src="/images/multi-node/nodes-table-overview.png" alt="Nodes table close-up showing the ten columns: a default-marker column with a star on the Local row, Name, Type, Mode, Endpoint, Status, Labels, Schedules, Updates, and Actions. The pilot-test row has Mode 'Pilot Agent' and Endpoint 'tunnel (seen 13h ago)'. Other remotes show Mode 'Proxy' and full URLs in the Endpoint column." />
+  <img src="/images/multi-node/nodes-table-overview.png" alt="Nodes table close-up showing the ten columns: a default-marker column with a star on the Local row, Name, Type, Mode, Endpoint, Status, Labels, Schedules, Updates, and Actions. The Local row shows Endpoint 'docker.sock' and an Auto updates badge. Three Proxy-mode remote rows show full URLs in the Endpoint column." />
 </Frame>
 
 | Column | What it shows |
@@ -187,17 +187,22 @@ When you select a remote node in the switcher, the Settings hub filters to the p
 
 | Panel | Scope | Notes |
 |-------|:-----:|-------|
-| Appearance | Per browser | Theme and density preferences are stored in your browser, not on the node. |
-| Host Alerts | Per node | Host CPU, RAM, and disk thresholds for the selected node. |
-| Channels | Per node | Discord, Slack, and Webhook channels fire from the node that detects the event. |
-| Labels | Per node | Stack and container label palettes. |
-| Vulnerability Scanning | Per node | Trivy install state and scanner readiness for the selected node. |
-| Developer | Per node | Retention windows for metrics and logs, plus Developer Mode. |
+| Appearance | Per browser | Theme, density, and navigation preferences are stored in your browser, not on the node. |
+| Stacks | Per node | Stack editor, lifecycle workflow preferences, and deploy guardrails for the selected node. |
+| Fleet (Settings panel) | Per node | Fleet-snapshot documentation capture for Dossier notes on the selected node. Administrator only. Distinct from the hub-only **Fleet** nav view described below. |
 | App Store | Per node | Template registry URL and featured-catalog source for the selected node's catalog. |
-| Support | Per browser | Diagnostics bundle, docs links, contact channels. |
-| About | Per browser | Build metadata for whichever instance the page is loaded from. |
+| Host Alerts | Per node | Host CPU, RAM, and disk alert thresholds for the selected node. |
+| Container Alerts | Per node | Crash, OOM, and healthcheck alert behavior for containers on the selected node. |
+| Docker & Storage | Per node | Reclaimable-space alerts and image cleanup after updates on the selected node. |
+| Channels | Per node | Discord, Slack, and webhook destinations that fire from whichever node detects the event. |
+| Image update checks | Per node | How often the selected node polls registries for available image updates. |
+| Labels | Per node | Stack and container label palettes for the selected node. |
+| Data Retention | Per node | How long the selected node keeps container metrics, notification logs, scan history, and audit entries. |
+| Developer Diagnostics | Per node | Developer mode for real-time metrics streams and verbose debug diagnostics on the selected node. |
+| Support | Same everywhere | Diagnostics bundle, docs links, and contact channels; identical regardless of the active node. |
+| About | Same everywhere | Build metadata, release notes, and licence attributions; identical regardless of the active node. |
 
-Panels that manage control-plane concerns (Account, License, Users, SSO, API Tokens, Registries, Cloud Backup, Nodes, Routing, Webhooks) are hidden when a remote node is active.
+Panels that manage control-plane concerns (Account, Admiral Account, Users, SSO, API Tokens, Nodes, Registries, Recovery Vault, Routing, Mute Rules, Webhooks, Recovery) are hub-only and are hidden when a remote node is active.
 
 ## License enforcement across nodes
 
@@ -316,7 +321,7 @@ Sencho takes the opposite approach: infrastructure-level encryption (VPN, revers
     Click **Test connection** on the row to re-probe and read the toast. The most common causes are: a wrong URL (missing scheme, missing port, trailing slash typo), a token that was rotated on the remote (any new **Generate Token** invalidates the previous one, so re-issue and update the saved row), and a firewall or reverse proxy that is not forwarding to port 1852 on the remote. Distributed API Proxy mode requires the control instance to reach the remote on the URL you saved; Pilot Agent mode requires the remote to reach the control instance on outbound HTTPS.
   </Accordion>
   <Accordion title="A pilot agent stays on `tunnel (waiting)`">
-    The agent has not dialled home yet. Three things can cause this. First, the enrollment token expired (15 minutes from generation): open **Edit node**, click **Regenerate enrollment token**, copy the new command, and run it on the remote host. Second, the `sencho-agent` container exited or never started; `docker ps -a` on the remote will show the exit code. Third, outbound HTTPS to the control instance is blocked, so check the remote's egress firewall or proxy.
+    The agent has not dialled home yet. Three things can cause this. First, the enrollment token expired (15 minutes from generation): open **Edit node**, click **Regenerate enrollment token**, save the new `compose.yaml`, and run `docker compose up -d` again on the remote host. Second, the `sencho-agent` container exited or never started; `docker ps -a` on the remote will show the exit code. Third, outbound HTTPS to the control instance is blocked, so check the remote's egress firewall or proxy.
   </Accordion>
   <Accordion title="Test Connection fails with 401 Unauthorized">
     The bearer token saved for the row no longer matches what the remote will accept. This usually means somebody clicked **Generate Token** on the remote (which invalidates the previous token) or the row was saved with a typo. Generate a fresh token on the remote, click the pencil icon on the row in the control instance, paste the new token into the API Token field, and save.
@@ -325,6 +330,6 @@ Sencho takes the opposite approach: infrastructure-level encryption (VPN, revers
     The control instance's license tier is authoritative for proxied requests, so a Community control plane gates Admiral features on every remote, even if the remote itself has its own Admiral license. Activate an Admiral license on the control instance to lift the gate fleet-wide. The reverse case (Admiral control plane, Community remote) works automatically because the control plane's tier is what the remote trusts.
   </Accordion>
   <Accordion title="Settings panels disappear when I switch to a remote">
-    That is intentional. Account, License, Users, SSO, API Tokens, Registries, Cloud Backup, Nodes, Routing, and Webhooks are control-plane concerns and are hidden while a remote node is selected. Switch back to **Local** from the node switcher to manage them. The full list of which panels are per-node, per-browser, and control-plane-only lives in the [What Settings apply per node](#what-settings-apply-per-node) table above.
+    That is intentional. Account, Admiral Account, Users, SSO, API Tokens, Nodes, Registries, Recovery Vault, Routing, Mute Rules, Webhooks, and Recovery are control-plane concerns and are hidden while a remote node is selected. Switch back to **Local** from the node switcher to manage them. The full list of which panels are per-node, per-browser, and control-plane-only lives in the [What Settings apply per node](#what-settings-apply-per-node) table above.
   </Accordion>
 </AccordionGroup>
