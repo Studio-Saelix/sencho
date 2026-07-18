@@ -176,7 +176,8 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
      * open the rollout preview so the operator confirms the full plan.
      * The nodeId argument satisfies BlueprintDeploymentTable.onRetry's signature.
      */
-    async function handleRetryRow(_nodeId: number): Promise<void> {
+    async function handleRetryRow(nodeId: number): Promise<void> {
+        void nodeId;
         setPreviewOpen(true);
     }
 
