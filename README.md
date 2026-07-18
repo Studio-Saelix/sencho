@@ -17,8 +17,12 @@
   [![Latest release](https://img.shields.io/github/v/release/studio-saelix/sencho?label=release)](https://github.com/studio-saelix/sencho/releases)
   [![Docker Pulls](https://img.shields.io/docker/pulls/saelix/sencho)](https://hub.docker.com/r/saelix/sencho)
   [![CI](https://github.com/studio-saelix/sencho/actions/workflows/ci.yml/badge.svg)](https://github.com/studio-saelix/sencho/actions/workflows/ci.yml)
+  [![CodeQL](https://github.com/studio-saelix/sencho/actions/workflows/codeql.yml/badge.svg)](https://github.com/studio-saelix/sencho/actions/workflows/codeql.yml)
   [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
-  [![Discussions](https://img.shields.io/github/discussions/studio-saelix/sencho)](https://github.com/studio-saelix/sencho/discussions)
+  [![Last commit](https://img.shields.io/github/last-commit/studio-saelix/sencho)](https://github.com/studio-saelix/sencho/commits/main)
+  [![Open issues](https://img.shields.io/github/issues/studio-saelix/sencho)](https://github.com/studio-saelix/sencho/issues)
+  [![Website](https://img.shields.io/website?url=https%3A%2F%2Fsencho.io&label=website)](https://sencho.io)
+  [![Docs](https://img.shields.io/website?url=https%3A%2F%2Fdocs.sencho.io&label=docs)](https://docs.sencho.io)
 </div>
 
 <br />
@@ -35,11 +39,11 @@
 
 ## What Sencho is
 
-Sencho is for homelab operators, small DevOps teams, and platform engineers who run services on Docker Compose, want a graphical interface without giving up file-on-disk workflows, and need to manage more than one machine without SSH gymnastics or a VPN.
+Sencho is a Docker Compose control plane for DevOps engineers, platform teams, and system administrators who run services on Compose and need a real operational surface: a graphical interface that does not give up file-on-disk workflows, and the ability to manage more than one machine without SSH gymnastics or a VPN.
 
-It runs as a single container on your hardware and gives you a UI for the work you currently do over SSH on compose stacks: deploying, editing files, watching logs, restarting containers, browsing volumes, and recovering from failures. Your compose files stay on the host filesystem and remain the source of truth.
+It runs as a single container on your hardware and provides a UI for common Compose operations: deploying, editing files, watching logs, restarting containers, browsing volumes, and recovering from failures. Your compose files stay on the host filesystem and remain the source of truth.
 
-A Sencho instance is autonomous. To manage another machine, you install a second Sencho on it and connect them with a long-lived API token; the primary dashboard then acts as an authenticated HTTP and WebSocket proxy across your fleet. Use TLS, a VPN, or a private network for any untrusted link. Each node still uses its local Docker socket (see Quick start), but Sencho does not require SSH and does not expose a remote Docker socket on the network. For nodes behind NAT or strict firewalls, the Pilot Agent establishes a single outbound WebSocket tunnel to the primary, so the remote host opens no inbound port at all.
+Multi-node was part of the architecture from the start, not bolted on later: every Sencho instance is the same autonomous node, whether it runs alone or as one of many in a fleet. To manage another machine, you install a second Sencho on it and connect them with a long-lived API token; the primary dashboard then acts as an authenticated HTTP and WebSocket proxy across your fleet. Use TLS, a VPN, or a private network for any untrusted link. Each node still uses its local Docker socket (see Quick start), but Sencho does not require SSH and does not expose a remote Docker socket on the network. For nodes behind NAT or strict firewalls, the Pilot Agent establishes a single outbound WebSocket tunnel to the primary, so the remote host opens no inbound port at all.
 
 Sencho is free, open-source software under AGPLv3. Everything below is included in the Community tier with unlimited nodes and users.
 
@@ -197,6 +201,7 @@ Sencho does not emit telemetry, analytics, or crash reports, and makes no outbou
 ## Documentation, community, and license
 
 - **Documentation:** [docs.sencho.io](https://docs.sencho.io)
+- **Blog:** [sencho.io/blog](https://sencho.io/blog)
 - **Known limitations:** [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)
 - **If something breaks:** the [Recovery guide](https://docs.sencho.io/operations/recovery) covers getting back to a working state when Sencho, a deploy, sign-in, Docker, or a node fails.
 - **Community:** [GitHub Discussions](https://github.com/studio-saelix/sencho/discussions)
