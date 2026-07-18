@@ -12,6 +12,12 @@ vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
+vi.mock('@/context/DeployFeedbackContext', () => ({
+  useDeployFeedback: () => ({
+    runWithLog: async (_params: unknown, fn: (started: Promise<void>, ds: string) => Promise<unknown>) =>
+      fn(Promise.resolve(), 'test-session'),
+  }),
+}));
 // nodeMeta/refreshNodeMeta must be stable across renders (matching the real
 // NodeContext), or a fresh Map/fn on every useNodes() call churns the
 // loadReadiness useCallback identity and re-triggers its effect forever.
