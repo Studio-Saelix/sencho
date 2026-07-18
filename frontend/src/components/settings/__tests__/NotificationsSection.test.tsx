@@ -93,6 +93,8 @@ describe('NotificationsSection', () => {
         await waitFor(() => expect(screen.getByLabelText(/Apprise endpoint/i)).toHaveValue(
             'http://apprise.local/notify/<redacted>',
         ));
+        // Public DTO masks the notify key; Tags must stay editable without re-entering the raw key.
+        expect(screen.getByLabelText(/^Tags$/i)).toBeInTheDocument();
 
         await userEvent.click(screen.getByRole('button', { name: 'Save' }));
 

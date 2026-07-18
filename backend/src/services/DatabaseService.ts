@@ -2329,16 +2329,30 @@ export class DatabaseService {
         };
     }
 
+    /**
+     * Decrypt Apprise fields for one row. Corrupt ciphertext or a key mismatch
+     * must not throw out of list/dispatch paths: one bad Apprise row would
+     * otherwise 500 GET /agents and silently drop every notification channel.
+     * Empty url/config forces the operator to re-enter credentials to repair.
+     */
     private loadAppriseFields(
         isApprise: boolean,
         url: string,
         config: string | null | undefined,
     ): { url: string; config: string | null } {
         if (!isApprise) return { url, config: config ?? null };
-        return {
-            url: this.openAppriseSecret(url) ?? '',
-            config: this.openAppriseSecret(config ?? null),
-        };
+        try {
+            return {
+                url: this.openAppriseSecret(url) ?? '',
+                config: this.openAppriseSecret(config ?? null),
+            };
+        } catch (e) {
+            console.error(
+                '[DatabaseService] Failed to decrypt Apprise credentials; isolating row:',
+                (e as Error).message,
+            );
+            return { url: '', config: null };
+        }
     }
 
     private mapAgentRow(row: any): Agent {

@@ -125,4 +125,83 @@ describe('Apprise secrets at rest (downgrade-safe)', () => {
     expect(pub.secrets_redacted).toBe(false);
     expect(pub.url).toBe(url);
   });
+
+  it('isolates corrupt Apprise ciphertext so sibling channels still load and Apprise can be repaired', () => {
+    const db = DatabaseService.getInstance();
+    const discordUrl = 'https://discord.com/api/webhooks/123/plaintext-token';
+    db.upsertAgent(1, { type: 'discord', url: discordUrl, enabled: true });
+    db.upsertAgent(1, {
+      type: 'apprise',
+      url: 'http://apprise.local/notify/good-key',
+      enabled: true,
+      config: '{}',
+    });
+
+    // Simulate backup-restore / key-rotation damage: enc: prefix with invalid payload.
+    db.getDb().prepare('UPDATE agents SET url = ?, config = ? WHERE type = ?').run(
+      'enc:000000000000000000000000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbb',
+      'enc:000000000000000000000000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbb',
+      'apprise',
+    );
+
+    const agents = db.getAgents(1);
+    expect(agents.find(a => a.type === 'discord')!.url).toBe(discordUrl);
+    const broken = agents.find(a => a.type === 'apprise')!;
+    expect(broken.url).toBe('');
+    expect(broken.config).toBeNull();
+
+    const enabled = db.getEnabledAgents(1);
+    expect(enabled.some(a => a.type === 'discord')).toBe(true);
+
+    db.upsertAgent(1, {
+      type: 'apprise',
+      url: 'http://apprise.local/notify/repaired-key',
+      enabled: true,
+      config: '{}',
+    });
+    expect(db.getAgents(1).find(a => a.type === 'apprise')!.url).toBe(
+      'http://apprise.local/notify/repaired-key',
+    );
+  });
+
+  it('isolates corrupt Apprise route ciphertext from the routes list', () => {
+    const db = DatabaseService.getInstance();
+    const now = Date.now();
+    db.createNotificationRoute({
+      name: 'discord-ok',
+      node_id: null,
+      stack_patterns: [],
+      label_ids: null,
+      categories: null,
+      channel_type: 'discord',
+      channel_url: 'https://discord.com/api/webhooks/1/token',
+      config: null,
+      priority: 0,
+      enabled: true,
+      created_at: now,
+      updated_at: now,
+    });
+    const apprise = db.createNotificationRoute({
+      name: 'apprise-broken',
+      node_id: null,
+      stack_patterns: [],
+      label_ids: null,
+      categories: null,
+      channel_type: 'apprise',
+      channel_url: 'http://apprise.local/notify/route-key',
+      config: '{}',
+      priority: 1,
+      enabled: true,
+      created_at: now,
+      updated_at: now,
+    });
+    db.getDb().prepare('UPDATE notification_routes SET channel_url = ? WHERE id = ?').run(
+      'enc:000000000000000000000000:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:bbbb',
+      apprise.id,
+    );
+
+    const routes = db.getNotificationRoutes();
+    expect(routes.find(r => r.name === 'discord-ok')!.channel_url).toContain('discord.com');
+    expect(routes.find(r => r.name === 'apprise-broken')!.channel_url).toBe('');
+  });
 });
