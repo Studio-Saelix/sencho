@@ -109,7 +109,7 @@ When you submit the Add Node form with Mode set to Pilot Agent, the control inst
 3. Shows the compose file in an enrollment dialog with a 15-minute countdown.
 
 <Frame>
-  <img src="/images/pilot-agent/02-enrollment-dialog.png" alt="Enroll the pilot agent modal with kicker 'NODES · PILOT ENROLLMENT'. Step 1 saves a Docker Compose file as 'compose.yaml' with the env block showing SENCHO_MODE: pilot, SENCHO_PRIMARY_URL: https://sencho.example.com, and SENCHO_ENROLL_TOKEN: <short-lived token>. Step 2 shows the 'docker compose -f compose.yaml up -d' command. Footer reads 'Expires 14m from now' alongside a 'Copy compose file' button." />
+  <img src="/images/pilot-agent/02-enrollment-dialog.png" alt="Enroll the pilot agent modal with kicker 'NODES · PILOT ENROLLMENT'. Step 1 saves a Docker Compose file as 'compose.yaml' with the env block showing SENCHO_MODE: pilot, SENCHO_PRIMARY_URL: https://sencho.example.com, and SENCHO_ENROLL_TOKEN: <short-lived token>. Step 2 shows the 'docker compose up -d' command. Footer reads 'Expires 14m from now' alongside a 'Copy compose file' button." />
 </Frame>
 
 The enrollment token is one-time and short-lived by design. If a token is intercepted or leaked, the window of risk is small and the slot is consumed on first use.
@@ -142,7 +142,7 @@ volumes:
 Save it as `compose.yaml` on the remote host and bring the agent up from the same directory:
 
 ```bash
-docker compose -f compose.yaml up -d
+docker compose up -d
 ```
 
 Deploying through Compose also lets the control instance push over-the-air updates to the agent later from the Fleet view ([Remote Updates](/features/remote-updates)), without manual intervention on the remote host. Compose-managed containers carry the labels Sencho needs to recreate them in place.
@@ -167,7 +167,7 @@ The control instance pings every connected agent every 30 seconds. Any stream wi
 
 - **Control instance restarts**: every agent's tunnel drops cleanly. Each agent reconnects within seconds. In-flight HTTP requests fail and the browser retries; long-lived WebSockets (logs, console) reconnect.
 - **Agent restarts**: the persisted token re-authenticates without operator intervention. Same reconnect-and-recover behavior.
-- **Operator deletes the node on the control instance**: the agent's existing tunnel is closed. The agent will keep trying to reconnect with its persisted token, which the control instance no longer accepts; the agent stays in a reconnect-backoff loop. To stop it, tear the agent down on the remote with `docker compose -f compose.yaml down -v`.
+- **Operator deletes the node on the control instance**: the agent's existing tunnel is closed. The agent will keep trying to reconnect with its persisted token, which the control instance no longer accepts; the agent stays in a reconnect-backoff loop. To stop it, tear the agent down on the remote with `docker compose down -v`.
 
 ### Re-enrollment
 
@@ -251,7 +251,7 @@ Each pilot tunnel has fixed protocol-level ceilings so one misbehaving agent can
 | **Tunnel write buffer pause** | 4 MB | High-water mark for the agent-bound write queue | When the control instance's queue is over the mark, inbound HTTP request bodies are paused and resumed on drain. Backpressure rather than memory growth. |
 | **Enrollment rate** | 10 per minute | Operator-issued enrollment tokens | Protects the database against a script accidentally minting tokens in a loop. |
 
-An admin-only diagnostic endpoint, `GET /api/system/pilot-tunnels`, returns counters and a per-node breakdown of active tunnels (open stream count and `bufferedAmount` for each). Useful for triaging a single sticky tunnel inside an otherwise healthy fleet.
+An admin-only diagnostic endpoint, `GET /api/system/pilot-tunnels`, returns counters and a per-node breakdown of active tunnels (connect time and `bufferedAmount` for each). Useful for triaging a single sticky tunnel inside an otherwise healthy fleet.
 
 ## Environment variables
 
@@ -280,7 +280,7 @@ These are the boundaries operators should know about before designing a fleet ar
 
 - **No mode conversion.** The Edit dialog shows a Mode field for an enrolled node, but switching a node between Pilot Agent and Distributed API Proxy after enrollment leaves the credentials and connection state inconsistent. To change modes, delete the node and re-create it in the desired mode.
 - **No audit log entries for enrollment lifecycle.** Node creation, enrollment regeneration, and node deletion do not write to the audit log today. This is on the roadmap.
-- **`pilot.jwt` is not cleaned up on node deletion.** When you delete a node from the control instance, the agent's persisted token stays on the remote's data volume. The agent will fail to reconnect on next restart, but the file persists. If you are repurposing the host, tear the agent down with `docker compose -f compose.yaml down -v` to remove the `sencho-agent-data` volume.
+- **`pilot.jwt` is not cleaned up on node deletion.** When you delete a node from the control instance, the agent's persisted token stays on the remote's data volume. The agent will fail to reconnect on next restart, but the file persists. If you are repurposing the host, tear the agent down with `docker compose down -v` to remove the `sencho-agent-data` volume.
 - **JWT-secret rotation invalidates existing tunnel JWTs.** Rebuilding the control instance from scratch or rotating `auth_jwt_secret` requires a fresh enrollment token on each agent. When that token is still in the container environment, the agent re-enrolls automatically without manual deletion of `pilot.jwt`.
 - **One tunnel per node.** Splitting a node's load across multiple control instances or running multiple agent containers against the same control instance for the same node is not supported.
 - **Mesh and pilot share the per-tunnel stream pool.** A node that runs heavy Sencho Mesh traffic counts those streams against the same 1024-stream cap as HTTP and WebSocket traffic.
@@ -312,7 +312,7 @@ The generic node-connectivity issues (a node showing Offline, a pilot agent stuc
   </Accordion>
 
   <Accordion title="I ran the enrollment command on the wrong host">
-    Tear the agent down on the wrong host (`docker compose -f compose.yaml down -v` from the directory you saved the compose file in), then regenerate the enrollment token on the control instance and deploy the new compose file on the correct host.
+    Tear the agent down on the wrong host (`docker compose down -v` from the directory you saved the compose file in), then regenerate the enrollment token on the control instance and deploy the new compose file on the correct host.
   </Accordion>
 
   <Accordion title="HTTP 429 'Too many enrollment requests'">
@@ -324,7 +324,7 @@ The generic node-connectivity issues (a node showing Offline, a pilot agent stuc
   </Accordion>
 
   <Accordion title="I deleted the node on the control instance but the agent keeps trying to reconnect">
-    Deleting the node removes the routing entry on the control instance but does not touch the remote. The agent still holds `/app/data/pilot.jwt` and will keep dialing. Tear the agent down on the remote (`docker compose -f compose.yaml down -v` from the directory holding the compose file) so the `sencho-agent-data` named volume that stores the persisted token is removed.
+    Deleting the node removes the routing entry on the control instance but does not touch the remote. The agent still holds `/app/data/pilot.jwt` and will keep dialing. Tear the agent down on the remote (`docker compose down -v` from the directory holding the compose file) so the `sencho-agent-data` named volume that stores the persisted token is removed.
   </Accordion>
 
   <Accordion title="Stacks tab on a pilot node shows nothing or fails to list">
