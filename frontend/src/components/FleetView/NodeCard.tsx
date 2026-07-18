@@ -22,7 +22,6 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatVersion } from '@/lib/version';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { useNodes, type Node } from '@/context/NodeContext';
 import { cordonNode, uncordonNode } from '@/lib/nodesApi';
 import { UpdateStatusBadge } from './UpdateStatusBadge';
@@ -77,15 +76,13 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
     const [cordonSubmitting, setCordonSubmitting] = useState(false);
 
     const { isAdmin, can } = useAuth();
-    const { isPaid } = useLicense();
     const { nodes: registryNodes } = useNodes();
     const registryNode = registryNodes.find(n => n.id === node.id);
     const isLastLocal = registryNode?.type === 'local' && registryNodes.filter(n => n.type === 'local').length <= 1;
     const canEdit = Boolean(isAdmin && onEdit && registryNode);
     const canDelete = Boolean(isAdmin && onDelete && registryNode && !registryNode.is_default && !isLastLocal);
-    // Cordon requires the paid tier AND node:manage, matching the backend guard
-    // (requirePermission('node:manage','node',id) + requirePaid).
-    const canCordon = isPaid && can('node:manage', 'node', String(node.id));
+    // Cordon is permission-gated only (node:manage), matching the backend route guard.
+    const canCordon = can('node:manage', 'node', String(node.id));
     const nodeMuteActions = useNodeMuteActions(
         node.id,
         node.name,
