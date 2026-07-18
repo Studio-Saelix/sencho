@@ -408,9 +408,10 @@ Create routing rules that direct specific alert types to specific notification c
 |-------|-------------|
 | **Name** | Operator-facing label for the rule. |
 | **Node** | Specific node, or all nodes if left empty. |
-| **Stack patterns** | Glob patterns to match stack names (multi-select). |
+| **Stack patterns** | Glob patterns with `*` (for example `prod-*`) matching stack names. |
 | **Labels** | Apply this rule to stacks that carry any of the selected labels. |
 | **Categories** | Event categories that trigger the rule (crash, deploy, vulnerability, etc.). |
+| **Severity** | Info, warning, and/or error levels. Empty matches any severity. |
 | **Channel type** | `discord`, `slack`, `webhook`, or `apprise`. |
 | **Channel URL** | The destination endpoint for this rule. |
 | **Priority** | Sort order among matching rules. Every matching route fires; priority does not stop later matches. |
@@ -436,7 +437,7 @@ Create notification suppression rules that mute or drop matching alerts from the
 |-------|-------------|
 | **Name** | Operator-facing label for the rule. |
 | **Node** | Specific node, or all nodes if left empty. |
-| **Stack patterns** | Stack names to match (multi-select). |
+| **Stack patterns** | Glob patterns with `*` matching stack names (for example `prod-*`). |
 | **Labels** | Match stacks that carry any selected label. |
 | **Categories** | Notification categories to suppress. |
 | **Severity** | Info, warning, and/or error levels to suppress. |

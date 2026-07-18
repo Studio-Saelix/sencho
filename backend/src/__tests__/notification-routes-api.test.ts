@@ -824,3 +824,85 @@ describe('GET /api/notifications - history', () => {
     expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to clear notifications:', expect.any(Error));
   });
 });
+
+describe('notification routes - glob patterns and levels', () => {
+  it('POST omits stack_patterns and levels to defaults', async () => {
+    const res = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'defaults',
+        channel_type: 'discord',
+        channel_url: 'https://discord.com/api/webhooks/1/abc',
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.stack_patterns).toEqual([]);
+    expect(res.body.levels).toBeNull();
+    DatabaseService.getInstance().deleteNotificationRoute(res.body.id);
+  });
+
+  it('POST rejects null stack_patterns and ReDoS patterns', async () => {
+    const nullRes = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'bad-null',
+        stack_patterns: null,
+        channel_type: 'discord',
+        channel_url: 'https://discord.com/api/webhooks/1/abc',
+      });
+    expect(nullRes.status).toBe(400);
+
+    const redos = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'bad-redos',
+        stack_patterns: ['****'],
+        channel_type: 'discord',
+        channel_url: 'https://discord.com/api/webhooks/1/abc',
+      });
+    expect(redos.status).toBe(400);
+  });
+
+  it('POST/GET/PUT levels round-trip; invalid levels 400', async () => {
+    const created = await request(app)
+      .post('/api/notification-routes')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'level-route',
+        stack_patterns: ['prod-*'],
+        levels: ['error'],
+        channel_type: 'discord',
+        channel_url: 'https://discord.com/api/webhooks/1/abc',
+      });
+    expect(created.status).toBe(201);
+    expect(created.body.levels).toEqual(['error']);
+    expect(created.body.stack_patterns).toEqual(['prod-*']);
+    const id = created.body.id as number;
+
+    const bad = await request(app)
+      .put(`/api/notification-routes/${id}`)
+      .set('Cookie', authCookie)
+      .send({ levels: ['critical'] });
+    expect(bad.status).toBe(400);
+
+    const partial = await request(app)
+      .put(`/api/notification-routes/${id}`)
+      .set('Cookie', authCookie)
+      .send({ name: 'level-route-renamed' });
+    expect(partial.status).toBe(200);
+    expect(partial.body.levels).toEqual(['error']);
+    expect(partial.body.stack_patterns).toEqual(['prod-*']);
+
+    const cleared = await request(app)
+      .put(`/api/notification-routes/${id}`)
+      .set('Cookie', authCookie)
+      .send({ levels: null, stack_patterns: [] });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.levels).toBeNull();
+    expect(cleared.body.stack_patterns).toEqual([]);
+
+    DatabaseService.getInstance().deleteNotificationRoute(id);
+  });
+});

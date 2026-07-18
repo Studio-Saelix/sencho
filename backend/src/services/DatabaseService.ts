@@ -9,6 +9,7 @@ import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
 import { HIGH_EPSS_THRESHOLD } from './securityPosture';
 import type { BackendScheduledAction } from './scheduledActionRegistry';
+import { stackPatternMatches } from '../helpers/stackPattern';
 
 function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
@@ -614,6 +615,7 @@ export interface NotificationRoute {
     stack_patterns: string[];
     label_ids: number[] | null;
     categories: string[] | null;
+    levels: ('info' | 'warning' | 'error')[] | null;
     channel_type: 'discord' | 'slack' | 'webhook' | 'apprise';
     channel_url: string;
     config?: string | null;
@@ -912,6 +914,7 @@ export class DatabaseService {
         this.migrateNotificationRoutesNodeId();
         this.migrateNotificationRoutesMatchers();
         this.migrateNotificationChannelConfig();
+        this.migrateNotificationRouteLevels();
         this.migrateNotificationSuppressionRules();
         this.migrateNotificationHistoryContext();
         this.migrateScanPolicyFleetColumns();
@@ -1915,6 +1918,10 @@ export class DatabaseService {
         this.tryAddColumn('notification_routes', 'config', 'TEXT NULL');
     }
 
+    private migrateNotificationRouteLevels(): void {
+        this.tryAddColumn('notification_routes', 'levels', 'TEXT NULL');
+    }
+
     private migrateNotificationSuppressionRules(): void {
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS notification_suppression_rules (
@@ -2405,6 +2412,7 @@ export class DatabaseService {
             stack_patterns: JSON.parse(row.stack_patterns as string) as string[],
             label_ids: row.label_ids ? JSON.parse(row.label_ids as string) as number[] : null,
             categories: row.categories ? JSON.parse(row.categories as string) as string[] : null,
+            levels: row.levels ? JSON.parse(row.levels as string) as ('info' | 'warning' | 'error')[] : null,
             channel_type,
             channel_url: fields.url,
             config: fields.config,
@@ -2442,13 +2450,14 @@ export class DatabaseService {
     public createNotificationRoute(route: Omit<NotificationRoute, 'id'>): NotificationRoute {
         const stored = this.storeAppriseFields(route.channel_type === 'apprise', route.channel_url, route.config);
         const result = this.db.prepare(
-            'INSERT INTO notification_routes (name, node_id, stack_patterns, label_ids, categories, channel_type, channel_url, config, priority, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO notification_routes (name, node_id, stack_patterns, label_ids, categories, levels, channel_type, channel_url, config, priority, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         ).run(
             route.name,
             route.node_id ?? null,
             JSON.stringify(route.stack_patterns),
             route.label_ids ? JSON.stringify(route.label_ids) : null,
             route.categories ? JSON.stringify(route.categories) : null,
+            route.levels && route.levels.length > 0 ? JSON.stringify(route.levels) : null,
             route.channel_type,
             stored.url,
             stored.config,
@@ -2472,6 +2481,10 @@ export class DatabaseService {
         if (updates.stack_patterns !== undefined) { fields.push('stack_patterns = ?'); values.push(JSON.stringify(updates.stack_patterns)); }
         if ('label_ids' in updates) { fields.push('label_ids = ?'); values.push(updates.label_ids ? JSON.stringify(updates.label_ids) : null); }
         if ('categories' in updates) { fields.push('categories = ?'); values.push(updates.categories ? JSON.stringify(updates.categories) : null); }
+        if ('levels' in updates) {
+            fields.push('levels = ?');
+            values.push(updates.levels && updates.levels.length > 0 ? JSON.stringify(updates.levels) : null);
+        }
         if (updates.channel_type !== undefined) { fields.push('channel_type = ?'); values.push(updates.channel_type); }
         if (updates.channel_url !== undefined) {
             fields.push('channel_url = ?');
@@ -6073,10 +6086,7 @@ export class DatabaseService {
         const matchesStack = (pattern: string | null): boolean => {
             if (!pattern) return true;
             if (!stackName) return false;
-            const regex = new RegExp(
-                '^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$',
-            );
-            return regex.test(stackName);
+            return stackPatternMatches(stackName, pattern);
         };
         const matchesIdentity = (p: ScanPolicy): boolean => {
             // Locally created policies (never replicated) apply based on node_id logic already filtered.

@@ -84,6 +84,7 @@ function makeRoute() {
     stack_patterns: ['my-app'],
     label_ids: null,
     categories: null,
+    levels: null,
     channel_type: 'discord' as const,
     channel_url: 'https://discord.com/api/webhooks/123/abc',
     priority: 0,

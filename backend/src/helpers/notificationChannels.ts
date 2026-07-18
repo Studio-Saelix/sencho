@@ -1,5 +1,7 @@
 import type { Agent, NotificationRoute } from '../services/DatabaseService';
 
+export { cleanStackPatterns } from './stackPattern';
+
 export const NOTIFICATION_CHANNEL_TYPES = ['discord', 'slack', 'webhook', 'apprise'] as const;
 export type NotificationChannelType = typeof NOTIFICATION_CHANNEL_TYPES[number];
 
@@ -48,9 +50,6 @@ function notifyKeyFromPath(path: string): string | null {
   const match = path.match(/^\/notify\/([^/]+)$/);
   return match ? match[1] : null;
 }
-
-export const cleanStackPatterns = (patterns: string[]): string[] =>
-  [...new Set(patterns.map(p => p.trim()).filter(Boolean))];
 
 export function validateHttpsUrl(value: unknown): string | null {
   if (!value || typeof value !== 'string' || !value.startsWith('https://')) return 'must be a valid HTTPS URL';

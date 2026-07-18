@@ -173,4 +173,126 @@ describe('Notification suppression - CRUD', () => {
       .set('Cookie', authCookie);
     expect(res.status).toBe(200);
   });
+
+  it('POST omits stack_patterns to []; rejects malformed and ReDoS patterns', async () => {
+    const omitted = await request(app)
+      .post('/api/notification-suppression-rules')
+      .set('Cookie', authCookie)
+      .send({
+        name: 'Mute omit',
+        applies_to: 'both',
+      });
+    expect(omitted.status).toBe(201);
+    expect(omitted.body.stack_patterns).toEqual([]);
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(omitted.body.id);
+
+    const bad = await request(app)
+      .post('/api/notification-suppression-rules')
+      .set('Cookie', authCookie)
+      .send({ ...validBody, name: 'bad', stack_patterns: null });
+    expect(bad.status).toBe(400);
+
+    const redos = await request(app)
+      .post('/api/notification-suppression-rules')
+      .set('Cookie', authCookie)
+      .send({ ...validBody, name: 'redos', stack_patterns: ['****'] });
+    expect(redos.status).toBe(400);
+  });
+
+  it('PUT enabled-only preserves patterns; explicit [] clears', async () => {
+    const created = await request(app)
+      .post('/api/notification-suppression-rules')
+      .set('Cookie', authCookie)
+      .send(validBody);
+    const id = created.body.id as number;
+
+    const partial = await request(app)
+      .put(`/api/notification-suppression-rules/${id}`)
+      .set('Cookie', authCookie)
+      .send({ enabled: false });
+    expect(partial.status).toBe(200);
+    expect(partial.body.enabled).toBe(false);
+    expect(partial.body.stack_patterns).toEqual(['staging']);
+    expect(partial.body.levels).toEqual(['warning']);
+
+    const cleared = await request(app)
+      .put(`/api/notification-suppression-rules/${id}`)
+      .set('Cookie', authCookie)
+      .send({ stack_patterns: [] });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.stack_patterns).toEqual([]);
+
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(id);
+  });
+
+  it('replica requires and validates stack_patterns', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    const missing = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 9001,
+          name: 'replica',
+          applies_to: 'both',
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(missing.status).toBe(400);
+
+    const redos = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 9001,
+          name: 'replica',
+          applies_to: 'both',
+          stack_patterns: ['****'],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(redos.status).toBe(400);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(9001)).toBeUndefined();
+
+    const ok = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 9001,
+          name: 'replica',
+          applies_to: 'both',
+          stack_patterns: ['prod-*'],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(ok.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(9001)?.stack_patterns).toEqual(['prod-*']);
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(9001);
+  });
 });
