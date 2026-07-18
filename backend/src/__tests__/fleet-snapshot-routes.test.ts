@@ -101,14 +101,16 @@ describe('Snapshot content-at-rest encryption', () => {
         expect(raw.content).not.toContain('s3cr3t');
 
         const env = db.getSnapshotFiles(snapshotId).find(f => f.filename === '.env');
-        expect(env?.content).toBe(ENV_SECRET);
+        expect(env?.available).toBe(true);
+        if (env?.available) expect(env.content).toBe(ENV_SECRET);
     });
 
     it('decrypts content on the restore read path (getSnapshotStackFiles)', () => {
         const db = DatabaseService.getInstance();
         const files = db.getSnapshotStackFiles(snapshotId, 1, 'web');
         const env = files.find(f => f.filename === '.env');
-        expect(env?.content).toBe(ENV_SECRET);
+        expect(env?.available).toBe(true);
+        if (env?.available) expect(env.content).toBe(ENV_SECRET);
     });
 
     it('reads a legacy plaintext row back verbatim (decrypt tolerates non-ciphertext)', () => {
@@ -121,7 +123,45 @@ describe('Snapshot content-at-rest encryption', () => {
         ).run(legacyId, 1, 'local', 'legacy', 'compose.yaml', 'plain: text\n');
 
         const files = db.getSnapshotFiles(legacyId);
-        expect(files[0].content).toBe('plain: text\n');
+        expect(files[0].available).toBe(true);
+        if (files[0].available) expect(files[0].content).toBe('plain: text\n');
+    });
+
+    it('isolates a corrupt encrypted sibling without failing the read', () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('partial-corrupt', 'admin', 1, 2, '[]', '[]');
+        const good = CryptoService.getInstance().encrypt('services: {}\n');
+        const bad = CryptoService.getInstance().encrypt('SECRET=x\n');
+        const payload = bad.slice('enc:'.length);
+        const [iv, tag, ct] = payload.split(':');
+        const damaged = `enc:${iv}:${tag}:${ct.slice(0, 3)}`;
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, 1, 'local', 'good', 'compose.yaml', good);
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, 1, 'local', 'bad', 'compose.yaml', damaged);
+
+        const files = db.getSnapshotFiles(id);
+        expect(files).toHaveLength(2);
+        const goodFile = files.find(f => f.stack_name === 'good');
+        const badFile = files.find(f => f.stack_name === 'bad');
+        expect(goodFile?.available).toBe(true);
+        if (goodFile?.available) expect(goodFile.content).toBe('services: {}\n');
+        expect(badFile?.available).toBe(false);
+    });
+
+    it('preserves a valid empty file as available empty content', () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('empty-env', 'admin', 1, 1, '[]', '[]');
+        db.insertSnapshotFiles(id, [
+            { nodeId: 1, nodeName: 'local', stackName: 'web', filename: '.env', content: '' },
+            { nodeId: 1, nodeName: 'local', stackName: 'web', filename: 'compose.yaml', content: 'services: {}\n' },
+        ]);
+        const files = db.getSnapshotFiles(id);
+        const env = files.find(f => f.filename === '.env');
+        expect(env?.available).toBe(true);
+        if (env?.available) expect(env.content).toBe('');
     });
 });
 
@@ -219,6 +259,93 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
             .set('Cookie', adminCookie)
             .send({ nodeId: LOCAL_NODE_ID, stackName: 'policy-web', redeploy: true });
         expect(res.status).toBe(409);
+    });
+
+    it('returns 409 SNAPSHOT_FILE_UNAVAILABLE and does not mutate live files', async () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('restore-corrupt', 'admin', 1, 1, '[]', '[]');
+        const cipher = CryptoService.getInstance().encrypt('services: {}\n');
+        const payload = cipher.slice('enc:'.length);
+        const [iv, tag, ct] = payload.split(':');
+        const damaged = `enc:${iv}:${tag}:${ct.slice(0, 3)}`;
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, LOCAL_NODE_ID, 'local', 'corrupt-web', 'compose.yaml', damaged);
+        seedStackDir('corrupt-web');
+        const beforeCompose = 'services:\n  keep: {}\n';
+        const beforeEnv = 'KEEP=1\n';
+        fs.writeFileSync(composePath('corrupt-web'), beforeCompose);
+        fs.writeFileSync(envPath('corrupt-web'), beforeEnv);
+
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue();
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'corrupt-web', redeploy: true, restoreNotes: true });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('SNAPSHOT_FILE_UNAVAILABLE');
+        expect(fs.readFileSync(composePath('corrupt-web'), 'utf-8')).toBe(beforeCompose);
+        expect(fs.readFileSync(envPath('corrupt-web'), 'utf-8')).toBe(beforeEnv);
+        expect(deploySpy).not.toHaveBeenCalled();
+    });
+
+    it('returns 409 for mixed available and unavailable files in the same stack without writing', async () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('restore-mixed', 'admin', 1, 1, '[]', '[]');
+        const good = CryptoService.getInstance().encrypt('services: { ok: {} }\n');
+        const bad = CryptoService.getInstance().encrypt('SECRET=long-enough-to-truncate\n');
+        const payload = bad.slice('enc:'.length);
+        const [iv, tag, ct] = payload.split(':');
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, LOCAL_NODE_ID, 'local', 'mixed-web', 'compose.yaml', good);
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, LOCAL_NODE_ID, 'local', 'mixed-web', '.env', `enc:${iv}:${tag}:${ct.slice(0, 3)}`);
+        seedStackDir('mixed-web');
+        const beforeCompose = 'services:\n  keep: {}\n';
+        const beforeEnv = 'KEEP=1\n';
+        fs.writeFileSync(composePath('mixed-web'), beforeCompose);
+        fs.writeFileSync(envPath('mixed-web'), beforeEnv);
+
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue();
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'mixed-web', redeploy: true });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('SNAPSHOT_FILE_UNAVAILABLE');
+        expect(fs.readFileSync(composePath('mixed-web'), 'utf-8')).toBe(beforeCompose);
+        expect(fs.readFileSync(envPath('mixed-web'), 'utf-8')).toBe(beforeEnv);
+        expect(deploySpy).not.toHaveBeenCalled();
+    });
+
+    it('detail returns 200 with unavailable marker and intact sibling content', async () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('detail-corrupt', 'admin', 1, 2, '[]', '[]');
+        const good = CryptoService.getInstance().encrypt('services: { ok: {} }\n');
+        const bad = CryptoService.getInstance().encrypt('SECRET=long-enough-to-truncate\n');
+        const payload = bad.slice('enc:'.length);
+        const [iv, tag, ct] = payload.split(':');
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, LOCAL_NODE_ID, 'local', 'ok', 'compose.yaml', good);
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, LOCAL_NODE_ID, 'local', 'bad', 'compose.yaml', `enc:${iv}:${tag}:${ct.slice(0, 3)}`);
+
+        const res = await request(app).get(`/api/fleet/snapshots/${id}`).set('Cookie', adminCookie);
+        expect(res.status).toBe(200);
+        expect(res.body.fileDecryptWarnings).toEqual([
+            expect.objectContaining({ stackName: 'bad', filename: 'compose.yaml' }),
+        ]);
+        const okStack = res.body.nodes[0].stacks.find((s: { stackName: string }) => s.stackName === 'ok');
+        const badStack = res.body.nodes[0].stacks.find((s: { stackName: string }) => s.stackName === 'bad');
+        expect(okStack.files[0].content).toBe('services: { ok: {} }\n');
+        expect(okStack.files[0].unavailable).toBeUndefined();
+        expect(badStack.files[0].unavailable).toBe(true);
+        expect(badStack.files[0].content).toBeUndefined();
+        expect(JSON.stringify(res.body)).not.toContain('enc:');
     });
 
     it('redeploys after restore when requested', async () => {
@@ -581,6 +708,44 @@ describe('Restore-all', () => {
         const bad = (res.body.results as Array<{ stackName: string; success: boolean; error?: string }>).find(r => r.stackName === 'bad');
         expect(bad?.success).toBe(false);
         expect(bad?.error).toMatch(/no longer exists/i);
+    });
+
+    it('isolates corrupt decrypt stacks before any mutation with notes and redeploy requested', async () => {
+        vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue();
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('restore-all-corrupt', 'admin', 1, 2, '[]', '[]');
+        const good = CryptoService.getInstance().encrypt('services:\n  app: {}\n');
+        const bad = CryptoService.getInstance().encrypt('SECRET=x\n');
+        const payload = bad.slice('enc:'.length);
+        const [iv, tag, ct] = payload.split(':');
+        const damaged = `enc:${iv}:${tag}:${ct.slice(0, 3)}`;
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, LOCAL_NODE_ID, 'local', 'healthy', 'compose.yaml', good);
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, LOCAL_NODE_ID, 'local', 'corrupt', 'compose.yaml', damaged);
+        seedStackDir('healthy');
+        seedStackDir('corrupt');
+        fs.writeFileSync(composePath('corrupt'), 'services:\n  keep: {}\n');
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore-all`)
+            .set('Cookie', adminCookie)
+            .send({ redeploy: true, restoreNotes: true });
+        expect(res.status).toBe(200);
+        expect(res.body.restored).toBe(1);
+        expect(res.body.failed).toBe(1);
+        const corrupt = (res.body.results as Array<{ stackName: string; success: boolean; error?: string; redeployed: boolean }>)
+            .find(r => r.stackName === 'corrupt');
+        expect(corrupt?.success).toBe(false);
+        expect(corrupt?.error).toMatch(/could not be decrypted/i);
+        expect(corrupt?.redeployed).toBe(false);
+        expect(fs.readFileSync(composePath('corrupt'), 'utf-8')).toContain('keep: {}');
+        expect(fs.readFileSync(composePath('healthy'), 'utf-8')).toContain('app: {}');
+        expect(deploySpy).toHaveBeenCalledWith('healthy', undefined, undefined, expect.anything());
+        expect(deploySpy).not.toHaveBeenCalledWith('corrupt', expect.anything(), expect.anything(), expect.anything());
     });
 
     it('redeploys each restored stack when requested', async () => {

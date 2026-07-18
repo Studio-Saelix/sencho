@@ -2583,8 +2583,13 @@ fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Resp
 
     const files = db.getSnapshotFiles(id);
 
-    // Group files by node and stack.
-    const nodesMap = new Map<number, { nodeId: number; nodeName: string; stacks: Map<string, Array<{ filename: string; content: string }>> }>();
+    // Group files by node and stack. Unavailable decrypts keep attribution but
+    // never expose ciphertext or fabricated placeholders as content.
+    type DetailFile =
+      | { filename: string; content: string }
+      | { filename: string; unavailable: true };
+    const fileDecryptWarnings: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string }> = [];
+    const nodesMap = new Map<number, { nodeId: number; nodeName: string; stacks: Map<string, DetailFile[]> }>();
     for (const file of files) {
       if (!nodesMap.has(file.node_id)) {
         nodesMap.set(file.node_id, { nodeId: file.node_id, nodeName: file.node_name, stacks: new Map() });
@@ -2593,7 +2598,17 @@ fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Resp
       if (!nodeEntry.stacks.has(file.stack_name)) {
         nodeEntry.stacks.set(file.stack_name, []);
       }
-      nodeEntry.stacks.get(file.stack_name)!.push({ filename: file.filename, content: file.content });
+      if (file.available) {
+        nodeEntry.stacks.get(file.stack_name)!.push({ filename: file.filename, content: file.content });
+      } else {
+        nodeEntry.stacks.get(file.stack_name)!.push({ filename: file.filename, unavailable: true });
+        fileDecryptWarnings.push({
+          nodeId: file.node_id,
+          nodeName: file.node_name,
+          stackName: file.stack_name,
+          filename: file.filename,
+        });
+      }
     }
 
     const nodes = Array.from(nodesMap.values()).map(n => ({
@@ -2628,7 +2643,7 @@ fleetRouter.get('/snapshots/:id', authMiddleware, async (req: Request, res: Resp
     }
 
     if (isDebugEnabled()) console.debug('[Fleet:debug] Snapshot detail:', id, files.length, 'files');
-    res.json({ ...snapshot, nodes, documentation });
+    res.json({ ...snapshot, nodes, documentation, fileDecryptWarnings });
   } catch (error) {
     console.error('[Fleet Snapshot] Detail error:', error);
     res.status(500).json({ error: 'Failed to fetch snapshot details' });
@@ -2835,9 +2850,19 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       res.status(404).json({ error: 'No files found for this stack in the snapshot' });
       return;
     }
+    if (files.some(f => !f.available)) {
+      res.status(409).json({
+        error: 'One or more snapshot files could not be decrypted',
+        code: 'SNAPSHOT_FILE_UNAVAILABLE',
+      });
+      return;
+    }
+    const writableFiles = files
+      .filter((f): f is Extract<typeof f, { available: true }> => f.available)
+      .map(f => ({ filename: f.filename, content: f.content }));
 
     if (isDebugEnabled()) {
-      const fileNames = files.map(f => f.filename).join(', ');
+      const fileNames = writableFiles.map(f => f.filename).join(', ');
       console.debug('[Fleet:debug] Restore: snapshot=%s, node=%s, stack="%s", files=[%s], redeploy=%s', sanitizeForLog(snapshotId), sanitizeForLog(nodeId), sanitizeForLog(stackName), sanitizeForLog(fileNames), sanitizeForLog(redeploy));
     }
 
@@ -2847,7 +2872,7 @@ fleetRouter.post('/snapshots/:id/restore', authMiddleware, async (req: Request, 
       return;
     }
 
-    await applySnapshotStackFiles(node, stackName, files);
+    await applySnapshotStackFiles(node, stackName, writableFiles);
 
     // Dossier notes are restored only on explicit opt-in, so a routine file
     // restore never clobbers the operator's current notes. The note write is
@@ -2923,8 +2948,14 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
       return;
     }
 
-    // Group the snapshot's files by node + stack, mirroring the detail route.
-    const groups = new Map<string, { nodeId: number; nodeName: string; stackName: string; files: Array<{ filename: string; content: string }> }>();
+    // Group the snapshot's files by node + stack, retaining availability so
+    // unavailable rows are rejected before any content is written.
+    const groups = new Map<string, {
+      nodeId: number;
+      nodeName: string;
+      stackName: string;
+      files: typeof files;
+    }>();
     for (const file of files) {
       const key = `${file.node_id}:${file.stack_name}`;
       let entry = groups.get(key);
@@ -2932,7 +2963,7 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
         entry = { nodeId: file.node_id, nodeName: file.node_name, stackName: file.stack_name, files: [] };
         groups.set(key, entry);
       }
-      entry.files.push({ filename: file.filename, content: file.content });
+      entry.files.push(file);
     }
 
     const policyOptions = buildPolicyGateOptions(req);
@@ -2943,10 +2974,25 @@ fleetRouter.post('/snapshots/:id/restore-all', authMiddleware, async (req: Reque
     for (const group of groups.values()) {
       try {
         if (!isValidStackName(group.stackName)) throw new Error('Invalid stack name');
+        if (group.files.some(f => !f.available)) {
+          results.push({
+            nodeId: group.nodeId,
+            nodeName: group.nodeName,
+            stackName: group.stackName,
+            success: false,
+            redeployed: false,
+            notesRestored: false,
+            error: 'One or more snapshot files could not be decrypted',
+          });
+          continue;
+        }
         const node = db.getNode(group.nodeId);
         if (!node) throw new Error('Target node no longer exists');
 
-        await applySnapshotStackFiles(node, group.stackName, group.files);
+        const writableFiles = group.files
+          .filter((f): f is Extract<typeof f, { available: true }> => f.available)
+          .map(f => ({ filename: f.filename, content: f.content }));
+        await applySnapshotStackFiles(node, group.stackName, writableFiles);
 
         // Files are restored; a notes failure is recorded but does not fail the
         // stack (and must not block the redeploy below).

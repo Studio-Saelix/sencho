@@ -35,9 +35,14 @@ interface FleetSnapshot {
     has_documentation?: number;
 }
 
-interface SnapshotStackFile {
-    filename: string;
-    content: string;
+type SnapshotStackFile =
+    | { filename: string; content: string }
+    | { filename: string; unavailable: true };
+
+function isUnavailableSnapshotFile(
+    file: SnapshotStackFile,
+): file is { filename: string; unavailable: true } {
+    return 'unavailable' in file;
 }
 
 interface SnapshotStack {
@@ -70,6 +75,7 @@ interface SnapshotDocumentation {
 interface FleetSnapshotDetail extends FleetSnapshot {
     nodes: SnapshotNode[];
     documentation?: SnapshotDocumentation;
+    fileDecryptWarnings?: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string }>;
 }
 
 // Ordered labels for the read-only dossier block; only non-empty fields render.
@@ -110,7 +116,7 @@ export default function FleetSnapshots() {
 
     // Cloud-upload affordance is reachable when the saved provider is custom
     // (every tier) or sencho on a paid license. A downgraded admin whose
-    // saved provider is still 'sencho' sees no upload button — they cannot
+    // saved provider is still 'sencho' sees no upload button; they cannot
     // call POST /cloud-backup/upload/:id because gateForCurrentProvider would
     // 403 anyway, so the UI must not advertise an action that is gated away.
     const [cloudEnabled, setCloudEnabled] = useState(false);
@@ -303,7 +309,11 @@ export default function FleetSnapshots() {
                 }
             } else {
                 const err = await res.json().catch(() => null);
-                toast.error(err?.message || err?.error || err?.data?.error || 'Failed to restore stack.');
+                if (res.status === 409 && err?.code === 'SNAPSHOT_FILE_UNAVAILABLE') {
+                    toast.error(err?.error || 'One or more snapshot files could not be decrypted.');
+                } else {
+                    toast.error(err?.message || err?.error || err?.data?.error || 'Failed to restore stack.');
+                }
             }
         } catch (error: unknown) {
             const err = error as Record<string, unknown> | null;
@@ -314,6 +324,10 @@ export default function FleetSnapshots() {
     };
 
     const handleDownloadFile = (stackName: string, file: SnapshotStackFile) => {
+        if (isUnavailableSnapshotFile(file)) {
+            toast.error('This snapshot file could not be decrypted.');
+            return;
+        }
         try {
             const blob = new Blob([file.content], { type: 'text/plain;charset=utf-8' });
             const url = URL.createObjectURL(blob);
@@ -505,6 +519,32 @@ export default function FleetSnapshots() {
                             );
                         })()}
 
+                        {(() => {
+                            const warnings = selectedSnapshot.fileDecryptWarnings ?? [];
+                            if (warnings.length === 0) return null;
+                            return (
+                                <div className="rounded-xl border border-warning/30 bg-warning/5 p-4">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <AlertTriangle className="w-4 h-4 text-warning shrink-0" />
+                                        <span className="text-sm font-medium text-warning">
+                                            Some snapshot files could not be decrypted:
+                                        </span>
+                                    </div>
+                                    <ul className="ml-6 space-y-1">
+                                        {warnings.map((w, i) => (
+                                            <li key={`${w.nodeId}:${w.stackName}:${w.filename}:${i}`} className="text-sm text-muted-foreground">
+                                                <span className="font-medium">{w.nodeName}</span>
+                                                {' / '}
+                                                <span className="font-mono">{w.stackName}</span>
+                                                {' / '}
+                                                <span className="font-mono">{w.filename}</span>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            );
+                        })()}
+
                         {/* Partially captured stacks warning */}
                         {(() => {
                             const skipped = parseJsonArray<SkippedStack>(selectedSnapshot.skipped_stacks);
@@ -587,6 +627,7 @@ export default function FleetSnapshots() {
                                                 {node.stacks.map(stack => {
                                                     const stackKey = `${node.nodeId}:${stack.stackName}`;
                                                     const stackExpanded = expandedStacks.has(stackKey);
+                                                    const stackHasUnavailable = stack.files.some(isUnavailableSnapshotFile);
                                                     const dossier = selectedSnapshot.documentation?.stacks
                                                         .find(s => s.nodeId === node.nodeId && s.stackName === stack.stackName)?.dossier;
                                                     return (
@@ -615,6 +656,7 @@ export default function FleetSnapshots() {
                                                                         stackName={stack.stackName}
                                                                         hasDossier={!!dossier}
                                                                         restoring={restoringStack === `${node.nodeId}:${stack.stackName}`}
+                                                                        disabled={stackHasUnavailable}
                                                                         onRestore={handleRestore}
                                                                     />
                                                                 )}
@@ -626,6 +668,19 @@ export default function FleetSnapshots() {
                                                                     {stack.files.map(file => {
                                                                         const fileKey = `${stackKey}:${file.filename}`;
                                                                         const showPreview = previewFiles.has(fileKey);
+                                                                        if (isUnavailableSnapshotFile(file)) {
+                                                                            return (
+                                                                                <div key={fileKey}>
+                                                                                    <div className="flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-muted/50 transition-colors">
+                                                                                        <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                                                                                        <span className="text-xs font-mono flex-1 truncate">{file.filename}</span>
+                                                                                        <Badge variant="outline" className="text-[10px] text-warning border-warning/40">
+                                                                                            Unavailable
+                                                                                        </Badge>
+                                                                                    </div>
+                                                                                </div>
+                                                                            );
+                                                                        }
                                                                         return (
                                                                             <div key={fileKey}>
                                                                                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-muted/50 transition-colors">
@@ -911,12 +966,13 @@ export default function FleetSnapshots() {
 
 // --- Restore Button Sub-Component ---
 
-function RestoreButton({ nodeId, nodeName, stackName, hasDossier, restoring, onRestore }: {
+function RestoreButton({ nodeId, nodeName, stackName, hasDossier, restoring, disabled, onRestore }: {
     nodeId: number;
     nodeName: string;
     stackName: string;
     hasDossier: boolean;
     restoring: boolean;
+    disabled?: boolean;
     onRestore: (nodeId: number, stackName: string, redeploy: boolean, restoreNotes: boolean) => Promise<void>;
 }) {
     const [redeploy, setRedeploy] = useState(false);
@@ -929,7 +985,8 @@ function RestoreButton({ nodeId, nodeName, stackName, hasDossier, restoring, onR
                 variant="ghost"
                 size="sm"
                 className="h-6 px-2 text-xs"
-                disabled={restoring}
+                disabled={restoring || disabled}
+                title={disabled ? 'One or more files in this stack could not be decrypted' : undefined}
                 onClick={() => setOpen(true)}
             >
                 {restoring ? (

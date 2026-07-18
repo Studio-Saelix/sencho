@@ -9,6 +9,9 @@ import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
 import { HIGH_EPSS_THRESHOLD } from './securityPosture';
 import type { BackendScheduledAction } from './scheduledActionRegistry';
+import { readSnapshotFileRow, type SnapshotFileReadResult, type SnapshotFileRow } from '../helpers/snapshotFileDecrypt';
+
+export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 
 function isPilotMode(): boolean {
     return process.env.SENCHO_MODE === 'pilot';
@@ -4182,8 +4185,9 @@ export class DatabaseService {
     public insertSnapshotFiles(snapshotId: number, files: Array<{ nodeId: number; nodeName: string; stackName: string; filename: string; content: string }>): void {
         // Snapshot file bodies are compose.yaml and .env captures, so they carry
         // the same secrets as the live stack. Encrypt content at rest with the
-        // instance key; getSnapshotFiles/getSnapshotStackFiles decrypt on read,
-        // so restore and cloud-archive paths see plaintext and stay portable.
+        // instance key. Getters classify and decrypt per row (see
+        // snapshotFileDecrypt.ts); unavailable rows omit content so callers
+        // cannot treat damage as usable plaintext.
         const crypto = CryptoService.getInstance();
         const insert = this.db.prepare(
             'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)'
@@ -4218,7 +4222,7 @@ export class DatabaseService {
         const row = this.db.prepare('SELECT documentation FROM fleet_snapshots WHERE id = ?').get(id) as { documentation: string } | undefined;
         if (!row || row.documentation === '') return '';
         try {
-            // decrypt() returns non-ciphertext input unchanged, mirroring the file path.
+            // decrypt() returns non-ciphertext input unchanged.
             return CryptoService.getInstance().decrypt(row.documentation);
         } catch (e) {
             // A corrupt blob or a key rotation must not break the primary backup
@@ -4229,22 +4233,24 @@ export class DatabaseService {
         }
     }
 
-    public getSnapshotFiles(snapshotId: number): FleetSnapshotFile[] {
-        const crypto = CryptoService.getInstance();
+    // Per-row classification isolates corrupt encrypted rows so intact stacks
+    // remain readable. See helpers/snapshotFileDecrypt.ts.
+    public getSnapshotFiles(snapshotId: number): SnapshotFileReadResult[] {
         const rows = this.db.prepare(
-            'SELECT * FROM fleet_snapshot_files WHERE snapshot_id = ? ORDER BY node_name, stack_name'
-        ).all(snapshotId) as FleetSnapshotFile[];
-        // decrypt() returns non-ciphertext input unchanged, so rows written
-        // before content-at-rest encryption still read back as plaintext.
-        return rows.map(row => ({ ...row, content: crypto.decrypt(row.content) }));
+            'SELECT node_id, node_name, stack_name, filename, content FROM fleet_snapshot_files WHERE snapshot_id = ? ORDER BY node_name, stack_name'
+        ).all(snapshotId) as SnapshotFileRow[];
+        return this.mapSnapshotFileRows(rows, snapshotId);
     }
 
-    public getSnapshotStackFiles(snapshotId: number, nodeId: number, stackName: string): FleetSnapshotFile[] {
-        const crypto = CryptoService.getInstance();
+    public getSnapshotStackFiles(snapshotId: number, nodeId: number, stackName: string): SnapshotFileReadResult[] {
         const rows = this.db.prepare(
-            'SELECT * FROM fleet_snapshot_files WHERE snapshot_id = ? AND node_id = ? AND stack_name = ?'
-        ).all(snapshotId, nodeId, stackName) as FleetSnapshotFile[];
-        return rows.map(row => ({ ...row, content: crypto.decrypt(row.content) }));
+            'SELECT node_id, node_name, stack_name, filename, content FROM fleet_snapshot_files WHERE snapshot_id = ? AND node_id = ? AND stack_name = ?'
+        ).all(snapshotId, nodeId, stackName) as SnapshotFileRow[];
+        return this.mapSnapshotFileRows(rows, snapshotId);
+    }
+
+    private mapSnapshotFileRows(rows: SnapshotFileRow[], snapshotId: number): SnapshotFileReadResult[] {
+        return rows.map(row => readSnapshotFileRow(row, snapshotId));
     }
 
     /** Created-at of the most recent fleet snapshot covering a stack, or null. */
