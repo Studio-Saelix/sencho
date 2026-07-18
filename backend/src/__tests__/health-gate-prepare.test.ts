@@ -224,6 +224,27 @@ describe('primary vs collateral attribution', () => {
     expect(report.failureSource).toBe('collateral');
   });
 
+  it('fails with failureSource collateral when a healthy sibling vanishes before the first poll', async () => {
+    // Sibling is healthy at prepare, then gone before arming. Seeding expected
+    // from the prepare baseline must still track it so the gate fails.
+    const token = await prepareService([
+      { id: 'p1', name: 'web-app-1', service: 'app' },
+      { id: 's1', name: 'web-db-1', service: 'db' },
+    ]);
+    svc().attachExpectedImage(token, 'sha256:app');
+    setContainers([
+      { id: 'p1', name: 'web-app-1', service: 'app' },
+    ]);
+    const { runId } = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
+    await ticks(1); // arm expected from primary + prepare collateral baseline
+    await ticks(1); // first miss on the vanished sibling
+    await ticks(1); // second miss fails the gate
+    const report = svc().getReport(0, 'web', runId!);
+    expect(report.status).toBe('failed');
+    expect(report.failureSource).toBe('collateral');
+    expect(report.reason ?? '').toMatch(/disappeared|sibling/i);
+  });
+
   it('keeps a pre-existing unhealthy sibling advisory: the gate can still pass', async () => {
     // The sibling is unhealthy at prepare, so it is not regression-eligible and
     // cannot fail the service gate; the healthy primary carries it to a pass.

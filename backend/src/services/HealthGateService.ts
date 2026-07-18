@@ -81,6 +81,12 @@ interface ActiveGate {
   expectedReplicas: number;
   /** Sibling names eligible for regression evaluation (service gates). */
   collateralEligibleNames: Set<string>;
+  /**
+   * Pre-mutation baselines for regression-eligible collateral siblings.
+   * Used to seed `expected` at arm time so a sibling that vanishes during the
+   * mutation gap is still tracked (and can fail) on the first poll.
+   */
+  collateralBaselineByName: Map<string, ObservedContainer>;
   /** Role of each expected container (service gates), for failure attribution. */
   roleByName: Map<string, GateRole>;
 }
@@ -99,6 +105,20 @@ interface PreparedBaseline {
 
 function isRegressionEligibleSibling(baseline: PreparedBaseline): boolean {
   return baseline.state === 'running' && (baseline.health === null || baseline.health === 'healthy');
+}
+
+function observedFromPreparedBaseline(baseline: PreparedBaseline): ObservedContainer {
+  return {
+    id: baseline.id,
+    name: baseline.name,
+    startedAt: baseline.startedAt,
+    restartCount: baseline.restartCount,
+    restarts: 0,
+    state: baseline.state,
+    health: baseline.health,
+    service: baseline.service,
+    imageId: baseline.imageId,
+  };
 }
 
 /** An in-memory prepare snapshot awaiting attachExpectedImage + beginPrepared. */
@@ -190,17 +210,36 @@ export class HealthGateService {
     return `${nodeId}:${stackName}:${scope}:${serviceName ?? '_'}`;
   }
 
+  private baselineMapFromPrepared(baselines: PreparedBaseline[]): Map<string, ObservedContainer> {
+    const map = new Map<string, ObservedContainer>();
+    for (const baseline of baselines) {
+      map.set(baseline.name, observedFromPreparedBaseline(baseline));
+    }
+    return map;
+  }
+
   /**
-   * Finalize every in-flight gate for one stack as superseded, regardless of
-   * scope or service, before a newer operation begins. A stack gate supersedes
-   * an in-flight service gate and vice versa; the per-stack lock means only one
-   * begins at a time in practice.
+   * Finalize in-flight gates that a newer operation must replace:
+   * - A stack-scoped begin supersedes every gate on the stack.
+   * - A service-scoped begin supersedes only the same service's gate and any
+   *   stack-scoped gate; other services keep observing independently.
    */
-  private supersedeGatesForStack(nodeId: number, stackName: string): void {
+  private supersedeGatesForStack(
+    nodeId: number,
+    stackName: string,
+    options?: { serviceName?: string | null; stackOnly?: boolean },
+  ): void {
+    const serviceName = options?.serviceName;
+    const stackOnly = options?.stackOnly === true;
     for (const gate of [...this.active.values()]) {
-      if (gate.nodeId === nodeId && gate.stackName === stackName) {
-        this.finalize(gate, 'unknown', 'superseded by a newer operation', []);
+      if (gate.nodeId !== nodeId || gate.stackName !== stackName) continue;
+      if (serviceName !== undefined) {
+        // Service begin: keep other services' gates.
+        if (gate.targetScope === 'service' && gate.serviceName !== serviceName) continue;
+      } else if (stackOnly) {
+        if (gate.targetScope !== 'stack') continue;
       }
+      this.finalize(gate, 'unknown', 'superseded by a newer operation', []);
     }
   }
 
@@ -240,8 +279,8 @@ export class HealthGateService {
       }
       if (!settings.enabled) return null;
 
-      // A newer operation supersedes any in-flight gate for the same stack
-      // (stack supersedes service and vice versa).
+      // A newer stack operation supersedes every in-flight gate on this stack
+      // (including service gates).
       const key = this.gateKey(nodeId, stackName, 'stack', null);
       this.supersedeGatesForStack(nodeId, stackName);
 
@@ -288,6 +327,7 @@ export class HealthGateService {
         expectedImageId: null,
         expectedReplicas: 0,
         collateralEligibleNames: new Set(),
+        collateralBaselineByName: new Map(),
         roleByName: new Map(),
       };
       this.active.set(key, gate);
@@ -398,7 +438,8 @@ export class HealthGateService {
       if (!settings.enabled) return { runId: null, observing: false };
 
       const key = this.gateKey(prep.nodeId, prep.stackName, 'service', prep.serviceName);
-      this.supersedeGatesForStack(prep.nodeId, prep.stackName);
+      // Same-service + stack gates only; sibling service observations continue.
+      this.supersedeGatesForStack(prep.nodeId, prep.stackName, { serviceName: prep.serviceName });
 
       const runId = randomUUID();
       const startedAt = Date.now();
@@ -443,6 +484,9 @@ export class HealthGateService {
         expectedImageId: prep.expectedImageId,
         expectedReplicas: prep.expectedReplicas,
         collateralEligibleNames: prep.collateralEligibleNames,
+        collateralBaselineByName: this.baselineMapFromPrepared(
+          prep.collateralBaseline.filter(b => prep.collateralEligibleNames.has(b.name)),
+        ),
         roleByName: new Map(),
       };
       this.active.set(key, gate);
@@ -660,8 +704,11 @@ export class HealthGateService {
     const serviceName = gate.serviceName ?? '';
 
     // Arm the expected set once from post-mutation primary replicas plus the
-    // regression-eligible collateral siblings. Scale-0 arms immediately with an
-    // empty primary set; scale>0 waits (up to the empty grace) for replicas.
+    // pre-mutation regression-eligible collateral baselines. Seeding collateral
+    // from the prepare baseline (not only from the first post-mutation poll)
+    // means a healthy sibling that vanished during the mutation gap is still
+    // tracked and can fail the gate. Scale-0 arms immediately with an empty
+    // primary set; scale>0 waits (up to the empty grace) for replicas.
     if (gate.expected === null) {
       const primary = observed.filter(c => c.service === serviceName);
       if (gate.expectedReplicas > 0 && primary.length === 0) {
@@ -675,6 +722,16 @@ export class HealthGateService {
         gate.roleByName.set(c.name, 'primary');
         expected.set(c.name, c);
       }
+      const observedByName = new Map(observed.map(c => [c.name, c]));
+      for (const [name, baseline] of gate.collateralBaselineByName) {
+        if (gate.roleByName.has(name)) continue;
+        gate.roleByName.set(name, 'collateral');
+        // Prefer the live observation when the sibling is still present; otherwise
+        // keep the prepare baseline so a missing sibling enters the miss path.
+        expected.set(name, observedByName.get(name) ?? baseline);
+      }
+      // Also pick up eligible siblings that appeared under a new name after mutation
+      // (unusual, but keeps prior behavior for containers still in the eligible set).
       for (const c of observed) {
         if (gate.collateralEligibleNames.has(c.name) && !gate.roleByName.has(c.name)) {
           gate.roleByName.set(c.name, 'collateral');

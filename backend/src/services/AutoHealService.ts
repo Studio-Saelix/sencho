@@ -72,15 +72,14 @@ export class AutoHealService {
     private historyTimestamps = new Map<string, number>();
     private leaseRefreshFailures = new Map<number, number>();
     /**
-     * In-memory suppression set for service-scoped updates/restores. While a
+     * Ref-counted suppressions for service-scoped updates/restores. While a
      * service is being recreated and its post-mutation health gate observes it,
      * auto-heal must not restart the churning containers out from under the gate.
-     * Keyed `${nodeId}:${stackName}:${serviceName}`; a stack-wide policy is
-     * suppressed only for the specific service's containers, never the whole
-     * stack. Process death clears it naturally (the orchestrator's suppression
-     * only lives as long as the process that set it).
+     * Keyed `${nodeId}:${stackName}:${serviceName}`. Nested owners (overlapping
+     * same-service ops, or a gate that outlives the orchestrator finally) each
+     * increment; clearSuppress only unmutes at zero. Process death clears it.
      */
-    private suppressedServices = new Set<string>();
+    private suppressedServices = new Map<string, number>();
 
     private constructor() {}
 
@@ -127,17 +126,24 @@ export class AutoHealService {
 
     /** Suppress auto-heal for one service while a service-scoped update/restore + its health gate run. */
     suppress(nodeId: number, stackName: string, serviceName: string): void {
-        this.suppressedServices.add(this.suppressKey(nodeId, stackName, serviceName));
+        const key = this.suppressKey(nodeId, stackName, serviceName);
+        this.suppressedServices.set(key, (this.suppressedServices.get(key) ?? 0) + 1);
     }
 
-    /** Release a service suppression (orchestrator `finally` when not observing, or the gate on finalize/supersede/stop). */
+    /** Release one suppression owner; Auto-Heal resumes only when the count hits zero. */
     clearSuppress(nodeId: number, stackName: string, serviceName: string): void {
-        this.suppressedServices.delete(this.suppressKey(nodeId, stackName, serviceName));
+        const key = this.suppressKey(nodeId, stackName, serviceName);
+        const current = this.suppressedServices.get(key) ?? 0;
+        if (current <= 1) {
+            this.suppressedServices.delete(key);
+            return;
+        }
+        this.suppressedServices.set(key, current - 1);
     }
 
     /** True while the given service is suppressed. A stack-wide policy still heals other services. */
     isSuppressed(nodeId: number, stackName: string, serviceName: string): boolean {
-        return this.suppressedServices.has(this.suppressKey(nodeId, stackName, serviceName));
+        return (this.suppressedServices.get(this.suppressKey(nodeId, stackName, serviceName)) ?? 0) > 0;
     }
 
     /**

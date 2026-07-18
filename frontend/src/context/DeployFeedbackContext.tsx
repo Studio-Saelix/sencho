@@ -59,6 +59,8 @@ interface RunResult {
    * node never returns one, so no gate UI appears.
    */
   healthGateId?: string | null;
+  /** Service-scoped recovery snapshot id, when one was captured. */
+  recoveryId?: string | null;
 }
 
 /** Post-update health gate state for the current deploy session. */
@@ -80,6 +82,8 @@ export interface HealthGateUiState {
   serviceName?: string | null;
   /** Which side of a service-scoped gate failed; null/absent for full-stack gates and non-failures. */
   failureSource?: 'primary' | 'collateral' | null;
+  /** Recovery snapshot to offer restore after a failed service gate. */
+  recoveryId?: string | null;
 }
 
 const GATE_POLL_INTERVAL_MS = 4_000;
@@ -90,6 +94,8 @@ export interface RunWithLogParams {
   action: ActionVerb;
   /** Node the operation runs on (null = local), for node-scoped surfaces. */
   nodeId: number | null;
+  /** When set, this is a service-scoped update/restore; gate polling uses targetScope=service. */
+  serviceName?: string;
 }
 
 interface DeployFeedbackContextValue {
@@ -268,11 +274,22 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
   // instead of this session showing a newer run's result. Mirrors the backend
   // gate's own degradation: repeated failures (or an absurdly long poll)
   // resolve to an honest client-side unknown rather than observing forever.
-  const startGatePolling = useCallback((stackName: string, nodeId: number | null, gateId: string, trigger: 'update' | 'deploy', mySession: number) => {
+  const startGatePolling = useCallback((
+    stackName: string,
+    nodeId: number | null,
+    gateId: string,
+    trigger: 'update' | 'deploy',
+    mySession: number,
+    options?: { serviceName?: string; recoveryId?: string | null },
+  ) => {
     stopGatePolling();
+    const targetScope = options?.serviceName ? 'service' : 'stack';
     setHealthGate({
       stackName, nodeId, gateId, trigger, status: 'observing', reason: null, windowSeconds: null, startedAt: null,
-      targetScope: 'stack', serviceName: null, failureSource: null,
+      targetScope,
+      serviceName: options?.serviceName ?? null,
+      failureSource: null,
+      recoveryId: options?.recoveryId ?? null,
     });
     let strikes = 0;
     // Single-flight: skip a tick while one request is outstanding so two
@@ -323,14 +340,22 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
           return;
         }
         strikes = 0;
-        setHealthGate({
-          stackName, nodeId, gateId, trigger, status: report.status, reason: report.reason,
+        const status: HealthGateUiState['status'] =
+          report.status === 'observing' || report.status === 'passed'
+          || report.status === 'failed' || report.status === 'unknown'
+            ? report.status
+            : 'unknown';
+        setHealthGate(prev => ({
+          stackName, nodeId, gateId, trigger,
+          status,
+          reason: report.reason,
           windowSeconds: report.windowSeconds, startedAt: report.startedAt,
-          targetScope: report.targetScope ?? 'stack',
-          serviceName: report.serviceName ?? null,
+          targetScope: report.targetScope ?? targetScope,
+          serviceName: report.serviceName ?? options?.serviceName ?? null,
           failureSource: report.failureSource ?? null,
-        });
-        if (report.status !== 'observing') {
+          recoveryId: prev?.recoveryId ?? options?.recoveryId ?? null,
+        }));
+        if (status !== 'observing') {
           settled = true;
           stopGatePolling();
         }
@@ -437,7 +462,10 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
           errorMessage: result.ok ? undefined : result.errorMessage,
         }));
         if (result.ok && result.healthGateId && (params.action === 'update' || params.action === 'deploy')) {
-          startGatePolling(params.stackName, params.nodeId, result.healthGateId, params.action, mySession);
+          startGatePolling(params.stackName, params.nodeId, result.healthGateId, params.action, mySession, {
+            serviceName: params.serviceName,
+            recoveryId: result.recoveryId,
+          });
         }
       }
 

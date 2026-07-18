@@ -1,4 +1,4 @@
-import { apiFetch } from './api';
+import { apiFetch, withDeploySession } from './api';
 
 export interface RequestServiceUpdateParams {
     nodeId: number | null;
@@ -7,6 +7,8 @@ export interface RequestServiceUpdateParams {
     /** Caller's intent only (Update vs Rebuild copy); the backend route and
      *  orchestrator path are the same either way. Defaults to 'update'. */
     mode?: 'update' | 'rebuild';
+    /** Deploy-feedback session id so Compose output streams to the panel. */
+    deploySessionId?: string;
 }
 
 export interface ServiceUpdateSuccess {
@@ -40,11 +42,11 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
  * (see `sendServiceResult` in backend/src/routes/stacks.ts).
  */
 export async function requestServiceUpdate(params: RequestServiceUpdateParams): Promise<ServiceUpdateResult> {
-    const { nodeId, stackName, serviceName, mode = 'update' } = params;
+    const { nodeId, stackName, serviceName, mode = 'update', deploySessionId } = params;
     try {
         const res = await apiFetch(
             `/stacks/${encodeURIComponent(stackName)}/services/${encodeURIComponent(serviceName)}/update`,
-            { method: 'POST', nodeId },
+            withDeploySession(deploySessionId ?? '', { method: 'POST', nodeId }),
         );
         const body: unknown = await res.json().catch(() => null);
         if (!res.ok) {
@@ -87,6 +89,7 @@ export interface RequestServiceRestoreParams {
     stackName: string;
     serviceName: string;
     recoveryId: string;
+    deploySessionId?: string;
 }
 
 /**
@@ -94,16 +97,16 @@ export interface RequestServiceRestoreParams {
  * prior service-scoped update (`POST .../services/:serviceName/restore`).
  */
 export async function requestServiceRestore(params: RequestServiceRestoreParams): Promise<ServiceUpdateResult> {
-    const { nodeId, stackName, serviceName, recoveryId } = params;
+    const { nodeId, stackName, serviceName, recoveryId, deploySessionId } = params;
     try {
         const res = await apiFetch(
             `/stacks/${encodeURIComponent(stackName)}/services/${encodeURIComponent(serviceName)}/restore`,
-            {
+            withDeploySession(deploySessionId ?? '', {
                 method: 'POST',
                 nodeId,
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ recoveryId }),
-            },
+            }),
         );
         const body: unknown = await res.json().catch(() => null);
         if (!res.ok) {

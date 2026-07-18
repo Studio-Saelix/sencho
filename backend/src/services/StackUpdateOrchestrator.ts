@@ -524,6 +524,12 @@ export class StackUpdateOrchestrator {
     if (distinct.size === 0) {
       return { kind: 'divergent', error: `Service "${serviceName}" has no running replicas after the update.` };
     }
+    if (inspected.ids.length !== expectedReplicas) {
+      return {
+        kind: 'divergent',
+        error: `Service "${serviceName}" has ${inspected.ids.length} running replica(s); expected ${expectedReplicas}.`,
+      };
+    }
     if (distinct.size > 1) {
       return { kind: 'divergent', error: `Service "${serviceName}" replicas did not converge on a single image.` };
     }
@@ -571,6 +577,9 @@ export class StackUpdateOrchestrator {
     for (const info of listed) {
       try {
         const inspect = await docker.getContainer(info.Id).inspect();
+        // Convergence requires running replicas; exited/created leftovers must
+        // not count toward the expected replica total or the shared image id.
+        if (inspect.State?.Status !== 'running') continue;
         if (inspect.Image) ids.push(inspect.Image);
       } catch (error) {
         if ((error as { statusCode?: number })?.statusCode === 404) continue;

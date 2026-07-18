@@ -2110,6 +2110,14 @@ async function handleServiceScopedMutation(
     ok = sendServiceResult(res, result);
     if (ok) {
       options.onSuccess(stackName, serviceName, req.user?.username ?? 'system');
+      NotificationService.getInstance().broadcastEvent({
+        type: 'state-invalidate',
+        scope: 'image-updates',
+        nodeId: req.nodeId,
+        stackName,
+        action: 'stack-updated',
+        ts: Date.now(),
+      });
     } else if (result.kind === 'service_failed') {
       notifyActionFailure(
         options.notifyFailureAction,

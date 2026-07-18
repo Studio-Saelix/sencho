@@ -138,7 +138,7 @@ export class ServiceUpdateRecoveryService {
       weak_floating_tag: majority.weakFloatingTag ? 1 : 0,
       health_gate_id: null,
       status: 'active',
-      expires_at: now + this.readRecoveryWindowSeconds() * 1000 + RECOVERY_TTL_BUFFER_MS,
+      expires_at: now + this.activeRecoveryTtlMs() + RECOVERY_TTL_BUFFER_MS,
       claim_expires_at: null,
       created_at: now,
       created_by: input.createdBy,
@@ -243,6 +243,15 @@ export class ServiceUpdateRecoveryService {
 
   private nextClaimExpiry(now: number): number {
     return now + Math.max(getComposeCommandTimeoutMs(), MIN_CLAIM_WINDOW_MS) + CLAIM_RENEWAL_BUFFER_MS;
+  }
+
+  /**
+   * Active recovery must outlive both the Compose mutation and the post-update
+   * health window. A raised SENCHO_COMPOSE_COMMAND_TIMEOUT_MS must not leave the
+   * snapshot eligible for sweep while Compose is still running.
+   */
+  private activeRecoveryTtlMs(): number {
+    return Math.max(getComposeCommandTimeoutMs(), this.readRecoveryWindowSeconds() * 1000);
   }
 
   private readRecoveryWindowSeconds(): number {

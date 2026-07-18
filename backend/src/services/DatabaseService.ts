@@ -1896,7 +1896,10 @@ export class DatabaseService {
 
     /**
      * Rebuild health_gate_runs when the installed CHECK still only allows
-     * update|deploy or target/failure columns are missing. Idempotent.
+     * update|deploy or target/failure columns are missing. Idempotent and
+     * restart-safe: drops a stale temporary table, then rebuilds in one
+     * better-sqlite3 transaction so an interrupted startup cannot leave
+     * CREATE TABLE health_gate_runs_new blocking the next boot.
      */
     private migrateHealthGateTargetSchema(): void {
         const tableSql = (this.db.prepare(
@@ -1909,37 +1912,46 @@ export class DatabaseService {
         const hasWideTrigger = tableSql.includes('service_update') && tableSql.includes('service_restore');
         if (hasTarget && hasFailure && hasWideTrigger) return;
 
-        this.db.exec(`
-            CREATE TABLE health_gate_runs_new (
-              id TEXT PRIMARY KEY,
-              node_id INTEGER NOT NULL,
-              stack_name TEXT NOT NULL,
-              trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore')),
-              status TEXT NOT NULL CHECK (status IN ('observing','passed','failed','unknown')),
-              reason TEXT,
-              window_seconds INTEGER NOT NULL,
-              containers_json TEXT NOT NULL DEFAULT '[]',
-              started_at INTEGER NOT NULL,
-              ended_at INTEGER,
-              created_by TEXT,
-              target_scope TEXT NOT NULL DEFAULT 'stack' CHECK (target_scope IN ('stack','service')),
-              service_name TEXT,
-              failure_source TEXT CHECK (failure_source IS NULL OR failure_source IN ('primary','collateral'))
-            );
-            INSERT INTO health_gate_runs_new (
-              id, node_id, stack_name, trigger_action, status, reason, window_seconds,
-              containers_json, started_at, ended_at, created_by, target_scope, service_name, failure_source
-            )
-            SELECT
-              id, node_id, stack_name, trigger_action, status, reason, window_seconds,
-              containers_json, started_at, ended_at, created_by,
-              'stack', NULL, NULL
-            FROM health_gate_runs;
-            DROP TABLE health_gate_runs;
-            ALTER TABLE health_gate_runs_new RENAME TO health_gate_runs;
-            CREATE INDEX IF NOT EXISTS idx_health_gate_runs_node_stack
-              ON health_gate_runs(node_id, stack_name, started_at);
-        `);
+        // A previous crash between CREATE and RENAME leaves this temp table behind.
+        this.db.exec('DROP TABLE IF EXISTS health_gate_runs_new');
+
+        const targetExpr = hasTarget ? 'target_scope' : "'stack'";
+        const serviceExpr = colNames.has('service_name') ? 'service_name' : 'NULL';
+        const failureExpr = hasFailure ? 'failure_source' : 'NULL';
+
+        this.db.transaction(() => {
+            this.db.exec(`
+                CREATE TABLE health_gate_runs_new (
+                  id TEXT PRIMARY KEY,
+                  node_id INTEGER NOT NULL,
+                  stack_name TEXT NOT NULL,
+                  trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore')),
+                  status TEXT NOT NULL CHECK (status IN ('observing','passed','failed','unknown')),
+                  reason TEXT,
+                  window_seconds INTEGER NOT NULL,
+                  containers_json TEXT NOT NULL DEFAULT '[]',
+                  started_at INTEGER NOT NULL,
+                  ended_at INTEGER,
+                  created_by TEXT,
+                  target_scope TEXT NOT NULL DEFAULT 'stack' CHECK (target_scope IN ('stack','service')),
+                  service_name TEXT,
+                  failure_source TEXT CHECK (failure_source IS NULL OR failure_source IN ('primary','collateral'))
+                );
+                INSERT INTO health_gate_runs_new (
+                  id, node_id, stack_name, trigger_action, status, reason, window_seconds,
+                  containers_json, started_at, ended_at, created_by, target_scope, service_name, failure_source
+                )
+                SELECT
+                  id, node_id, stack_name, trigger_action, status, reason, window_seconds,
+                  containers_json, started_at, ended_at, created_by,
+                  ${targetExpr}, ${serviceExpr}, ${failureExpr}
+                FROM health_gate_runs;
+                DROP TABLE health_gate_runs;
+                ALTER TABLE health_gate_runs_new RENAME TO health_gate_runs;
+                CREATE INDEX IF NOT EXISTS idx_health_gate_runs_node_stack
+                  ON health_gate_runs(node_id, stack_name, started_at);
+            `);
+        })();
     }
 
     private migrateEncryptNodeTokens(): void {

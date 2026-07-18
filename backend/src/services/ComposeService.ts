@@ -946,6 +946,8 @@ export class ComposeService {
    * never `--remove-orphans`.
    */
   async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
+    await this.assertRequiredEnvPresent(stackName);
+    await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
     const sendOutput = (data: string) => {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);

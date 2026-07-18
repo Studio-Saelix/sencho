@@ -17,6 +17,8 @@ import { StructuredLogRow } from '@/components/log-rendering/StructuredLogRow';
 import TerminalComponent from '@/components/Terminal';
 import { useDeployFeedback, VERB_LABELS, type HealthGateUiState } from '@/context/DeployFeedbackContext';
 import { useDeployFeedbackStyle } from '@/hooks/use-deploy-feedback-style';
+import { requestServiceRestore } from '@/lib/serviceUpdate';
+import { toast } from '@/components/ui/toast-store';
 
 const AUTO_CLOSE_SECONDS = 4;
 
@@ -364,12 +366,55 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
 // Re-renders every second via the elapsed-time interval, so the observing
 // elapsed count stays live without its own timer.
 function HealthGateBanner({ gate }: { gate: HealthGateUiState }) {
+  const { runWithLog } = useDeployFeedback();
+  const [restoring, setRestoring] = useState(false);
   const elapsed = gate.startedAt ? Math.max(0, Math.floor((Date.now() - gate.startedAt) / 1000)) : 0;
   const windowLabel = gate.windowSeconds ? ` of ${gate.windowSeconds}s` : '';
   // Service-scoped gates name the service; a full-stack gate keeps the
   // existing "containers"/"the stack" phrasing unchanged.
   const scopeSubject = gate.serviceName ? `service "${gate.serviceName}"` : 'containers';
   const collateralNote = gate.failureSource === 'collateral' ? ' A dependent service triggered the failure.' : '';
+  const canRestoreService =
+    gate.targetScope === 'service'
+    && !!gate.serviceName
+    && !!gate.recoveryId
+    && gate.status === 'failed';
+
+  const onRestoreService = useCallback(async () => {
+    if (!gate.serviceName || !gate.recoveryId || restoring) return;
+    setRestoring(true);
+    try {
+      await runWithLog(
+        { stackName: gate.stackName, action: 'update', nodeId: gate.nodeId, serviceName: gate.serviceName },
+        async (started, ds) => {
+          await started;
+          const result = await requestServiceRestore({
+            nodeId: gate.nodeId,
+            stackName: gate.stackName,
+            serviceName: gate.serviceName as string,
+            recoveryId: gate.recoveryId as string,
+            deploySessionId: ds,
+          });
+          if (!result.ok) {
+            toast.error(result.error);
+            return { ok: false as const, errorMessage: result.error };
+          }
+          if (result.healthGateId && result.observing) {
+            toast.info(`Service "${gate.serviceName}" restored. Verifying health...`);
+          } else {
+            toast.success(`Service "${gate.serviceName}" restored successfully!`);
+          }
+          return {
+            ok: true as const,
+            healthGateId: result.observing ? result.healthGateId : null,
+            recoveryId: result.recoveryId,
+          };
+        },
+      );
+    } finally {
+      setRestoring(false);
+    }
+  }, [gate, restoring, runWithLog]);
 
   if (gate.status === 'observing') {
     return (
@@ -395,9 +440,26 @@ function HealthGateBanner({ gate }: { gate: HealthGateUiState }) {
     return (
       <div data-testid="health-gate-banner" data-status="failed" className="flex items-start gap-2 px-4 py-2 border-b border-destructive/30 bg-destructive/5 shrink-0">
         <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-destructive" />
-        <p className="min-w-0 text-xs text-destructive">
-          Health gate failed{gate.reason ? `: ${gate.reason}` : ''}.{collateralNote} Rollback options are available on the stack.
-        </p>
+        <div className="min-w-0 flex-1 space-y-2">
+          <p className="text-xs text-destructive">
+            Health gate failed{gate.reason ? `: ${gate.reason}` : ''}.{collateralNote}
+            {canRestoreService
+              ? ` Restore "${gate.serviceName}" from the recovery snapshot, or inspect the stack.`
+              : ' Rollback options are available on the stack.'}
+          </p>
+          {canRestoreService && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              data-testid="service-restore-from-gate"
+              disabled={restoring}
+              onClick={() => { void onRestoreService(); }}
+            >
+              {restoring ? 'Restoring...' : `Restore ${gate.serviceName}`}
+            </Button>
+          )}
+        </div>
       </div>
     );
   }

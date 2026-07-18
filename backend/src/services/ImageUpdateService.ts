@@ -750,6 +750,14 @@ export class ImageUpdateService {
         }
 
         // Phase 4: Deduplicate and check all unique images
+        // Reserve write generations before the slow registry checks so a concurrent
+        // recheckStack that finishes first keeps its write (stale full-scan commits
+        // are dropped in withStackWriteLock).
+        const writeGenerations = new Map<string, number>();
+        for (const stackName of stackImages.keys()) {
+            writeGenerations.set(stackName, this.reserveStackWriteGeneration(nodeId, stackName));
+        }
+
         const allImages = new Set<string>();
         for (const imgs of stackImages.values()) for (const img of imgs) allImages.add(img);
 
@@ -788,6 +796,7 @@ export class ImageUpdateService {
                 now,
                 allContainers,
                 db,
+                writeGenerations.get(stackName) ?? this.reserveStackWriteGeneration(nodeId, stackName),
             );
             if (outcome.hasUpdate) {
                 updatesFound++;
@@ -852,6 +861,7 @@ export class ImageUpdateService {
      * render failure the prior row is left untouched and a warning is returned.
      */
     public async recheckStack(nodeId: number, stackName: string): Promise<{ warning: string | null }> {
+        const generation = this.reserveStackWriteGeneration(nodeId, stackName);
         const db = DatabaseService.getInstance();
         const docker = DockerController.getInstance(nodeId);
         const model = await buildEffectiveServiceModel(nodeId, stackName);
@@ -901,11 +911,11 @@ export class ImageUpdateService {
         const lastError = stackStatusLastError(services);
         const now = Date.now();
 
-        await this.withStackWriteLock(nodeId, stackName, async (generation) => {
+        await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
             if (checkStatus === 'failed') {
-                db.recordStackCheckFailure(nodeId, stackName, lastError ?? 'Update check failed', now, services, generation);
+                db.recordStackCheckFailure(nodeId, stackName, lastError ?? 'Update check failed', now, services, gen);
             } else {
-                db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError, services, generation);
+                db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError, services, gen);
             }
         });
 
@@ -916,11 +926,9 @@ export class ImageUpdateService {
         return `${nodeId}:${stackName}`;
     }
 
-    private async withStackWriteLock(
-        nodeId: number,
-        stackName: string,
-        write: (generation: number) => void | Promise<void>,
-    ): Promise<void> {
+    /** Bump the per-stack write generation before async registry work so a later
+     *  slower scan cannot commit after a newer recheck reserved a higher gen. */
+    private reserveStackWriteGeneration(nodeId: number, stackName: string): number {
         const key = this.stackWriteKey(nodeId, stackName);
         let state = this.stackWriteState.get(key);
         if (!state) {
@@ -928,10 +936,25 @@ export class ImageUpdateService {
             this.stackWriteState.set(key, state);
         }
         state.generation += 1;
-        const generation = state.generation;
+        return state.generation;
+    }
+
+    private async withStackWriteLock(
+        nodeId: number,
+        stackName: string,
+        generation: number,
+        write: (generation: number) => void | Promise<void>,
+    ): Promise<void> {
+        const key = this.stackWriteKey(nodeId, stackName);
+        let state = this.stackWriteState.get(key);
+        if (!state) {
+            state = { chain: Promise.resolve(), generation };
+            this.stackWriteState.set(key, state);
+        }
         state.chain = state.chain.then(async () => {
             const current = this.stackWriteState.get(key);
-            if (!current || current.generation !== generation) return;
+            // A newer reservation supersedes this writer; drop the stale commit.
+            if (!current || generation < current.generation) return;
             await write(generation);
         });
         await state.chain;
@@ -964,6 +987,7 @@ export class ImageUpdateService {
         checkedAt: number,
         containers: Array<{ Image?: string; Labels?: Record<string, string> }>,
         db: DatabaseService,
+        generation: number,
     ): Promise<{ hasUpdate: boolean; notifyMessage: string }> {
         const model = await buildEffectiveServiceModel(nodeId, stackName);
         if (model.renderable) {
@@ -984,14 +1008,14 @@ export class ImageUpdateService {
             const lastError = stackStatusLastError(services);
             const notifyMessage = buildAvailabilityNotifyMessage(stackName, services);
 
-            await this.withStackWriteLock(nodeId, stackName, async (generation) => {
+            await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
                 if (checkStatus === 'failed') {
                     db.recordStackCheckFailure(
-                        nodeId, stackName, lastError ?? 'Update check failed', checkedAt, services, generation,
+                        nodeId, stackName, lastError ?? 'Update check failed', checkedAt, services, gen,
                     );
                 } else {
                     db.upsertStackUpdateStatus(
-                        nodeId, stackName, hasUpdate, checkedAt, checkStatus, lastError, services, generation,
+                        nodeId, stackName, hasUpdate, checkedAt, checkStatus, lastError, services, gen,
                     );
                 }
             });
@@ -1006,7 +1030,7 @@ export class ImageUpdateService {
         const confirmedHasUpdate = checkable.some((r) => r.error === undefined && r.hasUpdate === true);
 
         if (checkable.length > 0 && errored.length === checkable.length) {
-            await this.withStackWriteLock(nodeId, stackName, async () => {
+            await this.withStackWriteLock(nodeId, stackName, generation, async () => {
                 db.recordStackCheckFailure(
                     nodeId, stackName, errored[0].error ?? 'Update check failed', checkedAt,
                 );
@@ -1023,7 +1047,7 @@ export class ImageUpdateService {
             ? (confirmedHasUpdate || previousState[stackName] === true)
             : confirmedHasUpdate;
 
-        await this.withStackWriteLock(nodeId, stackName, async () => {
+        await this.withStackWriteLock(nodeId, stackName, generation, async () => {
             db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, checkedAt, checkStatus, lastError);
         });
 

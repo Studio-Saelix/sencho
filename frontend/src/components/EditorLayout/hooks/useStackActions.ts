@@ -11,7 +11,7 @@ import {
 } from '@/lib/hydrationTiming';
 import { toast } from '@/components/ui/toast-store';
 import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
-import { requestServiceUpdate as postServiceUpdate } from '@/lib/serviceUpdate';
+import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
 import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
@@ -1625,9 +1625,9 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   // Single entry point for a manual service-scoped update/rebuild (declared-
-  // service header, Updates view per-service Apply). Mirrors requestStackUpdate's
-  // guard-first flow but targets one service; the other services in the stack
-  // are untouched.
+  // service header, Updates view per-service Apply). Uses the same deploy-
+  // feedback session as full-stack Update so progress streams and the health
+  // gate is polled; siblings are not intentionally recreated.
   const requestServiceUpdate = async (
     stackFile: string,
     serviceName: string,
@@ -1638,26 +1638,40 @@ export function useStackActions(options: UseStackActionsOptions) {
     const opNodeId = activeNode?.id ?? null;
     const run = async () => {
       editorState.setServiceUpdateInProgress({ service: serviceName, mode });
-      const result = await postServiceUpdate({ nodeId: opNodeId, stackName, serviceName, mode });
-      editorState.setServiceUpdateInProgress(null);
-      if (!result.ok) {
-        toast.error(result.error);
+      try {
+        await runWithLog({ stackName, action: 'update', nodeId: opNodeId, serviceName }, async (started, ds) => {
+          await started;
+          const result = await postServiceUpdate({
+            nodeId: opNodeId,
+            stackName,
+            serviceName,
+            mode,
+            deploySessionId: ds,
+          });
+          if (!result.ok) {
+            toast.error(result.error);
+            return { ok: false as const, errorMessage: result.error };
+          }
+          const verb = mode === 'rebuild' ? 'rebuilt' : 'updated';
+          if (result.healthGateId && result.observing) {
+            toast.info(`Service "${serviceName}" ${verb}. Verifying health...`);
+          } else {
+            toast.success(`Service "${serviceName}" ${verb} successfully!`);
+          }
+          if (result.recheckWarning) toast.info(result.recheckWarning);
+          stackListState.fetchImageUpdates();
+          await refreshSelectedContainers(stackName, stackFile);
+          stackListState.recordActionSuccess(stackFile);
+          return {
+            ok: true as const,
+            healthGateId: result.observing ? result.healthGateId : null,
+            recoveryId: result.recoveryId,
+          };
+        });
+      } finally {
+        editorState.setServiceUpdateInProgress(null);
         stackListState.refreshStacks(true);
-        return;
       }
-      const verb = mode === 'rebuild' ? 'rebuilt' : 'updated';
-      if (result.healthGateId && result.observing) {
-        toast.info(`Service "${serviceName}" ${verb}. Verifying health...`);
-      } else {
-        toast.success(`Service "${serviceName}" ${verb} successfully!`);
-      }
-      if (result.recheckWarning) toast.info(result.recheckWarning);
-      if (result.recoveryAvailable && result.recoveryId) {
-        toast.info(`Recovery snapshot ready for "${serviceName}".`);
-      }
-      stackListState.fetchImageUpdates();
-      await refreshSelectedContainers(stackName, stackFile);
-      stackListState.refreshStacks(true);
     };
     if (hasUpdateGuard) {
       overlayState.setUpdateReadiness({
@@ -1674,6 +1688,49 @@ export function useStackActions(options: UseStackActionsOptions) {
       return;
     }
     await run();
+  };
+
+  const requestServiceRestore = async (
+    stackFile: string,
+    serviceName: string,
+    recoveryId: string,
+  ): Promise<void> => {
+    if (stackListState.isStackBusy(stackFile) || editorState.serviceUpdateInProgress) return;
+    const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
+    const opNodeId = activeNode?.id ?? null;
+    editorState.setServiceUpdateInProgress({ service: serviceName, mode: 'update' });
+    try {
+      await runWithLog({ stackName, action: 'update', nodeId: opNodeId, serviceName }, async (started, ds) => {
+        await started;
+        const result = await postServiceRestore({
+          nodeId: opNodeId,
+          stackName,
+          serviceName,
+          recoveryId,
+          deploySessionId: ds,
+        });
+        if (!result.ok) {
+          toast.error(result.error);
+          return { ok: false as const, errorMessage: result.error };
+        }
+        if (result.healthGateId && result.observing) {
+          toast.info(`Service "${serviceName}" restored. Verifying health...`);
+        } else {
+          toast.success(`Service "${serviceName}" restored successfully!`);
+        }
+        stackListState.fetchImageUpdates();
+        await refreshSelectedContainers(stackName, stackFile);
+        stackListState.recordActionSuccess(stackFile);
+        return {
+          ok: true as const,
+          healthGateId: result.observing ? result.healthGateId : null,
+          recoveryId: result.recoveryId,
+        };
+      });
+    } finally {
+      editorState.setServiceUpdateInProgress(null);
+      stackListState.refreshStacks(true);
+    }
   };
 
   const updateStack = async (e?: React.MouseEvent) => {
@@ -2060,6 +2117,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     updateStack,
     requestStackUpdate,
     requestServiceUpdate,
+    requestServiceRestore,
     deleteStack,
     attemptLeaveEditor,
     attemptPopstateNavigation,

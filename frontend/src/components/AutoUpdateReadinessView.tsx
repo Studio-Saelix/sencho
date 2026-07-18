@@ -14,6 +14,7 @@ import { ImageSourceMenu } from './ImageSourceMenu';
 import type { ScheduledTask } from '@/types/scheduling';
 import { SERVICE_SCOPED_UPDATE_CAPABILITY } from '@/lib/capabilities';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
+import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
 
@@ -40,9 +41,20 @@ interface UpdatePreview {
     update_kind: UpdateKind;
     blocked: boolean;
     blocked_reason: string | null;
+    has_build_services?: boolean;
+    rebuild_available?: boolean;
   };
+  build_services?: string[];
   rollback_target: string | null;
   changelog: string | null;
+}
+
+function declaredServiceCount(preview: UpdatePreview | null | undefined): number {
+  if (!preview) return 0;
+  const names = new Set<string>();
+  for (const img of preview.images) names.add(img.service);
+  for (const name of preview.build_services ?? []) names.add(name);
+  return names.size;
 }
 
 export interface StackCard {
@@ -207,9 +219,9 @@ function StackReadinessCard({
   const bump = preview?.summary.semver_bump ?? 'none';
   const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
   const updatingImageCount = updatingImages.length;
-  // Multi-service only (§12): a single-image preview is a single-service
-  // stack, which keeps the full-stack-only "Apply now" affordance below.
-  const showServiceApply = canServiceUpdate && (preview?.images.length ?? 0) > 1 && updatingImageCount > 0;
+  // Multi-service only: count declared Compose services (image-backed and
+  // build-only), not preview.images.length (shared tags collapse that list).
+  const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImageCount > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
 
   return (
@@ -470,7 +482,7 @@ export function MobileReadinessCard({
   const blocked = preview?.summary.blocked ?? false;
   const bump = preview?.summary.semver_bump ?? 'none';
   const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
-  const showServiceApply = canServiceUpdate && (preview?.images.length ?? 0) > 1 && updatingImages.length > 0;
+  const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImages.length > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
@@ -615,6 +627,7 @@ interface AutoUpdateReadinessProps {
 
 function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps) {
   const isMobile = useIsMobile();
+  const { runWithLog } = useDeployFeedback();
   const { nodes, nodeMeta, refreshNodeMeta } = useNodes();
   const [groups, setGroups] = useState<NodeGroup[]>([]);
   const [reachableNodeCount, setReachableNodeCount] = useState<number | null>(null);
@@ -890,32 +903,44 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
     setCardField(c => c.stack === stack && c.nodeId === nodeId, { applyingService: serviceName });
     const loadingId = toast.loading(`Applying update to "${serviceName}" in ${stack}...`);
     try {
-      const result = await requestServiceUpdate({ nodeId, stackName: stack, serviceName, mode: 'update' });
-      if (!result.ok) {
-        toast.error(result.error);
-        return;
-      }
-      toast.success(`Service "${serviceName}" updated successfully`);
-      setGroups(prev => prev.map(g => (g.nodeId === nodeId
-        ? {
-          ...g,
-          cards: g.cards.map(c => (c.stack === stack
-            ? {
-              ...c,
-              preview: c.preview
-                ? { ...c.preview, images: c.preview.images.filter(i => i.service !== serviceName) }
-                : c.preview,
-            }
-            : c)),
+      await runWithLog({ stackName: stack, action: 'update', nodeId, serviceName }, async (started, ds) => {
+        await started;
+        const result = await requestServiceUpdate({
+          nodeId, stackName: stack, serviceName, mode: 'update', deploySessionId: ds,
+        });
+        if (!result.ok) {
+          toast.error(result.error);
+          return { ok: false as const, errorMessage: result.error };
         }
-        : g)));
+        if (result.recheckWarning) toast.info(result.recheckWarning);
+        if (result.healthGateId && result.observing) {
+          toast.info(`Service "${serviceName}" updated. Verifying health...`);
+        } else {
+          toast.success(`Service "${serviceName}" updated successfully`);
+        }
+        // Reload authoritative preview so summary / Apply affordances stay accurate.
+        try {
+          const res = await fetchForNode(`/stacks/${encodeURIComponent(stack)}/update-preview`, nodeId);
+          if (res.ok) {
+            const next = await res.json() as UpdatePreview;
+            setCardField(c => c.stack === stack && c.nodeId === nodeId, { preview: next, previewLoaded: true });
+          }
+        } catch {
+          // Preview refresh is best-effort; the update itself already succeeded.
+        }
+        return {
+          ok: true as const,
+          healthGateId: result.observing ? result.healthGateId : null,
+          recoveryId: result.recoveryId,
+        };
+      });
     } catch (err) {
       toast.error((err as Error)?.message || 'Update failed');
     } finally {
       toast.dismiss(loadingId);
       setCardField(c => c.stack === stack && c.nodeId === nodeId, { applyingService: null });
     }
-  }, []);
+  }, [runWithLog]);
 
   const handleApply = useCallback(async (stack: string, nodeId: number) => {
     const setCardField = (predicate: (c: StackCard) => boolean, patch: Partial<StackCard>) =>

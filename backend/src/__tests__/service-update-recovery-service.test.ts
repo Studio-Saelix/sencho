@@ -119,22 +119,32 @@ describe('createIfEligible - eligible cases', () => {
     expect(result.row.weak_floating_tag).toBe(0);
   });
 
-  it('sets expires_at from health_gate_window_seconds with a 90s floor', () => {
+  it('sets expires_at from max(compose timeout, health window) plus buffer', () => {
     db().updateGlobalSetting('health_gate_window_seconds', '120');
     const now = Date.now();
     const replicas: ServiceReplicaSnapshot[] = [{ imageId: 'sha256:aaa', repoDigest: null }];
     const result = svc().createIfEligible({ ...BASE_INPUT, replicas });
     if (!result.eligible) throw new Error('expected eligible');
-    expect(result.row.expires_at).toBe(now + 120_000 + 30 * 60_000);
+    // Default compose timeout is 30m; health window 120s is smaller, so compose wins.
+    expect(result.row.expires_at).toBe(now + 30 * 60_000 + 30 * 60_000);
   });
 
-  it('floors expires_at to 90s when the setting is below the floor or unset', () => {
+  it('uses a raised health window when it exceeds the compose command timeout', () => {
+    db().updateGlobalSetting('health_gate_window_seconds', String(45 * 60));
+    const now = Date.now();
+    const replicas: ServiceReplicaSnapshot[] = [{ imageId: 'sha256:aaa', repoDigest: null }];
+    const result = svc().createIfEligible({ ...BASE_INPUT, replicas });
+    if (!result.eligible) throw new Error('expected eligible');
+    expect(result.row.expires_at).toBe(now + 45 * 60_000 + 30 * 60_000);
+  });
+
+  it('floors the health window to 90s but still honors the compose timeout floor', () => {
     db().updateGlobalSetting('health_gate_window_seconds', '15');
     const now = Date.now();
     const replicas: ServiceReplicaSnapshot[] = [{ imageId: 'sha256:aaa', repoDigest: null }];
     const result = svc().createIfEligible({ ...BASE_INPUT, replicas });
     if (!result.eligible) throw new Error('expected eligible');
-    expect(result.row.expires_at).toBe(now + 90_000 + 30 * 60_000);
+    expect(result.row.expires_at).toBe(now + 30 * 60_000 + 30 * 60_000);
   });
 });
 
