@@ -46,6 +46,8 @@ import StructuredLogViewer from '../StructuredLogViewer';
 import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
 import type { ContainerInfo, ContainerStatsEntry, StackAction } from './EditorView';
+import type { EffectiveServiceSpec } from '@/types/effectiveServices';
+import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 
 const extractUptime = (status: string | undefined): string | null => {
     if (!status) return null;
@@ -304,6 +306,15 @@ export interface ContainersHealthProps {
     openLogViewer: (containerId: string, containerName: string) => void;
     openBashModal: (containerId: string, containerName: string) => void;
     serviceAction: (action: 'start' | 'stop' | 'restart', serviceName: string) => Promise<void>;
+    // Declared Compose services from the effective model. Multi-service
+    // headers (owning Update/Rebuild + badge + Start/Stop/Restart) render only
+    // when this has more than one entry; empty/single leaves the flat
+    // container-card layout below untouched. Optional so callers that never
+    // deal in services (and existing tests) can omit them.
+    effectiveServices?: EffectiveServiceSpec[];
+    serviceUpdateStatuses?: StackServiceUpdateStatus[];
+    serviceUpdateInProgress?: { service: string; mode: 'update' | 'rebuild' } | null;
+    onRequestServiceUpdate?: (serviceName: string, mode: 'update' | 'rebuild') => void;
     containersExpanded?: boolean;
     onToggleContainersExpand?: () => void;
 }
@@ -319,9 +330,16 @@ export function ContainersHealth({
     openLogViewer,
     openBashModal,
     serviceAction,
+    effectiveServices = [],
+    serviceUpdateStatuses = [],
+    serviceUpdateInProgress = null,
+    onRequestServiceUpdate,
     containersExpanded,
     onToggleContainersExpand,
 }: ContainersHealthProps) {
+    // Multi-service only (§12): a single-service stack keeps the existing flat
+    // layout untouched, including its per-container Start/Stop/Restart kebab.
+    const isMultiService = effectiveServices.length > 1;
     const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
     const copiedUrlTimerRef = useRef<number | null>(null);
     // Compact mode hides sparkline grids across all containers for a denser
@@ -343,102 +361,11 @@ export function ContainersHealth({
             }, 1500);
         }).catch(() => { /* clipboard unavailable */ });
     }, []);
-    return (
-        <div>
-            {containerStatsError && safeContainers.length > 0 && (
-                <div className="mb-3 flex items-center justify-end">
-                    <TooltipProvider>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <span className="text-[10px] uppercase tracking-wider font-mono text-warning-foreground bg-warning/10 border border-warning/30 rounded-md px-2 py-0.5">
-                            Stats unavailable
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent>{containerStatsError}</TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                </div>
-            )}
-            {safeContainers.length === 0 ? (
-                <div className="text-muted-foreground text-sm">No containers running for this stack.</div>
-            ) : (
-                <>
-                    {/* Summary strip + density toggle appear only for multi-container
-                        stacks; single-container stacks keep the original layout. */}
-                    {safeContainers.length > 1 && (() => {
-                        const total = safeContainers.length;
-                        const running = safeContainers.filter(c => c.State === 'running').length;
-                        const unhealthy = safeContainers.filter(c => c.healthStatus === 'unhealthy').length;
-                        const paused = safeContainers.filter(c => c.State === 'paused').length;
-                        return (
-                            <div className="flex items-center justify-between mb-1 px-1">
-                                <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
-                                    <span>{total} container{total !== 1 ? 's' : ''}</span>
-                                    <span className="text-success/80">{running} up</span>
-                                    {paused > 0 && <span className="text-warning/80">{paused} paused</span>}
-                                    {unhealthy > 0 && <span className="text-destructive/80">{unhealthy} unhealthy</span>}
-                                </div>
-                                <div className="flex items-center gap-1">
-                                    <div className="inline-flex rounded-md border border-muted bg-muted/30 p-0.5">
-                                        <TooltipProvider>
-                                          <Tooltip>
-                                            <TooltipTrigger asChild>
-                                              <button
-                                                type="button"
-                                                onClick={() => setDensity('compact')}
-                                                className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'compact' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
-                                                aria-pressed={density === 'compact'}
-                                                aria-label="Compact view"
-                                              >
-                                                <List className="h-3 w-3" strokeWidth={1.5} />
-                                              </button>
-                                            </TooltipTrigger>
-                                            <TooltipContent>Compact view</TooltipContent>
-                                          </Tooltip>
-                                        </TooltipProvider>
-                                        <TooltipProvider>
-                                          <Tooltip>
-                                            <TooltipTrigger asChild>
-                                              <button
-                                                type="button"
-                                                onClick={() => setDensity('detailed')}
-                                                className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'detailed' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
-                                                aria-pressed={density === 'detailed'}
-                                                aria-label="Detailed view"
-                                              >
-                                                <Layers className="h-3 w-3" strokeWidth={1.5} />
-                                              </button>
-                                            </TooltipTrigger>
-                                            <TooltipContent>Detailed view</TooltipContent>
-                                          </Tooltip>
-                                        </TooltipProvider>
-                                        {onToggleContainersExpand && (
-                                            <TooltipProvider>
-                                              <Tooltip>
-                                                <TooltipTrigger asChild>
-                                                  <button
-                                                    type="button"
-                                                    onClick={onToggleContainersExpand}
-                                                    className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${containersExpanded ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
-                                                    aria-pressed={containersExpanded}
-                                                    aria-label={containersExpanded ? 'Collapse containers' : 'Expand containers'}
-                                                  >
-                                                    {containersExpanded
-                                                      ? <Minimize2 className="h-3 w-3" strokeWidth={1.5} />
-                                                      : <Maximize2 className="h-3 w-3" strokeWidth={1.5} />}
-                                                  </button>
-                                                </TooltipTrigger>
-                                                <TooltipContent>{containersExpanded ? 'Collapse containers' : 'Expand containers'}</TooltipContent>
-                                              </Tooltip>
-                                            </TooltipProvider>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        );
-                    })()}
-                    <div className="flex flex-col gap-2">
-                    {safeContainers.map(container => {
+    // One container card. `hideServiceMenu` drops the per-container
+    // Start/Stop/Restart kebab on multi-service stacks, where the declared-
+    // service header above owns that action instead (§12 point 4: child cards
+    // keep only logs, shell, ports, metrics).
+    const renderContainerCard = (container: ContainerInfo, hideServiceMenu: boolean) => {
                         let mainPort: number | undefined;
                         let mainPortPrivate: number | undefined;
                         let mainPortProto: string | undefined;
@@ -574,7 +501,7 @@ export function ContainersHealth({
                                             </Tooltip>
                                           </TooltipProvider>
                                         )}
-                                        {container.Service && (
+                                        {!hideServiceMenu && container.Service && (
                                             <DropdownMenu>
                                                 <DropdownMenuTrigger asChild>
                                                     <Button
@@ -639,7 +566,199 @@ export function ContainersHealth({
                                 ) : null}
                             </div>
                         );
+    };
+
+    return (
+        <div>
+            {containerStatsError && safeContainers.length > 0 && (
+                <div className="mb-3 flex items-center justify-end">
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="text-[10px] uppercase tracking-wider font-mono text-warning-foreground bg-warning/10 border border-warning/30 rounded-md px-2 py-0.5">
+                            Stats unavailable
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent>{containerStatsError}</TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                </div>
+            )}
+            {isMultiService ? (
+                <div className="flex flex-col gap-3">
+                    {effectiveServices.map(spec => {
+                        const group = safeContainers.filter(c => c.Service === spec.name);
+                        const status = serviceUpdateStatuses.find(s => s.service === spec.name);
+                        const busy = serviceUpdateInProgress?.service === spec.name;
+                        const hasUpdate = status?.hasUpdate === true;
+                        const mode: 'update' | 'rebuild' = !hasUpdate && spec.hasBuild ? 'rebuild' : 'update';
+                        const showUpdateAction = spec.declaredImage !== null || spec.hasBuild;
+                        const isServiceActive = group.some(c => c.State === 'running' || c.State === 'paused');
+                        const runningCount = group.filter(c => c.State === 'running').length;
+                        const replicaWord = spec.expectedReplicas === 1 ? 'replica' : 'replicas';
+                        const replicaCopy = mode === 'rebuild'
+                            ? `Rebuilds all ${spec.expectedReplicas} ${replicaWord}`
+                            : `Updates all ${spec.expectedReplicas} ${replicaWord}`;
+                        return (
+                            <div key={spec.name} className="flex flex-col gap-2">
+                                <div className="flex items-center justify-between gap-3 rounded-lg border border-card-border bg-muted/40 px-3 py-2">
+                                    <div className="flex min-w-0 items-center gap-2">
+                                        <span className="truncate font-mono text-sm font-medium text-foreground">{spec.name}</span>
+                                        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
+                                            {runningCount}/{spec.expectedReplicas} running
+                                        </span>
+                                        {hasUpdate && (
+                                            <span className="rounded-full border border-brand/30 bg-brand/10 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-brand">
+                                                Update
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="flex shrink-0 items-center gap-1">
+                                        {showUpdateAction && (
+                                            <TooltipProvider>
+                                              <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                  <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    variant="outline"
+                                                    className="h-7 rounded-md px-2 max-md:h-11"
+                                                    onClick={() => onRequestServiceUpdate?.(spec.name, mode)}
+                                                    disabled={busy}
+                                                  >
+                                                    <CloudDownload className="h-3.5 w-3.5 mr-1.5" strokeWidth={1.5} />
+                                                    {busy
+                                                        ? (mode === 'rebuild' ? 'Rebuilding...' : 'Updating...')
+                                                        : (mode === 'rebuild' ? 'Rebuild' : 'Update')}
+                                                  </Button>
+                                                </TooltipTrigger>
+                                                <TooltipContent>{replicaCopy}</TooltipContent>
+                                              </Tooltip>
+                                            </TooltipProvider>
+                                        )}
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger asChild>
+                                                <Button
+                                                    size="icon"
+                                                    variant="ghost"
+                                                    className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
+                                                    aria-label="Service actions"
+                                                >
+                                                    <MoreVertical className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                                </Button>
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent align="end">
+                                                {isServiceActive ? (
+                                                    <>
+                                                        <DropdownMenuItem onSelect={() => serviceAction('restart', spec.name)}>
+                                                            Restart service
+                                                        </DropdownMenuItem>
+                                                        <DropdownMenuItem onSelect={() => serviceAction('stop', spec.name)}>
+                                                            Stop service
+                                                        </DropdownMenuItem>
+                                                    </>
+                                                ) : (
+                                                    <DropdownMenuItem onSelect={() => serviceAction('start', spec.name)}>
+                                                        Start service
+                                                    </DropdownMenuItem>
+                                                )}
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
+                                    </div>
+                                </div>
+                                {group.length > 0 ? (
+                                    <div className="ml-2 flex flex-col gap-2 border-l border-hairline pl-3">
+                                        {group.map(container => renderContainerCard(container, true))}
+                                    </div>
+                                ) : (
+                                    <div className="ml-2 pl-3 font-mono text-xs text-muted-foreground">
+                                        No containers running for this service.
+                                    </div>
+                                )}
+                            </div>
+                        );
                     })}
+                </div>
+            ) : safeContainers.length === 0 ? (
+                <div className="text-muted-foreground text-sm">No containers running for this stack.</div>
+            ) : (
+                <>
+                    {/* Summary strip + density toggle appear only for multi-container
+                        stacks; single-container stacks keep the original layout. */}
+                    {safeContainers.length > 1 && (() => {
+                        const total = safeContainers.length;
+                        const running = safeContainers.filter(c => c.State === 'running').length;
+                        const unhealthy = safeContainers.filter(c => c.healthStatus === 'unhealthy').length;
+                        const paused = safeContainers.filter(c => c.State === 'paused').length;
+                        return (
+                            <div className="flex items-center justify-between mb-1 px-1">
+                                <div className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
+                                    <span>{total} container{total !== 1 ? 's' : ''}</span>
+                                    <span className="text-success/80">{running} up</span>
+                                    {paused > 0 && <span className="text-warning/80">{paused} paused</span>}
+                                    {unhealthy > 0 && <span className="text-destructive/80">{unhealthy} unhealthy</span>}
+                                </div>
+                                <div className="flex items-center gap-1">
+                                    <div className="inline-flex rounded-md border border-muted bg-muted/30 p-0.5">
+                                        <TooltipProvider>
+                                          <Tooltip>
+                                            <TooltipTrigger asChild>
+                                              <button
+                                                type="button"
+                                                onClick={() => setDensity('compact')}
+                                                className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'compact' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
+                                                aria-pressed={density === 'compact'}
+                                                aria-label="Compact view"
+                                              >
+                                                <List className="h-3 w-3" strokeWidth={1.5} />
+                                              </button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>Compact view</TooltipContent>
+                                          </Tooltip>
+                                        </TooltipProvider>
+                                        <TooltipProvider>
+                                          <Tooltip>
+                                            <TooltipTrigger asChild>
+                                              <button
+                                                type="button"
+                                                onClick={() => setDensity('detailed')}
+                                                className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${density === 'detailed' ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
+                                                aria-pressed={density === 'detailed'}
+                                                aria-label="Detailed view"
+                                              >
+                                                <Layers className="h-3 w-3" strokeWidth={1.5} />
+                                              </button>
+                                            </TooltipTrigger>
+                                            <TooltipContent>Detailed view</TooltipContent>
+                                          </Tooltip>
+                                        </TooltipProvider>
+                                        {onToggleContainersExpand && (
+                                            <TooltipProvider>
+                                              <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                  <button
+                                                    type="button"
+                                                    onClick={onToggleContainersExpand}
+                                                    className={`rounded px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide transition-colors ${containersExpanded ? 'bg-brand/15 text-brand' : 'text-stat-subtitle hover:text-foreground'}`}
+                                                    aria-pressed={containersExpanded}
+                                                    aria-label={containersExpanded ? 'Collapse containers' : 'Expand containers'}
+                                                  >
+                                                    {containersExpanded
+                                                      ? <Minimize2 className="h-3 w-3" strokeWidth={1.5} />
+                                                      : <Maximize2 className="h-3 w-3" strokeWidth={1.5} />}
+                                                  </button>
+                                                </TooltipTrigger>
+                                                <TooltipContent>{containersExpanded ? 'Collapse containers' : 'Expand containers'}</TooltipContent>
+                                              </Tooltip>
+                                            </TooltipProvider>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })()}
+                    <div className="flex flex-col gap-2">
+                    {safeContainers.map(container => renderContainerCard(container, false))}
                 </div>
                 </>
             )}

@@ -2,7 +2,7 @@ import path from 'path';
 import YAML from 'yaml';
 import { CronExpressionParser } from 'cron-parser';
 import DockerController from './DockerController';
-import { DatabaseService } from './DatabaseService';
+import { DatabaseService, type StackCheckStatus, type StackServiceStatus } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
@@ -12,6 +12,7 @@ import { parseImageRef, selectLocalRepoDigest, compareLocalToRemoteTag } from '.
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
+import { buildEffectiveServiceModel } from './effectiveServiceModel';
 
 const BACKFILL_KEY = 'image_update_notifications_backfilled';
 
@@ -243,10 +244,123 @@ export async function loadStackBuildServices(nodeId: number, stackName: string):
     return extractBuildServicesFromCompose(composeContent);
 }
 
+// ─── Per-service reduction (model-based status) ─────────────────────────────
+
+export interface ServiceReduction {
+    status: StackServiceStatus;
+    confirmedUpdateThisRun: boolean;
+}
+
+export function reduceServiceStatus(
+    service: string,
+    declaredImage: string | null,
+    runtimeImages: string[],
+    imageUpdateMap: Map<string, ImageCheckResult>,
+    prior: StackServiceStatus | undefined,
+): ServiceReduction {
+    const dedupedRuntime = [...new Set(runtimeImages)].sort();
+    const refs = new Set<string>();
+    if (declaredImage) refs.add(declaredImage);
+    for (const ref of dedupedRuntime) refs.add(ref);
+
+    if (refs.size === 0) {
+        return {
+            status: { service, image: declaredImage, hasUpdate: false, checkStatus: 'not_checkable', lastError: null },
+            confirmedUpdateThisRun: false,
+        };
+    }
+
+    const checkableResults: ImageCheckResult[] = [];
+    for (const ref of refs) {
+        const result = imageUpdateMap.get(ref);
+        if (!result || result.notCheckable) continue;
+        checkableResults.push(result);
+    }
+
+    if (checkableResults.length === 0) {
+        return {
+            status: { service, image: declaredImage, hasUpdate: false, checkStatus: 'not_checkable', lastError: null },
+            confirmedUpdateThisRun: false,
+        };
+    }
+
+    const errored = checkableResults.filter((r) => r.error !== undefined);
+    const confirmedUpdateThisRun = checkableResults.some(
+        (r) => r.error === undefined && r.hasUpdate === true,
+    );
+
+    if (errored.length === checkableResults.length) {
+        const priorHasUpdate = prior?.hasUpdate ?? false;
+        return {
+            status: {
+                service,
+                image: declaredImage,
+                ...(dedupedRuntime.length > 0 ? { runtimeImages: dedupedRuntime } : {}),
+                hasUpdate: priorHasUpdate,
+                checkStatus: 'failed',
+                lastError: errored[0].error ?? 'Update check failed',
+            },
+            confirmedUpdateThisRun: false,
+        };
+    }
+
+    const checkStatus: StackServiceStatus['checkStatus'] = errored.length > 0 ? 'partial' : 'ok';
+    const lastError = errored.length > 0 ? (errored[0].error ?? null) : null;
+    const hasUpdate = checkStatus === 'partial'
+        ? (confirmedUpdateThisRun || (prior?.hasUpdate ?? false))
+        : confirmedUpdateThisRun;
+
+    return {
+        status: {
+            service,
+            image: declaredImage,
+            ...(dedupedRuntime.length > 0 ? { runtimeImages: dedupedRuntime } : {}),
+            hasUpdate,
+            checkStatus,
+            lastError,
+        },
+        confirmedUpdateThisRun,
+    };
+}
+
+export function aggregateServiceCheckStatus(services: StackServiceStatus[]): StackCheckStatus {
+    if (services.length === 0) return 'ok';
+    const checkable = services.filter((s) => s.checkStatus !== 'not_checkable');
+    if (checkable.length === 0) return 'ok';
+    const failedCount = checkable.filter((s) => s.checkStatus === 'failed').length;
+    if (failedCount === checkable.length) return 'failed';
+    if (checkable.some((s) => s.checkStatus === 'partial')
+        || checkable.some((s) => s.checkStatus === 'failed')) {
+        return 'partial';
+    }
+    return 'ok';
+}
+
+export function buildAvailabilityNotifyMessage(stackName: string, services: StackServiceStatus[]): string {
+    const named = services.filter((s) => s.hasUpdate).map((s) => s.service).sort();
+    if (named.length === 0 || services.length <= 1) {
+        return `Stack "${stackName}" has image updates available.`;
+    }
+    if (named.length === 1) {
+        return `Stack "${stackName}" has image updates available for service: ${named[0]}.`;
+    }
+    return `Stack "${stackName}" has image updates available for services: ${named.join(', ')}.`;
+}
+
+function stackStatusLastError(services: StackServiceStatus[]): string | null {
+    for (const svc of services) {
+        if (svc.checkStatus !== 'not_checkable' && svc.lastError) return svc.lastError;
+    }
+    return null;
+}
+
 // ─── Service ──────────────────────────────────────────────────────────────────
 
 export class ImageUpdateService {
     private static instance: ImageUpdateService;
+
+    /** Per-stack write serialization and generation for stale-writer discard. */
+    private stackWriteState = new Map<string, { chain: Promise<void>; generation: number }>();
 
     private static readonly MIN_INTERVAL_MINUTES = 15;
     private static readonly MAX_INTERVAL_MINUTES = 1440;          // 24 hours
@@ -594,9 +708,10 @@ export class ImageUpdateService {
         }
 
         // Phase 3: Container augmentation (captures actual deployed image tags)
+        let allContainers: Awaited<ReturnType<DockerController['getAllContainers']>> = [];
         try {
-            const containers = await withTimeout(docker.getAllContainers(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getAllContainers');
-            for (const c of containers) {
+            allContainers = await withTimeout(docker.getAllContainers(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getAllContainers');
+            for (const c of allContainers) {
                 // Prefer the pinned project label (== stackName for Sencho-deployed
                 // stacks, including multi-file / context-dir ones where
                 // --project-directory would otherwise change the working-dir
@@ -662,54 +777,35 @@ export class ImageUpdateService {
         // Write status for ALL stacks (including those with no pullable images)
         const now = Date.now();
         let updatesFound = 0;
-        const newlyUpdated: string[] = [];
-        for (const [stackName, images] of stackImages) {
-            // Tally only checkable images: a not-checkable image (locally built,
-            // or a bare digest ref) is neither a pass nor a failure.
-            const checkable = Array.from(images)
-                .map(img => imageUpdateMap.get(img))
-                .filter((r): r is ImageCheckResult => !!r && !r.notCheckable);
-            const errored = checkable.filter(r => r.error !== undefined);
-            const confirmedHasUpdate = checkable.some(r => r.error === undefined && r.hasUpdate === true);
-
-            // Every checkable image failed: status is undeterminable. Preserve the
-            // last-known has_update so a transient registry outage neither erases a
-            // real update nor flaps the notification state.
-            if (checkable.length > 0 && errored.length === checkable.length) {
-                db.recordStackCheckFailure(nodeId, stackName, errored[0].error ?? 'Update check failed', now);
-                continue;
-            }
-
-            const checkStatus = errored.length > 0 ? 'partial' : 'ok';
-            const lastError = errored.length > 0 ? (errored[0].error ?? null) : null;
-            // Only a fully-ok check is authoritative enough to lower has_update to
-            // false. On a partial check some image could not be reached, so a
-            // previously confirmed update is preserved rather than erased (which
-            // would also re-fire the notification when that image recovers).
-            const hasUpdate = checkStatus === 'partial'
-                ? (confirmedHasUpdate || previousState[stackName] === true)
-                : confirmedHasUpdate;
-
-            if (hasUpdate) {
+        const newlyUpdated: Array<{ stackName: string; message: string }> = [];
+        for (const [stackName] of stackImages) {
+            const outcome = await this.writeStackUpdateStatus(
+                nodeId,
+                stackName,
+                stackImages.get(stackName) ?? new Set(),
+                imageUpdateMap,
+                previousState,
+                now,
+                allContainers,
+                db,
+            );
+            if (outcome.hasUpdate) {
                 updatesFound++;
-                // Notify only on state transition: was false/absent, now true
                 if (!isBackfilled || !previousState[stackName]) {
-                    newlyUpdated.push(stackName);
+                    newlyUpdated.push({ stackName, message: outcome.notifyMessage });
                 }
             }
-            db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError);
         }
 
         // Dispatch notifications for stacks that newly have updates
         if (newlyUpdated.length > 0) {
             const notifier = NotificationService.getInstance();
-            for (const stackName of newlyUpdated) {
+            for (const { stackName, message } of newlyUpdated) {
                 try {
                     await notifier.dispatchAlert(
                         'info',
                         'image_update_available',
-                        // Node-neutral body: the hub bell badge attributes remotes.
-                        `Stack "${stackName}" has image updates available.`,
+                        message,
                         { stackName, actor: 'system:image-update' },
                     );
                 } catch (e) {
@@ -749,6 +845,188 @@ export class ImageUpdateService {
                 db.clearStackUpdateStatus(nodeId, staleStack);
             }
         }
+    }
+
+    /**
+     * Re-check a single stack after a service-scoped update or restore. On a
+     * render failure the prior row is left untouched and a warning is returned.
+     */
+    public async recheckStack(nodeId: number, stackName: string): Promise<{ warning: string | null }> {
+        const db = DatabaseService.getInstance();
+        const docker = DockerController.getInstance(nodeId);
+        const model = await buildEffectiveServiceModel(nodeId, stackName);
+        if (!model.renderable) {
+            return { warning: model.error };
+        }
+
+        let containers: Array<{ Image?: string; Labels?: Record<string, string> }> = [];
+        try {
+            containers = await withTimeout(docker.getAllContainers(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getAllContainers');
+        } catch (e) {
+            console.warn(`[ImageUpdateService] recheckStack container read failed for "${stackName}":`, e);
+        }
+
+        const refs = new Set<string>();
+        const runtimeByService = this.runtimeImagesByService(stackName, containers);
+        for (const spec of model.services) {
+            if (spec.declaredImage) refs.add(spec.declaredImage);
+            for (const ref of runtimeByService.get(spec.name) ?? []) refs.add(ref);
+        }
+
+        const imageUpdateMap = new Map<string, ImageCheckResult>();
+        for (const imageRef of refs) {
+            try {
+                imageUpdateMap.set(imageRef, await this.checkImage(docker, imageRef));
+            } catch (e) {
+                imageUpdateMap.set(imageRef, { hasUpdate: false, error: getErrorMessage(e, 'Update check failed') });
+            }
+            await sleep(ImageUpdateService.INTER_IMAGE_DELAY_MS);
+        }
+
+        const priorByService = new Map(db.getStackServicesJson(nodeId, stackName).map((s) => [s.service, s]));
+        const reductions = model.services.map((spec) => reduceServiceStatus(
+            spec.name,
+            spec.declaredImage,
+            runtimeByService.get(spec.name) ?? [],
+            imageUpdateMap,
+            priorByService.get(spec.name),
+        ));
+        const services = reductions.map((r) => r.status);
+        const checkStatus = aggregateServiceCheckStatus(services);
+        const hasUpdate = services.some((s) => s.hasUpdate);
+        const lastError = stackStatusLastError(services);
+        const now = Date.now();
+
+        await this.withStackWriteLock(nodeId, stackName, async (generation) => {
+            if (checkStatus === 'failed') {
+                db.recordStackCheckFailure(nodeId, stackName, lastError ?? 'Update check failed', now, services, generation);
+            } else {
+                db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError, services, generation);
+            }
+        });
+
+        return { warning: null };
+    }
+
+    private stackWriteKey(nodeId: number, stackName: string): string {
+        return `${nodeId}:${stackName}`;
+    }
+
+    private async withStackWriteLock(
+        nodeId: number,
+        stackName: string,
+        write: (generation: number) => void | Promise<void>,
+    ): Promise<void> {
+        const key = this.stackWriteKey(nodeId, stackName);
+        let state = this.stackWriteState.get(key);
+        if (!state) {
+            state = { chain: Promise.resolve(), generation: 0 };
+            this.stackWriteState.set(key, state);
+        }
+        state.generation += 1;
+        const generation = state.generation;
+        state.chain = state.chain.then(async () => {
+            const current = this.stackWriteState.get(key);
+            if (!current || current.generation !== generation) return;
+            await write(generation);
+        });
+        await state.chain;
+    }
+
+    private runtimeImagesByService(
+        stackName: string,
+        containers: Array<{ Image?: string; Labels?: Record<string, string> }>,
+    ): Map<string, string[]> {
+        const out = new Map<string, string[]>();
+        for (const c of containers) {
+            if (c.Labels?.['com.docker.compose.project'] !== stackName) continue;
+            const service = c.Labels?.['com.docker.compose.service'];
+            if (!service) continue;
+            const imageRef = c.Image ?? '';
+            if (!imageRef || imageRef.startsWith('sha256:')) continue;
+            const list = out.get(service) ?? [];
+            list.push(imageRef);
+            out.set(service, list);
+        }
+        return out;
+    }
+
+    private async writeStackUpdateStatus(
+        nodeId: number,
+        stackName: string,
+        images: Set<string>,
+        imageUpdateMap: Map<string, ImageCheckResult>,
+        previousState: Record<string, boolean>,
+        checkedAt: number,
+        containers: Array<{ Image?: string; Labels?: Record<string, string> }>,
+        db: DatabaseService,
+    ): Promise<{ hasUpdate: boolean; notifyMessage: string }> {
+        const model = await buildEffectiveServiceModel(nodeId, stackName);
+        if (model.renderable) {
+            const priorByService = new Map(
+                DatabaseService.getInstance().getStackServicesJson(nodeId, stackName).map((s) => [s.service, s]),
+            );
+            const runtimeByService = this.runtimeImagesByService(stackName, containers);
+            const reductions = model.services.map((spec) => reduceServiceStatus(
+                spec.name,
+                spec.declaredImage,
+                runtimeByService.get(spec.name) ?? [],
+                imageUpdateMap,
+                priorByService.get(spec.name),
+            ));
+            const services = reductions.map((r) => r.status);
+            const checkStatus = aggregateServiceCheckStatus(services);
+            const hasUpdate = services.some((s) => s.hasUpdate);
+            const lastError = stackStatusLastError(services);
+            const notifyMessage = buildAvailabilityNotifyMessage(stackName, services);
+
+            await this.withStackWriteLock(nodeId, stackName, async (generation) => {
+                if (checkStatus === 'failed') {
+                    db.recordStackCheckFailure(
+                        nodeId, stackName, lastError ?? 'Update check failed', checkedAt, services, generation,
+                    );
+                } else {
+                    db.upsertStackUpdateStatus(
+                        nodeId, stackName, hasUpdate, checkedAt, checkStatus, lastError, services, generation,
+                    );
+                }
+            });
+
+            return { hasUpdate, notifyMessage };
+        }
+
+        const checkable = Array.from(images)
+            .map((img) => imageUpdateMap.get(img))
+            .filter((r): r is ImageCheckResult => !!r && !r.notCheckable);
+        const errored = checkable.filter((r) => r.error !== undefined);
+        const confirmedHasUpdate = checkable.some((r) => r.error === undefined && r.hasUpdate === true);
+
+        if (checkable.length > 0 && errored.length === checkable.length) {
+            await this.withStackWriteLock(nodeId, stackName, async () => {
+                db.recordStackCheckFailure(
+                    nodeId, stackName, errored[0].error ?? 'Update check failed', checkedAt,
+                );
+            });
+            return {
+                hasUpdate: previousState[stackName] === true,
+                notifyMessage: buildAvailabilityNotifyMessage(stackName, []),
+            };
+        }
+
+        const checkStatus: StackCheckStatus = errored.length > 0 ? 'partial' : 'ok';
+        const lastError = errored.length > 0 ? (errored[0].error ?? null) : null;
+        const hasUpdate = checkStatus === 'partial'
+            ? (confirmedHasUpdate || previousState[stackName] === true)
+            : confirmedHasUpdate;
+
+        await this.withStackWriteLock(nodeId, stackName, async () => {
+            db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, checkedAt, checkStatus, lastError);
+        });
+
+        return {
+            hasUpdate,
+            notifyMessage: buildAvailabilityNotifyMessage(stackName, []),
+        };
     }
 
     public async checkImage(docker: DockerController, imageRef: string): Promise<ImageCheckResult> {

@@ -5,7 +5,7 @@ import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER, PROXY_DEPLOY_SOURCE_HEADER, PROXY
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
-import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY } from '../services/CapabilityRegistry';
+import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { DatabaseService } from '../services/DatabaseService';
 import { redactSensitiveText } from '../utils/safeLog';
@@ -171,7 +171,7 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         finalizeProxyTiming(req, 'error');
         console.error('[Proxy] Remote node error:', getErrorMessage(err, 'unknown'));
         const path = req.originalUrl || req.url;
-        if (req.method === 'POST' && /^\/api\/stacks\/[^/]+\/(?:deploy|update)(?:\?|$)/.test(path)) {
+        if (req.method === 'POST' && /^\/api\/stacks\/[^/]+\/(?:deploy|update|services\/[^/]+\/(?:update|restore))(?:\?|$)/.test(path)) {
           try {
             DatabaseService.getInstance().insertAuditLog({
               timestamp: Date.now(),
@@ -238,6 +238,14 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
       }
 
+      if (isServiceScopedUpdateRoute(req)) {
+        const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_UPDATE_CAPABILITY);
+        if (!supported) {
+          res.status(400).json({ error: 'Service-scoped updates are not supported on this node', code: 'capability_unavailable' });
+          return;
+        }
+      }
+
       // Mixed-version RBAC gate (non-admin only).
       if (req.user?.role !== 'admin') {
         const rbacSupported = await remoteSupportsCrossNodeRbac(req.nodeId);
@@ -263,4 +271,10 @@ function isStackDownWithRemoveVolumes(req: Request): boolean {
   if (req.method !== 'POST') return false;
   if (!/^\/stacks\/[^/]+\/down$/.test(req.path)) return false;
   return req.query.removeVolumes === 'true';
+}
+
+/** POST /stacks/:stackName/services/:serviceName/(update|restore) (path is post-/api strip). */
+function isServiceScopedUpdateRoute(req: Request): boolean {
+  if (req.method !== 'POST') return false;
+  return /^\/stacks\/[^/]+\/services\/[^/]+\/(?:update|restore)$/.test(req.path);
 }

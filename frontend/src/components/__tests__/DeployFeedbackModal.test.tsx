@@ -60,7 +60,14 @@ async function renderStreaming() {
 
 type GateStatus = 'observing' | 'passed' | 'failed' | 'unknown';
 
-function routeGateApi(responses: Array<{ id: string; status: GateStatus; reason?: string | null }>) {
+function routeGateApi(responses: Array<{
+  id: string;
+  status: GateStatus;
+  reason?: string | null;
+  serviceName?: string | null;
+  targetScope?: 'stack' | 'service';
+  failureSource?: 'primary' | 'collateral' | null;
+}>) {
   let call = 0;
   vi.mocked(apiFetch).mockImplementation((url: string) => {
     if (!String(url).includes('/health-gate')) {
@@ -71,6 +78,7 @@ function routeGateApi(responses: Array<{ id: string; status: GateStatus; reason?
     return Promise.resolve(new Response(JSON.stringify({
       stack: 'web', id: r.id, status: r.status, trigger: 'update',
       reason: r.reason ?? null, windowSeconds: 90, startedAt: Date.now(), endedAt: null, containers: [],
+      targetScope: r.targetScope ?? 'stack', serviceName: r.serviceName ?? null, failureSource: r.failureSource ?? null,
     }), { status: 200 }));
   });
 }
@@ -150,6 +158,17 @@ describe('DeployFeedbackModal health gate', () => {
     expect(screen.getAllByText(/Health gate failed/).length).toBeGreaterThan(0);
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
     expect(screen.getByTestId('deploy-feedback-modal')).toBeInTheDocument();
+  });
+
+  it('names the service in the banner for a service-scoped gate and notes a collateral failure', async () => {
+    routeGateApi([{
+      id: 'gate-1', status: 'failed', reason: 'service web has no running replicas to observe',
+      serviceName: 'web', targetScope: 'service', failureSource: 'collateral',
+    }]);
+    await succeedWithGate('gate-1');
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(screen.getByTestId('health-gate-banner')).toHaveAttribute('data-status', 'failed');
+    expect(screen.getByText(/A dependent service triggered the failure/)).toBeInTheDocument();
   });
 
   it('gives up with an unknown verdict after repeated poll failures', async () => {

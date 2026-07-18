@@ -1772,10 +1772,21 @@ paths:
         now, from the stored preflight result, open drift findings, live
         container health, the pending image change, the rollback backup slot,
         and node disk headroom. Advisory only: no verdict blocks an update.
-        Requires `stack:read` permission.
+        Requires `stack:read` permission. Pass `service` to scope the verdict
+        to one Compose service on a multi-service stack.
       parameters:
         - $ref: "#/components/parameters/stackName"
         - $ref: "#/components/parameters/nodeId"
+        - name: service
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            When set, readiness is scoped to this Compose service (multi-service
+            stacks only). Stack-wide guardrails still apply; sibling and
+            dependency signals become advisory. Single-service stacks reject
+            this parameter with 400.
       responses:
         "200":
           description: Readiness report.
@@ -1810,12 +1821,191 @@ paths:
                           type: string
                         affectsVerdict:
                           type: boolean
+        "400":
+          description: Invalid service scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /api/stacks/{stackName}/effective-services:
+    get:
+      operationId: getStackEffectiveServices
+      tags: [Stacks]
+      summary: List effective Compose services
+      description: |
+        Returns the fail-closed effective service model for the stack (declared
+        image, build presence, expected replicas, depends_on, healthcheck).
+        Requires `stack:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Effective model result.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [renderable]
+                properties:
+                  renderable:
+                    type: boolean
+                  services:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, declaredImage, hasBuild, expectedReplicas, dependsOn, hasHealthcheck]
+                      properties:
+                        name:
+                          type: string
+                        declaredImage:
+                          type: string
+                          nullable: true
+                        hasBuild:
+                          type: boolean
+                        expectedReplicas:
+                          type: integer
+                        dependsOn:
+                          type: array
+                          items:
+                            type: string
+                        hasHealthcheck:
+                          type: boolean
+                  code:
+                    type: string
+                  error:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/stacks/{stackName}/services/{serviceName}/update:
+    post:
+      operationId: updateStackService
+      tags: [Stacks]
+      summary: Update or rebuild one Compose service
+      description: |
+        Manually pulls or builds one declared service, then recreates only that
+        service with `--no-deps --force-recreate`. Multi-service stacks only.
+        Requires `stack:deploy`. Automation paths continue to update the full stack.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - name: serviceName
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Service update completed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [serviceName, healthGateId, observing, recoveryAvailable]
+                properties:
+                  serviceName:
+                    type: string
+                  healthGateId:
+                    type: string
+                    nullable: true
+                  observing:
+                    type: boolean
+                  recoveryId:
+                    type: string
+                    nullable: true
+                  recoveryAvailable:
+                    type: boolean
+                  recheckWarning:
+                    type: string
+        "400":
+          description: Service update rejected (single-service stack, missing service, or unavailable capability).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Service update failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /api/stacks/{stackName}/services/{serviceName}/restore:
+    post:
+      operationId: restoreStackService
+      tags: [Stacks]
+      summary: Restore one Compose service from a recovery snapshot
+      description: |
+        Retags the captured majority image onto the declared tag and recreates
+        only that service. Body must include `recoveryId` from a prior service
+        update. Requires `stack:deploy`.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - name: serviceName
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [recoveryId]
+              properties:
+                recoveryId:
+                  type: string
+      responses:
+        "200":
+          description: Service restore completed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [serviceName, healthGateId, observing, recoveryAvailable]
+                properties:
+                  serviceName:
+                    type: string
+                  healthGateId:
+                    type: string
+                    nullable: true
+                  observing:
+                    type: boolean
+                  recoveryId:
+                    type: string
+                    nullable: true
+                  recoveryAvailable:
+                    type: boolean
+        "400":
+          description: Restore rejected (missing recoveryId or invalid binding).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Service restore failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /api/stacks/{stackName}/rollback-readiness:
     get:
@@ -1908,7 +2098,7 @@ paths:
                   trigger:
                     type: string
                     nullable: true
-                    enum: [update, deploy, null]
+                    enum: [update, deploy, service_update, service_restore, null]
                   reason:
                     type: string
                     nullable: true
@@ -1937,6 +2127,25 @@ paths:
                           nullable: true
                         restarts:
                           type: integer
+                        service:
+                          type: string
+                          nullable: true
+                        role:
+                          type: string
+                          nullable: true
+                          enum: [primary, collateral, null]
+                  targetScope:
+                    type: string
+                    enum: [stack, service]
+                    description: Defaults to stack for legacy runs.
+                  serviceName:
+                    type: string
+                    nullable: true
+                  failureSource:
+                    type: string
+                    nullable: true
+                    enum: [primary, collateral, null]
+                    description: Set on failed service-scoped runs; null for stack and successful runs.
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":

@@ -74,6 +74,12 @@ export interface HealthGateUiState {
   reason: string | null;
   windowSeconds: number | null;
   startedAt: number | null;
+  /** 'service' for a service-scoped update/restore gate; 'stack' otherwise. Absent on older gates. */
+  targetScope?: 'stack' | 'service';
+  /** Set only for a service-scoped gate; null/absent for a full-stack gate. */
+  serviceName?: string | null;
+  /** Which side of a service-scoped gate failed; null/absent for full-stack gates and non-failures. */
+  failureSource?: 'primary' | 'collateral' | null;
 }
 
 const GATE_POLL_INTERVAL_MS = 4_000;
@@ -264,7 +270,10 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
   // resolve to an honest client-side unknown rather than observing forever.
   const startGatePolling = useCallback((stackName: string, nodeId: number | null, gateId: string, trigger: 'update' | 'deploy', mySession: number) => {
     stopGatePolling();
-    setHealthGate({ stackName, nodeId, gateId, trigger, status: 'observing', reason: null, windowSeconds: null, startedAt: null });
+    setHealthGate({
+      stackName, nodeId, gateId, trigger, status: 'observing', reason: null, windowSeconds: null, startedAt: null,
+      targetScope: 'stack', serviceName: null, failureSource: null,
+    });
     let strikes = 0;
     // Single-flight: skip a tick while one request is outstanding so two
     // overlapping responses cannot land out of order.
@@ -299,6 +308,9 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
               reason: string | null;
               windowSeconds: number | null;
               startedAt: number | null;
+              targetScope?: 'stack' | 'service';
+              serviceName?: string | null;
+              failureSource?: 'primary' | 'collateral' | null;
             }
           : null;
         if (sessionIdRef.current !== mySession || settled) return;
@@ -311,7 +323,13 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
           return;
         }
         strikes = 0;
-        setHealthGate({ stackName, nodeId, gateId, trigger, status: report.status, reason: report.reason, windowSeconds: report.windowSeconds, startedAt: report.startedAt });
+        setHealthGate({
+          stackName, nodeId, gateId, trigger, status: report.status, reason: report.reason,
+          windowSeconds: report.windowSeconds, startedAt: report.startedAt,
+          targetScope: report.targetScope ?? 'stack',
+          serviceName: report.serviceName ?? null,
+          failureSource: report.failureSource ?? null,
+        });
         if (report.status !== 'observing') {
           settled = true;
           stopGatePolling();

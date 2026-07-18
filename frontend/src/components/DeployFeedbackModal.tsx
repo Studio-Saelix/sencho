@@ -366,13 +366,17 @@ export function DeployFeedbackModal({ isMinimized, onMinimize }: DeployFeedbackM
 function HealthGateBanner({ gate }: { gate: HealthGateUiState }) {
   const elapsed = gate.startedAt ? Math.max(0, Math.floor((Date.now() - gate.startedAt) / 1000)) : 0;
   const windowLabel = gate.windowSeconds ? ` of ${gate.windowSeconds}s` : '';
+  // Service-scoped gates name the service; a full-stack gate keeps the
+  // existing "containers"/"the stack" phrasing unchanged.
+  const scopeSubject = gate.serviceName ? `service "${gate.serviceName}"` : 'containers';
+  const collateralNote = gate.failureSource === 'collateral' ? ' A dependent service triggered the failure.' : '';
 
   if (gate.status === 'observing') {
     return (
       <div data-testid="health-gate-banner" data-status="observing" className="flex items-start gap-2 px-4 py-2 border-b border-glass-border bg-card/40 shrink-0">
         <HeartPulse className="h-3.5 w-3.5 mt-0.5 shrink-0 text-brand" />
         <p className="min-w-0 text-xs text-muted-foreground">
-          Health gate: observing containers ({elapsed}s{windowLabel}). Closing this panel does not stop the observation.
+          Health gate: observing {scopeSubject} ({elapsed}s{windowLabel}). Closing this panel does not stop the observation.
         </p>
       </div>
     );
@@ -382,7 +386,7 @@ function HealthGateBanner({ gate }: { gate: HealthGateUiState }) {
       <div data-testid="health-gate-banner" data-status="passed" className="flex items-start gap-2 px-4 py-2 border-b border-success/30 bg-success/5 shrink-0">
         <CheckCircle2 className="h-3.5 w-3.5 mt-0.5 shrink-0 text-success" />
         <p className="min-w-0 text-xs text-success">
-          Health gate passed: containers stayed healthy through the observation window.
+          Health gate passed: {scopeSubject} stayed healthy through the observation window.
         </p>
       </div>
     );
@@ -392,7 +396,7 @@ function HealthGateBanner({ gate }: { gate: HealthGateUiState }) {
       <div data-testid="health-gate-banner" data-status="failed" className="flex items-start gap-2 px-4 py-2 border-b border-destructive/30 bg-destructive/5 shrink-0">
         <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-destructive" />
         <p className="min-w-0 text-xs text-destructive">
-          Health gate failed{gate.reason ? `: ${gate.reason}` : ''}. Rollback options are available on the stack.
+          Health gate failed{gate.reason ? `: ${gate.reason}` : ''}.{collateralNote} Rollback options are available on the stack.
         </p>
       </div>
     );

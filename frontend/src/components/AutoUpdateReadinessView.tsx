@@ -12,6 +12,8 @@ import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, Kicker } from '@/components/mobile/mobile-ui';
 import { ImageSourceMenu } from './ImageSourceMenu';
 import type { ScheduledTask } from '@/types/scheduling';
+import { SERVICE_SCOPED_UPDATE_CAPABILITY } from '@/lib/capabilities';
+import { requestServiceUpdate } from '@/lib/serviceUpdate';
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
 
@@ -55,6 +57,9 @@ export interface StackCard {
   // and the hero "ready to apply automatically" count. Manual Apply now is
   // schedule-independent and does not read this field.
   autoUpdateEnabled: boolean;
+  // Name of the service currently applying a per-service update on this card,
+  // or null when none is in flight. Distinct from `applying` (full-stack).
+  applyingService: string | null;
 }
 
 interface NodeGroup {
@@ -186,17 +191,25 @@ function VersionDiff({ current, next }: { current: string | null; next: string |
 
 function StackReadinessCard({
   card,
+  canServiceUpdate = false,
   onApply,
+  onApplyService,
 }: {
   card: StackCard;
+  canServiceUpdate?: boolean;
   onApply: (stack: string, nodeId: number) => void;
+  onApplyService?: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, autoUpdateEnabled } = card;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled } = card;
   const loading = !previewLoaded;
   const failed = previewLoaded && preview === null;
   const blocked = preview?.summary.blocked ?? false;
   const bump = preview?.summary.semver_bump ?? 'none';
-  const updatingImageCount = preview?.images.filter(i => i.has_update).length ?? 0;
+  const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
+  const updatingImageCount = updatingImages.length;
+  // Multi-service only (§12): a single-image preview is a single-service
+  // stack, which keeps the full-stack-only "Apply now" affordance below.
+  const showServiceApply = canServiceUpdate && (preview?.images.length ?? 0) > 1 && updatingImageCount > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
 
   return (
@@ -267,6 +280,25 @@ function StackReadinessCard({
                 </div>
               )}
 
+              {showServiceApply && (
+                <div className="flex flex-col gap-1.5 rounded-md border border-card-border bg-muted/20 p-2">
+                  {updatingImages.map(img => (
+                    <div key={img.service} className="flex items-center justify-between gap-2">
+                      <span className="truncate font-mono text-[11px] text-stat-subtitle">{img.service}</span>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 gap-1 rounded-md px-2 text-[11px]"
+                        onClick={() => onApplyService?.(stack, nodeId, img.service)}
+                        disabled={blocked || applying || applyingService !== null}
+                      >
+                        {applyingService === img.service ? 'Applying...' : 'Apply'}
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <div className="mt-auto flex items-center justify-between gap-3 pt-1">
                 <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle">
                   {nextRun ? (
@@ -285,7 +317,7 @@ function StackReadinessCard({
                 <Button
                   size="sm"
                   onClick={() => onApply(stack, nodeId)}
-                  disabled={blocked || applying}
+                  disabled={blocked || applying || applyingService !== null}
                   title={blocked ? (blockedReason ?? undefined) : undefined}
                   className="gap-1.5"
                 >
@@ -378,10 +410,14 @@ function ReadinessHero({
 
 function NodeGroupSection({
   group,
+  canServiceUpdate,
   onApply,
+  onApplyService,
 }: {
   group: NodeGroup;
+  canServiceUpdate: boolean;
   onApply: (stack: string, nodeId: number) => void;
+  onApplyService: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
   const TypeIcon = group.nodeType === 'local' ? Monitor : Globe;
   const stackCount = group.cards.length;
@@ -401,7 +437,13 @@ function NodeGroupSection({
       </div>
       <div className="grid gap-4 grid-cols-1 lg:grid-cols-2 2xl:grid-cols-3">
         {group.cards.map(card => (
-          <StackReadinessCard key={`${card.nodeId}::${card.stack}`} card={card} onApply={onApply} />
+          <StackReadinessCard
+            key={`${card.nodeId}::${card.stack}`}
+            card={card}
+            canServiceUpdate={canServiceUpdate}
+            onApply={onApply}
+            onApplyService={onApplyService}
+          />
         ))}
       </div>
     </section>
@@ -412,11 +454,23 @@ function NodeGroupSection({
 
 /** One-up readiness card for the phone screen. Reuses RiskBadge + VersionDiff
  *  and the same apply/disabled logic as the desktop card. Exported for tests. */
-export function MobileReadinessCard({ card, onApply }: { card: StackCard; onApply: (stack: string, nodeId: number) => void }) {
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, autoUpdateEnabled } = card;
+export function MobileReadinessCard({
+  card,
+  canServiceUpdate = false,
+  onApply,
+  onApplyService,
+}: {
+  card: StackCard;
+  canServiceUpdate?: boolean;
+  onApply: (stack: string, nodeId: number) => void;
+  onApplyService?: (stack: string, nodeId: number, serviceName: string) => void;
+}) {
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled } = card;
   const failed = previewLoaded && preview === null;
   const blocked = preview?.summary.blocked ?? false;
   const bump = preview?.summary.semver_bump ?? 'none';
+  const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
+  const showServiceApply = canServiceUpdate && (preview?.images.length ?? 0) > 1 && updatingImages.length > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
@@ -458,6 +512,24 @@ export function MobileReadinessCard({ card, onApply }: { card: StackCard; onAppl
           <div className="border-t border-dashed border-card-border pt-[9px] text-[12.5px] leading-[18px] text-stat-subtitle">
             {lead && <b className="text-stat-title">{lead}</b>}{rest}
           </div>
+          {showServiceApply && (
+            <div className="flex flex-col gap-1.5 rounded-md border border-card-border bg-muted/20 p-2">
+              {updatingImages.map(img => (
+                <div key={img.service} className="flex items-center justify-between gap-2">
+                  <span className="truncate font-mono text-[11px] text-stat-subtitle">{img.service}</span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 rounded-md px-2 text-[11px]"
+                    onClick={() => onApplyService?.(stack, nodeId, img.service)}
+                    disabled={blocked || applying || applyingService !== null}
+                  >
+                    {applyingService === img.service ? 'Applying...' : 'Apply'}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="flex items-center justify-between gap-[10px] pt-0.5">
             <span className={`font-mono text-[11px] ${blocked ? 'text-destructive' : 'text-stat-subtitle'}`}>
               {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked ? 'Held for review' : 'No schedule')}
@@ -466,7 +538,7 @@ export function MobileReadinessCard({ card, onApply }: { card: StackCard; onAppl
               size="sm"
               variant={blocked ? 'outline' : 'default'}
               onClick={() => onApply(stack, nodeId)}
-              disabled={blocked || applying}
+              disabled={blocked || applying || applyingService !== null}
               className="gap-1.5"
             >
               <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
@@ -479,7 +551,17 @@ export function MobileReadinessCard({ card, onApply }: { card: StackCard; onAppl
   );
 }
 
-function MobileNodeSection({ group, onApply }: { group: NodeGroup; onApply: (stack: string, nodeId: number) => void }) {
+function MobileNodeSection({
+  group,
+  canServiceUpdate,
+  onApply,
+  onApplyService,
+}: {
+  group: NodeGroup;
+  canServiceUpdate: boolean;
+  onApply: (stack: string, nodeId: number) => void;
+  onApplyService: (stack: string, nodeId: number, serviceName: string) => void;
+}) {
   return (
     <section>
       <div className="mb-[13px] flex items-baseline gap-2 border-b border-hairline pb-2">
@@ -489,7 +571,13 @@ function MobileNodeSection({ group, onApply }: { group: NodeGroup; onApply: (sta
       </div>
       <div className="flex flex-col gap-3">
         {group.cards.map(card => (
-          <MobileReadinessCard key={`${card.nodeId}::${card.stack}`} card={card} onApply={onApply} />
+          <MobileReadinessCard
+            key={`${card.nodeId}::${card.stack}`}
+            card={card}
+            canServiceUpdate={canServiceUpdate}
+            onApply={onApply}
+            onApplyService={onApplyService}
+          />
         ))}
       </div>
     </section>
@@ -527,7 +615,7 @@ interface AutoUpdateReadinessProps {
 
 function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps) {
   const isMobile = useIsMobile();
-  const { nodes } = useNodes();
+  const { nodes, nodeMeta, refreshNodeMeta } = useNodes();
   const [groups, setGroups] = useState<NodeGroup[]>([]);
   const [reachableNodeCount, setReachableNodeCount] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
@@ -650,6 +738,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             previewLoaded: false,
             scheduledTask,
             applying: false,
+            applyingService: null,
             autoUpdateEnabled: scheduledTask !== null,
           };
         });
@@ -667,6 +756,12 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
 
       if (token !== loadTokenRef.current) return;
       setGroups(initialGroups);
+      // Resolve service-scoped-update capability for every node in this fleet
+      // view (not just the active one) so per-service Apply can gate on each
+      // card's own node; skips nodes whose meta is already cached.
+      for (const g of initialGroups) {
+        void refreshNodeMeta(g.nodeId);
+      }
 
       const previews = await Promise.all(
         flatPairs.map(async ({ nodeId, stack }) => {
@@ -700,7 +795,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
     } finally {
       if (token === loadTokenRef.current) setLoading(false);
     }
-  }, [localNodeId]);
+  }, [localNodeId, refreshNodeMeta]);
 
   // Detection-cadence status for the control instance (localOnly): the readiness
   // list is fleet-wide, but the cadence shown by the card is this instance's own
@@ -773,6 +868,54 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       setRefreshing(false);
     }
   }, [loadReadiness, loadCadence]);
+
+  // Nodes that advertise service-scoped updates, resolved per node (not just
+  // the active one) since this view spans the whole fleet.
+  const serviceScopedNodeIds = useMemo(
+    () => new Set(
+      Array.from(nodeMeta.entries())
+        .filter(([, meta]) => meta.capabilities.includes(SERVICE_SCOPED_UPDATE_CAPABILITY))
+        .map(([id]) => id),
+    ),
+    [nodeMeta],
+  );
+
+  const handleApplyService = useCallback(async (stack: string, nodeId: number, serviceName: string) => {
+    const setCardField = (predicate: (c: StackCard) => boolean, patch: Partial<StackCard>) =>
+      setGroups(prev => prev.map(g => ({
+        ...g,
+        cards: g.cards.map(c => predicate(c) ? { ...c, ...patch } : c),
+      })));
+
+    setCardField(c => c.stack === stack && c.nodeId === nodeId, { applyingService: serviceName });
+    const loadingId = toast.loading(`Applying update to "${serviceName}" in ${stack}...`);
+    try {
+      const result = await requestServiceUpdate({ nodeId, stackName: stack, serviceName, mode: 'update' });
+      if (!result.ok) {
+        toast.error(result.error);
+        return;
+      }
+      toast.success(`Service "${serviceName}" updated successfully`);
+      setGroups(prev => prev.map(g => (g.nodeId === nodeId
+        ? {
+          ...g,
+          cards: g.cards.map(c => (c.stack === stack
+            ? {
+              ...c,
+              preview: c.preview
+                ? { ...c.preview, images: c.preview.images.filter(i => i.service !== serviceName) }
+                : c.preview,
+            }
+            : c)),
+        }
+        : g)));
+    } catch (err) {
+      toast.error((err as Error)?.message || 'Update failed');
+    } finally {
+      toast.dismiss(loadingId);
+      setCardField(c => c.stack === stack && c.nodeId === nodeId, { applyingService: null });
+    }
+  }, []);
 
   const handleApply = useCallback(async (stack: string, nodeId: number) => {
     const setCardField = (predicate: (c: StackCard) => boolean, patch: Partial<StackCard>) =>
@@ -861,7 +1004,15 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
               <div className="font-mono text-[11px] text-stat-subtitle">Sencho rechecks registries on the configured interval.</div>
             </div>
           ) : (
-            groups.map(group => <MobileNodeSection key={group.nodeId} group={group} onApply={handleApply} />)
+            groups.map(group => (
+              <MobileNodeSection
+                key={group.nodeId}
+                group={group}
+                canServiceUpdate={serviceScopedNodeIds.has(group.nodeId)}
+                onApply={handleApply}
+                onApplyService={handleApplyService}
+              />
+            ))
           )}
         </div>
       </div>
@@ -903,7 +1054,13 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       ) : (
         <div className="flex flex-col gap-8">
           {groups.map(group => (
-            <NodeGroupSection key={group.nodeId} group={group} onApply={handleApply} />
+            <NodeGroupSection
+              key={group.nodeId}
+              group={group}
+              canServiceUpdate={serviceScopedNodeIds.has(group.nodeId)}
+              onApply={handleApply}
+              onApplyService={handleApplyService}
+            />
           ))}
         </div>
       )}

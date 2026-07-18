@@ -122,13 +122,18 @@ export function useOverlayState() {
   const [policyBypassing, setPolicyBypassing] = useState(false);
 
   // Pre-update readiness dialog. `proceed` runs the actual update when the
-  // user confirms; opened by useStackActions.requestStackUpdate. `nodeId` is
-  // captured at open time so both the readiness fetch and the update run against
-  // the same node even if the active node changes while the dialog is open.
+  // user confirms; opened by useStackActions.requestStackUpdate (full stack)
+  // or requestServiceUpdate (a single declared service). `nodeId` is captured
+  // at open time so both the readiness fetch and the update run against the
+  // same node even if the active node changes while the dialog is open.
+  // `serviceName`/`mode` are set only for a service-scoped update; absent
+  // means the full-stack readiness check, unchanged from before.
   const [updateReadiness, setUpdateReadiness] = useState<{
     stackName: string;
     stackFile: string;
     nodeId: number | null;
+    serviceName?: string;
+    mode?: 'update' | 'rebuild';
     proceed: () => void;
   } | null>(null);
 

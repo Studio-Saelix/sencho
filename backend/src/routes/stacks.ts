@@ -13,6 +13,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { StackFileRootsService, STACK_SOURCE_ROOT_ID, stackSourceFileRoot, type StackFileRoot } from '../services/StackFileRootsService';
 import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
+import { StackUpdateOrchestrator, type OrchestratorResult } from '../services/StackUpdateOrchestrator';
 import DockerController, { type BulkStackInfo } from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { MeshService } from '../services/MeshService';
@@ -30,11 +31,12 @@ import { buildStackNetworkFacts } from '../services/network/composeNetworkInspec
 import { buildStorageInventory } from '../services/storage/inventory';
 import { probeComposeDiscovery } from '../services/ComposeDiscoveryService';
 import { buildEffectiveAnatomy } from '../services/effectiveAnatomy';
+import { buildEffectiveServiceModel } from '../services/effectiveServiceModel';
 import { buildEnvInventory } from '../services/EnvInventoryService';
 import { buildStackLabelInventory } from '../services/LabelInventoryService';
 import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers/labelInventoryRequest';
 import { EXPOSURE_INTENTS, type ExposureIntent } from '../services/network/types';
-import { UpdateGuardService } from '../services/UpdateGuardService';
+import { UpdateGuardService, SingleServiceUpdateReadinessError } from '../services/UpdateGuardService';
 import { HealthGateService } from '../services/HealthGateService';
 import { classifyFailure } from '../services/updateGuard/failureClassifier';
 import { requirePermission, checkPermission } from '../middleware/permissions';
@@ -58,7 +60,7 @@ import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/e
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 import { isSelfStack, refuseIfSelfStack, selfStackProtectedBulkResult } from '../helpers/selfStackGuard';
-import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY } from '../services/CapabilityRegistry';
+import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
 
 // Authenticated users with edit permission can write arbitrarily large compose
 // files. Refuse to YAML.parse anything beyond this bound so a malformed (or
@@ -471,7 +473,10 @@ async function runStackBulkOp(
         };
       }
       const atomic = true;
-      await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
+      await StackUpdateOrchestrator.getInstance().execute(
+        { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'bulk', actor: user },
+        { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
+      );
       DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
       NotificationService.getInstance().broadcastEvent({
         type: 'state-invalidate',
@@ -485,7 +490,7 @@ async function runStackBulkOp(
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>
         console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
       );
-      const healthGateId = HealthGateService.getInstance().begin(req.nodeId, stackName, 'update', req.user?.username ?? null);
+      const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null);
       return { stackName, ok: true, healthGateId };
     } else {
       const outcome = await containerActionForStack(req.nodeId, stackName, action);
@@ -1143,6 +1148,7 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
   try {
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
     DatabaseService.getInstance().clearStackScanAttempts(req.nodeId, stackName);
+    DatabaseService.getInstance().deleteServiceUpdateRecoveries(req.nodeId, stackName);
     DatabaseService.getInstance().deleteRoleAssignmentsByResource('stack', stackName);
     DatabaseService.getInstance().deleteGitSource(stackName);
     DatabaseService.getInstance().deleteStackDossier(req.nodeId, stackName);
@@ -1558,6 +1564,24 @@ stacksRouter.get('/:stackName/effective-anatomy', async (req: Request, res: Resp
   }
 });
 
+// Effective Service Model: per-service facts (declared image, build presence,
+// expected replica count, dependencies, healthcheck) that service-scoped
+// update/restore key off of, from the fully-merged effective model. Read-only
+// and advisory; auto-proxies to the active node. Never returns raw render
+// stderr or any environment/label/command value.
+stacksRouter.get('/:stackName/effective-services', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  try {
+    res.json(await buildEffectiveServiceModel(req.nodeId, stackName));
+  } catch (error) {
+    console.error('[Stacks] Failed to build effective service model for %s:', sanitizeForLog(stackName),
+      sanitizeForLog(inspect(error, { depth: 4 })));
+    res.status(500).json({ error: 'Failed to build effective service model' });
+  }
+});
+
 // Environment inventory: per-stack env vars with their source, scope (Compose
 // interpolation vs container injection), and status (present/missing/unused/
 // duplicate/unpersisted), plus likely-secret classification. Read-only and
@@ -1656,12 +1680,17 @@ stacksRouter.put('/:stackName/exposure', async (req: Request, res: Response) => 
 // that owns it. Read-only, so stack:read is the correct gate.
 stacksRouter.get('/:stackName/update-readiness', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
+  const serviceName = typeof req.query.service === 'string' && req.query.service.length > 0 ? req.query.service : undefined;
   if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   if (!(await requireStackExists(req.nodeId, stackName, res))) return;
   try {
-    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(req.nodeId, stackName);
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(req.nodeId, stackName, serviceName);
     res.json(report);
   } catch (error) {
+    if (error instanceof SingleServiceUpdateReadinessError) {
+      res.status(400).json({ error: error.message, code: 'service_update_single_service' });
+      return;
+    }
     console.error('[Stacks] Failed to compute update readiness for %s:', sanitizeForLog(stackName),
       sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to compute update readiness' });
@@ -1724,7 +1753,7 @@ stacksRouter.post('/:stackName/deploy', async (req: Request, res: Response) => {
     dlog(`[Stacks] Deploy completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Deploy finished in ${Date.now() - t0}ms`);
     ok = true;
-    const healthGateId = HealthGateService.getInstance().begin(req.nodeId, stackName, 'deploy', req.user?.username ?? null);
+    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'deploy', req.user?.username ?? null);
     res.json({ message: 'Deployed successfully', healthGateId });
     notifyActionSuccess('deploy_success', `${stackName} deployed`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
@@ -1987,6 +2016,153 @@ stacksRouter.post('/:stackName/services/:serviceName/stop', (req, res) =>
 stacksRouter.post('/:stackName/services/:serviceName/start', (req, res) =>
   handleServiceAction(req, res, 'start'));
 
+/** Map an orchestrator `service_failed` code to an HTTP status. */
+function serviceFailureStatus(code: string): number {
+  switch (code) {
+    case 'service_update_single_service':
+    case 'service_not_updatable':
+    case 'effective_model_render_failed':
+    case 'recovery_id_required':
+      return 400;
+    case 'service_not_found':
+    case 'recovery_not_found':
+      return 404;
+    case 'policy_blocked':
+    case 'recovery_not_restorable':
+    case 'recovery_claim_failed':
+      return 409;
+    default:
+      // Compose, retag, inspect, and replica-divergence failures are server-side.
+      return 500;
+  }
+}
+
+/** Send an orchestrator service result as an HTTP response. Returns success. */
+function sendServiceResult(res: Response, result: OrchestratorResult): boolean {
+  if (result.kind === 'service_done') {
+    res.json({
+      serviceName: result.serviceName,
+      healthGateId: result.healthGateId,
+      observing: result.observing,
+      recoveryId: result.recoveryId,
+      recoveryAvailable: result.recoveryAvailable,
+      ...(result.recheckWarning ? { recheckWarning: result.recheckWarning } : {}),
+    });
+    return true;
+  }
+  if (result.kind === 'service_failed') {
+    res.status(serviceFailureStatus(result.code)).json({
+      error: result.error,
+      code: result.code,
+      ...(result.recoveryId ? { recoveryId: result.recoveryId } : {}),
+    });
+    return false;
+  }
+  // Stack results never reach the service routes; treat defensively.
+  res.status(500).json({ error: 'Unexpected orchestrator result', code: 'unexpected_result' });
+  return false;
+}
+
+function requireServiceScopedUpdateCapability(res: Response): boolean {
+  if (getActiveCapabilities().includes(SERVICE_SCOPED_UPDATE_CAPABILITY)) return true;
+  res.status(400).json({ error: 'Service-scoped updates are not supported on this node', code: 'capability_unavailable' });
+  return false;
+}
+
+async function handleServiceScopedMutation(
+  req: Request,
+  res: Response,
+  options: {
+    lockAction: 'update' | 'rollback';
+    recoveryId?: string;
+    notifyFailureAction: 'update' | 'rollback';
+    failureCode: string;
+    failureMessage: string;
+    onSuccess: (stackName: string, serviceName: string, actor: string) => void;
+  },
+): Promise<void> {
+  const stackName = req.params.stackName as string;
+  const serviceName = req.params.serviceName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (await refuseIfSelfStack(req, res, stackName)) return;
+  if (!requireServiceScopedUpdateCapability(res)) return;
+  if (!tryAcquireStackOpLock(req, res, stackName, options.lockAction)) return;
+
+  const t0 = Date.now();
+  let ok = false;
+  try {
+    const result = await StackUpdateOrchestrator.getInstance().execute(
+      {
+        nodeId: req.nodeId,
+        stackName,
+        target: { scope: 'service', serviceName },
+        trigger: 'manual',
+        actor: req.user?.username ?? null,
+      },
+      {
+        policyOptions: buildPolicyGateOptions(req),
+        terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)),
+        ...(options.recoveryId ? { recoveryId: options.recoveryId } : {}),
+      },
+    );
+    invalidateNodeCaches(req.nodeId);
+    ok = sendServiceResult(res, result);
+    if (ok) {
+      options.onSuccess(stackName, serviceName, req.user?.username ?? 'system');
+    } else if (result.kind === 'service_failed') {
+      notifyActionFailure(
+        options.notifyFailureAction,
+        stackName,
+        new Error(result.error),
+        req.user?.username ?? 'system',
+      );
+    }
+  } catch (error: unknown) {
+    console.error('[Stacks] Service %s failed: %s/%s', sanitizeForLog(options.notifyFailureAction), sanitizeForLog(stackName), sanitizeForLog(serviceName), error);
+    notifyActionFailure(options.notifyFailureAction, stackName, error, req.user?.username ?? 'system');
+    if (!res.headersSent) {
+      res.status(500).json({ error: getErrorMessage(error, options.failureMessage), code: options.failureCode });
+    }
+  } finally {
+    StackOpMetricsService.getInstance().record(req.nodeId, 'update', Date.now() - t0, ok, {
+      targetScope: 'service',
+      serviceName,
+    });
+    releaseStackOpLock(req, stackName);
+  }
+}
+
+stacksRouter.post('/:stackName/services/:serviceName/update', async (req: Request, res: Response) => {
+  await handleServiceScopedMutation(req, res, {
+    lockAction: 'update',
+    notifyFailureAction: 'update',
+    failureCode: 'service_update_failed',
+    failureMessage: 'Failed to update service',
+    onSuccess: (stackName, serviceName, actor) => {
+      notifyActionSuccess('image_update_applied', `${stackName}/${serviceName} updated`, stackName, actor);
+    },
+  });
+});
+
+stacksRouter.post('/:stackName/services/:serviceName/restore', async (req: Request, res: Response) => {
+  const recoveryId = typeof req.body?.recoveryId === 'string' ? req.body.recoveryId : '';
+  if (!recoveryId) {
+    res.status(400).json({ error: 'A recoveryId is required to restore a service.', code: 'recovery_id_required' });
+    return;
+  }
+  await handleServiceScopedMutation(req, res, {
+    lockAction: 'rollback',
+    recoveryId,
+    notifyFailureAction: 'rollback',
+    failureCode: 'service_restore_failed',
+    failureMessage: 'Failed to restore service',
+    onSuccess: (stackName, serviceName, actor) => {
+      notifyActionSuccess('deploy_success', `${stackName}/${serviceName} restored`, stackName, actor);
+    },
+  });
+});
+
 stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   try {
@@ -2013,7 +2189,10 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     const debug = isDebugEnabled();
     const atomic = true;
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
-    await ComposeService.getInstance(req.nodeId).updateStack(stackName, getTerminalWs(req.get(DEPLOY_SESSION_HEADER)), atomic);
+    await StackUpdateOrchestrator.getInstance().execute(
+      { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'manual', actor: req.user?.username ?? null },
+      { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
+    );
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
     invalidateNodeCaches(req.nodeId);
     NotificationService.getInstance().broadcastEvent({
@@ -2027,7 +2206,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     dlog(`[Stacks] Update completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Update finished in ${Date.now() - t0}ms`);
     ok = true;
-    const healthGateId = HealthGateService.getInstance().begin(req.nodeId, stackName, 'update', req.user?.username ?? null);
+    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null);
     res.json({ status: 'Update completed', healthGateId });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {

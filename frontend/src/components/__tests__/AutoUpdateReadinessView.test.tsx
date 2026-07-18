@@ -12,8 +12,17 @@ vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
+// nodeMeta/refreshNodeMeta must be stable across renders (matching the real
+// NodeContext), or a fresh Map/fn on every useNodes() call churns the
+// loadReadiness useCallback identity and re-triggers its effect forever.
+const mockNodeMeta = new Map();
+const mockRefreshNodeMeta = vi.fn();
 vi.mock('@/context/NodeContext', () => ({
-  useNodes: () => ({ nodes: [{ id: 1, name: 'Local', type: 'local', status: 'online' }] }),
+  useNodes: () => ({
+    nodes: [{ id: 1, name: 'Local', type: 'local', status: 'online' }],
+    nodeMeta: mockNodeMeta,
+    refreshNodeMeta: mockRefreshNodeMeta,
+  }),
 }));
 
 import { apiFetch, fetchForNode } from '@/lib/api';
@@ -25,6 +34,7 @@ function card(over: Partial<StackCard> = {}): StackCard {
     nodeId: 1,
     previewLoaded: true,
     applying: false,
+    applyingService: null,
     autoUpdateEnabled: true,
     scheduledTask: null,
     preview: {

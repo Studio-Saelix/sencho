@@ -85,7 +85,8 @@ export function getComposeRollbackInfo(error: unknown): { attempted: boolean; ro
 
 const DEFAULT_COMPOSE_COMMAND_TIMEOUT_MS = 30 * 60 * 1000;
 
-function getComposeCommandTimeoutMs(): number {
+/** Public so other services (e.g. recovery claim leases) can size their own timers off the same ceiling without depending on a private module-local. */
+export function getComposeCommandTimeoutMs(): number {
   const configured = Number(process.env.SENCHO_COMPOSE_COMMAND_TIMEOUT_MS);
   if (Number.isFinite(configured) && configured > 0) {
     return configured;
@@ -873,7 +874,11 @@ export class ComposeService {
       try {
         const pruneOnUpdate = DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1';
         if (pruneOnUpdate) {
-          const result = await DockerController.getInstance(this.nodeId).pruneDanglingImages();
+          // Dynamic import: ServiceUpdateRecoveryService imports getComposeCommandTimeoutMs
+          // from this module, so a static import here would be circular.
+          const { ServiceUpdateRecoveryService } = await import('./ServiceUpdateRecoveryService');
+          const isImageHeld = ServiceUpdateRecoveryService.getInstance().buildHeldImagePredicate(this.nodeId);
+          const result = await DockerController.getInstance(this.nodeId).pruneDanglingImages(isImageHeld);
           // The Docker prune API does not report SpaceReclaimed on the containerd
           // image store, so only show the figure when the daemon actually returns one.
           const reclaimed = result.reclaimedBytes > 0
@@ -904,6 +909,51 @@ export class ComposeService {
       console.warn('[ComposeService] Exposure refresh failed after update for %s:',
         sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
     }
+  }
+
+  /**
+   * Service-scoped update: pull (or `build --pull` for a build-backed service)
+   * and recreate a single service's replicas in place. Always
+   * `--no-deps --force-recreate`, never `--remove-orphans`, so sibling services
+   * keep their container ids and StartedAt. No drift re-baseline and no dangling
+   * prune here; the orchestrator owns per-service post-update reconciliation.
+   */
+  async updateService(stackName: string, serviceName: string, hasBuild: boolean, ws?: WebSocket): Promise<void> {
+    await this.assertRequiredEnvPresent(stackName);
+    await this.assertSafePilotBindMapping(stackName);
+    const stackDir = path.join(this.baseDir, stackName);
+    const sendOutput = (data: string) => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+    };
+    await this.withRegistryAuth(async (env) => {
+      if (hasBuild) {
+        sendOutput(`=== Building ${serviceName} ===\n`);
+        await this.execute('docker', await this.authoredComposeArgs(stackName, ['build', '--pull', serviceName]), stackDir, ws, true, env, getComposeStallTimeoutMs());
+      } else {
+        sendOutput(`=== Pulling ${serviceName} ===\n`);
+        await this.execute('docker', await this.authoredComposeArgs(stackName, ['pull', serviceName]), stackDir, ws, true, env, getComposeStallTimeoutMs());
+      }
+      sendOutput(`=== Recreating ${serviceName} ===\n`);
+      await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--no-deps', '--force-recreate', serviceName]), stackDir, ws, true, env, getComposeStallTimeoutMs());
+    }, sendOutput);
+  }
+
+  /**
+   * Recreate a single service from the image already present locally, without
+   * pulling or building. Used by service restore after the recovery image id has
+   * been retagged onto the declared ref (`--pull never --no-build` so Compose
+   * uses the just-retagged local image). Always `--no-deps --force-recreate`,
+   * never `--remove-orphans`.
+   */
+  async recreateServiceFromLocal(stackName: string, serviceName: string, ws?: WebSocket): Promise<void> {
+    const stackDir = path.join(this.baseDir, stackName);
+    const sendOutput = (data: string) => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+    };
+    await this.withRegistryAuth(async (env) => {
+      sendOutput(`=== Restoring ${serviceName} ===\n`);
+      await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--no-deps', '--force-recreate', '--pull', 'never', '--no-build', serviceName]), stackDir, ws, true, env, getComposeStallTimeoutMs());
+    }, sendOutput);
   }
 
   public async downStack(stackName: string): Promise<void> {
