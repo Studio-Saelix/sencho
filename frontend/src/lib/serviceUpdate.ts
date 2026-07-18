@@ -27,6 +27,8 @@ export interface ServiceUpdateFailure {
     mode: 'update' | 'rebuild';
     error: string;
     code?: string;
+    serviceName?: string;
+    mutationStage?: string;
     recoveryId?: string;
     status?: number;
 }
@@ -58,6 +60,8 @@ export async function requestServiceUpdate(params: RequestServiceUpdateParams): 
                 mode,
                 error,
                 code: isRecord(body) && typeof body.code === 'string' ? body.code : undefined,
+                serviceName: isRecord(body) && typeof body.serviceName === 'string' ? body.serviceName : undefined,
+                mutationStage: isRecord(body) && typeof body.mutationStage === 'string' ? body.mutationStage : undefined,
                 recoveryId: isRecord(body) && typeof body.recoveryId === 'string' ? body.recoveryId : undefined,
                 status: res.status,
             };
@@ -118,6 +122,8 @@ export async function requestServiceRestore(params: RequestServiceRestoreParams)
                 mode: 'update',
                 error,
                 code: isRecord(body) && typeof body.code === 'string' ? body.code : undefined,
+                serviceName: isRecord(body) && typeof body.serviceName === 'string' ? body.serviceName : undefined,
+                mutationStage: isRecord(body) && typeof body.mutationStage === 'string' ? body.mutationStage : undefined,
                 recoveryId: isRecord(body) && typeof body.recoveryId === 'string' ? body.recoveryId : undefined,
                 status: res.status,
             };

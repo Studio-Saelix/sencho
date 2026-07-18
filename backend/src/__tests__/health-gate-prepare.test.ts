@@ -259,4 +259,35 @@ describe('primary vs collateral attribution', () => {
     expect(report.status).toBe('passed');
     expect(report.failureSource).toBeNull();
   });
+
+  it('lets different-service gates coexist while same-service begin supersedes', async () => {
+    const appToken = await prepareService(
+      [{ id: 'p1', name: 'web-app-1', service: 'app' }, { id: 's1', name: 'web-db-1', service: 'db' }],
+      { serviceName: 'app' },
+    );
+    svc().attachExpectedImage(appToken, 'sha256:app');
+    const appFirst = svc().beginPrepared({ prepareToken: appToken, actor: 'tester' });
+    expect(appFirst.observing).toBe(true);
+
+    const dbToken = await prepareService(
+      [{ id: 'p1', name: 'web-app-1', service: 'app' }, { id: 's1', name: 'web-db-1', service: 'db' }],
+      { serviceName: 'db' },
+    );
+    svc().attachExpectedImage(dbToken, 'sha256:db');
+    const dbGate = svc().beginPrepared({ prepareToken: dbToken, actor: 'tester' });
+    expect(dbGate.observing).toBe(true);
+    expect(svc().getReport(0, 'web', appFirst.runId!).status).toBe('observing');
+    expect(svc().getReport(0, 'web', dbGate.runId!).status).toBe('observing');
+
+    const appToken2 = await prepareService(
+      [{ id: 'p1', name: 'web-app-1', service: 'app' }, { id: 's1', name: 'web-db-1', service: 'db' }],
+      { serviceName: 'app' },
+    );
+    svc().attachExpectedImage(appToken2, 'sha256:app2');
+    const appSecond = svc().beginPrepared({ prepareToken: appToken2, actor: 'tester' });
+    expect(appSecond.observing).toBe(true);
+    expect(svc().getReport(0, 'web', appFirst.runId!).status).toBe('unknown');
+    expect(svc().getReport(0, 'web', dbGate.runId!).status).toBe('observing');
+    expect(svc().getReport(0, 'web', appSecond.runId!).status).toBe('observing');
+  });
 });

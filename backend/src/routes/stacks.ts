@@ -13,7 +13,7 @@ import { FileSystemService } from '../services/FileSystemService';
 import { StackFileRootsService, STACK_SOURCE_ROOT_ID, stackSourceFileRoot, type StackFileRoot } from '../services/StackFileRootsService';
 import { FileRootGateway } from '../services/FileRootGateway';
 import { ComposeService, getComposeRollbackInfo } from '../services/ComposeService';
-import { StackUpdateOrchestrator, type OrchestratorResult } from '../services/StackUpdateOrchestrator';
+import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '../services/StackUpdateOrchestrator';
 import DockerController, { type BulkStackInfo } from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { MeshService } from '../services/MeshService';
@@ -2038,7 +2038,7 @@ function serviceFailureStatus(code: string): number {
 }
 
 /** Send an orchestrator service result as an HTTP response. Returns success. */
-function sendServiceResult(res: Response, result: OrchestratorResult): boolean {
+function sendServiceResult(res: Response, result: OrchestratorResult, serviceName: string): boolean {
   if (result.kind === 'service_done') {
     res.json({
       serviceName: result.serviceName,
@@ -2046,6 +2046,8 @@ function sendServiceResult(res: Response, result: OrchestratorResult): boolean {
       observing: result.observing,
       recoveryId: result.recoveryId,
       recoveryAvailable: result.recoveryAvailable,
+      ...(result.previousImageId ? { previousImageId: result.previousImageId } : {}),
+      ...(result.newImageId ? { newImageId: result.newImageId } : {}),
       ...(result.recheckWarning ? { recheckWarning: result.recheckWarning } : {}),
     });
     return true;
@@ -2054,6 +2056,8 @@ function sendServiceResult(res: Response, result: OrchestratorResult): boolean {
     res.status(serviceFailureStatus(result.code)).json({
       error: result.error,
       code: result.code,
+      serviceName: result.serviceName ?? serviceName,
+      ...(result.mutationStage ? { mutationStage: result.mutationStage } : {}),
       ...(result.recoveryId ? { recoveryId: result.recoveryId } : {}),
     });
     return false;
@@ -2078,7 +2082,12 @@ async function handleServiceScopedMutation(
     notifyFailureAction: 'update' | 'rollback';
     failureCode: string;
     failureMessage: string;
-    onSuccess: (stackName: string, serviceName: string, actor: string) => void;
+    onSuccess: (
+      stackName: string,
+      serviceName: string,
+      actor: string,
+      meta: { previousImageId?: string | null; newImageId?: string | null },
+    ) => void;
   },
 ): Promise<void> {
   const stackName = req.params.stackName as string;
@@ -2107,9 +2116,12 @@ async function handleServiceScopedMutation(
       },
     );
     invalidateNodeCaches(req.nodeId);
-    ok = sendServiceResult(res, result);
-    if (ok) {
-      options.onSuccess(stackName, serviceName, req.user?.username ?? 'system');
+    ok = sendServiceResult(res, result, serviceName);
+    if (ok && result.kind === 'service_done') {
+      options.onSuccess(stackName, serviceName, req.user?.username ?? 'system', {
+        previousImageId: result.previousImageId,
+        newImageId: result.newImageId,
+      });
       NotificationService.getInstance().broadcastEvent({
         type: 'state-invalidate',
         scope: 'image-updates',
@@ -2153,8 +2165,16 @@ stacksRouter.post('/:stackName/services/:serviceName/update', async (req: Reques
     notifyFailureAction: 'update',
     failureCode: 'service_update_failed',
     failureMessage: 'Failed to update service',
-    onSuccess: (stackName, serviceName, actor) => {
-      notifyActionSuccess('image_update_applied', `${stackName}/${serviceName} updated`, stackName, actor);
+    onSuccess: (stackName, serviceName, actor, meta) => {
+      const from = shortImageId(meta.previousImageId);
+      const to = shortImageId(meta.newImageId);
+      const transition = from && to && from !== to ? ` (${from} -> ${to})` : '';
+      notifyActionSuccess(
+        'image_update_applied',
+        `${stackName}/${serviceName} updated${transition}`,
+        stackName,
+        actor,
+      );
     },
   });
 });
@@ -2171,8 +2191,16 @@ stacksRouter.post('/:stackName/services/:serviceName/restore', async (req: Reque
     notifyFailureAction: 'rollback',
     failureCode: 'service_restore_failed',
     failureMessage: 'Failed to restore service',
-    onSuccess: (stackName, serviceName, actor) => {
-      notifyActionSuccess('deploy_success', `${stackName}/${serviceName} restored`, stackName, actor);
+    onSuccess: (stackName, serviceName, actor, meta) => {
+      const from = shortImageId(meta.previousImageId);
+      const to = shortImageId(meta.newImageId);
+      const transition = from && to && from !== to ? ` (${from} -> ${to})` : '';
+      notifyActionSuccess(
+        'deploy_success',
+        `${stackName}/${serviceName} restored${transition}`,
+        stackName,
+        actor,
+      );
     },
   });
 });

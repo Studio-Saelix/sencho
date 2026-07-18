@@ -25,7 +25,7 @@ vi.mock('../services/effectiveServiceModel', () => ({
   buildEffectiveServiceModel: vi.fn(async () => state.model),
 }));
 
-import { StackUpdateOrchestrator } from '../services/StackUpdateOrchestrator';
+import { StackUpdateOrchestrator, evaluateServiceReplicaConvergence, shortImageId } from '../services/StackUpdateOrchestrator';
 
 const orch = () => StackUpdateOrchestrator.getInstance();
 
@@ -37,6 +37,46 @@ beforeEach(() => {
   state.updateStack.mockReset();
   state.updateStack.mockResolvedValue(undefined);
   state.model = null;
+});
+
+describe('evaluateServiceReplicaConvergence', () => {
+  it('converges when the exact expected running replicas share one image', () => {
+    expect(evaluateServiceReplicaConvergence('api', 3, ['sha:a', 'sha:a', 'sha:a'], 0)).toEqual({
+      kind: 'converged', imageId: 'sha:a',
+    });
+  });
+
+  it('reports divergent when running replica count is below expected', () => {
+    const result = evaluateServiceReplicaConvergence('api', 3, ['sha:a'], 0);
+    expect(result).toMatchObject({ kind: 'divergent' });
+    expect((result as { error: string }).error).toMatch(/1 running.*expected 3/i);
+  });
+
+  it('reports divergent when no running replicas remain', () => {
+    const result = evaluateServiceReplicaConvergence('api', 2, [], 0);
+    expect(result).toMatchObject({ kind: 'divergent' });
+    expect((result as { error: string }).error).toMatch(/no running replicas/i);
+  });
+
+  it('reports divergent when replicas disagree on image', () => {
+    const result = evaluateServiceReplicaConvergence('api', 2, ['sha:a', 'sha:b'], 0);
+    expect(result).toMatchObject({ kind: 'divergent' });
+    expect((result as { error: string }).error).toMatch(/did not converge/i);
+  });
+
+  it('reports inspect_failed when every inspect failed', () => {
+    expect(evaluateServiceReplicaConvergence('api', 2, [], 2)).toMatchObject({ kind: 'inspect_failed' });
+  });
+
+  it('treats scale-zero as converged with a null image', () => {
+    expect(evaluateServiceReplicaConvergence('api', 0, [], 0)).toEqual({ kind: 'converged', imageId: null });
+  });
+});
+
+describe('shortImageId', () => {
+  it('strips the sha256 prefix and truncates', () => {
+    expect(shortImageId('sha256:abcdef0123456789')).toBe('abcdef012345');
+  });
 });
 
 describe('StackUpdateOrchestrator stack branch', () => {

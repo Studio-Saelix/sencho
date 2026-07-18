@@ -55,12 +55,15 @@ export type OrchestratorResult =
       observing: boolean;
       recoveryId: string | null;
       recoveryAvailable: boolean;
+      previousImageId?: string | null;
+      newImageId?: string | null;
       recheckWarning?: string;
     }
   | {
       kind: 'service_failed';
       code: string;
       error: string;
+      serviceName?: string;
       mutationStage?: string;
       recoveryId?: string | null;
     };
@@ -68,9 +71,55 @@ export type OrchestratorResult =
 function serviceFailed(
   code: string,
   error: string,
-  extra?: { mutationStage?: string; recoveryId?: string | null },
+  extra?: { serviceName?: string; mutationStage?: string; recoveryId?: string | null },
 ): Extract<OrchestratorResult, { kind: 'service_failed' }> {
   return { kind: 'service_failed', code, error, ...extra };
+}
+
+/** Shorten a local image id for activity copy (sha256:abcdef… → abcdef…). */
+export function shortImageId(imageId: string | null | undefined): string | null {
+  if (!imageId) return null;
+  const bare = imageId.startsWith('sha256:') ? imageId.slice(7) : imageId;
+  return bare.slice(0, 12);
+}
+
+/**
+ * Post-mutation replica convergence rules shared by update and restore.
+ * Requires the exact expected count of inspected running image ids and a
+ * single shared image before success (independent of optional health gating).
+ */
+export function evaluateServiceReplicaConvergence(
+  serviceName: string,
+  expectedReplicas: number,
+  ids: string[],
+  inspectErrors: number,
+):
+  | { kind: 'converged'; imageId: string | null }
+  | { kind: 'divergent'; error: string }
+  | { kind: 'inspect_failed'; error: string } {
+  if (expectedReplicas === 0) {
+    return { kind: 'converged', imageId: null };
+  }
+  if (inspectErrors > 0 && ids.length === 0) {
+    return {
+      kind: 'inspect_failed',
+      error: `Could not inspect replicas for service "${serviceName}" after the update.`,
+    };
+  }
+  const distinct = new Set(ids);
+  if (distinct.size === 0) {
+    return { kind: 'divergent', error: `Service "${serviceName}" has no running replicas after the update.` };
+  }
+  if (ids.length !== expectedReplicas) {
+    return {
+      kind: 'divergent',
+      error: `Service "${serviceName}" has ${ids.length} running replica(s); expected ${expectedReplicas}.`,
+    };
+  }
+  if (distinct.size > 1) {
+    return { kind: 'divergent', error: `Service "${serviceName}" replicas did not converge on a single image.` };
+  }
+  return { kind: 'converged', imageId: [...distinct][0] };
 }
 
 /** Parse a tag image ref into a Docker tag() repo + tag pair. */
@@ -169,7 +218,7 @@ export class StackUpdateOrchestrator {
     let recoveryAvailable = false;
     try {
       const policyFailure = await this.checkPolicyOrFail(
-        stackName, nodeId, spec.declaredImage ? [spec.declaredImage] : [], options.policyOptions, 'update',
+        stackName, nodeId, serviceName, spec.declaredImage ? [spec.declaredImage] : [], options.policyOptions, 'update',
       );
       if (policyFailure) return policyFailure;
 
@@ -189,6 +238,9 @@ export class StackUpdateOrchestrator {
         declaredImageRef: spec.declaredImage,
         createdBy: ctx.actor,
       });
+      const previousImageId = recovery.eligible
+        ? recovery.row.majority_image_id
+        : (replicas[0]?.imageId ?? null);
       if (recovery.eligible) {
         recoveryId = recovery.row.id;
         recoveryAvailable = true;
@@ -202,7 +254,7 @@ export class StackUpdateOrchestrator {
         return serviceFailed(
           'service_update_compose_failed',
           getErrorMessage(composeError, 'Service update failed'),
-          { mutationStage: 'compose', recoveryId },
+          { serviceName, mutationStage: 'compose', recoveryId },
         );
       }
 
@@ -237,6 +289,8 @@ export class StackUpdateOrchestrator {
         observing,
         recoveryId,
         recoveryAvailable,
+        previousImageId,
+        newImageId: observed.newImageId ?? null,
         recheckWarning: warnings.length > 0 ? warnings.join(' ') : undefined,
       };
     } finally {
@@ -289,7 +343,7 @@ export class StackUpdateOrchestrator {
 
       const scanTarget = await this.resolveRestoreScanTarget(nodeId, recovery);
       const policyFailure = await this.checkPolicyOrFail(
-        stackName, nodeId, [scanTarget], options.policyOptions, 'rollback', recoveryId,
+        stackName, nodeId, serviceName, [scanTarget], options.policyOptions, 'rollback', recoveryId,
       );
       if (policyFailure) return policyFailure;
 
@@ -313,6 +367,8 @@ export class StackUpdateOrchestrator {
       claimed = true;
       ServiceUpdateRecoveryService.getInstance().startClaimRenewal(recoveryId);
 
+      const previousImageId = (await this.snapshotServiceReplicas(nodeId, stackName, serviceName))[0]?.imageId ?? null;
+
       try {
         const { repo, tag } = splitImageRef(recovery.declared_image_ref);
         await DockerController.getInstance(nodeId).getDocker()
@@ -321,7 +377,7 @@ export class StackUpdateOrchestrator {
         return serviceFailed(
           'restore_retag_failed',
           getErrorMessage(retagError, 'Could not retag the recovery image'),
-          { mutationStage: 'retag', recoveryId },
+          { serviceName, mutationStage: 'retag', recoveryId },
         );
       }
       try {
@@ -332,7 +388,7 @@ export class StackUpdateOrchestrator {
         return serviceFailed(
           'restore_compose_failed',
           getErrorMessage(composeError, 'Service restore failed'),
-          { mutationStage: 'compose', recoveryId },
+          { serviceName, mutationStage: 'compose', recoveryId },
         );
       }
 
@@ -368,6 +424,8 @@ export class StackUpdateOrchestrator {
         observing,
         recoveryId,
         recoveryAvailable: false,
+        previousImageId,
+        newImageId: observed.newImageId ?? null,
         recheckWarning: warnings.length > 0 ? warnings.join(' ') : undefined,
       };
     } finally {
@@ -429,6 +487,7 @@ export class StackUpdateOrchestrator {
   private async checkPolicyOrFail(
     stackName: string,
     nodeId: number,
+    serviceName: string,
     refs: string[],
     policyOptions: PolicyEnforcementOptions,
     action: 'update' | 'rollback',
@@ -439,8 +498,8 @@ export class StackUpdateOrchestrator {
     if (gate.ok || gate.bypassed) return null;
     return serviceFailed(
       'policy_blocked',
-      describePolicyBlock(gate.policy, gate.violations, action),
-      { recoveryId },
+      `Service "${serviceName}": ${describePolicyBlock(gate.policy, gate.violations, action)}`,
+      { serviceName, mutationStage: 'policy', recoveryId },
     );
   }
 
@@ -455,20 +514,24 @@ export class StackUpdateOrchestrator {
     recoveryId: string | null,
     prepareSnapshotOk: boolean,
   ): Promise<
-    | { ok: true; healthGateId: string | null; observing: boolean; gateWarning?: string }
+    | { ok: true; healthGateId: string | null; observing: boolean; newImageId: string | null; gateWarning?: string }
     | { ok: false; result: Extract<OrchestratorResult, { kind: 'service_failed' }> }
   > {
     const convergence = await this.resolvePrimaryImage(nodeId, stackName, serviceName, expectedReplicas);
     if (convergence.kind === 'inspect_failed') {
       return {
         ok: false,
-        result: serviceFailed('replica_inspect_failed', convergence.error, { mutationStage: 'inspect', recoveryId }),
+        result: serviceFailed('replica_inspect_failed', convergence.error, {
+          serviceName, mutationStage: 'inspect', recoveryId,
+        }),
       };
     }
     if (convergence.kind === 'divergent') {
       return {
         ok: false,
-        result: serviceFailed(divergenceCode, convergence.error, { mutationStage: 'inspect', recoveryId }),
+        result: serviceFailed(divergenceCode, convergence.error, {
+          serviceName, mutationStage: 'inspect', recoveryId,
+        }),
       };
     }
     if (!prepareSnapshotOk) {
@@ -476,11 +539,17 @@ export class StackUpdateOrchestrator {
         ok: true,
         healthGateId: null,
         observing: false,
+        newImageId: convergence.imageId,
         gateWarning: 'Health gate skipped: pre-update container snapshot was unavailable.',
       };
     }
     const begin = this.beginPrepared(prepareToken, convergence.imageId, actor);
-    return { ok: true, healthGateId: begin.runId, observing: begin.observing };
+    return {
+      ok: true,
+      healthGateId: begin.runId,
+      observing: begin.observing,
+      newImageId: convergence.imageId,
+    };
   }
 
   /** Attach the single converged image id (scale>0) and begin the prepared gate. */
@@ -514,26 +583,9 @@ export class StackUpdateOrchestrator {
       return { kind: 'converged', imageId: null };
     }
     const inspected = await this.inspectServiceContainers(nodeId, stackName, serviceName);
-    if (inspected.inspectErrors > 0 && inspected.ids.length === 0) {
-      return {
-        kind: 'inspect_failed',
-        error: `Could not inspect replicas for service "${serviceName}" after the update.`,
-      };
-    }
-    const distinct = new Set(inspected.ids);
-    if (distinct.size === 0) {
-      return { kind: 'divergent', error: `Service "${serviceName}" has no running replicas after the update.` };
-    }
-    if (inspected.ids.length !== expectedReplicas) {
-      return {
-        kind: 'divergent',
-        error: `Service "${serviceName}" has ${inspected.ids.length} running replica(s); expected ${expectedReplicas}.`,
-      };
-    }
-    if (distinct.size > 1) {
-      return { kind: 'divergent', error: `Service "${serviceName}" replicas did not converge on a single image.` };
-    }
-    return { kind: 'converged', imageId: [...distinct][0] };
+    return evaluateServiceReplicaConvergence(
+      serviceName, expectedReplicas, inspected.ids, inspected.inspectErrors,
+    );
   }
 
   private async inspectPrimaryImageIds(nodeId: number, stackName: string, serviceName: string): Promise<string[]> {

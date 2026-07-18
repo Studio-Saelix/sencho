@@ -7,6 +7,7 @@ import type { StackStatusEntry, MetricPoint, StackCpuSeries } from './types';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
 import { aggregateCurrentUsage } from './aggregateCurrentUsage';
 import { classifyRow, type RowState } from './classifyRow';
+import { updateAvailableBadge, updateAvailableLabel } from '@/lib/updateAvailableLabel';
 
 interface StackHealthTableProps {
   stackStatuses: Record<string, StackStatusEntry>;
@@ -125,6 +126,9 @@ export function StackHealthTable({
         source: entry.source ?? 'local',
         mainPort: entry.mainPort ?? null,
         hasUpdate: stackUpdates[file]?.hasUpdate ?? false,
+        outdatedServices: (stackUpdates[file]?.services ?? [])
+          .filter((s) => s.hasUpdate)
+          .map((s) => s.service),
       };
     });
   }, [stackStatuses, stackAggregates, stackCpuSeries, stackUpdates]);
@@ -245,8 +249,11 @@ export function StackHealthTable({
             <span className="flex items-center gap-1.5 min-w-0">
               <span className="min-w-0 truncate font-mono text-sm text-stat-value">{row.name}</span>
               {row.hasUpdate && (
-                <span className="shrink-0 rounded-full bg-brand/15 px-2 py-0.5 font-mono text-[10px] leading-none text-brand tracking-wide">
-                  Update available
+                <span
+                  className="shrink-0 rounded-full bg-brand/15 px-2 py-0.5 font-mono text-[10px] leading-none text-brand tracking-wide"
+                  title={updateAvailableLabel(row.outdatedServices)}
+                >
+                  {updateAvailableBadge(row.outdatedServices)}
                 </span>
               )}
             </span>
