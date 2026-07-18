@@ -588,9 +588,9 @@ blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<vo
         const updated = DatabaseService.getInstance().setBlueprintPinnedNode(id, nodeId);
         if (!updated) { res.status(404).json({ error: 'Blueprint not found' }); return; }
         if (isDebugEnabled()) console.log('[Federation:diag] pinned blueprint=%s node=%s', sanitizeForLog(id), sanitizeForLog(nodeId));
-        // Trigger immediate reconciliation so the pin takes effect without
-        // waiting for the next 60s tick. Errors here are logged but do not
-        // fail the request: the pin is already persisted.
+        // Pin clears approval, so reconcileOne cannot mutate until Confirm Apply.
+        // Still call it so the fail-closed pending state is evaluated immediately
+        // instead of waiting for the next tick.
         if (updated.enabled) {
             BlueprintReconciler.getInstance().reconcileOne(id).catch(err => {
                 console.warn('[Blueprints] post-pin reconcileOne failed:', err);

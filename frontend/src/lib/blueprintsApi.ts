@@ -93,6 +93,13 @@ export type PreviewAction =
     | 'skip_cordoned'
     | 'blocked_name_conflict';
 
+export interface BlueprintPreviewWarning {
+    id: string;
+    message: string;
+    source?: string;
+    severity?: string;
+}
+
 export interface BlueprintPreview {
     blueprintId: number;
     classification: BlueprintClassification;
@@ -113,10 +120,16 @@ export interface BlueprintPreview {
     changes: Array<{
         nodeId: number;
         nodeName: string;
+        nodeType: 'local' | 'remote';
+        mode?: string | null;
+        status: 'online' | 'offline' | 'unknown';
+        contactAt?: number | null;
+        contactSource?: 'local' | 'pilot_last_seen' | 'last_successful_contact';
         action: PreviewAction;
         severity: 'safe' | 'warning' | 'blocker';
         kind: 'executor' | 'informational';
         detail: string;
+        reachabilityNote: string;
     }>;
     confirmableActions: Array<{ nodeId: number; action: PreviewAction }>;
     executorActions: Array<{ nodeId: number; action: PreviewAction }>;
@@ -128,8 +141,8 @@ export interface BlueprintPreview {
     };
     compatibilityWarnings: string[];
     healthNote: string;
-    blockers: Array<{ id: string; message: string }>;
-    warnings: Array<{ id: string; message: string }>;
+    blockers: BlueprintPreviewWarning[];
+    warnings: BlueprintPreviewWarning[];
 }
 
 export type WithdrawConfirm = 'standard' | 'snapshot_then_evict' | 'evict_and_destroy';

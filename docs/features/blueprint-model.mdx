@@ -73,7 +73,7 @@ The first time you visit the tab, the catalog is empty and a three-step explaine
 
 | Field | Purpose |
 |---|---|
-| **Name** | Used as the stack directory on every targeted node (`<COMPOSE_DIR>/<blueprint-name>/`). Lowercase letters, digits, hyphens, and underscores only. Fixed once the blueprint exists. |
+| **Name** | Used as the stack directory on every targeted node (`<COMPOSE_DIR>/<blueprint-name>/`). Lowercase letters, digits, hyphens, and underscores only. Rename is allowed only when every deployment is withdrawn (or there are none); live placements and guards block rename. |
 | **Description** | Short prose for the catalog tile and the detail header. |
 | **Compose** | Standard `docker-compose.yml`. The same file ships to every targeted node. Sencho parses it on save and classifies the blueprint as stateless, stateful, or unknown. The YAML must parse successfully and stay under 96 KiB. |
 | **Selector** | Either label expressions (any-of plus all-of) or a list of node IDs picked by hand. |

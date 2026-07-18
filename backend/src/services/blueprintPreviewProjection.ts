@@ -500,17 +500,23 @@ export function buildBlueprintPreview(blueprintId: number): BlueprintPreviewResu
     const { requirements, compat, reqWarnings } = extractRequirements(blueprint.compose_content);
     const compatibilityWarnings = [...blueprint.classification_reasons, ...compat];
 
-    const summary = { safe: 0, warning: 0, blocker: 0, total: changes.length };
     const blockers: PreviewWarningItem[] = [];
     const warnings: PreviewWarningItem[] = [];
+    let safeCount = 0;
     for (const c of changes) {
-        summary[c.severity] += 1;
-        if (c.severity === 'safe') continue;
+        if (c.severity === 'safe') {
+            safeCount += 1;
+            continue;
+        }
+        let message = `${c.nodeName}: ${c.detail}`;
+        if (c.reachabilityNote !== 'Local node') {
+            message += ` [${c.nodeType}/${c.status}: ${c.reachabilityNote}]`;
+        }
         const item: PreviewWarningItem = {
             id: `change:${c.nodeId}:${c.action}`,
             source: 'change',
             severity: c.severity,
-            message: `${c.nodeName}: ${c.detail}`,
+            message,
         };
         if (c.severity === 'blocker') blockers.push(item);
         else warnings.push(item);
@@ -519,6 +525,15 @@ export function buildBlueprintPreview(blueprintId: number): BlueprintPreviewResu
     for (const msg of compatibilityWarnings) {
         warnings.push({ id: `compat:${createHashId(msg)}`, source: 'compat', severity: 'warning', message: msg });
     }
+
+    // Totals include requirement and compatibility warnings so UI header counts
+    // match the lists operators see (not only per-change severity).
+    const summary = {
+        safe: safeCount,
+        warning: warnings.length,
+        blocker: blockers.length,
+        total: changes.length,
+    };
 
     const desiredNodes = BlueprintReconciler.getInstance().listDesiredNodes(blueprint, allNodes);
     const desiredIds = new Set(desiredNodes.map(n => n.id));

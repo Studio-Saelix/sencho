@@ -123,31 +123,43 @@ export function RolloutPreviewDialog({
                         </div>
                         <p className="text-xs text-stat-subtitle">{preview.healthNote}</p>
                         {preview.blockers.length > 0 && (
-                            <Section title="Blockers" tone="destructive">
+                            <Section title={`Blockers (${preview.blockers.length})`} tone="destructive">
                                 {preview.blockers.map(b => (
                                     <li key={b.id} className="text-xs text-stat-value">{b.message}</li>
                                 ))}
                             </Section>
                         )}
                         {preview.warnings.length > 0 && (
-                            <Section title="Warnings" tone="warning">
-                                {preview.warnings.slice(0, 12).map(w => (
+                            <Section title={`Warnings (${preview.warnings.length})`} tone="warning">
+                                {preview.warnings.map(w => (
                                     <li key={w.id} className="text-xs text-stat-value">{w.message}</li>
                                 ))}
                             </Section>
                         )}
                         <Section title="Changes" tone="neutral">
-                            {preview.changes.map(c => (
-                                <li key={`${c.nodeId}:${c.action}`} className="text-xs text-stat-value">
-                                    <span className="font-mono">{c.nodeName}</span>
-                                    {' · '}
-                                    {c.action}
-                                    {' · '}
-                                    {c.severity}
-                                    {': '}
-                                    {c.detail}
-                                </li>
-                            ))}
+                            {preview.changes.map(c => {
+                                const nodeMeta = [c.nodeType, c.status].filter(Boolean).join('/');
+                                const reachNote = c.reachabilityNote && c.reachabilityNote !== 'Local node'
+                                    ? c.reachabilityNote
+                                    : null;
+                                return (
+                                    <li key={`${c.nodeId}:${c.action}`} className="text-xs text-stat-value">
+                                        <span className="font-mono">{c.nodeName}</span>
+                                        {nodeMeta ? (
+                                            <span className="text-stat-subtitle"> ({nodeMeta})</span>
+                                        ) : null}
+                                        {' · '}
+                                        {c.action}
+                                        {' · '}
+                                        {c.severity}
+                                        {': '}
+                                        {c.detail}
+                                        {reachNote ? (
+                                            <span className="text-stat-subtitle"> · {reachNote}</span>
+                                        ) : null}
+                                    </li>
+                                );
+                            })}
                             {preview.changes.length === 0 && (
                                 <li className="text-xs text-stat-subtitle">No node actions in this plan.</li>
                             )}
