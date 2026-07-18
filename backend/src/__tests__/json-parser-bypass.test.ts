@@ -108,4 +108,29 @@ describe('conditionalJsonParser remote-proxy bypass', () => {
     expect(lastUpstreamAuth).toBeNull();
     expect([200, 404]).toContain(res.status);
   });
+
+  it('forwards Apprise agent config bodies intact to the remote', async () => {
+    lastUpstreamBody = null;
+    lastUpstreamAuth = null;
+
+    const payload = {
+      type: 'apprise',
+      url: 'http://apprise.local/notify',
+      enabled: true,
+      config: { urls: 'discord://webhook-id/webhook-token?token=query-secret' },
+    };
+
+    const res = await request(app)
+      .post('/api/agents')
+      .set('Authorization', authHeader)
+      .set('x-node-id', String(remoteNodeId))
+      .set('Content-Type', 'application/json')
+      .send(payload);
+
+    expect(res.status).toBe(200);
+    expect(lastUpstreamBody).not.toBeNull();
+    expect(JSON.parse(lastUpstreamBody!.toString('utf-8'))).toEqual(payload);
+    expect(lastUpstreamAuth).toBe('Bearer bypass-test-token');
+    expect(JSON.stringify(res.body)).not.toContain('query-secret');
+  });
 });

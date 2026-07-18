@@ -216,7 +216,7 @@ Use the **Enabled** toggle in the row to pause a schedule without losing its con
 
 ## Failure notifications
 
-When a scheduled task fails, Sencho dispatches an `error`-level notification in the `system` category through your configured channels (Discord, Slack, custom webhooks, and the in-app bell). The notification carries the task name, the action, and the error message so you can diagnose without opening the run history.
+When a scheduled task fails, Sencho dispatches an `error`-level notification in the `system` category through your configured channels (Discord, Slack, Apprise, custom webhooks, and the in-app bell). The notification carries the task name, the action, and the error message so you can diagnose without opening the run history.
 
 When a task that previously failed succeeds again, Sencho dispatches an `info`-level recovery notification in the same category to confirm the issue is resolved. Tasks that succeed on every run do not produce per-run notifications: the recovery-only approach keeps the channel quiet during steady-state operation.
 
