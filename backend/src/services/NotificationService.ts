@@ -12,6 +12,13 @@ import {
     matchesNotificationFilters,
     ruleNeedsStackLabels,
 } from '../helpers/notificationMatchers';
+import {
+    type NotificationChannelType,
+    type ParsedAppriseConfig,
+    normalizeAppriseStoredJson,
+    parseStoredAppriseConfig,
+    validateNotificationChannel,
+} from '../helpers/notificationChannels';
 
 export type NotificationCategory =
     | 'deploy_success'
@@ -65,7 +72,13 @@ export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
 const WEBHOOK_TIMEOUT_MS = 10_000;
 
 /** Valid notification channel types for defense-in-depth validation. */
-const ALLOWED_CHANNEL_TYPES = new Set(['discord', 'slack', 'webhook']);
+const ALLOWED_CHANNEL_TYPES = new Set<NotificationChannelType>(['discord', 'slack', 'webhook', 'apprise']);
+
+export class NotificationDeliveryError extends Error {
+    public constructor(message: string, public readonly status: number | null, public readonly retryable: boolean) {
+        super(message);
+    }
+}
 
 export class NotificationService {
     private static instance: NotificationService;
@@ -251,7 +264,7 @@ export class NotificationService {
                 if (isDebugEnabled()) console.log(`[Notify:diag] Matched ${matched.length} route(s) for stack "${sanitizeForLog(stackName ?? '(none)')}", category="${sanitizeForLog(category)}"`);
                 await Promise.allSettled(
                     matched.map(route =>
-                        this.sendToChannel(route.channel_type, route.channel_url, level, sanitized)
+                        this.sendToChannel(route.channel_type, route.channel_url, level, sanitized, route.config)
                             .then(() => {
                                 if (isDebugEnabled()) console.log(`[Notify:diag] Dispatched ${level} via route "${sanitizeForLog(route.name)}" (${route.channel_type})`);
                             })
@@ -275,7 +288,7 @@ export class NotificationService {
             if (isDebugEnabled()) console.log(`[Notify:diag] Falling back to ${agents.length} global agent(s)`);
             await Promise.allSettled(
                 agents.map(agent =>
-                    this.sendToChannel(agent.type, agent.url, level, sanitized)
+                    this.sendToChannel(agent.type, agent.url, level, sanitized, agent.config)
                         .then(() => {
                             if (isDebugEnabled()) console.log(`[Notify:diag] Dispatched ${level} via global agent (${agent.type})`);
                         })
@@ -302,22 +315,66 @@ export class NotificationService {
         }
     }
 
-    private async sendToChannel(type: string, url: string, level: 'info' | 'warning' | 'error', message: string): Promise<void> {
+    private async sendToChannel(type: string, url: string, level: 'info' | 'warning' | 'error', message: string, config?: string | null): Promise<void> {
         if (type === 'discord') {
             await this.sendDiscordWebhook(url, level, message);
         } else if (type === 'slack') {
             await this.sendSlackWebhook(url, level, message);
         } else if (type === 'webhook') {
             await this.sendCustomWebhook(url, level, message);
+        } else if (type === 'apprise') {
+            const parsed = parseStoredAppriseConfig(url, config);
+            if (!parsed.ok) {
+                throw new NotificationDeliveryError(parsed.reason, null, false);
+            }
+            await this.sendAppriseNotify(url, level, message, parsed);
         } else {
             throw new Error(`Unsupported channel type: ${type}`);
         }
     }
 
-    public async testDispatch(type: 'discord' | 'slack' | 'webhook', url: string) {
+    public async testDispatch(type: NotificationChannelType, url: string, config?: unknown) {
         if (!ALLOWED_CHANNEL_TYPES.has(type)) throw new Error(`Invalid notification type: ${type}`);
-        if (!url || !url.startsWith('https://')) throw new Error('URL must use HTTPS');
-        await this.sendToChannel(type, url, 'info', '🔌 Test Notification from Sencho!');
+        const validation = validateNotificationChannel(type, url, config);
+        if (validation) throw new Error(`URL ${validation}`);
+        const stored = type === 'apprise' ? normalizeAppriseStoredJson(url, config) : (config == null ? null : JSON.stringify(config));
+        await this.sendToChannel(type, url, 'info', '🔌 Test Notification from Sencho!', stored);
+    }
+
+    private async sendAppriseNotify(
+        url: string,
+        level: 'info' | 'warning' | 'error',
+        message: string,
+        config: Extract<ParsedAppriseConfig, { ok: true }>,
+    ): Promise<void> {
+        const payload: Record<string, string> = {
+            title: `Sencho Alert [${level.toUpperCase()}]`,
+            body: message,
+            type: level === 'error' ? 'failure' : level,
+        };
+        if (config.mode === 'stateless') payload.urls = config.urlsJoined;
+        else if (config.tags) payload.tag = config.tags;
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+            });
+            if (response.status === 204) throw new NotificationDeliveryError('Apprise returned no delivery (HTTP 204)', 204, false);
+            if (response.status >= 400 && response.status < 500) {
+                throw new NotificationDeliveryError(`Apprise responded with HTTP ${response.status}`, response.status, false);
+            }
+            if (!response.ok) throw new NotificationDeliveryError(`Apprise responded with HTTP ${response.status}`, response.status, true);
+        } catch (error) {
+            if (error instanceof NotificationDeliveryError) throw error;
+            const aborted = error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
+            throw new NotificationDeliveryError(
+                aborted ? 'Apprise request timed out' : 'Apprise request failed',
+                null,
+                true,
+            );
+        }
     }
 
     private async sendDiscordWebhook(url: string, level: 'info' | 'warning' | 'error', message: string) {

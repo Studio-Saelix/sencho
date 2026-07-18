@@ -30,15 +30,20 @@ const POLLING_EXEMPT_PATHS = new Set([
 
 type CachedProxyFlagReq = Request & { _isNodeProxy?: boolean };
 
+/** Claims read from a verified session/bearer JWT on the rate-limiter path. */
+type VerifiedJwtClaims = { username?: string; sub?: string; scope?: string };
+
 /**
- * True when the request bears a node_proxy Bearer token. Uses `jwt.decode()`
- * (no signature verification) to keep the hot path cheap; `authMiddleware`
- * verifies signatures downstream. Worst case for a forged token: it bypasses
- * the rate limiter but is still rejected at auth. Result is memoized on the
- * request object so sequential limiters don't repeat the work.
+ * True when the request bears a verified node_proxy Bearer JWT. Signature and
+ * expiry are checked via `verifiedJwtPayload` against this instance's cached
+ * signing secret (the same secret authMiddleware uses downstream). Forged,
+ * expired, or otherwise unverifiable credentials fail closed: no skip, so the
+ * request stays in the normal per-IP bucket. Only exact `scope === 'node_proxy'`
+ * skips; `pilot_tunnel` and other machine scopes remain rate-limited. Result is
+ * memoized on the request object so sequential limiters don't repeat the work.
  */
 function isNodeProxyRequest(req: Request): boolean {
-  const cached = (req as CachedProxyFlagReq);
+  const cached = req as CachedProxyFlagReq;
   if (cached._isNodeProxy !== undefined) return cached._isNodeProxy;
   const auth = req.headers.authorization;
   if (!auth?.startsWith('Bearer ')) {
@@ -47,20 +52,13 @@ function isNodeProxyRequest(req: Request): boolean {
   }
   const bearer = auth.slice(7);
   // Opaque API tokens are never node_proxy credentials, and they are not
-  // JWTs — short-circuit so `jwt.decode` is never invoked on them.
+  // JWTs; short-circuit so verification is never invoked on them.
   if (looksLikeApiToken(bearer)) {
     cached._isNodeProxy = false;
     return false;
   }
-  try {
-    const decoded = jwt.decode(bearer) as { scope?: string } | null;
-    const result = decoded?.scope === 'node_proxy';
-    cached._isNodeProxy = result;
-    return result;
-  } catch {
-    cached._isNodeProxy = false;
-    return false;
-  }
+  cached._isNodeProxy = verifiedJwtPayload(bearer)?.scope === 'node_proxy';
+  return cached._isNodeProxy;
 }
 
 /**
@@ -70,15 +68,16 @@ function isNodeProxyRequest(req: Request): boolean {
  * cache (no per-call DB hit) and `jwt.verify` costs microseconds, so this is safe
  * on the rate-limiter hot path. Verifying here is what stops one source from
  * fragmenting the limiter by rotating a forged JWT with a varying username: a
- * credential that does not verify yields no per-user key. Fails closed: any error
- * returns null, so the caller degrades to per-IP keying rather than throwing out
- * of the key generator.
+ * credential that does not verify yields no per-user key. The same helper gates
+ * the node_proxy limiter skip so a forged scope claim cannot bypass limiting.
+ * Fails closed: any error returns null, so callers degrade to per-IP keying /
+ * no skip rather than throwing out of the hot path.
  */
-function verifiedJwtPayload(token: string): { username?: string; sub?: string } | null {
+function verifiedJwtPayload(token: string): VerifiedJwtClaims | null {
   try {
     const secret = DatabaseService.getInstance().getGlobalSettings().auth_jwt_secret;
     if (!secret) return null;
-    return jwt.verify(token, secret) as { username?: string; sub?: string };
+    return jwt.verify(token, secret) as VerifiedJwtClaims;
   } catch {
     return null;
   }
