@@ -378,4 +378,75 @@ describe('declared-service headers (multi-service only)', () => {
     await user.click(await screen.findByRole('menuitem', { name: 'Restart service' }));
     expect(serviceAction).toHaveBeenCalledWith('restart', 'web');
   });
+
+  it('still surfaces summary strip and density toggle on multi-service stacks', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'd1', Service: 'db', State: 'running' }),
+          makeContainer({ Id: 'd2', Service: 'db', State: 'paused' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db' })]}
+      />,
+    );
+    expect(screen.getByText(/3 containers/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 up/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 paused/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Compact view' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Detailed view' })).toBeInTheDocument();
+  });
+
+  it('toggles detailed sparklines on the multi-service path', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'd1', Service: 'db', State: 'running' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db' })]}
+      />,
+    );
+    expect(screen.queryByText('cpu')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Detailed view' }));
+    expect(screen.getAllByText('cpu')).toHaveLength(2);
+  });
+
+  it('surfaces expand control on multi-service stacks when wired', () => {
+    const onToggle = vi.fn();
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'd1', Service: 'db', State: 'running' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db' })]}
+        containersExpanded={false}
+        onToggleContainersExpand={onToggle}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Expand containers' }));
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
 });
