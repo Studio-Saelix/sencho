@@ -4,7 +4,8 @@ import { sanitizeForLog } from '../utils/safeLog';
 
 const ENCRYPTED_PREFIX = 'enc:';
 const HEX_RE = /^[0-9a-fA-F]+$/;
-const HEX_OR_COLON_RE = /^[0-9a-fA-F:]+$/;
+/** Identifier-like legacy body after enc: (e.g. enc:hello, enc:FOO_BAR). */
+const LEGACY_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** Database row shape for fleet_snapshot_files (content still ciphertext or legacy plaintext). */
 export interface SnapshotFileRow {
@@ -43,45 +44,37 @@ export function isStructurallyValidSnapshotEnvelope(value: string): boolean {
     );
 }
 
-function isHexIsh(value: string): boolean {
-    if (value.length === 0) return false;
-    const hexChars = value.match(/[0-9a-fA-F]/g)?.length ?? 0;
-    return hexChars / value.length >= 0.8;
+/**
+ * Clear non-envelope legacy plaintext that happens to start with enc:.
+ * Only these shapes stay usable when the payload is not a valid envelope.
+ * Everything else with an enc: prefix fails closed as envelope damage.
+ */
+export function isClearlyLegacyEncProse(value: string): boolean {
+    if (!value.startsWith(ENCRYPTED_PREFIX)) return false;
+    const payload = value.slice(ENCRYPTED_PREFIX.length);
+    if (payload === '') return false;
+
+    // Env-style or free text (spaces) cannot be a producer envelope.
+    if (payload.includes('=') || /\s/.test(payload)) return true;
+
+    // Identifier body with no colons (enc:hello, enc:FOO_BAR). Pure hex
+    // strings are producer truncations, not legacy prose.
+    if (LEGACY_IDENT_RE.test(payload) && !HEX_RE.test(payload)) return true;
+
+    return false;
 }
 
 /**
- * Detectable producer-envelope damage family (no DB provenance). Values that
- * look like CryptoService.encrypt output after truncation or field corruption
- * must fail closed. Clearly non-envelope enc: prose is not included here.
+ * Producer-envelope damage (no DB provenance). Any enc: payload that is not
+ * a structurally valid envelope and not clearly legacy prose is treated as
+ * damage so delimiter substitution and similar corruption cannot fall through
+ * as writable plaintext.
  */
 export function isEnvelopeLikeDamage(value: string): boolean {
     if (!value.startsWith(ENCRYPTED_PREFIX)) return false;
-    const payload = value.slice(ENCRYPTED_PREFIX.length);
-
-    // Complete truncation to "enc:"
-    if (payload === '') return true;
-
-    // Hex-only of any length (short or long truncated IV with lost delimiters)
-    if (HEX_RE.test(payload)) return true;
-
-    // Hex and colon only with at least one delimiter
-    if (HEX_OR_COLON_RE.test(payload) && payload.includes(':')) return true;
-
-    const parts = payload.split(':');
-
-    // Three-field producer skeleton with possible non-hex damage in any field
-    if (parts.length === 3) {
-        const hexishCount = parts.filter(isHexIsh).length;
-        if (hexishCount >= 2) return true;
-    }
-
-    // Two fields: IV-shaped first + mostly-hex remainder (merged tag/cipher)
-    if (parts.length === 2) {
-        const [first, second] = parts;
-        if (HEX_RE.test(first) && first.length <= 24 && isHexIsh(second)) return true;
-    }
-
-    return false;
+    if (isStructurallyValidSnapshotEnvelope(value)) return false;
+    if (isClearlyLegacyEncProse(value)) return false;
+    return true;
 }
 
 export type SnapshotContentClass =
@@ -89,9 +82,8 @@ export type SnapshotContentClass =
     | { kind: 'unavailable'; reason: 'decrypt_failed' | 'envelope_damage'; detail?: string };
 
 /**
- * Classify a stored snapshot file body. Perfect provenance is impossible
- * without a schema marker; this covers the detectable family in
- * isEnvelopeLikeDamage only.
+ * Classify a stored snapshot file body. Without a provenance marker, enc:
+ * values that are not valid envelopes and not clearly legacy prose fail closed.
  */
 export function classifySnapshotFileContent(raw: string): SnapshotContentClass {
     if (!raw.startsWith(ENCRYPTED_PREFIX)) {
@@ -110,12 +102,11 @@ export function classifySnapshotFileContent(raw: string): SnapshotContentClass {
         }
     }
 
-    if (isEnvelopeLikeDamage(raw)) {
-        return { kind: 'unavailable', reason: 'envelope_damage' };
+    if (isClearlyLegacyEncProse(raw)) {
+        return { kind: 'usable', content: raw };
     }
 
-    // Clearly non-envelope legacy plaintext beginning with enc:
-    return { kind: 'usable', content: raw };
+    return { kind: 'unavailable', reason: 'envelope_damage' };
 }
 
 export function readSnapshotFileRow(

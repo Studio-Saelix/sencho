@@ -320,6 +320,31 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         expect(deploySpy).not.toHaveBeenCalled();
     });
 
+    it('returns 409 when a delimiter byte is corrupted and does not write ciphertext', async () => {
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('restore-delim', 'admin', 1, 1, '[]', '[]');
+        const cipher = CryptoService.getInstance().encrypt('services: { ok: {} }\n');
+        const payload = cipher.slice('enc:'.length);
+        const [iv, tag, ct] = payload.split(':');
+        const damaged = `enc:${iv}Z${tag}:${ct}`;
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, LOCAL_NODE_ID, 'local', 'delim-web', 'compose.yaml', damaged);
+        seedStackDir('delim-web');
+        const beforeCompose = 'services:\n  keep: {}\n';
+        fs.writeFileSync(composePath('delim-web'), beforeCompose);
+
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue();
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore`)
+            .set('Cookie', adminCookie)
+            .send({ nodeId: LOCAL_NODE_ID, stackName: 'delim-web', redeploy: true });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('SNAPSHOT_FILE_UNAVAILABLE');
+        expect(fs.readFileSync(composePath('delim-web'), 'utf-8')).toBe(beforeCompose);
+        expect(deploySpy).not.toHaveBeenCalled();
+    });
+
     it('detail returns 200 with unavailable marker and intact sibling content', async () => {
         const db = DatabaseService.getInstance();
         const id = db.createSnapshot('detail-corrupt', 'admin', 1, 2, '[]', '[]');
@@ -744,8 +769,47 @@ describe('Restore-all', () => {
         expect(corrupt?.redeployed).toBe(false);
         expect(fs.readFileSync(composePath('corrupt'), 'utf-8')).toContain('keep: {}');
         expect(fs.readFileSync(composePath('healthy'), 'utf-8')).toContain('app: {}');
-        expect(deploySpy).toHaveBeenCalledWith('healthy', undefined, undefined, expect.anything());
-        expect(deploySpy).not.toHaveBeenCalledWith('corrupt', expect.anything(), expect.anything(), expect.anything());
+        expect(deploySpy).toHaveBeenCalledTimes(1);
+        expect(deploySpy).toHaveBeenCalledWith('healthy', undefined, undefined, {
+            source: 'fleet_snapshot',
+            actor: 'system:fleet-snapshot',
+        });
+        expect(deploySpy.mock.calls.every(call => call[0] !== 'corrupt')).toBe(true);
+    });
+
+    it('isolates delimiter-byte corruption before restore-all mutation', async () => {
+        vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue();
+        const db = DatabaseService.getInstance();
+        const id = db.createSnapshot('restore-all-delim', 'admin', 1, 2, '[]', '[]');
+        const good = CryptoService.getInstance().encrypt('services:\n  app: {}\n');
+        const bad = CryptoService.getInstance().encrypt('SECRET=long-enough-to-mutate\n');
+        const payload = bad.slice('enc:'.length);
+        const [iv, tag, ct] = payload.split(':');
+        const damaged = `enc:${iv}Z${tag}:${ct}`;
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, LOCAL_NODE_ID, 'local', 'healthy', 'compose.yaml', good);
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(id, LOCAL_NODE_ID, 'local', 'corrupt', 'compose.yaml', damaged);
+        seedStackDir('healthy');
+        seedStackDir('corrupt');
+        fs.writeFileSync(composePath('corrupt'), 'services:\n  keep: {}\n');
+
+        const res = await request(app)
+            .post(`/api/fleet/snapshots/${id}/restore-all`)
+            .set('Cookie', adminCookie)
+            .send({ redeploy: true });
+        expect(res.status).toBe(200);
+        expect(res.body.restored).toBe(1);
+        expect(res.body.failed).toBe(1);
+        const corrupt = (res.body.results as Array<{ stackName: string; success: boolean; error?: string }>)
+            .find(r => r.stackName === 'corrupt');
+        expect(corrupt?.success).toBe(false);
+        expect(fs.readFileSync(composePath('corrupt'), 'utf-8')).toContain('keep: {}');
+        expect(deploySpy).toHaveBeenCalledTimes(1);
+        expect(deploySpy.mock.calls.every(call => call[0] !== 'corrupt')).toBe(true);
     });
 
     it('redeploys each restored stack when requested', async () => {

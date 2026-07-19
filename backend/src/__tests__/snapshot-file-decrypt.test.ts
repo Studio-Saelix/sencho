@@ -43,6 +43,11 @@ describe('snapshotFileDecrypt classification', () => {
             content: 'enc:FOO_BAR=baz',
         });
         expect(isEnvelopeLikeDamage('enc:hello')).toBe(false);
+        expect(isEnvelopeLikeDamage('enc:deadbeef')).toBe(true);
+        expect(classifySnapshotFileContent('enc:deadbeef')).toEqual({
+            kind: 'unavailable',
+            reason: 'envelope_damage',
+        });
     });
 
     describe('encrypt-then-corrupt detectable family', () => {
@@ -98,6 +103,24 @@ describe('snapshotFileDecrypt classification', () => {
             const [iv, tag, ct] = payload.split(':');
             expect(classifySnapshotFileContent(`enc:${iv}:${tag}${ct}`)).toEqual(envelopeDamage);
             expect(classifySnapshotFileContent(`enc:${iv}:${tag}:${ct}:00`)).toEqual(envelopeDamage);
+        });
+
+        it('fails closed when a delimiter byte is replaced with a non-hex character', () => {
+            const payload = good.slice('enc:'.length);
+            const [iv, tag, ct] = payload.split(':');
+            // Replace the colon after IV with 'Z' (auditor B1).
+            const delimiterMutation = `enc:${iv}Z${tag}:${ct}`;
+            expect(isStructurallyValidSnapshotEnvelope(delimiterMutation)).toBe(false);
+            expect(isEnvelopeLikeDamage(delimiterMutation)).toBe(true);
+            expect(classifySnapshotFileContent(delimiterMutation)).toEqual(envelopeDamage);
+        });
+
+        it('fails closed when a non-hex extra field is appended', () => {
+            const payload = good.slice('enc:'.length);
+            const [iv, tag, ct] = payload.split(':');
+            const extraField = `enc:${iv}:${tag}:${ct}:oops`;
+            expect(isEnvelopeLikeDamage(extraField)).toBe(true);
+            expect(classifySnapshotFileContent(extraField)).toEqual(envelopeDamage);
         });
     });
 });
