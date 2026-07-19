@@ -42,6 +42,7 @@ Sencho handles all schema changes internally. When the application starts, it ch
 - **Encryption of sensitive values** (node API tokens, registry credentials) that were previously stored in plaintext
 - **SSO and RBAC setup** for single sign-on provider config and role-based access
 - **Legacy cleanup** of obsolete fields from pre-0.7 versions (SSH/TLS columns)
+- **Blueprint rollout approval** columns (`approval_status`, intent fingerprint, and blast JSON). Existing Blueprints start **pending**. Automatic reconciliation and enforcement pause until an admin opens **Apply now**, reviews the rollout preview, and confirms. New installs behave the same way for each Blueprint until the first confirmation.
 
 You never need to run SQL commands, migration scripts, or any manual database operations.
 

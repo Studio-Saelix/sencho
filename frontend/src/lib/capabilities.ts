@@ -34,9 +34,11 @@ export const CAPABILITIES = [
   'cross-node-rbac',
   'stack-down-remove-volumes',
   'guided-external-network-preflight',
+  'service-scoped-update',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
 
 export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' as const satisfies Capability;
 export const GUIDED_EXTERNAL_NETWORK_PREFLIGHT_CAPABILITY = 'guided-external-network-preflight' as const satisfies Capability;
+export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const satisfies Capability;

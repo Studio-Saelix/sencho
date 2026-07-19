@@ -422,7 +422,7 @@ describe('POST /api/auto-update/execute', () => {
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
       .mockResolvedValue({ hasUpdate: true } as never);
     const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue();
-    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-au');
+    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-au');
     try {
       const res = await request(app)
         .post('/api/auto-update/execute')

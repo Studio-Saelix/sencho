@@ -71,6 +71,15 @@ export class AutoHealService {
     private observedUnhealthySince = new Map<string, number>();
     private historyTimestamps = new Map<string, number>();
     private leaseRefreshFailures = new Map<number, number>();
+    /**
+     * Ref-counted suppressions for service-scoped updates/restores. While a
+     * service is being recreated and its post-mutation health gate observes it,
+     * auto-heal must not restart the churning containers out from under the gate.
+     * Keyed `${nodeId}:${stackName}:${serviceName}`. Nested owners (overlapping
+     * same-service ops, or a gate that outlives the orchestrator finally) each
+     * increment; clearSuppress only unmutes at zero. Process death clears it.
+     */
+    private suppressedServices = new Map<string, number>();
 
     private constructor() {}
 
@@ -108,6 +117,33 @@ export class AutoHealService {
             clearInterval(this.leaseRefreshTimer);
             this.leaseRefreshTimer = null;
         }
+        this.suppressedServices.clear();
+    }
+
+    private suppressKey(nodeId: number, stackName: string, serviceName: string): string {
+        return `${nodeId}:${stackName}:${serviceName}`;
+    }
+
+    /** Suppress auto-heal for one service while a service-scoped update/restore + its health gate run. */
+    suppress(nodeId: number, stackName: string, serviceName: string): void {
+        const key = this.suppressKey(nodeId, stackName, serviceName);
+        this.suppressedServices.set(key, (this.suppressedServices.get(key) ?? 0) + 1);
+    }
+
+    /** Release one suppression owner; Auto-Heal resumes only when the count hits zero. */
+    clearSuppress(nodeId: number, stackName: string, serviceName: string): void {
+        const key = this.suppressKey(nodeId, stackName, serviceName);
+        const current = this.suppressedServices.get(key) ?? 0;
+        if (current <= 1) {
+            this.suppressedServices.delete(key);
+            return;
+        }
+        this.suppressedServices.set(key, current - 1);
+    }
+
+    /** True while the given service is suppressed. A stack-wide policy still heals other services. */
+    isSuppressed(nodeId: number, stackName: string, serviceName: string): boolean {
+        return (this.suppressedServices.get(this.suppressKey(nodeId, stackName, serviceName)) ?? 0) > 0;
     }
 
     /**
@@ -283,6 +319,12 @@ export class AutoHealService {
                 const containerName =
                     container.Names?.[0]?.replace(/^\//, '') ?? container.Id.slice(0, 12);
                 const serviceOverride = container.Labels?.['com.docker.compose.service'] ?? null;
+                // Skip containers whose service is suppressed by an in-flight
+                // service-scoped update/restore, so the post-mutation health gate
+                // owns the churn without auto-heal racing it.
+                if (serviceOverride && this.isSuppressed(nodeId, policy.stack_name, serviceOverride)) {
+                    continue;
+                }
                 const signal = this.getHealSignal(nodeId, container, eventSvc?.getContainerState(container.Id), now);
                 const decision = this.shouldHeal(signal, policy, this.containerKey(nodeId, container.Id), now);
 

@@ -59,13 +59,13 @@ export interface StackEnvSources {
   authoredComposeText: string;
 }
 
-interface EnvFileEntry {
+export interface EnvFileEntry {
   rawPath: string;
   required: boolean;
 }
 
 /** Normalize a service `env_file:` field (string, array of strings, or long-form objects). */
-function normalizeEnvFileField(envFile: unknown): EnvFileEntry[] {
+export function normalizeEnvFileField(envFile: unknown): EnvFileEntry[] {
   if (typeof envFile === 'string') return [{ rawPath: envFile, required: true }];
   if (!Array.isArray(envFile)) return [];
   const out: EnvFileEntry[] = [];

@@ -3,7 +3,9 @@ import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { ComposeDoctorService } from './ComposeDoctorService';
-import { UpdatePreviewService, isMovingTag } from './UpdatePreviewService';
+import { UpdatePreviewService, isMovingTag, filterPreviewForService } from './UpdatePreviewService';
+import { buildEffectiveServiceModel, type EffectiveServiceModelResult } from './effectiveServiceModel';
+import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { withTimeout } from '../utils/withTimeout';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -17,9 +19,12 @@ import {
   diskSignal,
   driftSignal,
   healthchecksSignal,
+  isTroubledContainer,
   preflightSignal,
+  serviceSignal,
   updatePreviewSignal,
   type Errored,
+  type ServiceMembership,
 } from './updateGuard/readiness';
 import type { ContainerProbe, RollbackReadinessReport, UpdateReadinessReport } from './updateGuard/types';
 
@@ -29,6 +34,19 @@ import type { ContainerProbe, RollbackReadinessReport, UpdateReadinessReport } f
 // DB/file reads. A timed-out input degrades to its 'unknown' signal instead
 // of failing the report.
 const INPUT_TIMEOUT_MS = 3_000;
+
+/**
+ * Thrown by `computeUpdateReadiness` when a `serviceName` is given for a
+ * stack that has one (or zero) declared services: service-scoped readiness
+ * requires a real choice among siblings. The route maps this to a 400,
+ * distinct from the 500 a genuine computation failure gets.
+ */
+export class SingleServiceUpdateReadinessError extends Error {
+  constructor() {
+    super('Service-scoped readiness requires a stack with more than one service.');
+    this.name = 'SingleServiceUpdateReadinessError';
+  }
+}
 
 /**
  * Computes update readiness and rollback readiness for a stack, on demand,
@@ -49,16 +67,18 @@ export class UpdateGuardService {
   /**
    * Probe the stack's containers via the compose project label, normalized for
    * the pure scoring functions. Throws on Docker errors; callers map that to
-   * the 'error' sentinel.
+   * the 'error' sentinel. When `serviceName` is given, narrows to that
+   * service's containers before inspecting (labeled containers, per §6).
    */
-  async probeContainers(nodeId: number, stackName: string): Promise<ContainerProbe[]> {
+  async probeContainers(nodeId: number, stackName: string, serviceName?: string): Promise<ContainerProbe[]> {
     const docker = DockerController.getInstance(nodeId).getDocker();
     const listed = await docker.listContainers({
       all: true,
       filters: { label: [`com.docker.compose.project=${stackName}`] },
     });
+    const scoped = serviceName ? filterContainersByComposeService(listed, serviceName) : listed;
     const probes = await Promise.all(
-      listed.map(async (info): Promise<ContainerProbe | null> => {
+      scoped.map(async (info): Promise<ContainerProbe | null> => {
         const name = info.Names?.[0]?.replace(/^\//, '') ?? info.Id.slice(0, 12);
         let inspect: Awaited<ReturnType<ReturnType<typeof docker.getContainer>['inspect']>>;
         try {
@@ -86,17 +106,40 @@ export class UpdateGuardService {
     return probes.filter((p): p is ContainerProbe => p !== null);
   }
 
-  async computeUpdateReadiness(nodeId: number, stackName: string): Promise<UpdateReadinessReport> {
+  /**
+   * When `serviceName` is set, scopes the verdict-affecting inputs (labeled
+   * containers, healthchecks, the update preview, and drift) to that service
+   * only; the stack guardrails (preflight, disk, backup, Docker reachability)
+   * stay unchanged (§6). A render failure or missing service fails closed via
+   * the added `service` signal; a single-service stack throws instead of
+   * scoping (the caller/route maps that to a 400).
+   */
+  async computeUpdateReadiness(nodeId: number, stackName: string, serviceName?: string): Promise<UpdateReadinessReport> {
     const db = DatabaseService.getInstance();
     const now = Date.now();
 
-    const [preflight, drift, containers, preview, backup, disk] = await Promise.all([
+    let model: EffectiveServiceModelResult | null = null;
+    if (serviceName) {
+      model = await buildEffectiveServiceModel(nodeId, stackName);
+      if (model.renderable && model.services.length <= 1) {
+        throw new SingleServiceUpdateReadinessError();
+      }
+    }
+
+    const [preflight, drift, containers, siblings, preview, backup, disk] = await Promise.all([
       this.collect('preflight', stackName, async () => ComposeDoctorService.getInstance().getLatest(nodeId, stackName)),
-      this.collect('drift', stackName, async () => db.getOpenDriftFindings(nodeId, stackName).length),
+      this.collect('drift', stackName, async () =>
+        db.getOpenDriftFindings(nodeId, stackName).filter(f => !serviceName || f.service === serviceName).length),
       this.collect('containers', stackName, () =>
-        withTimeout(this.probeContainers(nodeId, stackName), INPUT_TIMEOUT_MS, 'readiness container probe')),
-      this.collect('update preview', stackName, () =>
-        withTimeout(UpdatePreviewService.getInstance().getPreview(nodeId, stackName), INPUT_TIMEOUT_MS, 'readiness update preview')),
+        withTimeout(this.probeContainers(nodeId, stackName, serviceName), INPUT_TIMEOUT_MS, 'readiness container probe')),
+      serviceName
+        ? this.collect('sibling containers', stackName, () =>
+            withTimeout(this.probeContainers(nodeId, stackName), INPUT_TIMEOUT_MS, 'readiness sibling probe'))
+        : Promise.resolve<ContainerProbe[] | Errored>([]),
+      this.collect('update preview', stackName, async () => {
+        const full = await withTimeout(UpdatePreviewService.getInstance().getPreview(nodeId, stackName), INPUT_TIMEOUT_MS, 'readiness update preview');
+        return serviceName ? filterPreviewForService(full, serviceName) : full;
+      }),
       this.collect('backup info', stackName, () => FileSystemService.getInstance(nodeId).getBackupInfo(stackName)),
       this.collect('disk', stackName, () => this.readDiskUsage()),
     ]);
@@ -114,8 +157,56 @@ export class UpdateGuardService {
       backupSlotSignal(backup, now),
       diskSignal(typeof disk === 'number' ? { usePercent: disk, limitPercent } : 'error'),
     ];
+    if (serviceName) {
+      signals.push(serviceSignal(this.resolveServiceMembership(model, serviceName)));
+    }
 
-    return { stack: stackName, computedAt: now, verdict: aggregateVerdict(signals), signals };
+    const advisories = serviceName
+      ? [
+          this.siblingHealthAdvisory(containers, siblings),
+          this.dependencyAdvisory(model, serviceName),
+        ].filter((note): note is string => note !== null)
+      : [];
+
+    return {
+      stack: stackName,
+      computedAt: now,
+      verdict: aggregateVerdict(signals),
+      signals,
+      serviceName: serviceName ?? null,
+      advisories,
+    };
+  }
+
+  /** Model-membership facts for the selected service; 'error' when the model failed to render. */
+  private resolveServiceMembership(model: EffectiveServiceModelResult | null, serviceName: string): ServiceMembership | Errored {
+    if (!model || !model.renderable) return 'error';
+    const spec = model.services.find(s => s.name === serviceName);
+    if (!spec) return { found: false };
+    return { found: true, hasBuild: spec.hasBuild, declaredImage: spec.declaredImage, expectedReplicas: spec.expectedReplicas };
+  }
+
+  /** Advisory only (§6): a sibling already unhealthy before the update never blocks the selected service's verdict. */
+  private siblingHealthAdvisory(selected: ContainerProbe[] | Errored, all: ContainerProbe[] | Errored): string | null {
+    if (selected === 'error' || all === 'error') return null;
+    const selectedNames = new Set(selected.map(c => c.name));
+    const troubled = all.filter(c => !selectedNames.has(c.name) && isTroubledContainer(c));
+    if (troubled.length === 0) return null;
+    const names = troubled.map(c => c.name).join(', ');
+    return `Other containers in this stack are already unhealthy: ${names}. This does not block the selected service.`;
+  }
+
+  /** Advisory only (§6): dependsOn relationships are informational; this update never recreates siblings. */
+  private dependencyAdvisory(model: EffectiveServiceModelResult | null, serviceName: string): string | null {
+    if (!model || !model.renderable) return null;
+    const spec = model.services.find(s => s.name === serviceName);
+    const dependsOn = spec?.dependsOn ?? [];
+    const dependents = model.services.filter(s => s.dependsOn.includes(serviceName)).map(s => s.name);
+    const parts: string[] = [];
+    if (dependsOn.length > 0) parts.push(`depends on ${dependsOn.join(', ')}`);
+    if (dependents.length > 0) parts.push(`is a dependency of ${dependents.join(', ')}`);
+    if (parts.length === 0) return null;
+    return `This service ${parts.join(' and ')}. Those services are not restarted by this update.`;
   }
 
   async computeRollbackReadiness(nodeId: number, stackName: string): Promise<RollbackReadinessReport> {

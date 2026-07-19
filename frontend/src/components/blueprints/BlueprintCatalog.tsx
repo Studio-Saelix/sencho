@@ -154,6 +154,14 @@ function BlueprintTile({ blueprint, onClick }: { blueprint: BlueprintListItem; o
                         <span className="text-warning">disabled</span>
                     </>
                 )}
+                {blueprint.effectiveApproval && blueprint.effectiveApproval !== 'approved' && (
+                    <>
+                        <span>·</span>
+                        <span className={blueprint.effectiveApproval === 'reapproval_required' ? 'text-warning' : 'text-stat-subtitle'}>
+                            {blueprint.effectiveApproval === 'reapproval_required' ? 'reapproval required' : 'pending'}
+                        </span>
+                    </>
+                )}
             </div>
         </button>
     );

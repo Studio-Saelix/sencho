@@ -1,4 +1,5 @@
 import type { NotificationCategory } from '../services/NotificationService';
+import { stackPatternMatches } from './stackPattern';
 
 export type NotificationLevel = 'info' | 'warning' | 'error';
 export type NotificationAppliesTo = 'bell' | 'external' | 'both';
@@ -27,7 +28,8 @@ export function matchesNotificationFilters(
     if (rule.node_id != null && rule.node_id !== ctx.localNodeId) return false;
     if (
         rule.stack_patterns.length > 0
-        && (ctx.stackName === undefined || !rule.stack_patterns.includes(ctx.stackName))
+        && (ctx.stackName === undefined
+            || !rule.stack_patterns.some((pattern) => stackPatternMatches(ctx.stackName!, pattern)))
     ) {
         return false;
     }

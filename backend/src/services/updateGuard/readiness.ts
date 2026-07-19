@@ -67,6 +67,11 @@ export function driftSignal(input: number | Errored): ReadinessSignal {
   return { ...base, status: 'ok', affectsVerdict: true, detail: 'No open drift findings.' };
 }
 
+/** A container already unhealthy, restarting, or crash-exited before any update runs. */
+export function isTroubledContainer(c: ContainerProbe): boolean {
+  return c.health === 'unhealthy' || c.state === 'restarting' || (c.state === 'exited' && (c.exitCode ?? 0) !== 0);
+}
+
 export function containersSignal(input: ContainerProbe[] | Errored): ReadinessSignal {
   const base = { id: 'containers' as const, title: 'Current containers' };
   if (input === 'error') {
@@ -75,9 +80,7 @@ export function containersSignal(input: ContainerProbe[] | Errored): ReadinessSi
   if (input.length === 0) {
     return { ...base, status: 'warning', affectsVerdict: true, detail: 'The stack is not running; updating will start it.' };
   }
-  const troubled = input.filter(
-    c => c.health === 'unhealthy' || c.state === 'restarting' || (c.state === 'exited' && (c.exitCode ?? 0) !== 0),
-  );
+  const troubled = input.filter(isTroubledContainer);
   if (troubled.length > 0) {
     const names = troubled.map(c => c.name).join(', ');
     return {
@@ -159,6 +162,50 @@ export function buildServicesSignal(buildServices: string[] | Errored): Readines
     ...base,
     status: 'warning',
     detail: `${buildServices.length} ${plural} (${names}) rebuild from source. This may take longer and depends on the local Dockerfile context, network access, and base-image availability.`,
+  };
+}
+
+/** Model-membership facts for the selected service, gathered from EffectiveServiceModel. */
+export type ServiceMembership =
+  | { found: false }
+  | { found: true; hasBuild: boolean; declaredImage: string | null; expectedReplicas: number };
+
+/** Matches `ServiceUpdateRecoveryService`'s digest-pin check (a recovery snapshot is never eligible for a digest-pinned declared ref). */
+const DIGEST_PIN_RE = /@sha256:[a-f0-9]{64}$/i;
+
+/**
+ * Selected-service signal for a service-scoped readiness check: model
+ * membership and whether the update would leave a rollback recovery snapshot
+ * behind. Render failure or a missing service fails closed (blocked), never
+ * unknown, so a service-scoped check cannot silently proceed against a stale
+ * or absent model.
+ */
+export function serviceSignal(input: ServiceMembership | Errored): ReadinessSignal {
+  const base = { id: 'service' as const, title: 'Selected service' };
+  if (input === 'error') {
+    return { ...base, status: 'blocked', affectsVerdict: true, detail: 'The compose model could not be rendered, so the selected service cannot be validated. Resolve the compose error before updating.' };
+  }
+  if (!input.found) {
+    return { ...base, status: 'blocked', affectsVerdict: true, detail: 'The selected service is not declared in this stack\u2019s compose model.' };
+  }
+  if (!input.hasBuild && !input.declaredImage) {
+    return { ...base, status: 'blocked', affectsVerdict: true, detail: 'The selected service has neither an image nor a build, so it cannot be updated.' };
+  }
+  const digestPinned = input.declaredImage !== null && DIGEST_PIN_RE.test(input.declaredImage);
+  if (!input.declaredImage || digestPinned) {
+    const reason = !input.declaredImage ? 'it builds from source with no declared image' : 'its declared image is pinned to a digest';
+    return {
+      ...base,
+      status: 'warning',
+      affectsVerdict: true,
+      detail: `Declared with ${input.expectedReplicas} expected replica${input.expectedReplicas === 1 ? '' : 's'}. No rollback recovery snapshot will be available for this update because ${reason}.`,
+    };
+  }
+  return {
+    ...base,
+    status: 'ok',
+    affectsVerdict: true,
+    detail: `Declared with ${input.expectedReplicas} expected replica${input.expectedReplicas === 1 ? '' : 's'}; a rollback recovery snapshot will be captured before the update.`,
   };
 }
 

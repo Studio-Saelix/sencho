@@ -11,6 +11,11 @@
 
 export type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update';
 
+export interface StackOpRecordMeta {
+  targetScope?: 'stack' | 'service';
+  serviceName?: string | null;
+}
+
 interface StackOpStats {
   count: number;
   successCount: number;
@@ -22,6 +27,10 @@ interface StackOpStats {
    * computed from this window on demand.
    */
   recentSamples: number[];
+  /** Most recent target scope recorded for this bucket (additive; stack default). */
+  lastTargetScope: 'stack' | 'service';
+  /** Most recent service name when lastTargetScope is service; otherwise null. */
+  lastServiceName: string | null;
 }
 
 export interface StackOpSnapshotEntry {
@@ -33,6 +42,8 @@ export interface StackOpSnapshotEntry {
   avgMs: number;
   p50Ms: number;
   p95Ms: number;
+  targetScope: 'stack' | 'service';
+  serviceName: string | null;
 }
 
 const MAX_SAMPLES = 1000;
@@ -66,12 +77,26 @@ export class StackOpMetricsService {
    * Record one completed op. Call from the route layer after the lifecycle
    * call resolves or rejects; `ok=false` for the rejection path.
    */
-  public record(nodeId: number, action: StackOpAction, durationMs: number, ok: boolean): void {
+  public record(
+    nodeId: number,
+    action: StackOpAction,
+    durationMs: number,
+    ok: boolean,
+    meta?: StackOpRecordMeta,
+  ): void {
     if (!Number.isFinite(durationMs) || durationMs < 0) return;
     const k = this.key(nodeId, action);
     let s = this.stats.get(k);
     if (!s) {
-      s = { count: 0, successCount: 0, errorCount: 0, totalMs: 0, recentSamples: [] };
+      s = {
+        count: 0,
+        successCount: 0,
+        errorCount: 0,
+        totalMs: 0,
+        recentSamples: [],
+        lastTargetScope: 'stack',
+        lastServiceName: null,
+      };
       this.stats.set(k, s);
     }
     s.count += 1;
@@ -83,6 +108,12 @@ export class StackOpMetricsService {
       // Drop oldest. Array.shift is O(n) but n is bounded to MAX_SAMPLES
       // and this path is once-per-stack-op (low cadence).
       s.recentSamples.shift();
+    }
+    if (meta?.targetScope) s.lastTargetScope = meta.targetScope;
+    if (meta?.targetScope === 'service') {
+      s.lastServiceName = meta.serviceName ?? null;
+    } else if (meta?.targetScope === 'stack') {
+      s.lastServiceName = null;
     }
   }
 
@@ -102,6 +133,8 @@ export class StackOpMetricsService {
         avgMs: s.count === 0 ? 0 : Math.round(s.totalMs / s.count),
         p50Ms: percentile(sorted, 0.5),
         p95Ms: percentile(sorted, 0.95),
+        targetScope: s.lastTargetScope,
+        serviceName: s.lastServiceName,
       });
     }
     // Stable ordering: nodeId asc, then action asc.

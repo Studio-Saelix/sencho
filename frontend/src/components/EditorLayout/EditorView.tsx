@@ -47,6 +47,8 @@ import type { NotificationItem } from '../dashboard/types';
 import type { Node } from '@/context/NodeContext';
 import type { useAuth } from '@/context/AuthContext';
 import type { useStackMuteActions } from '@/hooks/useMuteRuleActions';
+import type { EffectiveServiceSpec } from '@/types/effectiveServices';
+import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 
 export interface ContainerInfo {
     Id: string;
@@ -176,6 +178,14 @@ export interface EditorViewProps {
         action: 'start' | 'stop' | 'restart',
         serviceName: string,
     ) => Promise<void>;
+    // Declared-service facts for the multi-service header split (§12). Empty
+    // on single-service stacks and older remotes (capability-gated fetch), so
+    // ContainersHealth falls back to the flat single-service layout. Optional
+    // so callers/tests that never deal in services can omit them.
+    effectiveServices?: EffectiveServiceSpec[];
+    serviceUpdateStatuses?: StackServiceUpdateStatus[];
+    serviceUpdateInProgress?: { service: string; mode: 'update' | 'rebuild' } | null;
+    onRequestServiceUpdate?: (serviceName: string, mode: 'update' | 'rebuild') => void;
 
     // UI state setters
     setActiveTab: (tab: 'compose' | 'env' | 'files') => void;
@@ -263,6 +273,10 @@ export function EditorView(props: EditorViewProps) {
         openLogViewer,
         openBashModal,
         serviceAction,
+        effectiveServices = [],
+        serviceUpdateStatuses = [],
+        serviceUpdateInProgress = null,
+        onRequestServiceUpdate,
         setActiveTab,
         setLogsMode,
         setEditingCompose,
@@ -368,6 +382,11 @@ export function EditorView(props: EditorViewProps) {
         });
     };
 
+    // Declared-service headers (§12) need the same expandable, scroll-wrapped
+    // layout as a multi-container stack even when only one container of a
+    // multi-service stack is currently running.
+    const isMultiContainerLayout = safeContainers.length > 1 || effectiveServices.length > 1;
+
     // Below md, render the segmented full-screen mobile detail instead of the
     // desktop two-pane grid. All hooks above run unconditionally before this
     // branch so hook order stays stable across breakpoints.
@@ -386,7 +405,7 @@ export function EditorView(props: EditorViewProps) {
                     {/* Command Center Card (identity + health strip). Hidden when
                         the logs are expanded so the logs pane fills the column. */}
                     {!logsExpanded && (
-                    <Card className={`rounded-xl border-muted bg-card ${safeContainers.length > 1 && !containersExpanded ? 'flex flex-col min-h-0 max-h-[42%]' : safeContainers.length > 1 && containersExpanded ? 'flex flex-col flex-1 min-h-0' : 'shrink-0'}`}>
+                    <Card className={`rounded-xl border-muted bg-card ${isMultiContainerLayout && !containersExpanded ? 'flex flex-col min-h-0 max-h-[42%]' : isMultiContainerLayout && containersExpanded ? 'flex flex-col flex-1 min-h-0' : 'shrink-0'}`}>
                         <CardHeader className="p-4 pb-2">
                             <div className="flex items-start justify-between gap-3">
                                 <div className="min-w-0 flex-1">
@@ -438,7 +457,7 @@ export function EditorView(props: EditorViewProps) {
                             panelStartedAt={panelStartedAt}
                             variant="band"
                         />
-                        {safeContainers.length > 1 ? (
+                        {isMultiContainerLayout ? (
                         <CardContent className="p-4 pt-2 flex-1 min-h-0">
                             <ScrollArea className="h-full">
                                 <ContainersHealth
@@ -450,6 +469,10 @@ export function EditorView(props: EditorViewProps) {
                                     openLogViewer={openLogViewer}
                                     openBashModal={openBashModal}
                                     serviceAction={serviceAction}
+                                    effectiveServices={effectiveServices}
+                                    serviceUpdateStatuses={serviceUpdateStatuses}
+                                    serviceUpdateInProgress={serviceUpdateInProgress}
+                                    onRequestServiceUpdate={onRequestServiceUpdate}
                                     containersExpanded={containersExpanded}
                                     onToggleContainersExpand={toggleContainersExpand}
                                     key={`${activeNode?.id ?? 'local'}:${stackName}`}
@@ -467,6 +490,10 @@ export function EditorView(props: EditorViewProps) {
                                 openLogViewer={openLogViewer}
                                 openBashModal={openBashModal}
                                 serviceAction={serviceAction}
+                                effectiveServices={effectiveServices}
+                                serviceUpdateStatuses={serviceUpdateStatuses}
+                                serviceUpdateInProgress={serviceUpdateInProgress}
+                                onRequestServiceUpdate={onRequestServiceUpdate}
                                 key={`${activeNode?.id ?? 'local'}:${stackName}`}
                             />
                         </CardContent>
@@ -477,7 +504,7 @@ export function EditorView(props: EditorViewProps) {
                     {/* Logs Section (fills remaining left-column height). On multi-
                         container stacks a min-h guarantees logs are never hidden.
                         Hidden when containers are expanded to fill the column. */}
-                    {!containersExpanded && (safeContainers.length > 1 ? (
+                    {!containersExpanded && (isMultiContainerLayout ? (
                     <div className="flex-1 min-h-[180px] flex flex-col">
                     <StackLogsSection
                         stackName={stackName}

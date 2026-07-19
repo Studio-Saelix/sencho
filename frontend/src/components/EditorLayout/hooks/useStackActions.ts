@@ -11,6 +11,8 @@ import {
 } from '@/lib/hydrationTiming';
 import { toast } from '@/components/ui/toast-store';
 import { buildServiceUrl, openServiceUrl } from '@/lib/serviceUrl';
+import { requestServiceUpdate as postServiceUpdate, requestServiceRestore as postServiceRestore } from '@/lib/serviceUpdate';
+import type { EffectiveServiceModelResult } from '@/types/effectiveServices';
 import type { useEditorViewState } from './useEditorViewState';
 import type { useStackListState } from './useStackListState';
 import type { useViewNavigationState } from './useViewNavigationState';
@@ -153,6 +155,11 @@ interface UseStackActionsOptions {
   // Active node advertises guided external-network preflight. Absent capability
   // keeps legacy deploy (no GET). Advertised-but-broken fails closed.
   hasGuidedExternalNetworkPreflight?: boolean;
+  // Active node advertises service-scoped updates. Gates both the
+  // effective-services fetch (skipped entirely on an older node, so
+  // effectiveServices stays empty and no declared-service headers render)
+  // and the manual per-service update/rebuild action.
+  hasServiceScopedUpdate?: boolean;
   // Target-aware stack:edit check. Pass the loaded stack identity (folder name
   // or compose path); callers strip extensions when comparing to RBAC stack
   // names. Evaluated against the load target so post-load auto-edit is not
@@ -379,6 +386,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     diffPreviewEnabled,
     hasUpdateGuard = false,
     hasGuidedExternalNetworkPreflight = false,
+    hasServiceScopedUpdate = false,
     canEditStack,
     canOfferVolumeRemoval = false,
   } = options;
@@ -493,6 +501,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setSelectedEnvFile('');
     editorState.setEnvExists(false);
     editorState.setContainers([]);
+    editorState.setEffectiveServices([]);
+    editorState.setServiceUpdateInProgress(null);
     editorState.setIsEditing(false);
   };
 
@@ -692,6 +702,32 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
+  // Declared-service facts for the multi-service headers. Skipped entirely
+  // without the capability so an older remote node never sees the extra
+  // request; a render failure or non-ok response also fails closed to an
+  // empty list, which keeps the legacy single-service layout.
+  const loadEffectiveServicesState = async (filename: string, signal?: AbortSignal) => {
+    if (!hasServiceScopedUpdate) {
+      editorState.setEffectiveServices([]);
+      return;
+    }
+    const stackName = filename.replace(/\.(yml|yaml)$/, '');
+    try {
+      const res = await apiFetch(`/stacks/${stackName}/effective-services`, { signal });
+      if (signal?.aborted) return;
+      if (!res.ok) {
+        editorState.setEffectiveServices([]);
+        return;
+      }
+      const data = await res.json() as EffectiveServiceModelResult;
+      if (signal?.aborted) return;
+      editorState.setEffectiveServices(data.renderable ? data.services : []);
+    } catch (err) {
+      if (isAbortError(err)) return;
+      editorState.setEffectiveServices([]);
+    }
+  };
+
   const applyEditorRouteState = (tab: EditorTab) => {
     editorState.setActiveTab(tab);
     editorState.setEditingCompose(true);
@@ -764,6 +800,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         };
       }
       await loadBackupState(filename, signal);
+      await loadEffectiveServicesState(filename, signal);
       // Post-load auto-edit evaluates permission for the loaded target, not
       // the previously selected stack (selectedFile was just updated above).
       if (options?.startInComposeEdit && canEditStack(filename)) {
@@ -789,6 +826,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setOriginalEnvContent('');
       editorState.setEnvEtag(null);
       editorState.setContainers([]);
+      editorState.setEffectiveServices([]);
       return { ok: false };
     } finally {
       if (!signal.aborted) {
@@ -1586,6 +1624,115 @@ export function useStackActions(options: UseStackActionsOptions) {
     await run();
   };
 
+  // Single entry point for a manual service-scoped update/rebuild (declared-
+  // service header, Updates view per-service Apply). Uses the same deploy-
+  // feedback session as full-stack Update so progress streams and the health
+  // gate is polled; siblings are not intentionally recreated.
+  const requestServiceUpdate = async (
+    stackFile: string,
+    serviceName: string,
+    mode: 'update' | 'rebuild' = 'update',
+  ): Promise<void> => {
+    if (stackListState.isStackBusy(stackFile) || editorState.serviceUpdateInProgress) return;
+    const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
+    const opNodeId = activeNode?.id ?? null;
+    const run = async () => {
+      editorState.setServiceUpdateInProgress({ service: serviceName, mode });
+      try {
+        await runWithLog({ stackName, action: 'update', nodeId: opNodeId, serviceName }, async (started, ds) => {
+          await started;
+          const result = await postServiceUpdate({
+            nodeId: opNodeId,
+            stackName,
+            serviceName,
+            mode,
+            deploySessionId: ds,
+          });
+          if (!result.ok) {
+            toast.error(result.error);
+            return { ok: false as const, errorMessage: result.error };
+          }
+          const verb = mode === 'rebuild' ? 'rebuilt' : 'updated';
+          if (result.healthGateId && result.observing) {
+            toast.info(`Service "${serviceName}" ${verb}. Verifying health...`);
+          } else {
+            toast.success(`Service "${serviceName}" ${verb} successfully!`);
+          }
+          if (result.recheckWarning) toast.info(result.recheckWarning);
+          stackListState.fetchImageUpdates();
+          await refreshSelectedContainers(stackName, stackFile);
+          stackListState.recordActionSuccess(stackFile);
+          return {
+            ok: true as const,
+            healthGateId: result.observing ? result.healthGateId : null,
+            recoveryId: result.recoveryId,
+          };
+        });
+      } finally {
+        editorState.setServiceUpdateInProgress(null);
+        stackListState.refreshStacks(true);
+      }
+    };
+    if (hasUpdateGuard) {
+      overlayState.setUpdateReadiness({
+        stackName,
+        stackFile,
+        nodeId: opNodeId,
+        serviceName,
+        mode,
+        proceed: () => {
+          overlayState.setUpdateReadiness(null);
+          void run();
+        },
+      });
+      return;
+    }
+    await run();
+  };
+
+  const requestServiceRestore = async (
+    stackFile: string,
+    serviceName: string,
+    recoveryId: string,
+  ): Promise<void> => {
+    if (stackListState.isStackBusy(stackFile) || editorState.serviceUpdateInProgress) return;
+    const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
+    const opNodeId = activeNode?.id ?? null;
+    editorState.setServiceUpdateInProgress({ service: serviceName, mode: 'update' });
+    try {
+      await runWithLog({ stackName, action: 'update', nodeId: opNodeId, serviceName }, async (started, ds) => {
+        await started;
+        const result = await postServiceRestore({
+          nodeId: opNodeId,
+          stackName,
+          serviceName,
+          recoveryId,
+          deploySessionId: ds,
+        });
+        if (!result.ok) {
+          toast.error(result.error);
+          return { ok: false as const, errorMessage: result.error };
+        }
+        if (result.healthGateId && result.observing) {
+          toast.info(`Service "${serviceName}" restored. Verifying health...`);
+        } else {
+          toast.success(`Service "${serviceName}" restored successfully!`);
+        }
+        stackListState.fetchImageUpdates();
+        await refreshSelectedContainers(stackName, stackFile);
+        stackListState.recordActionSuccess(stackFile);
+        return {
+          ok: true as const,
+          healthGateId: result.observing ? result.healthGateId : null,
+          recoveryId: result.recoveryId,
+        };
+      });
+    } finally {
+      editorState.setServiceUpdateInProgress(null);
+      stackListState.refreshStacks(true);
+    }
+  };
+
   const updateStack = async (e?: React.MouseEvent) => {
     e?.preventDefault();
     e?.stopPropagation();
@@ -1969,6 +2116,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     serviceAction,
     updateStack,
     requestStackUpdate,
+    requestServiceUpdate,
+    requestServiceRestore,
     deleteStack,
     attemptLeaveEditor,
     attemptPopstateNavigation,

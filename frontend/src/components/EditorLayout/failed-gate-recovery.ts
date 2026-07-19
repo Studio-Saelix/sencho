@@ -17,6 +17,12 @@ import type { HealthGateUiState } from '@/context/DeployFeedbackContext';
  *   file matches its name yet (the list may be mid-refresh). The caller leaves it
  *   unhandled so the effect retries once the files land.
  * - `record`: record a recovery entry against `stackFile`.
+ *
+ * A service-scoped gate (`targetScope === 'service'`) always classifies as
+ * `skip`: the stack-level rollback recovery this feeds (RecoveryChip/Panel,
+ * keyed off the stack's own `rollback_target`) does not know how to restore a
+ * single service, so routing a service gate's failure into it would offer a
+ * rollback action that does not correspond to what actually happened.
  */
 export type FailedGateOutcome =
   | { kind: 'skip' }
@@ -24,12 +30,13 @@ export type FailedGateOutcome =
   | { kind: 'record'; stackFile: string };
 
 export function classifyFailedGate(
-  healthGate: Pick<HealthGateUiState, 'status' | 'nodeId' | 'stackName'> | null,
+  healthGate: Pick<HealthGateUiState, 'status' | 'nodeId' | 'stackName' | 'targetScope'> | null,
   activeNodeId: number | null,
   filesNodeId: number | null,
   files: string[],
 ): FailedGateOutcome {
   if (!healthGate || healthGate.status !== 'failed') return { kind: 'skip' };
+  if (healthGate.targetScope === 'service') return { kind: 'skip' };
   // Record only while on the gate's node AND with that node's file list loaded.
   if (healthGate.nodeId !== activeNodeId || healthGate.nodeId !== filesNodeId) return { kind: 'skip' };
   const stackFile = files.find(f => f.replace(/\.(yml|yaml)$/, '') === healthGate.stackName);

@@ -34,6 +34,23 @@ describe('StackOpMetricsService', () => {
       successCount: 2,
       errorCount: 1,
       avgMs: 200,
+      targetScope: 'stack',
+      serviceName: null,
+    });
+  });
+
+  it('records the latest service-scoped metadata on the action bucket', () => {
+    const svc = StackOpMetricsService.getInstance();
+    svc.record(1, 'update', 50, true, { targetScope: 'service', serviceName: 'web' });
+    expect(svc.snapshot()[0]).toMatchObject({
+      action: 'update',
+      targetScope: 'service',
+      serviceName: 'web',
+    });
+    svc.record(1, 'update', 40, true, { targetScope: 'stack' });
+    expect(svc.snapshot()[0]).toMatchObject({
+      targetScope: 'stack',
+      serviceName: null,
     });
   });
 

@@ -62,7 +62,7 @@ A mono table of every stack discovered in the active node's `COMPOSE_DIR`, sorte
 | Column | Description |
 |--------|-------------|
 | **Status dot** | Green when the stack is running and its 10-minute peak CPU is under 80%, amber when peak CPU is at or above 80%, rose when any container has exited or peak CPU is at or above 90% |
-| **STACK** | Stack name with an orange "Update available" badge when a newer image has been detected. The badge appears regardless of the sidebar indicator setting. |
+| **STACK** | Stack name with an orange update badge when a newer image has been detected. When per-service status is known, the badge names the outdated service (or a count for several). The badge appears regardless of the sidebar indicator setting. |
 | **HOST** | Active node this stack belongs to |
 | **UP** | How long the oldest running container has been up, in compact units (`s` / `m` / `h` / `d`); a stopped or never-started stack reads `--` |
 | **CPU** | Latest aggregate CPU across the stack's containers |

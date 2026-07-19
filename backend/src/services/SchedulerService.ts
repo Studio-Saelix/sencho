@@ -5,9 +5,11 @@ import { LicenseService } from './LicenseService';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
+import { StackUpdateOrchestrator } from './StackUpdateOrchestrator';
 import { StackOpLockService, stackOpSkipMessage as skipMessage } from './StackOpLockService';
 import { FileSystemService } from './FileSystemService';
 import { HealthGateService } from './HealthGateService';
+import { ServiceUpdateRecoveryService } from './ServiceUpdateRecoveryService';
 import { ImageUpdateService } from './ImageUpdateService';
 import type { ImageCheckResult } from './ImageUpdateService';
 import { isDebugEnabled } from '../utils/debug';
@@ -706,12 +708,13 @@ export class SchedulerService {
             ? (JSON.parse(task.prune_targets) as string[]).filter((t): t is PruneTarget => allTargets.includes(t as PruneTarget))
             : [...allTargets];
         const labelFilter = task.prune_label_filter || undefined;
+        const isImageHeld = ServiceUpdateRecoveryService.getInstance().buildHeldImagePredicate(nodeId);
         const results: string[] = [];
         const failures: string[] = [];
 
         for (const target of targets) {
             try {
-                const result = await docker.pruneSystem(target, labelFilter);
+                const result = await docker.pruneSystem(target, labelFilter, isImageHeld);
                 results.push(`${target}: ${result.reclaimedBytes ?? 0} bytes reclaimed`);
             } catch (error: unknown) {
                 const msg = error instanceof Error ? error.message : String(error);
@@ -766,12 +769,11 @@ export class SchedulerService {
         const db = DatabaseService.getInstance();
         const docker = DockerController.getInstance(task.node_id);
         const imageUpdateService = ImageUpdateService.getInstance();
-        const compose = ComposeService.getInstance(task.node_id);
         const results: string[] = [];
 
         for (const stackName of stackNames) {
             try {
-                const output = await this.executeUpdateForStack(stackName, task.node_id, docker, imageUpdateService, compose, db, isFleet || isWildcard);
+                const output = await this.executeUpdateForStack(stackName, task.node_id, docker, imageUpdateService, db, isFleet || isWildcard);
                 results.push(output);
             } catch (e) {
                 const msg = getErrorMessage(e, String(e));
@@ -1028,7 +1030,6 @@ export class SchedulerService {
         nodeId: number,
         docker: DockerController,
         imageUpdateService: ImageUpdateService,
-        compose: ComposeService,
         db: DatabaseService,
         isWildcard = false
     ): Promise<string> {
@@ -1096,11 +1097,14 @@ export class SchedulerService {
         const atomic = true;
         const lock = await StackOpLockService.getInstance().runExclusive(
             nodeId, stackName, 'update', 'system',
-            () => compose.updateStack(stackName, undefined, atomic),
+            () => StackUpdateOrchestrator.getInstance().execute(
+                { nodeId, stackName, target: { scope: 'stack' }, trigger: 'scheduled', actor: 'system:scheduler' },
+                { atomic, terminalWs: null },
+            ),
         );
         if (!lock.ran) return skipMessage(stackName, lock.existing.action);
         db.clearStackUpdateStatus(nodeId, stackName);
-        HealthGateService.getInstance().begin(nodeId, stackName, 'update', 'system:scheduler');
+        HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:scheduler');
 
         this.safeDispatch(
             'info',

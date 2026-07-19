@@ -462,7 +462,7 @@ describe('WebhookService.execute: health gate begin call sites', () => {
         vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue(undefined);
         vi.spyOn(fs.FileSystemService.prototype, 'getStacks').mockResolvedValue([stack]);
         vi.spyOn(compose.ComposeService.prototype, 'deployStack').mockResolvedValue(undefined);
-        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-hook');
+        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-hook');
 
         const result = await WebhookService.getInstance().execute(webhook, 'deploy', 'test', true);
         expect(result.success).toBe(true);
@@ -482,7 +482,7 @@ describe('WebhookService.execute: health gate begin call sites', () => {
         vi.spyOn(policyGate, 'assertPolicyGateAllows').mockResolvedValue(undefined);
         vi.spyOn(fs.FileSystemService.prototype, 'getStacks').mockResolvedValue([stack]);
         vi.spyOn(compose.ComposeService.prototype, 'updateStack').mockResolvedValue(undefined);
-        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-hook');
+        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-hook');
 
         const result = await WebhookService.getInstance().execute(webhook, 'pull', 'test', true);
         expect(result.success).toBe(true);

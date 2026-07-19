@@ -12,10 +12,15 @@ import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTes
 const {
   mockComputeUpdateReadiness,
   mockComputeRollbackReadiness,
-} = vi.hoisted(() => ({
-  mockComputeUpdateReadiness: vi.fn(),
-  mockComputeRollbackReadiness: vi.fn(),
-}));
+  MockSingleServiceUpdateReadinessError,
+} = vi.hoisted(() => {
+  class MockSingleServiceUpdateReadinessError extends Error {}
+  return {
+    mockComputeUpdateReadiness: vi.fn(),
+    mockComputeRollbackReadiness: vi.fn(),
+    MockSingleServiceUpdateReadinessError,
+  };
+});
 
 vi.mock('../services/UpdateGuardService', () => ({
   UpdateGuardService: {
@@ -24,6 +29,7 @@ vi.mock('../services/UpdateGuardService', () => ({
       computeRollbackReadiness: mockComputeRollbackReadiness,
     }),
   },
+  SingleServiceUpdateReadinessError: MockSingleServiceUpdateReadinessError,
 }));
 
 vi.mock('../services/FileSystemService', () => ({
@@ -85,6 +91,28 @@ describe('GET /api/stacks/:stackName/update-readiness', () => {
     expect(res.status).toBe(500);
     expect(res.body).toEqual({ error: 'Failed to compute update readiness' });
   });
+
+  it('forwards the service query param to computeUpdateReadiness', async () => {
+    const report = { stack: 'web', computedAt: 1, verdict: 'ready', signals: [], serviceName: 'api', advisories: [] };
+    mockComputeUpdateReadiness.mockResolvedValue(report);
+    const res = await request(app).get('/api/stacks/web/update-readiness?service=api').set('Cookie', authCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(report);
+    expect(mockComputeUpdateReadiness).toHaveBeenCalledWith(expect.any(Number), 'web', 'api');
+  });
+
+  it('omits the service argument when no service query param is given', async () => {
+    mockComputeUpdateReadiness.mockResolvedValue({ stack: 'web', computedAt: 1, verdict: 'ready', signals: [] });
+    await request(app).get('/api/stacks/web/update-readiness').set('Cookie', authCookie);
+    expect(mockComputeUpdateReadiness).toHaveBeenCalledWith(expect.any(Number), 'web', undefined);
+  });
+
+  it('returns 400 when the service query targets a single-service stack', async () => {
+    mockComputeUpdateReadiness.mockRejectedValue(new MockSingleServiceUpdateReadinessError('single service'));
+    const res = await request(app).get('/api/stacks/web/update-readiness?service=api').set('Cookie', authCookie);
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ code: 'service_update_single_service' });
+  });
 });
 
 describe('GET /api/stacks/:stackName/rollback-readiness', () => {
@@ -120,6 +148,7 @@ describe('GET /api/stacks/:stackName/health-gate', () => {
     db.insertHealthGateRun({
       id, node_id: defaultNodeId, stack_name: 'web', trigger_action: 'update', status, reason,
       window_seconds: 90, containers_json: '[]', started_at: startedAt, ended_at: status === 'observing' ? null : startedAt + 1000, created_by: 'tester',
+      target_scope: 'stack', service_name: null, failure_source: null,
     });
   };
 

@@ -246,6 +246,74 @@ describe('DriftLedgerService.reconcile', () => {
   });
 });
 
+describe('DriftLedgerService.reconcileService', () => {
+  beforeEach(() => clearLedger('svcrec'));
+  const ledger = () => DriftLedgerService.getInstance();
+
+  it('inserts only the selected service\'s findings, ignoring other services in the same report', () => {
+    const report = reportWith([finding('image-mismatch', 'web'), finding('service-missing', 'db')], { stack: 'svcrec' });
+    const res = ledger().reconcileService(nodeId, 'svcrec', 'web', report);
+    expect(res).toEqual({ detected: 1, resolved: 0 });
+    const open = db().getOpenDriftFindings(nodeId, 'svcrec');
+    expect(open).toHaveLength(1);
+    expect(open[0].service).toBe('web');
+  });
+
+  it('resolves only the selected service\'s open finding, leaving other open services untouched', () => {
+    ledger().reconcile(nodeId, 'svcrec', reportWith([finding('image-mismatch', 'web'), finding('service-missing', 'db')], { stack: 'svcrec' }));
+    // 'web' cleared, 'db' absent from this service-scoped report too, but only 'web' is in scope.
+    const res = ledger().reconcileService(nodeId, 'svcrec', 'web', reportWith([], { stack: 'svcrec', status: 'in-sync' }));
+    expect(res).toEqual({ detected: 0, resolved: 1 });
+    const open = db().getOpenDriftFindings(nodeId, 'svcrec');
+    expect(open).toHaveLength(1);
+    expect(open[0].service).toBe('db');
+  });
+
+  it('preserves an empty-service (network-level) finding when reconciling one named service', () => {
+    ledger().reconcile(nodeId, 'svcrec', reportWith([finding('image-mismatch', 'web'), finding('network-missing', '')], { stack: 'svcrec' }));
+    const res = ledger().reconcileService(nodeId, 'svcrec', 'web', reportWith([], { stack: 'svcrec', status: 'in-sync' }));
+    expect(res).toEqual({ detected: 0, resolved: 1 });
+    const open = db().getOpenDriftFindings(nodeId, 'svcrec');
+    expect(open).toHaveLength(1);
+    expect(open[0].service).toBe('');
+  });
+
+  it('does not touch findings when the same service is idempotently rechecked', () => {
+    const report = reportWith([finding('image-mismatch', 'web')], { stack: 'svcrec' });
+    ledger().reconcileService(nodeId, 'svcrec', 'web', report);
+    const res = ledger().reconcileService(nodeId, 'svcrec', 'web', report);
+    expect(res).toEqual({ detected: 0, resolved: 0 });
+    expect(db().getOpenDriftFindings(nodeId, 'svcrec')).toHaveLength(1);
+  });
+
+  it('does not reconcile an unreachable report (open findings are not falsely resolved)', () => {
+    ledger().reconcile(nodeId, 'svcrec', reportWith([finding('image-mismatch', 'web')], { stack: 'svcrec' }));
+    const res = ledger().reconcileService(nodeId, 'svcrec', 'web', { stack: 'svcrec', status: 'unreachable', hasComposeFile: true, hasContainers: false, findings: [] });
+    expect(res).toEqual({ detected: 0, resolved: 0 });
+    expect(db().getOpenDriftFindings(nodeId, 'svcrec')).toHaveLength(1);
+  });
+
+  it('does not reconcile a parse-error report', () => {
+    ledger().reconcile(nodeId, 'svcrec', reportWith([finding('image-mismatch', 'web')], { stack: 'svcrec' }));
+    const res = ledger().reconcileService(nodeId, 'svcrec', 'web', { stack: 'svcrec', status: 'drifted', hasComposeFile: false, hasContainers: false, findings: [], parseError: 'bad yaml' });
+    expect(res).toEqual({ detected: 0, resolved: 0 });
+    expect(db().getOpenDriftFindings(nodeId, 'svcrec')).toHaveLength(1);
+  });
+
+  it('names the service in the recorded activity message', () => {
+    ledger().reconcileService(nodeId, 'svcrec', 'web', reportWith([finding('image-mismatch', 'web')], { stack: 'svcrec' }));
+    const activity = driftActivity('svcrec');
+    expect(activity).toHaveLength(1);
+    expect(activity[0].message).toContain('web');
+  });
+
+  it('stamps the dossier last-checked time', () => {
+    expect(db().getStackDossier(nodeId, 'svcrec')?.last_drift_check_at ?? null).toBeNull();
+    ledger().reconcileService(nodeId, 'svcrec', 'web', reportWith([finding('image-mismatch', 'web')], { stack: 'svcrec' }));
+    expect(typeof db().getStackDossier(nodeId, 'svcrec')?.last_drift_check_at).toBe('number');
+  });
+});
+
 describe('DriftLedgerService.reconcileStack', () => {
   const STACK_A = 'recstacka';
   let dirA: string;

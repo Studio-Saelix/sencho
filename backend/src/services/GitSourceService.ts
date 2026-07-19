@@ -1337,7 +1337,7 @@ export class GitSourceService {
                     console.warn(`[GitSource] ${busy}`);
                     return { applied: true, deployed: false, deployError: busy };
                 }
-                HealthGateService.getInstance().begin(nodeId, stackName, 'deploy', 'system:git-source');
+                HealthGateService.getInstance().beginStack(nodeId, stackName, 'deploy', 'system:git-source');
                 console.log(`[GitSource] Applied and deployed ${stackName} at ${commitSha.slice(0, 7)}`);
                 return { applied: true, deployed: true };
             } catch (e) {

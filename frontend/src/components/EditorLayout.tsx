@@ -48,6 +48,7 @@ import { useTopNavMode } from '@/hooks/use-top-nav-mode';
 import { useTopNavQuickLinks } from '@/hooks/use-top-nav-quick-links';
 import { getAppNavItem } from '@/lib/navigation/appNavRegistry';
 import { useStackMuteActions } from '@/hooks/useMuteRuleActions';
+import { useServiceUpdateStatus } from '@/hooks/useServiceUpdateStatus';
 import { toast } from '@/components/ui/toast-store';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { MobileTabBar } from './MobileTabBar';
@@ -112,6 +113,8 @@ export default function EditorLayout() {
     backupInfo,
     isEditing,
     editingCompose, setEditingCompose,
+    effectiveServices,
+    serviceUpdateInProgress,
   } = editorState;
 
   const stackListState = useStackListState();
@@ -258,6 +261,8 @@ export default function EditorLayout() {
     activeNode?.id ?? null,
   );
 
+  const serviceUpdateStatuses = useServiceUpdateStatus(stackUpdates, selectedFile);
+
   const stackActions = useStackActions({
     editorState,
     stackListState,
@@ -271,6 +276,7 @@ export default function EditorLayout() {
     diffPreviewEnabled,
     hasUpdateGuard: hasCapability('update-guard'),
     hasGuidedExternalNetworkPreflight: hasCapability('guided-external-network-preflight'),
+    hasServiceScopedUpdate: hasCapability('service-scoped-update'),
     canEditStack: (stackNameOrFilename) => {
       const stackName = stackNameOrFilename.replace(/\.(ya?ml)$/, '');
       return can('stack:edit', 'stack', stackName);
@@ -639,6 +645,13 @@ export default function EditorLayout() {
       openLogViewer={stackActions.openLogViewer}
       openBashModal={stackActions.openBashModal}
       serviceAction={stackActions.serviceAction}
+      effectiveServices={effectiveServices}
+      serviceUpdateStatuses={serviceUpdateStatuses}
+      serviceUpdateInProgress={serviceUpdateInProgress}
+      onRequestServiceUpdate={(serviceName, mode) => {
+        if (!selectedFile) return;
+        void stackActions.requestServiceUpdate(selectedFile, serviceName, mode);
+      }}
       setActiveTab={setActiveTab}
       setLogsMode={setLogsMode}
       setEditingCompose={setEditingCompose}

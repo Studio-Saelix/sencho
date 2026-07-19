@@ -1,12 +1,22 @@
 import { randomUUID } from 'crypto';
 import DockerController from './DockerController';
 import { DatabaseService, type HealthGateRunRow } from './DatabaseService';
+import { AutoHealService } from './AutoHealService';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { withTimeout } from '../utils/withTimeout';
 import type { HealthGateContainer, HealthGateReport } from './updateGuard/types';
+import { getComposeCommandTimeoutMs } from './ComposeService';
 
 const POLL_INTERVAL_MS = 5_000;
+// A prepared-but-never-begun token (prepare called, mutation then failed before
+// beginPrepared) is dropped after this long. Swept lazily on each prepare/
+// attach/beginPrepared call rather than on a timer, so the service leaves no
+// standing interval (the observation poll timers are the only timers it arms).
+// Must outlive the longest Compose mutation (compose timeout + 5m buffer).
+function prepareTtlMs(): number {
+  return Math.max(getComposeCommandTimeoutMs(), 30 * 60_000) + 5 * 60_000;
+}
 // Per-observe ceiling so a hung Docker socket cannot leave a poll pending
 // forever. Above POLL_INTERVAL_MS so a slow-but-live probe is not cut short; a
 // timeout counts as a poll error and three in a row resolve the gate unknown.
@@ -20,6 +30,8 @@ const MAX_WINDOW_SECONDS = 600;
 // updates). Gates past the cap finalize immediately as unknown.
 const MAX_CONCURRENT_GATES = 25;
 
+type GateRole = 'primary' | 'collateral';
+
 interface ObservedContainer {
   id: string;
   name: string;
@@ -31,6 +43,10 @@ interface ObservedContainer {
   restarts: number;
   state: string;
   health: string | null;
+  /** `com.docker.compose.service` label, when present (service gates only). */
+  service: string | null;
+  /** Image id the container is running (service gates check convergence on it). */
+  imageId: string;
 }
 
 interface ActiveGate {
@@ -53,6 +69,90 @@ interface ActiveGate {
    * or stopped can never overwrite the terminal verdict with a stale one.
    */
   finalized: boolean;
+  /** 'stack' for the legacy post-mutation gate, 'service' for prepared gates. */
+  targetScope: 'stack' | 'service';
+  /** Named trigger persisted on the row. */
+  trigger: 'update' | 'deploy' | 'service_update' | 'service_restore';
+  /** Service gates only. */
+  serviceName: string | null;
+  /** Single image id every primary replica must converge on (service gates). */
+  expectedImageId: string | null;
+  /** Expected primary replica count from the effective model (service gates; may be 0). */
+  expectedReplicas: number;
+  /** Sibling names eligible for regression evaluation (service gates). */
+  collateralEligibleNames: Set<string>;
+  /**
+   * Pre-mutation baselines for regression-eligible collateral siblings.
+   * Used to seed `expected` at arm time so a sibling that vanishes during the
+   * mutation gap is still tracked (and can fail) on the first poll.
+   */
+  collateralBaselineByName: Map<string, ObservedContainer>;
+  /** Role of each expected container (service gates), for failure attribution. */
+  roleByName: Map<string, GateRole>;
+}
+
+/** A pre-mutation baseline container captured at prepare time. */
+interface PreparedBaseline {
+  id: string;
+  name: string;
+  service: string | null;
+  state: string;
+  health: string | null;
+  restartCount: number;
+  startedAt: string | null;
+  imageId: string;
+}
+
+function isRegressionEligibleSibling(baseline: PreparedBaseline): boolean {
+  return baseline.state === 'running' && (baseline.health === null || baseline.health === 'healthy');
+}
+
+function observedFromPreparedBaseline(baseline: PreparedBaseline): ObservedContainer {
+  return {
+    id: baseline.id,
+    name: baseline.name,
+    startedAt: baseline.startedAt,
+    restartCount: baseline.restartCount,
+    restarts: 0,
+    state: baseline.state,
+    health: baseline.health,
+    service: baseline.service,
+    imageId: baseline.imageId,
+  };
+}
+
+/** An in-memory prepare snapshot awaiting attachExpectedImage + beginPrepared. */
+interface PreparedGate {
+  token: string;
+  nodeId: number;
+  stackName: string;
+  serviceName: string;
+  trigger: 'service_update' | 'service_restore';
+  windowSeconds: number;
+  expiresAt: number;
+  expectedReplicas: number;
+  expectedImageId: string | null;
+  collateralEligibleNames: Set<string>;
+  primaryBaseline: PreparedBaseline[];
+  collateralBaseline: PreparedBaseline[];
+}
+
+export interface PrepareInput {
+  nodeId: number;
+  stackName: string;
+  target: { scope: 'service'; serviceName: string };
+  trigger: 'service_update' | 'service_restore';
+  /**
+   * Expected primary replica count from the effective model (may be 0). Passed
+   * by the orchestrator, which already rendered the model, so the gate stays a
+   * pure observer and does not run a second `docker compose config`.
+   */
+  expectedReplicas: number;
+}
+
+export interface BeginPreparedResult {
+  runId: string | null;
+  observing: boolean;
 }
 
 /**
@@ -71,6 +171,8 @@ interface ActiveGate {
 export class HealthGateService {
   private static instance: HealthGateService;
   private readonly active = new Map<string, ActiveGate>();
+  /** Prepare tokens awaiting beginPrepared (service update/restore only). */
+  private readonly prepared = new Map<string, PreparedGate>();
   private started = false;
 
   public static getInstance(): HealthGateService {
@@ -101,6 +203,51 @@ export class HealthGateService {
     for (const gate of [...this.active.values()]) {
       this.finalize(gate, 'unknown', 'shutdown during observation', []);
     }
+    this.prepared.clear();
+  }
+
+  private gateKey(nodeId: number, stackName: string, scope: 'stack' | 'service', serviceName: string | null): string {
+    return `${nodeId}:${stackName}:${scope}:${serviceName ?? '_'}`;
+  }
+
+  private baselineMapFromPrepared(baselines: PreparedBaseline[]): Map<string, ObservedContainer> {
+    const map = new Map<string, ObservedContainer>();
+    for (const baseline of baselines) {
+      map.set(baseline.name, observedFromPreparedBaseline(baseline));
+    }
+    return map;
+  }
+
+  /**
+   * Finalize in-flight gates that a newer operation must replace:
+   * - A stack-scoped begin supersedes every gate on the stack.
+   * - A service-scoped begin supersedes only the same service's gate and any
+   *   stack-scoped gate; other services keep observing independently.
+   */
+  private supersedeGatesForStack(
+    nodeId: number,
+    stackName: string,
+    options?: { serviceName?: string | null; stackOnly?: boolean },
+  ): void {
+    const serviceName = options?.serviceName;
+    const stackOnly = options?.stackOnly === true;
+    for (const gate of [...this.active.values()]) {
+      if (gate.nodeId !== nodeId || gate.stackName !== stackName) continue;
+      if (serviceName !== undefined) {
+        // Service begin: keep other services' gates.
+        if (gate.targetScope === 'service' && gate.serviceName !== serviceName) continue;
+      } else if (stackOnly) {
+        if (gate.targetScope !== 'stack') continue;
+      }
+      this.finalize(gate, 'unknown', 'superseded by a newer operation', []);
+    }
+  }
+
+  /** Drop prepare tokens whose TTL elapsed without a beginPrepared (lazy, no standing timer). */
+  private sweepExpiredPrepared(now: number): void {
+    for (const [token, prep] of this.prepared) {
+      if (now >= prep.expiresAt) this.prepared.delete(token);
+    }
   }
 
   /**
@@ -114,7 +261,7 @@ export class HealthGateService {
    * every gated update path gets the timeline marker even when the gate
    * itself is disabled.
    */
-  public begin(
+  public beginStack(
     nodeId: number,
     stackName: string,
     trigger: 'update' | 'deploy',
@@ -132,12 +279,10 @@ export class HealthGateService {
       }
       if (!settings.enabled) return null;
 
-      // A newer operation supersedes an in-flight gate for the same stack.
-      const key = `${nodeId}:${stackName}`;
-      const existing = this.active.get(key);
-      if (existing) {
-        this.finalize(existing, 'unknown', 'superseded by a newer update', []);
-      }
+      // A newer stack operation supersedes every in-flight gate on this stack
+      // (including service gates).
+      const key = this.gateKey(nodeId, stackName, 'stack', null);
+      this.supersedeGatesForStack(nodeId, stackName);
 
       const runId = randomUUID();
       const startedAt = Date.now();
@@ -153,6 +298,9 @@ export class HealthGateService {
         started_at: startedAt,
         ended_at: null,
         created_by: actor,
+        target_scope: 'stack',
+        service_name: null,
+        failure_source: null,
       };
 
       if (this.active.size >= MAX_CONCURRENT_GATES) {
@@ -173,6 +321,14 @@ export class HealthGateService {
         missingLastPoll: new Set(),
         restartingLastPoll: new Set(),
         finalized: false,
+        targetScope: 'stack',
+        trigger,
+        serviceName: null,
+        expectedImageId: null,
+        expectedReplicas: 0,
+        collateralEligibleNames: new Set(),
+        collateralBaselineByName: new Map(),
+        roleByName: new Map(),
       };
       this.active.set(key, gate);
       this.scheduleNextPoll(gate);
@@ -180,10 +336,166 @@ export class HealthGateService {
     } catch (error) {
       // The gate is an observer; its failure must never fail the operation.
       console.error(
-        '[HealthGate] begin (%s) failed for %s on node %d:',
+        '[HealthGate] beginStack (%s) failed for %s on node %d:',
         trigger, sanitizeForLog(stackName), nodeId, error,
       );
       return null;
+    }
+  }
+
+  /** @deprecated Prefer beginStack; retained as a one-PR alias for callers under migration. */
+  public begin(
+    nodeId: number,
+    stackName: string,
+    trigger: 'update' | 'deploy',
+    actor: string | null,
+  ): string | null {
+    return this.beginStack(nodeId, stackName, trigger, actor);
+  }
+
+  /**
+   * Pre-mutation snapshot for a service-scoped update/restore. Captures the
+   * selected service's primary replicas and the sibling collateral set (marking
+   * only currently-running, healthy or healthcheck-less siblings as
+   * regression-eligible), and returns an opaque token the orchestrator carries
+   * through attachExpectedImage and beginPrepared. Never throws: a Docker read
+   * failure yields snapshotOk=false so the orchestrator can skip observation
+   * rather than claim a gate with an empty baseline.
+   */
+  public async prepare(input: PrepareInput): Promise<{ prepareToken: string; expiresAt: number; snapshotOk: boolean }> {
+    const now = Date.now();
+    this.sweepExpiredPrepared(now);
+    const { nodeId, stackName, trigger } = input;
+    const serviceName = input.target.serviceName;
+    const settings = this.readSettings();
+
+    let baselines: PreparedBaseline[] = [];
+    let snapshotOk = true;
+    try {
+      baselines = await this.snapshotBaselines(nodeId, stackName);
+    } catch (error) {
+      snapshotOk = false;
+      console.warn('[HealthGate] prepare snapshot failed for %s/%s:',
+        sanitizeForLog(stackName), sanitizeForLog(serviceName), getErrorMessage(error, 'unknown'));
+    }
+
+    const primaryBaseline = baselines.filter(b => b.service === serviceName);
+    const collateralBaseline = baselines.filter(b => b.service !== serviceName);
+    const collateralEligibleNames = new Set(
+      collateralBaseline.filter(isRegressionEligibleSibling).map(b => b.name),
+    );
+
+    const token = randomUUID();
+    const expiresAt = now + prepareTtlMs();
+    this.prepared.set(token, {
+      token,
+      nodeId,
+      stackName,
+      serviceName,
+      trigger,
+      windowSeconds: settings.windowSeconds,
+      expiresAt,
+      expectedReplicas: input.expectedReplicas,
+      expectedImageId: null,
+      collateralEligibleNames,
+      primaryBaseline,
+      collateralBaseline,
+    });
+    return { prepareToken: token, expiresAt, snapshotOk };
+  }
+
+  /** Record the single image id every primary replica must converge on. No-op for an unknown/expired token. */
+  public attachExpectedImage(prepareToken: string, expectedImageId: string): void {
+    this.sweepExpiredPrepared(Date.now());
+    const prep = this.prepared.get(prepareToken);
+    if (!prep) {
+      console.warn('[HealthGate] attachExpectedImage: unknown or expired prepare token');
+      return;
+    }
+    prep.expectedImageId = expectedImageId;
+  }
+
+  /**
+   * Begin observing a prepared service gate after its mutation. Mirrors
+   * beginStack's nullability: returns a null runId (and observing:false) when
+   * the service is not started, gating is disabled, or the insert fails; a
+   * non-null runId with observing:false past the concurrency cap; and a non-null
+   * runId with observing:true once the poll is armed. The prepare token is
+   * consumed either way. Never throws.
+   */
+  public beginPrepared(input: { prepareToken: string; actor: string | null }): BeginPreparedResult {
+    const now = Date.now();
+    this.sweepExpiredPrepared(now);
+    const prep = this.prepared.get(input.prepareToken);
+    // Always consume the token so a caller cannot begin twice off one prepare.
+    if (prep) this.prepared.delete(input.prepareToken);
+
+    if (!this.started || !prep) return { runId: null, observing: false };
+
+    try {
+      const db = DatabaseService.getInstance();
+      const settings = this.readSettings();
+      if (!settings.enabled) return { runId: null, observing: false };
+
+      const key = this.gateKey(prep.nodeId, prep.stackName, 'service', prep.serviceName);
+      // Same-service + stack gates only; sibling service observations continue.
+      this.supersedeGatesForStack(prep.nodeId, prep.stackName, { serviceName: prep.serviceName });
+
+      const runId = randomUUID();
+      const startedAt = Date.now();
+      const row: HealthGateRunRow = {
+        id: runId,
+        node_id: prep.nodeId,
+        stack_name: prep.stackName,
+        trigger_action: prep.trigger,
+        status: 'observing',
+        reason: null,
+        window_seconds: prep.windowSeconds,
+        containers_json: '[]',
+        started_at: startedAt,
+        ended_at: null,
+        created_by: input.actor,
+        target_scope: 'service',
+        service_name: prep.serviceName,
+        failure_source: null,
+      };
+
+      if (this.active.size >= MAX_CONCURRENT_GATES) {
+        db.insertHealthGateRun({ ...row, status: 'unknown', reason: 'too many concurrent observations', ended_at: startedAt });
+        return { runId, observing: false };
+      }
+
+      db.insertHealthGateRun(row);
+      const gate: ActiveGate = {
+        runId,
+        nodeId: prep.nodeId,
+        stackName: prep.stackName,
+        windowSeconds: prep.windowSeconds,
+        startedAt,
+        timer: null,
+        expected: null,
+        consecutivePollErrors: 0,
+        missingLastPoll: new Set(),
+        restartingLastPoll: new Set(),
+        finalized: false,
+        targetScope: 'service',
+        trigger: prep.trigger,
+        serviceName: prep.serviceName,
+        expectedImageId: prep.expectedImageId,
+        expectedReplicas: prep.expectedReplicas,
+        collateralEligibleNames: prep.collateralEligibleNames,
+        collateralBaselineByName: this.baselineMapFromPrepared(
+          prep.collateralBaseline.filter(b => prep.collateralEligibleNames.has(b.name)),
+        ),
+        roleByName: new Map(),
+      };
+      this.active.set(key, gate);
+      this.scheduleNextPoll(gate);
+      return { runId, observing: true };
+    } catch (error) {
+      console.error('[HealthGate] beginPrepared failed for %s/%s:',
+        sanitizeForLog(prep.stackName), sanitizeForLog(prep.serviceName), error);
+      return { runId: null, observing: false };
     }
   }
 
@@ -197,6 +509,7 @@ export class HealthGateService {
       return {
         stack: stackName, id: null, status: 'never-run', trigger: null, reason: null,
         windowSeconds: null, startedAt: null, endedAt: null, containers: [],
+        targetScope: 'stack', serviceName: null, failureSource: null,
       };
     }
     let containers: HealthGateContainer[] = [];
@@ -217,6 +530,9 @@ export class HealthGateService {
       startedAt: row.started_at,
       endedAt: row.ended_at,
       containers,
+      targetScope: row.target_scope ?? 'stack',
+      serviceName: row.service_name ?? null,
+      failureSource: row.failure_source ?? null,
     };
   }
 
@@ -227,11 +543,15 @@ export class HealthGateService {
    * or corrupt the restart/missing accounting that assumes one poll at a time.
    */
   private async poll(gate: ActiveGate): Promise<void> {
-    const key = `${gate.nodeId}:${gate.stackName}`;
+    const key = this.gateKey(gate.nodeId, gate.stackName, gate.targetScope, gate.serviceName);
     // A late timer fire after supersede, stop, or finalize must do nothing.
     if (gate.finalized || this.active.get(key) !== gate) return;
     try {
-      await this.runPollCycle(gate, key);
+      if (gate.targetScope === 'service') {
+        await this.runServicePollCycle(gate, key);
+      } else {
+        await this.runPollCycle(gate, key);
+      }
     } finally {
       if (!gate.finalized && this.active.get(key) === gate) {
         this.scheduleNextPoll(gate);
@@ -352,16 +672,201 @@ export class HealthGateService {
     this.finalize(gate, 'passed', null, summary);
   }
 
+  /**
+   * Poll cycle for a prepared service gate. Observes the selected service's
+   * primary replicas (image convergence, replica count, health/restart) and the
+   * regression-eligible collateral siblings, attributing a failure to
+   * 'primary' or 'collateral'. Unrelated containers that appear after prepare do
+   * not expand the observed set.
+   */
+  private async runServicePollCycle(gate: ActiveGate, key: string): Promise<void> {
+    let observed: ObservedContainer[];
+    try {
+      observed = await withTimeout(
+        this.observeContainers(gate), OBSERVE_TIMEOUT_MS, 'health gate observe',
+      );
+    } catch (error) {
+      gate.consecutivePollErrors += 1;
+      console.warn(
+        '[HealthGate] service poll error %d for %s/%s:',
+        gate.consecutivePollErrors, sanitizeForLog(gate.stackName),
+        sanitizeForLog(gate.serviceName ?? ''), getErrorMessage(error, 'unknown'),
+      );
+      if (gate.consecutivePollErrors >= 3) {
+        this.finalize(gate, 'unknown', 'Docker became unreachable during observation', []);
+      }
+      return;
+    }
+    if (gate.finalized || this.active.get(key) !== gate) return;
+    gate.consecutivePollErrors = 0;
+
+    const elapsedMs = Date.now() - gate.startedAt;
+    const serviceName = gate.serviceName ?? '';
+
+    // Arm the expected set once from post-mutation primary replicas plus the
+    // pre-mutation regression-eligible collateral baselines. Seeding collateral
+    // from the prepare baseline (not only from the first post-mutation poll)
+    // means a healthy sibling that vanished during the mutation gap is still
+    // tracked and can fail the gate. Scale-0 arms immediately with an empty
+    // primary set; scale>0 waits (up to the empty grace) for replicas.
+    if (gate.expected === null) {
+      const primary = observed.filter(c => c.service === serviceName);
+      if (gate.expectedReplicas > 0 && primary.length === 0) {
+        if (elapsedMs >= EMPTY_GRACE_MS) {
+          this.finalize(gate, 'failed', `service ${serviceName} has no running replicas to observe`, [], 'primary');
+        }
+        return;
+      }
+      const expected = new Map<string, ObservedContainer>();
+      for (const c of primary) {
+        gate.roleByName.set(c.name, 'primary');
+        expected.set(c.name, c);
+      }
+      const observedByName = new Map(observed.map(c => [c.name, c]));
+      for (const [name, baseline] of gate.collateralBaselineByName) {
+        if (gate.roleByName.has(name)) continue;
+        gate.roleByName.set(name, 'collateral');
+        // Prefer the live observation when the sibling is still present; otherwise
+        // keep the prepare baseline so a missing sibling enters the miss path.
+        expected.set(name, observedByName.get(name) ?? baseline);
+      }
+      // Also pick up eligible siblings that appeared under a new name after mutation
+      // (unusual, but keeps prior behavior for containers still in the eligible set).
+      for (const c of observed) {
+        if (gate.collateralEligibleNames.has(c.name) && !gate.roleByName.has(c.name)) {
+          gate.roleByName.set(c.name, 'collateral');
+          expected.set(c.name, c);
+        }
+      }
+      gate.expected = expected;
+      return;
+    }
+
+    const byName = new Map(observed.map(c => [c.name, c]));
+
+    for (const [name, baseline] of gate.expected) {
+      const current = byName.get(name);
+      if (!current) continue;
+      const restarted =
+        current.id !== baseline.id ||
+        current.restartCount > baseline.restartCount ||
+        (current.startedAt !== null && baseline.startedAt !== null && current.startedAt !== baseline.startedAt);
+      current.restarts = baseline.restarts + (restarted ? 1 : 0);
+    }
+    const summary = this.summarizeService(gate, byName);
+
+    // Primary image convergence: a primary replica on any image id other than
+    // the single attached expected id fails the gate.
+    if (gate.expectedImageId) {
+      const wrongImage = observed.find(
+        c => c.service === serviceName && c.imageId && c.imageId !== gate.expectedImageId,
+      );
+      if (wrongImage) {
+        this.finalize(gate, 'failed', `service ${serviceName} replica ${wrongImage.name} is running an unexpected image`, summary, 'primary');
+        return;
+      }
+    }
+
+    for (const [name, baseline] of gate.expected) {
+      const role = gate.roleByName.get(name) ?? 'collateral';
+      const noun = role === 'primary' ? 'replica' : 'sibling';
+      const current = byName.get(name);
+      if (!current) {
+        if (gate.missingLastPoll.has(name)) {
+          this.finalize(gate, 'failed', `${noun} ${name} disappeared during observation`, summary, role);
+          return;
+        }
+        gate.missingLastPoll.add(name);
+        continue;
+      }
+      gate.missingLastPoll.delete(name);
+
+      if (current.state === 'exited' && baseline.restarts === current.restarts) {
+        this.finalize(gate, 'failed', `${noun} ${name} exited during observation`, summary, role);
+        return;
+      }
+      if (current.health === 'unhealthy') {
+        this.finalize(gate, 'failed', `${noun} ${name} reported unhealthy`, summary, role);
+        return;
+      }
+      if (current.restarts >= 2) {
+        this.finalize(gate, 'failed', `${noun} ${name} is restart looping`, summary, role);
+        return;
+      }
+      if (current.state === 'restarting') {
+        if (gate.restartingLastPoll.has(name)) {
+          this.finalize(gate, 'failed', `${noun} ${name} is stuck restarting`, summary, role);
+          return;
+        }
+        gate.restartingLastPoll.add(name);
+      } else {
+        gate.restartingLastPoll.delete(name);
+      }
+      gate.expected.set(name, current);
+    }
+
+    if (elapsedMs < gate.windowSeconds * 1000) return;
+
+    const stillStarting = observed.filter(
+      c => c.health === 'starting' && (c.service === serviceName || gate.collateralEligibleNames.has(c.name)),
+    );
+    if (stillStarting.length > 0) {
+      this.finalize(gate, 'unknown', 'a healthcheck was still starting when the observation window ended', summary);
+      return;
+    }
+    const runningPrimary = observed.filter(c => c.service === serviceName && c.state === 'running');
+    if (runningPrimary.length !== gate.expectedReplicas) {
+      this.finalize(
+        gate, 'failed',
+        `service ${serviceName} has ${runningPrimary.length} running replica(s), expected ${gate.expectedReplicas}`,
+        summary, 'primary',
+      );
+      return;
+    }
+    const collateralNotRunning = [...gate.expected.keys()]
+      .filter(name => gate.roleByName.get(name) === 'collateral')
+      .filter(name => byName.get(name)?.state !== 'running');
+    if (collateralNotRunning.length > 0) {
+      this.finalize(gate, 'failed', `sibling(s) not running at the end of the window: ${collateralNotRunning.join(', ')}`, summary, 'collateral');
+      return;
+    }
+    this.finalize(gate, 'passed', null, summary);
+  }
+
+  private summarizeService(
+    gate: ActiveGate,
+    current: Map<string, ObservedContainer>,
+  ): HealthGateContainer[] {
+    if (!gate.expected) return [];
+    return [...gate.expected.values()].map(baseline => {
+      const now = current.get(baseline.name);
+      return {
+        name: baseline.name,
+        state: now?.state ?? 'missing',
+        health: now?.health ?? null,
+        restarts: now?.restarts ?? baseline.restarts,
+        service: (now ?? baseline).service ?? gate.serviceName,
+        role: gate.roleByName.get(baseline.name) ?? null,
+      };
+    });
+  }
+
   private async observeContainers(gate: ActiveGate): Promise<ObservedContainer[]> {
-    const docker = DockerController.getInstance(gate.nodeId).getDocker();
+    return this.listStackContainers(gate.nodeId, gate.stackName);
+  }
+
+  /** List and inspect a stack's containers into the gate's observation shape. */
+  private async listStackContainers(nodeId: number, stackName: string): Promise<ObservedContainer[]> {
+    const docker = DockerController.getInstance(nodeId).getDocker();
     const listed = await docker.listContainers({
       all: true,
-      filters: { label: [`com.docker.compose.project=${gate.stackName}`] },
+      filters: { label: [`com.docker.compose.project=${stackName}`] },
     });
     const observed = await Promise.all(
       listed.map(async (info): Promise<ObservedContainer | null> => {
         try {
           const inspect = await docker.getContainer(info.Id).inspect();
+          const labels = (info.Labels ?? inspect.Config?.Labels ?? {}) as Record<string, string>;
           return {
             id: info.Id,
             name: info.Names?.[0]?.replace(/^\//, '') ?? info.Id.slice(0, 12),
@@ -370,6 +875,8 @@ export class HealthGateService {
             restarts: 0,
             state: inspect.State?.Status ?? info.State ?? 'unknown',
             health: inspect.State?.Health?.Status ?? null,
+            service: labels['com.docker.compose.service'] ?? null,
+            imageId: inspect.Image ?? '',
           };
         } catch (e: unknown) {
           // Removed between list and inspect; the missing-container logic will
@@ -380,6 +887,23 @@ export class HealthGateService {
       }),
     );
     return observed.filter((c): c is ObservedContainer => c !== null);
+  }
+
+  /** Snapshot the current per-container facts for prepare's primary/collateral partition. */
+  private async snapshotBaselines(nodeId: number, stackName: string): Promise<PreparedBaseline[]> {
+    const observed = await withTimeout(
+      this.listStackContainers(nodeId, stackName), OBSERVE_TIMEOUT_MS, 'health gate prepare snapshot',
+    );
+    return observed.map(c => ({
+      id: c.id,
+      name: c.name,
+      service: c.service,
+      state: c.state,
+      health: c.health,
+      restartCount: c.restartCount,
+      startedAt: c.startedAt,
+      imageId: c.imageId,
+    }));
   }
 
   private summarize(
@@ -402,16 +926,29 @@ export class HealthGateService {
     status: 'passed' | 'failed' | 'unknown',
     reason: string | null,
     containers: HealthGateContainer[],
+    failureSource: 'primary' | 'collateral' | null = null,
   ): void {
     if (gate.finalized) return;
     gate.finalized = true;
     if (gate.timer) clearTimeout(gate.timer);
-    const key = `${gate.nodeId}:${gate.stackName}`;
+    const key = this.gateKey(gate.nodeId, gate.stackName, gate.targetScope, gate.serviceName);
     if (this.active.get(key) === gate) this.active.delete(key);
+
+    // A service gate owns its service's Auto-Heal suppression while observing;
+    // release it here so a failed/superseded/stopped gate never leaves auto-heal
+    // muted for that service.
+    if (gate.targetScope === 'service' && gate.serviceName) {
+      try {
+        AutoHealService.getInstance().clearSuppress(gate.nodeId, gate.stackName, gate.serviceName);
+      } catch (error) {
+        console.warn('[HealthGate] Failed to clear auto-heal suppression for %s/%s:',
+          sanitizeForLog(gate.stackName), sanitizeForLog(gate.serviceName), getErrorMessage(error, 'unknown'));
+      }
+    }
 
     try {
       DatabaseService.getInstance().finalizeHealthGateRun(
-        gate.runId, status, reason, Date.now(), JSON.stringify(containers),
+        gate.runId, status, reason, Date.now(), JSON.stringify(containers), failureSource,
       );
     } catch (error) {
       // The verdict is lost from the DB (the startup sweep will later rewrite

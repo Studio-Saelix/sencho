@@ -13,7 +13,6 @@ import {
     type WithdrawConfirm,
     type AcceptMode,
     getBlueprint,
-    applyBlueprint,
     updateBlueprint,
     deleteBlueprint,
     withdrawDeployment,
@@ -24,6 +23,7 @@ import { BlueprintEditor } from './BlueprintEditor';
 import { BlueprintDeploymentTable } from './BlueprintDeploymentTable';
 import { EvictionDialog } from './EvictionDialog';
 import { StateReviewDialog } from './StateReviewDialog';
+import { RolloutPreviewDialog } from './RolloutPreviewDialog';
 import { useNodes } from '@/context/NodeContext';
 import { formatTimeAgo } from '@/lib/relativeTime';
 
@@ -46,6 +46,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     const [stateReviewTarget, setStateReviewTarget] = useState<{ nodeId: number; nodeName: string } | null>(null);
     const [deleteOpen, setDeleteOpen] = useState(false);
     const [deleteConfirmText, setDeleteConfirmText] = useState('');
+    const [previewOpen, setPreviewOpen] = useState(false);
     const { nodes } = useNodes();
 
     // Hold the latest onOpenChange without making it a refresh dependency. Parents
@@ -78,19 +79,9 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
 
     const blueprint = summary?.blueprint;
 
-    async function handleApply() {
-        if (!blueprint) return;
-        setSubmitting(true);
-        try {
-            await applyBlueprint(blueprint.id);
-            toast.success('Reconciliation triggered');
-            await refresh();
-            onChanged();
-        } catch (err) {
-            toast.error(err instanceof Error ? err.message : 'Failed to apply blueprint');
-        } finally {
-            setSubmitting(false);
-        }
+    async function handleRolloutApplied() {
+        await refresh();
+        onChanged();
     }
 
     async function handleSaveEdit(input: CreateBlueprintInput | UpdateBlueprintInput) {
@@ -156,7 +147,13 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
             await refresh();
             onChanged();
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : 'Failed to withdraw');
+            const status = (err as Error & { status?: number }).status;
+            const message = err instanceof Error ? err.message : 'Failed to withdraw';
+            if (status === 409 && /approval|removal|stale/i.test(message)) {
+                toast.error('Confirm a remove rollout for this node before destructive eviction.');
+            } else {
+                toast.error(message);
+            }
         } finally {
             setBusyNodeId(null);
             setEvictTarget(null);
@@ -182,12 +179,12 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     /**
      * Row-level retry isn't a backend primitive: the reconciler operates on the whole
      * blueprint, not a single deployment. We surface the row's "Retry" button and
-     * trigger a full reconciliation tick, which retries failed deployments naturally.
+     * open the rollout preview so the operator confirms the full plan.
      * The nodeId argument satisfies BlueprintDeploymentTable.onRetry's signature.
      */
     async function handleRetryRow(nodeId: number): Promise<void> {
         void nodeId;
-        await handleApply();
+        setPreviewOpen(true);
     }
 
     function openWithdraw(nodeId: number) {
@@ -206,8 +203,12 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
         ? `${describeSelector(blueprint.selector)} · ${blueprint.drift_mode} · rev ${blueprint.revision}`
         : (loading ? 'Loading…' : '');
 
+    const approvalLabel = summary?.effectiveApproval === 'reapproval_required'
+        ? 'reapproval required'
+        : summary?.effectiveApproval ?? 'pending';
+
     const footerContext = blueprint
-        ? `Updated ${formatTimeAgo(blueprint.updated_at)}${blueprint.enabled ? '' : ' · reconciler disabled'}`
+        ? `Updated ${formatTimeAgo(blueprint.updated_at)}${blueprint.enabled ? '' : ' · reconciler disabled'} · ${approvalLabel}`
         : undefined;
 
     const secondaryActions = blueprint && canEdit
@@ -238,7 +239,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                 primaryAction={blueprint && canEdit ? {
                     label: 'Apply now',
                     icon: Play,
-                    onClick: handleApply,
+                    onClick: () => setPreviewOpen(true),
                     disabled: submitting || !blueprint.enabled || editMode,
                 } : undefined}
                 secondaryActions={secondaryActions}
@@ -335,6 +336,15 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                         nodeName={stateReviewTarget.nodeName}
                         busy={busyNodeId === stateReviewTarget.nodeId}
                         onAccept={(mode) => performAccept(stateReviewTarget.nodeId, mode)}
+                    />
+                )}
+                {blueprint && (
+                    <RolloutPreviewDialog
+                        blueprintId={blueprint.id}
+                        blueprintName={blueprint.name}
+                        open={previewOpen}
+                        onOpenChange={setPreviewOpen}
+                        onApplied={handleRolloutApplied}
                     />
                 )}
                 {blueprint && (

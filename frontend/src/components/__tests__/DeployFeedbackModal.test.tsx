@@ -5,7 +5,15 @@ import { DeployFeedbackProvider, useDeployFeedback } from '@/context/DeployFeedb
 import { DeployFeedbackModal } from '../DeployFeedbackModal';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
+vi.mock('@/lib/serviceUpdate', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/serviceUpdate')>();
+  return {
+    ...actual,
+    requestServiceRestore: vi.fn(),
+  };
+});
 import { apiFetch } from '@/lib/api';
+import { requestServiceRestore } from '@/lib/serviceUpdate';
 
 // Lets a test simulate a mid-stream drop (onReady then onError) so the panel
 // reaches 'streaming' with progressUnavailable set.
@@ -15,12 +23,21 @@ const ctl = vi.hoisted(() => ({ drop: false, lastNodeId: undefined as number | n
 // the stream connected on mount so the panel reaches the 'streaming' state, and
 // records the captured nodeId it was mounted with.
 vi.mock('@/components/Terminal', () => {
-  const MockTerminal = ({ onReady, onError, nodeId }: { onReady?: () => void; onError?: () => void; nodeId?: number | null }) => {
+  const MockTerminal = ({
+    onReady, onError, nodeId, deploySessionId,
+  }: {
+    onReady?: () => void;
+    onError?: () => void;
+    nodeId?: number | null;
+    deploySessionId?: string | null;
+  }) => {
     ctl.lastNodeId = nodeId;
+    // Re-fire on each deploy session so a Restore (second runWithLog) can
+    // release its progress-stream gate the same way the first update does.
     React.useEffect(() => {
       onReady?.();
       if (ctl.drop) onError?.();
-    }, [onReady, onError]);
+    }, [onReady, onError, deploySessionId]);
     return null;
   };
   return { default: MockTerminal };
@@ -28,19 +45,28 @@ vi.mock('@/components/Terminal', () => {
 
 // Resolver for the in-flight operation, assigned inside the run callback (async,
 // after render) so the test can leave it pending or settle it on demand.
-let resolveRun: ((r: { ok: boolean; errorMessage?: string; healthGateId?: string | null }) => void) | null = null;
+let resolveRun: ((r: {
+  ok: boolean;
+  errorMessage?: string;
+  healthGateId?: string | null;
+  recoveryId?: string | null;
+}) => void) | null = null;
 // The runWithLog promise itself, so a test can await full result propagation.
 let runOuter: Promise<unknown> | null = null;
 // Node the driver captures for the operation; default local, overridden per test.
 let driverNodeId: number | null = null;
+let driverServiceName: string | undefined;
 
 function Driver() {
   const { runWithLog } = useDeployFeedback();
   React.useEffect(() => {
-    runOuter = runWithLog({ stackName: 'web', action: 'update', nodeId: driverNodeId }, async (started) => {
-      await started;
-      return new Promise<{ ok: boolean; errorMessage?: string; healthGateId?: string | null }>((res) => { resolveRun = res; });
-    });
+    runOuter = runWithLog(
+      { stackName: 'web', action: 'update', nodeId: driverNodeId, serviceName: driverServiceName },
+      async (started) => {
+        await started;
+        return new Promise((res) => { resolveRun = res; });
+      },
+    );
   }, [runWithLog]);
   return null;
 }
@@ -60,7 +86,14 @@ async function renderStreaming() {
 
 type GateStatus = 'observing' | 'passed' | 'failed' | 'unknown';
 
-function routeGateApi(responses: Array<{ id: string; status: GateStatus; reason?: string | null }>) {
+function routeGateApi(responses: Array<{
+  id: string;
+  status: GateStatus;
+  reason?: string | null;
+  serviceName?: string | null;
+  targetScope?: 'stack' | 'service';
+  failureSource?: 'primary' | 'collateral' | null;
+}>) {
   let call = 0;
   vi.mocked(apiFetch).mockImplementation((url: string) => {
     if (!String(url).includes('/health-gate')) {
@@ -71,6 +104,7 @@ function routeGateApi(responses: Array<{ id: string; status: GateStatus; reason?
     return Promise.resolve(new Response(JSON.stringify({
       stack: 'web', id: r.id, status: r.status, trigger: 'update',
       reason: r.reason ?? null, windowSeconds: 90, startedAt: Date.now(), endedAt: null, containers: [],
+      targetScope: r.targetScope ?? 'stack', serviceName: r.serviceName ?? null, failureSource: r.failureSource ?? null,
     }), { status: 200 }));
   });
 }
@@ -83,8 +117,10 @@ describe('DeployFeedbackModal health gate', () => {
     ctl.drop = false;
     ctl.lastNodeId = undefined;
     driverNodeId = null;
+    driverServiceName = undefined;
     vi.mocked(apiFetch).mockReset();
     vi.mocked(apiFetch).mockResolvedValue(new Response('{}', { status: 200 }));
+    vi.mocked(requestServiceRestore).mockReset();
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -150,6 +186,55 @@ describe('DeployFeedbackModal health gate', () => {
     expect(screen.getAllByText(/Health gate failed/).length).toBeGreaterThan(0);
     await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
     expect(screen.getByTestId('deploy-feedback-modal')).toBeInTheDocument();
+  });
+
+  it('names the service in the banner for a service-scoped gate and notes a collateral failure', async () => {
+    routeGateApi([{
+      id: 'gate-1', status: 'failed', reason: 'service web has no running replicas to observe',
+      serviceName: 'web', targetScope: 'service', failureSource: 'collateral',
+    }]);
+    await succeedWithGate('gate-1');
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(screen.getByTestId('health-gate-banner')).toHaveAttribute('data-status', 'failed');
+    expect(screen.getByText(/A dependent service triggered the failure/)).toBeInTheDocument();
+  });
+
+  it('offers Restore for a failed service gate and calls requestServiceRestore with the recovery id', async () => {
+    driverServiceName = 'api';
+    vi.mocked(requestServiceRestore).mockResolvedValue({
+      ok: true,
+      mode: 'update',
+      serviceName: 'api',
+      healthGateId: null,
+      observing: false,
+      recoveryId: 'rec-1',
+      recoveryAvailable: false,
+    });
+    routeGateApi([{
+      id: 'gate-1', status: 'failed', reason: 'service api reported unhealthy',
+      serviceName: 'api', targetScope: 'service', failureSource: 'primary',
+    }]);
+    await renderStreaming();
+    await act(async () => { await vi.advanceTimersByTimeAsync(60); });
+    await act(async () => {
+      resolveRun?.({ ok: true, healthGateId: 'gate-1', recoveryId: 'rec-1' });
+      await runOuter;
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    const restoreBtn = screen.getByTestId('service-restore-from-gate');
+    expect(restoreBtn).toBeInTheDocument();
+    await act(async () => {
+      restoreBtn.click();
+    });
+    // Restore starts a fresh runWithLog; Terminal remounts for the new
+    // deploySessionId and releases the gate after the 50ms handshake.
+    await act(async () => { await vi.advanceTimersByTimeAsync(60); });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(requestServiceRestore).toHaveBeenCalledWith(expect.objectContaining({
+      stackName: 'web',
+      serviceName: 'api',
+      recoveryId: 'rec-1',
+    }));
   });
 
   it('gives up with an unknown verdict after repeated poll failures', async () => {

@@ -20,7 +20,7 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 import { blockIfReplica } from '../middleware/fleetSyncGuards';
-import { validateStackPatternForRedos } from './fleet';
+import { validateStackPatternForRedos } from '../helpers/stackPattern';
 import { FINDING_SEVERITIES, POLICY_SEVERITIES } from '../utils/severity';
 import { isNoOpBlockingPolicy } from '../utils/policy-risk';
 import { DEFAULT_POLICY_PACKS } from '../services/policy-packs';

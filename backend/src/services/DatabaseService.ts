@@ -9,6 +9,7 @@ import type { AuditStatsInput } from './AuditAnomalyService';
 import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
 import { HIGH_EPSS_THRESHOLD } from './securityPosture';
 import type { BackendScheduledAction } from './scheduledActionRegistry';
+import { stackPatternMatches } from '../helpers/stackPattern';
 import { readSnapshotFileRow, type SnapshotFileReadResult, type SnapshotFileRow } from '../helpers/snapshotFileDecrypt';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
@@ -38,11 +39,58 @@ export interface GlobalSetting {
  */
 export type StackCheckStatus = 'ok' | 'partial' | 'failed';
 
+/**
+ * Per-service check outcome persisted in stack_update_status.services_json.
+ * Distinct from StackCheckStatus: a service with no checkable image ref is
+ * `not_checkable`, which never counts as a check failure at the aggregate
+ * (stack-level) status.
+ */
+export type ServiceCheckStatus = 'ok' | 'partial' | 'failed' | 'not_checkable';
+
+export interface StackServiceStatus {
+    service: string;
+    image: string | null;
+    runtimeImages?: string[];
+    hasUpdate: boolean;
+    checkStatus: ServiceCheckStatus;
+    lastError: string | null;
+}
+
 export interface StackUpdateDetail {
     hasUpdate: boolean;
     checkStatus: StackCheckStatus;
     lastError: string | null;
     checkedAt: number;
+    /** Per-service breakdown; omitted when the stack has no persisted per-service data (no effective model available yet, or corrupt JSON). */
+    services?: StackServiceStatus[];
+}
+
+const SERVICES_JSON_VERSION = 1;
+
+function isStackServiceStatus(value: unknown): value is StackServiceStatus {
+    if (!value || typeof value !== 'object') return false;
+    const v = value as Record<string, unknown>;
+    return typeof v.service === 'string'
+        && (v.image === null || typeof v.image === 'string')
+        && typeof v.hasUpdate === 'boolean'
+        && (v.checkStatus === 'ok' || v.checkStatus === 'partial' || v.checkStatus === 'failed' || v.checkStatus === 'not_checkable')
+        && (v.lastError === null || typeof v.lastError === 'string');
+}
+
+/** Parses stack_update_status.services_json safely; a missing, corrupt, or version-mismatched value yields an empty list rather than throwing. */
+function parseServicesJson(raw: string | null | undefined): StackServiceStatus[] {
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(raw) as { version?: unknown; services?: unknown };
+        if (parsed?.version !== SERVICES_JSON_VERSION || !Array.isArray(parsed.services)) return [];
+        return parsed.services.filter(isStackServiceStatus);
+    } catch {
+        return [];
+    }
+}
+
+function stringifyServicesJson(services: StackServiceStatus[], generation: number): string {
+    return JSON.stringify({ version: SERVICES_JSON_VERSION, generation, services });
 }
 
 export interface StackAlert {
@@ -149,7 +197,7 @@ export interface HealthGateRunRow {
     node_id: number;
     stack_name: string;
     /** Named trigger_action because TRIGGER is reserved in SQLite. */
-    trigger_action: 'update' | 'deploy';
+    trigger_action: 'update' | 'deploy' | 'service_update' | 'service_restore';
     status: 'observing' | 'passed' | 'failed' | 'unknown';
     reason: string | null;
     window_seconds: number;
@@ -157,6 +205,30 @@ export interface HealthGateRunRow {
     containers_json: string;
     started_at: number;
     ended_at: number | null;
+    created_by: string | null;
+    /** Additive; legacy rows default to stack. */
+    target_scope: 'stack' | 'service';
+    service_name: string | null;
+    failure_source: 'primary' | 'collateral' | null;
+}
+
+/** Pre-update image snapshot enabling a manual per-service restore after a service-scoped update. */
+export interface ServiceUpdateRecoveryRow {
+    id: string;
+    node_id: number;
+    stack_name: string;
+    service_name: string;
+    /** JSON array of pre-update replica image snapshots (imageId + repoDigest when known). */
+    replicas_json: string;
+    majority_image_id: string;
+    /** Audit/UI only: the tag the majority image is retagged onto during restore, never a policy scan target. */
+    declared_image_ref: string;
+    weak_floating_tag: number;
+    health_gate_id: string | null;
+    status: 'active' | 'restoring' | 'consumed' | 'expired' | 'invalidated';
+    expires_at: number;
+    claim_expires_at: number | null;
+    created_at: number;
     created_by: string | null;
 }
 
@@ -470,6 +542,11 @@ export interface Blueprint {
     updated_at: number;
     created_by: string | null;
     pinned_node_id: number | null;
+    approval_status: 'pending' | 'approved';
+    approved_intent_fingerprint: string | null;
+    approved_blast_json: string | null;
+    approved_at: number | null;
+    approved_by: string | null;
 }
 
 export interface BlueprintDeployment {
@@ -617,6 +694,7 @@ export interface NotificationRoute {
     stack_patterns: string[];
     label_ids: number[] | null;
     categories: string[] | null;
+    levels: ('info' | 'warning' | 'error')[] | null;
     channel_type: 'discord' | 'slack' | 'webhook' | 'apprise';
     channel_url: string;
     config?: string | null;
@@ -915,6 +993,7 @@ export class DatabaseService {
         this.migrateNotificationRoutesNodeId();
         this.migrateNotificationRoutesMatchers();
         this.migrateNotificationChannelConfig();
+        this.migrateNotificationRouteLevels();
         this.migrateNotificationSuppressionRules();
         this.migrateNotificationHistoryContext();
         this.migrateScanPolicyFleetColumns();
@@ -930,6 +1009,7 @@ export class DatabaseService {
         this.migrateAddNodeLastContact();
         this.migrateAddNodeCordonFields();
         this.migrateAddBlueprintPinnedNode();
+        this.migrateAddBlueprintApproval();
         this.migrateAutoHealNodeId();
         this.migrateFleetSyncStickyError();
         this.migrateStackDossierHashes();
@@ -1008,6 +1088,7 @@ export class DatabaseService {
         has_update INTEGER DEFAULT 0,
         check_status TEXT NOT NULL DEFAULT 'ok',
         last_error TEXT,
+        services_json TEXT,
         checked_at INTEGER NOT NULL,
         PRIMARY KEY (node_id, stack_name)
       );
@@ -1528,17 +1609,43 @@ export class DatabaseService {
         id TEXT PRIMARY KEY,
         node_id INTEGER NOT NULL,
         stack_name TEXT NOT NULL,
-        trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy')),
+        trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore')),
         status TEXT NOT NULL CHECK (status IN ('observing','passed','failed','unknown')),
         reason TEXT,
         window_seconds INTEGER NOT NULL,
         containers_json TEXT NOT NULL DEFAULT '[]',
         started_at INTEGER NOT NULL,
         ended_at INTEGER,
-        created_by TEXT
+        created_by TEXT,
+        target_scope TEXT NOT NULL DEFAULT 'stack' CHECK (target_scope IN ('stack','service')),
+        service_name TEXT,
+        failure_source TEXT CHECK (failure_source IS NULL OR failure_source IN ('primary','collateral'))
       );
       CREATE INDEX IF NOT EXISTS idx_health_gate_runs_node_stack
         ON health_gate_runs(node_id, stack_name, started_at);
+
+      CREATE TABLE IF NOT EXISTS service_update_recovery (
+        id TEXT PRIMARY KEY,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        service_name TEXT NOT NULL,
+        replicas_json TEXT NOT NULL,
+        majority_image_id TEXT NOT NULL,
+        declared_image_ref TEXT NOT NULL,
+        weak_floating_tag INTEGER NOT NULL DEFAULT 0,
+        health_gate_id TEXT,
+        status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','restoring','consumed','expired','invalidated')),
+        expires_at INTEGER NOT NULL,
+        claim_expires_at INTEGER,
+        created_at INTEGER NOT NULL,
+        created_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_service_update_recovery_node_stack_service
+        ON service_update_recovery(node_id, stack_name, service_name, status);
+      CREATE INDEX IF NOT EXISTS idx_service_update_recovery_status_expires
+        ON service_update_recovery(status, expires_at);
+      CREATE INDEX IF NOT EXISTS idx_service_update_recovery_status_claim_expires
+        ON service_update_recovery(status, claim_expires_at);
 
       CREATE TABLE IF NOT EXISTS secrets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1667,6 +1774,11 @@ export class DatabaseService {
         // failed check is no longer indistinguishable from "up to date".
         maybeAddCol('stack_update_status', 'check_status', "TEXT NOT NULL DEFAULT 'ok'");
         maybeAddCol('stack_update_status', 'last_error', 'TEXT');
+        // Per-service image-update snapshot. Must run AFTER the composite-PK
+        // recreate above so it is never silently dropped on old installs.
+        maybeAddCol('stack_update_status', 'services_json', 'TEXT');
+
+        this.migrateHealthGateTargetSchema();
 
         // Drop legacy SSH/TLS columns from pre-0.7 databases (no longer read or written)
         const legacyCols = ['host', 'port', 'ssh_port', 'ssh_user', 'ssh_password', 'ssh_key', 'tls_ca', 'tls_cert', 'tls_key'];
@@ -1794,6 +1906,66 @@ export class DatabaseService {
         }
     }
 
+    /**
+     * Rebuild health_gate_runs when the installed CHECK still only allows
+     * update|deploy or target/failure columns are missing. Idempotent and
+     * restart-safe: drops a stale temporary table, then rebuilds in one
+     * better-sqlite3 transaction so an interrupted startup cannot leave
+     * CREATE TABLE health_gate_runs_new blocking the next boot.
+     */
+    private migrateHealthGateTargetSchema(): void {
+        const tableSql = (this.db.prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'health_gate_runs'"
+        ).get() as { sql: string } | undefined)?.sql ?? '';
+        const cols = this.db.pragma('table_info(health_gate_runs)') as Array<{ name: string }>;
+        const colNames = new Set(cols.map(c => c.name));
+        const hasTarget = colNames.has('target_scope');
+        const hasFailure = colNames.has('failure_source');
+        const hasWideTrigger = tableSql.includes('service_update') && tableSql.includes('service_restore');
+        if (hasTarget && hasFailure && hasWideTrigger) return;
+
+        // A previous crash between CREATE and RENAME leaves this temp table behind.
+        this.db.exec('DROP TABLE IF EXISTS health_gate_runs_new');
+
+        const targetExpr = hasTarget ? 'target_scope' : "'stack'";
+        const serviceExpr = colNames.has('service_name') ? 'service_name' : 'NULL';
+        const failureExpr = hasFailure ? 'failure_source' : 'NULL';
+
+        this.db.transaction(() => {
+            this.db.exec(`
+                CREATE TABLE health_gate_runs_new (
+                  id TEXT PRIMARY KEY,
+                  node_id INTEGER NOT NULL,
+                  stack_name TEXT NOT NULL,
+                  trigger_action TEXT NOT NULL CHECK (trigger_action IN ('update','deploy','service_update','service_restore')),
+                  status TEXT NOT NULL CHECK (status IN ('observing','passed','failed','unknown')),
+                  reason TEXT,
+                  window_seconds INTEGER NOT NULL,
+                  containers_json TEXT NOT NULL DEFAULT '[]',
+                  started_at INTEGER NOT NULL,
+                  ended_at INTEGER,
+                  created_by TEXT,
+                  target_scope TEXT NOT NULL DEFAULT 'stack' CHECK (target_scope IN ('stack','service')),
+                  service_name TEXT,
+                  failure_source TEXT CHECK (failure_source IS NULL OR failure_source IN ('primary','collateral'))
+                );
+                INSERT INTO health_gate_runs_new (
+                  id, node_id, stack_name, trigger_action, status, reason, window_seconds,
+                  containers_json, started_at, ended_at, created_by, target_scope, service_name, failure_source
+                )
+                SELECT
+                  id, node_id, stack_name, trigger_action, status, reason, window_seconds,
+                  containers_json, started_at, ended_at, created_by,
+                  ${targetExpr}, ${serviceExpr}, ${failureExpr}
+                FROM health_gate_runs;
+                DROP TABLE health_gate_runs;
+                ALTER TABLE health_gate_runs_new RENAME TO health_gate_runs;
+                CREATE INDEX IF NOT EXISTS idx_health_gate_runs_node_stack
+                  ON health_gate_runs(node_id, stack_name, started_at);
+            `);
+        })();
+    }
+
     private migrateEncryptNodeTokens(): void {
         const crypto = CryptoService.getInstance();
         const rows = this.db.prepare("SELECT id, api_token FROM nodes WHERE api_token != '' AND api_token IS NOT NULL").all() as Array<{ id: number; api_token: string }>;
@@ -1916,6 +2088,10 @@ export class DatabaseService {
     private migrateNotificationChannelConfig(): void {
         this.tryAddColumn('agents', 'config', 'TEXT NULL');
         this.tryAddColumn('notification_routes', 'config', 'TEXT NULL');
+    }
+
+    private migrateNotificationRouteLevels(): void {
+        this.tryAddColumn('notification_routes', 'levels', 'TEXT NULL');
     }
 
     private migrateNotificationSuppressionRules(): void {
@@ -2186,6 +2362,27 @@ export class DatabaseService {
         this.tryAddColumn('blueprints', 'pinned_node_id', 'INTEGER');
     }
 
+    private migrateAddBlueprintApproval(): void {
+        this.tryAddColumn('blueprints', 'approval_status', "TEXT NOT NULL DEFAULT 'pending'");
+        this.tryAddColumn('blueprints', 'approved_intent_fingerprint', 'TEXT');
+        this.tryAddColumn('blueprints', 'approved_blast_json', 'TEXT');
+        this.tryAddColumn('blueprints', 'approved_at', 'INTEGER');
+        this.tryAddColumn('blueprints', 'approved_by', 'TEXT');
+        // Fail-closed backfill: any pre-existing approved-looking default stays pending.
+        try {
+            this.db.prepare(
+                `UPDATE blueprints SET approval_status = 'pending',
+                    approved_intent_fingerprint = NULL,
+                    approved_blast_json = NULL,
+                    approved_at = NULL,
+                    approved_by = NULL
+                 WHERE approval_status IS NULL OR approval_status NOT IN ('pending', 'approved')`,
+            ).run();
+        } catch (e) {
+            console.warn('[DatabaseService] blueprint approval backfill:', (e as Error).message);
+        }
+    }
+
     private migrateFleetSyncStickyError(): void {
         this.tryAddColumn('fleet_sync_status', 'sticky_error_code', 'TEXT');
         this.tryAddColumn('fleet_sync_status', 'sticky_error_expected', 'TEXT');
@@ -2408,6 +2605,7 @@ export class DatabaseService {
             stack_patterns: JSON.parse(row.stack_patterns as string) as string[],
             label_ids: row.label_ids ? JSON.parse(row.label_ids as string) as number[] : null,
             categories: row.categories ? JSON.parse(row.categories as string) as string[] : null,
+            levels: row.levels ? JSON.parse(row.levels as string) as ('info' | 'warning' | 'error')[] : null,
             channel_type,
             channel_url: fields.url,
             config: fields.config,
@@ -2445,13 +2643,14 @@ export class DatabaseService {
     public createNotificationRoute(route: Omit<NotificationRoute, 'id'>): NotificationRoute {
         const stored = this.storeAppriseFields(route.channel_type === 'apprise', route.channel_url, route.config);
         const result = this.db.prepare(
-            'INSERT INTO notification_routes (name, node_id, stack_patterns, label_ids, categories, channel_type, channel_url, config, priority, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO notification_routes (name, node_id, stack_patterns, label_ids, categories, levels, channel_type, channel_url, config, priority, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         ).run(
             route.name,
             route.node_id ?? null,
             JSON.stringify(route.stack_patterns),
             route.label_ids ? JSON.stringify(route.label_ids) : null,
             route.categories ? JSON.stringify(route.categories) : null,
+            route.levels && route.levels.length > 0 ? JSON.stringify(route.levels) : null,
             route.channel_type,
             stored.url,
             stored.config,
@@ -2475,6 +2674,10 @@ export class DatabaseService {
         if (updates.stack_patterns !== undefined) { fields.push('stack_patterns = ?'); values.push(JSON.stringify(updates.stack_patterns)); }
         if ('label_ids' in updates) { fields.push('label_ids = ?'); values.push(updates.label_ids ? JSON.stringify(updates.label_ids) : null); }
         if ('categories' in updates) { fields.push('categories = ?'); values.push(updates.categories ? JSON.stringify(updates.categories) : null); }
+        if ('levels' in updates) {
+            fields.push('levels = ?');
+            values.push(updates.levels && updates.levels.length > 0 ? JSON.stringify(updates.levels) : null);
+        }
         if (updates.channel_type !== undefined) { fields.push('channel_type = ?'); values.push(updates.channel_type); }
         if (updates.channel_url !== undefined) {
             fields.push('channel_url = ?');
@@ -3131,11 +3334,13 @@ export class DatabaseService {
     public insertHealthGateRun(run: HealthGateRunRow): void {
         this.db.prepare(
             `INSERT INTO health_gate_runs
-               (id, node_id, stack_name, trigger_action, status, reason, window_seconds, containers_json, started_at, ended_at, created_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+               (id, node_id, stack_name, trigger_action, status, reason, window_seconds, containers_json,
+                started_at, ended_at, created_by, target_scope, service_name, failure_source)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
             run.id, run.node_id, run.stack_name, run.trigger_action, run.status, run.reason,
             run.window_seconds, run.containers_json, run.started_at, run.ended_at, run.created_by,
+            run.target_scope, run.service_name, run.failure_source,
         );
         // Bounded history: keep only the 10 most recent runs per stack.
         this.db.prepare(
@@ -3155,10 +3360,11 @@ export class DatabaseService {
         reason: string | null,
         endedAt: number,
         containersJson: string,
+        failureSource: 'primary' | 'collateral' | null = null,
     ): void {
         this.db.prepare(
-            'UPDATE health_gate_runs SET status = ?, reason = ?, ended_at = ?, containers_json = ? WHERE id = ?'
-        ).run(status, reason, endedAt, containersJson, id);
+            'UPDATE health_gate_runs SET status = ?, reason = ?, ended_at = ?, containers_json = ?, failure_source = ? WHERE id = ?'
+        ).run(status, reason, endedAt, containersJson, failureSource, id);
     }
 
     public getHealthGateRun(nodeId: number, stackName: string, id: string): HealthGateRunRow | undefined {
@@ -3179,6 +3385,128 @@ export class DatabaseService {
             "UPDATE health_gate_runs SET status = 'unknown', reason = ?, ended_at = ? WHERE status = 'observing'"
         ).run(reason, endedAt);
         return result.changes;
+    }
+
+    // --- Service Update Recovery ---
+
+    public insertServiceUpdateRecovery(row: ServiceUpdateRecoveryRow): void {
+        this.db.prepare(
+            `INSERT INTO service_update_recovery
+               (id, node_id, stack_name, service_name, replicas_json, majority_image_id,
+                declared_image_ref, weak_floating_tag, health_gate_id, status,
+                expires_at, claim_expires_at, created_at, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+            row.id, row.node_id, row.stack_name, row.service_name, row.replicas_json, row.majority_image_id,
+            row.declared_image_ref, row.weak_floating_tag, row.health_gate_id, row.status,
+            row.expires_at, row.claim_expires_at, row.created_at, row.created_by,
+        );
+    }
+
+    public getServiceUpdateRecovery(id: string): ServiceUpdateRecoveryRow | undefined {
+        return this.db.prepare(
+            'SELECT * FROM service_update_recovery WHERE id = ?'
+        ).get(id) as ServiceUpdateRecoveryRow | undefined;
+    }
+
+    /** Active, unexpired rows for one service, most recent first. */
+    public listActiveServiceUpdateRecoveries(nodeId: number, stackName: string, serviceName: string): ServiceUpdateRecoveryRow[] {
+        return this.db.prepare(
+            `SELECT * FROM service_update_recovery
+             WHERE node_id = ? AND stack_name = ? AND service_name = ? AND status = 'active'
+             ORDER BY created_at DESC`
+        ).all(nodeId, stackName, serviceName) as ServiceUpdateRecoveryRow[];
+    }
+
+    /** Attach the update flow's own health gate run id while the row is still active. */
+    public linkServiceUpdateRecoveryHealthGate(id: string, healthGateId: string): void {
+        this.db.prepare(
+            `UPDATE service_update_recovery SET health_gate_id = ? WHERE id = ? AND status = 'active'`
+        ).run(healthGateId, id);
+    }
+
+    /**
+     * Atomic claim CAS for restore: active -> restoring, only when the row has
+     * not already expired. Returns the updated row, or undefined when another
+     * claim, a sweep, or a terminal status won the race.
+     */
+    public claimServiceUpdateRecovery(id: string, claimExpiresAt: number, now: number): ServiceUpdateRecoveryRow | undefined {
+        const result = this.db.prepare(
+            `UPDATE service_update_recovery
+             SET status = 'restoring', claim_expires_at = ?
+             WHERE id = ? AND status = 'active' AND expires_at > ?`
+        ).run(claimExpiresAt, id, now);
+        if (result.changes === 0) return undefined;
+        return this.getServiceUpdateRecovery(id);
+    }
+
+    /** Renewal CAS: only while still restoring. Cannot revive a consumed/expired/invalidated/active row. */
+    public renewServiceUpdateRecoveryClaim(id: string, claimExpiresAt: number): boolean {
+        const result = this.db.prepare(
+            `UPDATE service_update_recovery SET claim_expires_at = ? WHERE id = ? AND status = 'restoring'`
+        ).run(claimExpiresAt, id);
+        return result.changes > 0;
+    }
+
+    /** Restore succeeded: restoring -> consumed, optionally linking the restore's own health gate run. */
+    public markServiceUpdateRecoveryConsumed(id: string, healthGateId: string | null = null): boolean {
+        const result = this.db.prepare(
+            `UPDATE service_update_recovery
+             SET status = 'consumed', claim_expires_at = NULL, health_gate_id = COALESCE(?, health_gate_id)
+             WHERE id = ? AND status = 'restoring'`
+        ).run(healthGateId, id);
+        return result.changes > 0;
+    }
+
+    /** Mid-flight restore failure with the image still local: restoring -> active, claim cleared. */
+    public reactivateServiceUpdateRecovery(id: string): boolean {
+        const result = this.db.prepare(
+            `UPDATE service_update_recovery SET status = 'active', claim_expires_at = NULL WHERE id = ? AND status = 'restoring'`
+        ).run(id);
+        return result.changes > 0;
+    }
+
+    /** Mid-flight restore failure with the image gone: restoring -> invalidated. */
+    public invalidateServiceUpdateRecovery(id: string): boolean {
+        const result = this.db.prepare(
+            `UPDATE service_update_recovery SET status = 'invalidated', claim_expires_at = NULL WHERE id = ? AND status = 'restoring'`
+        ).run(id);
+        return result.changes > 0;
+    }
+
+    /** Startup/interval sweep: active rows whose TTL has lapsed. */
+    public sweepExpiredActiveServiceUpdateRecoveries(now: number): number {
+        const result = this.db.prepare(
+            `UPDATE service_update_recovery SET status = 'expired' WHERE status = 'active' AND expires_at <= ?`
+        ).run(now);
+        return result.changes;
+    }
+
+    /**
+     * Startup/interval sweep: restoring rows abandoned by a dead claim (process
+     * died mid-restore). A restoring row with a live claim is never expired here,
+     * even if its original expires_at has long passed.
+     */
+    public sweepAbandonedRestoringServiceUpdateRecoveries(now: number): number {
+        const result = this.db.prepare(
+            `UPDATE service_update_recovery
+             SET status = 'expired'
+             WHERE status = 'restoring' AND claim_expires_at IS NOT NULL AND claim_expires_at <= ?`
+        ).run(now);
+        return result.changes;
+    }
+
+    /** Image IDs currently protected from prune: active rows and restoring rows with a live claim. */
+    public listHeldServiceUpdateRecoveryImageIds(nodeId: number, now: number): string[] {
+        const rows = this.db.prepare(
+            `SELECT DISTINCT majority_image_id FROM service_update_recovery
+             WHERE node_id = ? AND (status = 'active' OR (status = 'restoring' AND claim_expires_at > ?))`
+        ).all(nodeId, now) as Array<{ majority_image_id: string }>;
+        return rows.map(r => r.majority_image_id);
+    }
+
+    public deleteServiceUpdateRecoveries(nodeId: number, stackName: string): void {
+        this.db.prepare('DELETE FROM service_update_recovery WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
     // --- Notification History ---
@@ -3572,6 +3900,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_exposure WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM health_gate_runs WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM service_update_recovery WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
@@ -3598,9 +3927,58 @@ export class DatabaseService {
     }
 
     public setBlueprintPinnedNode(blueprintId: number, nodeId: number | null): Blueprint | undefined {
-        this.db.prepare('UPDATE blueprints SET pinned_node_id = ?, updated_at = ? WHERE id = ?')
-            .run(nodeId, Date.now(), blueprintId);
+        this.db.prepare(
+            `UPDATE blueprints SET pinned_node_id = ?, updated_at = ?,
+                approval_status = 'pending',
+                approved_intent_fingerprint = NULL,
+                approved_blast_json = NULL,
+                approved_at = NULL,
+                approved_by = NULL
+             WHERE id = ?`,
+        ).run(nodeId, Date.now(), blueprintId);
         return this.getBlueprint(blueprintId);
+    }
+
+    /** Persist approval without bumping operational updated_at. */
+    public setBlueprintApproval(
+        blueprintId: number,
+        input: {
+            intentFingerprint: string;
+            blastJson: string;
+            approvedBy: string | null;
+        },
+    ): Blueprint | undefined {
+        this.db.prepare(
+            `UPDATE blueprints SET
+                approval_status = 'approved',
+                approved_intent_fingerprint = ?,
+                approved_blast_json = ?,
+                approved_at = ?,
+                approved_by = ?
+             WHERE id = ?`,
+        ).run(input.intentFingerprint, input.blastJson, Date.now(), input.approvedBy, blueprintId);
+        return this.getBlueprint(blueprintId);
+    }
+
+    public clearBlueprintApproval(blueprintId: number): void {
+        this.db.prepare(
+            `UPDATE blueprints SET
+                approval_status = 'pending',
+                approved_intent_fingerprint = NULL,
+                approved_blast_json = NULL,
+                approved_at = NULL,
+                approved_by = NULL
+             WHERE id = ?`,
+        ).run(blueprintId);
+    }
+
+    /** True when any deployment row is not withdrawn (blocks rename). */
+    public hasNonWithdrawnBlueprintDeployments(blueprintId: number): boolean {
+        const row = this.db.prepare(
+            `SELECT 1 AS ok FROM blueprint_deployments
+             WHERE blueprint_id = ? AND status != 'withdrawn' LIMIT 1`,
+        ).get(blueprintId) as { ok: number } | undefined;
+        return !!row;
     }
 
     public updateNodeLastContact(nodeId: number): void {
@@ -3647,6 +4025,12 @@ export class DatabaseService {
 
     // --- Stack Update Status ---
 
+    /**
+     * `services` is omitted by legacy (non-service-aware) callers; omitting it
+     * leaves the stack's existing services_json untouched (COALESCE against the
+     * current row) rather than erasing a per-service breakdown that a model-aware
+     * caller persisted on a previous check.
+     */
     public upsertStackUpdateStatus(
         nodeId: number,
         stackName: string,
@@ -3654,16 +4038,20 @@ export class DatabaseService {
         checkedAt: number,
         checkStatus: StackCheckStatus = 'ok',
         lastError: string | null = null,
+        services?: StackServiceStatus[],
+        generation = 0,
     ): void {
+        const servicesJson = services !== undefined ? stringifyServicesJson(services, generation) : null;
         this.db.prepare(
-            `INSERT INTO stack_update_status (node_id, stack_name, has_update, check_status, last_error, checked_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            `INSERT INTO stack_update_status (node_id, stack_name, has_update, check_status, last_error, checked_at, services_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(node_id, stack_name) DO UPDATE SET
                has_update = excluded.has_update,
                check_status = excluded.check_status,
                last_error = excluded.last_error,
-               checked_at = excluded.checked_at`
-        ).run(nodeId, stackName, hasUpdate ? 1 : 0, checkStatus, lastError, checkedAt);
+               checked_at = excluded.checked_at,
+               services_json = COALESCE(excluded.services_json, stack_update_status.services_json)`
+        ).run(nodeId, stackName, hasUpdate ? 1 : 0, checkStatus, lastError, checkedAt, servicesJson);
     }
 
     /**
@@ -3674,15 +4062,24 @@ export class DatabaseService {
      * first-ever failed check inserts a row with has_update = 0 so the stack
      * still appears with its failure reason.
      */
-    public recordStackCheckFailure(nodeId: number, stackName: string, lastError: string, checkedAt: number): void {
+    public recordStackCheckFailure(
+        nodeId: number,
+        stackName: string,
+        lastError: string,
+        checkedAt: number,
+        services?: StackServiceStatus[],
+        generation = 0,
+    ): void {
+        const servicesJson = services !== undefined ? stringifyServicesJson(services, generation) : null;
         this.db.prepare(
-            `INSERT INTO stack_update_status (node_id, stack_name, has_update, check_status, last_error, checked_at)
-             VALUES (?, ?, 0, 'failed', ?, ?)
+            `INSERT INTO stack_update_status (node_id, stack_name, has_update, check_status, last_error, checked_at, services_json)
+             VALUES (?, ?, 0, 'failed', ?, ?, ?)
              ON CONFLICT(node_id, stack_name) DO UPDATE SET
                check_status = 'failed',
                last_error = excluded.last_error,
-               checked_at = excluded.checked_at`
-        ).run(nodeId, stackName, lastError, checkedAt);
+               checked_at = excluded.checked_at,
+               services_json = COALESCE(excluded.services_json, stack_update_status.services_json)`
+        ).run(nodeId, stackName, lastError, checkedAt, servicesJson);
     }
 
     public getStackUpdateStatus(nodeId?: number): Record<string, boolean> {
@@ -3703,18 +4100,33 @@ export class DatabaseService {
      */
     public getStackUpdateDetail(nodeId: number): Record<string, StackUpdateDetail> {
         const rows = this.db.prepare(
-            'SELECT stack_name, has_update, check_status, last_error, checked_at FROM stack_update_status WHERE node_id = ?'
-        ).all(nodeId) as Array<{ stack_name: string; has_update: number; check_status: string | null; last_error: string | null; checked_at: number }>;
+            'SELECT stack_name, has_update, check_status, last_error, checked_at, services_json FROM stack_update_status WHERE node_id = ?'
+        ).all(nodeId) as Array<{ stack_name: string; has_update: number; check_status: string | null; last_error: string | null; checked_at: number; services_json: string | null }>;
         const result: Record<string, StackUpdateDetail> = {};
         for (const row of rows) {
+            const services = parseServicesJson(row.services_json);
             result[row.stack_name] = {
                 hasUpdate: row.has_update === 1,
                 checkStatus: (row.check_status === 'failed' || row.check_status === 'partial') ? row.check_status : 'ok',
                 lastError: row.last_error,
                 checkedAt: row.checked_at,
+                ...(services.length > 0 ? { services } : {}),
             };
         }
         return result;
+    }
+
+    /**
+     * Prior per-service breakdown for a single stack, used by ImageUpdateService
+     * to look up each service's last-known hasUpdate before reducing a fresh
+     * check (so a preserved value survives a partial/failed re-check). Corrupt
+     * or missing JSON yields an empty list.
+     */
+    public getStackServicesJson(nodeId: number, stackName: string): StackServiceStatus[] {
+        const row = this.db.prepare(
+            'SELECT services_json FROM stack_update_status WHERE node_id = ? AND stack_name = ?'
+        ).get(nodeId, stackName) as { services_json: string | null } | undefined;
+        return parseServicesJson(row?.services_json);
     }
 
     public clearStackUpdateStatus(nodeId: number, stackName: string): void {
@@ -6079,10 +6491,7 @@ export class DatabaseService {
         const matchesStack = (pattern: string | null): boolean => {
             if (!pattern) return true;
             if (!stackName) return false;
-            const regex = new RegExp(
-                '^' + pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$',
-            );
-            return regex.test(stackName);
+            return stackPatternMatches(stackName, pattern);
         };
         const matchesIdentity = (p: ScanPolicy): boolean => {
             // Locally created policies (never replicated) apply based on node_id logic already filtered.
@@ -6704,6 +7113,11 @@ export class DatabaseService {
             updated_at: row.updated_at as number,
             created_by: (row.created_by as string | null) ?? null,
             pinned_node_id: (row.pinned_node_id as number | null) ?? null,
+            approval_status: (row.approval_status as 'pending' | 'approved' | undefined) === 'approved' ? 'approved' : 'pending',
+            approved_intent_fingerprint: (row.approved_intent_fingerprint as string | null) ?? null,
+            approved_blast_json: (row.approved_blast_json as string | null) ?? null,
+            approved_at: (row.approved_at as number | null) ?? null,
+            approved_by: (row.approved_by as string | null) ?? null,
         };
     }
 
@@ -6786,6 +7200,18 @@ export class DatabaseService {
         if (updates.classification_reasons !== undefined) { fields.push('classification_reasons = ?'); values.push(JSON.stringify(updates.classification_reasons)); }
         if (updates.enabled !== undefined) { fields.push('enabled = ?'); values.push(updates.enabled ? 1 : 0); }
         if (updates.bumpRevision) { fields.push('revision = revision + 1'); }
+        const invalidatesApproval = updates.name !== undefined
+            || updates.compose_content !== undefined
+            || updates.selector !== undefined
+            || updates.drift_mode !== undefined
+            || updates.enabled !== undefined;
+        if (invalidatesApproval) {
+            fields.push("approval_status = 'pending'");
+            fields.push('approved_intent_fingerprint = NULL');
+            fields.push('approved_blast_json = NULL');
+            fields.push('approved_at = NULL');
+            fields.push('approved_by = NULL');
+        }
         fields.push('updated_at = ?');
         values.push(Date.now());
         values.push(id);

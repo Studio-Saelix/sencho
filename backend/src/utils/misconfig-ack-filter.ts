@@ -14,6 +14,7 @@
  * cross-multiply with the fleet ack list on every render.
  */
 import type { MisconfigAcknowledgement } from '../services/DatabaseService';
+import { stackPatternMatches } from '../helpers/stackPattern';
 
 export interface MisconfigAcknowledgementDecision {
     acknowledged: boolean;
@@ -31,8 +32,7 @@ function matchesStackPattern(pattern: string | null, stackContext: string | null
     if (!pattern) return true;
     // Stack-scoped acks against an image scan (no stack_context) cannot match.
     if (stackContext === null) return false;
-    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-    return new RegExp(`^${escaped}$`).test(stackContext);
+    return stackPatternMatches(stackContext, pattern);
 }
 
 function isActive(ack: MisconfigAcknowledgement, now: number): boolean {

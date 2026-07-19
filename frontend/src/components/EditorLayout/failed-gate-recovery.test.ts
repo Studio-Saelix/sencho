@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { classifyFailedGate } from './failed-gate-recovery';
 import type { HealthGateUiState } from '@/context/DeployFeedbackContext';
 
-type Gate = Pick<HealthGateUiState, 'status' | 'nodeId' | 'stackName'>;
-const gate = (over: Partial<Gate> = {}): Gate => ({ status: 'failed', nodeId: null, stackName: 'web', ...over });
+type Gate = Pick<HealthGateUiState, 'status' | 'nodeId' | 'stackName' | 'targetScope'>;
+const gate = (over: Partial<Gate> = {}): Gate => ({ status: 'failed', nodeId: null, stackName: 'web', targetScope: 'stack', ...over });
 
 describe('classifyFailedGate', () => {
   it('skips when there is no gate', () => {
@@ -42,5 +42,9 @@ describe('classifyFailedGate', () => {
 
   it('reports no-file when the node and file list match but no stack file matches the name yet', () => {
     expect(classifyFailedGate(gate({ nodeId: 3, stackName: 'web' }), 3, 3, ['other.yml'])).toEqual({ kind: 'no-file' });
+  });
+
+  it('skips a failed service-scoped gate: the stack rollback recovery does not apply to a single service', () => {
+    expect(classifyFailedGate(gate({ targetScope: 'service' }), null, null, ['web.yml'])).toEqual({ kind: 'skip' });
   });
 });

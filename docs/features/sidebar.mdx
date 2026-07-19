@@ -68,7 +68,7 @@ Each row gives you everything you need to read the stack at a glance, in a fixed
 - **Stack name** in mono type, truncated with an ellipsis when the row gets tight.
 - **Label dots** to the right of the name. Up to three colored dots represent the stack's labels. If a stack carries more than three labels, a **+N** counter appears for the extras.
 - **Trailing indicator** in its own fixed-width slot at the far right of the name area, showing the highest-priority signal present:
-  - Pulsing orange dot: an image update is available. Hover for the "Update available" tooltip.
+  - Pulsing orange dot: an image update is available. Hover for the update tooltip; when per-service status is known, the tooltip names the outdated service(s).
   - Muted circle-alert icon: the last registry check failed (registry unreachable, missing credentials, or rate-limited). Hover to read the failure reason.
   - Git branch icon: a Git source update is pending and no image update is available.
 - **Hover kebab** on the right edge. On desktop, hover the row to reveal a vertical three-dot menu that opens the same actions as right-clicking. On touch viewports the kebab is always visible.
