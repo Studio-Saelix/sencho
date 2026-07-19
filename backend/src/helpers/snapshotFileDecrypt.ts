@@ -6,6 +6,13 @@ const ENCRYPTED_PREFIX = 'enc:';
 const HEX_RE = /^[0-9a-fA-F]+$/;
 /** Identifier-like legacy body after enc: (e.g. enc:hello, enc:FOO_BAR). */
 const LEGACY_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/**
+ * Producer envelopes are at least an IV worth of hex (24) plus delimiters /
+ * ciphertext. Genuine legacy prose such as enc:hello is much shorter.
+ */
+const MIN_ENVELOPE_LIKE_LENGTH = 24;
+/** Damaged encrypt() payloads remain mostly hex even after a one-byte mutation. */
+const ENVELOPE_HEX_DENSITY = 0.75;
 
 /** Database row shape for fleet_snapshot_files (content still ciphertext or legacy plaintext). */
 export interface SnapshotFileRow {
@@ -44,21 +51,41 @@ export function isStructurallyValidSnapshotEnvelope(value: string): boolean {
     );
 }
 
+function hexDensity(payload: string): number {
+    if (payload.length === 0) return 0;
+    const hexChars = payload.match(/[0-9a-fA-F]/g)?.length ?? 0;
+    return hexChars / payload.length;
+}
+
+/**
+ * True when the payload still looks like CryptoService.encrypt output after
+ * truncation or one-byte field/delimiter corruption (high length + hex density),
+ * or is pure hex of any length.
+ */
+export function isEnvelopeShapedPayload(payload: string): boolean {
+    if (payload === '') return true;
+    if (HEX_RE.test(payload)) return true;
+    return payload.length >= MIN_ENVELOPE_LIKE_LENGTH && hexDensity(payload) >= ENVELOPE_HEX_DENSITY;
+}
+
 /**
  * Clear non-envelope legacy plaintext that happens to start with enc:.
- * Only these shapes stay usable when the payload is not a valid envelope.
- * Everything else with an enc: prefix fails closed as envelope damage.
+ * Envelope-shaped payloads are never treated as legacy, even if they contain
+ * '=' or whitespace from a delimiter/field mutation.
  */
 export function isClearlyLegacyEncProse(value: string): boolean {
     if (!value.startsWith(ENCRYPTED_PREFIX)) return false;
     const payload = value.slice(ENCRYPTED_PREFIX.length);
     if (payload === '') return false;
 
-    // Env-style or free text (spaces) cannot be a producer envelope.
+    // Subordinate legacy exceptions to envelope-likeness (B1-R2).
+    if (isEnvelopeShapedPayload(payload)) return false;
+
+    // Env-style or free text (spaces) that is not encryption-shaped.
     if (payload.includes('=') || /\s/.test(payload)) return true;
 
     // Identifier body with no colons (enc:hello, enc:FOO_BAR). Pure hex
-    // strings are producer truncations, not legacy prose.
+    // already rejected by isEnvelopeShapedPayload.
     if (LEGACY_IDENT_RE.test(payload) && !HEX_RE.test(payload)) return true;
 
     return false;

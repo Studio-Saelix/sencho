@@ -326,7 +326,7 @@ describe('Single-stack snapshot restore (behavior lock)', () => {
         const cipher = CryptoService.getInstance().encrypt('services: { ok: {} }\n');
         const payload = cipher.slice('enc:'.length);
         const [iv, tag, ct] = payload.split(':');
-        const damaged = `enc:${iv}Z${tag}:${ct}`;
+        const damaged = `enc:${iv}=${tag}:${ct}`;
         db.getDb().prepare(
             'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
         ).run(id, LOCAL_NODE_ID, 'local', 'delim-web', 'compose.yaml', damaged);
@@ -786,7 +786,7 @@ describe('Restore-all', () => {
         const bad = CryptoService.getInstance().encrypt('SECRET=long-enough-to-mutate\n');
         const payload = bad.slice('enc:'.length);
         const [iv, tag, ct] = payload.split(':');
-        const damaged = `enc:${iv}Z${tag}:${ct}`;
+        const damaged = `enc:${iv} ${tag}:${ct}`;
         db.getDb().prepare(
             'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
         ).run(id, LOCAL_NODE_ID, 'local', 'healthy', 'compose.yaml', good);

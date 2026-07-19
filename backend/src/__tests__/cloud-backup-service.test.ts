@@ -315,7 +315,7 @@ describe('CloudBackupService — uploadSnapshot', () => {
         const [iv, tag, ct] = payload.split(':');
         db.getDb().prepare(
             'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
-        ).run(snapshotId, 1, 'gateway', 'web', 'compose.yaml', `enc:${iv}Z${tag}:${ct}`);
+        ).run(snapshotId, 1, 'gateway', 'web', 'compose.yaml', `enc:${iv}=${tag}:${ct}`);
 
         sentSpy.mockClear();
         await expect(CloudBackupService.getInstance().uploadSnapshot(snapshotId)).rejects.toThrow(/could not be decrypted/i);

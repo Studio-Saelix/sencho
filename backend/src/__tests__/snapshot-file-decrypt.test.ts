@@ -42,6 +42,10 @@ describe('snapshotFileDecrypt classification', () => {
             kind: 'usable',
             content: 'enc:FOO_BAR=baz',
         });
+        expect(classifySnapshotFileContent('enc: path with spaces')).toEqual({
+            kind: 'usable',
+            content: 'enc: path with spaces',
+        });
         expect(isEnvelopeLikeDamage('enc:hello')).toBe(false);
         expect(isEnvelopeLikeDamage('enc:deadbeef')).toBe(true);
         expect(classifySnapshotFileContent('enc:deadbeef')).toEqual({
@@ -105,14 +109,31 @@ describe('snapshotFileDecrypt classification', () => {
             expect(classifySnapshotFileContent(`enc:${iv}:${tag}:${ct}:00`)).toEqual(envelopeDamage);
         });
 
-        it('fails closed when a delimiter byte is replaced with a non-hex character', () => {
+        it('fails closed for single-character delimiter substitutions including = and whitespace', () => {
+            const payload = good.slice('enc:'.length);
+            const colonIdx = payload.indexOf(':');
+            expect(colonIdx).toBeGreaterThan(0);
+            const mutants = ['Z', '=', ' ', '\t', '|', '/', '+', '@', '.', ',', ';', '_', '-'];
+            for (const ch of mutants) {
+                const damaged = `enc:${payload.slice(0, colonIdx)}${ch}${payload.slice(colonIdx + 1)}`;
+                expect(isStructurallyValidSnapshotEnvelope(damaged), `delim=${JSON.stringify(ch)}`).toBe(false);
+                expect(isEnvelopeLikeDamage(damaged), `delim=${JSON.stringify(ch)}`).toBe(true);
+                expect(classifySnapshotFileContent(damaged), `delim=${JSON.stringify(ch)}`).toEqual(envelopeDamage);
+            }
+        });
+
+        it('fails closed when = or whitespace is inserted into IV, tag, or ciphertext fields', () => {
             const payload = good.slice('enc:'.length);
             const [iv, tag, ct] = payload.split(':');
-            // Replace the colon after IV with 'Z' (auditor B1).
-            const delimiterMutation = `enc:${iv}Z${tag}:${ct}`;
-            expect(isStructurallyValidSnapshotEnvelope(delimiterMutation)).toBe(false);
-            expect(isEnvelopeLikeDamage(delimiterMutation)).toBe(true);
-            expect(classifySnapshotFileContent(delimiterMutation)).toEqual(envelopeDamage);
+            const cases = [
+                `enc:${iv.slice(0, 8)}=${iv.slice(8)}:${tag}:${ct}`,
+                `enc:${iv}:${tag.slice(0, 8)} ${tag.slice(8)}:${ct}`,
+                `enc:${iv}:${tag}:${ct.slice(0, 4)}=${ct.slice(4)}`,
+                `enc:${iv}:${tag}:${ct.slice(0, 4)} ${ct.slice(4)}`,
+            ];
+            for (const damaged of cases) {
+                expect(classifySnapshotFileContent(damaged)).toEqual(envelopeDamage);
+            }
         });
 
         it('fails closed when a non-hex extra field is appended', () => {
