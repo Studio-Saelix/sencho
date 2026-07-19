@@ -6,7 +6,7 @@ export type SignalStatus = 'ok' | 'warning' | 'attention' | 'blocked' | 'unknown
 
 /** One input to the readiness verdict (preflight, drift, containers, ...). */
 export interface ReadinessSignal {
-  id: 'preflight' | 'drift' | 'containers' | 'healthchecks' | 'update_preview' | 'build_services' | 'backup_slot' | 'disk';
+  id: 'preflight' | 'drift' | 'containers' | 'healthchecks' | 'update_preview' | 'build_services' | 'backup_slot' | 'disk' | 'service';
   status: SignalStatus;
   /** Short headline ("Compose Doctor", "Running containers"). */
   title: string;
@@ -25,6 +25,13 @@ export interface UpdateReadinessReport {
   computedAt: number;
   verdict: ReadinessVerdict;
   signals: ReadinessSignal[];
+  /** The service this report is scoped to, or null for a full-stack check. */
+  serviceName: string | null;
+  /**
+   * Non-blocking notes that never affect `verdict` (sibling health,
+   * dependsOn relationships). Always empty for a full-stack check.
+   */
+  advisories: string[];
 }
 
 /** State of one rollback readiness item. */
@@ -72,6 +79,8 @@ export interface HealthGateContainer {
   state: string;
   health: string | null;
   restarts: number;
+  service?: string | null;
+  role?: 'primary' | 'collateral' | null;
 }
 
 /** Payload of GET /:stackName/health-gate ('never-run' when no run exists). */
@@ -79,12 +88,15 @@ export interface HealthGateReport {
   stack: string;
   id: string | null;
   status: HealthGateStatus | 'never-run';
-  trigger: 'update' | 'deploy' | null;
+  trigger: 'update' | 'deploy' | 'service_update' | 'service_restore' | null;
   reason: string | null;
   windowSeconds: number | null;
   startedAt: number | null;
   endedAt: number | null;
   containers: HealthGateContainer[];
+  targetScope: 'stack' | 'service';
+  serviceName: string | null;
+  failureSource: 'primary' | 'collateral' | null;
 }
 
 /** Categories a failed stack deploy or update can be classified into. */

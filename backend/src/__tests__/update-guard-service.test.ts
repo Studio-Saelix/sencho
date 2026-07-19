@@ -16,6 +16,7 @@ const {
   mockGetOpenDriftFindings,
   mockGetGlobalSettings,
   mockFsSize,
+  mockBuildEffectiveServiceModel,
 } = vi.hoisted(() => ({
   mockListContainers: vi.fn(),
   mockGetContainer: vi.fn(),
@@ -27,6 +28,7 @@ const {
   mockGetOpenDriftFindings: vi.fn(),
   mockGetGlobalSettings: vi.fn(),
   mockFsSize: vi.fn(),
+  mockBuildEffectiveServiceModel: vi.fn(),
 }));
 
 vi.mock('../services/DockerController', () => ({
@@ -75,7 +77,11 @@ vi.mock('systeminformation', () => ({
   default: { fsSize: mockFsSize },
 }));
 
-import { UpdateGuardService } from '../services/UpdateGuardService';
+vi.mock('../services/effectiveServiceModel', () => ({
+  buildEffectiveServiceModel: mockBuildEffectiveServiceModel,
+}));
+
+import { UpdateGuardService, SingleServiceUpdateReadinessError } from '../services/UpdateGuardService';
 
 const inspectResult = (over: Record<string, unknown> = {}) => ({
   State: { Status: 'running', ExitCode: 0 },
@@ -163,6 +169,110 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
 
     const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app');
     expect(report.verdict).toBe('ready');
+  });
+});
+
+describe('UpdateGuardService.computeUpdateReadiness with a serviceName', () => {
+  const twoServiceModel = {
+    renderable: true as const,
+    services: [
+      { name: 'web', declaredImage: 'nginx:1.27', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: true },
+      { name: 'db', declaredImage: 'postgres:16', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false },
+    ],
+  };
+  const multiServicePreview = {
+    stack_name: 'app',
+    images: [
+      { service: 'web', image: 'nginx', current_tag: '1.27.0', next_tag: '1.27.1', has_update: true, semver_bump: 'patch' },
+      { service: 'db', image: 'postgres', current_tag: '16.0', next_tag: null, has_update: false, semver_bump: 'none' },
+    ],
+    build_services: [],
+    summary: {
+      has_update: true, primary_image: 'nginx', current_tag: '1.27.0', next_tag: '1.27.1',
+      semver_bump: 'patch', update_kind: 'tag', blocked: false, blocked_reason: null,
+      has_build_services: false, rebuild_available: false,
+    },
+    rollback_target: 'nginx:1.27.0',
+    changelog: null,
+  };
+
+  beforeEach(() => {
+    mockGetLatest.mockReturnValue({ activeStatus: 'pass' });
+    mockGetOpenDriftFindings.mockReturnValue([]);
+    mockGetPreview.mockResolvedValue(multiServicePreview);
+    mockGetBackupInfo.mockResolvedValue({ exists: true, timestamp: Date.now() });
+    mockFsSize.mockResolvedValue([{ mount: '/', use: 42 }]);
+    mockListContainers.mockResolvedValue([
+      { Id: 'web1', Names: ['/web'], State: 'running' },
+      { Id: 'db1', Names: ['/db'], State: 'running' },
+    ]);
+    mockGetContainer.mockReturnValue({ inspect: vi.fn().mockResolvedValue(inspectResult()) });
+  });
+
+  it('scopes the verdict to the selected service, includes a service signal, and filters the preview', async () => {
+    mockBuildEffectiveServiceModel.mockResolvedValue(twoServiceModel);
+
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app', 'web');
+
+    expect(report.serviceName).toBe('web');
+    expect(report.verdict).toBe('ready');
+    const serviceSig = report.signals.find(s => s.id === 'service');
+    expect(serviceSig?.status).toBe('ok');
+    // update_preview signal is derived from the filtered summary (recomputed for 'web' only).
+    const previewSig = report.signals.find(s => s.id === 'update_preview');
+    expect(previewSig?.status).toBe('ok');
+  });
+
+  it('throws SingleServiceUpdateReadinessError for a single-service stack', async () => {
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true,
+      services: [{ name: 'web', declaredImage: 'nginx:1.27', hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: true }],
+    });
+
+    await expect(UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app', 'web'))
+      .rejects.toBeInstanceOf(SingleServiceUpdateReadinessError);
+  });
+
+  it('fails closed (blocked service signal) when the effective model fails to render', async () => {
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: false,
+      code: 'effective_model_render_failed',
+      error: 'bad yaml',
+    });
+
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app', 'web');
+
+    const serviceSig = report.signals.find(s => s.id === 'service');
+    expect(serviceSig?.status).toBe('blocked');
+    expect(report.verdict).toBe('blocked');
+  });
+
+  it('fails closed when the selected service is not declared in the model', async () => {
+    mockBuildEffectiveServiceModel.mockResolvedValue(twoServiceModel);
+
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app', 'cache');
+
+    const serviceSig = report.signals.find(s => s.id === 'service');
+    expect(serviceSig?.status).toBe('blocked');
+    expect(report.verdict).toBe('blocked');
+  });
+
+  it('reports a sibling advisory without affecting the verdict', async () => {
+    mockBuildEffectiveServiceModel.mockResolvedValue(twoServiceModel);
+    mockListContainers.mockResolvedValue([
+      { Id: 'web1', Names: ['/web'], State: 'running' },
+      { Id: 'db1', Names: ['/db'], State: 'exited', ExitCode: 1 },
+    ]);
+    mockGetContainer.mockImplementation((id: string) => ({
+      inspect: vi.fn().mockResolvedValue(id === 'db1'
+        ? inspectResult({ State: { Status: 'exited', ExitCode: 1 } })
+        : inspectResult()),
+    }));
+
+    const report = await UpdateGuardService.getInstance().computeUpdateReadiness(0, 'app', 'web');
+
+    expect(report.verdict).toBe('ready');
+    expect(report.advisories.some(a => a.includes('db'))).toBe(true);
   });
 });
 

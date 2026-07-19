@@ -338,7 +338,7 @@ The entire host threshold evaluation can be silenced per node from **Settings ·
 
 ### Image update availability
 
-`info`/`image_update_available`: `Stack "<name>" has image updates available.` By default, checks every two hours in interval mode, with a two-minute startup delay. The cadence can be changed or replaced with a cron schedule. Manual refresh carries a two-minute cooldown. Notifies on **state transition only**; the first run also emits catch-up notifications for stacks already known to have updates.
+`info`/`image_update_available`: `Stack "<name>" has image updates available.` On multi-service stacks the message can name the services that have updates. By default, checks every two hours in interval mode, with a two-minute startup delay. The cadence can be changed or replaced with a cron schedule. Manual refresh carries a two-minute cooldown. Notifies on **state transition only**; the first run also emits catch-up notifications for stacks already known to have updates.
 
 ### Auto-update execution
 

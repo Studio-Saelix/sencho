@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ContainerInfo } from '../EditorView';
+import type { EffectiveServiceSpec } from '@/types/effectiveServices';
 
 export const LOGS_MODE_STORAGE_KEY = 'sencho.stackView.logsMode';
 
@@ -30,6 +31,16 @@ export function useEditorViewState() {
   const [envFiles, setEnvFiles] = useState<string[]>([]);
   const [selectedEnvFile, setSelectedEnvFile] = useState<string>('');
   const [containers, setContainers] = useState<ContainerInfo[]>([]);
+  // Declared-service facts for the loaded stack, from the effective Compose
+  // model. Empty for a single-service stack, an older node without the
+  // service-scoped-update capability, or a render failure; all three cases
+  // fail closed to the legacy per-container layout (no declared-service
+  // headers), so this array doubles as the multi-service gate.
+  const [effectiveServices, setEffectiveServices] = useState<EffectiveServiceSpec[]>([]);
+  // The declared service currently running a manual update/rebuild, so the
+  // owning header can show a busy state. Only one at a time, mirroring the
+  // single `loadingAction` for stack-level operations.
+  const [serviceUpdateInProgress, setServiceUpdateInProgress] = useState<{ service: string; mode: 'update' | 'rebuild' } | null>(null);
 
   const [activeTab, setActiveTab] = useState<EditorTab>('compose');
   const [logsMode, setLogsMode] = useState<LogsMode>(readLogsMode);
@@ -56,6 +67,8 @@ export function useEditorViewState() {
     envFiles, setEnvFiles,
     selectedEnvFile, setSelectedEnvFile,
     containers, setContainers,
+    effectiveServices, setEffectiveServices,
+    serviceUpdateInProgress, setServiceUpdateInProgress,
     activeTab, setActiveTab,
     logsMode, setLogsMode,
     gitSourceOpen, setGitSourceOpen,

@@ -8,6 +8,7 @@ import DockerController, {
 } from '../services/DockerController';
 import { isPruneTarget } from '../services/prunePlan';
 import { FileSystemService } from '../services/FileSystemService';
+import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import SelfIdentityService from '../services/SelfIdentityService';
 import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -127,8 +128,9 @@ systemMaintenanceRouter.post('/prune/plan', async (req: Request, res: Response) 
     const pruneScope = parsePruneScope((req.body as { scope?: unknown }).scope);
     const dockerController = DockerController.getInstance(req.nodeId);
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
+    const isImageHeld = ServiceUpdateRecoveryService.getInstance().buildHeldImagePredicate(req.nodeId);
     const plan = await withTimeout(
-      dockerController.buildPrunePlan(targets, pruneScope, knownStacks, req.nodeId),
+      dockerController.buildPrunePlan(targets, pruneScope, knownStacks, req.nodeId, isImageHeld),
       PRUNE_ESTIMATE_TIMEOUT_MS,
       'docker prune plan',
     );
@@ -171,11 +173,12 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
     const planFingerprint = typeof body.planFingerprint === 'string' ? body.planFingerprint : null;
     const dockerController = DockerController.getInstance(req.nodeId);
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
+    const isImageHeld = ServiceUpdateRecoveryService.getInstance().buildHeldImagePredicate(req.nodeId);
 
     if (isDryRun) {
       // Dry-run returns the same itemized plan shape Resources uses for preview.
       const plan = await withTimeout(
-        dockerController.buildPrunePlan(targets, pruneScope, knownStacks, req.nodeId),
+        dockerController.buildPrunePlan(targets, pruneScope, knownStacks, req.nodeId, isImageHeld),
         PRUNE_ESTIMATE_TIMEOUT_MS,
         'docker prune plan',
       );
@@ -201,7 +204,7 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
     // fingerprint and keeps the legacy pruneManagedOnly / pruneSystem path.
     if (planFingerprint) {
       const built = await withTimeout(
-        dockerController.buildPrunePlan(targets, pruneScope, knownStacks, req.nodeId),
+        dockerController.buildPrunePlan(targets, pruneScope, knownStacks, req.nodeId, isImageHeld),
         PRUNE_ESTIMATE_TIMEOUT_MS,
         'docker prune plan',
       );
@@ -215,7 +218,7 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
         `[Resources] System prune (plan): ${built.targets.join(',')} (scope: ${pruneScope}, items: ${built.items.length})`,
       );
       const pruneStartedAt = Date.now();
-      const result = await dockerController.executePrunePlan(built, knownStacks);
+      const result = await dockerController.executePrunePlan(built, knownStacks, isImageHeld);
       console.log(
         `[Resources] System prune completed: reclaimed ${result.reclaimedBytes} bytes, outcomes=${result.outcomes.length}`,
       );
@@ -254,14 +257,15 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
       result = await dockerController.pruneManagedOnly(
         target as 'images' | 'volumes' | 'networks',
         knownStacks,
+        isImageHeld,
       );
     } else if (pruneScope === 'managed' && target === 'containers') {
       // Managed containers must never fall through to system prune. Build and
       // execute an itemized plan for this single target instead.
-      const plan = await dockerController.buildPrunePlan(['containers'], 'managed', knownStacks, req.nodeId);
-      result = await dockerController.executePrunePlan(plan, knownStacks);
+      const plan = await dockerController.buildPrunePlan(['containers'], 'managed', knownStacks, req.nodeId, isImageHeld);
+      result = await dockerController.executePrunePlan(plan, knownStacks, isImageHeld);
     } else {
-      result = await dockerController.pruneSystem(target);
+      result = await dockerController.pruneSystem(target, undefined, isImageHeld);
     }
 
     console.log(`[Resources] System prune completed: ${target}, reclaimed ${result.reclaimedBytes} bytes`);

@@ -97,6 +97,10 @@ interface UpdateReadinessDialogProps {
    * while the dialog is open cannot mismatch the readiness from the update.
    */
   nodeId: number | null;
+  /** Set only for a service-scoped update; absent means the full stack. */
+  serviceName?: string;
+  /** Update vs rebuild copy for a service-scoped update. Ignored for the full stack. */
+  mode?: 'update' | 'rebuild';
   onCancel: () => void;
   /** Caller closes the dialog and starts the update. */
   onProceed: () => void;
@@ -108,7 +112,7 @@ interface UpdateReadinessDialogProps {
  * the single hard block. A slow or failed readiness fetch degrades to an
  * unknown verdict so this dialog can never strand the update path.
  */
-export function UpdateReadinessDialog({ open, stackName, nodeId, onCancel, onProceed }: UpdateReadinessDialogProps) {
+export function UpdateReadinessDialog({ open, stackName, nodeId, serviceName, mode = 'update', onCancel, onProceed }: UpdateReadinessDialogProps) {
   const { isAdmin } = useAuth();
 
   const [report, setReport] = useState<UpdateReadinessReport | null>(null);
@@ -136,7 +140,10 @@ export function UpdateReadinessDialog({ open, stackName, nodeId, onCancel, onPro
 
     const load = async () => {
       try {
-        const res = await apiFetch(`/stacks/${stackName}/update-readiness`, { nodeId, signal: controller.signal });
+        const path = serviceName
+          ? `/stacks/${stackName}/update-readiness?service=${encodeURIComponent(serviceName)}`
+          : `/stacks/${stackName}/update-readiness`;
+        const res = await apiFetch(path, { nodeId, signal: controller.signal });
         if (!res.ok) {
           const unreachable = res.status === 502 || res.status === 503 || res.status === 504;
           setReport(UNKNOWN_FALLBACK(unreachable
@@ -184,7 +191,7 @@ export function UpdateReadinessDialog({ open, stackName, nodeId, onCancel, onPro
       clearTimeout(timer);
       controller.abort();
     };
-  }, [open, stackName, nodeId, isAdmin]);
+  }, [open, stackName, nodeId, isAdmin, serviceName]);
 
   const proceed = async () => {
     if (snapshotFirst) {
@@ -221,9 +228,11 @@ export function UpdateReadinessDialog({ open, stackName, nodeId, onCancel, onPro
   return (
     <Modal open={open} onOpenChange={(next) => { if (!next && !working) onCancel(); }} size="lg">
       <ModalHeader
-        kicker={`${stackName.toUpperCase()} · UPDATE READINESS`}
-        title="Ready to update?"
-        description="A pre-update check of this stack's preflight, drift, containers, backup, and pending image change."
+        kicker={serviceName ? `${stackName.toUpperCase()} / ${serviceName.toUpperCase()} · ${mode === 'rebuild' ? 'REBUILD' : 'UPDATE'} READINESS` : `${stackName.toUpperCase()} · UPDATE READINESS`}
+        title={serviceName ? (mode === 'rebuild' ? 'Ready to rebuild?' : 'Ready to update?') : 'Ready to update?'}
+        description={serviceName
+          ? `A pre-${mode} check of this stack's preflight, drift, containers, backup, and pending image change. This service is checked in the context of the whole stack.`
+          : "A pre-update check of this stack's preflight, drift, containers, backup, and pending image change."}
       />
       <ModalBody>
         {!report || !verdict || !VerdictIcon ? (
@@ -297,7 +306,7 @@ export function UpdateReadinessDialog({ open, stackName, nodeId, onCancel, onPro
               void proceed();
             }}
           >
-            {working ? 'Creating snapshot…' : 'Update now'}
+            {working ? 'Creating snapshot…' : (mode === 'rebuild' ? 'Rebuild now' : 'Update now')}
           </Button>
         }
       />

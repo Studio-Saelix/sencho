@@ -56,6 +56,7 @@ export const CAPABILITIES = [
   'cross-node-rbac',
   'stack-down-remove-volumes',
   'guided-external-network-preflight',
+  'service-scoped-update',
 ] as const;
 
 /**
@@ -71,6 +72,9 @@ export type Capability = (typeof CAPABILITIES)[number];
 
 /** Capability for optional `?removeVolumes=true` on POST /stacks/:name/down. */
 export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' as const satisfies Capability;
+
+/** Capability for the nested per-service update/restore routes and the `effective-services` model they read. */
+export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const satisfies Capability;
 
 /** Returns true when the string is a usable semver version. */
 export function isValidVersion(v: string | null | undefined): v is string {

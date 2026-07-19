@@ -11,6 +11,7 @@ import SelfIdentityService from '../services/SelfIdentityService';
 import { MonitorService } from '../services/MonitorService';
 import { AutoHealService } from '../services/AutoHealService';
 import { HealthGateService } from '../services/HealthGateService';
+import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { FleetSyncRetryService } from '../services/FleetSyncRetryService';
 import { DockerEventManager } from '../services/DockerEventManager';
 import TrivyService, { sweepStaleTrivyTempDirs } from '../services/TrivyService';
@@ -139,6 +140,7 @@ export async function startServer(server: Server): Promise<void> {
   MonitorService.getInstance().start();
   AutoHealService.getInstance().start();
   HealthGateService.getInstance().start();
+  ServiceUpdateRecoveryService.getInstance().start();
   FleetSyncRetryService.getInstance().start();
   ImageUpdateService.getInstance().start();
   SchedulerService.getInstance().start();

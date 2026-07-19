@@ -21,9 +21,11 @@ describe('DeployFeedbackContext', () => {
   beforeEach(() => {
     localStorage.setItem(DEPLOY_FEEDBACK_KEY, 'true');
     vi.mocked(apiFetch).mockReset();
+    vi.useRealTimers();
   });
   afterEach(() => {
     localStorage.clear();
+    vi.useRealTimers();
   });
 
   it('releases the deploy when the progress stream fails before connecting', async () => {
@@ -147,6 +149,90 @@ describe('DeployFeedbackContext', () => {
 
     expect(deployRan).toBe(true);
     expect(result.current.panelState.isOpen).toBe(false);
+  });
+
+  it('silently polls a service health gate when Deploy Progress is disabled', async () => {
+    vi.useFakeTimers();
+    try {
+      localStorage.setItem(DEPLOY_FEEDBACK_KEY, 'false');
+      vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+        if (String(url).includes('/health-gate')) {
+          return new Response(JSON.stringify({
+            id: 'gate-svc', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now(),
+            targetScope: 'service', serviceName: 'api', failureSource: null,
+          }), { status: 200 });
+        }
+        return new Response('{}', { status: 200 });
+      });
+      const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+
+      await act(async () => {
+        await result.current.runWithLog(
+          { stackName: 'web', action: 'update', nodeId: null, serviceName: 'api' },
+          async (started) => {
+            await started;
+            return { ok: true, healthGateId: 'gate-svc', recoveryId: 'rec-1' };
+          },
+        );
+      });
+
+      expect(result.current.panelState.isOpen).toBe(false);
+      expect(result.current.healthGate).toMatchObject({
+        gateId: 'gate-svc', serviceName: 'api', recoveryId: 'rec-1', status: 'observing',
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(4_000); });
+      expect(apiFetch).toHaveBeenCalledWith(
+        expect.stringContaining('/stacks/web/health-gate?gateId=gate-svc'),
+        expect.anything(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps service gate recovery after the panel is closed', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(apiFetch).mockImplementation(async (url: string) => {
+        if (String(url).includes('/health-gate')) {
+          return new Response(JSON.stringify({
+            id: 'gate-svc', status: 'observing', reason: null, windowSeconds: 90, startedAt: Date.now(),
+            targetScope: 'service', serviceName: 'api', failureSource: null,
+          }), { status: 200 });
+        }
+        return new Response('{}', { status: 200 });
+      });
+      const { result } = renderHook(() => useDeployFeedback(), { wrapper });
+
+      let outer: Promise<unknown> | undefined;
+      await act(async () => {
+        outer = result.current.runWithLog(
+          { stackName: 'web', action: 'update', nodeId: null, serviceName: 'api' },
+          async (started) => {
+            await started;
+            return { ok: true, healthGateId: 'gate-svc', recoveryId: 'rec-keep' };
+          },
+        );
+        await Promise.resolve();
+      });
+      // onTerminalReady schedules the deploy gate release after 50ms.
+      await act(async () => {
+        result.current.onTerminalReady();
+        await vi.advanceTimersByTimeAsync(60);
+        await outer;
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(result.current.healthGate?.recoveryId).toBe('rec-keep');
+
+      act(() => { result.current.onPanelClose(); });
+      expect(result.current.panelState.isOpen).toBe(false);
+      expect(result.current.healthGate).toMatchObject({
+        gateId: 'gate-svc', recoveryId: 'rec-keep', status: 'observing',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('caps log rows and marks the truncation point', () => {

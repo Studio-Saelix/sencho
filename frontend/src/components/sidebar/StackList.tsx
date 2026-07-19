@@ -253,6 +253,9 @@ export function StackList(props: StackListProps & StackListBulkProps) {
                     isActive={selectedFile === file}
                     labels={stackLabelMap[file] ?? []}
                     hasUpdate={stackUpdates[file]?.hasUpdate ?? false}
+                    outdatedServices={(stackUpdates[file]?.services ?? [])
+                      .filter((s) => s.hasUpdate)
+                      .map((s) => s.service)}
                     checkStatus={stackUpdates[file]?.checkStatus}
                     lastError={stackUpdates[file]?.lastError ?? undefined}
                     hasGitPending={!!gitSourcePendingMap[file]}

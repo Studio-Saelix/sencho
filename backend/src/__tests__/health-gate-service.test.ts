@@ -9,7 +9,7 @@ interface StoredRun {
   id: string;
   node_id: number;
   stack_name: string;
-  trigger_action: 'update' | 'deploy';
+  trigger_action: 'update' | 'deploy' | 'service_update' | 'service_restore';
   status: 'observing' | 'passed' | 'failed' | 'unknown';
   reason: string | null;
   window_seconds: number;
@@ -17,6 +17,9 @@ interface StoredRun {
   started_at: number;
   ended_at: number | null;
   created_by: string | null;
+  target_scope: 'stack' | 'service';
+  service_name: string | null;
+  failure_source: 'primary' | 'collateral' | null;
 }
 
 const { state } = vi.hoisted(() => ({
@@ -34,9 +37,9 @@ vi.mock('../services/DatabaseService', () => ({
     getInstance: () => ({
       getGlobalSettings: () => state.settings,
       insertHealthGateRun: (run: StoredRun) => { state.runs.set(run.id, { ...run }); },
-      finalizeHealthGateRun: (id: string, status: StoredRun['status'], reason: string | null, endedAt: number, containersJson: string) => {
+      finalizeHealthGateRun: (id: string, status: StoredRun['status'], reason: string | null, endedAt: number, containersJson: string, failureSource: StoredRun['failure_source'] = null) => {
         const run = state.runs.get(id);
-        if (run) Object.assign(run, { status, reason, ended_at: endedAt, containers_json: containersJson });
+        if (run) Object.assign(run, { status, reason, ended_at: endedAt, containers_json: containersJson, failure_source: failureSource });
       },
       getHealthGateRun: (nodeId: number, stackName: string, id: string) => {
         const run = state.runs.get(id);
@@ -134,7 +137,7 @@ afterEach(() => {
 
 describe('HealthGateService verdicts', () => {
   it('passes at the window end when containers stay running', async () => {
-    const id = svc().begin(0, 'web', 'update', 'tester');
+    const id = svc().beginStack(0, 'web', 'update', 'tester');
     expect(id).toBeTruthy();
     await ticks(3); // 15s: still observing
     expect(latest().status).toBe('observing');
@@ -144,7 +147,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('fails fast when a container exits', async () => {
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1); // baseline
     setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited' }]);
     await ticks(1);
@@ -155,7 +158,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('fails fast when a healthcheck reports unhealthy', async () => {
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1);
     setContainers([{ id: 'aaa', name: 'web-app-1', health: 'unhealthy' }]);
     await ticks(1);
@@ -164,7 +167,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('detects a restart loop via container replacement (new id)', async () => {
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1);
     setContainers([{ id: 'bbb', name: 'web-app-1' }]);
     await ticks(1); // restart 1 observed; carried as new baseline
@@ -180,7 +183,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('detects a restart loop via RestartCount and StartedAt movement', async () => {
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1);
     setContainers([{ id: 'aaa', name: 'web-app-1', restartCount: 1 }]);
     await ticks(1);
@@ -195,7 +198,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('tolerates a one-poll disappearance but fails on two consecutive misses', async () => {
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1); // baseline
     setContainers([]); // one missed poll: tolerated
     await ticks(1);
@@ -203,7 +206,7 @@ describe('HealthGateService verdicts', () => {
     await ticks(5); // through the 30s window
     expect(latest().status).toBe('passed');
 
-    const second = svc().begin(0, 'web', 'update', 'tester')!;
+    const second = svc().beginStack(0, 'web', 'update', 'tester')!;
     await ticks(1);
     setContainers([]);
     await ticks(2); // two consecutive misses: disappeared
@@ -213,7 +216,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('fails when a container is stuck restarting across consecutive polls', async () => {
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1);
     setContainers([{ id: 'aaa', name: 'web-app-1', state: 'restarting' }]);
     await ticks(2);
@@ -222,7 +225,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('goes unknown after three consecutive docker errors', async () => {
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1);
     state.listContainers.mockRejectedValue(new Error('socket gone'));
     await ticks(3);
@@ -231,7 +234,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('resolves unknown when every docker observe hangs', async () => {
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     // A wedged socket never settles. The per-observe timeout turns each poll
     // into an error, and three in a row finalize the gate unknown instead of
     // observing forever on a pending promise.
@@ -244,7 +247,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('recovers from a transient observe timeout instead of finalizing', async () => {
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     // One observe wedges and times out (a single strike), then the socket
     // recovers; the gate must keep observing, not give up at one error.
     state.listContainers.mockImplementationOnce(() => new Promise<never>(() => {}));
@@ -257,7 +260,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('runs polls single-flight: no second observe until the first settles', async () => {
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     let release: (value: Array<{ Id: string; Names: string[]; State: string }>) => void = () => {};
     state.listContainers.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
     // Advance past a second poll interval while the first observe is still
@@ -272,7 +275,7 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('ends unknown when a healthcheck is still starting at the window end', async () => {
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     setContainers([{ id: 'aaa', name: 'web-app-1', health: 'starting' }]);
     await ticks(7);
     expect(latest().status).toBe('unknown');
@@ -281,7 +284,7 @@ describe('HealthGateService verdicts', () => {
 
   it('goes unknown when no containers ever appear', async () => {
     setContainers([]);
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(4);
     expect(latest().status).toBe('unknown');
     expect(latest().reason).toContain('no containers');
@@ -293,7 +296,7 @@ describe('HealthGateService lifecycle', () => {
     // A poll is mid-await on Docker when a newer update supersedes the gate;
     // when the await resolves with healthy containers, the superseded run
     // must keep its terminal unknown verdict.
-    const first = svc().begin(0, 'web', 'update', 'tester')!;
+    const first = svc().beginStack(0, 'web', 'update', 'tester')!;
     await ticks(2); // baseline established, healthy
 
     let releasePoll: (value: Array<{ Id: string; Names: string[]; State: string }>) => void = () => {};
@@ -302,7 +305,7 @@ describe('HealthGateService lifecycle', () => {
     );
     const straddlingPoll = vi.advanceTimersByTimeAsync(5_000); // poll now awaiting Docker
 
-    const second = svc().begin(0, 'web', 'update', 'tester')!;
+    const second = svc().beginStack(0, 'web', 'update', 'tester')!;
     expect(svc().getReport(0, 'web', first).status).toBe('unknown');
 
     releasePoll([{ Id: 'aaa', Names: ['/web-app-1'], State: 'running' }]);
@@ -317,10 +320,10 @@ describe('HealthGateService lifecycle', () => {
   });
 
   it('supersede finalizes the old run as unknown, clears its timer, and getRun still resolves it', async () => {
-    const first = svc().begin(0, 'web', 'update', 'tester')!;
+    const first = svc().beginStack(0, 'web', 'update', 'tester')!;
     await ticks(1);
     const timersBefore = vi.getTimerCount();
-    const second = svc().begin(0, 'web', 'update', 'tester')!;
+    const second = svc().beginStack(0, 'web', 'update', 'tester')!;
     expect(vi.getTimerCount()).toBe(timersBefore); // old interval cleared, new one added
 
     const superseded = svc().getReport(0, 'web', first);
@@ -337,6 +340,7 @@ describe('HealthGateService lifecycle', () => {
     state.runs.set('stale', {
       id: 'stale', node_id: 0, stack_name: 'web', trigger_action: 'update', status: 'observing',
       reason: null, window_seconds: 30, containers_json: '[]', started_at: 1, ended_at: null, created_by: null,
+      target_scope: 'stack', service_name: null, failure_source: null,
     });
     svc().start();
     expect(state.runs.get('stale')!.status).toBe('unknown');
@@ -345,7 +349,7 @@ describe('HealthGateService lifecycle', () => {
 
   it('no-ops when disabled but still records the update_started event', () => {
     state.settings.health_gate_enabled = '0';
-    const id = svc().begin(0, 'web', 'update', 'tester');
+    const id = svc().beginStack(0, 'web', 'update', 'tester');
     expect(id).toBeNull();
     expect(state.runs.size).toBe(0);
     expect(state.activity.some(a => a.category === 'update_started')).toBe(true);
@@ -353,24 +357,24 @@ describe('HealthGateService lifecycle', () => {
   });
 
   it('records update_started for update triggers but not deploy triggers', () => {
-    svc().begin(0, 'web', 'deploy', 'tester');
+    svc().beginStack(0, 'web', 'deploy', 'tester');
     expect(state.activity.some(a => a.category === 'update_started')).toBe(false);
-    svc().begin(0, 'web', 'update', 'tester');
+    svc().beginStack(0, 'web', 'update', 'tester');
     expect(state.activity.some(a => a.category === 'update_started')).toBe(true);
   });
 
   it('refuses to begin before start() so shutdown cannot leak timers', () => {
     svc().stop();
-    expect(svc().begin(0, 'web', 'update', 'tester')).toBeNull();
+    expect(svc().beginStack(0, 'web', 'update', 'tester')).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
     svc().start();
   });
 
   it('persists an immediate unknown past the concurrency cap', () => {
     for (let i = 0; i < 25; i++) {
-      svc().begin(0, `stack-${i}`, 'update', 'tester');
+      svc().beginStack(0, `stack-${i}`, 'update', 'tester');
     }
-    const overCap = svc().begin(0, 'one-too-many', 'update', 'tester')!;
+    const overCap = svc().beginStack(0, 'one-too-many', 'update', 'tester')!;
     const report = svc().getReport(0, 'one-too-many', overCap);
     expect(report.status).toBe('unknown');
     expect(report.reason).toContain('concurrent');
@@ -378,10 +382,10 @@ describe('HealthGateService lifecycle', () => {
 
   it('clamps the configured window into its valid range and falls back on garbage', () => {
     state.settings.health_gate_window_seconds = '99999';
-    const a = svc().begin(0, 'web', 'update', 'tester')!;
+    const a = svc().beginStack(0, 'web', 'update', 'tester')!;
     expect(svc().getReport(0, 'web', a).windowSeconds).toBe(600);
     state.settings.health_gate_window_seconds = 'banana';
-    const b = svc().begin(0, 'web', 'update', 'tester')!;
+    const b = svc().beginStack(0, 'web', 'update', 'tester')!;
     expect(svc().getReport(0, 'web', b).windowSeconds).toBe(90);
   });
 
@@ -392,7 +396,7 @@ describe('HealthGateService lifecycle', () => {
   });
 
   it('stop() finalizes in-flight gates as unknown with zero timers left', async () => {
-    const id = svc().begin(0, 'web', 'update', 'tester')!;
+    const id = svc().beginStack(0, 'web', 'update', 'tester')!;
     await ticks(1);
     svc().stop();
     expect(vi.getTimerCount()).toBe(0);

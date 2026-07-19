@@ -50,6 +50,10 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     setGitSourcePendingMap: vi.fn(),
     setComposeEtag: vi.fn(),
     setEnvEtag: vi.fn(),
+    effectiveServices: [],
+    setEffectiveServices: vi.fn(),
+    serviceUpdateInProgress: null,
+    setServiceUpdateInProgress: vi.fn(),
   };
   return { ...base, ...over } as unknown as EditorState;
 }

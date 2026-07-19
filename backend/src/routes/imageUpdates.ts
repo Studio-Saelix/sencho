@@ -7,7 +7,7 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { FileSystemService } from '../services/FileSystemService';
-import { ComposeService } from '../services/ComposeService';
+import { StackUpdateOrchestrator } from '../services/StackUpdateOrchestrator';
 import { StackOpLockService, stackOpSkipMessage } from '../services/StackOpLockService';
 import { NotificationService } from '../services/NotificationService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
@@ -342,7 +342,6 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
 
     const docker = DockerController.getInstance(req.nodeId);
     const imageUpdateService = ImageUpdateService.getInstance();
-    const compose = ComposeService.getInstance(req.nodeId);
     const db = DatabaseService.getInstance();
     const atomic = true;
     const results: string[] = [];
@@ -417,14 +416,17 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
 
         const lock = await StackOpLockService.getInstance().runExclusive(
           req.nodeId, stackName, 'update', 'system',
-          () => compose.updateStack(stackName, undefined, atomic),
+          () => StackUpdateOrchestrator.getInstance().execute(
+            { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'automatic', actor: `auto-update:${req.user?.username ?? 'scheduler'}` },
+            { atomic, terminalWs: null },
+          ),
         );
         if (!lock.ran) {
           results.push(stackOpSkipMessage(stackName, lock.existing.action));
           continue;
         }
         db.clearStackUpdateStatus(req.nodeId, stackName);
-        HealthGateService.getInstance().begin(req.nodeId, stackName, 'update', `auto-update:${req.user?.username ?? 'scheduler'}`);
+        HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', `auto-update:${req.user?.username ?? 'scheduler'}`);
 
         NotificationService.getInstance().broadcastEvent({
           type: 'state-invalidate',

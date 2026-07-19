@@ -660,6 +660,38 @@ describe('ComposeService - deployStack', () => {
     expect(mockGetLegacyOrphanContainersByStack).toHaveBeenCalledWith('my-stack');
   });
 
+  it('blocks a pilot service restore with relative binds before Compose up', async () => {
+    process.env.SENCHO_MODE = 'pilot';
+    const composeDir = path.resolve('/test/compose');
+    mockGetBindMounts.mockResolvedValue([
+      { source: '/opt/docker/sencho', destination: composeDir },
+    ]);
+    const configProc = createMockProcess();
+    mockSpawn.mockReturnValue(configProc);
+
+    const svc = ComposeService.getInstance(1);
+    const result = svc.recreateServiceFromLocal('my-stack', 'db').then(() => null, (error: Error) => error);
+    await waitForSpawn();
+    configProc.stdout.emit('data', Buffer.from(JSON.stringify({
+      name: 'my-stack',
+      services: {
+        db: {
+          image: 'postgres:17',
+          volumes: [{
+            type: 'bind',
+            source: path.join(composeDir, 'my-stack', 'data'),
+            target: '/var/lib/postgresql/data',
+          }],
+        },
+      },
+    })));
+    configProc.emit('close', 0);
+
+    const error = await result;
+    expect(error?.message).toContain('1:1');
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
   it('does not remove compose-managed containers before deploy (#1565)', async () => {
     setupAutoCloseSpawn();
     mockListContainers.mockResolvedValue([]);

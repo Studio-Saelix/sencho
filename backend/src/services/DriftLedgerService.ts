@@ -180,6 +180,65 @@ export class DriftLedgerService {
     }
 
     /**
+     * Service-scoped counterpart to `reconcile`: only inserts/resolves findings
+     * for `serviceName`, leaving every other service's (and the empty/`null`
+     * service, i.e. network-level) open findings untouched. Used by the service
+     * update orchestrator so a service-scoped update never resolves drift it
+     * did not touch. Never pass a report already filtered to one service into
+     * the stack-wide `reconcile`; that would falsely resolve every other
+     * service's open findings.
+     */
+    reconcileService(nodeId: number, stackName: string, serviceName: string, report: StackDriftReport): DriftReconcileResult {
+        if (report.status === 'unreachable' || report.parseError) {
+            return { detected: 0, resolved: 0 };
+        }
+        const db = DatabaseService.getInstance();
+        const now = Date.now();
+        const openForService = db.getOpenDriftFindings(nodeId, stackName).filter(r => r.service === serviceName);
+        const openByKey = new Map(openForService.map(r => [findingKey(r.service, r.finding_type), r]));
+        const currentForService = report.findings.filter(f => f.service === serviceName);
+        const currentByKey = new Map(currentForService.map(f => [findingKey(f.service, f.kind), f]));
+
+        const toInsert: StackDriftFinding[] = [];
+        for (const [key, f] of currentByKey) {
+            if (!openByKey.has(key)) toInsert.push(f);
+        }
+        const toResolve: StackDriftFindingRow[] = [];
+        for (const [key, row] of openByKey) {
+            if (!currentByKey.has(key)) toResolve.push(row);
+        }
+        db.getDb().transaction(() => {
+            db.setStackDossierDriftCheck(nodeId, stackName, now);
+            for (const f of toInsert) {
+                db.insertDriftFinding({
+                    node_id: nodeId,
+                    stack_name: stackName,
+                    service: f.service,
+                    finding_type: f.kind,
+                    severity: 'warning',
+                    message: f.detail,
+                    expected_json: f.expected !== undefined ? JSON.stringify(f.expected) : null,
+                    actual_json: f.actual !== undefined ? JSON.stringify(f.actual) : null,
+                    detected_at: now,
+                });
+            }
+            for (const row of toResolve) {
+                db.resolveDriftFinding(row.id, now);
+            }
+        })();
+
+        if (toInsert.length > 0) {
+            this.recordActivity(nodeId, stackName, 'drift_detected', 'warning',
+                `Drift detected on ${stackName} (${serviceName}): ${toInsert.length} new finding${toInsert.length === 1 ? '' : 's'}`, now);
+        }
+        if (toResolve.length > 0) {
+            this.recordActivity(nodeId, stackName, 'drift_resolved', 'info',
+                `Drift resolved on ${stackName} (${serviceName}): ${toResolve.length} finding${toResolve.length === 1 ? '' : 's'} cleared`, now);
+        }
+        return { detected: toInsert.length, resolved: toResolve.length };
+    }
+
+    /**
      * Build the spatial report for one stack and reconcile it into the ledger.
      * Used by the deploy and update success hooks (and the rollback route, which
      * re-deploys through deployStack) so a change resolves the findings it fixed and
@@ -192,6 +251,22 @@ export class DriftLedgerService {
             return this.reconcile(nodeId, stackName, report);
         } catch (error) {
             console.error('[DriftLedger] reconcileStack failed for %s:', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+            return { detected: 0, resolved: 0 };
+        }
+    }
+
+    /**
+     * Build the spatial report for one stack and reconcile only `serviceName`'s
+     * findings into the ledger. Used by the service update orchestrator's
+     * success path. Best-effort: a build or reconcile failure is logged and
+     * swallowed so it never fails the update that triggered it.
+     */
+    async reconcileServiceForStack(nodeId: number, stackName: string, serviceName: string): Promise<DriftReconcileResult> {
+        try {
+            const report = await buildStackDriftReport(nodeId, stackName);
+            return this.reconcileService(nodeId, stackName, serviceName, report);
+        } catch (error) {
+            console.error('[DriftLedger] reconcileServiceForStack failed for %s/%s:', sanitizeForLog(stackName), sanitizeForLog(serviceName), sanitizeForLog(getErrorMessage(error, 'unknown')));
             return { detected: 0, resolved: 0 };
         }
     }

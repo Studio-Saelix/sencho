@@ -1168,7 +1168,7 @@ describe('GitSourceService.apply', () => {
         const { HealthGateService } = await import('../services/HealthGateService');
         const saveSpy = vi.spyOn(FileSystemService.prototype, 'saveStackContent').mockResolvedValue();
         const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue();
-        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-git');
+        const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-git');
         const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
 
         try {

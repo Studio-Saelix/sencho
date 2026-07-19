@@ -690,8 +690,8 @@ describe('SchedulerService - executePrune', () => {
     await svc.triggerTask(71);
 
     expect(mockPruneSystem).toHaveBeenCalledTimes(2);
-    expect(mockPruneSystem).toHaveBeenCalledWith('images', undefined);
-    expect(mockPruneSystem).toHaveBeenCalledWith('volumes', undefined);
+    expect(mockPruneSystem).toHaveBeenCalledWith('images', undefined, expect.any(Function));
+    expect(mockPruneSystem).toHaveBeenCalledWith('volumes', undefined, expect.any(Function));
   });
 
   it('includes label filter when configured', async () => {
@@ -711,7 +711,7 @@ describe('SchedulerService - executePrune', () => {
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(72);
 
-    expect(mockPruneSystem).toHaveBeenCalledWith('containers', 'env=staging');
+    expect(mockPruneSystem).toHaveBeenCalledWith('containers', 'env=staging', expect.any(Function));
   });
 
   it('marks scheduled prune runs as failed when a target prune fails', async () => {
@@ -828,7 +828,7 @@ describe('SchedulerService - executeUpdate', () => {
 
   it('begins a health gate after a scheduled update succeeds', async () => {
     const { HealthGateService } = await import('../services/HealthGateService');
-    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-1');
+    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-1');
     try {
       mockGetScheduledTask.mockReturnValue({
         id: 83,

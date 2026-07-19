@@ -10,6 +10,7 @@ import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPD
 import { NodeRegistry } from '../services/NodeRegistry';
 import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../services/network/networkingSummary';
 import DockerController from '../services/DockerController';
+import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { getHostMemory } from '../helpers/hostMemory';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
@@ -2115,9 +2116,10 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
                 targetResults.push({ target, success: true, reclaimedBytes: estimate.reclaimableBytes, dryRun: true });
                 continue;
               }
+              const isImageHeld = ServiceUpdateRecoveryService.getInstance().buildHeldImagePredicate(node.id);
               const result = scope === 'managed'
-                ? await dockerController.pruneManagedOnly(target, knownStacks)
-                : await dockerController.pruneSystem(target);
+                ? await dockerController.pruneManagedOnly(target, knownStacks, isImageHeld)
+                : await dockerController.pruneSystem(target, undefined, isImageHeld);
               targetResults.push({ target, success: true, reclaimedBytes: result.reclaimedBytes });
               if (result.reclaimedBytes > 0 || result.success) anySuccess = true;
             } catch (err) {
