@@ -4,8 +4,6 @@ import { sanitizeForLog } from '../utils/safeLog';
 
 const ENCRYPTED_PREFIX = 'enc:';
 const HEX_RE = /^[0-9a-fA-F]+$/;
-/** Identifier-like legacy body after enc: (e.g. enc:hello, enc:FOO_BAR). */
-const LEGACY_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /**
  * Producer envelopes are at least an IV worth of hex (24) plus delimiters /
  * ciphertext. Genuine legacy prose such as enc:hello is much shorter.
@@ -69,26 +67,15 @@ export function isEnvelopeShapedPayload(payload: string): boolean {
 }
 
 /**
- * Clear non-envelope legacy plaintext that happens to start with enc:.
- * Envelope-shaped payloads are never treated as legacy, even if they contain
- * '=' or whitespace from a delimiter/field mutation.
+ * Non-envelope legacy plaintext that happens to start with enc:.
+ * Any non-empty payload that is not encryption-shaped is preserved verbatim
+ * (SEN-213). Envelope-shaped damage never qualifies, even with = or whitespace.
  */
 export function isClearlyLegacyEncProse(value: string): boolean {
     if (!value.startsWith(ENCRYPTED_PREFIX)) return false;
     const payload = value.slice(ENCRYPTED_PREFIX.length);
     if (payload === '') return false;
-
-    // Subordinate legacy exceptions to envelope-likeness (B1-R2).
-    if (isEnvelopeShapedPayload(payload)) return false;
-
-    // Env-style or free text (spaces) that is not encryption-shaped.
-    if (payload.includes('=') || /\s/.test(payload)) return true;
-
-    // Identifier body with no colons (enc:hello, enc:FOO_BAR). Pure hex
-    // already rejected by isEnvelopeShapedPayload.
-    if (LEGACY_IDENT_RE.test(payload) && !HEX_RE.test(payload)) return true;
-
-    return false;
+    return !isEnvelopeShapedPayload(payload);
 }
 
 /**

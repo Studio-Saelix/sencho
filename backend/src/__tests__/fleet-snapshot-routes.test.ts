@@ -127,6 +127,18 @@ describe('Snapshot content-at-rest encryption', () => {
         if (files[0].available) expect(files[0].content).toBe('plain: text\n');
     });
 
+    it('reads punctuated legacy enc: plaintext rows back verbatim', () => {
+        const db = DatabaseService.getInstance();
+        const legacyId = db.createSnapshot('legacy-punct', 'admin', 1, 1, '[]', '[]');
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(legacyId, 1, 'local', 'legacy', 'compose.yaml', 'enc:hello-world');
+
+        const files = db.getSnapshotFiles(legacyId);
+        expect(files[0].available).toBe(true);
+        if (files[0].available) expect(files[0].content).toBe('enc:hello-world');
+    });
+
     it('isolates a corrupt encrypted sibling without failing the read', () => {
         const db = DatabaseService.getInstance();
         const id = db.createSnapshot('partial-corrupt', 'admin', 1, 2, '[]', '[]');

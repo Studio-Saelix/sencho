@@ -3,6 +3,7 @@ import { CryptoService } from '../services/CryptoService';
 import {
     classifySnapshotFileContent,
     isEnvelopeLikeDamage,
+    isEnvelopeShapedPayload,
     isStructurallyValidSnapshotEnvelope,
 } from '../helpers/snapshotFileDecrypt';
 
@@ -36,17 +37,22 @@ describe('snapshotFileDecrypt classification', () => {
         );
     });
 
-    it('preserves clearly non-envelope legacy enc: prose', () => {
-        expect(classifySnapshotFileContent('enc:hello')).toEqual({ kind: 'usable', content: 'enc:hello' });
-        expect(classifySnapshotFileContent('enc:FOO_BAR=baz')).toEqual({
-            kind: 'usable',
-            content: 'enc:FOO_BAR=baz',
-        });
-        expect(classifySnapshotFileContent('enc: path with spaces')).toEqual({
-            kind: 'usable',
-            content: 'enc: path with spaces',
-        });
-        expect(isEnvelopeLikeDamage('enc:hello')).toBe(false);
+    it('preserves clearly non-envelope legacy enc: prose including punctuation', () => {
+        const legacyValues = [
+            'enc:hello',
+            'enc:FOO_BAR=baz',
+            'enc: path with spaces',
+            'enc:hello-world',
+            'enc:hello/world',
+            'enc:{legacy}',
+            'enc:hello.world',
+            'enc:hello!',
+        ];
+        for (const value of legacyValues) {
+            expect(isEnvelopeShapedPayload(value.slice('enc:'.length)), value).toBe(false);
+            expect(classifySnapshotFileContent(value), value).toEqual({ kind: 'usable', content: value });
+            expect(isEnvelopeLikeDamage(value), value).toBe(false);
+        }
         expect(isEnvelopeLikeDamage('enc:deadbeef')).toBe(true);
         expect(classifySnapshotFileContent('enc:deadbeef')).toEqual({
             kind: 'unavailable',
