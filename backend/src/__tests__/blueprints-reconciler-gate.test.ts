@@ -292,7 +292,7 @@ describe('Accept/Evict STALE_GUARD', () => {
     });
 });
 
-describe('approval migration fail-closed', () => {
+describe('approval defaults and corrupt-approval fail-closed', () => {
     it('new blueprints persist pending approval columns', () => {
         const node = seedNode();
         const bp = createBp({ nodeIds: [node.id] });
