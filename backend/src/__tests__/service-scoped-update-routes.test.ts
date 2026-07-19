@@ -156,3 +156,62 @@ describe('OrchestratorResult to HTTP mapping', () => {
     expect(mockExecute).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('GET /api/stacks/:stackName/services/:serviceName/recovery', () => {
+  it('returns null when no active recovery exists', async () => {
+    const res = await request(app)
+      .get('/api/stacks/web/services/app/recovery')
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ recovery: null });
+  });
+
+  it('returns the newest active recovery row', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const { NodeRegistry } = await import('../services/NodeRegistry');
+    const db = DatabaseService.getInstance();
+    const nodeId = NodeRegistry.getInstance().getDefaultNodeId();
+    const now = Date.now();
+    db.insertServiceUpdateRecovery({
+      id: 'rec-old',
+      node_id: nodeId,
+      stack_name: 'web',
+      service_name: 'app',
+      replicas_json: '[]',
+      majority_image_id: 'sha256:old',
+      declared_image_ref: 'nginx:latest',
+      weak_floating_tag: 0,
+      health_gate_id: null,
+      status: 'active',
+      expires_at: now + 60_000,
+      claim_expires_at: null,
+      created_at: now - 1_000,
+      created_by: 'tester',
+    });
+    db.insertServiceUpdateRecovery({
+      id: 'rec-new',
+      node_id: nodeId,
+      stack_name: 'web',
+      service_name: 'app',
+      replicas_json: '[]',
+      majority_image_id: 'sha256:new',
+      declared_image_ref: 'nginx:latest',
+      weak_floating_tag: 0,
+      health_gate_id: 'gate-1',
+      status: 'active',
+      expires_at: now + 60_000,
+      claim_expires_at: null,
+      created_at: now,
+      created_by: 'tester',
+    });
+    const res = await request(app)
+      .get('/api/stacks/web/services/app/recovery')
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.recovery).toMatchObject({
+      id: 'rec-new',
+      healthGateId: 'gate-1',
+      majorityImageId: 'sha256:new',
+    });
+  });
+});

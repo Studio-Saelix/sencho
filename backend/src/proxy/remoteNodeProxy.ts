@@ -273,8 +273,13 @@ function isStackDownWithRemoveVolumes(req: Request): boolean {
   return req.query.removeVolumes === 'true';
 }
 
-/** POST /stacks/:stackName/services/:serviceName/(update|restore) (path is post-/api strip). */
+/** Nested service update/restore/recovery routes (path is post-/api strip). */
 function isServiceScopedUpdateRoute(req: Request): boolean {
-  if (req.method !== 'POST') return false;
-  return /^\/stacks\/[^/]+\/services\/[^/]+\/(?:update|restore)$/.test(req.path);
+  if (req.method === 'GET') {
+    return /^\/stacks\/[^/]+\/services\/[^/]+\/recovery$/.test(req.path);
+  }
+  if (req.method === 'POST') {
+    return /^\/stacks\/[^/]+\/services\/[^/]+\/(?:update|restore)$/.test(req.path);
+  }
+  return false;
 }

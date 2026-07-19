@@ -3,6 +3,8 @@ import { apiFetch } from '../lib/api';
 import { type ParsedLogRow, parseLogChunk } from '../components/log-rendering/composeLogParser';
 import { useDeployFeedbackEnabled } from '../hooks/use-deploy-feedback-enabled';
 import { readDeployFeedbackStyle } from '../hooks/use-deploy-feedback-style';
+import { toast } from '../components/ui/toast-store';
+import { fetchActiveServiceRecovery, requestServiceRestore } from '../lib/serviceUpdate';
 
 export type ActionVerb = 'deploy' | 'update' | 'down' | 'restart' | 'stop' | 'install' | 'scan';
 
@@ -176,9 +178,22 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
   const [logRows, setLogRows] = useState<ParsedLogRow[]>([]);
   const [lastOutputAt, setLastOutputAt] = useState<number>(0);
 
-  // Poll timer for the current session's health gate; cleared on panel close
-  // and whenever a new session starts.
+  // Poll timer for the current session's health gate; cleared when a watch
+  // ends or a newer session starts. Closing the panel no longer stops a
+  // service-scoped watch: recovery must stay discoverable after dismiss.
   const gatePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const healthGateRef = useRef<HealthGateUiState | null>(null);
+  const panelOpenRef = useRef(false);
+  /** True when gate polling runs without the Deploy Progress panel (disabled setting or after dismiss). */
+  const silentGateRef = useRef(false);
+  const offerRestoreToastRef = useRef<(gate: HealthGateUiState) => void>(() => {});
+
+  useEffect(() => {
+    healthGateRef.current = healthGate;
+  }, [healthGate]);
+  useEffect(() => {
+    panelOpenRef.current = panelState.isOpen;
+  }, [panelState.isOpen]);
 
   const stopGatePolling = useCallback(() => {
     if (gatePollRef.current !== null) {
@@ -257,16 +272,31 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
   }, []);
 
   const onPanelClose = useCallback(() => {
-    sessionIdRef.current += 1;
+    const gate = healthGateRef.current;
+    const keepServiceWatch = !!gate
+      && gate.targetScope === 'service'
+      && (gate.status === 'observing' || gate.status === 'failed');
+
     settleStartRef.current = null;
     streamReadyRef.current = false;
-    // The gate keeps observing server-side; only this session's poll stops.
-    stopGatePolling();
-    setHealthGate(null);
     setPanelState(DEFAULT_PANEL_STATE);
     setMinimized(false);
     setBannerActive(false);
     setLogRows([]);
+
+    if (keepServiceWatch) {
+      // Keep polling (or a failed gate with recovery) so Restore stays reachable.
+      silentGateRef.current = true;
+      if (gate.status === 'failed') {
+        offerRestoreToastRef.current(gate);
+      }
+      return;
+    }
+
+    sessionIdRef.current += 1;
+    silentGateRef.current = false;
+    stopGatePolling();
+    setHealthGate(null);
   }, [stopGatePolling]);
 
   // Poll the by-id gate endpoint until a terminal status. The id-scoped read
@@ -280,9 +310,10 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     gateId: string,
     trigger: 'update' | 'deploy',
     mySession: number,
-    options?: { serviceName?: string; recoveryId?: string | null },
+    options?: { serviceName?: string; recoveryId?: string | null; silent?: boolean },
   ) => {
     stopGatePolling();
+    silentGateRef.current = options?.silent === true;
     const targetScope = options?.serviceName ? 'service' : 'stack';
     setHealthGate({
       stackName, nodeId, gateId, trigger, status: 'observing', reason: null, windowSeconds: null, startedAt: null,
@@ -345,7 +376,7 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
           || report.status === 'failed' || report.status === 'unknown'
             ? report.status
             : 'unknown';
-        setHealthGate(prev => ({
+        const nextGate: HealthGateUiState = {
           stackName, nodeId, gateId, trigger,
           status,
           reason: report.reason,
@@ -353,11 +384,20 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
           targetScope: report.targetScope ?? targetScope,
           serviceName: report.serviceName ?? options?.serviceName ?? null,
           failureSource: report.failureSource ?? null,
-          recoveryId: prev?.recoveryId ?? options?.recoveryId ?? null,
-        }));
+          recoveryId: healthGateRef.current?.recoveryId ?? options?.recoveryId ?? null,
+        };
+        setHealthGate(nextGate);
         if (status !== 'observing') {
           settled = true;
           stopGatePolling();
+          if (
+            status === 'failed'
+            && nextGate.targetScope === 'service'
+            && nextGate.serviceName
+            && (silentGateRef.current || !panelOpenRef.current)
+          ) {
+            offerRestoreToastRef.current(nextGate);
+          }
         }
       } catch (e) {
         strikes += 1;
@@ -370,6 +410,76 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
     void tick();
     gatePollRef.current = setInterval(() => { void tick(); }, GATE_POLL_INTERVAL_MS);
   }, [stopGatePolling]);
+
+  // Keep the toast helper current without re-creating startGatePolling on every render.
+  useEffect(() => {
+    offerRestoreToastRef.current = (gate: HealthGateUiState) => {
+      const serviceName = gate.serviceName;
+      if (!serviceName) return;
+      toast.error(
+        `Health gate failed for service "${serviceName}"${gate.reason ? `: ${gate.reason}` : ''}.`,
+        {
+          duration: 120_000,
+          action: {
+            label: 'Restore',
+            onClick: () => {
+              void (async () => {
+                let recoveryId = gate.recoveryId ?? null;
+                if (!recoveryId) {
+                  const lookup = await fetchActiveServiceRecovery({
+                    nodeId: gate.nodeId,
+                    stackName: gate.stackName,
+                    serviceName,
+                  });
+                  if (!lookup.ok) {
+                    toast.error(lookup.error);
+                    return;
+                  }
+                  recoveryId = lookup.recovery?.id ?? null;
+                }
+                if (!recoveryId) {
+                  toast.error(`No recovery snapshot is available for "${serviceName}".`);
+                  return;
+                }
+                const loadingId = toast.loading(`Restoring "${serviceName}"...`);
+                try {
+                  const result = await requestServiceRestore({
+                    nodeId: gate.nodeId,
+                    stackName: gate.stackName,
+                    serviceName,
+                    recoveryId,
+                  });
+                  toast.dismiss(loadingId);
+                  if (!result.ok) {
+                    toast.error(result.error);
+                    return;
+                  }
+                  if (result.healthGateId && result.observing) {
+                    toast.info(`Service "${serviceName}" restored. Verifying health...`);
+                    sessionIdRef.current += 1;
+                    startGatePolling(
+                      gate.stackName,
+                      gate.nodeId,
+                      result.healthGateId,
+                      'update',
+                      sessionIdRef.current,
+                      { serviceName, recoveryId: result.recoveryId, silent: true },
+                    );
+                  } else {
+                    toast.success(`Service "${serviceName}" restored successfully`);
+                    setHealthGate(null);
+                  }
+                } catch (error) {
+                  toast.dismiss(loadingId);
+                  toast.error(error instanceof Error ? error.message : `Failed to restore "${serviceName}"`);
+                }
+              })();
+            },
+          },
+        },
+      );
+    };
+  }, [startGatePolling]);
 
   const runWithLog = useCallback(
     async (
@@ -387,7 +497,26 @@ export function DeployFeedbackProvider({ children }: { children: React.ReactNode
       const deploySessionId = Array.from(idBytes, (b) => b.toString(16).padStart(2, '0')).join('');
 
       if (!isEnabled) {
-        return run(Promise.resolve(), deploySessionId);
+        const result = await run(Promise.resolve(), deploySessionId);
+        // Service-scoped updates still need gate polling and Restore discovery
+        // when Deploy Progress is off; open no panel, watch silently.
+        if (
+          result.ok
+          && result.healthGateId
+          && params.serviceName
+          && (params.action === 'update' || params.action === 'deploy')
+        ) {
+          sessionIdRef.current += 1;
+          startGatePolling(
+            params.stackName,
+            params.nodeId,
+            result.healthGateId,
+            params.action === 'deploy' ? 'deploy' : 'update',
+            sessionIdRef.current,
+            { serviceName: params.serviceName, recoveryId: result.recoveryId, silent: true },
+          );
+        }
+        return result;
       }
 
       // Read the persisted style synchronously so this deploy uses the style in

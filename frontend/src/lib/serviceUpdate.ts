@@ -149,3 +149,75 @@ export async function requestServiceRestore(params: RequestServiceRestoreParams)
         };
     }
 }
+
+export interface ActiveServiceRecovery {
+    id: string;
+    status: string;
+    healthGateId: string | null;
+    expiresAt: number;
+    createdAt: number;
+    majorityImageId: string;
+    declaredImageRef: string;
+}
+
+/**
+ * Fetch the newest active recovery snapshot for a service, if any. Used when
+ * Deploy Progress is disabled or dismissed so Restore remains discoverable.
+ * Distinguishes "none" from lookup failure so the UI does not claim the
+ * snapshot is missing when the request actually failed.
+ */
+export type FetchActiveServiceRecoveryResult =
+    | { ok: true; recovery: ActiveServiceRecovery | null }
+    | { ok: false; error: string };
+
+export async function fetchActiveServiceRecovery(params: {
+    nodeId: number | null;
+    stackName: string;
+    serviceName: string;
+}): Promise<FetchActiveServiceRecoveryResult> {
+    const { nodeId, stackName, serviceName } = params;
+    try {
+        const res = await apiFetch(
+            `/stacks/${encodeURIComponent(stackName)}/services/${encodeURIComponent(serviceName)}/recovery`,
+            { method: 'GET', nodeId },
+        );
+        const body: unknown = await res.json().catch(() => null);
+        if (!res.ok) {
+            const error = isRecord(body) && typeof body.error === 'string'
+                ? body.error
+                : `Failed to look up recovery for "${serviceName}"`;
+            console.warn('[serviceUpdate] recovery lookup failed:', res.status, error);
+            return { ok: false, error };
+        }
+        if (!isRecord(body)) return { ok: true, recovery: null };
+        if (body.recovery === null || body.recovery === undefined) {
+            return { ok: true, recovery: null };
+        }
+        if (!isRecord(body.recovery)) {
+            console.warn('[serviceUpdate] recovery lookup returned an unexpected payload');
+            return { ok: false, error: `Unexpected recovery response for "${serviceName}"` };
+        }
+        const row = body.recovery;
+        const id = row.id;
+        if (typeof id !== 'string') {
+            console.warn('[serviceUpdate] recovery lookup returned an unexpected payload');
+            return { ok: false, error: `Unexpected recovery response for "${serviceName}"` };
+        }
+        return {
+            ok: true,
+            recovery: {
+                id,
+                status: typeof row.status === 'string' ? row.status : 'active',
+                healthGateId: typeof row.healthGateId === 'string' ? row.healthGateId : null,
+                expiresAt: typeof row.expiresAt === 'number' ? row.expiresAt : 0,
+                createdAt: typeof row.createdAt === 'number' ? row.createdAt : 0,
+                majorityImageId: typeof row.majorityImageId === 'string' ? row.majorityImageId : '',
+                declaredImageRef: typeof row.declaredImageRef === 'string' ? row.declaredImageRef : '',
+            },
+        };
+    } catch (error) {
+        const message = error instanceof Error ? error.message : `Failed to look up recovery for "${serviceName}"`;
+        console.warn('[serviceUpdate] recovery lookup failed:', message);
+        return { ok: false, error: message };
+    }
+}

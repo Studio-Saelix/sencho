@@ -1944,6 +1944,65 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /api/stacks/{stackName}/services/{serviceName}/recovery:
+    get:
+      operationId: getStackServiceRecovery
+      tags: [Stacks]
+      summary: Latest active service recovery snapshot
+      description: |
+        Returns the newest active, unexpired recovery row for one service, or
+        `recovery: null` when none is available. Used so Restore stays
+        discoverable when Deploy Progress is disabled or dismissed.
+        Requires `stack:deploy`.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - name: serviceName
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Recovery lookup completed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recovery]
+                properties:
+                  recovery:
+                    oneOf:
+                      - type: "null"
+                      - type: object
+                        required: [id, status, expiresAt, createdAt]
+                        properties:
+                          id:
+                            type: string
+                          status:
+                            type: string
+                          healthGateId:
+                            type: string
+                            nullable: true
+                          expiresAt:
+                            type: integer
+                          createdAt:
+                            type: integer
+                          majorityImageId:
+                            type: string
+                          declaredImageRef:
+                            type: string
+        "400":
+          description: Capability unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /api/stacks/{stackName}/services/{serviceName}/restore:
     post:
       operationId: restoreStackService

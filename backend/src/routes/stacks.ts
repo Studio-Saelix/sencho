@@ -61,6 +61,7 @@ import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
 import { getTerminalWs, DEPLOY_SESSION_HEADER } from '../websocket/generic';
 import { isSelfStack, refuseIfSelfStack, selfStackProtectedBulkResult } from '../helpers/selfStackGuard';
 import { getActiveCapabilities, STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
+import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 
 // Authenticated users with edit permission can write arbitrarily large compose
 // files. Refuse to YAML.parse anything beyond this bound so a malformed (or
@@ -2177,6 +2178,41 @@ stacksRouter.post('/:stackName/services/:serviceName/update', async (req: Reques
       );
     },
   });
+});
+
+/** Latest restorable service recovery snapshot (active, unexpired), for UI discovery outside Deploy Progress. */
+stacksRouter.get('/:stackName/services/:serviceName/recovery', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  const serviceName = req.params.serviceName as string;
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  if (!(await requireStackExists(req.nodeId, stackName, res))) return;
+  if (!requireServiceScopedUpdateCapability(res)) return;
+  try {
+    const row = ServiceUpdateRecoveryService.getInstance().listActive(req.nodeId, stackName, serviceName)[0];
+    if (!row) {
+      res.json({ recovery: null });
+      return;
+    }
+    res.json({
+      recovery: {
+        id: row.id,
+        status: row.status,
+        healthGateId: row.health_gate_id,
+        expiresAt: row.expires_at,
+        createdAt: row.created_at,
+        majorityImageId: row.majority_image_id,
+        declaredImageRef: row.declared_image_ref,
+      },
+    });
+  } catch (error: unknown) {
+    console.error(
+      '[Stacks] Failed to list service recovery for %s/%s: %s',
+      sanitizeForLog(stackName),
+      sanitizeForLog(serviceName),
+      sanitizeForLog(getErrorMessage(error, 'unknown')),
+    );
+    res.status(500).json({ error: 'Failed to load service recovery', code: 'service_recovery_lookup_failed' });
+  }
 });
 
 stacksRouter.post('/:stackName/services/:serviceName/restore', async (req: Request, res: Response) => {

@@ -798,7 +798,7 @@ export class ImageUpdateService {
                 db,
                 writeGenerations.get(stackName) ?? this.reserveStackWriteGeneration(nodeId, stackName),
             );
-            if (outcome.hasUpdate) {
+            if (outcome.committed && outcome.hasUpdate) {
                 updatesFound++;
                 if (!isBackfilled || !previousState[stackName]) {
                     newlyUpdated.push({ stackName, message: outcome.notifyMessage });
@@ -944,20 +944,23 @@ export class ImageUpdateService {
         stackName: string,
         generation: number,
         write: (generation: number) => void | Promise<void>,
-    ): Promise<void> {
+    ): Promise<boolean> {
         const key = this.stackWriteKey(nodeId, stackName);
         let state = this.stackWriteState.get(key);
         if (!state) {
             state = { chain: Promise.resolve(), generation };
             this.stackWriteState.set(key, state);
         }
+        let committed = false;
         state.chain = state.chain.then(async () => {
             const current = this.stackWriteState.get(key);
             // A newer reservation supersedes this writer; drop the stale commit.
             if (!current || generation < current.generation) return;
             await write(generation);
+            committed = true;
         });
         await state.chain;
+        return committed;
     }
 
     private runtimeImagesByService(
@@ -988,7 +991,7 @@ export class ImageUpdateService {
         containers: Array<{ Image?: string; Labels?: Record<string, string> }>,
         db: DatabaseService,
         generation: number,
-    ): Promise<{ hasUpdate: boolean; notifyMessage: string }> {
+    ): Promise<{ hasUpdate: boolean; notifyMessage: string; committed: boolean }> {
         const model = await buildEffectiveServiceModel(nodeId, stackName);
         if (model.renderable) {
             const priorByService = new Map(
@@ -1008,7 +1011,7 @@ export class ImageUpdateService {
             const lastError = stackStatusLastError(services);
             const notifyMessage = buildAvailabilityNotifyMessage(stackName, services);
 
-            await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
+            const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
                 if (checkStatus === 'failed') {
                     db.recordStackCheckFailure(
                         nodeId, stackName, lastError ?? 'Update check failed', checkedAt, services, gen,
@@ -1020,7 +1023,7 @@ export class ImageUpdateService {
                 }
             });
 
-            return { hasUpdate, notifyMessage };
+            return { hasUpdate, notifyMessage, committed };
         }
 
         const checkable = Array.from(images)
@@ -1030,7 +1033,7 @@ export class ImageUpdateService {
         const confirmedHasUpdate = checkable.some((r) => r.error === undefined && r.hasUpdate === true);
 
         if (checkable.length > 0 && errored.length === checkable.length) {
-            await this.withStackWriteLock(nodeId, stackName, generation, async () => {
+            const committed = await this.withStackWriteLock(nodeId, stackName, generation, async () => {
                 db.recordStackCheckFailure(
                     nodeId, stackName, errored[0].error ?? 'Update check failed', checkedAt,
                 );
@@ -1038,6 +1041,7 @@ export class ImageUpdateService {
             return {
                 hasUpdate: previousState[stackName] === true,
                 notifyMessage: buildAvailabilityNotifyMessage(stackName, []),
+                committed,
             };
         }
 
@@ -1047,13 +1051,14 @@ export class ImageUpdateService {
             ? (confirmedHasUpdate || previousState[stackName] === true)
             : confirmedHasUpdate;
 
-        await this.withStackWriteLock(nodeId, stackName, generation, async () => {
+        const committed = await this.withStackWriteLock(nodeId, stackName, generation, async () => {
             db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, checkedAt, checkStatus, lastError);
         });
 
         return {
             hasUpdate,
             notifyMessage: buildAvailabilityNotifyMessage(stackName, []),
+            committed,
         };
     }
 

@@ -1571,6 +1571,50 @@ services:
     expect(mockDispatchAlert).not.toHaveBeenCalled();
   });
 
+  it('suppresses notification and count side effects when a newer recheck discards a stale full-scan write', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(TWO_SERVICE_COMPOSE);
+    mockGetStackUpdateStatus.mockReturnValue({});
+    // Full-scan write path (after registry work) and recheck both need a model.
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true,
+      services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
+    });
+
+    const service = ImageUpdateService.getInstance();
+    let resolveFullScan: ((value: { hasUpdate: boolean }) => void) | undefined;
+    let fullScanPending = true;
+    (service as any).checkImage = vi.fn().mockImplementation(async () => {
+      if (fullScanPending) {
+        return new Promise<{ hasUpdate: boolean }>((resolve) => {
+          resolveFullScan = resolve;
+        });
+      }
+      return { hasUpdate: false };
+    });
+
+    const fullScan = (service as any).checkNode(1, fakeDb());
+    await vi.waitFor(() => expect((service as any).checkImage).toHaveBeenCalled());
+
+    // A newer service recheck reserves a higher generation and commits "no update".
+    fullScanPending = false;
+    await service.recheckStack(1, 'stackA');
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
+      1, 'stackA', false, expect.any(Number), 'ok', null,
+      expect.any(Array),
+      expect.any(Number),
+    );
+    const upsertsAfterRecheck = mockUpsertStackUpdateStatus.mock.calls.length;
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+
+    // Stale full scan finishes with hasUpdate=true but must not commit or notify.
+    resolveFullScan?.({ hasUpdate: true });
+    await fullScan;
+
+    expect(mockUpsertStackUpdateStatus.mock.calls.length).toBe(upsertsAfterRecheck);
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
   describe('recheckStack', () => {
     it('persists a fresh per-service reduction and returns no warning on success', async () => {
       mockBuildEffectiveServiceModel.mockResolvedValueOnce({

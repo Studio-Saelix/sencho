@@ -8,6 +8,9 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, act, waitFor, fireEvent } from '@testing-library/react';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), fetchForNode: vi.fn() }));
+vi.mock('@/lib/serviceUpdate', () => ({
+  requestServiceUpdate: vi.fn(),
+}));
 vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
@@ -32,6 +35,7 @@ vi.mock('@/context/NodeContext', () => ({
 }));
 
 import { apiFetch, fetchForNode } from '@/lib/api';
+import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import AutoUpdateReadinessView, { MobileReadinessCard, CadenceStrip, type StackCard } from '../AutoUpdateReadinessView';
 
 function card(over: Partial<StackCard> = {}): StackCard {
@@ -99,6 +103,48 @@ it('enables Apply when no schedule covers the stack', () => {
   expect(apply()).toBeEnabled();
 });
 
+it('offers per-service Apply when build-only companions make the stack multi-service', () => {
+  const onApplyService = vi.fn();
+  render(
+    <MobileReadinessCard
+      canServiceUpdate
+      onApply={vi.fn()}
+      onApplyService={onApplyService}
+      card={card({
+        preview: {
+          stack_name: 'nextcloud',
+          images: [{
+            service: 'app',
+            image: 'nextcloud:27',
+            current_tag: '27.1.4',
+            next_tag: '27.1.5',
+            has_update: true,
+            semver_bump: 'patch',
+          }],
+          build_services: ['cron'],
+          summary: {
+            has_update: true,
+            primary_image: 'nextcloud',
+            current_tag: '27.1.4',
+            next_tag: '27.1.5',
+            semver_bump: 'patch',
+            update_kind: 'tag',
+            blocked: false,
+            blocked_reason: null,
+            has_build_services: true,
+          },
+          rollback_target: null,
+          changelog: 'Fixes.',
+        },
+      })}
+    />,
+  );
+  const serviceApply = screen.getByRole('button', { name: /^Apply$/i });
+  expect(serviceApply).toBeEnabled();
+  fireEvent.click(serviceApply);
+  expect(onApplyService).toHaveBeenCalledWith('nextcloud', 1, 'app');
+});
+
 /**
  * The desktop StackReadinessCard is not exported, so its Apply-now gating is
  * covered through a full-view render (useIsMobile is mocked false). A safe
@@ -113,6 +159,8 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
   afterEach(() => {
     mockedFetch.mockReset();
     mockedFetchForNode.mockReset();
+    mockNodeMeta.clear();
+    vi.mocked(requestServiceUpdate).mockReset();
   });
 
   it('enables Apply for a safe update with no covering schedule', async () => {
@@ -137,6 +185,97 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     // The stack is enabled to apply manually but must NOT count as "ready to
     // apply automatically": that still requires a covering schedule.
     expect(screen.getByText(/0 of 1 ready to apply automatically/)).toBeInTheDocument();
+  });
+
+  it('applies a single service and refreshes the authoritative update preview', async () => {
+    mockNodeMeta.set(1, {
+      version: '1.0.0',
+      capabilities: ['service-scoped-update'],
+      fetchedAt: Date.now(),
+    });
+    const multiPreview = {
+      stack_name: 'nextcloud',
+      images: [
+        {
+          service: 'app',
+          image: 'nextcloud:27',
+          current_tag: '27.1.4',
+          next_tag: '27.1.5',
+          has_update: true,
+          semver_bump: 'patch' as const,
+        },
+        {
+          service: 'redis',
+          image: 'redis:7',
+          current_tag: '7.2',
+          next_tag: '7.2',
+          has_update: false,
+          semver_bump: 'none' as const,
+        },
+      ],
+      summary: {
+        has_update: true,
+        primary_image: 'nextcloud',
+        current_tag: '27.1.4',
+        next_tag: '27.1.5',
+        semver_bump: 'patch' as const,
+        update_kind: 'tag' as const,
+        blocked: false,
+        blocked_reason: null,
+      },
+      rollback_target: null,
+      changelog: 'Fixes.',
+    };
+    const refreshedPreview = {
+      ...multiPreview,
+      images: multiPreview.images.map((img) => (
+        img.service === 'app' ? { ...img, has_update: false, current_tag: '27.1.5', next_tag: '27.1.5' } : img
+      )),
+      summary: { ...multiPreview.summary, has_update: false, current_tag: '27.1.5' },
+    };
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { nextcloud: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockImplementation((url: string) => {
+      if (String(url).includes('/update-preview')) {
+        const call = mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview')).length;
+        return Promise.resolve({
+          ok: true,
+          json: async () => (call <= 1 ? multiPreview : refreshedPreview),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    vi.mocked(requestServiceUpdate).mockResolvedValue({
+      ok: true,
+      mode: 'update',
+      serviceName: 'app',
+      healthGateId: null,
+      observing: false,
+      recoveryId: null,
+      recoveryAvailable: false,
+    });
+
+    render(<AutoUpdateReadinessView />);
+    const serviceApply = await screen.findByRole('button', { name: /^Apply$/i });
+    await act(async () => { fireEvent.click(serviceApply); });
+
+    await waitFor(() => {
+      expect(requestServiceUpdate).toHaveBeenCalledWith(expect.objectContaining({
+        stackName: 'nextcloud',
+        serviceName: 'app',
+        mode: 'update',
+      }));
+    });
+    await waitFor(() => {
+      expect(mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview')).length).toBeGreaterThanOrEqual(2);
+    });
   });
 });
 
