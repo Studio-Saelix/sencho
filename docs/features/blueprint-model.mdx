@@ -211,7 +211,7 @@ In the deployment table, click **Withdraw** on the node's row. For stateless blu
 
 - **Snapshot, then evict (recommended)** captures the blueprint's compose definition into [Fleet · Snapshots](/features/fleet-backups) before running `docker compose down`. The volume bytes still leave the node when compose tears down the named volumes; the snapshot only preserves the YAML so you can redeploy it elsewhere.
 - **Evict and destroy data** runs the eviction without a snapshot. Type the blueprint name to confirm.
-- Manual **Evict** (including from an active row) requires a current approved remove outcome for that node. Confirm a rollout that removes the node first; Evict while the node is still desired, or without remove approval, returns a stale-guard error.
+- Manual **Evict and destroy** / **Snapshot, then evict** require a current approved remove outcome for that node, and the node must no longer be desired. Confirm a remove rollout after the node leaves the selector first; destructive Evict while the node is still desired, or without remove approval, returns a stale-guard error. Plain stateless **Withdraw** does not require remove approval.
 
 <Frame caption="Stateful eviction dialog. Snapshot, then evict captures the compose YAML to Fleet · Snapshots; Evict and destroy data requires typing the blueprint name to confirm.">
   <img src="/images/blueprint-model/eviction-dialog.png" alt="Stateful eviction dialog with Snapshot then evict and Evict and destroy data options" />

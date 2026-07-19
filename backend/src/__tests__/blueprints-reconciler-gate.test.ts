@@ -316,7 +316,7 @@ describe('Accept/Evict STALE_GUARD', () => {
         expect(withdrawSpy).not.toHaveBeenCalled();
     });
 
-    it('refuses standard withdraw on an active stateless deployment without remove approval', async () => {
+    it('allows standard withdraw on an active stateless deployment without remove approval', async () => {
         const node = seedNode();
         const bp = createBp({ nodeIds: [node.id] });
         DatabaseService.getInstance().upsertDeployment({
@@ -332,9 +332,8 @@ describe('Accept/Evict STALE_GUARD', () => {
             .post(`/api/blueprints/${bp.id}/withdraw/${node.id}`)
             .set('Cookie', adminCookie)
             .send({ confirm: 'standard' });
-        expect(res.status).toBe(409);
-        expect(res.body.code).toBe('STALE_GUARD');
-        expect(withdrawSpy).not.toHaveBeenCalled();
+        expect(res.status).toBe(200);
+        expect(withdrawSpy).toHaveBeenCalledOnce();
     });
 });
 

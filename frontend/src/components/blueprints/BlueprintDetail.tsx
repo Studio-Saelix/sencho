@@ -150,7 +150,7 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
             const status = (err as Error & { status?: number }).status;
             const message = err instanceof Error ? err.message : 'Failed to withdraw';
             if (status === 409 && /approval|removal|stale/i.test(message)) {
-                toast.error('Confirm a remove rollout for this node before withdrawing or evicting.');
+                toast.error('Confirm a remove rollout for this node before destructive eviction.');
             } else {
                 toast.error(message);
             }

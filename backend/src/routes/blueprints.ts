@@ -471,12 +471,17 @@ blueprintsRouter.post('/:id/withdraw/:nodeId', async (req: Request, res: Respons
             });
             return;
         }
-        // Every manual withdraw requires a current approved remove outcome, including
-        // active rows that never entered evict_blocked via the reconciler.
-        const guard = BlueprintReconciler.getInstance().validateWithdrawConfirmation(id, nodeId);
-        if (!guard.ok) {
-            res.status(409).json({ error: guard.error, code: guard.code });
-            return;
+        // Destructive eviction (and reconciler-queued evict_blocked rows) require a
+        // current approved remove outcome. Plain stateless "standard" withdraw
+        // remains an immediate operator stop (no remove blast required).
+        const existingDep = DatabaseService.getInstance().getDeployment(id, nodeId);
+        const destructiveConfirm = confirm === 'snapshot_then_evict' || confirm === 'evict_and_destroy';
+        if (destructiveConfirm || existingDep?.status === 'evict_blocked') {
+            const guard = BlueprintReconciler.getInstance().validateWithdrawConfirmation(id, nodeId);
+            if (!guard.ok) {
+                res.status(409).json({ error: guard.error, code: guard.code });
+                return;
+            }
         }
         let snapshotId: number | null = null;
         if (confirm === 'snapshot_then_evict') {
