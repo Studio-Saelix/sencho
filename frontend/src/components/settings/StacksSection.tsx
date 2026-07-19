@@ -17,6 +17,8 @@ import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
 import { useSettingsDirty } from './useSettingsDirty';
+import { useNodeSettingsLoad } from './useNodeSettingsLoad';
+import { SettingsLoadGate } from './SettingsLoadError';
 import { TogglePill } from '@/components/ui/toggle-pill';
 import { NumberChip } from './SystemControls';
 
@@ -59,15 +61,17 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
     const { isAdmin } = useAuth();
     const readOnly = !isAdmin;
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<GuardrailFields>({ ...DEFAULT_GUARDRAILS });
-    const [isLoading, setIsLoading] = useState(false);
+    const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);
 
+    const reportDirty = isCurrentNodeLoaded && hasChanges;
+
     useEffect(() => {
-        onDirtyChange?.(hasChanges);
-    }, [hasChanges, onDirtyChange]);
+        onDirtyChange?.(reportDirty);
+    }, [reportDirty, onDirtyChange]);
 
     useMastheadStats(
-        isLoading
+        !isCurrentNodeLoaded
             ? null
             : [
                 {
@@ -79,40 +83,39 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
     );
 
     useEffect(() => {
-        const fetchSettings = async () => {
-            setIsLoading(true);
-            try {
-                const nodeRes = await apiFetch('/settings');
-                const nodeData: Record<string, string> = nodeRes.ok ? await nodeRes.json() : {};
-                const safe: GuardrailFields = {
-                    health_gate_enabled: (nodeData.health_gate_enabled as '0' | '1') ?? DEFAULT_SETTINGS.health_gate_enabled,
-                    health_gate_window_seconds: nodeData.health_gate_window_seconds ?? DEFAULT_SETTINGS.health_gate_window_seconds,
-                    env_block_deploy_on_missing_required: (nodeData.env_block_deploy_on_missing_required as '0' | '1') ?? DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
-                    auto_create_missing_external_networks: (nodeData.auto_create_missing_external_networks as '0' | '1') ?? DEFAULT_SETTINGS.auto_create_missing_external_networks,
-                };
-                reset(safe);
-            } catch (e) {
-                console.error('Failed to fetch deploy guardrail settings', e);
-            } finally {
-                setIsLoading(false);
-            }
+        let cancelled = false;
+        setIsSaving(false);
+        void (async () => {
+            const nodeData = await load();
+            if (cancelled || !nodeData) return;
+            const safe: GuardrailFields = {
+                health_gate_enabled: (nodeData.health_gate_enabled as '0' | '1') ?? DEFAULT_SETTINGS.health_gate_enabled,
+                health_gate_window_seconds: nodeData.health_gate_window_seconds ?? DEFAULT_SETTINGS.health_gate_window_seconds,
+                env_block_deploy_on_missing_required: (nodeData.env_block_deploy_on_missing_required as '0' | '1') ?? DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
+                auto_create_missing_external_networks: (nodeData.auto_create_missing_external_networks as '0' | '1') ?? DEFAULT_SETTINGS.auto_create_missing_external_networks,
+            };
+            reset(safe);
+        })();
+        return () => {
+            cancelled = true;
         };
-        fetchSettings();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeNode?.id]);
+    }, [activeNode?.id, load, reset]);
 
     const onGuardrailChange = <K extends keyof GuardrailFields>(key: K, value: GuardrailFields[K]) => {
         setSettings(prev => ({ ...prev, [key]: value }));
     };
 
     const saveGuardrails = async () => {
+        const saveGuard = captureSaveGuard();
         const submitted = { ...settings };
         setIsSaving(true);
         try {
             const res = await apiFetch('/settings', {
                 method: 'PATCH',
+                nodeId: saveGuard.nodeId,
                 body: JSON.stringify(submitted),
             });
+            if (!isSaveOwner(saveGuard)) return;
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 toast.error(err?.error || err?.message || 'Failed to save settings.');
@@ -121,9 +124,10 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
             markSaved(submitted);
             toast.success('Deploy guardrail settings saved.');
         } catch (e: unknown) {
+            if (!isSaveOwner(saveGuard)) return;
             toast.error((e as Error)?.message || 'Something went wrong.');
         } finally {
-            setIsSaving(false);
+            if (isSaveOwner(saveGuard)) setIsSaving(false);
         }
     };
 
@@ -187,9 +191,7 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
                 ⓘ saved to this browser only · every device remembers its own choice
             </p>
 
-            {isLoading ? (
-                <GuardrailSkeleton />
-            ) : (
+            <SettingsLoadGate phase={phase} isCurrentNodeLoaded={isCurrentNodeLoaded} skeleton={<GuardrailSkeleton />}>
                 <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
                     <SettingsSection title="Deploy Guardrails" kicker="this node">
                         <p className="pb-2 text-sm leading-relaxed text-stat-subtitle">
@@ -238,7 +240,7 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
 
                     <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
                         {!readOnly && (
-                            <SettingsPrimaryButton onClick={saveGuardrails} disabled={isSaving || !hasChanges}>
+                            <SettingsPrimaryButton onClick={saveGuardrails} disabled={isSaving || !hasChanges || !isCurrentNodeLoaded}>
                                 {isSaving ? (
                                     <>
                                         <RefreshCw className="w-4 h-4 animate-spin" />
@@ -251,7 +253,7 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
                         )}
                     </SettingsActions>
                 </fieldset>
-            )}
+            </SettingsLoadGate>
         </div>
     );
 }

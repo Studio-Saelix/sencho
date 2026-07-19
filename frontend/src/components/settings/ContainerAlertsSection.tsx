@@ -13,6 +13,8 @@ import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
 import { useSettingsDirty } from './useSettingsDirty';
+import { useNodeSettingsLoad } from './useNodeSettingsLoad';
+import { SettingsLoadGate } from './SettingsLoadError';
 
 interface ContainerAlertsSectionProps {
     onDirtyChange?: (dirty: boolean) => void;
@@ -37,15 +39,17 @@ export function ContainerAlertsSection({ onDirtyChange }: ContainerAlertsSection
     const { activeNode } = useNodes();
     const readOnly = !isAdmin;
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<ContainerAlertFields>({ ...DEFAULT_CONTAINER_ALERTS });
-    const [isLoading, setIsLoading] = useState(false);
+    const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);
 
+    const reportDirty = isCurrentNodeLoaded && hasChanges;
+
     useEffect(() => {
-        onDirtyChange?.(hasChanges);
-    }, [hasChanges, onDirtyChange]);
+        onDirtyChange?.(reportDirty);
+    }, [reportDirty, onDirtyChange]);
 
     useMastheadStats(
-        isLoading
+        !isCurrentNodeLoaded
             ? null
             : [
                 {
@@ -57,37 +61,36 @@ export function ContainerAlertsSection({ onDirtyChange }: ContainerAlertsSection
     );
 
     useEffect(() => {
-        const fetchSettings = async () => {
-            setIsLoading(true);
-            try {
-                const nodeRes = await apiFetch('/settings');
-                const nodeData: Record<string, string> = nodeRes.ok ? await nodeRes.json() : {};
-                const safe: ContainerAlertFields = {
-                    global_crash: (nodeData.global_crash as '0' | '1') ?? DEFAULT_SETTINGS.global_crash,
-                };
-                reset(safe);
-            } catch (e) {
-                console.error('Failed to fetch container alert settings', e);
-            } finally {
-                setIsLoading(false);
-            }
+        let cancelled = false;
+        setIsSaving(false);
+        void (async () => {
+            const nodeData = await load();
+            if (cancelled || !nodeData) return;
+            const safe: ContainerAlertFields = {
+                global_crash: (nodeData.global_crash as '0' | '1') ?? DEFAULT_SETTINGS.global_crash,
+            };
+            reset(safe);
+        })();
+        return () => {
+            cancelled = true;
         };
-        fetchSettings();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeNode?.id]);
+    }, [activeNode?.id, load, reset]);
 
     const onSettingChange = <K extends keyof ContainerAlertFields>(key: K, value: ContainerAlertFields[K]) => {
         setSettings(prev => ({ ...prev, [key]: value }));
     };
 
     const saveSettings = async () => {
+        const saveGuard = captureSaveGuard();
         const submitted = { ...settings };
         setIsSaving(true);
         try {
             const res = await apiFetch('/settings', {
                 method: 'PATCH',
+                nodeId: saveGuard.nodeId,
                 body: JSON.stringify({ global_crash: submitted.global_crash }),
             });
+            if (!isSaveOwner(saveGuard)) return;
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 toast.error(err?.error || err?.message || 'Failed to save settings.');
@@ -96,15 +99,15 @@ export function ContainerAlertsSection({ onDirtyChange }: ContainerAlertsSection
             markSaved(submitted);
             toast.success('Container alert settings saved.');
         } catch (e: unknown) {
+            if (!isSaveOwner(saveGuard)) return;
             toast.error((e as Error)?.message || 'Something went wrong.');
         } finally {
-            setIsSaving(false);
+            if (isSaveOwner(saveGuard)) setIsSaving(false);
         }
     };
 
-    if (isLoading) return <SectionSkeleton />;
-
     return (
+        <SettingsLoadGate phase={phase} isCurrentNodeLoaded={isCurrentNodeLoaded} skeleton={<SectionSkeleton />}>
         <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
             <SettingsSection title="Container crash & health alerts">
                 <SettingsField
@@ -120,7 +123,7 @@ export function ContainerAlertsSection({ onDirtyChange }: ContainerAlertsSection
 
             <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
                 {!readOnly && (
-                    <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges}>
+                    <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges || !isCurrentNodeLoaded}>
                         {isSaving ? (
                             <>
                                 <RefreshCw className="w-4 h-4 animate-spin" />
@@ -133,5 +136,6 @@ export function ContainerAlertsSection({ onDirtyChange }: ContainerAlertsSection
                 )}
             </SettingsActions>
         </fieldset>
+        </SettingsLoadGate>
     );
 }
