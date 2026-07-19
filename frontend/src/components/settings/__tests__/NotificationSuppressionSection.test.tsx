@@ -42,6 +42,13 @@ import { NotificationSuppressionSection } from '../NotificationSuppressionSectio
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
 
+async function openMuteForm() {
+  render(<NotificationSuppressionSection />);
+  await waitFor(() => expect(screen.getByRole('button', { name: /Add mute rule|Add rule/i })).toBeInTheDocument());
+  await userEvent.click(screen.getByRole('button', { name: /Add mute rule|Add rule/i }));
+  await waitFor(() => expect(screen.getByRole('dialog', { name: /New mute rule/i })).toBeInTheDocument());
+}
+
 describe('NotificationSuppressionSection', () => {
   beforeEach(() => {
     mockedFetch.mockReset();
@@ -58,10 +65,8 @@ describe('NotificationSuppressionSection', () => {
     });
   });
 
-  it('posts normalized stack patterns and levels; blocks invalid patterns', async () => {
-    render(<NotificationSuppressionSection />);
-    await waitFor(() => expect(screen.getByRole('button', { name: /Add mute rule|Add rule/i })).toBeInTheDocument());
-    await userEvent.click(screen.getByRole('button', { name: /Add mute rule|Add rule/i }));
+  it('posts normalized stack patterns and null levels', async () => {
+    await openMuteForm();
 
     const nameInput = screen.getByPlaceholderText(/Mute staging/i);
     await userEvent.type(nameInput, 'Mute prod');
@@ -77,9 +82,11 @@ describe('NotificationSuppressionSection', () => {
       expect(body.stack_patterns).toEqual(['prod-*']);
       expect(body.levels).toBeNull();
     });
+  });
 
-    mockedFetch.mockClear();
-    await userEvent.click(screen.getByRole('button', { name: /Add mute rule/i }));
+  it('blocks create when a stack pattern is invalid', async () => {
+    await openMuteForm();
+
     await userEvent.type(screen.getByPlaceholderText(/Mute staging/i), 'Bad mute');
     await userEvent.type(screen.getByPlaceholderText(/Type a pattern/i), '****');
     await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));

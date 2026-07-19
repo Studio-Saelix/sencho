@@ -284,7 +284,7 @@ describe('NotificationRoutingSection', () => {
         expect(screen.queryByText(/^Matches all alerts$/)).not.toBeInTheDocument();
     });
 
-    it('commits pattern chips and severity into create JSON; blocks invalid patterns', async () => {
+    it('commits pattern chips and null severity into create JSON', async () => {
         mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
             if (url === '/notification-routes' && !opts?.method) {
                 return { ok: true, json: async () => [] };
@@ -299,6 +299,7 @@ describe('NotificationRoutingSection', () => {
         render(<NotificationRoutingSection />);
         await waitFor(() => expect(screen.getByRole('button', { name: /Add route/i })).toBeInTheDocument());
         await userEvent.click(screen.getByRole('button', { name: /Add route/i }));
+        await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
 
         await userEvent.type(screen.getByPlaceholderText(/Type a pattern/i), 'prod-*{Enter}');
         const nameInput = screen.getByPlaceholderText(/Production alerts/i);
@@ -316,9 +317,25 @@ describe('NotificationRoutingSection', () => {
             expect(body.stack_patterns).toEqual(['prod-*']);
             expect(body.levels).toBeNull();
         });
+    });
 
-        mockedFetch.mockClear();
+    it('blocks create when a stack pattern is invalid', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return { ok: true, json: async () => [] };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => ['known-stack'] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            if (url === '/notification-routes' && opts?.method === 'POST') {
+                return { ok: true, json: async () => ({ id: 99 }) };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByRole('button', { name: /Add route/i })).toBeInTheDocument());
         await userEvent.click(screen.getByRole('button', { name: /Add route/i }));
+        await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+
         await userEvent.type(screen.getByPlaceholderText(/Type a pattern/i), '****');
         await userEvent.type(screen.getByPlaceholderText(/Production alerts/i), 'Bad');
         await userEvent.type(screen.getByPlaceholderText(/discord/i), 'https://discord.com/api/webhooks/1/token');
