@@ -69,6 +69,7 @@ function makeAppriseRoute(overrides: Record<string, unknown> = {}) {
     stack_patterns: ['my-app'],
     label_ids: null,
     categories: null,
+    levels: null,
     channel_type: 'apprise' as const,
     channel_url: KEYED,
     config: '{}',

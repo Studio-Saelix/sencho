@@ -134,6 +134,7 @@ describe('Apprise channel helpers', () => {
       stack_patterns: [],
       label_ids: null,
       categories: null,
+      levels: null,
       channel_type: 'apprise',
       channel_url: 'http://apprise.local/notify/path-secret',
       config: JSON.stringify({ tags: 'ops' }),

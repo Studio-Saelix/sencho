@@ -44,6 +44,7 @@ const APPRISE_ROUTE = {
     stack_patterns: ['app'],
     label_ids: null,
     categories: null,
+    levels: null,
     channel_type: 'apprise',
     channel_url: 'http://apprise.local/notify/<redacted>',
     config: {
@@ -224,6 +225,161 @@ describe('NotificationRoutingSection', () => {
         expect(body.channel_type).toBe('discord');
         expect(body.channel_url).toBe('https://discord.com/api/webhooks/9/new-token');
         expect(body).not.toHaveProperty('config');
+    });
+
+    it('shows Error badge and not Matches all alerts for a severity-only route', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return {
+                    ok: true,
+                    json: async () => [{
+                        ...APPRISE_ROUTE,
+                        id: 7,
+                        name: 'Errors only',
+                        stack_patterns: [],
+                        levels: ['error'],
+                        channel_type: 'discord',
+                        channel_url: 'https://discord.com/api/webhooks/1/x',
+                        config: null,
+                    }],
+                };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => ['app'] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            return { ok: true, json: async () => ([]) };
+        });
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByText('Errors only')).toBeInTheDocument());
+        expect(screen.getByText('Error')).toBeInTheDocument();
+        expect(screen.queryByText('Matches all alerts')).not.toBeInTheDocument();
+        expect(screen.queryByText('Matches all alerts on this node')).not.toBeInTheDocument();
+    });
+
+    it('shows node-scoped match-all for a node-only route', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return {
+                    ok: true,
+                    json: async () => [{
+                        ...APPRISE_ROUTE,
+                        id: 8,
+                        name: 'Local only',
+                        node_id: 1,
+                        stack_patterns: [],
+                        levels: null,
+                        channel_type: 'discord',
+                        channel_url: 'https://discord.com/api/webhooks/1/x',
+                        config: null,
+                    }],
+                };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => [] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            return { ok: true, json: async () => ([]) };
+        });
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByText('Local only')).toBeInTheDocument());
+        expect(screen.getByText('Local')).toBeInTheDocument();
+        expect(screen.getByText('Matches all alerts on this node')).toBeInTheDocument();
+        expect(screen.queryByText(/^Matches all alerts$/)).not.toBeInTheDocument();
+    });
+
+    it('commits pattern chips and null severity into create JSON', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return { ok: true, json: async () => [] };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => ['known-stack'] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            if (url === '/notification-routes' && opts?.method === 'POST') {
+                return { ok: true, json: async () => ({ id: 99 }) };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByRole('button', { name: /Add route/i })).toBeInTheDocument());
+        await userEvent.click(screen.getByRole('button', { name: /Add route/i }));
+        await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+
+        await userEvent.type(screen.getByPlaceholderText(/Type a pattern/i), 'prod-*{Enter}');
+        const nameInput = screen.getByPlaceholderText(/Production alerts/i);
+        await userEvent.clear(nameInput);
+        await userEvent.type(nameInput, 'Chip route');
+        await userEvent.type(screen.getByPlaceholderText(/discord/i), 'https://discord.com/api/webhooks/1/token');
+
+        await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+        await waitFor(() => {
+            const post = mockedFetch.mock.calls.find(
+                ([url, opts]) => url === '/notification-routes' && (opts as { method?: string })?.method === 'POST',
+            );
+            expect(post).toBeTruthy();
+            const body = JSON.parse((post![1] as { body: string }).body);
+            expect(body.stack_patterns).toEqual(['prod-*']);
+            expect(body.levels).toBeNull();
+        });
+    });
+
+    it('includes a pending pattern that was never committed with Enter', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return { ok: true, json: async () => [] };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => ['known-stack'] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            if (url === '/notification-routes' && opts?.method === 'POST') {
+                return { ok: true, json: async () => ({ id: 99 }) };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByRole('button', { name: /Add route/i })).toBeInTheDocument());
+        await userEvent.click(screen.getByRole('button', { name: /Add route/i }));
+        await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+
+        await userEvent.type(screen.getByPlaceholderText(/Type a pattern/i), 'prod-*');
+        const nameInput = screen.getByPlaceholderText(/Production alerts/i);
+        await userEvent.clear(nameInput);
+        await userEvent.type(nameInput, 'Pending route');
+        await userEvent.type(screen.getByPlaceholderText(/discord/i), 'https://discord.com/api/webhooks/1/token');
+
+        await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+        await waitFor(() => {
+            const post = mockedFetch.mock.calls.find(
+                ([url, opts]) => url === '/notification-routes' && (opts as { method?: string })?.method === 'POST',
+            );
+            expect(post).toBeTruthy();
+            const body = JSON.parse((post![1] as { body: string }).body);
+            expect(body.stack_patterns).toEqual(['prod-*']);
+        });
+    });
+
+    it('blocks create when a stack pattern is invalid', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return { ok: true, json: async () => [] };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => ['known-stack'] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            if (url === '/notification-routes' && opts?.method === 'POST') {
+                return { ok: true, json: async () => ({ id: 99 }) };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByRole('button', { name: /Add route/i })).toBeInTheDocument());
+        await userEvent.click(screen.getByRole('button', { name: /Add route/i }));
+        await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+
+        await userEvent.type(screen.getByPlaceholderText(/Type a pattern/i), '****');
+        await userEvent.type(screen.getByPlaceholderText(/Production alerts/i), 'Bad');
+        await userEvent.type(screen.getByPlaceholderText(/discord/i), 'https://discord.com/api/webhooks/1/token');
+        await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+        await waitFor(() => {
+            const posts = mockedFetch.mock.calls.filter(
+                ([url, opts]) => url === '/notification-routes' && (opts as { method?: string })?.method === 'POST',
+            );
+            expect(posts).toHaveLength(0);
+        });
     });
 
 });

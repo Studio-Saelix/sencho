@@ -9,7 +9,6 @@ import {
   NOTIFICATION_CHANNEL_TYPES,
   serializePublicNotificationRoute,
   validateNotificationChannel,
-  cleanStackPatterns,
   maskWebhookUrl,
   normalizeAppriseStoredJson,
   parseStoredAppriseConfig,
@@ -17,6 +16,7 @@ import {
   resolvePreservedAppriseConfig,
   storedAppriseToWriteConfig,
 } from '../helpers/notificationChannels';
+import { parseStackPatternsInput } from '../helpers/stackPattern';
 import {
   deleteSuppressionRuleFromFleet,
   syncSuppressionRuleToFleet,
@@ -109,6 +109,28 @@ function validateExpiresAt(expires_at: unknown, res: Response): number | null | 
   return expires_at;
 }
 
+function normalizeStoredLevels(levels: unknown): ('info' | 'warning' | 'error')[] | null {
+  if (!Array.isArray(levels) || levels.length === 0) return null;
+  return levels as ('info' | 'warning' | 'error')[];
+}
+
+/** Resolve stack_patterns with presence semantics. Returns false after sending 400. */
+function resolveStackPatternsField(
+  stack_patterns: unknown,
+  opts: { isCreate: boolean },
+  res: Response,
+): string[] | undefined | false {
+  if (stack_patterns === undefined) {
+    return opts.isCreate ? [] : undefined;
+  }
+  const parsed = parseStackPatternsInput(stack_patterns);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return false;
+  }
+  return parsed.patterns;
+}
+
 function parseSuppressionRuleBody(
   req: Request,
   res: Response,
@@ -144,16 +166,8 @@ function parseSuppressionRuleBody(
     : undefined;
   if (nodeIdResult === false) return null;
 
-  let cleanedPatterns: string[] | undefined;
-  if (stack_patterns !== undefined) {
-    if (!Array.isArray(stack_patterns) || stack_patterns.some((p: unknown) => typeof p !== 'string')) {
-      res.status(400).json({ error: 'stack_patterns must be an array of strings' });
-      return null;
-    }
-    cleanedPatterns = cleanStackPatterns(stack_patterns);
-  } else if (isCreate) {
-    cleanedPatterns = [];
-  }
+  const cleanedPatterns = resolveStackPatternsField(stack_patterns, { isCreate }, res);
+  if (cleanedPatterns === false) return null;
 
   if (!validateLabelIds(label_ids, res)) return null;
   if (!validateCategories(categories, res, VALID_SUPPRESSION_CATEGORIES)) return null;
@@ -180,7 +194,7 @@ function parseSuppressionRuleBody(
     stack_patterns: cleanedPatterns ?? [],
     label_ids: Array.isArray(label_ids) && label_ids.length > 0 ? label_ids : null,
     categories: Array.isArray(categories) && categories.length > 0 ? categories : null,
-    levels: Array.isArray(levels) && levels.length > 0 ? levels : null,
+    levels: normalizeStoredLevels(levels),
     applies_to: (appliesToResult ?? 'both') as NotificationSuppressionAppliesTo,
     enabled: enabled !== false,
     expires_at: expiresAtResult ?? null,
@@ -282,7 +296,7 @@ notificationRoutesRouter.get('/', authMiddleware, (req: Request, res: Response):
 notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
-    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, channel_type, channel_url, config, priority, enabled } = req.body;
+    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, levels, channel_type, channel_url, config, priority, enabled } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       res.status(400).json({ error: 'Name is required' });
@@ -294,13 +308,11 @@ notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Res
     }
     const nodeIdResult = validateNodeId(rawNodeId, res);
     if (nodeIdResult === false) return;
-    const cleanedPatterns = Array.isArray(stack_patterns) ? cleanStackPatterns(stack_patterns) : [];
-    if (Array.isArray(stack_patterns) && stack_patterns.some((p: unknown) => typeof p !== 'string')) {
-      res.status(400).json({ error: 'stack_patterns must be an array of strings' });
-      return;
-    }
+    const cleanedPatterns = resolveStackPatternsField(stack_patterns, { isCreate: true }, res);
+    if (cleanedPatterns === false) return;
     if (!validateLabelIds(label_ids, res)) return;
     if (!validateCategories(categories, res)) return;
+    if (!validateLevels(levels, res)) return;
     if (!(NOTIFICATION_CHANNEL_TYPES as readonly string[]).includes(channel_type)) {
       res.status(400).json({ error: `channel_type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}` });
       return;
@@ -316,9 +328,10 @@ notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Res
     const route = DatabaseService.getInstance().createNotificationRoute({
       name: name.trim(),
       node_id: nodeIdResult,
-      stack_patterns: cleanedPatterns,
+      stack_patterns: cleanedPatterns ?? [],
       label_ids: Array.isArray(label_ids) && label_ids.length > 0 ? label_ids : null,
       categories: Array.isArray(categories) && categories.length > 0 ? (categories as NotificationCategory[]) : null,
+      levels: normalizeStoredLevels(levels),
       channel_type,
       channel_url: channel_url.trim(),
       config: channel_type === 'apprise' ? normalizeAppriseStoredJson(channel_url.trim(), config) : null,
@@ -328,7 +341,7 @@ notificationRoutesRouter.post('/', authMiddleware, async (req: Request, res: Res
       updated_at: now,
     });
     console.log(`[Routes] Route "${sanitizeForLog(route.name)}" created (id=${route.id})`);
-    if (isDebugEnabled()) console.log(`[Routes:diag] Route "${sanitizeForLog(route.name)}" created with patterns=[${sanitizeForLog(cleanedPatterns.join(', '))}], channel=${channel_type}`);
+    if (isDebugEnabled()) console.log(`[Routes:diag] Route "${sanitizeForLog(route.name)}" created with patterns=[${sanitizeForLog((cleanedPatterns ?? []).join(', '))}], channel=${channel_type}`);
     res.status(201).json(serializePublicNotificationRoute(route));
   } catch (error) {
     console.error('Failed to create notification route:', error);
@@ -345,7 +358,7 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
     const existing = DatabaseService.getInstance().getNotificationRoute(id);
     if (!existing) { res.status(404).json({ error: 'Route not found' }); return; }
 
-    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, channel_type, channel_url, config, priority, enabled } = req.body;
+    const { name, node_id: rawNodeId, stack_patterns, label_ids, categories, levels, channel_type, channel_url, config, priority, enabled } = req.body;
 
     if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
       res.status(400).json({ error: 'Name must be a non-empty string' });
@@ -361,16 +374,11 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
       if (result === false) return;
       validatedNodeId = result;
     }
-    let cleanedPatterns: string[] | undefined;
-    if (stack_patterns !== undefined) {
-      if (!Array.isArray(stack_patterns) || stack_patterns.some((p: unknown) => typeof p !== 'string')) {
-        res.status(400).json({ error: 'stack_patterns must be an array of strings' });
-        return;
-      }
-      cleanedPatterns = cleanStackPatterns(stack_patterns);
-    }
+    const cleanedPatterns = resolveStackPatternsField(stack_patterns, { isCreate: false }, res);
+    if (cleanedPatterns === false) return;
     if (!validateLabelIds(label_ids, res)) return;
     if (!validateCategories(categories, res)) return;
+    if ('levels' in req.body && !validateLevels(levels, res)) return;
     if (channel_type !== undefined && !(NOTIFICATION_CHANNEL_TYPES as readonly string[]).includes(channel_type)) {
       res.status(400).json({ error: `channel_type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}` });
       return;
@@ -413,6 +421,7 @@ notificationRoutesRouter.put('/:id', authMiddleware, async (req: Request, res: R
     if (cleanedPatterns !== undefined) updates.stack_patterns = cleanedPatterns;
     if ('label_ids' in req.body) updates.label_ids = Array.isArray(label_ids) && label_ids.length > 0 ? label_ids : null;
     if ('categories' in req.body) updates.categories = Array.isArray(categories) && categories.length > 0 ? categories : null;
+    if ('levels' in req.body) updates.levels = normalizeStoredLevels(levels);
     if (channel_type !== undefined) updates.channel_type = channel_type;
     if (channel_url !== undefined || typeChanged) updates.channel_url = effectiveUrl;
     if (effectiveType === 'apprise') updates.config = normalizeAppriseStoredJson(effectiveUrl, effectiveConfig);
@@ -490,7 +499,19 @@ notificationSuppressionRouter.post('/replica', authMiddleware, (req: Request, re
       res.status(400).json({ error: 'Invalid applies_to on rule' });
       return;
     }
-    DatabaseService.getInstance().upsertNotificationSuppressionRuleReplica(rule);
+    if (!('stack_patterns' in rule)) {
+      res.status(400).json({ error: 'stack_patterns is required on replica rule' });
+      return;
+    }
+    const patterns = parseStackPatternsInput(rule.stack_patterns);
+    if (!patterns.ok) {
+      res.status(400).json({ error: patterns.error });
+      return;
+    }
+    DatabaseService.getInstance().upsertNotificationSuppressionRuleReplica({
+      ...rule,
+      stack_patterns: patterns.patterns,
+    });
     res.json({ success: true });
   } catch (error) {
     console.error('Failed to apply suppression rule replica:', error);
@@ -582,11 +603,9 @@ notificationSuppressionRouter.put('/:id', authMiddleware, (req: Request, res: Re
 
     let cleanedPatterns: string[] | undefined;
     if (stack_patterns !== undefined) {
-      if (!Array.isArray(stack_patterns) || stack_patterns.some((p: unknown) => typeof p !== 'string')) {
-        res.status(400).json({ error: 'stack_patterns must be an array of strings' });
-        return;
-      }
-      cleanedPatterns = cleanStackPatterns(stack_patterns);
+      const resolved = resolveStackPatternsField(stack_patterns, { isCreate: false }, res);
+      if (resolved === false) return;
+      cleanedPatterns = resolved;
     }
 
     if (!validateLabelIds(label_ids, res)) return;

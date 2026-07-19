@@ -63,33 +63,26 @@ Each dispatch is a single-shot HTTP POST with a 10-second `AbortSignal.timeout`.
 
 Routing lets you direct alerts that match specific criteria to dedicated channels. Production crashes can land in `#prod-incidents` on Slack while staging notifications go to a less urgent Discord channel, all without juggling per-channel webhook URLs across teams.
 
-<Frame>
-  <img src="/images/alerts-notifications/routing-list.png" alt="Settings · Notifications · Notification Routing card list showing two rules ('Critical to Slack' and 'Production alerts'), each with a Discord badge, an ON pill, the 'Matches all alerts' summary line, a truncated channel URL, a Priority chip, and lightning-test, edit, and delete icon actions on the right." />
-</Frame>
-
 ### How routing fits into dispatch
 
-For every alert Sencho dispatches, the routing engine evaluates every enabled route. A route matches when **all of its non-empty matchers** match the alert: the **Node**, **Stacks**, **Labels**, and **Categories** filters compose with AND. An empty matcher is treated as match-anything.
+For every alert Sencho dispatches, the routing engine evaluates every enabled route. A route matches when **all of its non-empty matchers** match the alert: the **Node**, **Stacks**, **Labels**, **Categories**, and **Severity** filters compose with AND. An empty matcher is treated as match-anything.
 
 If at least one route matches, every matching route fires and the **global channels are skipped** for that alert. If zero routes match, the alert falls back to the global channels configured in the previous section.
 
-A route with all four matchers left empty matches every alert and intercepts global delivery entirely. Stack-less alerts (host CPU, RAM, disk, fleet-sync warnings, and scheduled-task results without a stack target) almost always miss any populated `Stacks` filter, so they fall back to global by default.
+A route with all five matchers left unconstrained (`Node` = any, and empty Stacks, Labels, Categories, and Severity) matches every alert and intercepts global delivery entirely. A route scoped to a node with the other four matchers empty matches every alert on that node. Stack-less alerts (host CPU, RAM, disk, fleet-sync warnings, and scheduled-task results without a stack target) almost always miss any populated `Stacks` filter, so they fall back to global by default.
 
 ### Creating a routing rule
 
 Open **Settings · Notifications · Notification Routing** and click **+ Add Route**.
 
-<Frame>
-  <img src="/images/alerts-notifications/routing-modal.png" alt="The New routing rule modal with empty Name, Node scope set to Any node, empty Stacks, Labels, and Categories fields, Channel tabs with Apprise selected, and Cancel and CREATE actions. Priority and Enabled may be scrolled out of the cropped frame." />
-</Frame>
-
 | Field | Purpose |
 |-------|---------|
 | **Name** | A human label, up to 100 characters. Shown on the rule card. |
 | **Node scope** | Either `Any node` or a specific node. When set to a node, the rule only matches alerts originating from that node. |
-| **Stacks** *(optional)* | A combobox of stacks on the active node. Selected stacks appear as removable pills. Empty matches any stack. |
+| **Stacks** *(optional)* | Free-form stack patterns with `*` as the only wildcard (for example `prod-*`), plus an optional picker that inserts a known exact stack name as a chip. Empty matches any stack. |
 | **Labels** *(optional)* | A combobox of stack labels on the active node. Empty matches any label. |
 | **Categories** *(optional)* | A combobox of notification categories. The helper line reads `Leave blank to match all categories. All non-empty filters must match (AND).` |
+| **Severity** *(optional)* | One or more of info, warning, or error. Empty matches any severity. |
 | **Channel** | Tabs for Discord, Slack, Webhook, and Apprise. Discord, Slack, and Webhook require HTTPS. Apprise accepts HTTP or HTTPS. |
 | **Priority** | A number used to sort the rule list. Lower numbers appear higher up. Priority does not gate dispatch: when multiple rules match the same alert, every matching rule fires concurrently. |
 | **Enabled** | Toggle the rule on or off without deleting it. |
@@ -98,7 +91,7 @@ The modal kicker reads `ROUTING · NEW RULE` when adding and `ROUTING · EDIT RU
 
 ### Managing rules
 
-Each rule renders as a card on the Routing page with the rule name, channel-type badge, an `ON` / `OFF` pill, then a row of small badges naming each matcher: one mono badge per **Stack**, one outline badge per **Label**, one outline mono badge per **Category** label. When all matchers are empty, a single muted `Matches all alerts` line replaces the badge row. After the badges, a vertical bar separator is followed by the truncated channel URL, then a second separator and a `Priority: N` chip when priority is non-zero.
+Each rule renders as a card on the Routing page with the rule name, channel-type badge, optional node badge, an `ON` / `OFF` pill, then a row of small badges naming each matcher: one mono badge per **Stack** pattern, one outline badge per **Label**, one outline mono badge per **Category**, and one outline badge per **Severity**. When Node is any and the other four matchers are empty, a muted `Matches all alerts` line replaces the badge row. When the rule is node-scoped and the other four are empty, the card shows `Matches all alerts on this node` instead. After the badges, a vertical bar separator is followed by the truncated channel URL, then a second separator and a `Priority: N` chip when priority is non-zero.
 
 Three icon actions appear on the right edge of each card:
 
@@ -122,7 +115,7 @@ Open **Settings · Notifications · Mute Rules** and click **+ Add mute rule**.
 |-------|---------|
 | **Name** | A human label, up to 100 characters. |
 | **Node scope** | `Any node` or a specific fleet node. Limits which node emits the alert before the rule can match. |
-| **Stacks** *(optional)* | Stack names. Empty matches any stack. |
+| **Stacks** *(optional)* | Free-form stack patterns with `*` as the only wildcard (for example `prod-*`), plus an optional known-stack picker. Empty matches any stack. |
 | **Labels** *(optional)* | Stack labels. Empty matches any label. |
 | **Categories** *(optional)* | Notification categories. Empty matches any category. |
 | **Severity** *(optional)* | One or more of info, warning, or error. Empty matches any severity. |
@@ -440,7 +433,7 @@ Switching the active node tears down per-stack rule editors and reloads channel 
 
 <AccordionGroup>
   <Accordion title="Notifications never arrive">
-    Check three things in order. First, the channel toggle in **Settings · Notifications · Channels** must be on; the kicker on each tab reads `enabled` or `off`. Second, Discord, Slack, and webhook URLs must use HTTPS (the form rejects plain `http://` for those channels); Apprise endpoints may use HTTP or HTTPS. Third, a routing rule with empty `Stacks`, `Labels`, and `Categories` matchers will intercept every alert and skip the global channels. Use the per-channel **Test** button to issue a one-shot dispatch and watch your endpoint for the literal message `🔌 Test Notification from Sencho!` Sencho records the failure reason in `notification_history.dispatch_error` when delivery throws, so a row that appears in the bell with no follow-up at the endpoint usually means a 4xx or timeout at the receiver.
+    Check three things in order. First, the channel toggle in **Settings · Notifications · Channels** must be on; the kicker on each tab reads `enabled` or `off`. Second, Discord, Slack, and webhook URLs must use HTTPS (the form rejects plain `http://` for those channels); Apprise endpoints may use HTTP or HTTPS. Third, a routing rule with unconstrained Node plus empty Stacks, Labels, Categories, and Severity matchers will intercept every alert and skip the global channels. Use the per-channel **Test** button to issue a one-shot dispatch and watch your endpoint for the literal message `🔌 Test Notification from Sencho!` Sencho records the failure reason in `notification_history.dispatch_error` when delivery throws, so a row that appears in the bell with no follow-up at the endpoint usually means a 4xx or timeout at the receiver.
   </Accordion>
   <Accordion title="An alert rule never fires even when the threshold is breached">
     Three causes account for almost every case. First, the rule's **Duration** has not elapsed yet: the breach must persist for the full duration before the rule fires. Second, the rule is still in cooldown after a previous fire. Third, the panel's banner is not green: a remote-node banner means the rule was saved on a remote whose channels you may not have configured, and an amber `No notification channels configured` banner means the rule evaluates fine but Sencho has nowhere to send the alert. The evaluator runs on a 30-second tick, so expect up to 30 seconds of latency between the breach starting and the timer engaging.
@@ -461,7 +454,7 @@ Switching the active node tears down per-stack rule editors and reloads channel 
     Sencho deliberately hides rows whose category is one of `deploy_success`, `stack_started`, `stack_stopped`, `stack_restarted`, or `image_update_applied` AND whose `actor_username` is set to a real user. The reasoning: those are confirmations of the action you just clicked and are already shown as a toast. The rows are still persisted to `notification_history` and still dispatched to global channels and matching routes; only the bell render hides them.
   </Accordion>
   <Accordion title="A routing rule is set up but the global channel still fires">
-    Routing matchers AND together: every non-empty matcher must match the alert. A rule with **Stacks** set to `prod-api` will not match a `monitor_alert` for a different stack, and a rule with a populated **Stacks** matcher will not match host-level alerts (which carry no stack target). When zero rules match, Sencho falls back to global channels. To intercept everything, leave all four matcher fields empty on the rule. Also confirm the rule's **Enabled** pill is `ON`.
+    Routing matchers AND together: every non-empty matcher must match the alert. A rule with **Stacks** set to `prod-api` will not match a `monitor_alert` for a different stack, and a rule with a populated **Stacks** matcher will not match host-level alerts (which carry no stack target). Stack patterns may use `*` as a wildcard (for example `prod-*`). When zero rules match, Sencho falls back to global channels. To intercept everything, leave Node as any and leave Stacks, Labels, Categories, and Severity empty. Also confirm the rule's **Enabled** pill is `ON`.
   </Accordion>
   <Accordion title="Fleet shows an update button but I never received a Sencho version notification">
     Fleet and the notification path share the same version lookup. When a newer published release is in that cache, Monitor dispatches a single `info`/`node_update_available` alert and records it under `last_sencho_update_notified_version`, so each release produces one alert per node. If you already upgraded to (or past) that version, the dedup self-heals and the alert does not fire. Check **Settings · Notifications · Mute Rules** for a rule that mutes `node_update_available` in the bell. A newly published release may take up to the cache TTL (about 30 minutes when published, or about 3 minutes while registry publish is still pending) before Fleet and the bell both observe it.

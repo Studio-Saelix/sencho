@@ -29,6 +29,9 @@ import { captureLocalNodeFiles, captureRemoteNodeFiles, buildSnapshotDocumentati
 import { getLatestVersion, getLatestRelease } from '../utils/version-check';
 import { isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
+import { validateStackPatternForRedos } from '../helpers/stackPattern';
+
+export { validateStackPatternForRedos } from '../helpers/stackPattern';
 import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
 import { parseRequestedTargetVersion, pickCompareTarget } from '../utils/targetVersion';
@@ -170,21 +173,8 @@ function validateScanPolicyRow(row: unknown): string | null {
 
 /**
  * Reject `stack_pattern` inputs that would compile to a backtracking-prone
- * regex. The matcher in `getMatchingPolicy` substitutes `*` with `.*`, so a
- * pattern like `***...` becomes a chain of adjacent `.*` runs that exhibit
- * catastrophic backtracking on long inputs.
- *
- * Caps mirror the limit in routes/security.ts so a control creating a policy
- * sees the same error as a replica receiving one. Length is gated at 200 by
- * the surrounding row validator.
+ * regex. Implementation lives in helpers/stackPattern.ts (re-exported above).
  */
-export function validateStackPatternForRedos(pattern: string): string | null {
-  if (pattern.length > 200) return 'stack_pattern is too long';
-  const stars = (pattern.match(/\*/g) ?? []).length;
-  if (stars > 8) return 'stack_pattern has too many wildcards (max 8)';
-  if (/\*{4,}/.test(pattern)) return 'stack_pattern must not contain 4+ consecutive wildcards';
-  return null;
-}
 
 function validateCveSuppressionRow(row: unknown): string | null {
   if (!row || typeof row !== 'object') return 'row must be an object';

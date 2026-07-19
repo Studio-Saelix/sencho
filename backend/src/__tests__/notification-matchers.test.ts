@@ -73,6 +73,36 @@ describe('notificationMatchers', () => {
     })).toBe(true);
   });
 
+  it('matches stack globs with OR across patterns', () => {
+    expect(matchesNotificationFilters(baseCtx, {
+      node_id: null,
+      stack_patterns: ['prod-*', 'my-app'],
+      label_ids: null,
+      categories: null,
+    })).toBe(true);
+    expect(matchesNotificationFilters({ ...baseCtx, stackName: 'prod-web' }, {
+      node_id: null,
+      stack_patterns: ['prod-*'],
+      label_ids: null,
+      categories: null,
+    })).toBe(true);
+    expect(matchesNotificationFilters(baseCtx, {
+      node_id: null,
+      stack_patterns: ['prod-*'],
+      label_ids: null,
+      categories: null,
+    })).toBe(false);
+  });
+
+  it('fails closed on invalid stored stack patterns', () => {
+    expect(matchesNotificationFilters(baseCtx, {
+      node_id: null,
+      stack_patterns: ['****'],
+      label_ids: null,
+      categories: null,
+    })).toBe(false);
+  });
+
   it('detects when stack labels are needed', () => {
     expect(ruleNeedsStackLabels([{ node_id: null, stack_patterns: [], label_ids: [1], categories: null }])).toBe(true);
     expect(ruleNeedsStackLabels([{ node_id: null, stack_patterns: [], label_ids: null, categories: null }])).toBe(false);

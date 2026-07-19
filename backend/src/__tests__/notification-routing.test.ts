@@ -70,6 +70,7 @@ function makeRoute(overrides: Record<string, unknown> = {}) {
     stack_patterns: ['my-app'],
     label_ids: null as number[] | null,
     categories: null as string[] | null,
+    levels: null as ('info' | 'warning' | 'error')[] | null,
     channel_type: 'discord' as const,
     channel_url: 'https://discord.com/api/webhooks/123/abc',
     priority: 0,
@@ -367,6 +368,53 @@ describe('NotificationService - routing logic', () => {
     expect(mockFetch).toHaveBeenCalledWith(
       'https://discord.com/api/webhooks/123/abc',
       expect.objectContaining({ method: 'POST' })
+    );
+  });
+
+  it('routes by severity when levels is set; mismatches fall back to agents', async () => {
+    mockGetEnabledNotificationRoutes.mockReturnValue([
+      makeRoute({ stack_patterns: [], levels: ['error'] }),
+    ]);
+    mockGetEnabledAgents.mockReturnValue([makeAgent()]);
+
+    await svc.dispatchAlert('info', 'monitor_alert', 'Info only', { stackName: 'my-app' });
+    expect(mockFetch).not.toHaveBeenCalledWith(
+      'https://discord.com/api/webhooks/123/abc',
+      expect.anything(),
+    );
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://hooks.slack.com/services/global',
+      expect.objectContaining({ method: 'POST' }),
+    );
+
+    vi.clearAllMocks();
+    mockGetEnabledNotificationRoutes.mockReturnValue([
+      makeRoute({ stack_patterns: [], levels: ['error'] }),
+    ]);
+    mockGetEnabledAgents.mockReturnValue([makeAgent()]);
+
+    await svc.dispatchAlert('error', 'monitor_alert', 'Error route', { stackName: 'my-app' });
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://discord.com/api/webhooks/123/abc',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('fails closed on invalid stored route patterns without blocking agent fallback', async () => {
+    mockGetEnabledNotificationRoutes.mockReturnValue([
+      makeRoute({ stack_patterns: ['****'] }),
+    ]);
+    mockGetEnabledAgents.mockReturnValue([makeAgent()]);
+
+    await svc.dispatchAlert('error', 'monitor_alert', 'Bad pattern', { stackName: 'my-app' });
+
+    expect(mockFetch).not.toHaveBeenCalledWith(
+      'https://discord.com/api/webhooks/123/abc',
+      expect.anything(),
+    );
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://hooks.slack.com/services/global',
+      expect.objectContaining({ method: 'POST' }),
     );
   });
 
