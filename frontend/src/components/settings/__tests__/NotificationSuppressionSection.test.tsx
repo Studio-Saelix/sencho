@@ -84,6 +84,38 @@ describe('NotificationSuppressionSection', () => {
     });
   });
 
+  it('includes a pending pattern that was never committed with Enter', async () => {
+    await openMuteForm();
+
+    await userEvent.type(screen.getByPlaceholderText(/Mute staging/i), 'Pending mute');
+    await userEvent.type(screen.getByPlaceholderText(/Type a pattern/i), 'prod-*');
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/notification-suppression-rules' && (opts as { method?: string })?.method === 'POST',
+      );
+      expect(post).toBeTruthy();
+      const body = JSON.parse((post![1] as { body: string }).body);
+      expect(body.stack_patterns).toEqual(['prod-*']);
+    });
+  });
+
+  it('accumulates multi-pattern comma input into the create body', async () => {
+    await openMuteForm();
+
+    await userEvent.type(screen.getByPlaceholderText(/Mute staging/i), 'Paste mute');
+    await userEvent.type(screen.getByPlaceholderText(/Type a pattern/i), 'alpha-*,beta-*');
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/notification-suppression-rules' && (opts as { method?: string })?.method === 'POST',
+      );
+      expect(post).toBeTruthy();
+      const body = JSON.parse((post![1] as { body: string }).body);
+      expect(body.stack_patterns).toEqual(['alpha-*', 'beta-*']);
+    });
+  });
+
   it('blocks create when a stack pattern is invalid', async () => {
     await openMuteForm();
 

@@ -4,9 +4,16 @@ import { Badge } from '@/components/ui/badge';
 import { X } from 'lucide-react';
 import { validateStackPatternClient } from './stackPatternClient';
 
+export type PrepareSaveResult =
+  | { ok: true; patterns: string[] }
+  | { ok: false };
+
 export interface PatternChipsHandle {
-  /** Commit pending text if any; returns false when validation blocks save. */
-  prepareSave: () => boolean;
+  /**
+   * Commit pending text if any and return the validated pattern list to serialize.
+   * Callers must use the returned `patterns` instead of a stale parent render.
+   */
+  prepareSave: () => PrepareSaveResult;
 }
 
 interface PatternChipsProps {
@@ -16,6 +23,15 @@ interface PatternChipsProps {
   'data-testid'?: string;
 }
 
+function appendPattern(base: string[], raw: string): { ok: true; patterns: string[] } | { ok: false; error: string } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: true, patterns: base };
+  const err = validateStackPatternClient(trimmed);
+  if (err) return { ok: false, error: err };
+  if (base.includes(trimmed)) return { ok: true, patterns: base };
+  return { ok: true, patterns: [...base, trimmed] };
+}
+
 export const PatternChips = forwardRef<PatternChipsHandle, PatternChipsProps>(function PatternChips(
   { patterns, onChange, placeholder = 'Type a pattern and press Enter', 'data-testid': testId },
   ref,
@@ -23,44 +39,45 @@ export const PatternChips = forwardRef<PatternChipsHandle, PatternChipsProps>(fu
   const [pending, setPending] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  const tryAdd = (raw: string): boolean => {
-    const trimmed = raw.trim();
-    if (!trimmed) {
-      setError(null);
-      return true;
+  const commitAgainst = (base: string[], raw: string): string[] | null => {
+    const result = appendPattern(base, raw);
+    if (!result.ok) {
+      setError(result.error);
+      return null;
     }
-    const err = validateStackPatternClient(trimmed);
-    if (err) {
-      setError(err);
-      return false;
-    }
-    if (!patterns.includes(trimmed)) {
-      onChange([...patterns, trimmed]);
-    }
-    setPending('');
     setError(null);
-    return true;
+    return result.patterns;
   };
 
   useImperativeHandle(ref, () => ({
     prepareSave: () => {
-      if (pending.trim()) return tryAdd(pending);
-      for (const p of patterns) {
+      let next = patterns;
+      if (pending.trim()) {
+        const committed = commitAgainst(patterns, pending);
+        if (!committed) return { ok: false };
+        next = committed;
+      }
+      for (const p of next) {
         const err = validateStackPatternClient(p);
         if (err) {
           setError(err);
-          return false;
+          return { ok: false };
         }
       }
+      if (next !== patterns) onChange(next);
+      setPending('');
       setError(null);
-      return true;
+      return { ok: true, patterns: next };
     },
   }));
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' || e.key === ',') {
       e.preventDefault();
-      tryAdd(pending);
+      const next = commitAgainst(patterns, pending);
+      if (!next) return;
+      if (next !== patterns) onChange(next);
+      setPending('');
     }
   };
 
@@ -68,9 +85,13 @@ export const PatternChips = forwardRef<PatternChipsHandle, PatternChipsProps>(fu
     if (value.includes(',')) {
       const parts = value.split(',');
       const last = parts.pop() ?? '';
+      let next = patterns;
       for (const part of parts) {
-        if (!tryAdd(part)) return;
+        const committed = commitAgainst(next, part);
+        if (!committed) return;
+        next = committed;
       }
+      if (next !== patterns) onChange(next);
       setPending(last);
       return;
     }

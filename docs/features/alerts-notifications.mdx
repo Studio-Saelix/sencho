@@ -63,10 +63,6 @@ Each dispatch is a single-shot HTTP POST with a 10-second `AbortSignal.timeout`.
 
 Routing lets you direct alerts that match specific criteria to dedicated channels. Production crashes can land in `#prod-incidents` on Slack while staging notifications go to a less urgent Discord channel, all without juggling per-channel webhook URLs across teams.
 
-<Frame>
-  <img src="/images/alerts-notifications/routing-list.png" alt="Settings · Notifications · Notification Routing card list showing rules with channel badges, severity or Matches all alerts summaries, truncated channel URLs, and test, edit, and delete actions." />
-</Frame>
-
 ### How routing fits into dispatch
 
 For every alert Sencho dispatches, the routing engine evaluates every enabled route. A route matches when **all of its non-empty matchers** match the alert: the **Node**, **Stacks**, **Labels**, **Categories**, and **Severity** filters compose with AND. An empty matcher is treated as match-anything.
@@ -78,10 +74,6 @@ A route with all five matchers left unconstrained (`Node` = any, and empty Stack
 ### Creating a routing rule
 
 Open **Settings · Notifications · Notification Routing** and click **+ Add Route**.
-
-<Frame>
-  <img src="/images/alerts-notifications/routing-modal.png" alt="The New routing rule modal with Name, Node scope, free-form stack pattern chips, Labels, Categories, Severity, Channel tabs, and Cancel and CREATE actions." />
-</Frame>
 
 | Field | Purpose |
 |-------|---------|

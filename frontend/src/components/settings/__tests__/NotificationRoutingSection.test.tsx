@@ -319,6 +319,40 @@ describe('NotificationRoutingSection', () => {
         });
     });
 
+    it('includes a pending pattern that was never committed with Enter', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/notification-routes' && !opts?.method) {
+                return { ok: true, json: async () => [] };
+            }
+            if (url === '/stacks') return { ok: true, json: async () => ['known-stack'] };
+            if (url === '/labels') return { ok: true, json: async () => [] };
+            if (url === '/notification-routes' && opts?.method === 'POST') {
+                return { ok: true, json: async () => ({ id: 99 }) };
+            }
+            return { ok: true, json: async () => ([]) };
+        });
+        render(<NotificationRoutingSection />);
+        await waitFor(() => expect(screen.getByRole('button', { name: /Add route/i })).toBeInTheDocument());
+        await userEvent.click(screen.getByRole('button', { name: /Add route/i }));
+        await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+
+        await userEvent.type(screen.getByPlaceholderText(/Type a pattern/i), 'prod-*');
+        const nameInput = screen.getByPlaceholderText(/Production alerts/i);
+        await userEvent.clear(nameInput);
+        await userEvent.type(nameInput, 'Pending route');
+        await userEvent.type(screen.getByPlaceholderText(/discord/i), 'https://discord.com/api/webhooks/1/token');
+
+        await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+        await waitFor(() => {
+            const post = mockedFetch.mock.calls.find(
+                ([url, opts]) => url === '/notification-routes' && (opts as { method?: string })?.method === 'POST',
+            );
+            expect(post).toBeTruthy();
+            const body = JSON.parse((post![1] as { body: string }).body);
+            expect(body.stack_patterns).toEqual(['prod-*']);
+        });
+    });
+
     it('blocks create when a stack pattern is invalid', async () => {
         mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
             if (url === '/notification-routes' && !opts?.method) {

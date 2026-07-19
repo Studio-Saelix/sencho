@@ -214,7 +214,8 @@ export function NotificationSuppressionSection({
 
     const handleSave = async () => {
         if (!formName.trim()) { toast.error('Name is required.'); return; }
-        if (!patternChipsRef.current?.prepareSave()) {
+        const preparedPatterns = patternChipsRef.current?.prepareSave();
+        if (!preparedPatterns?.ok) {
             toast.error('Fix invalid stack patterns before saving.');
             return;
         }
@@ -229,7 +230,7 @@ export function NotificationSuppressionSection({
             const body = {
                 name: formName.trim(),
                 node_id: formNodeId,
-                stack_patterns: formStacks,
+                stack_patterns: preparedPatterns.patterns,
                 label_ids: formLabelIds.length > 0 ? formLabelIds : null,
                 categories: formCategories.length > 0 ? formCategories : null,
                 levels: formLevels.length > 0 ? formLevels : null,

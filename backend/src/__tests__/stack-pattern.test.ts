@@ -27,11 +27,21 @@ describe('stackPattern', () => {
     expect(stackPatternMatches('a+b', 'a+b')).toBe(true);
   });
 
-  it('fails closed on ReDoS-prone stored patterns without throwing', () => {
+  it('fails closed on write-cap rejected patterns without throwing', () => {
     expect(() => stackPatternMatches('anything', '****')).not.toThrow();
     expect(stackPatternMatches('anything', '****')).toBe(false);
     expect(stackPatternMatches('x', 'a'.repeat(201))).toBe(false);
     expect(stackPatternMatches('x', `${'a*'.repeat(9)}`)).toBe(false);
+  });
+
+  it('matches accepted separated-star patterns without RegExp backtracking', () => {
+    const pattern = '*a*a*a*a*a*a*a*a';
+    expect(validateStackPatternForRedos(pattern)).toBeNull();
+    expect(stackPatternMatches('aaaaaaaa', pattern)).toBe(true);
+    const nonMatch = `${'a'.repeat(80)}b`;
+    const started = performance.now();
+    expect(stackPatternMatches(nonMatch, pattern)).toBe(false);
+    expect(performance.now() - started).toBeLessThan(50);
   });
 
   it('OR semantics are call-site: any pattern may match', () => {
@@ -45,6 +55,7 @@ describe('stackPattern', () => {
     expect(validateStackPatternForRedos('ok-*')).toBeNull();
     expect(validateStackPatternForRedos('****')).toMatch(/consecutive/);
     expect(validateStackPatternForRedos('a'.repeat(201))).toMatch(/too long/);
+    expect(validateStackPatternForRedos('*a*a*a*a*a*a*a*a')).toBeNull();
   });
 
   it('parseStackPatternsInput rejects non-arrays and non-strings', () => {
