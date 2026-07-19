@@ -234,10 +234,32 @@ export async function deleteBlueprint(id: number): Promise<void> {
 
 // ---- Apply / Withdraw / Accept / Preview ----
 
+export interface ApplyBlueprintOutcome {
+    nodeId: number;
+    nodeName: string;
+    action: PreviewAction;
+    status: 'ok' | 'failed' | 'name_conflict' | 'pending' | 'skipped';
+    error?: string | null;
+}
+
+export interface ApplyBlueprintResult {
+    message: string;
+    blueprintId: number;
+    effectiveApproval: string;
+    outcomes: ApplyBlueprintOutcome[];
+    outcomeSummary: {
+        total: number;
+        ok: number;
+        failed: number;
+        pending: number;
+        skipped: number;
+    };
+}
+
 export async function applyBlueprint(
     id: number,
     confirm: { planFingerprint: string; actions: Array<{ nodeId: number; action: PreviewAction }> },
-): Promise<{ message: string }> {
+): Promise<ApplyBlueprintResult> {
     const res = await apiFetch(`/blueprints/${id}/apply`, {
         method: 'POST',
         body: JSON.stringify(confirm),

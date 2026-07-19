@@ -71,11 +71,18 @@ export function RolloutPreviewDialog({
         if (!preview) return;
         setSubmitting(true);
         try {
-            await applyBlueprint(blueprintId, {
+            const result = await applyBlueprint(blueprintId, {
                 planFingerprint: preview.planFingerprint,
                 actions: preview.confirmableActions,
             });
-            toast.success('Rollout confirmed');
+            const { failed = 0, pending = 0 } = result.outcomeSummary ?? {};
+            if (failed > 0) {
+                toast.warning(result.message || 'Rollout confirmed with node failures');
+            } else if (pending > 0) {
+                toast.info(result.message || 'Rollout confirmed; some actions are still in progress');
+            } else {
+                toast.success(result.message || 'Rollout confirmed');
+            }
             onApplied();
             onOpenChange(false);
         } catch (err) {

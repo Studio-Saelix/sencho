@@ -60,7 +60,7 @@ beforeEach(() => {
     vi.restoreAllMocks();
     mockTier('community');
     vi.spyOn(BlueprintReconciler.getInstance(), 'reconcileOne').mockResolvedValue(undefined);
-    vi.spyOn(BlueprintReconciler.getInstance(), 'reconcileConfirmedPlan').mockResolvedValue(undefined);
+    vi.spyOn(BlueprintReconciler.getInstance(), 'reconcileConfirmedPlan').mockResolvedValue({ outcomes: [] });
     const db = DatabaseService.getInstance().getDb();
     db.prepare('DELETE FROM blueprint_deployments').run();
     db.prepare('DELETE FROM blueprints').run();

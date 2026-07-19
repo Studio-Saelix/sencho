@@ -3,6 +3,8 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
+import fs from 'fs';
+import path from 'path';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -44,7 +46,7 @@ afterAll(() => cleanupTestDb(tmpDir));
 
 beforeEach(() => {
     vi.restoreAllMocks();
-    vi.spyOn(BlueprintReconciler.getInstance(), 'reconcileConfirmedPlan').mockResolvedValue(undefined);
+    vi.spyOn(BlueprintReconciler.getInstance(), 'reconcileConfirmedPlan').mockResolvedValue({ outcomes: [] });
     const db = DatabaseService.getInstance().getDb();
     db.prepare('DELETE FROM blueprint_deployments').run();
     db.prepare('DELETE FROM blueprints').run();
@@ -120,6 +122,14 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
             });
         expect(res.status).toBe(200);
         expect(res.body.effectiveApproval).toBe('approved');
+        expect(res.body.outcomes).toEqual([]);
+        expect(res.body.outcomeSummary).toEqual({
+            total: 0,
+            ok: 0,
+            failed: 0,
+            pending: 0,
+            skipped: 0,
+        });
         expect(reconcileSpy).toHaveBeenCalledWith(created.body.id, preview.body.executorActions);
 
         const detail = await request(app)
@@ -132,6 +142,79 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
         expect(stored.approval_status).toBe('approved');
         expect(stored.approved_intent_fingerprint).toBe(preview.body.planFingerprint);
         expect(stored.updated_at).toBe(created.body.updated_at);
+    });
+
+    it('returns failed outcomes without pretending the rollout was clean', async () => {
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send(validBlueprintBody(node.id));
+        expect(created.status).toBe(201);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+
+        vi.mocked(BlueprintReconciler.getInstance().reconcileConfirmedPlan).mockResolvedValueOnce({
+            outcomes: [{
+                nodeId: node.id,
+                nodeName: node.name,
+                action: 'create',
+                status: 'failed',
+                error: 'EHOSTUNREACH',
+            }],
+        });
+
+        const res = await request(app)
+            .post(`/api/blueprints/${created.body.id}/apply`)
+            .set('Cookie', adminCookie)
+            .send({
+                planFingerprint: preview.body.planFingerprint,
+                actions: preview.body.confirmableActions,
+            });
+        expect(res.status).toBe(200);
+        expect(res.body.effectiveApproval).toBe('approved');
+        expect(res.body.message).toMatch(/node failures/i);
+        expect(res.body.outcomeSummary.failed).toBe(1);
+        expect(res.body.outcomes[0].error).toBe('EHOSTUNREACH');
+    });
+
+    it('marks create as blocked when an unmanaged same-name stack already exists', async () => {
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send(validBlueprintBody(node.id));
+        expect(created.status).toBe(201);
+
+        const composeDir = process.env.COMPOSE_DIR!;
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE nodes SET compose_dir = ? WHERE id = ?')
+            .run(composeDir, node.id);
+
+        const stackDir = path.join(composeDir, created.body.name as string);
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'docker-compose.yml'), 'services:\n  app:\n    image: nginx\n');
+
+        const { BlueprintService } = await import('../services/BlueprintService');
+        const conflict = await BlueprintService.getInstance().hasNameConflict(
+            created.body.name as string,
+            DatabaseService.getInstance().getNode(node.id)!,
+        );
+        expect(conflict).toBe(true);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+        const change = preview.body.changes.find((c: { nodeId: number }) => c.nodeId === node.id);
+        expect(change.action).toBe('blocked_name_conflict');
+        expect(change.severity).toBe('blocker');
+        expect(preview.body.summary.blocker).toBeGreaterThan(0);
     });
 
     it('blocks rename while a non-withdrawn deployment exists', async () => {

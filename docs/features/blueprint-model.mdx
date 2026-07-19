@@ -189,7 +189,7 @@ If the YAML is malformed or larger than 96 KiB, Sencho rejects the save before c
 
 ### Apply on demand
 
-The reconciler runs every minute, but only for blueprints whose current operational intent is **approved**. To authorize or re-authorize a rollout, click **Apply now** on the detail sheet (or **Retry** on a failed row). Sencho opens a rollout preview that lists place and remove outcomes, requirements, and health notes. **Confirm Apply** stores that approval and runs the confirmed executor actions. Changing the compose, selector, name, pin, drift mode, or enabled flag clears approval back to pending. Catalog tiles show **pending** or **reapproval required** when confirmation is needed again (for example after a label change adds a new target node).
+The reconciler runs every minute, but only for blueprints whose current operational intent is **approved**. To authorize or re-authorize a rollout, click **Apply now** on the detail sheet (or **Retry** on a failed row). Sencho opens a rollout preview that lists place and remove outcomes, requirements, and health notes. **Confirm Apply** stores that approval and runs the confirmed executor actions. If some nodes fail (for example a remote host is unreachable) or an unmanaged same-name stack blocks placement, Confirm still records approval, but the response and toast report those per-node outcomes instead of a clean success. Changing the compose, selector, name, pin, drift mode, or enabled flag clears approval back to pending. Catalog tiles show **pending** or **reapproval required** when confirmation is needed again (for example after a label change adds a new target node).
 
 Raw `POST /api/blueprints/:id/apply` clients must send `{ planFingerprint, actions }` from a fresh `GET .../preview`. A body without that confirmation is rejected.
 
@@ -211,6 +211,7 @@ In the deployment table, click **Withdraw** on the node's row. For stateless blu
 
 - **Snapshot, then evict (recommended)** captures the blueprint's compose definition into [Fleet · Snapshots](/features/fleet-backups) before running `docker compose down`. The volume bytes still leave the node when compose tears down the named volumes; the snapshot only preserves the YAML so you can redeploy it elsewhere.
 - **Evict and destroy data** runs the eviction without a snapshot. Type the blueprint name to confirm.
+- Manual **Evict** (including from an active row) requires a current approved remove outcome for that node. Confirm a rollout that removes the node first; Evict while the node is still desired, or without remove approval, returns a stale-guard error.
 
 <Frame caption="Stateful eviction dialog. Snapshot, then evict captures the compose YAML to Fleet · Snapshots; Evict and destroy data requires typing the blueprint name to confirm.">
   <img src="/images/blueprint-model/eviction-dialog.png" alt="Stateful eviction dialog with Snapshot then evict and Evict and destroy data options" />

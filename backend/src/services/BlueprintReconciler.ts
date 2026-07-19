@@ -4,7 +4,7 @@ import {
     type BlueprintDeployment,
     type Node,
 } from './DatabaseService';
-import { BlueprintService } from './BlueprintService';
+import { BlueprintService, type DeployOutcome } from './BlueprintService';
 import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { NodeLabelService } from './NodeLabelService';
 import { NotificationService } from './NotificationService';
@@ -24,6 +24,75 @@ import {
 
 const RECONCILER_INTERVAL_MS = 60_000;
 const RECONCILER_INITIAL_DELAY_MS = 5_000;
+
+export type ConfirmedActionOutcomeStatus = 'ok' | 'failed' | 'name_conflict' | 'pending' | 'skipped';
+
+export interface ConfirmedActionOutcome {
+    nodeId: number;
+    nodeName: string;
+    action: PreviewAction;
+    status: ConfirmedActionOutcomeStatus;
+    error?: string | null;
+}
+
+export interface ConfirmedPlanResult {
+    outcomes: ConfirmedActionOutcome[];
+}
+
+export interface ConfirmedOutcomeSummary {
+    total: number;
+    ok: number;
+    failed: number;
+    pending: number;
+    skipped: number;
+}
+
+export function summarizeConfirmedOutcomes(outcomes: ConfirmedActionOutcome[]): ConfirmedOutcomeSummary {
+    let ok = 0;
+    let failed = 0;
+    let pending = 0;
+    let skipped = 0;
+    for (const outcome of outcomes) {
+        switch (outcome.status) {
+            case 'ok':
+                ok += 1;
+                break;
+            case 'failed':
+            case 'name_conflict':
+                failed += 1;
+                break;
+            case 'pending':
+                pending += 1;
+                break;
+            case 'skipped':
+                skipped += 1;
+                break;
+        }
+    }
+    return { total: outcomes.length, ok, failed, pending, skipped };
+}
+
+export function messageForConfirmedOutcomes(summary: ConfirmedOutcomeSummary): string {
+    if (summary.failed > 0) return 'Rollout confirmed with node failures';
+    if (summary.pending > 0) return 'Rollout confirmed; some actions are still in progress';
+    return 'Rollout confirmed';
+}
+
+function mapDeployOutcome(
+    base: { nodeId: number; nodeName: string; action: PreviewAction },
+    result: DeployOutcome,
+): ConfirmedActionOutcome {
+    if (result.status === 'active' || result.status === 'withdrawn') {
+        return { ...base, status: 'ok' };
+    }
+    if (result.status === 'name_conflict') {
+        return { ...base, status: 'name_conflict', error: result.error ?? 'name_conflict' };
+    }
+    if (result.status === 'pending' || result.status === 'deploying' || result.status === 'withdrawing') {
+        return { ...base, status: 'pending', error: result.error ?? null };
+    }
+    return { ...base, status: 'failed', error: result.error ?? result.status };
+}
 
 function isDeveloperModeEnabled(): boolean {
     try {
@@ -117,23 +186,27 @@ export class BlueprintReconciler {
 
     /**
      * Execute only the provided executor actions for an already-validated plan.
-     * Does not recompute or widen the action set.
+     * Does not recompute or widen the action set. Returns per-node outcomes so
+     * Apply can report partial failure without claiming a clean rollout.
      */
     async reconcileConfirmedPlan(
         blueprintId: number,
         executorActions: ConfirmableActionRef[],
-    ): Promise<void> {
+    ): Promise<ConfirmedPlanResult> {
         const blueprint = DatabaseService.getInstance().getBlueprint(blueprintId);
-        if (!blueprint || !blueprint.enabled) return;
+        if (!blueprint || !blueprint.enabled) {
+            return { outcomes: [] };
+        }
         const parsed = parseApprovedBlastJson(blueprint.approved_blast_json);
         if (!parsed.ok || blueprint.approval_status !== 'approved') {
             diagnosticLog('reconcileConfirmedPlan skipped: approval missing or invalid', { blueprintId });
-            return;
+            return { outcomes: [] };
         }
         const authorized = filterAuthorizedExecutorActions(parsed.entries, executorActions);
         const nodes = DatabaseService.getInstance().getNodes();
         const byId = new Map(nodes.map(n => [n.id, n]));
-        await this.executeAuthorizedActions(blueprint, byId, authorized);
+        const outcomes = await this.executeAuthorizedActions(blueprint, byId, authorized);
+        return { outcomes };
     }
 
     private async evaluate(): Promise<void> {
@@ -161,7 +234,7 @@ export class BlueprintReconciler {
     }
 
     private async reconcileBlueprint(blueprint: Blueprint, allNodes: Node[]): Promise<void> {
-        const preview = buildBlueprintPreview(blueprint.id);
+        const preview = await buildBlueprintPreview(blueprint.id);
         if (!preview) return;
 
         const parsed = parseApprovedBlastJson(blueprint.approved_blast_json);
@@ -199,18 +272,27 @@ export class BlueprintReconciler {
         blueprint: Blueprint,
         byId: Map<number, Node>,
         actions: ConfirmableActionRef[],
-    ): Promise<void> {
+    ): Promise<ConfirmedActionOutcome[]> {
         const svc = BlueprintService.getInstance();
+        const outcomes: ConfirmedActionOutcome[] = [];
         for (const { nodeId, action } of actions) {
             const node = byId.get(nodeId);
             if (!node) {
                 console.warn(
                     `[BlueprintReconciler] confirmed plan skipped missing node ${nodeId} for blueprint ${blueprint.id}`,
                 );
+                outcomes.push({
+                    nodeId,
+                    nodeName: `node-${nodeId}`,
+                    action,
+                    status: 'skipped',
+                    error: 'Node not found',
+                });
                 continue;
             }
-            await this.executeOneAction(blueprint, node, action, svc);
+            outcomes.push(await this.executeOneAction(blueprint, node, action, svc));
         }
+        return outcomes;
     }
 
     private async executeOneAction(
@@ -218,7 +300,8 @@ export class BlueprintReconciler {
         node: Node,
         action: PreviewAction,
         svc: BlueprintService,
-    ): Promise<void> {
+    ): Promise<ConfirmedActionOutcome> {
+        const base = { nodeId: node.id, nodeName: node.name, action };
         switch (action) {
             case 'await_state_review': {
                 const existing = DatabaseService.getInstance().getDeployment(blueprint.id, node.id);
@@ -231,7 +314,7 @@ export class BlueprintReconciler {
                         ? 'Stateful blueprint revision change awaits operator confirmation'
                         : 'Stateful blueprint awaiting operator confirmation before first deploy',
                 });
-                return;
+                return { ...base, status: 'ok' };
             }
             case 'await_evict_confirm': {
                 DatabaseService.getInstance().upsertDeployment({
@@ -241,25 +324,27 @@ export class BlueprintReconciler {
                     last_checked_at: Date.now(),
                     drift_summary: 'Stateful blueprint eviction requires operator confirmation',
                 });
-                return;
+                return { ...base, status: 'ok' };
             }
             case 'clear_reversed_evict':
                 applyClearReversedEvict(blueprint.id, node.id);
-                return;
+                return { ...base, status: 'ok' };
             case 'clear_stale_guard':
                 applyClearStaleGuard(blueprint.id, node.id);
-                return;
+                return { ...base, status: 'ok' };
             case 'create':
-            case 'update':
-                await svc.deployToNode(blueprint, node);
-                return;
-            case 'remove':
-                await svc.withdrawFromNode(blueprint, node);
-                return;
+            case 'update': {
+                const result = await svc.deployToNode(blueprint, node);
+                return mapDeployOutcome(base, result);
+            }
+            case 'remove': {
+                const result = await svc.withdrawFromNode(blueprint, node);
+                return mapDeployOutcome(base, result);
+            }
             case 'check_observe':
             case 'check_enforce': {
                 const driftResult = await svc.checkForDrift(blueprint, node);
-                if (!driftResult.drifted) return;
+                if (!driftResult.drifted) return { ...base, status: 'ok' };
                 const reason = driftResult.reason ?? 'unknown drift';
                 DatabaseService.getInstance().upsertDeployment({
                     blueprint_id: blueprint.id,
@@ -269,27 +354,57 @@ export class BlueprintReconciler {
                     last_drift_at: Date.now(),
                     drift_summary: reason,
                 });
-                if (action === 'check_enforce') {
-                    await this.handleDrift(blueprint, node, reason);
-                } else {
-                    // observe/suggest: notify path via handleDrift still respects drift_mode
-                    await this.handleDrift(blueprint, node, reason);
-                }
-                return;
+                // observe/suggest/enforce: notify path via handleDrift still respects drift_mode
+                await this.handleDrift(blueprint, node, reason);
+                return { ...base, status: 'ok' };
             }
             default:
-                return;
+                return { ...base, status: 'skipped', error: `Unsupported action ${action}` };
         }
     }
 
     /**
-     * Validate Accept/evict-from-guard against current approval and placement.
-     * Returns null when OK, or an error code/message.
+     * Validate Accept against current approval and placement.
+     * Returns ok when the guard row and approved place outcome still match.
      */
     validateGuardConfirmation(
         blueprintId: number,
         nodeId: number,
         kind: 'accept' | 'evict',
+    ): { ok: true } | { ok: false; code: string; error: string } {
+        if (kind === 'evict') {
+            // Guard-path Evict still requires the evict_blocked row; open withdraw uses
+            // validateWithdrawConfirmation without that flag.
+            return this.validateWithdrawConfirmation(blueprintId, nodeId, { requireEvictBlocked: true });
+        }
+        const db = DatabaseService.getInstance();
+        const blueprint = db.getBlueprint(blueprintId);
+        if (!blueprint) return { ok: false, code: 'not_found', error: 'Blueprint not found' };
+        const node = db.getNode(nodeId);
+        if (!node) return { ok: false, code: 'not_found', error: 'Node not found' };
+        const dep = db.getDeployment(blueprintId, nodeId);
+        if (!dep || dep.status !== 'pending_state_review') {
+            return { ok: false, code: 'STALE_GUARD', error: 'Deployment is not awaiting state review' };
+        }
+
+        const approval = this.requireApprovedRemoveOrPlace(blueprint, nodeId, 'place');
+        if (!approval.ok) return approval;
+        const desired = this.listDesiredNodes(blueprint, db.getNodes()).some(n => n.id === nodeId);
+        if (!desired) {
+            return { ok: false, code: 'STALE_GUARD', error: 'Node is no longer an approved placement target' };
+        }
+        return { ok: true };
+    }
+
+    /**
+     * Validate manual withdraw/evict against current remove approval.
+     * Manual destroy of an active row still requires an approved remove outcome
+     * and a node that is no longer desired (same contract as reconciler remove).
+     */
+    validateWithdrawConfirmation(
+        blueprintId: number,
+        nodeId: number,
+        opts: { requireEvictBlocked?: boolean } = {},
     ): { ok: true } | { ok: false; code: string; error: string } {
         const db = DatabaseService.getInstance();
         const blueprint = db.getBlueprint(blueprintId);
@@ -297,16 +412,27 @@ export class BlueprintReconciler {
         const node = db.getNode(nodeId);
         if (!node) return { ok: false, code: 'not_found', error: 'Node not found' };
         const dep = db.getDeployment(blueprintId, nodeId);
-        if (kind === 'accept') {
-            if (!dep || dep.status !== 'pending_state_review') {
-                return { ok: false, code: 'STALE_GUARD', error: 'Deployment is not awaiting state review' };
-            }
-        } else if (!dep || dep.status !== 'evict_blocked') {
+        if (!dep || dep.status === 'withdrawn') {
+            return { ok: false, code: 'STALE_GUARD', error: 'No withdrawable deployment on this node' };
+        }
+        if (opts.requireEvictBlocked && dep.status !== 'evict_blocked') {
             return { ok: false, code: 'STALE_GUARD', error: 'Deployment is not awaiting eviction confirmation' };
         }
 
-        const preview = buildBlueprintPreview(blueprintId);
-        if (!preview) return { ok: false, code: 'STALE_GUARD', error: 'Unable to evaluate approval' };
+        const approval = this.requireApprovedRemoveOrPlace(blueprint, nodeId, 'remove');
+        if (!approval.ok) return approval;
+        const desired = this.listDesiredNodes(blueprint, db.getNodes()).some(n => n.id === nodeId);
+        if (desired) {
+            return { ok: false, code: 'STALE_GUARD', error: 'Node is no longer an approved removal target' };
+        }
+        return { ok: true };
+    }
+
+    private requireApprovedRemoveOrPlace(
+        blueprint: Blueprint,
+        nodeId: number,
+        outcomeNeeded: 'place' | 'remove',
+    ): { ok: true } | { ok: false; code: string; error: string } {
         const parsed = parseApprovedBlastJson(blueprint.approved_blast_json);
         if (
             blueprint.approval_status !== 'approved'
@@ -316,13 +442,12 @@ export class BlueprintReconciler {
             return { ok: false, code: 'STALE_GUARD', error: 'Blueprint approval is no longer valid; preview and confirm again' };
         }
         const outcome = parsed.entries.find(e => e.nodeId === nodeId)?.outcome;
-        const desired = this.listDesiredNodes(blueprint, db.getNodes()).some(n => n.id === nodeId);
-        if (kind === 'accept') {
-            if (outcome !== 'place' || !desired) {
-                return { ok: false, code: 'STALE_GUARD', error: 'Node is no longer an approved placement target' };
-            }
-        } else if (outcome !== 'remove' || desired) {
-            return { ok: false, code: 'STALE_GUARD', error: 'Node is no longer an approved removal target' };
+        if (outcome !== outcomeNeeded) {
+            const errors: Record<'place' | 'remove', string> = {
+                place: 'Node is no longer an approved placement target',
+                remove: 'Node is no longer an approved removal target',
+            };
+            return { ok: false, code: 'STALE_GUARD', error: errors[outcomeNeeded] };
         }
         return { ok: true };
     }

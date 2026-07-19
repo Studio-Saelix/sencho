@@ -290,6 +290,52 @@ describe('Accept/Evict STALE_GUARD', () => {
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('STALE_GUARD');
     });
+
+    it('refuses Evict on an active deployment without remove approval', async () => {
+        const node = seedNode();
+        const bp = createBp({
+            nodeIds: [node.id],
+            classification: 'stateful',
+            compose: 'services:\n  app:\n    image: nginx\n    volumes:\n      - data:/data\nvolumes:\n  data:\n',
+        });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            last_deployed_at: Date.now(),
+        });
+        approvePlace(bp.id, [node.id]);
+
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        const res = await request(app)
+            .post(`/api/blueprints/${bp.id}/withdraw/${node.id}`)
+            .set('Cookie', adminCookie)
+            .send({ confirm: 'evict_and_destroy' });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('STALE_GUARD');
+        expect(withdrawSpy).not.toHaveBeenCalled();
+    });
+
+    it('refuses standard withdraw on an active stateless deployment without remove approval', async () => {
+        const node = seedNode();
+        const bp = createBp({ nodeIds: [node.id] });
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            last_deployed_at: Date.now(),
+        });
+        approvePlace(bp.id, [node.id]);
+
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+        const res = await request(app)
+            .post(`/api/blueprints/${bp.id}/withdraw/${node.id}`)
+            .set('Cookie', adminCookie)
+            .send({ confirm: 'standard' });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('STALE_GUARD');
+        expect(withdrawSpy).not.toHaveBeenCalled();
+    });
 });
 
 describe('approval defaults and corrupt-approval fail-closed', () => {
