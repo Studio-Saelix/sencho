@@ -423,6 +423,8 @@ describe('NotificationsSection', () => {
             expect(JSON.parse((patch![1] as { body: string }).body)).toEqual({ notification_dispatch_retries: '2' });
             expect((patch![1] as { nodeId?: number }).nodeId).toBe(1);
         });
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Save retries' })).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: /Saving/i })).toBeNull();
         expect(findAgentsPost()).toBeUndefined();
     });
 
@@ -564,5 +566,88 @@ describe('NotificationsSection', () => {
         expect(screen.getByRole('button', { name: /2\s*extra/i })).toBeInTheDocument();
         expect(screen.getByText('saved')).toBeInTheDocument();
     });
+
+
+    it('clears Saving after edit-during-save supersedes the PATCH apply', async () => {
+        let releasePatch: (() => void) | undefined;
+        const patchGate = new Promise<void>((resolve) => { releasePatch = resolve; });
+
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '0' }) };
+            }
+            if (url === '/settings' && opts?.method === 'PATCH') {
+                await patchGate;
+                return { ok: true, json: async () => ({ success: true }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+
+        await userEvent.click(screen.getByRole('button', { name: /0\s*extra/i }));
+        let input = screen.getByRole('spinbutton');
+        await userEvent.clear(input);
+        await userEvent.type(input, '2');
+        await userEvent.keyboard('{Enter}');
+        await userEvent.click(screen.getByRole('button', { name: 'Save retries' }));
+        await waitFor(() => expect(screen.getByRole('button', { name: /Saving/i })).toBeInTheDocument());
+
+        // Edit while the PATCH is in flight (bumps mutation gen).
+        await userEvent.click(screen.getByRole('button', { name: /2\s*extra/i }));
+        input = screen.getByRole('spinbutton');
+        await userEvent.clear(input);
+        await userEvent.type(input, '3');
+        await userEvent.keyboard('{Enter}');
+
+        releasePatch?.();
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Save retries' })).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: /Saving/i })).toBeNull();
+        expect(screen.getByRole('button', { name: /3\s*extra/i })).toBeInTheDocument();
+        expect(screen.getByText('edited')).toBeInTheDocument();
+    });
+
+    it('clears Saving when the active node changes during an in-flight PATCH', async () => {
+        let releasePatch: (() => void) | undefined;
+        const patchGate = new Promise<void>((resolve) => { releasePatch = resolve; });
+
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string; nodeId?: number }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                const id = opts?.nodeId ?? nodeState.activeNode.id;
+                return { ok: true, json: async () => ({ notification_dispatch_retries: id === 1 ? '0' : '1' }) };
+            }
+            if (url === '/settings' && opts?.method === 'PATCH') {
+                await patchGate;
+                return { ok: true, json: async () => ({ success: true }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        const { rerender } = render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+
+        await userEvent.click(screen.getByRole('button', { name: /0\s*extra/i }));
+        const input = screen.getByRole('spinbutton');
+        await userEvent.clear(input);
+        await userEvent.type(input, '2');
+        await userEvent.keyboard('{Enter}');
+        await userEvent.click(screen.getByRole('button', { name: 'Save retries' }));
+        await waitFor(() => expect(screen.getByRole('button', { name: /Saving/i })).toBeInTheDocument());
+
+        nodeState.activeNode = { id: 2 };
+        rerender(<NotificationsSection />);
+        await waitFor(() => expect(screen.queryByRole('button', { name: /Saving/i })).toBeNull());
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+        expect(screen.getByRole('button', { name: 'Save retries' })).toBeInTheDocument();
+
+        releasePatch?.();
+        await new Promise((r) => setTimeout(r, 40));
+        expect(screen.queryByRole('button', { name: /Saving/i })).toBeNull();
+        expect(screen.getByRole('button', { name: /1\s*extra/i })).toBeInTheDocument();
+    });
+
 
 });

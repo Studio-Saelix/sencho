@@ -73,6 +73,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
     const [hasLoadedRetries, setHasLoadedRetries] = useState(false);
     const retriesFetchGenRef = useRef(0);
     const retriesMutationGenRef = useRef(0);
+    const retriesSaveGenRef = useRef(0);
     const retriesDirty = hasLoadedRetries && retries !== savedRetries;
 
     useEffect(() => {
@@ -158,6 +159,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
         // node's values cannot flash while the replacement fetches settle.
         retriesFetchGenRef.current += 1;
         retriesMutationGenRef.current += 1;
+        retriesSaveGenRef.current += 1;
         // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional node-switch reset
         setAgents(emptyAgents());
         setAppriseUrlDirty(false);
@@ -166,6 +168,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
         setSavedRetries(DEFAULT_SETTINGS.notification_dispatch_retries!);
         setRetriesLoadState('idle');
         setHasLoadedRetries(false);
+        setIsSavingRetries(false);
         void fetchAgents();
         void fetchRetries();
     }, [activeNode?.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -186,6 +189,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
         const requestNodeId = activeNode?.id;
         const submitted = clampRetryExtras(retries);
         const mutationAtStart = retriesMutationGenRef.current;
+        const saveGen = ++retriesSaveGenRef.current;
         setIsSavingRetries(true);
         try {
             const res = await apiFetch('/settings', {
@@ -213,7 +217,8 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
             if (retriesMutationGenRef.current !== mutationAtStart) return;
             toast.error((e as Error)?.message || 'Network error.');
         } finally {
-            if (activeNodeIdRef.current === requestNodeId && retriesMutationGenRef.current === mutationAtStart) {
+            // Own the spinner by save generation, not value mutation (success bumps mutation).
+            if (activeNodeIdRef.current === requestNodeId && saveGen === retriesSaveGenRef.current) {
                 setIsSavingRetries(false);
             }
         }
@@ -447,7 +452,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
                         />
                     </SettingsField>
                     <SettingsActions>
-                                                {(hasLoadedRetries || retriesLoadState === 'error') && (
+                        {(hasLoadedRetries || retriesLoadState === 'error') && (
                             <Button
                                 variant="outline"
                                 onClick={() => void fetchRetries()}
