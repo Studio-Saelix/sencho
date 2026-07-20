@@ -18,7 +18,7 @@ Create point-in-time snapshots of every `compose.yaml` and `.env` file across yo
 4. Click **Create** to capture files from every reachable node
 
 <Frame>
-  <img src="/images/fleet-backups/create-snapshot.png" alt="Inline create snapshot form with optional description field, showing Create and Cancel buttons above the snapshot table" />
+  <img src="/images/fleet-backups/create-snapshot.png" alt="Fleet Snapshots tab with the inline create form open above the table: a description textbox and Create and Cancel buttons" />
 </Frame>
 
 During creation, Sencho connects to each node in parallel:
@@ -29,7 +29,13 @@ If a remote node is offline or unreachable, it is **skipped gracefully**. The sn
 
 ### Scheduled snapshots
 
-Fleet snapshots can also be created automatically on a recurring schedule. Navigate to the **Schedules** view, create a new scheduled operation, and select **Create Fleet Snapshot** as the action type. Scheduled snapshots appear in the snapshot list with a "Scheduled snapshot" prefix in their description.
+Fleet snapshots can also be created automatically on a recurring schedule. Navigate to the **Schedules** view, create a new scheduled operation, and select **Create Fleet Snapshot** (grouped under the **Backups** category) as the action type. Scheduled snapshots appear in the snapshot list with a "Scheduled snapshot" prefix in their description.
+
+### Triggered from an update
+
+The stack update flow surfaces fleet snapshot coverage too. Before an admin updates or rebuilds a stack, the [Update Readiness](/features/health-gated-updates) dialog shows how long ago the most recent fleet snapshot covering that stack was taken, or that none exists yet, and offers a **Create a fleet snapshot before updating** checkbox. Checking it captures a fresh snapshot as part of proceeding; if the snapshot fails, the update does not start. These pre-update snapshots appear in the snapshot list with a "Pre-update snapshot: `<stack>`" description, alongside manual and scheduled ones.
+
+The [Storage Portability](/features/compose-storage) tab surfaces the same coverage for any stack with persistent volumes: a warning card and a **Take a fleet snapshot →** link appear when the stack has no fleet snapshot in the last 7 days, or the relative time since the last one otherwise.
 
 ### Capturing stack documentation
 
@@ -47,8 +53,10 @@ The snapshot list shows each snapshot in a table with the following columns:
 - **Warnings** - a warning icon with a count if any nodes or stacks were skipped, or "None"
 - **Actions** - **View** to open the detail view, a cloud-upload icon for snapshots not yet mirrored to a configured Recovery Vault or custom off-site target, and a delete button for admins
 
+The list paginates at 10 snapshots per page; use the arrows next to **Create Snapshot** to page through history.
+
 <Frame>
-  <img src="/images/fleet-backups/browse-snapshots.png" alt="Snapshot list showing paginated rows with date, description with cloud upload indicator, scope, warnings, and action buttons" />
+  <img src="/images/fleet-backups/browse-snapshots.png" alt="Fleet Snapshots list paginated 1 of 5, with rows for a manual snapshot, a Pre-update snapshot: dozzle row, and several Scheduled snapshot: Nightly Snapshot rows, each showing date, scope, warnings, and View, cloud-upload, and delete actions" />
 </Frame>
 
 ## Snapshot detail view
@@ -60,10 +68,10 @@ The header shows the snapshot's title (or "Untitled Snapshot"), who created it, 
 Below the header, each node appears as a collapsible card. Expand a node to see its stacks, then expand a stack to see individual files. If documentation was captured for a stack, its preserved Dossier notes are shown read-only beneath the file list. Each file has a **Preview** button that renders the full file contents inline in a scrollable panel, and a **Download** button that saves that single file to your machine (named `<stack>-<filename>`, for example `web-compose.yaml`).
 
 <Frame>
-  <img src="/images/fleet-backups/snapshot-detail.png" alt="Snapshot detail view with a node expanded, showing a stack expanded with a compose file, Preview button, and Restore button" />
+  <img src="/images/fleet-backups/snapshot-detail.png" alt="Snapshot detail view for an Untitled Snapshot, with the Local node expanded to its stack list and the plex stack further expanded to show its compose.yaml file with Preview and Download buttons, plus a Restore button per stack and Restore all in the header" />
 </Frame>
 
-If any nodes were unreachable during snapshot creation, a warning banner appears at the top of the detail view listing each skipped node and the reason it was skipped. A second banner lists any individual stacks that were only partially captured, naming the node, the stack, and the reason.
+Up to four warning banners can appear at the top of the detail view, each only when it applies: skipped nodes that were unreachable during creation, snapshot files that could not be decrypted (see [Storage](#storage) below), stacks that were only partially captured, and, when documentation capture was on, stacks whose Dossier notes could not be fetched. Each banner names the affected node, stack, and reason. A clean snapshot with no problems shows none of them.
 
 ## Restoring from a snapshot
 
@@ -78,7 +86,7 @@ Admins can restore individual stacks from any snapshot:
 By default, restoring a stack only writes back its files and leaves the stack's current Dossier notes untouched. Notes are restored only when you explicitly check **Restore documentation notes**, which overwrites the current notes with the captured ones. The same option appears on **Restore all** when the snapshot has documentation.
 
 <Frame>
-  <img src="/images/fleet-backups/restore-dialog.png" alt="Restore confirmation dialog showing the target stack and node name, a redeploy checkbox, and Cancel and Restore buttons" />
+  <img src="/images/fleet-backups/restore-dialog.png" alt="Restore plex on Local confirmation dialog with the warning that it overwrites the current compose files with the snapshot version, a Redeploy stack after restore checkbox, and Cancel and Restore buttons" />
 </Frame>
 
 Sencho writes the snapshot's files back to the target node:
@@ -109,12 +117,12 @@ Recovery Vault mirrors every fleet snapshot to off-site storage so your snapshot
 
 ### Recovery Vault (included)
 
-A managed 500 MB allowance, included with every Admiral subscription. Open **Settings → Infrastructure → Recovery Vault**, choose **Recovery Vault (Included)**, and click **Activate**. Sencho exchanges your license key for scoped storage credentials and starts replicating new snapshots automatically.
+A managed 500 MB allowance backed by Cloudflare R2, included with every Admiral subscription. Open **Settings → Infrastructure → Recovery Vault**, choose **Recovery Vault (included)**, and click **Activate**. Sencho exchanges your license key for scoped storage credentials and starts replicating new snapshots automatically.
 
 Once active, the settings page shows a storage gauge (used / 500 MB and object count), a status message confirming auto-upload is on, and a **Reprovision** button to refresh credentials if needed. You can verify connectivity at any time with the **Test** button.
 
 <Frame>
-  <img src="/images/cloud-backup/cloud-backup-active.png" alt="Recovery Vault settings page with Recovery Vault active, showing the storage gauge, auto-upload status, and the Cloud Snapshots list" />
+  <img src="/images/cloud-backup/cloud-backup-active.png" alt="Recovery Vault settings page with Storage Mode set to Recovery Vault (included), Test and Reprovision buttons, a storage-used gauge reading 0 Bytes of 500 MB, the auto-upload confirmation message, and an empty Cloud Snapshots panel" />
 </Frame>
 
 ### Custom S3 (BYOB)
@@ -131,18 +139,18 @@ Bring any S3-compatible bucket: AWS S3, MinIO, Backblaze B2, Wasabi, or your own
 Click **Test** to verify connectivity, then **Save**. Secret keys are encrypted at rest. Sencho only sends them to your configured endpoint.
 
 <Frame>
-  <img src="/images/cloud-backup/cloud-backup-custom.png" alt="Custom S3 configuration form with fields for Endpoint URL, Region, Bucket, Path Prefix, Access Key ID, Secret Access Key, and an Auto-upload toggle" />
+  <img src="/images/cloud-backup/cloud-backup-custom.png" alt="Custom S3 Configuration form with Storage Mode set to Custom S3 (BYOB) and empty fields for Endpoint URL, Region, Bucket, Path Prefix, Access Key ID, and Secret Access Key, plus an Auto-upload toggle set to off" />
 </Frame>
 
 ### Manual upload vs auto-upload
 
 When auto-upload is on, every fleet snapshot is replicated as soon as it is created. Manual snapshots from the **Fleet → Snapshots** view upload asynchronously so the UI returns immediately; scheduled snapshots block on the upload so the task's success status reflects cloud durability.
 
-To upload a single snapshot on demand, open the **Snapshots** tab in Fleet View. Each row that hasn't been mirrored yet shows a cloud-upload action in the Actions column. Once a snapshot is in the cloud, an upload icon appears next to its description.
+To upload a single snapshot on demand, open the **Snapshots** tab in the Fleet view. Each row that hasn't been mirrored yet shows a cloud-upload action in the Actions column. Once a snapshot is in the cloud, an upload icon appears next to its description.
 
 ### Browsing and downloading cloud snapshots
 
-The **Cloud Snapshots** panel in **Settings → Infrastructure → Recovery Vault** lists every archive currently in your bucket, with size and last-modified timestamp. Click the download icon to save a `.tar.gz` archive locally for off-host disaster recovery. Each archive contains a `metadata.json` describing the snapshot and a `nodes/` tree with the captured compose and environment files, organised by node and stack. When the snapshot preserved Dossier notes, the archive also includes a `documentation.json` with those notes.
+The **Cloud Snapshots** panel in **Settings → Infrastructure → Recovery Vault** lists every archive currently in your bucket, paginated at 10 per page, with size and last-modified timestamp. Click the download icon to save a `.tar.gz` archive locally for off-host disaster recovery, or the trash icon to permanently delete the archive from your bucket (the corresponding local snapshot in the **Fleet → Snapshots** list is unaffected). Each archive contains a `metadata.json` describing the snapshot and a `nodes/` tree with the captured compose and environment files, organised by node and stack. When the snapshot preserved Dossier notes, the archive also includes a `documentation.json` with those notes.
 
 ### Restoring from a cloud snapshot
 
@@ -150,13 +158,15 @@ For in-place rollback, use the **Restore** action on the snapshot detail view as
 
 ## Access control
 
-Every fleet snapshot action requires the **admin** role: viewing the snapshot list, browsing snapshot contents, creating, restoring, deleting, and uploading to the cloud. Because a snapshot captures the `.env` file of every stack, the snapshot list and detail views are restricted to administrators rather than read-only roles.
+Every fleet snapshot action requires the **admin** role: viewing the snapshot list, browsing snapshot contents, creating, restoring, deleting, and uploading to the cloud. Because a snapshot captures the `.env` file of every stack, the snapshot list and detail views are restricted to administrators rather than read-only roles. The **Snapshots** tab itself does not appear in the Fleet view for non-admin roles, so there is no read-only path into a stack's `.env` contents.
 
 Recovery Vault configuration is also admin-only. Mirroring to Recovery Vault additionally requires an Admiral subscription; a Custom S3-compatible target works on every tier.
 
+Fleet Snapshots and Recovery Vault settings are both hub-only: the **Snapshots** tab lives inside the **Fleet** view and Recovery Vault lives in **Settings → Infrastructure**, neither of which appears when a remote node is the active selection. See [Multi-Node Management](/features/multi-node) for the full list of hub-only views.
+
 ## Storage
 
-Snapshots are stored in Sencho's SQLite database. Captured file contents, including `.env` files, are encrypted at rest with the instance key, so a database copy never exposes stack secrets in plaintext. Compose files are typically small (under 10 KB each), so even hundreds of snapshots consume minimal disk space. Individual files larger than 1 MB are skipped and recorded as a warning to keep snapshots bounded. For very large fleets, consider periodically deleting old snapshots to keep the database lean.
+Snapshots are stored in Sencho's SQLite database. Captured file contents, including `.env` files, are encrypted at rest with the instance key, so a database copy never exposes stack secrets in plaintext. Compose files are typically small (under 10 KB each), so even hundreds of snapshots consume minimal disk space. Each captured file is capped at 1 MB to keep snapshots bounded: an oversized `compose.yaml` skips that stack entirely for the snapshot, while an oversized `.env` is dropped and the rest of the stack (including its `compose.yaml`) is still captured. Either case is recorded as a warning, never silently dropped. For very large fleets, consider periodically deleting old snapshots to keep the database lean.
 
 If a stored encrypted file cannot be decrypted (for example after on-disk corruption, including damaged ciphertext that still looks encryption-shaped), the snapshot detail view marks that file unavailable and lists it in a warning. Restore for that stack is blocked so live compose and environment files are never overwritten with that damaged data. Configured off-site upload (Recovery Vault or Custom S3) also refuses to publish an archive that would omit or fabricate those files. Intact stacks in the same snapshot remain readable and restorable. Only short, clearly non-ciphertext values that happen to start with `enc:` (for example `enc:hello`, `enc:hello-world`, or `enc:FOO_BAR=baz`) stay readable as legacy plaintext. Encryption-shaped damage remains unavailable.
 
@@ -191,3 +201,17 @@ If a stored encrypted file cannot be decrypted (for example after on-disk corrup
     Enable **Developer Mode** under **Settings → Operations → Developer Diagnostics** to activate diagnostic logging for snapshot creation (per-node capture timing and file counts), restore operations, and scheduled snapshot execution. Diagnostic logs appear in the server's standard output with a `:debug` suffix.
   </Accordion>
 </AccordionGroup>
+
+## Where Fleet Backups fits
+
+Fleet snapshots show up in several other views. Each adjacent surface answers a different question.
+
+| Related feature | What it covers | Why it is not Fleet Backups |
+|---|---|---|
+| [Health-Gated Updates](/features/health-gated-updates) | The readiness check before a stack update or rebuild. | Health-Gated Updates gates the update itself; Fleet Backups is the point-in-time capture it can optionally trigger first. |
+| [Storage Portability](/features/compose-storage) | Per-stack mount inventory and portability verdict. | Storage Portability surfaces snapshot recency for stacks with persistent volumes; Fleet Backups owns the actual capture and restore. |
+| [Scheduled Operations](/features/scheduled-operations) | Recurring or one-shot scheduled stack operations. | Scheduled Operations owns recurrence and dispatch; Fleet Backups defines what a snapshot captures and how to restore it. |
+| [Stack Dossier](/features/stack-dossier) | Operator-authored notes about a stack (purpose, owner, access, recovery). | Stack Dossier owns the notes; Fleet Backups only preserves a read-only copy of them inside a snapshot when documentation capture is on. |
+| [Atomic Deployments](/features/atomic-deployments) | The rollback-point mechanism created on every local deploy. | Atomic Deployments backs up automatically on every deploy; Fleet Backups is a separate, on-demand, fleet-wide capture you trigger yourself. |
+| [Multi-Node Management](/features/multi-node) | How nodes join the fleet and which top-level views are hub-only. | Multi-Node Management is why Snapshots and Recovery Vault are hub-only; Fleet Backups just inherits that rule. |
+| [Licensing](/features/licensing) | Community and Admiral plans. | Licensing covers plan coverage across the product; Fleet Backups only cites the Recovery Vault tier requirement above. |
