@@ -73,6 +73,23 @@ function patchCalls() {
     return mockedFetch.mock.calls.filter((c) => c[1]?.method === 'PATCH');
 }
 
+function refreshCacheCalls() {
+    return mockedFetch.mock.calls.filter(
+        (c) => typeof c[0] === 'string' && c[0].includes('refresh-cache'),
+    );
+}
+
+function expectFailedLoadToast() {
+    expect(mockedToast.error).toHaveBeenCalledTimes(1);
+    expect(mockedToast.error).toHaveBeenCalledWith('Failed to load settings.');
+}
+
+async function waitForActiveNodeFetch(nodeId: number) {
+    await waitFor(() => {
+        expect(mockedFetch.mock.calls.some((c) => c[1]?.nodeId === nodeId && c[1]?.method !== 'PATCH')).toBe(true);
+    });
+}
+
 beforeEach(() => {
     activeNodeState.id = 1;
     mockedFetch.mockReset();
@@ -144,7 +161,7 @@ const dirtyCases: DirtyCase[] = [
 
 describe('settings load failures (dirty sections)', () => {
     for (const c of dirtyCases) {
-        it(`${c.name}: failed load shows error, blocks save, and never PATCHes`, async () => {
+        it(`${c.name}: failed load shows error, toasts once, blocks save, and never PATCHes`, async () => {
             mockedFetch.mockResolvedValue(failSettings());
             const onDirty = vi.fn();
             render(<c.Section onDirtyChange={onDirty} />);
@@ -152,6 +169,7 @@ describe('settings load failures (dirty sections)', () => {
             await waitFor(() => {
                 expect(screen.getByText(/could not load settings/i)).toBeTruthy();
             });
+            expectFailedLoadToast();
             expect(screen.queryByRole('button', { name: c.saveName })).toBeNull();
             expect(patchCalls()).toHaveLength(0);
             expect(onDirty).not.toHaveBeenCalledWith(true);
@@ -173,12 +191,13 @@ describe('settings load failures (dirty sections)', () => {
 });
 
 describe('AppStoreSection load failures', () => {
-    it('failed load shows error and keeps Save disabled with no PATCH', async () => {
+    it('failed load shows error, toasts once, and keeps Save disabled with no PATCH', async () => {
         mockedFetch.mockResolvedValue(failSettings());
         render(<AppStoreSection />);
         await waitFor(() => {
             expect(screen.getByText(/could not load settings/i)).toBeTruthy();
         });
+        expectFailedLoadToast();
         expect(screen.queryByRole('button', { name: /save & refresh/i })).toBeNull();
         expect(patchCalls()).toHaveLength(0);
     });
@@ -199,8 +218,51 @@ describe('AppStoreSection load failures', () => {
         fireEvent.change(input, { target: { value: 'https://example.com/other.json' } });
         const save = screen.getByRole('button', { name: /save & refresh/i });
         fireEvent.click(save);
-        await waitFor(() => expect(patchCalls().length).toBe(1));
+        await waitFor(() => expect(patchCalls()).toHaveLength(1));
         expect((patchCalls()[0][1] as { nodeId?: number | null }).nodeId).toBe(1);
+    });
+
+    it('refreshes App Store cache on the PATCH node after a mid-save switch', async () => {
+        let resolvePatch: ((v: unknown) => void) | undefined;
+        mockedFetch.mockImplementation((url: string, opts?: { method?: string; nodeId?: number | null }) => {
+            if (opts?.method === 'PATCH') {
+                return new Promise((resolve) => {
+                    resolvePatch = resolve;
+                });
+            }
+            if (typeof url === 'string' && url.includes('refresh-cache')) {
+                return Promise.resolve({ ok: true, json: async () => ({}) });
+            }
+            if (opts?.nodeId === 2) {
+                return Promise.resolve(okSettings({ template_registry_url: 'https://b.example.com/templates.json' }));
+            }
+            return Promise.resolve(okSettings());
+        });
+
+        const { rerender } = render(<AppStoreSection />);
+        const input = await screen.findByLabelText(/registry url/i);
+        fireEvent.change(input, { target: { value: 'https://example.com/other.json' } });
+        fireEvent.click(screen.getByRole('button', { name: /save & refresh/i }));
+
+        await waitFor(() => expect(patchCalls()).toHaveLength(1));
+        expect((patchCalls()[0][1] as { nodeId?: number | null }).nodeId).toBe(1);
+
+        activeNodeState.id = 2;
+        rerender(<AppStoreSection />);
+        await waitForActiveNodeFetch(2);
+
+        mockedToast.success.mockClear();
+        mockedToast.error.mockClear();
+        await act(async () => {
+            resolvePatch?.({ ok: true, json: async () => ({}) });
+        });
+
+        await waitFor(() => expect(refreshCacheCalls()).toHaveLength(1));
+        expect((refreshCacheCalls()[0][1] as { nodeId?: number | null }).nodeId).toBe(1);
+        expect(mockedToast.success).not.toHaveBeenCalled();
+        // Node B's form must not adopt A's edited URL from the stale save completion.
+        const bInput = await screen.findByLabelText(/registry url/i);
+        expect((bInput as HTMLInputElement).value).toBe('https://b.example.com/templates.json');
     });
 });
 
@@ -300,9 +362,7 @@ describe('node ownership races', () => {
         activeNodeState.id = 2;
         rerender(<DeveloperSection />);
         // Allow node B's load effect to run; do not require a dirty Save button.
-        await waitFor(() => {
-            expect(mockedFetch.mock.calls.some((c) => c[1]?.nodeId === 2 && c[1]?.method !== 'PATCH')).toBe(true);
-        });
+        await waitForActiveNodeFetch(2);
 
         mockedToast.success.mockClear();
         await act(async () => {
