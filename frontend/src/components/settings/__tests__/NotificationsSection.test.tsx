@@ -650,4 +650,53 @@ describe('NotificationsSection', () => {
     });
 
 
+
+    it('treats invalid stored notification_dispatch_retries as error, not clamped saved', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '9' }) };
+            }
+            if (url === '/settings' && opts?.method === 'PATCH') {
+                return { ok: true, json: async () => ({ success: true }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('error')).toBeInTheDocument());
+        expect(screen.queryByText('saved')).toBeNull();
+        expect(screen.getByText(/Stored delivery retries value is invalid/i)).toBeInTheDocument();
+        // Chip may show 0 as a draft, but Save must be enabled so the operator can repair.
+        expect(screen.getByRole('button', { name: 'Save retries' })).not.toBeDisabled();
+
+        await userEvent.click(screen.getByRole('button', { name: 'Save retries' }));
+        await waitFor(() => {
+            const patch = mockedFetch.mock.calls.find(
+                ([url, opts]) => url === '/settings' && (opts as { method?: string })?.method === 'PATCH',
+            );
+            expect(patch).toBeTruthy();
+            expect(JSON.parse((patch![1] as { body: string }).body)).toEqual({ notification_dispatch_retries: '0' });
+        });
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+        expect(screen.getByRole('button', { name: /0\s*extra/i })).toBeInTheDocument();
+    });
+
+    it('treats decimal stored notification_dispatch_retries as invalid, not truncated saved', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '1.5' }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('error')).toBeInTheDocument());
+        expect(screen.queryByText('saved')).toBeNull();
+        expect(screen.queryByRole('button', { name: /1\s*extra/i })).toBeNull();
+        expect(screen.getByText(/Stored delivery retries value is invalid/i)).toBeInTheDocument();
+    });
+
+
 });

@@ -17,6 +17,7 @@ import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
 import { NumberChip } from './SystemControls';
 import { classifyAppriseEndpoint, isKeyedAppriseEndpoint, isStatelessAppriseEndpoint } from '@/lib/appriseEndpoint';
+import { parseNotificationDispatchRetries } from '@/lib/notificationDispatchRetries';
 
 type ChannelType = 'discord' | 'slack' | 'webhook' | 'apprise';
 
@@ -71,10 +72,11 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
     // idle: node-switch reset before first successful load; ready: trusted saved value; error: GET failed.
     const [retriesLoadState, setRetriesLoadState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
     const [hasLoadedRetries, setHasLoadedRetries] = useState(false);
+    const [retriesNeedsRepair, setRetriesNeedsRepair] = useState(false);
     const retriesFetchGenRef = useRef(0);
     const retriesMutationGenRef = useRef(0);
     const retriesSaveGenRef = useRef(0);
-    const retriesDirty = hasLoadedRetries && retries !== savedRetries;
+    const retriesDirty = hasLoadedRetries && (retries !== savedRetries || retriesNeedsRepair);
 
     useEffect(() => {
         onDirtyChange?.(retriesDirty);
@@ -139,9 +141,32 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
                 restoreAfterStale();
                 return;
             }
-            const next = clampRetryExtras(data.notification_dispatch_retries ?? DEFAULT_SETTINGS.notification_dispatch_retries!);
+            // Missing key: same as seed/runtime default. Malformed stored values must NOT
+            // clamp into a false "saved" policy (backend falls back to 0 without accepting 1.5/9).
+            const raw = data.notification_dispatch_retries;
+            if (raw === undefined || raw === null || raw === '') {
+                const next = DEFAULT_SETTINGS.notification_dispatch_retries!;
+                setRetries(next);
+                setSavedRetries(next);
+                setRetriesNeedsRepair(false);
+                setRetriesLoadState('ready');
+                setHasLoadedRetries(true);
+                return;
+            }
+            const parsed = parseNotificationDispatchRetries(raw);
+            if (parsed === null) {
+                const next = DEFAULT_SETTINGS.notification_dispatch_retries!;
+                setRetries(next);
+                setSavedRetries(next);
+                setRetriesNeedsRepair(true);
+                setRetriesLoadState('error');
+                setHasLoadedRetries(true);
+                return;
+            }
+            const next = String(parsed);
             setRetries(next);
             setSavedRetries(next);
+            setRetriesNeedsRepair(false);
             setRetriesLoadState('ready');
             setHasLoadedRetries(true);
         } catch (e) {
@@ -168,6 +193,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
         setSavedRetries(DEFAULT_SETTINGS.notification_dispatch_retries!);
         setRetriesLoadState('idle');
         setHasLoadedRetries(false);
+        setRetriesNeedsRepair(false);
         setIsSavingRetries(false);
         void fetchAgents();
         void fetchRetries();
@@ -211,6 +237,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
             setSavedRetries(submitted);
             setRetriesLoadState('ready');
             setHasLoadedRetries(true);
+            setRetriesNeedsRepair(false);
             toast.success('Delivery retries saved.');
         } catch (e: unknown) {
             if (activeNodeIdRef.current !== requestNodeId) return;
@@ -225,13 +252,15 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
     };
 
     const retriesKicker =
-        retriesLoadState === 'error'
+        retriesNeedsRepair && retries === savedRetries
             ? 'error'
             : retriesDirty
                 ? 'edited'
-                : retriesLoadState === 'loading' || retriesLoadState === 'idle'
-                    ? 'loading'
-                    : 'saved';
+                : retriesLoadState === 'error'
+                    ? 'error'
+                    : retriesLoadState === 'loading' || retriesLoadState === 'idle'
+                        ? 'loading'
+                        : 'saved';
     const retriesControlsDisabled = readOnly || !hasLoadedRetries;
 
     const handleAgentChange = (type: string, field: keyof Agent, value: Agent[keyof Agent]) => {
@@ -433,9 +462,11 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
                     <SettingsField
                         label="Extra attempts"
                         helper={
-                            retriesLoadState === 'error'
-                                ? 'Could not load delivery retries for this node. Retry after the load succeeds; default 0 is not treated as saved until then.'
-                                : 'Extra in-process attempts after a transient delivery failure (0 keeps single-shot). Fixed 1 second between attempts. Ambiguous timeouts can produce duplicate notifications.'
+                            retriesNeedsRepair
+                                ? 'Stored delivery retries value is invalid for this node. Runtime delivery uses 0 until you save a value from 0 to 3.'
+                                : retriesLoadState === 'error'
+                                    ? 'Could not load delivery retries for this node. Retry after the load succeeds; default 0 is not treated as saved until then.'
+                                    : 'Extra in-process attempts after a transient delivery failure (0 keeps single-shot). Fixed 1 second between attempts. Ambiguous timeouts can produce duplicate notifications.'
                         }
                     >
                         <NumberChip
