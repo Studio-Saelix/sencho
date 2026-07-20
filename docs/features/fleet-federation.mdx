@@ -12,7 +12,7 @@ Federation lives under **Fleet → Federation**.
 </Frame>
 
 <Note>
-Federation placement controls (cordon, uncordon, pin, and unpin) are available on every tier. Cordon and pin mutations require an admin user role, or the node-admin role for cordon when scoped to that node.
+Cordon and pin mutations require an admin user role, or the node-admin role for cordon when scoped to that node.
 </Note>
 
 ## Placement control, not placement automation
@@ -32,7 +32,7 @@ In practice, Federation hands you four operator decisions, each of which still e
 
 ### Cordon a node
 
-Cordon marks a node as unschedulable. From the moment a node is cordoned, the reconciler stops proposing it for new placements: existing stacks keep running, drift checks keep running, and revision bumps still redeploy in place on that node. Because cordon only *removes* a node from consideration, it needs no separate confirmation; the effect is visible on the node's next reconciliation tick without an Apply now / Confirm Apply round trip. The cordon is visible to every tier (the read-only `Cordoned` pill on the node card) so operators can see why a node is not picking up new work. Uncordoning is different: it can make the node newly eligible for a blueprint that targets it, and that eligibility is a real fleet mutation, so it goes through the same rollout preview as any other new placement (see [Behaviour and lifecycle](#behaviour-and-lifecycle) below).
+Cordon marks a node as unschedulable. From the moment a node is cordoned, the reconciler stops proposing it for new placements: existing stacks keep running, drift checks keep running, and revision bumps still redeploy in place on that node. Because cordon only *removes* a node from consideration, it needs no separate confirmation; the effect is visible on the node's next reconciliation tick without an Apply now / Confirm Apply round trip. The cordon is visible to every role (the read-only `Cordoned` pill on the node card) so operators can see why a node is not picking up new work. Uncordoning is different: it can make the node newly eligible for a blueprint that targets it, and that eligibility is a real fleet mutation, so it goes through the same rollout preview as any other new placement (see [Behaviour and lifecycle](#behaviour-and-lifecycle) below).
 
 The cordon reason is free-form text (up to 256 characters). It surfaces in the Federation tab summary and in the cordon pill's tooltip on the node card. The action itself is recorded in the audit log with the summary "Cordoned node" or "Uncordoned node."
 
@@ -52,7 +52,6 @@ Cordon, uncordon, and pin all flow through Sencho's standard audit log, alongsid
 
 | Requirement | Why it matters |
 |-------------|----------------|
-| **Community or Admiral on the control instance** | Federation placement is part of the Compose-first control plane. Remote nodes inherit the control instance tier through the [proxy tier assertion](/features/multi-node#license-enforcement-across-nodes). |
 | **Admin or node-admin role** | Pin policy edits require admin. Cordon and uncordon require `node:manage` (admin, or node-admin when scoped to that node). Operator and viewer roles can read cordon state but cannot toggle it. |
 | **At least one Blueprint defined** | The Pin policy table is empty until you create a blueprint under **Fleet → Deployments**. Cordon does not require any blueprints; it only suppresses *new* placements from blueprints that exist later. |
 | **A confirmed rollout after any pin change** | Setting or clearing a pin only declares intent. The actual create/remove on the fleet waits for **Apply now → Confirm Apply** on the blueprint's detail sheet, same as any other change to the blueprint's operational intent. See [Blueprints § Apply on demand](/features/blueprint-model#apply-on-demand). |
@@ -136,7 +135,7 @@ The **Effective** column in the Pin policy table is computed live each time the 
 
 ## Security and audit
 
-Federation mutations require an admin user role, or the node-admin role for cordon when scoped to that node. The `Cordoned` pill on the node card stays visible at every tier as a read-only signal, so operators without placement permissions can still see why a node is skipping new work.
+Federation mutations require an admin user role, or the node-admin role for cordon when scoped to that node. The `Cordoned` pill on the node card stays visible at every role as a read-only signal, so operators without placement permissions can still see why a node is skipping new work.
 
 Every cordon, uncordon, and pin write is captured in the audit log with the actor, the request path, the status code, and a short summary. There is no dedicated action-name taxonomy for these events (no `node.cordon` or `blueprint.pin` filter); search the **Audit** view's free-text box for "cordon" or "pin" to find the relevant rows, or narrow by the `POST`/`PUT` method filter.
 
@@ -202,7 +201,7 @@ Pinning a stateful blueprint that is currently deployed on multiple nodes shrink
     The Fleet Overview grid polls every 30 seconds, so the `Cordoned` pill can lag the action by up to that long. The Federation tab summary and the audit log update immediately; if the audit log shows the cordon action but the badge is still missing, click **Refresh** on the Fleet page to force an immediate re-fetch.
   </Accordion>
   <Accordion title="The Federation tab is not visible">
-    Federation is available on every tier under **Fleet → Federation**. Cordon and pin mutations require an admin user (or node-admin for cordon on nodes they manage). If the tab is missing, refresh the Fleet page; if controls are read-only, sign in as an admin.
+    Federation lives under **Fleet → Federation** on every Sencho instance. Cordon and pin mutations require an admin user (or node-admin for cordon on nodes they manage). If the tab is missing, refresh the Fleet page; if controls are read-only, sign in as an admin.
   </Accordion>
   <Accordion title="The Pin policy table is empty even though I created blueprints">
     Federation reads from the same Blueprints registry that powers **Fleet → Deployments**. If the Deployments tab shows blueprints but Federation does not, refresh the Fleet page (the Pin policy table caches its source list when the tab mounts). If Deployments is also empty, no blueprint has been saved yet; create one there first.
