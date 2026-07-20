@@ -16,7 +16,6 @@ import { ComposeService, getComposeRollbackInfo } from '../services/ComposeServi
 import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '../services/StackUpdateOrchestrator';
 import DockerController, { type BulkStackInfo } from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
-import { MeshService } from '../services/MeshService';
 import { CacheService, type CacheFetchOutcome } from '../services/CacheService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';

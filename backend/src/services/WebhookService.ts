@@ -174,7 +174,7 @@ export class WebhookService {
                         case 'start':
                             await compose.runCommand(stackName, 'start');
                             break;
-                        case 'pull':
+                        case 'pull': {
                             await assertPolicyGateAllows(
                                 stackName,
                                 nodeId,
@@ -191,6 +191,7 @@ export class WebhookService {
                                 StackUpdateRecoveryService.getInstance().linkGateOrRetain(recoveryId, healthGateId);
                             }
                             break;
+                        }
                     }
                 },
             );

@@ -101,7 +101,7 @@ export class DeployedStackDeletionService {
   }
 
   public async deleteDeployedStack(input: DeleteDeployedStackInput): Promise<DeleteDeployedStackResult> {
-    const { nodeId, stackName, pruneVolumes, actor } = input;
+    const { nodeId, stackName, actor } = input;
     const locks = StackOpLockService.getInstance();
 
     if (input.continuationIntentId) {

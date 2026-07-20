@@ -2,7 +2,7 @@
  * Docker-backed integration: a failed pull must leave the running stack untouched.
  * Skipped automatically when Docker is unavailable.
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'child_process';
 
 function dockerAvailable(): boolean {
