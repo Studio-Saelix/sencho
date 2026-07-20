@@ -11,10 +11,10 @@ Fleet Sync replicates three resources today, all over the same channel and with 
 - **CVE suppressions** ([CVE Suppressions](/features/cve-suppressions)).
 - **Misconfig acknowledgements**.
 
-Fleet Sync lives on the **Security** page (the **Policies** and **Suppressions** tabs) on both the control (where you author rules) and the replica (where you see them, read-only).
+Fleet Sync lives on the **Security** page (the **Policies** and **Suppressions** tabs, the latter also holding misconfig acknowledgements) on both the control (where you author rules) and the replica (where you see them, read-only).
 
 <Frame>
-  <img src="/images/fleet-sync/control-security.png" alt="The Security page on the control. The Scanner setup tab shows Trivy installed with Auto-update Trivy turned on. The Policies tab shows the empty 'No scan policies configured' state, and the Suppressions tab lists two active suppressions against github.com/docker/docker, each annotated 'by admin · expires Never'." />
+  <img src="/images/fleet-sync/fleet-sync-policies-control.png" alt="The Security page Policies tab on the control instance. The header reads 'Deploy enforcement policies' with an Add policy button, the body shows the empty 'No scan policies configured' state, and a Honor suppressions in deploy blocks toggle sits below, switched off." />
 </Frame>
 
 ## Control and replica roles
@@ -28,18 +28,32 @@ Every Sencho instance carries a `fleet_role` flag that is either `control` or `r
 
 The transition from control to replica happens automatically the first time a replica accepts a push: the apply transaction sets `fleet_role = 'replica'` atomically with the row replacement, so the role flip and the new rows land together or not at all. Going the other way is explicit: an admin clicks **Demote to control** on the replica (see [Demote a replica](#demote-a-replica) below).
 
+<Frame>
+  <img src="/images/fleet-sync/fleet-sync-policies-replica.png" alt="The Security page Policies tab on a replica, signed in directly. A callout reads 'Managed by control node: Security policies replicate from the control Sencho instance. View them here for audit; edit them on the control,' with a Demote to control button, above the empty 'No scan policies configured' state." />
+</Frame>
+
+### Viewing a replica through the control's fleet view
+
+The read-only banner above only appears when you sign in **directly** to the replica's own URL. Scan policies, CVE suppressions, and misconfig acknowledgements are fetched with a `localOnly` request, so they are not proxied through the Distributed API the way most other per-node pages are. If you instead browse a remote node's **Security** page from the control by switching nodes in the top-left node switcher, the Policies and Suppressions tabs show a different message and no replicated data at all:
+
+<Frame>
+  <img src="/images/fleet-sync/fleet-sync-proxy-notice.png" alt="The Security page Policies tab on the control, with the node switcher set to a remote named Opsix. A callout reads 'Managed on the local instance: Scan policies are managed on the local Sencho instance. Switch to the local node to manage them,' with no policy list below it." />
+</Frame>
+
+To see a replica's mirrored rules, sign in to that instance's own URL instead of viewing it through the control's node switcher. This is different from most other Security page tabs (Images, Secrets, Scanner setup) and most other Sencho pages generally, which do proxy through the node switcher; scan policies, CVE suppressions, and misconfig acknowledgements are the exception.
+
 ## What replicates
 
-The three replicated resources share one wire protocol, one retry queue, and one anchor. Each push carries the full current state of one resource (not a delta); the receiver replaces every `replicated_from_control = 1` row in a single transaction.
+The three replicated resources share one wire protocol, one retry queue, and one anchor. Each push carries the full current state of one resource (not a delta); the receiver replaces every `replicated_from_control = 1` row in a single transaction. On the replica, each mirrored row carries a **replicated** tag so you can tell it apart from a local one at a glance:
+
+<Frame>
+  <img src="/images/fleet-sync/fleet-sync-suppressions-replica.png" alt="The Security page Suppressions tab on a replica. Two CVE suppressions for github.com/docker/docker are listed, each tagged 'Accepted risk' and 'replicated,' with no Add suppression or Export VEX buttons visible. A Misconfig acknowledgements section below is empty." />
+</Frame>
 
 What does *not* replicate:
 
 - **Local rules created directly on a replica.** A replica can still hold its own local rules; sync only touches rows that originated on the control. The two coexist in the same table and are distinguished by an internal flag.
-- **Trivy itself.** The scanner binary is installed independently on each instance. The Security panel on a remote shows a "Scanner is per-node" callout in place of the full editor, since the scanner lifecycle is a node concern, not a fleet concern.
-
-<Frame>
-  <img src="/images/fleet-sync/remote-security-via-proxy.png" alt="The Security page Scanner setup tab on a remote, opened via the control's node switcher. The Vulnerability Scanner card shows 'Not installed' with an Install Trivy button; below it, a 'Scanner is per-node' status callout reads 'Trivy is installed independently on each Sencho instance. Scan policies and CVE suppressions are managed on the control node.'" />
-</Frame>
+- **Trivy itself.** The scanner binary is installed independently on each instance. The Security page's **Scanner setup** tab (unlike Policies and Suppressions, this one does proxy through the node switcher) shows a "Scanner is per-node" callout in place of the full editor when you view it on a remote, since the scanner lifecycle is a node concern, not a fleet concern.
 - **Everything outside the three resources above.** API tokens, audit logs, blueprints, secrets, alert rules, users, SSO config, and general settings stay per-instance.
 - **Pilot-agent nodes.** Sync over the [pilot tunnel](/features/pilot-agent) is not part of v1; the control logs a one-time warning per pilot node and skips it during fanout. The pilot node's local rules are unaffected.
 
