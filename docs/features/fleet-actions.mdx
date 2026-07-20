@@ -3,16 +3,16 @@ title: "Fleet Actions"
 description: "Bulk operations across the fleet from one tab: stop stacks by label, assign a label to stacks across nodes, and reclaim Docker disk space on every node."
 ---
 
-The **Actions** tab on the Fleet view groups bulk operations that touch more than a single stack on a single node. Each action lives in its own card, runs from the control instance, and reports per-node and per-stack results inline so you never have to click through a modal to learn what happened.
+The **Actions** tab on the Fleet view groups bulk operations that touch more than a single stack on a single node. Each action lives in its own card, orchestrates from the control instance, and reports per-node and per-stack results inline so you never have to click through a modal to learn what happened.
 
-Three cards ship today: **Stop fleet by label**, **Bulk label assign**, and **Prune Docker resources fleet-wide**.
+Three cards ship today: **Prune Docker resources fleet-wide**, **Bulk label assign**, and **Stop by label**. Every card follows the same discipline before it touches anything: a live, debounced readout resolves the exact blast radius as you type or select, and the destructive or state-changing button stays disabled until that readout resolves to a concrete node and stack list. You confirm against real names, not a label string or a byte estimate.
 
 <Frame>
-  <img src="/images/fleet-actions/fleet-actions-overview.png" alt="Fleet view with the Fleet Actions tab selected. Three side-by-side cards: Stop fleet by label (rose rail), Bulk label assign (purple rail), and Prune Docker resources fleet-wide (amber rail). Each card carries its own form controls and a calm warning callout beneath the primary button." />
+  <img src="/images/fleet-actions/fleet-actions-overview.png" alt="Fleet view with the Actions tab selected. A two-column grid: Prune fleet-wide (top left, Maintenance chip), Bulk label assign (top right, Transformative chip), and Stop by label (bottom, Destructive chip). Each card shows a toolbar row with an action-class chip, a live blast-radius readout, a Dry run or Reset button, and the primary action." />
 </Frame>
 
 <Note>
-Fleet Actions runs admin-only. Operator and viewer roles see the tab but cannot apply the cards.
+Fleet Actions runs admin-only. Operator and viewer roles see the tab and every card, but cannot apply them.
 </Note>
 
 ## What Fleet Actions covers (and what it doesn't)
@@ -26,77 +26,93 @@ Fleet Actions is the home for operations that span the fleet but don't fit anywh
 | Trigger a Sencho self-update across remote nodes | **Check Updates** button on the Fleet masthead |
 | Steer where new blueprint deployments land | [Fleet Federation](/features/fleet-federation) |
 | Replicate scan policies and CVE suppressions to remotes | [Fleet Sync](/features/fleet-sync) |
+| Reclaim disk space on a single node with an itemized, undo-safe preview | **Resources → Prune** on that node (a different endpoint and flow from the fleet-wide card; see [Prune Docker resources fleet-wide](#prune-docker-resources-fleet-wide)) |
 
-## Three cards, three execution paths
+## How every card works: preview, confirm, execute
 
-The cards share a tab and a role gate, but they don't share an execution path. Knowing which path runs explains the result panels and the failure modes.
+All three cards share one execution model, and understanding it explains every result panel, timeout, and edge case below.
 
-| Card | Endpoint | Where it runs | Scope |
-|---|---|---|---|
-| Stop fleet by label | `POST /api/fleet/labels/fleet-stop` | Control instance orchestrates; fans out to each node | Every configured node |
-| Bulk label assign | `POST /api/fleet/labels/bulk-assign` | Control instance orchestrates; fans out to each target node | The stacks you select across nodes |
-| Prune Docker resources fleet-wide | `POST /api/fleet/labels/fleet-prune` | Control instance orchestrates; fans out to each node | Every reachable node |
+1. **You describe the target.** A stack label name (Stop by label), a label plus checked stacks (Bulk label assign), or a set of resource targets and a scope (Prune).
+2. **A live, debounced readout resolves the real blast radius.** Typing a label name or checking a target fires a non-destructive preview call (`POST /api/fleet/labels/match-preview` or `POST /api/fleet/prune/estimate`) roughly 350-500ms after you stop changing input. The readout in the card's toolbar shows `awaiting target` until something is selected, `resolving…` while the call is in flight, and then a concrete count (`7 stacks · 1 nodes`, `~ 6.09 GB reclaimable`). The primary button stays disabled until this resolves to a non-zero, non-loading result.
+3. **You confirm against the resolved list, not the input.** Clicking the primary button opens a confirmation dialog that lists the actual nodes and stacks (Stop, Bulk assign) or restates the scope (Prune). For Stop by label specifically, the confirmation carries the exact node/stack list the preview resolved, and the real stop only touches stacks that are still in that list *and* still carry the label at execution time: a stack that gains the label after you opened the confirmation is never touched, and a node that reconnects after the preview does not get pulled into the stop.
+4. **The control instance fans the confirmed action out to every node in parallel.** The local node runs in-process; each remote node is called over the standard Bearer-token proxy path. A node that cannot be reached, returns a non-2xx response, or returns a shape Sencho does not recognize is reported as a failure for that node only; the fan-out to every other node still completes.
+5. **Results render per node, grouped and expandable**, in a `Per-node breakdown` section below the form. Stop and Prune also expose a **Dry run** button that walks the identical code path and locks without performing the destructive step, so you can rehearse the exact fan-out before committing.
 
-All three cards orchestrate from the control instance and report results grouped by node. Stop and Prune iterate every node in **Settings → Nodes**; Bulk label assign iterates only the nodes whose stacks you selected. Each card runs the authoritative work on the executing node (the local node in process, every remote over the node proxy), so unreachable nodes show up in the results with a transport error rather than blocking the rest of the batch.
+## The three cards
 
-## Stop fleet by label
+| Card | Class | Destructive endpoint | Preview / estimate endpoint | Scope |
+|---|---|---|---|---|
+| Stop by label | Destructive | `POST /api/fleet/labels/fleet-stop` | `POST /api/fleet/labels/match-preview`, `GET /api/fleet/labels/suggestions` | Every configured node |
+| Bulk label assign | Transformative | `POST /api/fleet/labels/bulk-assign` | (computed client-side from `/api/labels` and `/api/fleet/node/:id/stacks` per node) | Only the nodes whose stacks you select |
+| Prune Docker resources fleet-wide | Maintenance | `POST /api/fleet/labels/fleet-prune` | `POST /api/fleet/prune/estimate` | Every configured node |
 
-Stop every stack assigned a given **stack label** on every node where that stack label exists. Stack labels are matched **by name** across the fleet, so a stack label called `production` on one node and an independently-authored `production` label on another node both match. This action targets stack labels only; node labels (used for node grouping) are never used here. See [Stack Labels](/features/stack-labels) for how to author the selector taxonomy.
+Every card is admin-only and available on every license tier. Stop and Prune iterate every node in **Settings → Nodes**; Bulk label assign iterates only the nodes whose stacks you actually checked. Each card runs the authoritative work on the executing node (the local node in process, every remote over the node proxy), so an unreachable node shows up in the results with a transport error rather than blocking the rest of the batch.
+
+## Stop by label
+
+Stop every stack assigned a given **stack label** on every node where that stack label exists. Stack labels are matched **by name, case-sensitively,** across the fleet, so a stack label called `Media` on one node and an independently-authored `Media` label on another node both match, while `media` does not. This action targets stack labels only; node labels (used for node grouping) are never used here. See [Stack Labels](/features/stack-labels) for how to author the selector taxonomy.
 
 ### Step by step
 
 1. Open **Fleet → Actions**.
-2. Type a name in the **Stack label** field. The picker queries each reachable node for its own stack labels and lists each name once with its combined stack and node counts (and the carrying node names), so the scope is unmistakable. A stack label that exists only on a remote node still appears. When a node cannot be reached, the picker notes that the suggestions may be incomplete. You can also type a name by hand.
-3. As you type, a live preview resolves the blast radius across the fleet and the card lists which nodes and stacks match. **Stop fleet** stays disabled until that preview resolves to at least one matching stack, so the action can never run before you can see what it will hit. If the live preview is unavailable, **Dry run** rehearses the same fan-out without stopping anything and resolves the blast radius the same way.
-4. Click **Stop fleet**.
-5. A confirmation appears with the kicker **Fleet stop**, the title `Stop all stacks with the stack label "<name>"?`, and the resolved list of nodes and stacks that will be stopped. Review it, then click **Stop fleet** to commit.
+2. Type a name in the **Stack label** field. The autocomplete queries every reachable node for its own stack labels (`GET /api/fleet/labels/suggestions`) and lists each name once with its combined stack and node counts. A stack label that exists only on a remote node still appears. When a node cannot be reached, a note under the field warns that suggestions may be incomplete. You can also type a name that isn't suggested; the live preview and the eventual stop still resolve it authoritatively against every node.
+3. As you type, the **Preview** section resolves the live blast radius: which nodes carry the label, how many stacks match on each, and which nodes could not be reached. The toolbar readout mirrors this (`7 stacks · 1 nodes`), and **Stop fleet** stays disabled until it resolves to at least one matching stack.
+4. Click **Stop fleet**. A confirmation dialog opens with the kicker **Fleet stop**, the title `Stop all stacks with the stack label "<name>"?`, and the resolved node/stack list ("Will stop 7 stacks across 1 node. Only these stacks are stopped, and only while they still carry the label.").
 
 <Frame>
-  <img src="/images/fleet-actions/fleet-actions-stop-confirm.png" alt="Fleet stop confirmation dialog. Kicker 'Fleet stop' in red mono, italic title 'Stop all stacks with the stack label &quot;docs-preview&quot;?', Cancel and Stop fleet buttons in the footer." />
+  <img src="/images/fleet-actions/fleet-actions-stop-confirm.png" alt="Fleet stop confirmation dialog. Kicker 'FLEET STOP' in red mono, title 'Stop all stacks with the stack label \"Media\"?', a description of the effect, a bordered list reading 'LOCAL bazarr, plex, radarr, seerr, sonarr, tautulli, threadfin', and Cancel / Stop fleet buttons in the footer." />
 </Frame>
+
+5. Click **Stop fleet** again to commit. If the live preview is unavailable, running **Dry run** first resolves the same blast radius through the destructive endpoint's own dry-run path and unblocks the real stop against that snapshot instead.
 
 ### Reading the per-node breakdown
 
-When the request finishes, the results render below the form, grouped by node. Each node row carries a colored icon and either a stack count or a `(no matching stack label)` annotation; the indented children below each row are the per-stack results.
+When the request finishes, a **Per-node breakdown** section renders below the form with a `Results` badge pair (`N ok` / `N failed`). Each node row carries a status icon and either a stack count or a `(no matching stack label)` annotation; the indented children below each row are the per-stack results.
 
 <Frame>
-  <img src="/images/fleet-actions/fleet-actions-stop-results.png" alt="Per-node breakdown after running fleet stop against a label that no node has. The header reads PER-NODE BREAKDOWN with two badges, '0 ok' and '7 failed'. Seven rows follow, one per node (Local, Opsix, Pitt-Moba, SLX-Mars, sencho-pilot-test, sencho-test-01, sencho-test-02), each annotated '(no matching stack label) · Stack label not present'." />
+  <img src="/images/fleet-actions/fleet-actions-stop-results.png" alt="Per-node breakdown after a dry run against the Media label. Results badges read '1 ok' and '3 failed'. Local shows 7 stacks (dry run) with all seven listed as succeeded. Opsix, Pitt-Moba, and SLX-Mars each show '(no matching stack label) · Stack label not present'." />
 </Frame>
 
 A few quirks worth knowing:
 
-- A node that has no stack label by that name appears as `<node> (no matching stack label)` and is counted in the **failed** badge. This is not a transport failure, it just means the stack label was not present on that node.
+- A node that has no stack label by that name appears as `<node> (no matching stack label)` and is counted in the **failed** badge. This is not a transport failure; it just means the label was not present on that node.
 - A node where the label exists but no stacks are assigned to it appears with a matched count of zero stacks. No per-stack rows render.
-- When the control instance reaches a remote node, the per-stack results you see come from the remote node's own response. A remote the control cannot reach, or that returns a non-2xx, is reported once as a single `<node> (unreachable)` row carrying the reason, not as a per-stack error, and it never blocks the stops on the reachable nodes.
+- A remote the control cannot reach, or that returns a non-2xx or malformed response, is reported once as a single `<node> (unreachable)` row carrying the reason, not as a per-stack error, and it never blocks the stops on the reachable nodes.
+
+### Confirmed-target binding and mixed-version fleets
+
+The real stop (not the dry run) sends the confirmed node/stack list from the preview along with the label name. The backend intersects that list against the label's current, live assignment before stopping anything, so drift between the moment you saw the preview and the moment you clicked confirm cannot widen the blast radius in either direction: a stack that gained the label after the preview is never stopped, and a node that reconnects between preview and confirm is not pulled in.
+
+This binding requires the remote node to understand the confirmed-target contract. If a remote is running an older Sencho version that does not advertise support for it, a real stop bound to specific stacks refuses to send to that node and reports it as needing an upgrade rather than silently falling back to stopping everything the label matches there. Dry runs carry no binding and are unaffected; they preview safely against any remote version.
 
 ### Behaviour and partial-failure semantics
 
-- The endpoint always returns 200 with a `results` array. Partial failures live inside that array; the HTTP status is not the place to look.
-- Each remote node call carries a 60-second timeout. A slow remote with many stacks can produce a clean per-stack list or a timeout row, depending on whether the remote streamed before the timeout fired.
-- Every node, local or remote, runs the stop under a per-node bulk-action lock shared with the per-label action endpoint, so a fleet stop and a per-label stop aimed at the same node serialize cleanly instead of double-stopping the same containers. On a remote, the lock is held on that remote while it runs its share of the stop.
+- The endpoint always returns `200` with a `results` array. Partial failures live inside that array; the HTTP status is not the place to look.
+- Each remote node call carries a 60-second timeout. A slow remote with many stacks can produce a clean per-stack list or a timeout row, depending on whether the remote streamed a response before the timeout fired.
+- Every node, local or remote, runs the stop under a per-node bulk-action lock shared with the per-label action endpoint (`POST /api/labels/:id/action`), so a fleet stop and a per-label stop aimed at the same node serialize cleanly instead of double-stopping the same containers.
 
 ## Bulk label assign
 
-Add a stack label to stacks across the fleet in one round trip. Pick a label that exists anywhere in the fleet, select stacks on one or more nodes, and Sencho assigns that label on each target node, creating it there first if the node does not have it yet. Existing labels on the selected stacks are preserved. Use this to keep a label like `media` consistent across nodes without visiting each one to recreate and assign it by hand.
+Add a stack label to stacks across the fleet in one round trip. Pick a label that exists anywhere in the fleet, check stacks on one or more nodes, and Sencho assigns that label on each target node, creating it there first if the node does not already have it. Existing labels on the selected stacks are preserved. Use this to keep a label like `Media` consistent across nodes without visiting each one to recreate and assign it by hand.
 
 <Frame>
-  <img src="/images/fleet-actions/fleet-actions-bulk-assign.png" alt="Bulk label assign card. A label source row of pills with 'Media' selected, a target-stacks list grouped by node (Local and a remote) with several stacks checked, a preview showing 'create' on the remote and 'reuse' on Local, and a primary button reading 'Apply'." />
+  <img src="/images/fleet-actions/fleet-actions-preview-states.png" alt="Prune fleet-wide card (idle, Managed only scope, 0 reclaimable) beside Bulk label assign with the Media pill selected, all fifteen local stacks checked under Target stacks, and a Preview section reading 'REUSE Local · 15 stacks'." />
 </Frame>
 
 ### Cross-node by label identity
 
-Labels are node-local: each node owns its own copy of a label. Bulk label assign treats the label you pick as a name plus color, then resolves it per target node. If the node already has a label with that exact name, its own label is used; if not, Sencho creates one with the same name and color. The target node's own label is always used for the assignment, never the control node's.
+Labels are node-local: each node owns its own copy of a label row. Bulk label assign treats the label you pick as a name plus color, then resolves it per target node. If the node already has a label with that exact name, its own label row is reused; if not, Sencho creates one with the same name and color. The target node's own label is always used for the assignment, never the control node's row.
 
 ### Step by step
 
-1. Pick a label under **Label · source**. The pills list every stack label defined across the reachable fleet. If the same name carries different colors on different nodes, the local node's color is used where the label is created.
-2. Under **Target stacks**, check the stacks you want, grouped by node. Use the filter to narrow long lists and **Select all** to take a whole node. Unreachable nodes are shown and cannot be selected.
-3. The **Preview** shows, per node, whether the label will be **created** or **reused** and how many stacks it will touch.
-4. Click **Apply**. A confirmation summarizes the blast radius; confirm to commit. Results render grouped by node, each row noting whether the label was created or reused alongside the per-stack outcome.
+1. Pick a label under **Label · source**. The pills list every distinct stack label name defined across the reachable fleet. If the same name carries different colors on different nodes, the local node's color wins (or the most common color, if the local node doesn't have it); a note under the pills flags the conflict.
+2. Under **Target stacks**, check the stacks you want, grouped by node. Use the filter field to narrow long lists and **Select all** / **Clear** to toggle a whole node at once. Unreachable nodes are shown but cannot be selected. **Refresh** re-reads stacks and labels from every node on demand; the list is loaded once when the card mounts and does not auto-poll.
+3. The **Preview** section shows, per node with a selection, whether the label will be **created** or **reused** and how many stacks it will touch.
+4. Click **Apply**. A confirmation dialog summarizes the blast radius and lists the affected stacks per node, flagging which nodes will create the label. Confirm to commit. Results render grouped by node, each row noting whether the label was created or reused alongside the per-stack outcome.
 
 ### Add, preserving existing labels
 
-The selected label is **added** to each chosen stack; the stack keeps its other labels. The card only ever adds the one label you picked, so a fleet-wide propagation cannot accidentally wipe labels a remote node already carries.
+The selected label is **added** to each chosen stack; the stack keeps every other label it already had. The card only ever adds the one label you picked, so a fleet-wide propagation cannot accidentally strip labels a remote node already carries. There is no replace or remove mode on this card.
 
 ### Batch ceiling
 
@@ -107,92 +123,123 @@ A single Apply accepts up to **1,000 stack assignments** summed across every tar
 Reclaim disk space on every reachable node by deleting unused images, volumes, and networks. The control instance fans out to each node and reports reclaimed bytes per node and per target.
 
 <Frame>
-  <img src="/images/fleet-actions/fleet-actions-prune.png" alt="Prune Docker resources fleet-wide card. Description reads 'Reclaim space on 7 nodes by removing unused images, volumes, and networks. Reclaimed bytes are approximate.' Below: TARGETS checkboxes (Images checked by default; Volumes; Networks). SCOPE segmented control (Managed only / All unused) with helper text 'Restricts to resources owned by stacks Sencho manages.' Primary button 'Prune across fleet'. A calm callout reads 'Prune is destructive and cannot be undone. Each target is run serially per node; reclaimed bytes appear per node and per target below.'" />
+  <img src="/images/fleet-actions/fleet-actions-prune.png" alt="Prune fleet-wide card with Images and Volumes targets checked, scope set to All unused, and a live per-node estimate: Local 153.85 MB, Opsix 3.06 GB, Pitt-Moba 1.37 GB, SLX-Mars 1.51 GB, totaling roughly 6.09 GB reclaimable in the toolbar readout." />
 </Frame>
 
 ### Pick what to prune
 
-The **TARGETS** checkboxes are independent and at least one must be ticked: **Images**, **Volumes**, **Networks**. The card defaults to Images alone, which is the cheapest and most common case.
+The **Targets** checkboxes are independent and at least one must be ticked: **Images**, **Volumes**, **Networks**. The card defaults to Images alone, the cheapest and most common case.
 
 ### Managed only versus All unused
 
 Scope is a segmented control with two options:
 
-- **Managed only** (default). Sencho looks up the list of stacks it knows about on the node, then prunes only resources owned by those stacks. Active containers and resources that other tools placed on the host are untouched. Helper text reads *Restricts to resources owned by stacks Sencho manages.*
-- **All unused**. Sencho runs `docker prune --all` for each selected target. Any image, volume, or network not currently in use is deleted, including resources from workloads Sencho does not manage. The confirmation title flips to **Prune ALL unused resources across the fleet?** and the confirm button reads **Prune everything unused**.
+- **Managed only** (default). Sencho looks up the stacks it knows about on the node, then prunes only resources owned by those stacks. Active containers and resources placed by other tools are untouched.
+- **All unused**. Sencho runs the equivalent of `docker system prune` for each selected target. Any image, volume, or network not currently in use is deleted, including resources from workloads Sencho does not manage. The confirmation title flips to **Prune ALL unused resources across the fleet?**.
 
-### Behaviour and reclaimed bytes
+### Live estimate and behaviour
 
-- Each remote node receives one `POST /api/system/prune/system` per selected target, with a 120-second timeout. If a transport error fires for one target, the remaining targets on that node are short-circuited with the same error so a dead node does not absorb the full multi-target timeout budget.
-- Local nodes serialize against a per-node lock (`bulk-prune:<nodeId>`). A second prune launched against the same local node while the first is still in flight returns *A prune is already running on this node* for each target.
-- Reclaimed bytes are reported by the Docker daemon and are approximate. Per-node rows in the results panel sum the per-target reclaim; the per-target children show how much each prune actually freed.
+- Changing a target or the scope re-triggers a debounced call to `POST /api/fleet/prune/estimate`, which walks the same Docker enumeration the destructive path uses so the estimate matches what pruning would actually reclaim. **Prune fleet** stays disabled until the estimate resolves: you cannot confirm a destructive fleet-wide prune with no context on what it will reclaim.
+- Each remote node receives one `POST /api/system/prune/system` call per selected target, with a 120-second timeout. If a transport error fires for one target, the remaining targets on that node are short-circuited with the same error rather than retried, so a dead node doesn't absorb the full multi-target timeout budget.
+- Local nodes serialize against a per-node lock (`bulk-prune:<nodeId>`). A second fleet prune launched against the same local node while the first is still in flight returns *A prune is already running on this node* for each target.
+- Reclaimed bytes are reported by the Docker daemon and are approximate. Per-node rows in the results panel sum the per-target reclaim; the per-target children show how much each individual prune actually freed.
+
+<Note>
+Fleet Actions' prune card calls the same node-local prune route as the single-node **Resources → Prune** page, but without that page's itemized plan-and-fingerprint flow. It never returns the `PRUNE_PLAN_STALE` (409) error you can see on Resources; each fleet prune call targets exactly one resource type per node and executes immediately. If you want an itemized, reviewable plan before pruning a specific node, use that node's own Resources page instead.
+</Note>
 
 ## Prerequisites
 
 | Requirement | Why it matters |
 |---|---|
-| **Configured remote nodes in Settings → Nodes** | The two fan-out cards iterate the configured node list. A node missing its `api_url` or `api_token`, or one that cannot be reached, is reported once per node as unreachable (Stop fleet by label) or per target (Prune), and never blocks the reachable nodes. |
-| **Labels you intend to target** | Stop fleet by label and the autocomplete depend on labels existing on at least one node. See [Stack Labels](/features/stack-labels) for the authoring flow. |
+| **Configured remote nodes in Settings → Nodes** | Stop and Prune iterate the configured node list; Bulk label assign iterates whichever nodes you select stacks on. A node missing its `api_url` or `api_token`, or one that cannot be reached, is reported once per node as unreachable and never blocks the reachable nodes. |
+| **Admin role** | Every card requires the admin role to apply. |
+| **Labels you intend to target** | Stop by label and its autocomplete depend on stack labels existing on at least one node; Bulk label assign depends on at least one stack label existing anywhere in the fleet. See [Stack Labels](/features/stack-labels) for the authoring flow. |
 
 ## Behaviour and lifecycle
 
-- **Always returns 200.** Every card is structured so that the HTTP status reflects the request shape, not the operational outcome. Partial failure is encoded in per-row fields, not in the status code.
+- **Always returns 200.** Every destructive endpoint is structured so the HTTP status reflects the request shape, not the operational outcome. Partial failure is encoded in per-row fields, not in the status code.
 - **No retry, no scheduling, no undo.** Fleet Actions runs synchronously and is operator-driven; there is no background scheduler and no roll-back. For recurrence, use [Scheduled Operations](/features/scheduled-operations).
 - **Offline remotes still receive the request.** A node that is down at the moment of the action returns a transport-error row but does not block the fan-out across the rest of the fleet.
-- **Concurrent runs serialize per node.** Both fan-out cards take per-node locks before hitting Docker, so kicking off a second prune (or a second fleet stop and a per-label stop) while the first is in flight yields a calm *A bulk action is already running on this node* / *A prune is already running on this node* row rather than silent overlap.
+- **Concurrent runs serialize per node.** All three cards take per-node locks before touching Docker or the label tables, so kicking off a second prune, a second fleet stop, or a fleet stop overlapping a per-label stop on the same node yields a calm "already running on this node" row rather than silent double-execution.
 
 ## Limitations and non-goals
 
-Fleet Actions is intentionally narrow in v1. The following are deliberately out of scope:
+Fleet Actions is intentionally narrow. The following are deliberately out of scope:
 
 - **No replace mode for bulk label assign.** The card only adds the label you pick; it never removes a stack's existing labels. To remove or swap labels on a stack, edit them from that stack's own view.
 - **No fleet-wide bulk start, restart, or update.** Stop is the only fleet-wide stack lifecycle action today. Per-node multi-stack start, restart, and update live in the sidebar's Bulk mode.
-- **No label-set selectors.** Stop fleet by label matches one label name. Combinations like "stacks labelled A AND B" are not supported.
-- **No partial-stop ceiling.** The Stop card stops every stack the label matches; there is no "stop the first N" knob.
+- **No label-set selectors.** Stop by label matches one label name. Combinations like "stacks labelled A AND B" are not supported.
+- **No partial-stop ceiling.** The Stop card stops every stack the resolved blast radius contains; there is no "stop the first N" knob.
 - **No undo.** A stopped stack stays stopped until you start it again; a pruned image is gone until it is pulled or rebuilt.
 - **Approximate reclaim numbers.** The bytes the Prune card reports come from the Docker daemon and are best-effort, not authoritative.
-- **60-second remote timeout on fleet-stop, 120-second remote timeout per prune target.** A remote with many stacks or a very slow filesystem may produce timeout rows before the work fully completes. The action itself usually still finishes on the remote; the control instance just stopped waiting.
+- **Confirmed-target stops need a current remote.** A real (non-dry-run) stop bound to specific stacks refuses to run against a remote that doesn't advertise support for confirmed-target binding; upgrade the remote to retry.
+- **Timeouts scale with the fan-out, not with any one node.** 60 seconds per remote on fleet-stop and bulk-assign, 120 seconds per remote per prune target. A remote with many stacks or a very slow filesystem may produce a timeout row before the underlying work fully completes; the action itself usually still finishes on the remote, the control instance just stopped waiting.
 
 ## Practical workflows
 
 ### Pause everything before a power event
 
-Tag the stacks you want to bring down with a dedicated label (for example `evening-shutdown`). Run **Stop fleet by label** with that label name. The per-node breakdown confirms each stack's stop result; restart from the sidebar when power is back.
+Tag the stacks you want to bring down with a dedicated label (for example `evening-shutdown`). Run **Stop by label** with that name and review the live preview before confirming. The per-node breakdown confirms each stack's stop result; restart from the sidebar when power is back.
+
+### Rehearse a destructive action before committing
+
+For Stop and Prune, click **Dry run** first. It walks the identical lock, fan-out, and per-node logic as the real action but skips the destructive leaf call, so the results panel shows exactly what would happen (including which nodes are unreachable right now) before you commit to it.
 
 ### Propagate a label across the fleet
 
-Define a label like `media` on one node (for example the local node) under **Settings → Labels**, then open **Bulk label assign**, pick `media` under the label source, and check the matching stacks on every node. Sencho creates `media` on each node that does not have it and assigns it, leaving each stack's other labels intact. The label then matches fleet-wide in **Stop fleet by label** and in per-node stack filtering.
+Define a label like `Media` on one node (for example the local node) under **Settings → Labels**, then open **Bulk label assign**, pick `Media` under the label source, and check the matching stacks on every node. Sencho creates `Media` on each node that does not have it and assigns it, leaving each stack's other labels intact. The label then matches fleet-wide in **Stop by label** and in per-node stack filtering.
 
 ### Free disk before a heavy deploy
 
-Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed only** scope. The reclaim shows up per node and gives you a quick read on which hosts had accumulated the most stale layers. Switch to **All unused** if you want the prune to reach workloads that Sencho does not manage.
+Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed only** scope, and check the live per-node estimate before confirming. It gives a quick read on which hosts have accumulated the most stale layers. Switch to **All unused** if you want the prune to reach workloads that Sencho does not manage.
+
+## Common questions
+
+<AccordionGroup>
+  <Accordion title="How is this different from Bulk mode in the sidebar?">
+    Bulk mode operates on a hand-picked set of stacks **on one node** and supports start, stop, restart, and update. Fleet Actions operates **across every configured node** by selector (a label, or a checked cross-node set), and only Stop is a lifecycle action here (Bulk mode covers restart and update, Fleet Actions does not).
+  </Accordion>
+  <Accordion title="Does Dry run touch anything?">
+    No. Dry run walks the same code path, including acquiring the per-node lock, but every card skips the destructive Docker or label-table call and returns what it would have done instead. It is safe to run repeatedly.
+  </Accordion>
+  <Accordion title="Why is the primary button disabled even though I typed a label or checked a target?">
+    Every destructive or state-changing button stays disabled until the live preview or estimate resolves to a non-zero, non-loading result. This is deliberate: you always confirm against a concrete, current blast radius rather than an unresolved input.
+  </Accordion>
+  <Accordion title="Why does Fleet's Prune never show the 'stale plan' error I've seen on Resources?">
+    Resources → Prune builds an itemized plan with a fingerprint and re-validates it at execute time, which is where that error comes from. Fleet Actions' prune card calls the simpler legacy single-target path on each node instead, so there is no plan to go stale.
+  </Accordion>
+</AccordionGroup>
 
 ## Troubleshooting
 
 <AccordionGroup>
   <Accordion title="A node shows '(no matching stack label)' but I created the label there">
-    The fleet-stop match is by **stack label name**, not label ID. Confirm the stack label name on the affected node under **Settings → Labels**; a typo, a case mismatch, or a trailing space will leave the node out. Stack labels are scoped per node, so renaming the label on one node does not propagate to the others.
+    The fleet-stop match is by **stack label name, case-sensitively**, not label ID. Confirm the exact stack label name on the affected node under **Settings → Labels**; a typo, a case mismatch (`media` vs `Media`), or a trailing space will leave the node out. Stack labels are scoped per node, so renaming the label on one node does not propagate to the others.
   </Accordion>
   <Accordion title="The autocomplete didn't suggest a stack label I know exists">
-    The picker queries each reachable node for its own stack labels, so a name is missing when no reachable node has a **stack label** by that name, or when the node that owns it could not be reached when the picker loaded (the picker flags this case). Node labels never appear here, because this action targets stack labels only. You can always type a name by hand; the fleet-stop request still iterates every node and asks each one authoritatively.
+    The picker queries each reachable node for its own stack labels, so a name is missing when no reachable node has a **stack label** by that name, or when the node that owns it could not be reached when the picker loaded (a note under the field flags this case). Node labels never appear here, because this action targets stack labels only. You can always type a name by hand; the live preview and the fleet-stop request still resolve it authoritatively against every node.
   </Accordion>
   <Accordion title="Bulk label assign reports 'Invalid stack name' or 'Stack not found' for one row">
-    Stack names must match the standard validator: alphanumeric plus dash and underscore, no spaces, no path separators. A name that does not exist on its node returns *Stack not found*. Each stack is validated independently, so one bad row does not block the rest of the batch. Fix the offending entry and re-run; the rows that already succeeded are simply re-added with no change.
+    Stack names must match the standard validator: alphanumeric plus dash and underscore, no spaces, no path separators. A name that does not exist on its node returns *Stack not found*. Each stack is validated independently, so one bad row does not block the rest of the batch.
   </Accordion>
   <Accordion title="The Apply button on Bulk label assign is disabled">
     Apply needs both a label picked under the source and at least one stack checked. An empty label source means no stack labels are defined on any reachable node yet; create one under **Settings → Labels** first. Wait for the per-node lists to finish loading before selecting.
   </Accordion>
-  <Accordion title="Fleet stop timed out on one remote node">
-    Each remote node call carries a 60-second timeout. A remote with many stacks or a slow Docker daemon can outlast that budget. Check the affected remote's logs; the stop usually completed on the remote even though the control instance stopped waiting. Re-running the same fleet-stop is safe: stacks that are already stopped return the per-stack error *No containers found for this stack* and do not toggle anything else.
+  <Accordion title="A real Stop by label refuses to run against one node with an upgrade message">
+    That remote is running a Sencho version that doesn't advertise support for confirmed-target binding, the mechanism that binds the real stop to exactly the stacks you saw in the preview. Upgrade the remote node and retry; Dry run is unaffected and works against any version.
+  </Accordion>
+  <Accordion title="Fleet stop or bulk assign timed out on one remote node">
+    Each remote node call carries a 60-second timeout. A remote with many stacks or a slow Docker daemon can outlast that budget. Check the affected remote's logs; the action usually completed on the remote even though the control instance stopped waiting. Re-running is safe for Stop: stacks that are already stopped return the per-stack error *No containers found for this stack* and do not toggle anything else.
   </Accordion>
   <Accordion title="Prune across fleet reports 'A prune is already running on this node'">
-    The per-node prune lock is held while the first prune is in flight. Wait for the first run to finish or click **Refresh** on the Fleet masthead to confirm it has cleared, then re-run. The lock is released automatically when the first run exits.
+    The per-node prune lock is held while the first prune is in flight. Wait for the first run to finish, then re-run. The lock is released automatically when the first run exits.
   </Accordion>
-  <Accordion title="The Apply button returns an error toast">
-    Fleet Actions runs admin-only. Confirm the active user has the admin role under **Settings → Users**. Operator and viewer roles see the cards but cannot apply them.
+  <Accordion title="A card's action returns a permission error even though I can see it">
+    Fleet Actions runs admin-only. Confirm the active user has the admin role under **Settings → Users**; operator and viewer roles see every card but cannot apply them.
   </Accordion>
-  <Accordion title="A node is reported as unreachable (or shows a transport error per target)">
-    The node is in **Settings → Nodes** but its `api_url` or `api_token` is missing, expired, or unreachable. Stop fleet by label reports it once as a single `<node> (unreachable)` row; Prune reports it per target. Open **Settings → Nodes** on the control instance and click **Test connection** for the remote; fix the credential or the reachability, then re-run the action.
+  <Accordion title="A node is reported as unreachable">
+    The node is in **Settings → Nodes** but its `api_url` or `api_token` is missing, expired, or unreachable. Stop by label reports it once as a single `<node> (unreachable)` row; Prune reports it per target. Open **Settings → Nodes** on the control instance and test the connection for the remote; fix the credential or the reachability, then re-run the action.
   </Accordion>
 </AccordionGroup>
 
@@ -200,13 +247,29 @@ Run **Prune Docker resources fleet-wide** with **Images** selected and **Managed
 
 Fleet Actions is one slice of the Fleet view. Each adjacent surface answers a different question.
 
-| Related feature | What it covers | Why it is not Fleet Actions |
-|---|---|---|
-| [Stack Labels](/features/stack-labels) | Author the per-node label taxonomy that Fleet Actions targets. | Fleet Actions consumes labels; Stack Labels create and rename them. |
-| [Stack Sidebar · Bulk mode](/features/sidebar#bulk-mode) | Per-node, per-stack bulk start, stop, restart, and update. | Bulk mode handles a hand-picked subset of stacks on one node; Fleet Actions runs by selector across many nodes. |
-| [Scheduled Operations](/features/scheduled-operations) | Recurring or one-shot scheduled stack operations. | Scheduled Operations owns recurrence; Fleet Actions is always operator-initiated. |
-| [Fleet Federation](/features/fleet-federation) | Operator-driven placement controls (cordon, pin) for [Blueprints](/features/blueprint-model). | Federation steers declarative placement; Fleet Actions runs imperative operations on what already exists. |
-| [Fleet Sync](/features/fleet-sync) | Push-only replication of security rules from a control instance to its replicas. | Fleet Sync replicates state; Fleet Actions runs operations. |
-| [Multi-Node Management](/features/multi-node) | How nodes get added to the fleet (proxy or pilot mode) and how the license tier propagates. | Multi-Node Management is the prerequisite; Fleet Actions runs against whatever Multi-Node Management already configured. |
-| [Fleet View](/features/fleet-view) | The masthead, tab strip, and node grid that host the Actions tab. | Fleet Actions is one tab inside Fleet View. |
-| [Licensing](/features/licensing) | Community and Admiral plans. | Licensing covers plan coverage across the product; Fleet Actions only cites the admin role check above. |
+<CardGroup cols={2}>
+  <Card title="Stack Labels" icon="tag" href="/features/stack-labels">
+    Author the per-node label taxonomy that Fleet Actions targets. Fleet Actions consumes labels; Stack Labels create and rename them.
+  </Card>
+  <Card title="Stack Sidebar · Bulk mode" icon="list-check" href="/features/sidebar#bulk-mode">
+    Per-node, per-stack bulk start, stop, restart, and update. Handles a hand-picked subset of stacks on one node; Fleet Actions runs by selector across many nodes.
+  </Card>
+  <Card title="Scheduled Operations" icon="clock" href="/features/scheduled-operations">
+    Recurring or one-shot scheduled stack operations. Owns recurrence; Fleet Actions is always operator-initiated.
+  </Card>
+  <Card title="Fleet Federation" icon="sitemap" href="/features/fleet-federation">
+    Operator-driven placement controls for Blueprints. Steers declarative placement; Fleet Actions runs imperative operations on what already exists.
+  </Card>
+  <Card title="Fleet Sync" icon="arrows-rotate" href="/features/fleet-sync">
+    Push-only replication of security rules from a control instance to its replicas. Replicates state; Fleet Actions runs operations.
+  </Card>
+  <Card title="Multi-Node Management" icon="server" href="/features/multi-node">
+    How nodes get added to the fleet and how license tier propagates. The prerequisite; Fleet Actions runs against whatever Multi-Node Management already configured.
+  </Card>
+  <Card title="Fleet View" icon="table-cells" href="/features/fleet-view">
+    The masthead, tab strip, and node grid that host the Actions tab.
+  </Card>
+  <Card title="Licensing" icon="key" href="/features/licensing">
+    Community and Admiral plans. Fleet Actions is available on every tier; only the admin role check applies.
+  </Card>
+</CardGroup>
