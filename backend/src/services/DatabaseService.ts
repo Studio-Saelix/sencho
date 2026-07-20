@@ -1823,6 +1823,7 @@ export class DatabaseService {
         stmt.run('image_update_check_mode', 'interval');
         stmt.run('image_update_check_cron', '');
         stmt.run('image_update_sidebar_indicators', '1');
+        stmt.run('notification_dispatch_retries', '0');
         stmt.run('env_block_deploy_on_missing_required', '0');
         stmt.run('auto_create_missing_external_networks', '0');
 

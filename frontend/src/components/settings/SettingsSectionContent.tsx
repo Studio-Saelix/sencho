@@ -96,7 +96,7 @@ function renderSection(
         case 'docker-storage': return <DockerStorageSection onDirtyChange={(d) => onDirtyChange('docker-storage', d)} />;
         case 'image-updates': return <UpdatesSection />;
         case 'fleet-mesh': return <FleetMeshSection onDirtyChange={(d) => onDirtyChange('fleet-mesh', d)} />;
-        case 'notifications': return <NotificationsSection />;
+        case 'notifications': return <NotificationsSection onDirtyChange={(d) => onDirtyChange('notifications', d)} />;
         case 'notification-routing': return <NotificationRoutingSection />;
         case 'notification-suppression': return (
             <NotificationSuppressionSection

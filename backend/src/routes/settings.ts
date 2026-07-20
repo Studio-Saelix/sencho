@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin, requirePaid } from '../middleware/tierGates';
+import { parseNotificationDispatchRetries } from '../helpers/notificationDispatchRetries';
 
 // Strict allowlist of keys readable and writable via the generic settings
 // API. This is the single source of truth for what the endpoint exposes:
@@ -34,6 +35,7 @@ const ALLOWED_SETTING_KEYS = new Set([
   'env_block_deploy_on_missing_required',
   'auto_create_missing_external_networks',
   'image_update_sidebar_indicators',
+  'notification_dispatch_retries',
 ]);
 
 // Keys whose write requires a paid license, not just an admin role.
@@ -66,6 +68,15 @@ const SettingsPatchSchema = z.object({
   env_block_deploy_on_missing_required: z.enum(['0', '1']),
   auto_create_missing_external_networks: z.enum(['0', '1']),
   image_update_sidebar_indicators: z.enum(['0', '1']),
+  // Strict: do not use bare z.coerce.number() (null/false/'' become 0; true becomes 1).
+  notification_dispatch_retries: z.unknown().superRefine((v, ctx) => {
+    if (parseNotificationDispatchRetries(v) === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Must be an integer from 0 to 3',
+      });
+    }
+  }).transform((v) => String(parseNotificationDispatchRetries(v)!)),
 }).partial();
 
 export const settingsRouter = Router();

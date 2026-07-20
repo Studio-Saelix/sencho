@@ -13,6 +13,7 @@ const {
   mockGetStackLabelIds,
   mockAddNotificationHistory,
   mockUpdateNotificationDispatchError,
+  mockGetGlobalSettings,
 } = vi.hoisted(() => ({
   mockGetEnabledNotificationRoutes: vi.fn().mockReturnValue([]),
   mockGetEnabledNotificationSuppressionRules: vi.fn().mockReturnValue([]),
@@ -26,6 +27,7 @@ const {
     is_read: 0,
   }),
   mockUpdateNotificationDispatchError: vi.fn(),
+  mockGetGlobalSettings: vi.fn().mockReturnValue({ notification_dispatch_retries: '0' }),
 }));
 
 vi.mock('../services/DatabaseService', () => ({
@@ -37,6 +39,7 @@ vi.mock('../services/DatabaseService', () => ({
       getStackLabelIds: mockGetStackLabelIds,
       addNotificationHistory: mockAddNotificationHistory,
       updateNotificationDispatchError: mockUpdateNotificationDispatchError,
+      getGlobalSettings: mockGetGlobalSettings,
     }),
   },
 }));
@@ -301,7 +304,7 @@ describe('NotificationService - routing logic', () => {
 
     expect(mockUpdateNotificationDispatchError).toHaveBeenCalledWith(
       1, // notification id from mock
-      expect.stringContaining('Connection refused')
+      expect.stringContaining('Discord webhook request failed')
     );
   });
 
@@ -314,7 +317,7 @@ describe('NotificationService - routing logic', () => {
 
     expect(mockUpdateNotificationDispatchError).toHaveBeenCalledWith(
       1,
-      expect.stringContaining('Timeout')
+      expect.stringContaining('Slack webhook request failed')
     );
   });
 

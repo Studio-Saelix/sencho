@@ -7,12 +7,14 @@ description: Threshold and event alerts for your fleet, dispatched to Discord, S
 Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and an external channel you configure. This page covers everything from configuring channels to writing per-stack threshold rules, routing alerts to dedicated channels with routing rules, and tuning retention.
 
 <Frame>
-  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel with Discord, Slack, Webhook, and Apprise tabs, CHANNELS 1/4 in the masthead, the Apprise tab active with Enabled on, a redacted Apprise endpoint, an empty Tags field, and Test disabled beside Save." />
+  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel showing a Delivery retries row with Extra attempts set to 0 and Save retries disabled, Discord Slack Webhook and Apprise tabs with Apprise selected, CHANNELS 0/4 in the masthead, Enabled off, an empty Apprise endpoint, and Test disabled beside Save." />
 </Frame>
 
 ## Notification channels
 
 Open **Settings · Notifications · Channels** to configure Discord, Slack, custom webhook, and Apprise channels. Each channel is per-node, so switching the active node via the node picker reloads the panel against that node's stored settings. The masthead carries a `CHANNELS` stat showing how many of the four slots are enabled.
+
+Above the channel tabs, **Delivery retries** sets how many extra in-process attempts (0 to 3) Sencho makes after a transient delivery failure on that node. The default is `0` (single-shot). Extra attempts wait a fixed one second between tries. Admin role is required to change the value.
 
 Each Discord, Slack, and Webhook tab carries an **Enabled** toggle, a **Webhook URL** input (HTTPS only), and **Test** / **Save**. The Apprise tab uses an **Apprise endpoint** instead: keyed `/notify/{key}` shows optional **Tags**; stateless `/notify` shows **Destination URLs**. The kicker on each tab toggles between `enabled` and `off` so you can see at a glance which slots are wired up.
 
@@ -51,9 +53,9 @@ Sencho sends the alert title, body, severity, and either tags or destination URL
 
 ### Test sends and delivery semantics
 
-The **Test** button on each tab dispatches the literal message `🔌 Test Notification from Sencho!` at level `info` through the same path a real alert would take. Test sends require the admin role; the server returns 403 if an operator or viewer submits one.
+The **Test** button on each tab dispatches the literal message `🔌 Test Notification from Sencho!` at level `info` through the same path a real alert would take, including the node's delivery-retries setting. Test sends require the admin role; the server returns 403 if an operator or viewer submits one.
 
-Each dispatch is a single-shot HTTP POST with a 10-second `AbortSignal.timeout`. There is no retry queue. If your endpoint is down at the moment of the dispatch, the alert is recorded in the bell with an internal `dispatch_error` field set and is not redelivered.
+Each delivery attempt is an HTTP POST with a 10-second `AbortSignal.timeout`. By default (`Delivery retries` = 0) Sencho makes one attempt. You can allow up to three extra in-process attempts with a fixed one-second delay between them. Retries apply only to classified transient failures (for example HTTP 5xx or network timeouts). Client errors such as HTTP 4xx and Apprise HTTP 204 are not retried. There is no durable retry queue: if the process exits mid-dispatch, remaining attempts are not persisted. Delivery is at-least-once under ambiguous timeouts or connection resets, so a receiver that accepted a request whose response was lost can receive a duplicate. If every attempt fails, the alert remains in the bell with `dispatch_error` set.
 
 ## Notification Routing
 
@@ -421,7 +423,7 @@ The **Host Alerts** panel carries the **Host thresholds** rows (CPU limit, RAM l
 | Per-stack alert rule evaluation | 30 seconds |
 | Image update poll | Configurable (default every 2 hours), with a 2-minute startup delay and a 2-minute cooldown on manual refresh |
 | Sencho version check | Monitor evaluation every 30 seconds; shared version cache refreshes every 30 minutes when published or every 3 minutes while publish is pending |
-| Notification fanout to channels | Single shot per dispatch, 10-second timeout, no retries |
+| Notification fanout to channels | One attempt by default; optional 0-3 extra in-process attempts with a fixed 1s delay; 10-second timeout per attempt; no durable queue |
 | Bell live updates | Pushed live over the notifications WebSocket per node |
 | Bell safety-net reconcile | 60 seconds |
 | Crash dedup window per container | 60 minutes |

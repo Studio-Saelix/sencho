@@ -22,6 +22,7 @@ export interface PatchableSettings {
     env_block_deploy_on_missing_required?: '0' | '1';
     auto_create_missing_external_networks?: '0' | '1';
     image_update_sidebar_indicators?: '0' | '1';
+    notification_dispatch_retries?: string;
 }
 
 export const DEFAULT_SETTINGS: PatchableSettings = {
@@ -48,6 +49,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     env_block_deploy_on_missing_required: '0',
     auto_create_missing_external_networks: '0',
     image_update_sidebar_indicators: '1',
+    notification_dispatch_retries: '0',
 };
 
 export type SectionId =

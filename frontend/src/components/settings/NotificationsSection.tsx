@@ -7,12 +7,15 @@ import { TogglePill } from '@/components/ui/toggle-pill';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { useNodes } from '@/context/NodeContext';
+import { useAuth } from '@/context/AuthContext';
 import { RefreshCw } from 'lucide-react';
 import type { Agent } from './types';
+import { DEFAULT_SETTINGS } from './types';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { NumberChip } from './SystemControls';
 import { classifyAppriseEndpoint, isKeyedAppriseEndpoint, isStatelessAppriseEndpoint } from '@/lib/appriseEndpoint';
 
 type ChannelType = 'discord' | 'slack' | 'webhook' | 'apprise';
@@ -38,8 +41,20 @@ function hasStoredAppriseAgent(agent: Agent): boolean {
     return Boolean(agent.config?.mode) || agent.url.includes('<redacted>');
 }
 
-export function NotificationsSection() {
+function clampRetryExtras(raw: string): string {
+    const n = Math.trunc(Number(raw));
+    if (!Number.isFinite(n)) return DEFAULT_SETTINGS.notification_dispatch_retries!;
+    return String(Math.max(0, Math.min(3, n)));
+}
+
+interface NotificationsSectionProps {
+    onDirtyChange?: (dirty: boolean) => void;
+}
+
+export function NotificationsSection({ onDirtyChange }: NotificationsSectionProps) {
     const { activeNode } = useNodes();
+    const { isAdmin } = useAuth();
+    const readOnly = !isAdmin;
     const activeNodeIdRef = useRef(activeNode?.id);
     useEffect(() => { activeNodeIdRef.current = activeNode?.id; }, [activeNode?.id]);
 
@@ -49,6 +64,15 @@ export function NotificationsSection() {
     const [isTestingAgent, setIsTestingAgent] = useState<Record<string, boolean>>({});
     const [appriseUrlDirty, setAppriseUrlDirty] = useState(false);
     const [appriseConfigDirty, setAppriseConfigDirty] = useState(false);
+
+    const [retries, setRetries] = useState(DEFAULT_SETTINGS.notification_dispatch_retries!);
+    const [savedRetries, setSavedRetries] = useState(DEFAULT_SETTINGS.notification_dispatch_retries!);
+    const [isSavingRetries, setIsSavingRetries] = useState(false);
+    const retriesDirty = retries !== savedRetries;
+
+    useEffect(() => {
+        onDirtyChange?.(retriesDirty);
+    }, [retriesDirty, onDirtyChange]);
 
     const fetchAgents = async () => {
         const requestNodeId = activeNode?.id;
@@ -73,11 +97,34 @@ export function NotificationsSection() {
         }
     };
 
+    const fetchRetries = async () => {
+        const requestNodeId = activeNode?.id;
+        try {
+            const res = await apiFetch('/settings', {
+                nodeId: typeof requestNodeId === 'number' ? requestNodeId : undefined,
+            });
+            if (!res.ok) return;
+            const data: Record<string, string> = await res.json();
+            if (activeNodeIdRef.current !== requestNodeId) return;
+            const next = clampRetryExtras(data.notification_dispatch_retries ?? DEFAULT_SETTINGS.notification_dispatch_retries!);
+            setRetries(next);
+            setSavedRetries(next);
+        } catch (e) {
+            console.error('Failed to fetch notification retry setting', e);
+        }
+    };
+
     useEffect(() => {
+        // Reset local channel/retry state when the active node changes so a prior
+        // node's values cannot flash while the replacement fetches settle.
+        // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional node-switch reset
         setAgents(emptyAgents());
         setAppriseUrlDirty(false);
         setAppriseConfigDirty(false);
+        setRetries(DEFAULT_SETTINGS.notification_dispatch_retries!);
+        setSavedRetries(DEFAULT_SETTINGS.notification_dispatch_retries!);
         void fetchAgents();
+        void fetchRetries();
     }, [activeNode?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const enabledCount = Object.values(agents).filter(a => a.enabled).length;
@@ -87,7 +134,36 @@ export function NotificationsSection() {
             value: `${enabledCount}/4`,
             tone: enabledCount > 0 ? 'value' : 'subtitle',
         },
+        ...(retriesDirty
+            ? [{ label: 'EDITED', value: 'retries', tone: 'warn' as const }]
+            : []),
     ]);
+
+    const saveRetries = async () => {
+        const requestNodeId = activeNode?.id;
+        const submitted = clampRetryExtras(retries);
+        setIsSavingRetries(true);
+        try {
+            const res = await apiFetch('/settings', {
+                method: 'PATCH',
+                nodeId: typeof requestNodeId === 'number' ? requestNodeId : undefined,
+                body: JSON.stringify({ notification_dispatch_retries: submitted }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                toast.error(err?.error || err?.message || 'Something went wrong.');
+                return;
+            }
+            if (activeNodeIdRef.current !== requestNodeId) return;
+            setRetries(submitted);
+            setSavedRetries(submitted);
+            toast.success('Delivery retries saved.');
+        } catch (e: unknown) {
+            toast.error((e as Error)?.message || 'Network error.');
+        } finally {
+            setIsSavingRetries(false);
+        }
+    };
 
     const handleAgentChange = (type: string, field: keyof Agent, value: Agent[keyof Agent]) => {
         setAgents(prev => ({
@@ -283,6 +359,39 @@ export function NotificationsSection() {
 
     return (
         <div className="flex flex-col gap-6">
+            <fieldset disabled={readOnly} className="min-w-0 border-0 p-0 m-0">
+                <SettingsSection title="Delivery retries" kicker={retriesDirty ? 'edited' : 'saved'}>
+                    <SettingsField
+                        label="Extra attempts"
+                        helper="Extra in-process attempts after a transient delivery failure (0 keeps single-shot). Fixed 1 second between attempts. Ambiguous timeouts can produce duplicate notifications."
+                    >
+                        <NumberChip
+                            value={retries}
+                            onChange={(v) => setRetries(clampRetryExtras(v))}
+                            suffix="extra"
+                            min={0}
+                            max={3}
+                            step={1}
+                            disabled={readOnly}
+                        />
+                    </SettingsField>
+                    <SettingsActions>
+                        <SettingsPrimaryButton
+                            onClick={() => void saveRetries()}
+                            disabled={readOnly || !retriesDirty || isSavingRetries}
+                        >
+                            {isSavingRetries ? (
+                                <>
+                                    <RefreshCw className="w-4 h-4 animate-spin" />
+                                    Saving
+                                </>
+                            ) : (
+                                'Save retries'
+                            )}
+                        </SettingsPrimaryButton>
+                    </SettingsActions>
+                </SettingsSection>
+            </fieldset>
             <Tabs value={notifTab} onValueChange={(v) => setNotifTab(v as ChannelType)} className="w-full">
                 <TabsList className="w-full mb-4 grid grid-cols-4">
                     <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>

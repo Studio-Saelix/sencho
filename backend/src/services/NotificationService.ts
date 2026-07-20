@@ -19,6 +19,7 @@ import {
     parseStoredAppriseConfig,
     validateNotificationChannel,
 } from '../helpers/notificationChannels';
+import { parseNotificationDispatchRetries } from '../helpers/notificationDispatchRetries';
 
 export type NotificationCategory =
     | 'deploy_success'
@@ -71,6 +72,13 @@ export const ALL_SUPPRESSIBLE_CATEGORIES: readonly NotificationCategory[] = [
 /** Webhook timeout: 10 seconds per external dispatch call. */
 const WEBHOOK_TIMEOUT_MS = 10_000;
 
+/** Fixed delay between retryable delivery attempts (extra attempts only). */
+const RETRY_DELAY_MS_DEFAULT = 1_000;
+
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Valid notification channel types for defense-in-depth validation. */
 const ALLOWED_CHANNEL_TYPES = new Set<NotificationChannelType>(['discord', 'slack', 'webhook', 'apprise']);
 
@@ -84,6 +92,8 @@ export class NotificationService {
     private static instance: NotificationService;
     private dbService: DatabaseService;
     private readonly subscribers = new Set<WebSocket>();
+    /** Overridable in tests so retry loops need not wait a real second. */
+    private static retryDelayMs = RETRY_DELAY_MS_DEFAULT;
 
     private constructor() {
         this.dbService = DatabaseService.getInstance();
@@ -94,6 +104,11 @@ export class NotificationService {
             NotificationService.instance = new NotificationService();
         }
         return NotificationService.instance;
+    }
+
+    /** @internal Test-only: set the inter-attempt delay (production uses 1000). */
+    public static setRetryDelayMsForTests(ms: number): void {
+        NotificationService.retryDelayMs = ms;
     }
 
     /**
@@ -256,6 +271,9 @@ export class NotificationService {
                 return;
             }
 
+            // Resolve retry extras once for this dispatch (shared by all destinations).
+            const retries = this.resolveDispatchRetries();
+
             // 3. Check notification routing rules — always evaluated, matchers compose AND
             const errors: string[] = [];
 
@@ -264,7 +282,7 @@ export class NotificationService {
                 if (isDebugEnabled()) console.log(`[Notify:diag] Matched ${matched.length} route(s) for stack "${sanitizeForLog(stackName ?? '(none)')}", category="${sanitizeForLog(category)}"`);
                 await Promise.allSettled(
                     matched.map(route =>
-                        this.sendToChannel(route.channel_type, route.channel_url, level, sanitized, route.config)
+                        this.sendWithRetries(route.channel_type, route.channel_url, level, sanitized, route.config, retries)
                             .then(() => {
                                 if (isDebugEnabled()) console.log(`[Notify:diag] Dispatched ${level} via route "${sanitizeForLog(route.name)}" (${route.channel_type})`);
                             })
@@ -288,7 +306,7 @@ export class NotificationService {
             if (isDebugEnabled()) console.log(`[Notify:diag] Falling back to ${agents.length} global agent(s)`);
             await Promise.allSettled(
                 agents.map(agent =>
-                    this.sendToChannel(agent.type, agent.url, level, sanitized, agent.config)
+                    this.sendWithRetries(agent.type, agent.url, level, sanitized, agent.config, retries)
                         .then(() => {
                             if (isDebugEnabled()) console.log(`[Notify:diag] Dispatched ${level} via global agent (${agent.type})`);
                         })
@@ -304,6 +322,25 @@ export class NotificationService {
         }
     }
 
+    /**
+     * Read notification_dispatch_retries once. Missing, malformed, out-of-range,
+     * or thrown settings reads fall back to 0 so the initial send still happens.
+     */
+    private resolveDispatchRetries(): number {
+        try {
+            const raw = this.dbService.getGlobalSettings().notification_dispatch_retries;
+            const parsed = parseNotificationDispatchRetries(raw);
+            if (parsed === null) {
+                console.warn('[Notify] Invalid notification_dispatch_retries; using 0');
+                return 0;
+            }
+            return parsed;
+        } catch (err) {
+            console.warn('[Notify] Failed to read notification_dispatch_retries; using 0:', err);
+            return 0;
+        }
+    }
+
     /** Persist dispatch errors to the notification record for user visibility. */
     private recordDispatchErrors(notificationId: number, errors: string[]) {
         if (errors.length > 0) {
@@ -313,6 +350,43 @@ export class NotificationService {
                 console.error('[Notify] Failed to record dispatch error:', e);
             }
         }
+    }
+
+    /**
+     * Deliver with up to `retries` extra attempts after the first try.
+     * Waits a fixed 1s between attempts only when a retryable failure leaves attempts remaining.
+     */
+    private async sendWithRetries(
+        type: string,
+        url: string,
+        level: 'info' | 'warning' | 'error',
+        message: string,
+        config: string | null | undefined,
+        retries: number,
+    ): Promise<void> {
+        const totalAttempts = 1 + retries;
+        let lastError: NotificationDeliveryError | undefined;
+        for (let attempt = 0; attempt < totalAttempts; attempt++) {
+            try {
+                await this.sendToChannel(type, url, level, message, config);
+                return;
+            } catch (error) {
+                const deliveryError = error instanceof NotificationDeliveryError
+                    ? error
+                    : new NotificationDeliveryError(
+                        getErrorMessage(error, 'Notification delivery failed'),
+                        null,
+                        false,
+                    );
+                lastError = deliveryError;
+                const attemptsRemain = attempt < totalAttempts - 1;
+                if (!deliveryError.retryable || !attemptsRemain) {
+                    throw deliveryError;
+                }
+                await sleep(NotificationService.retryDelayMs);
+            }
+        }
+        throw lastError ?? new NotificationDeliveryError('Notification delivery failed', null, false);
     }
 
     private async sendToChannel(type: string, url: string, level: 'info' | 'warning' | 'error', message: string, config?: string | null): Promise<void> {
@@ -329,7 +403,7 @@ export class NotificationService {
             }
             await this.sendAppriseNotify(url, level, message, parsed);
         } else {
-            throw new Error(`Unsupported channel type: ${type}`);
+            throw new NotificationDeliveryError(`Unsupported channel type: ${type}`, null, false);
         }
     }
 
@@ -338,7 +412,8 @@ export class NotificationService {
         const validation = validateNotificationChannel(type, url, config);
         if (validation) throw new Error(`URL ${validation}`);
         const stored = type === 'apprise' ? normalizeAppriseStoredJson(url, config) : (config == null ? null : JSON.stringify(config));
-        await this.sendToChannel(type, url, 'info', '🔌 Test Notification from Sencho!', stored);
+        const retries = this.resolveDispatchRetries();
+        await this.sendWithRetries(type, url, 'info', '🔌 Test Notification from Sencho!', stored, retries);
     }
 
     private async sendAppriseNotify(
@@ -393,15 +468,28 @@ export class NotificationService {
             }]
         };
 
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-            signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
-        });
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+            });
 
-        if (!response.ok) {
-            throw new Error(`Discord Webhook responded with ${response.status}`);
+            if (response.status >= 400 && response.status < 500) {
+                throw new NotificationDeliveryError(`Discord webhook responded with HTTP ${response.status}`, response.status, false);
+            }
+            if (!response.ok) {
+                throw new NotificationDeliveryError(`Discord webhook responded with HTTP ${response.status}`, response.status, true);
+            }
+        } catch (error) {
+            if (error instanceof NotificationDeliveryError) throw error;
+            const aborted = error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
+            throw new NotificationDeliveryError(
+                aborted ? 'Discord webhook request timed out' : 'Discord webhook request failed',
+                null,
+                true,
+            );
         }
     }
 
@@ -416,15 +504,28 @@ export class NotificationService {
             text: `${emojiMap[level]} *Sencho Alert [${level.toUpperCase()}]*\n${message}`
         };
 
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-            signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
-        });
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+            });
 
-        if (!response.ok) {
-            throw new Error(`Slack Webhook responded with ${response.status}`);
+            if (response.status >= 400 && response.status < 500) {
+                throw new NotificationDeliveryError(`Slack webhook responded with HTTP ${response.status}`, response.status, false);
+            }
+            if (!response.ok) {
+                throw new NotificationDeliveryError(`Slack webhook responded with HTTP ${response.status}`, response.status, true);
+            }
+        } catch (error) {
+            if (error instanceof NotificationDeliveryError) throw error;
+            const aborted = error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
+            throw new NotificationDeliveryError(
+                aborted ? 'Slack webhook request timed out' : 'Slack webhook request failed',
+                null,
+                true,
+            );
         }
     }
 
@@ -436,15 +537,28 @@ export class NotificationService {
             source: 'sencho'
         };
 
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-            signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
-        });
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+            });
 
-        if (!response.ok) {
-            throw new Error(`Custom Webhook responded with ${response.status}`);
+            if (response.status >= 400 && response.status < 500) {
+                throw new NotificationDeliveryError(`Custom webhook responded with HTTP ${response.status}`, response.status, false);
+            }
+            if (!response.ok) {
+                throw new NotificationDeliveryError(`Custom webhook responded with HTTP ${response.status}`, response.status, true);
+            }
+        } catch (error) {
+            if (error instanceof NotificationDeliveryError) throw error;
+            const aborted = error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
+            throw new NotificationDeliveryError(
+                aborted ? 'Custom webhook request timed out' : 'Custom webhook request failed',
+                null,
+                true,
+            );
         }
     }
 }
