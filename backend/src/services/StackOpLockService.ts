@@ -1,3 +1,4 @@
+import { DatabaseService } from './DatabaseService';
 /**
  * Tracks in-flight stack lifecycle operations (deploy, down, restart, stop,
  * start, update, rollback, backup) per (nodeId, stackName). A second request to
@@ -9,7 +10,7 @@
  * which matches the lifecycle of any in-flight `docker compose` child process.
  */
 
-export type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'rollback' | 'backup';
+export type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'rollback' | 'backup' | 'delete';
 
 /**
  * Note returned by a background path that skipped its operation because a manual
@@ -68,6 +69,31 @@ export class StackOpLockService {
 
   public release(nodeId: number, stackName: string): void {
     this.locks.delete(this.key(nodeId, stackName));
+  }
+
+  /**
+   * Matching-intent continuation for crash-resume of a prepared deletion.
+   * Succeeds only when the persisted intent matches and no other in-memory lock holds.
+   */
+  public tryAcquireDeletionContinuation(args: {
+    intentId: string;
+    nodeId: number;
+    stackName: string;
+  }): AcquireResult {
+    const intent = DatabaseService.getInstance().getDeletionIntentById(args.intentId);
+    if (
+      !intent
+      || intent.status !== 'prepared'
+      || intent.node_id !== args.nodeId
+      || intent.stack_name !== args.stackName
+    ) {
+      const existing = this.locks.get(this.key(args.nodeId, args.stackName));
+      return {
+        acquired: false,
+        existing: existing ?? { action: 'delete', startedAt: Date.now(), user: 'system' },
+      };
+    }
+    return this.tryAcquire(args.nodeId, args.stackName, 'delete', 'system:deletion-continuation');
   }
 
   /**

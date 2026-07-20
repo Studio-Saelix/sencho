@@ -47,7 +47,7 @@ export interface ServiceUpdateOptions {
 }
 
 export type OrchestratorResult =
-  | { kind: 'stack_compose_done' }
+  | { kind: 'stack_compose_done'; recoveryId: string | null }
   | {
       kind: 'service_done';
       serviceName: string;
@@ -182,10 +182,10 @@ export class StackUpdateOrchestrator {
     ctx: UpdateOperationContext,
     options: StackComposeOptions,
   ): Promise<OrchestratorResult> {
-    await ComposeService.getInstance(ctx.nodeId).updateStack(
+    const { recoveryId } = await ComposeService.getInstance(ctx.nodeId).updateStack(
       ctx.stackName, options.terminalWs ?? undefined, options.atomic,
     );
-    return { kind: 'stack_compose_done' };
+    return { kind: 'stack_compose_done', recoveryId };
   }
 
   private async executeServiceUpdate(
@@ -194,6 +194,16 @@ export class StackUpdateOrchestrator {
     options: ServiceUpdateOptions,
   ): Promise<OrchestratorResult> {
     const { nodeId, stackName } = ctx;
+
+    {
+      const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+      if (StackUpdateRecoveryService.getInstance().isRestoredCurrentPinActive(nodeId, stackName)) {
+        return serviceFailed(
+          'stack_recovery_pin_active',
+          'This stack is pinned to a restored recovery generation. Run a full-stack Update to continue.',
+        );
+      }
+    }
 
     const loaded = await this.loadServiceSpec(nodeId, stackName, serviceName);
     if (!loaded.ok) return loaded.result;
@@ -308,6 +318,16 @@ export class StackUpdateOrchestrator {
     const { nodeId, stackName } = ctx;
     const recoveryId = options.recoveryId as string;
 
+    {
+      const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+      if (StackUpdateRecoveryService.getInstance().isRestoredCurrentPinActive(nodeId, stackName)) {
+        return serviceFailed(
+          'stack_recovery_pin_active',
+          'This stack is pinned to a restored recovery generation. Run a full-stack Update to continue.',
+          { recoveryId },
+        );
+      }
+    }
     const recovery = ServiceUpdateRecoveryService.getInstance().get(recoveryId);
     if (
       !recovery ||

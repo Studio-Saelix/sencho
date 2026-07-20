@@ -213,6 +213,41 @@ export interface HealthGateRunRow {
 }
 
 /** Pre-update image snapshot enabling a manual per-service restore after a service-scoped update. */
+
+/** Full-stack update recovery generation. Separate from service_update_recovery. */
+export interface StackUpdateRecoveryGenerationRow {
+    id: string;
+    node_id: number;
+    stack_name: string;
+    status: 'candidate' | 'active' | 'restored_current' | 'superseded' | 'abandoned' | 'recovery_required';
+    phase: 'captured' | 'acquired' | 'handoff_committed' | 'reconciling' | 'immediate_verified';
+    is_current: number;
+    backup_slot_id: string | null;
+    override_path: string | null;
+    services_json: string;
+    health_gate_id: string | null;
+    gate_retain_until: number | null;
+    artifact_expires_at: number | null;
+    operation_lease_expires_at: number | null;
+    created_at: number;
+    updated_at: number;
+    created_by: string | null;
+}
+
+/** Durable cleanup tombstone for stack/node deletion artifact sweep. */
+export interface StackUpdateCleanupPendingRow {
+    id: string;
+    node_id: number | null;
+    stack_name: string | null;
+    status: 'prepared' | 'ready' | 'cancelled';
+    target_kind: 'local_socket';
+    rollback_tags_json: string;
+    override_paths_json: string;
+    prune_volumes_requested: number;
+    created_at: number;
+    updated_at: number;
+}
+
 export interface ServiceUpdateRecoveryRow {
     id: string;
     node_id: number;
@@ -1646,6 +1681,49 @@ export class DatabaseService {
         ON service_update_recovery(status, expires_at);
       CREATE INDEX IF NOT EXISTS idx_service_update_recovery_status_claim_expires
         ON service_update_recovery(status, claim_expires_at);
+
+
+      CREATE TABLE IF NOT EXISTS stack_update_recovery_generations (
+        id TEXT PRIMARY KEY,
+        node_id INTEGER NOT NULL,
+        stack_name TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('candidate','active','restored_current','superseded','abandoned','recovery_required')),
+        phase TEXT NOT NULL CHECK (phase IN ('captured','acquired','handoff_committed','reconciling','immediate_verified')),
+        is_current INTEGER NOT NULL DEFAULT 0,
+        backup_slot_id TEXT,
+        override_path TEXT,
+        services_json TEXT NOT NULL,
+        health_gate_id TEXT,
+        gate_retain_until INTEGER,
+        artifact_expires_at INTEGER,
+        operation_lease_expires_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        created_by TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_stack_update_recovery_node_stack_current
+        ON stack_update_recovery_generations(node_id, stack_name, is_current);
+      CREATE INDEX IF NOT EXISTS idx_stack_update_recovery_status_expires
+        ON stack_update_recovery_generations(status, artifact_expires_at);
+      CREATE INDEX IF NOT EXISTS idx_stack_update_recovery_phase_lease
+        ON stack_update_recovery_generations(phase, operation_lease_expires_at);
+
+      CREATE TABLE IF NOT EXISTS stack_update_cleanup_pending (
+        id TEXT PRIMARY KEY,
+        node_id INTEGER,
+        stack_name TEXT,
+        status TEXT NOT NULL CHECK (status IN ('prepared','ready','cancelled')),
+        target_kind TEXT NOT NULL CHECK (target_kind IN ('local_socket')),
+        rollback_tags_json TEXT NOT NULL,
+        override_paths_json TEXT NOT NULL,
+        prune_volumes_requested INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_stack_update_cleanup_status
+        ON stack_update_cleanup_pending(status);
+      CREATE INDEX IF NOT EXISTS idx_stack_update_cleanup_node_stack
+        ON stack_update_cleanup_pending(node_id, stack_name);
 
       CREATE TABLE IF NOT EXISTS secrets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3509,6 +3587,244 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM service_update_recovery WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
     }
 
+    public insertStackUpdateRecoveryGeneration(row: StackUpdateRecoveryGenerationRow): void {
+        this.db.prepare(
+            `INSERT INTO stack_update_recovery_generations (
+                id, node_id, stack_name, status, phase, is_current, backup_slot_id, override_path,
+                services_json, health_gate_id, gate_retain_until, artifact_expires_at,
+                operation_lease_expires_at, created_at, updated_at, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+            row.id, row.node_id, row.stack_name, row.status, row.phase, row.is_current,
+            row.backup_slot_id, row.override_path, row.services_json, row.health_gate_id,
+            row.gate_retain_until, row.artifact_expires_at, row.operation_lease_expires_at,
+            row.created_at, row.updated_at, row.created_by,
+        );
+    }
+
+    public getStackUpdateRecoveryGeneration(id: string): StackUpdateRecoveryGenerationRow | undefined {
+        return this.db.prepare('SELECT * FROM stack_update_recovery_generations WHERE id = ?').get(id) as StackUpdateRecoveryGenerationRow | undefined;
+    }
+
+    public getCurrentStackUpdateRecovery(nodeId: number, stackName: string): StackUpdateRecoveryGenerationRow | undefined {
+        return this.db.prepare(
+            'SELECT * FROM stack_update_recovery_generations WHERE node_id = ? AND stack_name = ? AND is_current = 1 LIMIT 1'
+        ).get(nodeId, stackName) as StackUpdateRecoveryGenerationRow | undefined;
+    }
+
+    public listStackUpdateRecoveryForStack(nodeId: number, stackName: string): StackUpdateRecoveryGenerationRow[] {
+        return this.db.prepare(
+            'SELECT * FROM stack_update_recovery_generations WHERE node_id = ? AND stack_name = ? ORDER BY created_at DESC'
+        ).all(nodeId, stackName) as StackUpdateRecoveryGenerationRow[];
+    }
+
+    public listStackUpdateRecoveryGenerationsForNode(nodeId: number): StackUpdateRecoveryGenerationRow[] {
+        return this.db.prepare(
+            'SELECT * FROM stack_update_recovery_generations WHERE node_id = ? ORDER BY created_at DESC'
+        ).all(nodeId) as StackUpdateRecoveryGenerationRow[];
+    }
+
+    public updateStackUpdateRecoveryGeneration(
+        id: string,
+        patch: Partial<Pick<StackUpdateRecoveryGenerationRow,
+            'status' | 'phase' | 'is_current' | 'override_path' | 'health_gate_id' |
+            'gate_retain_until' | 'artifact_expires_at' | 'operation_lease_expires_at' | 'services_json'>>,
+    ): void {
+        const keys = Object.keys(patch) as Array<keyof typeof patch>;
+        if (keys.length === 0) return;
+        const sets = keys.map((k) => `${String(k)} = ?`).join(', ');
+        const values = keys.map((k) => patch[k]);
+        this.db.prepare(
+            `UPDATE stack_update_recovery_generations SET ${sets}, updated_at = ? WHERE id = ?`
+        ).run(...values, Date.now(), id);
+    }
+
+    public casStackUpdateRecoveryPhase(
+        id: string,
+        expectedPhase: StackUpdateRecoveryGenerationRow['phase'],
+        nextPhase: StackUpdateRecoveryGenerationRow['phase'],
+    ): boolean {
+        const result = this.db.prepare(
+            'UPDATE stack_update_recovery_generations SET phase = ?, updated_at = ? WHERE id = ? AND phase = ?'
+        ).run(nextPhase, Date.now(), id, expectedPhase);
+        return result.changes === 1;
+    }
+
+    public casHandoffGeneration(candidateId: string, nodeId: number, stackName: string): boolean {
+        const handoff = this.db.transaction(() => {
+            const candidate = this.getStackUpdateRecoveryGeneration(candidateId);
+            if (!candidate || candidate.node_id !== nodeId || candidate.stack_name !== stackName) return false;
+            if (candidate.status !== 'candidate' || candidate.phase !== 'acquired') return false;
+            this.db.prepare(
+                `UPDATE stack_update_recovery_generations
+                 SET status = 'superseded', is_current = 0, artifact_expires_at = ?, updated_at = ?
+                 WHERE node_id = ? AND stack_name = ? AND is_current = 1 AND id != ?`
+            ).run(Date.now() + 7 * 24 * 60 * 60 * 1000, Date.now(), nodeId, stackName, candidateId);
+            const result = this.db.prepare(
+                `UPDATE stack_update_recovery_generations
+                 SET status = 'active', is_current = 1, phase = 'handoff_committed', updated_at = ?
+                 WHERE id = ? AND status = 'candidate' AND phase = 'acquired'`
+            ).run(Date.now(), candidateId);
+            return result.changes === 1;
+        });
+        return handoff();
+    }
+
+    public abandonStackUpdateRecoveryGeneration(id: string): boolean {
+        const result = this.db.prepare(
+            `UPDATE stack_update_recovery_generations
+             SET status = 'abandoned', is_current = 0, updated_at = ?
+             WHERE id = ? AND status = 'candidate'`
+        ).run(Date.now(), id);
+        return result.changes === 1;
+    }
+
+    /** Pre-handoff candidates whose operation lease has expired. */
+    public listStaleStackUpdateRecoveryCandidates(now: number): StackUpdateRecoveryGenerationRow[] {
+        return this.db.prepare(
+            `SELECT * FROM stack_update_recovery_generations
+             WHERE status = 'candidate'
+               AND operation_lease_expires_at IS NOT NULL
+               AND operation_lease_expires_at <= ?`
+        ).all(now) as StackUpdateRecoveryGenerationRow[];
+    }
+
+    /** Post-handoff generations stuck before immediate_verified with an expired lease. */
+    public listStuckStackUpdateRecoveryGenerations(now: number): StackUpdateRecoveryGenerationRow[] {
+        return this.db.prepare(
+            `SELECT * FROM stack_update_recovery_generations
+             WHERE status IN ('active', 'restored_current')
+               AND phase IN ('handoff_committed', 'reconciling')
+               AND operation_lease_expires_at IS NOT NULL
+               AND operation_lease_expires_at <= ?`
+        ).all(now) as StackUpdateRecoveryGenerationRow[];
+    }
+
+    public linkStackUpdateRecoveryHealthGate(id: string, healthGateId: string): void {
+        this.db.prepare(
+            'UPDATE stack_update_recovery_generations SET health_gate_id = ?, updated_at = ? WHERE id = ?'
+        ).run(healthGateId, Date.now(), id);
+    }
+
+    public setStackUpdateRecoveryGateRetainUntil(id: string, until: number): void {
+        this.db.prepare(
+            'UPDATE stack_update_recovery_generations SET gate_retain_until = ?, updated_at = ? WHERE id = ?'
+        ).run(until, Date.now(), id);
+    }
+
+    public listHeldStackUpdateRecoveryImageIds(nodeId: number, now: number): string[] {
+        const rows = this.db.prepare(
+            `SELECT services_json FROM stack_update_recovery_generations
+             WHERE node_id = ?
+               AND status IN ('candidate','active','restored_current','recovery_required')
+               AND (artifact_expires_at IS NULL OR artifact_expires_at > ? OR gate_retain_until > ? OR is_current = 1)`
+        ).all(nodeId, now, now) as Array<{ services_json: string }>;
+        const ids = new Set<string>();
+        for (const row of rows) {
+            try {
+                const parsed: unknown = JSON.parse(row.services_json);
+                if (!Array.isArray(parsed)) continue;
+                for (const item of parsed) {
+                    if (!item || typeof item !== 'object') continue;
+                    const replicas = (item as { replicas?: unknown }).replicas;
+                    if (Array.isArray(replicas)) {
+                        for (const replica of replicas) {
+                            if (replica && typeof replica === 'object'
+                                && typeof (replica as { imageId?: unknown }).imageId === 'string'
+                                && (replica as { imageId: string }).imageId.trim()) {
+                                ids.add((replica as { imageId: string }).imageId);
+                            }
+                        }
+                    } else if (typeof (item as { imageId?: unknown }).imageId === 'string') {
+                        ids.add((item as { imageId: string }).imageId);
+                    }
+                }
+            } catch {
+                // Corrupt JSON: skip.
+            }
+        }
+        return [...ids];
+    }
+
+    public deleteStackUpdateRecoveryGenerations(nodeId: number, stackName: string): void {
+        this.db.prepare(
+            'DELETE FROM stack_update_recovery_generations WHERE node_id = ? AND stack_name = ?'
+        ).run(nodeId, stackName);
+    }
+
+    public insertCleanupPending(row: StackUpdateCleanupPendingRow): void {
+        this.db.prepare(
+            `INSERT INTO stack_update_cleanup_pending (
+                id, node_id, stack_name, status, target_kind, rollback_tags_json,
+                override_paths_json, prune_volumes_requested, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+            row.id, row.node_id, row.stack_name, row.status, row.target_kind,
+            row.rollback_tags_json, row.override_paths_json, row.prune_volumes_requested,
+            row.created_at, row.updated_at,
+        );
+    }
+
+    public getCleanupPending(id: string): StackUpdateCleanupPendingRow | undefined {
+        return this.db.prepare('SELECT * FROM stack_update_cleanup_pending WHERE id = ?').get(id) as StackUpdateCleanupPendingRow | undefined;
+    }
+
+    public listReadyCleanupPending(): StackUpdateCleanupPendingRow[] {
+        return this.db.prepare(
+            "SELECT * FROM stack_update_cleanup_pending WHERE status = 'ready' ORDER BY created_at ASC"
+        ).all() as StackUpdateCleanupPendingRow[];
+    }
+
+    public listPreparedCleanupPending(): StackUpdateCleanupPendingRow[] {
+        return this.db.prepare(
+            "SELECT * FROM stack_update_cleanup_pending WHERE status = 'prepared' ORDER BY created_at ASC"
+        ).all() as StackUpdateCleanupPendingRow[];
+    }
+
+    public updateCleanupPendingStatus(id: string, status: StackUpdateCleanupPendingRow['status']): void {
+        this.db.prepare(
+            'UPDATE stack_update_cleanup_pending SET status = ?, updated_at = ? WHERE id = ?'
+        ).run(status, Date.now(), id);
+    }
+
+    public deleteCleanupPending(id: string): void {
+        this.db.prepare('DELETE FROM stack_update_cleanup_pending WHERE id = ?').run(id);
+    }
+
+    public hasBlockingDeletionIntent(nodeId: number, stackName: string): boolean {
+        const row = this.db.prepare(
+            `SELECT id FROM stack_update_cleanup_pending
+             WHERE node_id = ? AND stack_name = ? AND status IN ('prepared','ready') LIMIT 1`
+        ).get(nodeId, stackName);
+        return !!row;
+    }
+
+    public getPreparedDeletionIntent(nodeId: number, stackName: string): StackUpdateCleanupPendingRow | undefined {
+        return this.db.prepare(
+            `SELECT * FROM stack_update_cleanup_pending
+             WHERE node_id = ? AND stack_name = ? AND status = 'prepared' LIMIT 1`
+        ).get(nodeId, stackName) as StackUpdateCleanupPendingRow | undefined;
+    }
+
+    public getDeletionIntentById(id: string): StackUpdateCleanupPendingRow | undefined {
+        return this.getCleanupPending(id);
+    }
+
+    public commitStackDeletionReadyTransaction(intentId: string, nodeId: number, stackName: string): boolean {
+        const run = this.db.transaction(() => {
+            const intent = this.getCleanupPending(intentId);
+            if (!intent || intent.status !== 'prepared') return false;
+            if (intent.node_id !== nodeId || intent.stack_name !== stackName) return false;
+            this.db.prepare(
+                "UPDATE stack_update_cleanup_pending SET status = 'ready', updated_at = ? WHERE id = ? AND status = 'prepared'"
+            ).run(Date.now(), intentId);
+            this.deleteStackUpdateRecoveryGenerations(nodeId, stackName);
+            this.deleteServiceUpdateRecoveries(nodeId, stackName);
+            return true;
+        });
+        return run();
+    }
+
     // --- Notification History ---
 
     private mapNotificationRow(row: any): NotificationHistory {
@@ -3877,7 +4193,16 @@ export class DatabaseService {
         this.db.prepare(`UPDATE nodes SET ${fields.join(', ')} WHERE id = ?`).run(...values);
     }
 
-    public deleteNode(id: number): void {
+    /**
+     * Delete a node row and related per-node state.
+     * For a non-default local-socket node, pass localCleanup so a ready tombstone
+     * is inserted in the same transaction (caller enumerates tags/paths first).
+     * Remote hub node records must omit localCleanup (no Docker tombstone).
+     */
+    public deleteNode(
+        id: number,
+        localCleanup?: { tombstoneId: string; tags: string[]; overridePaths: string[] },
+    ): void {
         const node = this.getNode(id);
         // Protect the last local node regardless of is_default flag.
         if (node && node.type === 'local' && this.getLocalNodeCount() <= 1) {
@@ -3886,7 +4211,25 @@ export class DatabaseService {
         if (node?.is_default) {
             throw new Error('Cannot delete the default node');
         }
+        if (localCleanup && node?.type !== 'local') {
+            throw new Error('Local cleanup tombstones are only valid for local-socket nodes');
+        }
         this.db.transaction(() => {
+            if (localCleanup && node?.type === 'local') {
+                const now = Date.now();
+                this.insertCleanupPending({
+                    id: localCleanup.tombstoneId,
+                    node_id: id,
+                    stack_name: null,
+                    status: 'ready',
+                    target_kind: 'local_socket',
+                    rollback_tags_json: JSON.stringify(localCleanup.tags),
+                    override_paths_json: JSON.stringify(localCleanup.overridePaths),
+                    prune_volumes_requested: 0,
+                    created_at: now,
+                    updated_at: now,
+                });
+            }
             this.db.prepare('DELETE FROM scheduled_task_runs WHERE task_id IN (SELECT id FROM scheduled_tasks WHERE node_id = ?)').run(id);
             this.db.prepare('DELETE FROM scheduled_tasks WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ?').run(id);
@@ -3900,6 +4243,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM preflight_acknowledgements WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM stack_exposure WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM health_gate_runs WHERE node_id = ?').run(id);
+            this.db.prepare('DELETE FROM stack_update_recovery_generations WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM service_update_recovery WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));

@@ -237,7 +237,17 @@ export class ServiceUpdateRecoveryService {
     return (imageId: string) => {
       const held = this.getHeldImageIds(nodeId);
       if (held === null) return true;
-      return held.has(imageId);
+      if (held.has(imageId)) return true;
+      try {
+        // Dynamic import avoids a static cycle with StackUpdateRecoveryService.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { StackUpdateRecoveryService } = require('./StackUpdateRecoveryService') as typeof import('./StackUpdateRecoveryService');
+        const stackHeld = StackUpdateRecoveryService.getInstance().getHeldImageIds(nodeId);
+        if (stackHeld === null) return true;
+        return stackHeld.has(imageId);
+      } catch {
+        return true;
+      }
     };
   }
 

@@ -304,11 +304,11 @@ export function buildRollbackItems(inputs: RollbackInputs, now: number): Rollbac
   if (inputs.rollbackTarget === 'error') {
     items.push({ id: 'previous_images', state: 'unknown', label: 'Previous image tag', detail: 'The update preview is unavailable.' });
   } else if (inputs.rollbackTarget.target && inputs.rollbackTarget.moving) {
-    items.push({ id: 'previous_images', state: 'not_covered', label: 'Previous image tag', detail: `Rollback target ${inputs.rollbackTarget.target}. This stack uses a moving image tag, so restoring the compose and env files does not revert the image: the local tag still resolves to the newer digest. Pin every image to an immutable version tag for a true image rollback.` });
+    items.push({ id: 'previous_images', state: 'ready', label: 'Previous image tag', detail: `Rollback target ${inputs.rollbackTarget.target}. This stack uses a moving image tag. Full-stack updates capture the running image ID before pull/build and retain it through the recovery window so an immediate restore can retarget the exact prior image, not only the tag string.` });
   } else if (inputs.rollbackTarget.target) {
     items.push({ id: 'previous_images', state: 'ready', label: 'Previous image tag', detail: `Known rollback target: ${inputs.rollbackTarget.target}. The compose file pins an immutable tag, so restoring files also restores the image.` });
   } else {
-    items.push({ id: 'previous_images', state: 'unknown', label: 'Previous image tag', detail: 'The previous image tag could not be determined. A rollback restores compose and env files; a moving tag may keep the newer image.' });
+    items.push({ id: 'previous_images', state: 'unknown', label: 'Previous image tag', detail: 'The previous image tag could not be determined. When no prior image is recorded, a restore may fall back to compose and env files alone; a moving tag can still resolve to a newer digest.' });
   }
 
   if (inputs.lastDeployAt === 'error') {

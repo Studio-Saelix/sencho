@@ -1,0 +1,392 @@
+/**
+ * Shared deployed-stack deletion lifecycle (manual DELETE + Blueprint withdrawLocal).
+ *
+ * prepared -> (down, optional volume prune, FS delete) -> ready transaction that
+ * retires full-stack recovery generations and service_update_recovery rows, then
+ * sweeper removes ready tombstone tags/overrides.
+ */
+import { randomUUID } from 'crypto';
+import fs from 'fs/promises';
+import path from 'path';
+import {
+  DatabaseService,
+  type StackUpdateCleanupPendingRow,
+} from './DatabaseService';
+import { ComposeService } from './ComposeService';
+import DockerController from './DockerController';
+import { FileSystemService } from './FileSystemService';
+import { NodeRegistry } from './NodeRegistry';
+import { MeshService } from './MeshService';
+import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
+import { getErrorMessage } from '../utils/errors';
+import { sanitizeForLog } from '../utils/safeLog';
+import { isPathWithinBase } from '../utils/validation';
+
+export interface DeleteDeployedStackInput {
+  nodeId: number;
+  stackName: string;
+  pruneVolumes: boolean;
+  actor: string;
+  /** When true, skip acquiring a new lock (caller already holds delete via continuation). */
+  continuationIntentId?: string;
+}
+
+export type DeleteDeployedStackResult =
+  | { ok: true }
+  | { ok: false; code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed'; error: string; existingAction?: string };
+
+function collectArtifactsFromGenerations(
+  generations: Array<{ override_path: string | null; services_json: string }>,
+): { tags: string[]; overridePaths: string[] } {
+  const tags = new Set<string>();
+  const overridePaths = new Set<string>();
+
+  for (const gen of generations) {
+    if (gen.override_path) overridePaths.add(gen.override_path);
+    try {
+      const parsed: unknown = JSON.parse(gen.services_json);
+      if (!Array.isArray(parsed)) continue;
+      for (const svc of parsed) {
+        if (!svc || typeof svc !== 'object') continue;
+        const replicas = (svc as { replicas?: unknown }).replicas;
+        if (!Array.isArray(replicas)) continue;
+        for (const replica of replicas) {
+          const tag = replica && typeof replica === 'object'
+            ? (replica as { rollbackTag?: unknown }).rollbackTag
+            : null;
+          if (typeof tag === 'string' && tag.trim()) tags.add(tag);
+        }
+      }
+    } catch {
+      // Corrupt capture JSON: skip tags for this generation.
+    }
+  }
+
+  return { tags: [...tags], overridePaths: [...overridePaths] };
+}
+
+function collectArtifacts(nodeId: number, stackName: string): { tags: string[]; overridePaths: string[] } {
+  return collectArtifactsFromGenerations(
+    DatabaseService.getInstance().listStackUpdateRecoveryForStack(nodeId, stackName),
+  );
+}
+
+function parseJsonStringArray(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is string => typeof item === 'string');
+  } catch {
+    return [];
+  }
+}
+
+export class DeployedStackDeletionService {
+  private static instance: DeployedStackDeletionService;
+
+  public static getInstance(): DeployedStackDeletionService {
+    if (!DeployedStackDeletionService.instance) {
+      DeployedStackDeletionService.instance = new DeployedStackDeletionService();
+    }
+    return DeployedStackDeletionService.instance;
+  }
+
+  public assertNoBlockingDeletionIntent(nodeId: number, stackName: string): void {
+    if (DatabaseService.getInstance().hasBlockingDeletionIntent(nodeId, stackName)) {
+      throw new Error(
+        `Stack "${stackName}" has a deletion in progress and cannot be created or mutated until cleanup finishes.`,
+      );
+    }
+  }
+
+  public async deleteDeployedStack(input: DeleteDeployedStackInput): Promise<DeleteDeployedStackResult> {
+    const { nodeId, stackName, pruneVolumes, actor } = input;
+    const locks = StackOpLockService.getInstance();
+
+    if (input.continuationIntentId) {
+      const cont = locks.tryAcquireDeletionContinuation({
+        intentId: input.continuationIntentId,
+        nodeId,
+        stackName,
+      });
+      if (!cont.acquired) {
+        return {
+          ok: false,
+          code: 'lock_conflict',
+          error: stackOpSkipMessage(stackName, cont.existing.action),
+          existingAction: cont.existing.action,
+        };
+      }
+      try {
+        return await this.runDeletionBody(input, input.continuationIntentId);
+      } finally {
+        locks.release(nodeId, stackName);
+      }
+    }
+
+    const exclusive = await locks.runExclusive(nodeId, stackName, 'delete', actor, async () => {
+      return this.runDeletionBody(input);
+    });
+    if (!exclusive.ran) {
+      return {
+        ok: false,
+        code: 'lock_conflict',
+        error: stackOpSkipMessage(stackName, exclusive.existing.action),
+        existingAction: exclusive.existing.action,
+      };
+    }
+    return exclusive.result;
+  }
+
+  private async runDeletionBody(
+    input: DeleteDeployedStackInput,
+    existingIntentId?: string,
+  ): Promise<DeleteDeployedStackResult> {
+    const { nodeId, stackName, pruneVolumes } = input;
+    const db = DatabaseService.getInstance();
+
+    let intentId = existingIntentId;
+    if (!intentId) {
+      const { tags, overridePaths } = collectArtifacts(nodeId, stackName);
+      const now = Date.now();
+      const row: StackUpdateCleanupPendingRow = {
+        id: randomUUID(),
+        node_id: nodeId,
+        stack_name: stackName,
+        status: 'prepared',
+        target_kind: 'local_socket',
+        rollback_tags_json: JSON.stringify(tags),
+        override_paths_json: JSON.stringify(overridePaths),
+        prune_volumes_requested: pruneVolumes ? 1 : 0,
+        created_at: now,
+        updated_at: now,
+      };
+      try {
+        db.insertCleanupPending(row);
+      } catch (error) {
+        return {
+          ok: false,
+          code: 'tombstone_failed',
+          error: getErrorMessage(error, 'Failed to prepare stack deletion'),
+        };
+      }
+      intentId = row.id;
+    }
+
+    const intent = db.getDeletionIntentById(intentId);
+    if (!intent || intent.status !== 'prepared') {
+      return { ok: false, code: 'tombstone_failed', error: 'Deletion intent is not prepared' };
+    }
+
+    try {
+      await ComposeService.getInstance(nodeId).downStack(stackName);
+    } catch (downErr) {
+      console.warn(
+        '[DeployedStackDeletion] Compose down failed or no-op for %s:',
+        sanitizeForLog(stackName),
+        downErr,
+      );
+    }
+
+    if (intent.prune_volumes_requested === 1) {
+      try {
+        await DockerController.getInstance(nodeId).pruneManagedOnly('volumes', [stackName]);
+      } catch (pruneErr) {
+        console.warn(
+          '[DeployedStackDeletion] Volume prune failed for %s, continuing delete:',
+          sanitizeForLog(stackName),
+          pruneErr,
+        );
+      }
+    }
+
+    try {
+      await FileSystemService.getInstance(nodeId).deleteStack(stackName);
+    } catch (fsErr) {
+      db.updateCleanupPendingStatus(intentId, 'cancelled');
+      return {
+        ok: false,
+        code: 'fs_failed',
+        error: getErrorMessage(fsErr, 'Failed to remove stack files'),
+      };
+    }
+
+    if (!db.commitStackDeletionReadyTransaction(intentId, nodeId, stackName)) {
+      return {
+        ok: false,
+        code: 'db_failed',
+        error: 'Failed to commit stack deletion ready transaction',
+      };
+    }
+
+    try {
+      db.clearStackUpdateStatus(nodeId, stackName);
+      db.clearStackScanAttempts(nodeId, stackName);
+      db.deleteRoleAssignmentsByResource('stack', stackName);
+      db.deleteGitSource(stackName);
+      db.deleteStackDossier(nodeId, stackName);
+      db.deleteStackDriftFindings(nodeId, stackName);
+      db.deleteStackExposureIntents(nodeId, stackName);
+      db.deleteStackExposure(nodeId, stackName);
+      db.deleteStackProjectEnvFiles(nodeId, stackName);
+      db.deleteStackScans(nodeId, stackName);
+    } catch (dbErr) {
+      console.error(
+        '[DeployedStackDeletion] Secondary DB cleanup failed for %s; recovery rows already retired:',
+        sanitizeForLog(stackName),
+        dbErr,
+      );
+      return {
+        ok: false,
+        code: 'db_failed',
+        error: getErrorMessage(dbErr, 'Failed to clear stack database state'),
+      };
+    }
+
+    try {
+      await MeshService.getInstance().optOutStack(nodeId, stackName, input.actor);
+    } catch (meshErr) {
+      console.warn(
+        '[DeployedStackDeletion] Mesh opt-out failed for %s:',
+        sanitizeForLog(stackName),
+        meshErr,
+      );
+    }
+
+    await this.sweepReadyIntent(intentId);
+    return { ok: true };
+  }
+
+  /** Remove rollback tags + override paths for a ready tombstone, then drop the row. */
+  public async sweepReadyIntent(intentId: string): Promise<void> {
+    const db = DatabaseService.getInstance();
+    const intent = db.getCleanupPending(intentId);
+    if (!intent || intent.status !== 'ready') return;
+    if (intent.node_id == null) {
+      db.deleteCleanupPending(intentId);
+      return;
+    }
+
+    const tags = parseJsonStringArray(intent.rollback_tags_json);
+    const overridePaths = parseJsonStringArray(intent.override_paths_json);
+
+    // After a local-node delete the node row is gone; use the default local
+    // Docker socket for local_socket tombstones (absolute override paths remain valid).
+    const dockerNodeId = db.getNode(intent.node_id)
+      ? intent.node_id
+      : NodeRegistry.getInstance().getDefaultNodeId();
+    const docker = DockerController.getInstance(dockerNodeId).getDocker();
+    for (const tag of tags) {
+      try {
+        await docker.getImage(tag).remove({ force: true });
+      } catch (error) {
+        console.warn(
+          '[DeployedStackDeletion] Failed to remove rollback tag %s:',
+          sanitizeForLog(tag),
+          getErrorMessage(error, 'unknown'),
+        );
+      }
+    }
+
+    for (const overridePath of overridePaths) {
+      try {
+        const baseDir = FileSystemService.getInstance(intent.node_id).getBaseDir();
+        if (!isPathWithinBase(path.resolve(overridePath), path.resolve(baseDir))) {
+          console.warn(
+            '[DeployedStackDeletion] Refusing to delete override outside compose dir: %s',
+            sanitizeForLog(overridePath),
+          );
+          continue;
+        }
+        await fs.unlink(overridePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          console.warn(
+            '[DeployedStackDeletion] Failed to delete override %s:',
+            sanitizeForLog(overridePath),
+            getErrorMessage(error, 'unknown'),
+          );
+        }
+      }
+    }
+
+    db.deleteCleanupPending(intentId);
+  }
+
+  /** Enumerate rollback tags and override paths for every stack recovery on a node. */
+  public collectNodeArtifacts(nodeId: number): { tags: string[]; overridePaths: string[] } {
+    return collectArtifactsFromGenerations(
+      DatabaseService.getInstance().listStackUpdateRecoveryGenerationsForNode(nodeId),
+    );
+  }
+
+  /**
+   * Delete a local-socket node with an atomic ready tombstone, then sweep.
+   * Remote node records call DatabaseService.deleteNode without cleanup.
+   */
+  public async deleteLocalNode(nodeId: number): Promise<void> {
+    const db = DatabaseService.getInstance();
+    const node = db.getNode(nodeId);
+    if (!node) throw new Error('Node not found');
+    if (node.type !== 'local') {
+      db.deleteNode(nodeId);
+      return;
+    }
+    const { tags, overridePaths } = this.collectNodeArtifacts(nodeId);
+    const tombstoneId = randomUUID();
+    db.deleteNode(nodeId, { tombstoneId, tags, overridePaths });
+    await this.sweepReadyIntent(tombstoneId);
+  }
+
+  /**
+   * Startup reconciliation: resume prepared intents, complete ready transitions
+   * when the directory is already gone, and sweep ready tombstones.
+   */
+  public async reconcileAtStartup(): Promise<void> {
+    const db = DatabaseService.getInstance();
+    for (const intent of db.listPreparedCleanupPending()) {
+      if (intent.node_id == null || !intent.stack_name) continue;
+      const nodeId = intent.node_id;
+      const stackName = intent.stack_name;
+      const stackDir = path.join(FileSystemService.getInstance(nodeId).getBaseDir(), stackName);
+      let dirExists = true;
+      try {
+        await fs.access(stackDir);
+      } catch {
+        dirExists = false;
+      }
+
+      if (!dirExists) {
+        if (!db.commitStackDeletionReadyTransaction(intent.id, nodeId, stackName)) {
+          console.warn(
+            '[DeployedStackDeletion] Startup ready commit failed for %s/%s',
+            nodeId,
+            sanitizeForLog(stackName),
+          );
+          continue;
+        }
+        await this.sweepReadyIntent(intent.id);
+        continue;
+      }
+
+      const result = await this.deleteDeployedStack({
+        nodeId,
+        stackName,
+        pruneVolumes: intent.prune_volumes_requested === 1,
+        actor: 'system:startup',
+        continuationIntentId: intent.id,
+      });
+      if (!result.ok) {
+        console.warn(
+          '[DeployedStackDeletion] Startup resume failed for %s: %s',
+          sanitizeForLog(stackName),
+          result.error,
+        );
+      }
+    }
+
+    for (const intent of db.listReadyCleanupPending()) {
+      await this.sweepReadyIntent(intent.id);
+    }
+  }
+}

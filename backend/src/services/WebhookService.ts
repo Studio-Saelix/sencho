@@ -180,11 +180,16 @@ export class WebhookService {
                                 nodeId,
                                 buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
                             );
-                            await StackUpdateOrchestrator.getInstance().execute(
+                            const orchResult = await StackUpdateOrchestrator.getInstance().execute(
                                 { nodeId, stackName, target: { scope: 'stack' }, trigger: 'webhook', actor: 'system:webhook' },
                                 { atomic: atomic ?? false, terminalWs: null },
                             );
-                            HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:webhook');
+                            const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:webhook');
+                            const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
+                            if (recoveryId) {
+                                const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+                                StackUpdateRecoveryService.getInstance().linkGateOrRetain(recoveryId, healthGateId);
+                            }
                             break;
                     }
                 },

@@ -426,7 +426,13 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           continue;
         }
         db.clearStackUpdateStatus(req.nodeId, stackName);
-        HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', `auto-update:${req.user?.username ?? 'scheduler'}`);
+        const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', `auto-update:${req.user?.username ?? 'scheduler'}`);
+        const orchResult = lock.result;
+        const recoveryId = orchResult && orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
+        if (recoveryId) {
+          const { StackUpdateRecoveryService } = await import('../services/StackUpdateRecoveryService');
+          StackUpdateRecoveryService.getInstance().linkGateOrRetain(recoveryId, healthGateId);
+        }
 
         NotificationService.getInstance().broadcastEvent({
           type: 'state-invalidate',

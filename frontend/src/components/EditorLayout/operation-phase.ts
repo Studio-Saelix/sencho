@@ -38,7 +38,7 @@ export function classifyOperationPhase(rows: ParsedLogRow[], action: ActionVerb)
         if (stage === 'BUILD') {
             return 'Building images';
         }
-        if (message.includes('Backup created for atomic') || message.includes('Cleaning up existing containers')) {
+        if (message.includes('Backup created for atomic') || message.includes('Validating stack for update') || message.includes('Capturing rollback generation')) {
             return 'Preparing';
         }
     }
