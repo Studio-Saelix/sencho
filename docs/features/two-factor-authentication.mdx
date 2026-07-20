@@ -109,7 +109,13 @@ The mono-bracketed `[ Use authenticator ]` link toggles back to the six-digit TO
 
 ### Rate limiting
 
-Five failed verifications in a row lock the account for 15 minutes. The challenge screen replaces the input with a `Retry in MM:SS` countdown and a `Rate limited` label while the lockout is in effect. The failure counter resets only on a successful sign-in: if you retry with another wrong code after the window expires, the counter is still at five and the lockout re-engages immediately. See [Lockout recovery](#lockout-recovery) below.
+Five failed verifications in a row lock the account for 15 minutes. The whole verify screen switches to a throttled state: the kicker changes from `SENCHO · VERIFY` to `SENCHO · THROTTLED`, the large hero text becomes the live `MM:SS` countdown itself (replacing the word `Verify`), and the caption reads `Too many attempts. Take a breath and try again shortly.` Below that, a `Retry in` / `MM:SS` readout sits next to a `Rate limited` label. The failure counter resets only on a successful sign-in: if you retry with another wrong code after the window expires, the counter is still at five and the lockout re-engages immediately. See [Lockout recovery](#lockout-recovery) below.
+
+Submitting the same TOTP code twice within its 30-second window (for example, a double-submit from a flaky connection) is rejected as a replay and **counts toward the five-attempt lockout counter** the same as a wrong code. This lockout counter and its 15-minute window apply only to the sign-in challenge. Repeated wrong codes on the enrolment confirm step, the Disable 2FA dialog, or the Regenerate backup codes dialog just return an error each time; they never lock the account.
+
+<Note>
+  There is a second, separate limit in front of sign-in: Sencho also caps password and 2FA sign-in attempts from a single network address to 5 per 15 minutes. Because it is per-address rather than per-account, it is shared by everyone signing in from behind the same address (a shared office network, VPN egress, or NAT gateway). Once that shared budget is used up, sign-in attempts are rejected immediately with `Too many attempts. Please try again in 15 minutes.` for the rest of the window, for every account behind that address, regardless of the per-account MFA lockout described above.
+</Note>
 
 ## Account panel anatomy
 
@@ -216,7 +222,9 @@ The reset bumps the target user's token version, so any active sessions of their
 
 ## Lockout recovery
 
-The 15-minute lockout that fires after five failed verifications is per-account, not per-IP. The counter clears on a successful sign-in. Practical consequence: if you keep retrying with wrong codes after the 15-minute window expires, the counter is still at five and the lockout re-engages on the first wrong code. To break the cycle, either wait until you have a known-good code (clock synced authenticator) and sign in cleanly, or have an administrator reset your 2FA from the Users panel to clear both the enrollment and the failure counter at once.
+The 15-minute lockout that fires after five failed verifications is per-account, keyed to the user, not to where the request came from. The counter clears on a successful sign-in. Practical consequence: if you keep retrying with wrong codes after the 15-minute window expires, the counter is still at five and the lockout re-engages on the first wrong code. To break the cycle, either wait until you have a known-good code (clock synced authenticator) and sign in cleanly, or have an administrator reset your 2FA from the Users panel to clear both the enrollment and the failure counter at once.
+
+This is distinct from the shared, per-network-address limit described in [Rate limiting](#rate-limiting) above. An administrator reset clears the per-account lockout, but it cannot lift the shared per-address limit; that one only clears when its own 15-minute window elapses.
 
 ## Troubleshooting
 
@@ -230,6 +238,9 @@ The 15-minute lockout that fires after five failed verifications is per-account,
     - In Authy: **Settings · My account · Sync device time**.
 
     If Sencho runs in a container, the container's clock follows the host. Make sure the host clock is synced with NTP.
+  </Accordion>
+  <Accordion title="This code was already used">
+    Sencho rejects a TOTP code that was already accepted once inside the same 30-second window, to prevent a captured code from being replayed. This is most often triggered by a double-submit on a slow connection or by re-typing a code you already used to sign in seconds earlier. Wait for your authenticator to generate the next code and try again. This rejection counts toward the five-attempt lockout counter, so repeated replays can still trigger the 15-minute lockout described in [Rate limiting](#rate-limiting).
   </Accordion>
   <Accordion title="Wrong account selected in the authenticator">
     Authenticator apps let you store many accounts. The label Sencho uses is the literal issuer `Sencho` plus your username. If you have more than one Sencho instance enrolled in the same authenticator, every entry shows the same issuer; rename them in the app to distinguish (most apps let you edit the label without invalidating the secret).
@@ -251,6 +262,9 @@ The 15-minute lockout that fires after five failed verifications is per-account,
 
     - **Your own toggle.** **Settings · Account · Two-factor authentication · Require 2FA on SSO sign-in** is on for your account. Flip it off if SSO alone is enough for your threat model.
     - **The provider's toggle.** Each SSO provider config has a `Require MFA` switch. When that is on, every SSO-provisioned user must enrol TOTP after their first successful sign-in. Only an administrator can change this on the provider config under **Settings · SSO**.
+  </Accordion>
+  <Accordion title="Error reads Too many attempts, please try again in 15 minutes on the plain sign-in form">
+    This is the shared per-network-address limit from [Rate limiting](#rate-limiting), not the per-account MFA lockout; it can appear on the plain username/password form before 2FA is even reached, and it affects every account signing in from that address. It clears on its own after 15 minutes. An administrator 2FA reset does not lift it, since it is not tied to any one account.
   </Accordion>
   <Accordion title="Repeatedly locked out after waiting 15 minutes">
     The 15-minute window expires on the clock, but the failure counter only resets on a successful sign-in. If you retry with another wrong code after the window expires, the counter is still at five and the lockout re-engages immediately. Have an administrator reset your 2FA from the Users panel to clear both the enrolment and the failure counter, then sign in with your password and re-enrol TOTP from your account settings.
