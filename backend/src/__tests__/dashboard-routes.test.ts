@@ -54,7 +54,12 @@ describe('GET /api/dashboard/configuration', () => {
     expect(res.body).toMatchObject({
       tier: expect.any(String),
       notifications: {
-        agents: { discord: { configured: expect.any(Boolean) }, slack: { configured: expect.any(Boolean) }, webhook: { configured: expect.any(Boolean) } },
+        agents: {
+          discord: { configured: expect.any(Boolean) },
+          slack: { configured: expect.any(Boolean) },
+          webhook: { configured: expect.any(Boolean) },
+          apprise: { configured: expect.any(Boolean) },
+        },
         alertRules: expect.any(Number),
         routingRules: { count: expect.any(Number), enabledCount: expect.any(Number), locked: expect.any(Boolean) },
       },

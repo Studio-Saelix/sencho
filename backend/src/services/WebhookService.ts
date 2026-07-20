@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { ComposeService } from './ComposeService';
+import { StackUpdateOrchestrator } from './StackUpdateOrchestrator';
 import { StackOpLockService, stackOpSkipMessage, type StackOpAction } from './StackOpLockService';
 import { DatabaseService, type Webhook } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
@@ -162,7 +163,7 @@ export class WebhookService {
                                 atomic,
                                 { source: 'webhook', actor: 'system:webhook' },
                             );
-                            HealthGateService.getInstance().begin(nodeId, stackName, 'deploy', 'system:webhook');
+                            HealthGateService.getInstance().beginStack(nodeId, stackName, 'deploy', 'system:webhook');
                             break;
                         case 'restart':
                             await compose.runCommand(stackName, 'restart');
@@ -179,8 +180,11 @@ export class WebhookService {
                                 nodeId,
                                 buildSystemPolicyGateOptions('webhook', { auditPath: `/api/webhooks/${webhookId}/execute` }),
                             );
-                            await compose.updateStack(stackName, undefined, atomic);
-                            HealthGateService.getInstance().begin(nodeId, stackName, 'update', 'system:webhook');
+                            await StackUpdateOrchestrator.getInstance().execute(
+                                { nodeId, stackName, target: { scope: 'stack' }, trigger: 'webhook', actor: 'system:webhook' },
+                                { atomic: atomic ?? false, terminalWs: null },
+                            );
+                            HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:webhook');
                             break;
                     }
                 },

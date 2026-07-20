@@ -251,7 +251,7 @@ describe('health gate begin call sites', () => {
 
   beforeEach(async () => {
     const { HealthGateService } = await import('../services/HealthGateService');
-    beginSpy = vi.spyOn(HealthGateService.getInstance(), 'begin').mockReturnValue('gate-123') as ReturnType<typeof vi.spyOn>;
+    beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-123') as ReturnType<typeof vi.spyOn>;
   });
 
   afterEach(() => {

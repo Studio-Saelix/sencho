@@ -63,7 +63,7 @@ The row itself carries the health tint (see below); there is no separate status-
 
 | Column | Description |
 |--------|-------------|
-| **STACK** | Stack name with an orange "Update available" badge when a newer image has been detected. The badge appears regardless of the sidebar indicator setting. Sortable. |
+| **STACK** | Stack name with an orange "Update available" badge when a newer image has been detected. When per-service status is known, the badge narrows to the outdated service name or a count (for example `2 updates`); hover for the full breakdown. The badge appears regardless of the sidebar indicator setting. Sortable. |
 | **SOURCE** | `Git` when the stack is linked to a [Git source](/features/git-sources), `Local` otherwise |
 | **PORT** | The stack's main published port, or `--` when it does not publish one |
 | **UP** | How long the oldest running container has been up, in compact units (`s` / `m` / `h` / `d`); a stopped or never-started stack reads `--`. Sortable. |
@@ -89,7 +89,7 @@ The card is divided into four sections.
 
 | Row | What it shows |
 |-----|---------------|
-| **Channels** | The list of enabled delivery agents from `Discord`, `Slack`, `Webhook`, joined by commas; reads `None` when no agent is enabled |
+| **Channels** | The list of enabled delivery agents from `Discord`, `Slack`, `Webhook`, and `Apprise`, joined by commas; reads `None` when no agent is enabled |
 | **Alert rules** | Total per-stack alert rules in effect, formatted `<n> rules` |
 | **Routing** | Number of enabled routing rules that direct categories to specific agents, formatted `<n> routes` |
 | **Mute Rules** | Number of enabled notification-suppression rules, formatted `<n> rules`. See [Mute Rules](/features/alerts-notifications#mute-rules). |

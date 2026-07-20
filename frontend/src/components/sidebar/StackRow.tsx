@@ -8,6 +8,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { sidebarRowActive, sidebarRowBase, sidebarRowCheckboxSlot } from './sidebar-styles';
 import { statusText, statusColor } from './stack-status-utils';
 import type { StackRowStatus } from './stack-status-utils';
+import { updateAvailableLabel } from '@/lib/updateAvailableLabel';
 
 interface StackRowProps {
   file: string;
@@ -20,6 +21,8 @@ interface StackRowProps {
   isActive: boolean;
   labels: Label[];
   hasUpdate: boolean;
+  /** Outdated service names for the update tooltip; empty keeps the generic label. */
+  outdatedServices?: string[];
   // Last image-update check outcome. 'failed' surfaces a muted "couldn't check"
   // indicator so an undeterminable check is not mistaken for "up to date".
   checkStatus?: CheckStatus;
@@ -48,7 +51,7 @@ function RowTooltip({ trigger, label }: { trigger: ReactNode; label: string }) {
 export function StackRow(props: StackRowProps) {
   const {
     file, displayName, status, running, total, isBusy, isActive,
-    hasUpdate, checkStatus, lastError, hasGitPending, onSelect, kebabSlot,
+    hasUpdate, outdatedServices, checkStatus, lastError, hasGitPending, onSelect, kebabSlot,
     bulkMode = false, isSelected = false, onToggleSelect,
   } = props;
 
@@ -113,7 +116,7 @@ export function StackRow(props: StackRowProps) {
                 <span className="relative w-2 h-2 rounded-full bg-update" />
               </span>
             )}
-            label="Update available"
+            label={updateAvailableLabel(outdatedServices)}
           />
         ) : checkStatus === 'failed' ? (
           <RowTooltip

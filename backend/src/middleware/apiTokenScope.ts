@@ -26,6 +26,8 @@ const DEPLOY_ALLOWED_PATTERNS: RegExp[] = [
   /^\/api\/stacks\/[^/]+\/stop$/,
   /^\/api\/stacks\/[^/]+\/start$/,
   /^\/api\/stacks\/[^/]+\/update$/,
+  /^\/api\/stacks\/[^/]+\/services\/[^/]+\/update$/,
+  /^\/api\/stacks\/[^/]+\/services\/[^/]+\/restore$/,
 ];
 
 const deny = (res: Response, req: Request, error: string, scope: ApiTokenScope | 'unknown'): void => {

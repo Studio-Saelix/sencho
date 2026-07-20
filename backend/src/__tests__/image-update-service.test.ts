@@ -9,17 +9,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const {
   mockGetAuthForRegistry,
   mockGetStackUpdateStatus, mockUpsertStackUpdateStatus, mockClearStackUpdateStatus,
-  mockRecordStackCheckFailure,
+  mockRecordStackCheckFailure, mockGetStackServicesJson,
   mockGetSystemState, mockSetSystemState, mockAddNotificationHistory,
   mockDispatchAlert,
   mockGetStacks, mockGetStackContent, mockGetEnvContent, mockEnvExists,
   mockGetAllContainers, mockGetGlobalSettings, mockInspect,
+  mockBuildEffectiveServiceModel,
 } = vi.hoisted(() => ({
   mockGetAuthForRegistry: vi.fn().mockResolvedValue(null),
   mockGetStackUpdateStatus: vi.fn().mockReturnValue({}),
   mockUpsertStackUpdateStatus: vi.fn(),
   mockClearStackUpdateStatus: vi.fn(),
   mockRecordStackCheckFailure: vi.fn(),
+  mockGetStackServicesJson: vi.fn().mockReturnValue([]),
   mockGetSystemState: vi.fn().mockReturnValue('1'), // default: backfilled
   mockSetSystemState: vi.fn(),
   mockAddNotificationHistory: vi.fn(),
@@ -33,6 +35,10 @@ const {
   // Backs DockerController.getInstance().getDocker().getImage().inspect() for tests
   // that exercise the real checkImage (rather than stubbing it) through checkNode.
   mockInspect: vi.fn().mockResolvedValue({ RepoDigests: [] }),
+  // Defaults to non-renderable so checkNode's per-service reduction is a no-op
+  // (falls back to the legacy whole-stack tally) unless a test overrides this,
+  // matching how no real Compose model exists in this unit-test environment.
+  mockBuildEffectiveServiceModel: vi.fn().mockResolvedValue({ renderable: false, code: 'effective_model_render_failed', error: 'no model in test' }),
 }));
 
 vi.mock('../services/RegistryService', () => ({
@@ -54,11 +60,16 @@ vi.mock('../services/DatabaseService', () => ({
       getStackUpdateStatus: mockGetStackUpdateStatus,
       clearStackUpdateStatus: mockClearStackUpdateStatus,
       recordStackCheckFailure: mockRecordStackCheckFailure,
+      getStackServicesJson: mockGetStackServicesJson,
       getSystemState: mockGetSystemState,
       setSystemState: mockSetSystemState,
       addNotificationHistory: mockAddNotificationHistory,
     }),
   },
+}));
+
+vi.mock('../services/effectiveServiceModel', () => ({
+  buildEffectiveServiceModel: mockBuildEffectiveServiceModel,
 }));
 
 vi.mock('../services/NotificationService', () => ({
@@ -1435,5 +1446,208 @@ describe('ImageUpdateService cron scheduling', () => {
     expect(service.getStatus().mode).toBe('interval');
     expect(typeof delay).toBe('number');
     expect(delay).toBeGreaterThan(0);
+  });
+});
+
+// ── Model-based per-service reduction wiring (§5) ─────────────────
+
+describe('ImageUpdateService - model-based per-service reduction', () => {
+  const TWO_SERVICE_COMPOSE = `
+services:
+  web:
+    image: web:latest
+  worker:
+    image: worker:latest
+`;
+
+  const THREE_SERVICE_COMPOSE = `
+services:
+  worker:
+    image: worker:latest
+  api:
+    image: api:latest
+  db:
+    image: db:latest
+`;
+
+  const fakeDb = () => ({
+    getStackUpdateStatus: mockGetStackUpdateStatus,
+    upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
+    clearStackUpdateStatus: mockClearStackUpdateStatus,
+    recordStackCheckFailure: mockRecordStackCheckFailure,
+    getSystemState: mockGetSystemState,
+    setSystemState: mockSetSystemState,
+    addNotificationHistory: mockAddNotificationHistory,
+  });
+
+  function specFor(name: string, image: string): { name: string; declaredImage: string; hasBuild: boolean; expectedReplicas: number; dependsOn: string[]; hasHealthcheck: boolean } {
+    return { name, declaredImage: image, hasBuild: false, expectedReplicas: 1, dependsOn: [], hasHealthcheck: false };
+  }
+
+  /** Stubs checkImage to report hasUpdate only for the given image refs. */
+  function stubCheckImagePerRef(service: ImageUpdateService, updatedRefs: string[]) {
+    (service as any).checkImage = vi.fn().mockImplementation(async (_docker: unknown, ref: string) => ({ hasUpdate: updatedRefs.includes(ref) }));
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (ImageUpdateService as any).instance = undefined;
+    mockGetSystemState.mockReturnValue('1');
+    mockGetAllContainers.mockResolvedValue([]);
+    mockEnvExists.mockResolvedValue(false);
+  });
+
+  it('reduces per-service status through the effective model and persists services_json with a generation', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(TWO_SERVICE_COMPOSE);
+    mockGetStackUpdateStatus.mockReturnValue({});
+    mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+      renderable: true,
+      services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
+    });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImagePerRef(service, ['web:latest']);
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
+      1, 'stackA', true, expect.any(Number), 'ok', null,
+      [
+        { service: 'web', image: 'web:latest', hasUpdate: true, checkStatus: 'ok', lastError: null },
+        { service: 'worker', image: 'worker:latest', hasUpdate: false, checkStatus: 'ok', lastError: null },
+      ],
+      expect.any(Number),
+    );
+  });
+
+  it('falls back to the legacy whole-stack tally when the effective model is not renderable', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(TWO_SERVICE_COMPOSE);
+    mockGetStackUpdateStatus.mockReturnValue({});
+    mockBuildEffectiveServiceModel.mockResolvedValueOnce({ renderable: false, code: 'effective_model_render_failed', error: 'render failed' });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImagePerRef(service, ['web:latest']);
+
+    await (service as any).checkNode(1, fakeDb());
+
+    // Legacy path never passes a services/generation payload.
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(1, 'stackA', true, expect.any(Number), 'ok', null);
+  });
+
+  it('names sorted services with hasUpdate in the availability notification for a multi-service stack', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(THREE_SERVICE_COMPOSE);
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: false });
+    mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+      renderable: true,
+      services: [specFor('worker', 'worker:latest'), specFor('api', 'api:latest'), specFor('db', 'db:latest')],
+    });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImagePerRef(service, ['worker:latest', 'api:latest']);
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(mockDispatchAlert).toHaveBeenCalledWith(
+      'info',
+      'image_update_available',
+      'Stack "stackA" has image updates available for services: api, worker.',
+      { stackName: 'stackA', actor: 'system:image-update' },
+    );
+  });
+
+  it('does not re-notify a multi-service stack already known to have updates', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(TWO_SERVICE_COMPOSE);
+    mockGetStackUpdateStatus.mockReturnValue({ stackA: true });
+    mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+      renderable: true,
+      services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
+    });
+    const service = ImageUpdateService.getInstance();
+    stubCheckImagePerRef(service, ['web:latest']);
+
+    await (service as any).checkNode(1, fakeDb());
+
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
+  it('suppresses notification and count side effects when a newer recheck discards a stale full-scan write', async () => {
+    mockGetStacks.mockResolvedValue(['stackA']);
+    mockGetStackContent.mockResolvedValue(TWO_SERVICE_COMPOSE);
+    mockGetStackUpdateStatus.mockReturnValue({});
+    // Full-scan write path (after registry work) and recheck both need a model.
+    mockBuildEffectiveServiceModel.mockResolvedValue({
+      renderable: true,
+      services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
+    });
+
+    const service = ImageUpdateService.getInstance();
+    let resolveFullScan: ((value: { hasUpdate: boolean }) => void) | undefined;
+    let fullScanPending = true;
+    (service as any).checkImage = vi.fn().mockImplementation(async () => {
+      if (fullScanPending) {
+        return new Promise<{ hasUpdate: boolean }>((resolve) => {
+          resolveFullScan = resolve;
+        });
+      }
+      return { hasUpdate: false };
+    });
+
+    const fullScan = (service as any).checkNode(1, fakeDb());
+    await vi.waitFor(() => expect((service as any).checkImage).toHaveBeenCalled());
+
+    // A newer service recheck reserves a higher generation and commits "no update".
+    fullScanPending = false;
+    await service.recheckStack(1, 'stackA');
+    expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
+      1, 'stackA', false, expect.any(Number), 'ok', null,
+      expect.any(Array),
+      expect.any(Number),
+    );
+    const upsertsAfterRecheck = mockUpsertStackUpdateStatus.mock.calls.length;
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+
+    // Stale full scan finishes with hasUpdate=true but must not commit or notify.
+    resolveFullScan?.({ hasUpdate: true });
+    await fullScan;
+
+    expect(mockUpsertStackUpdateStatus.mock.calls.length).toBe(upsertsAfterRecheck);
+    expect(mockDispatchAlert).not.toHaveBeenCalled();
+  });
+
+  describe('recheckStack', () => {
+    it('persists a fresh per-service reduction and returns no warning on success', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      stubCheckImagePerRef(service, ['web:latest']);
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({ warning: null });
+      expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
+        1, 'stackA', true, expect.any(Number), 'ok', null,
+        [
+          { service: 'web', image: 'web:latest', runtimeImages: ['web:latest'], hasUpdate: true, checkStatus: 'ok', lastError: null },
+          { service: 'worker', image: 'worker:latest', hasUpdate: false, checkStatus: 'ok', lastError: null },
+        ],
+        expect.any(Number),
+      );
+    });
+
+    it('returns a warning and leaves the prior row untouched when the model cannot render', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({ renderable: false, code: 'effective_model_render_failed', error: 'no model in test' });
+      const service = ImageUpdateService.getInstance();
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({ warning: 'no model in test' });
+      expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+    });
   });
 });

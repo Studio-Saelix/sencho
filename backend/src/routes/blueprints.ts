@@ -8,9 +8,19 @@ import {
     type DriftMode,
 } from '../services/DatabaseService';
 import { BlueprintService } from '../services/BlueprintService';
-import { BlueprintReconciler } from '../services/BlueprintReconciler';
+import {
+    BlueprintReconciler,
+    messageForConfirmedOutcomes,
+    summarizeConfirmedOutcomes,
+} from '../services/BlueprintReconciler';
 import { BlueprintAnalyzer } from '../services/BlueprintAnalyzer';
-import { NodeLabelService } from '../services/NodeLabelService';
+import { buildBlueprintPreview, evaluateLightweightEffectiveApproval } from '../services/blueprintPreviewProjection';
+import {
+    confirmableActionsEqual,
+    deriveBlastFromConfirmableActions,
+    parseConfirmableActionsBody,
+    serializeApprovedBlast,
+} from '../services/blueprintApproval';
 import { isValidStackName } from '../utils/validation';
 import { parseIntParam } from '../utils/parseIntParam';
 import { isDebugEnabled } from '../utils/debug';
@@ -110,7 +120,14 @@ function summarizeBlueprint(blueprintId: number) {
     for (const dep of deployments) {
         counts[dep.status] = (counts[dep.status] ?? 0) + 1;
     }
-    return { blueprint, deployments, statusCounts: counts };
+    const auth = evaluateLightweightEffectiveApproval(blueprintId);
+    return {
+        blueprint,
+        deployments,
+        statusCounts: counts,
+        effectiveApproval: auth?.effectiveApproval ?? 'pending',
+        unauthorizedActions: auth?.unauthorizedActions ?? [],
+    };
 }
 
 blueprintsRouter.get('/', (req: Request, res: Response): void => {
@@ -120,7 +137,14 @@ blueprintsRouter.get('/', (req: Request, res: Response): void => {
             const deployments = DatabaseService.getInstance().listDeployments(b.id);
             const counts: Record<string, number> = {};
             for (const dep of deployments) counts[dep.status] = (counts[dep.status] ?? 0) + 1;
-            return { ...b, deploymentCounts: counts, deploymentTotal: deployments.length };
+            const auth = evaluateLightweightEffectiveApproval(b.id);
+            return {
+                ...b,
+                deploymentCounts: counts,
+                deploymentTotal: deployments.length,
+                effectiveApproval: auth?.effectiveApproval ?? 'pending',
+                unauthorizedActions: auth?.unauthorizedActions ?? [],
+            };
         });
         res.json(summaries);
     } catch (error) {
@@ -191,7 +215,17 @@ blueprintsRouter.put('/:id', (req: Request, res: Response): void => {
     if (body.name !== undefined) {
         const nameError = validateName(body.name);
         if (nameError) { res.status(400).json({ error: nameError }); return; }
-        updates.name = (body.name as string).trim();
+        const nextName = (body.name as string).trim();
+        const existing = DatabaseService.getInstance().getBlueprint(id);
+        if (existing && existing.name !== nextName
+            && DatabaseService.getInstance().hasNonWithdrawnBlueprintDeployments(id)) {
+            res.status(409).json({
+                error: 'Rename is blocked while non-withdrawn deployments or guards exist. Withdraw or resolve them first.',
+                code: 'RENAME_BLOCKED',
+            });
+            return;
+        }
+        updates.name = nextName;
     }
     if (body.description !== undefined) {
         const descError = validateDescription(body.description);
@@ -363,8 +397,50 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
             res.status(409).json({ error: 'Blueprint is disabled. Enable it before applying.', code: 'blueprint_disabled' });
             return;
         }
-        await BlueprintReconciler.getInstance().reconcileOne(id);
-        res.json({ message: 'Reconciliation triggered', blueprintId: id });
+
+        const body = (req.body ?? {}) as { planFingerprint?: unknown; actions?: unknown };
+        if (typeof body.planFingerprint !== 'string' || body.planFingerprint.length === 0) {
+            res.status(400).json({ error: 'planFingerprint is required', code: 'CONFIRM_REQUIRED' });
+            return;
+        }
+        const parsedActions = parseConfirmableActionsBody(body.actions);
+        if (!parsedActions.ok) {
+            res.status(400).json({ error: `Invalid actions: ${parsedActions.reason}`, code: 'CONFIRM_REQUIRED' });
+            return;
+        }
+
+        const preview = await buildBlueprintPreview(id);
+        if (!preview) {
+            res.status(404).json({ error: 'Blueprint not found' });
+            return;
+        }
+        if (preview.summary.blocker > 0) {
+            res.status(409).json({ error: 'Plan has blockers', code: 'PLAN_BLOCKED', preview });
+            return;
+        }
+        if (
+            body.planFingerprint !== preview.planFingerprint
+            || !confirmableActionsEqual(parsedActions.actions, preview.confirmableActions)
+        ) {
+            res.status(409).json({ error: 'Preview is stale; refresh and confirm again', code: 'PREVIEW_STALE', preview });
+            return;
+        }
+
+        const blast = deriveBlastFromConfirmableActions(preview.confirmableActions);
+        DatabaseService.getInstance().setBlueprintApproval(id, {
+            intentFingerprint: preview.planFingerprint,
+            blastJson: serializeApprovedBlast(blast),
+            approvedBy: req.user?.username ?? null,
+        });
+        const plan = await BlueprintReconciler.getInstance().reconcileConfirmedPlan(id, preview.executorActions);
+        const outcomeSummary = summarizeConfirmedOutcomes(plan.outcomes);
+        res.json({
+            message: messageForConfirmedOutcomes(outcomeSummary),
+            blueprintId: id,
+            effectiveApproval: 'approved',
+            outcomes: plan.outcomes,
+            outcomeSummary,
+        });
     } catch (error) {
         console.error('[Blueprints] Apply error:', error);
         res.status(500).json({ error: 'Failed to apply blueprint' });
@@ -394,6 +470,18 @@ blueprintsRouter.post('/:id/withdraw/:nodeId', async (req: Request, res: Respons
                 code: 'evict_blocked',
             });
             return;
+        }
+        // Destructive eviction (and reconciler-queued evict_blocked rows) require a
+        // current approved remove outcome. Plain stateless "standard" withdraw
+        // remains an immediate operator stop (no remove blast required).
+        const existingDep = DatabaseService.getInstance().getDeployment(id, nodeId);
+        const destructiveConfirm = confirm === 'snapshot_then_evict' || confirm === 'evict_and_destroy';
+        if (destructiveConfirm || existingDep?.status === 'evict_blocked') {
+            const guard = BlueprintReconciler.getInstance().validateWithdrawConfirmation(id, nodeId);
+            if (!guard.ok) {
+                res.status(409).json({ error: guard.error, code: guard.code });
+                return;
+            }
         }
         let snapshotId: number | null = null;
         if (confirm === 'snapshot_then_evict') {
@@ -462,9 +550,9 @@ blueprintsRouter.post('/:id/accept/:nodeId', async (req: Request, res: Response)
     try {
         const blueprint = DatabaseService.getInstance().getBlueprint(id);
         if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
-        const dep = DatabaseService.getInstance().getDeployment(id, nodeId);
-        if (!dep || dep.status !== 'pending_state_review') {
-            res.status(409).json({ error: 'Deployment is not awaiting state review' });
+        const guard = BlueprintReconciler.getInstance().validateGuardConfirmation(id, nodeId, 'accept');
+        if (!guard.ok) {
+            res.status(409).json({ error: guard.error, code: guard.code });
             return;
         }
         // 'restore_from_snapshot' is reserved for the future Volume Migration feature.
@@ -477,29 +565,13 @@ blueprintsRouter.post('/:id/accept/:nodeId', async (req: Request, res: Response)
     }
 });
 
-blueprintsRouter.get('/:id/preview', (req: Request, res: Response): void => {
+blueprintsRouter.get('/:id/preview', async (req: Request, res: Response): Promise<void> => {
     const id = parseIntParam(req, res, 'id');
     if (id === null) return;
     try {
-        const blueprint = DatabaseService.getInstance().getBlueprint(id);
-        if (!blueprint) { res.status(404).json({ error: 'Blueprint not found' }); return; }
-        const allNodes = DatabaseService.getInstance().getNodes();
-        const desired = NodeLabelService.getInstance().matchSelector(blueprint.selector, allNodes);
-        const existing = DatabaseService.getInstance().listDeployments(id);
-        const desiredIds = new Set(desired.map(n => n.id));
-        const willDeploy = desired.filter(n => !existing.some(d => d.node_id === n.id));
-        const willCheck = desired.filter(n => existing.some(d => d.node_id === n.id && d.status === 'active'));
-        const willEvict = existing
-            .filter(d => !desiredIds.has(d.node_id) && d.status !== 'withdrawn')
-            .map(d => d.node_id);
-        res.json({
-            blueprintId: id,
-            classification: blueprint.classification,
-            matchedNodes: desired.map(n => ({ id: n.id, name: n.name, type: n.type })),
-            plannedDeployments: willDeploy.map(n => ({ id: n.id, name: n.name })),
-            plannedDriftChecks: willCheck.map(n => ({ id: n.id, name: n.name })),
-            plannedEvictions: willEvict,
-        });
+        const preview = await buildBlueprintPreview(id);
+        if (!preview) { res.status(404).json({ error: 'Blueprint not found' }); return; }
+        res.json(preview);
     } catch (error) {
         console.error('[Blueprints] Preview error:', error);
         res.status(500).json({ error: 'Failed to preview blueprint' });
@@ -531,9 +603,9 @@ blueprintsRouter.put('/:id/pin', async (req: Request, res: Response): Promise<vo
         const updated = DatabaseService.getInstance().setBlueprintPinnedNode(id, nodeId);
         if (!updated) { res.status(404).json({ error: 'Blueprint not found' }); return; }
         if (isDebugEnabled()) console.log('[Federation:diag] pinned blueprint=%s node=%s', sanitizeForLog(id), sanitizeForLog(nodeId));
-        // Trigger immediate reconciliation so the pin takes effect without
-        // waiting for the next 60s tick. Errors here are logged but do not
-        // fail the request: the pin is already persisted.
+        // Pin clears approval, so reconcileOne cannot mutate until Confirm Apply.
+        // Still call it so the fail-closed pending state is evaluated immediately
+        // instead of waiting for the next tick.
         if (updated.enabled) {
             BlueprintReconciler.getInstance().reconcileOne(id).catch(err => {
                 console.warn('[Blueprints] post-pin reconcileOne failed:', err);

@@ -4,10 +4,17 @@
  * fleet_snapshots row + one fleet_snapshot_files row, and aborts the eviction
  * (without invoking withdrawFromNode) when the snapshot write fails. Also
  * verifies evict_and_destroy and stateless withdraws do not create snapshots.
+ *
+ * Destructive confirms require a remove-approved blast on a node that is no
+ * longer desired. Stateless standard withdraw does not.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import {
+    intentFingerprint,
+    serializeApprovedBlast,
+} from '../services/blueprintApproval';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -39,7 +46,7 @@ beforeEach(() => {
     db.prepare('DELETE FROM blueprints').run();
     db.prepare('DELETE FROM fleet_snapshot_files').run();
     db.prepare('DELETE FROM fleet_snapshots').run();
-    db.prepare("DELETE FROM nodes WHERE is_default = 0").run();
+    db.prepare('DELETE FROM nodes WHERE is_default = 0').run();
 });
 
 function seedNode(): { id: number; name: string } {
@@ -48,7 +55,7 @@ function seedNode(): { id: number; name: string } {
     const db = DatabaseService.getInstance().getDb();
     const result = db.prepare(
         `INSERT INTO nodes (name, type, mode, compose_dir, is_default, status, created_at)
-         VALUES (?, 'local', 'proxy', '/tmp/compose', 0, 'online', ?)`
+         VALUES (?, 'local', 'proxy', '/tmp/compose', 0, 'online', ?)`,
     ).run(name, Date.now());
     return { id: result.lastInsertRowid as number, name };
 }
@@ -78,6 +85,17 @@ function seedActiveDeployment(blueprintId: number, nodeId: number, revision: num
         node_id: nodeId,
         status: 'active',
         applied_revision: revision,
+        last_deployed_at: Date.now(),
+    });
+}
+
+/** Approve remove for nodes that have left the selector (empty desired set). */
+function approveRemove(blueprintId: number, nodeIds: number[]) {
+    const bp = DatabaseService.getInstance().getBlueprint(blueprintId)!;
+    DatabaseService.getInstance().setBlueprintApproval(blueprintId, {
+        intentFingerprint: intentFingerprint(bp),
+        blastJson: serializeApprovedBlast(nodeIds.map(nodeId => ({ nodeId, outcome: 'remove' as const }))),
+        approvedBy: 'admin',
     });
 }
 
@@ -85,8 +103,10 @@ describe('POST /api/blueprints/:id/withdraw/:nodeId', () => {
     it('snapshot_then_evict on a stateful blueprint captures compose into fleet_snapshots, then withdraws', async () => {
         const node = seedNode();
         const compose = 'services:\n  db:\n    image: postgres:16\n    volumes:\n      - data:/var/lib/postgresql/data\nvolumes:\n  data:\n';
-        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [node.id], composeContent: compose });
+        // Empty selector: node is not desired, so remove approval can authorize eviction.
+        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [], composeContent: compose });
         seedActiveDeployment(bp.id, node.id, bp.revision);
+        approveRemove(bp.id, [node.id]);
 
         const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode')
             .mockResolvedValue({ status: 'withdrawn' });
@@ -127,8 +147,9 @@ describe('POST /api/blueprints/:id/withdraw/:nodeId', () => {
 
     it('aborts the eviction with 500 and does NOT call withdrawFromNode when the snapshot write fails', async () => {
         const node = seedNode();
-        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [node.id] });
+        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [] });
         seedActiveDeployment(bp.id, node.id, bp.revision);
+        approveRemove(bp.id, [node.id]);
 
         const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode')
             .mockResolvedValue({ status: 'withdrawn' });
@@ -152,8 +173,9 @@ describe('POST /api/blueprints/:id/withdraw/:nodeId', () => {
 
     it('cleans up the orphan snapshot row when insertSnapshotFiles fails after createSnapshot succeeded', async () => {
         const node = seedNode();
-        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [node.id] });
+        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [] });
         seedActiveDeployment(bp.id, node.id, bp.revision);
+        approveRemove(bp.id, [node.id]);
 
         const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode')
             .mockResolvedValue({ status: 'withdrawn' });
@@ -177,8 +199,9 @@ describe('POST /api/blueprints/:id/withdraw/:nodeId', () => {
 
     it('evict_and_destroy on a stateful blueprint does NOT create a snapshot', async () => {
         const node = seedNode();
-        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [node.id] });
+        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [] });
         seedActiveDeployment(bp.id, node.id, bp.revision);
+        approveRemove(bp.id, [node.id]);
 
         vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode')
             .mockResolvedValue({ status: 'withdrawn' });
@@ -265,8 +288,9 @@ describe('POST /api/blueprints/:id/withdraw/:nodeId', () => {
 
     it('snapshot_then_evict returns 500 when compose_content is empty', async () => {
         const node = seedNode();
-        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [node.id], composeContent: '   \n  \n' });
+        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [], composeContent: '   \n  \n' });
         seedActiveDeployment(bp.id, node.id, bp.revision);
+        approveRemove(bp.id, [node.id]);
 
         const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode')
             .mockResolvedValue({ status: 'withdrawn' });
@@ -283,5 +307,23 @@ describe('POST /api/blueprints/:id/withdraw/:nodeId', () => {
         const db = DatabaseService.getInstance().getDb();
         const count = (db.prepare('SELECT COUNT(*) as n FROM fleet_snapshots').get() as { n: number }).n;
         expect(count).toBe(0);
+    });
+
+    it('rejects destructive evict on an active still-desired node without remove approval', async () => {
+        const node = seedNode();
+        const bp = seedBlueprint({ classification: 'stateful', nodeIds: [node.id] });
+        seedActiveDeployment(bp.id, node.id, bp.revision);
+
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode')
+            .mockResolvedValue({ status: 'withdrawn' });
+
+        const res = await request(app)
+            .post(`/api/blueprints/${bp.id}/withdraw/${node.id}`)
+            .set('Cookie', adminCookie)
+            .send({ confirm: 'evict_and_destroy' });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('STALE_GUARD');
+        expect(withdrawSpy).not.toHaveBeenCalled();
     });
 });

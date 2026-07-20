@@ -378,7 +378,7 @@ Quick reference:
 
 **Scope:** Per-node (each node has its own notification agents; remote nodes dispatch alerts through their own channels)
 
-Configure external destinations for alert notifications. Three agent types are available on separate tabs: **Discord**, **Slack**, and **Webhook**. The masthead publishes a **CHANNELS** pill showing how many agents are enabled (for example, `2/3`).
+Configure external destinations for alert notifications. Four agent types are available on separate tabs: **Discord**, **Slack**, **Webhook**, and **Apprise**. The masthead publishes a **CHANNELS** pill showing how many agents are enabled (for example, `2/4`).
 
 For each agent:
 
@@ -386,6 +386,7 @@ For each agent:
 |-------|-------------|
 | **Enabled** toggle | Activates or deactivates this agent. Disabled agents receive no messages even if a URL is saved. |
 | **Webhook URL** | The endpoint Sencho will POST to when an alert fires. |
+| **Apprise** | Use a keyed `/notify/<key>` endpoint with optional tags, or a stateless `/notify` endpoint with destination URLs. Apprise accepts HTTP or HTTPS. |
 
 Click **Save** to persist changes. Click **Test** to send a test payload immediately and verify delivery.
 
@@ -407,12 +408,13 @@ Create routing rules that direct specific alert types to specific notification c
 |-------|-------------|
 | **Name** | Operator-facing label for the rule. |
 | **Node** | Specific node, or all nodes if left empty. |
-| **Stack patterns** | Glob patterns to match stack names (multi-select). |
+| **Stack patterns** | Glob patterns with `*` (for example `prod-*`) matching stack names. |
 | **Labels** | Apply this rule to stacks that carry any of the selected labels. |
 | **Categories** | Event categories that trigger the rule (crash, deploy, vulnerability, etc.). |
-| **Channel type** | `discord`, `slack`, or `webhook`. |
+| **Severity** | Info, warning, and/or error levels. Empty matches any severity. |
+| **Channel type** | `discord`, `slack`, `webhook`, or `apprise`. |
 | **Channel URL** | The destination endpoint for this rule. |
-| **Priority** | Order in which rules are evaluated; the first match wins. |
+| **Priority** | Sort order among matching rules. Every matching route fires; priority does not stop later matches. |
 | **Enabled** toggle | Mute a rule without deleting it. |
 
 Each rule keeps an execution history (collapsible per row) showing which alerts triggered it, when, and whether the delivery succeeded.
@@ -435,7 +437,7 @@ Create notification suppression rules that mute or drop matching alerts from the
 |-------|-------------|
 | **Name** | Operator-facing label for the rule. |
 | **Node** | Specific node, or all nodes if left empty. |
-| **Stack patterns** | Stack names to match (multi-select). |
+| **Stack patterns** | Glob patterns with `*` matching stack names (for example `prod-*`). |
 | **Labels** | Match stacks that carry any selected label. |
 | **Categories** | Notification categories to suppress. |
 | **Severity** | Info, warning, and/or error levels to suppress. |

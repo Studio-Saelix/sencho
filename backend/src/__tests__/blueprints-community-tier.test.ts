@@ -60,6 +60,7 @@ beforeEach(() => {
     vi.restoreAllMocks();
     mockTier('community');
     vi.spyOn(BlueprintReconciler.getInstance(), 'reconcileOne').mockResolvedValue(undefined);
+    vi.spyOn(BlueprintReconciler.getInstance(), 'reconcileConfirmedPlan').mockResolvedValue({ outcomes: [] });
     const db = DatabaseService.getInstance().getDb();
     db.prepare('DELETE FROM blueprint_deployments').run();
     db.prepare('DELETE FROM blueprints').run();
@@ -109,9 +110,18 @@ describe('Blueprints on Community tier', () => {
             .send(validBlueprintBody(node.id));
         expect(created.status).toBe(201);
 
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+
         const res = await request(app)
             .post(`/api/blueprints/${created.body.id}/apply`)
-            .set('Cookie', adminCookie);
+            .set('Cookie', adminCookie)
+            .send({
+                planFingerprint: preview.body.planFingerprint,
+                actions: preview.body.confirmableActions,
+            });
         expect(res.status).toBe(200);
         expect(res.body.code).not.toBe('PAID_REQUIRED');
     });

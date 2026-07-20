@@ -403,13 +403,56 @@ class DockerController {
     };
   }
 
+  /** True when an image is unused and has no meaningful tag (dangling / untagged). */
+  private static isDanglingImage(img: { RepoTags?: string[] | null; Containers?: number }): boolean {
+    if ((img.Containers ?? 0) !== 0) return false;
+    const tags = img.RepoTags ?? [];
+    if (tags.length === 0) return true;
+    return tags.every((t) => t === '<none>:<none>');
+  }
+
+  /**
+   * Enumerate candidate images and delete individually. Used when a recovery
+   * hold predicate is supplied so held images are never removed by a bulk
+   * Docker prune API. Reclaimed bytes come from a LayersSize before/after delta.
+   */
+  private async pruneImagesEnumerated(
+    eligible: (img: { Id: string; RepoTags?: string[] | null; Containers?: number }) => boolean,
+    isImageHeld?: (imageId: string) => boolean,
+  ): Promise<{ success: boolean; reclaimedBytes: number }> {
+    const beforeDf = await this.safeDfSnapshot();
+    const rawImages = await this.docker.listImages({ all: false });
+    const candidates = (rawImages as Array<{ Id: string; RepoTags?: string[] | null; Containers?: number }>)
+      .filter((img) => eligible(img) && !isImageHeld?.(img.Id));
+
+    for (const img of candidates) {
+      if (isImageHeld?.(img.Id)) continue;
+      try {
+        await this.docker.getImage(img.Id).remove({ force: true });
+      } catch (e) {
+        console.error(`[pruneImagesEnumerated] Failed to remove image ${sanitizeForLog(img.Id)}:`, e);
+      }
+    }
+
+    const afterDf = await this.safeDfSnapshot();
+    let reclaimedBytes = 0;
+    if (typeof beforeDf?.LayersSize === 'number' && typeof afterDf?.LayersSize === 'number') {
+      reclaimedBytes = Math.max(0, beforeDf.LayersSize - afterDf.LayersSize);
+    }
+    return { success: true, reclaimedBytes };
+  }
+
   // Sencho's own image, networks, and named volumes are always in use by the
   // running container, so Docker's server-side prune APIs (pruneContainers,
   // pruneImages, pruneNetworks, pruneVolumes) skip them by definition. No
   // extra self-guard is needed at this layer; the `managed` scope path goes
   // through `pruneManagedOnly`, which adds an explicit self filter for
   // defense-in-depth.
-  public async pruneSystem(target: 'containers' | 'images' | 'networks' | 'volumes', labelFilter?: string) {
+  public async pruneSystem(
+    target: 'containers' | 'images' | 'networks' | 'volumes',
+    labelFilter?: string,
+    isImageHeld?: (imageId: string) => boolean,
+  ) {
     let spaceReclaimed = 0;
     if (target === 'containers') {
       const filters: Record<string, string[]> = {};
@@ -417,6 +460,9 @@ class DockerController {
       const r = await this.docker.pruneContainers({ filters });
       spaceReclaimed = r.SpaceReclaimed || 0;
     } else if (target === 'images') {
+      if (isImageHeld) {
+        return this.pruneImagesEnumerated((img) => (img.Containers ?? 0) === 0, isImageHeld);
+      }
       // Remove all unused images, not just dangling ones
       const filters: Record<string, string[] | Record<string, boolean>> = { dangling: { 'false': true } };
       if (labelFilter) filters.label = [labelFilter];
@@ -444,7 +490,10 @@ class DockerController {
   // which uses { dangling: { 'false': true } } to remove every unused image.
   // Used by the prune-on-update flow to reclaim the layers a pull/recreate
   // orphans, without touching tagged images for stopped stacks.
-  public async pruneDanglingImages(): Promise<{ success: boolean; reclaimedBytes: number }> {
+  public async pruneDanglingImages(isImageHeld?: (imageId: string) => boolean): Promise<{ success: boolean; reclaimedBytes: number }> {
+    if (isImageHeld) {
+      return this.pruneImagesEnumerated((img) => DockerController.isDanglingImage(img), isImageHeld);
+    }
     const filters: Record<string, string[] | Record<string, boolean>> = { dangling: { 'true': true } };
     const r = await this.docker.pruneImages({ filters });
     return { success: true, reclaimedBytes: r.SpaceReclaimed || 0 };
@@ -635,7 +684,8 @@ class DockerController {
 
   public async pruneManagedOnly(
     target: 'images' | 'volumes' | 'networks',
-    knownStackNames: string[]
+    knownStackNames: string[],
+    isImageHeld?: (imageId: string) => boolean,
   ): Promise<{ success: boolean; reclaimedBytes: number }> {
     const knownSet = new Set(knownStackNames);
     const projectToStack = await DockerController.resolveProjectNameMap(knownStackNames);
@@ -707,6 +757,7 @@ class DockerController {
       // once, but the per-image formula subtracts it from every referrer).
       const beforeDf = await this.safeDfSnapshot();
       await Promise.all(prunable.map(async (img) => {
+        if (isImageHeld?.(img.Id)) return;
         try {
           await this.docker.getImage(img.Id).remove({ force: true });
         } catch (e) {
@@ -832,6 +883,7 @@ class DockerController {
     scope: PruneScope,
     knownStackNames: string[],
     nodeId: number = this.nodeId,
+    isImageHeld?: (imageId: string) => boolean,
   ): Promise<PrunePlan> {
     const ordered = normalizePruneTargets(targets);
     const knownSet = new Set(knownStackNames);
@@ -980,6 +1032,7 @@ class DockerController {
       const freeingImages = ordered.includes('containers');
       for (const img of rawImages) {
         if (selfIdentity.isOwnImage(img.Id)) continue;
+        if (isImageHeld?.(img.Id)) continue;
         const containers = img.Containers ?? 0;
         const refs = imageToContainerIds.get(img.Id) ?? [];
         const becomesFree = freeingImages
@@ -1038,8 +1091,9 @@ class DockerController {
   public async assertPlanFresh(
     plan: PrunePlan,
     knownStackNames: string[],
+    isImageHeld?: (imageId: string) => boolean,
   ): Promise<PrunePlan | null> {
-    const rebuilt = await this.buildPrunePlan(plan.targets, plan.scope, knownStackNames, plan.nodeId);
+    const rebuilt = await this.buildPrunePlan(plan.targets, plan.scope, knownStackNames, plan.nodeId, isImageHeld);
     if (rebuilt.fingerprint !== plan.fingerprint) return null;
     return rebuilt;
   }
@@ -1051,8 +1105,9 @@ class DockerController {
   public async executePrunePlan(
     plan: PrunePlan,
     knownStackNames: string[],
+    isImageHeld?: (imageId: string) => boolean,
   ): Promise<{ outcomes: PruneItemOutcome[]; reclaimedBytes: number; success: boolean }> {
-    const fresh = await this.assertPlanFresh(plan, knownStackNames);
+    const fresh = await this.assertPlanFresh(plan, knownStackNames, isImageHeld);
     if (!fresh) throw new PrunePlanStaleError();
 
     const knownSet = new Set(knownStackNames);
@@ -1123,6 +1178,15 @@ class DockerController {
         }
 
         if (target === 'images') {
+          if (isImageHeld?.(item.id)) {
+            outcomes.push({
+              id: item.id,
+              target: 'images',
+              status: 'skipped',
+              reason: 'Image held for pending service-update recovery',
+            });
+            continue;
+          }
           if (imageIdBlocked(item.id)) {
             const stillReferenced = await this.imageStillReferenced(item.id);
             if (stillReferenced) {

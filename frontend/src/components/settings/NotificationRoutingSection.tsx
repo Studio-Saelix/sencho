@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -23,6 +23,10 @@ import { Plus, Trash2, Pencil, RefreshCw, Zap, X, Route } from 'lucide-react';
 import { SettingsCallout } from './SettingsCallout';
 import { SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { classifyAppriseEndpoint, isStatelessAppriseEndpoint } from '@/lib/appriseEndpoint';
+import { PatternChips, type PatternChipsHandle } from './PatternChips';
+
+type NotificationLevel = 'info' | 'warning' | 'error';
 
 interface NotificationRoute {
     id: number;
@@ -31,24 +35,34 @@ interface NotificationRoute {
     stack_patterns: string[];
     label_ids: number[] | null;
     categories: NotificationCategory[] | null;
-    channel_type: 'discord' | 'slack' | 'webhook';
+    levels: NotificationLevel[] | null;
+    channel_type: 'discord' | 'slack' | 'webhook' | 'apprise';
     channel_url: string;
+    config: { mode: 'keyed' | 'stateless'; tags?: string; has_urls: boolean; providers?: string[]; url_count?: number } | null;
     priority: number;
     enabled: boolean;
     created_at: number;
     updated_at: number;
 }
 
+const LEVEL_LABELS: Record<NotificationLevel, string> = {
+    info: 'Info',
+    warning: 'Warning',
+    error: 'Error',
+};
+
 const CHANNEL_LABELS: Record<string, string> = {
     discord: 'Discord',
     slack: 'Slack',
     webhook: 'Webhook',
+    apprise: 'Apprise',
 };
 
 const CHANNEL_PLACEHOLDERS: Record<string, string> = {
     discord: 'https://discord.com/api/webhooks/...',
     slack: 'https://hooks.slack.com/services/...',
     webhook: 'https://example.com/webhook',
+    apprise: 'http://apprise.local/notify',
 };
 
 export function NotificationRoutingSection() {
@@ -70,8 +84,17 @@ export function NotificationRoutingSection() {
     const [formStacks, setFormStacks] = useState<string[]>([]);
     const [formLabelIds, setFormLabelIds] = useState<number[]>([]);
     const [formCategories, setFormCategories] = useState<NotificationCategory[]>([]);
-    const [formChannelType, setFormChannelType] = useState<'discord' | 'slack' | 'webhook'>('discord');
+    const [formLevels, setFormLevels] = useState<NotificationLevel[]>([]);
+    const [formChannelType, setFormChannelType] = useState<'discord' | 'slack' | 'webhook' | 'apprise'>('discord');
+    const patternChipsRef = useRef<PatternChipsHandle>(null);
     const [formChannelUrl, setFormChannelUrl] = useState('');
+    const [formAppriseUrls, setFormAppriseUrls] = useState('');
+    const [formAppriseTags, setFormAppriseTags] = useState('');
+    const [appriseEndpointDirty, setAppriseEndpointDirty] = useState(false);
+    const [appriseConfigDirty, setAppriseConfigDirty] = useState(false);
+    /** Original Apprise mode when editing; drives preserve hints and forces a config write on mode switch. */
+    const [editAppriseOriginalMode, setEditAppriseOriginalMode] = useState<'keyed' | 'stateless' | null>(null);
+    const [editOriginalChannelType, setEditOriginalChannelType] = useState<'discord' | 'slack' | 'webhook' | 'apprise' | null>(null);
     const [formPriority, setFormPriority] = useState(0);
     const [formEnabled, setFormEnabled] = useState(true);
 
@@ -121,8 +144,15 @@ export function NotificationRoutingSection() {
         setFormStacks([]);
         setFormLabelIds([]);
         setFormCategories([]);
+        setFormLevels([]);
         setFormChannelType('discord');
         setFormChannelUrl('');
+        setFormAppriseUrls('');
+        setFormAppriseTags('');
+        setAppriseEndpointDirty(false);
+        setAppriseConfigDirty(false);
+        setEditAppriseOriginalMode(null);
+        setEditOriginalChannelType(null);
         setFormPriority(0);
         setFormEnabled(true);
         setEditingId(null);
@@ -136,8 +166,17 @@ export function NotificationRoutingSection() {
         setFormStacks([...route.stack_patterns]);
         setFormLabelIds(route.label_ids ? [...route.label_ids] : []);
         setFormCategories(route.categories ? [...route.categories] : []);
+        setFormLevels(route.levels ? [...route.levels] : []);
         setFormChannelType(route.channel_type);
         setFormChannelUrl(route.channel_url);
+        setFormAppriseTags(route.config?.tags ?? '');
+        setFormAppriseUrls('');
+        setAppriseEndpointDirty(false);
+        setAppriseConfigDirty(false);
+        setEditAppriseOriginalMode(
+            route.channel_type === 'apprise' ? (route.config?.mode ?? null) : null,
+        );
+        setEditOriginalChannelType(route.channel_type);
         setFormPriority(route.priority);
         setFormEnabled(route.enabled);
         setShowForm(true);
@@ -145,8 +184,37 @@ export function NotificationRoutingSection() {
 
     const handleSave = async () => {
         if (!formName.trim()) { toast.error('Name is required.'); return; }
-        if (!formChannelUrl.trim() || !formChannelUrl.startsWith('https://')) {
-            toast.error('Channel URL must be a valid HTTPS URL.');
+        const preparedPatterns = patternChipsRef.current?.prepareSave();
+        if (!preparedPatterns?.ok) {
+            toast.error('Fix invalid stack patterns before saving.');
+            return;
+        }
+        if (!formChannelUrl.trim() || (formChannelType !== 'apprise' && !formChannelUrl.startsWith('https://'))) {
+            toast.error(formChannelType === 'apprise' ? 'Enter a valid Apprise endpoint.' : 'Channel URL must be a valid HTTPS URL.');
+            return;
+        }
+
+        const channelTypeChanged = Boolean(
+            editingId
+            && editOriginalChannelType
+            && formChannelType !== editOriginalChannelType,
+        );
+        const appriseMode = formChannelType === 'apprise' ? classifyAppriseEndpoint(formChannelUrl) : null;
+        const appriseModeChanged = Boolean(
+            editingId
+            && editAppriseOriginalMode
+            && appriseMode
+            && appriseMode !== editAppriseOriginalMode,
+        );
+        // Mode switch, type switch, or dirty tags/URLs need config; endpoint-only edits omit it so blank fields preserve destinations.
+        const needsAppriseConfig = formChannelType === 'apprise'
+            && (!editingId || appriseConfigDirty || appriseModeChanged || channelTypeChanged);
+        if (
+            appriseMode === 'stateless'
+            && !formAppriseUrls.trim()
+            && (!editingId || appriseModeChanged || appriseConfigDirty || channelTypeChanged)
+        ) {
+            toast.error('Destination URLs are required for a stateless Apprise endpoint.');
             return;
         }
 
@@ -155,11 +223,21 @@ export function NotificationRoutingSection() {
             const body = {
                 name: formName.trim(),
                 node_id: formNodeId,
-                stack_patterns: formStacks,
+                stack_patterns: preparedPatterns.patterns,
                 label_ids: formLabelIds.length > 0 ? formLabelIds : null,
                 categories: formCategories.length > 0 ? formCategories : null,
+                levels: formLevels.length > 0 ? formLevels : null,
                 channel_type: formChannelType,
-                channel_url: formChannelUrl.trim(),
+                ...(formChannelType !== 'apprise' || !editingId || appriseEndpointDirty || channelTypeChanged
+                    ? { channel_url: formChannelUrl.trim() }
+                    : {}),
+                ...(needsAppriseConfig
+                    ? {
+                        config: appriseMode === 'stateless'
+                            ? { urls: formAppriseUrls }
+                            : { tags: formAppriseTags },
+                    }
+                    : {}),
                 priority: formPriority,
                 enabled: formEnabled,
             };
@@ -247,10 +325,6 @@ export function NotificationRoutingSection() {
         }
     };
 
-    const removeStack = (stackName: string) => {
-        setFormStacks(prev => prev.filter(s => s !== stackName));
-    };
-
     const addLabel = (idStr: string) => {
         const id = Number(idStr);
         if (!isNaN(id) && id > 0 && !formLabelIds.includes(id)) {
@@ -273,6 +347,17 @@ export function NotificationRoutingSection() {
         setFormCategories(prev => prev.filter(c => c !== cat));
     };
 
+    const addLevel = (level: string) => {
+        const l = level as NotificationLevel;
+        if ((l === 'info' || l === 'warning' || l === 'error') && !formLevels.includes(l)) {
+            setFormLevels(prev => [...prev, l]);
+        }
+    };
+
+    const removeLevel = (level: NotificationLevel) => {
+        setFormLevels(prev => prev.filter(l => l !== level));
+    };
+
     const enabledRoutesCount = routes.filter(r => r.enabled).length;
     useMastheadStats(
         loading
@@ -287,6 +372,7 @@ export function NotificationRoutingSection() {
             ],
     );
 
+    const isAppriseStateless = isStatelessAppriseEndpoint(formChannelUrl);
     const availableStackOptions = stackOptions.filter(o => !formStacks.includes(o.value));
     const availableLabelOptions = useMemo<ComboboxOption[]>(
         () => labelOptions.filter(l => !formLabelIds.includes(l.id)).map(l => ({ value: String(l.id), label: l.name })),
@@ -295,6 +381,10 @@ export function NotificationRoutingSection() {
     const availableCategoryOptions = useMemo<ComboboxOption[]>(
         () => (Object.keys(CATEGORY_LABELS) as NotificationCategory[]).filter(c => !formCategories.includes(c)).map(c => ({ value: c, label: CATEGORY_LABELS[c] })),
         [formCategories],
+    );
+    const availableLevelOptions = useMemo<ComboboxOption[]>(
+        () => (Object.keys(LEVEL_LABELS) as NotificationLevel[]).filter(l => !formLevels.includes(l)).map(l => ({ value: l, label: LEVEL_LABELS[l] })),
+        [formLevels],
     );
 
     return (
@@ -343,30 +433,21 @@ export function NotificationRoutingSection() {
 
                             <div className="space-y-2">
                                 <Label>Stacks <span className="text-muted-foreground font-normal text-xs">(optional)</span></Label>
+                                <PatternChips
+                                    ref={patternChipsRef}
+                                    patterns={formStacks}
+                                    onChange={setFormStacks}
+                                    placeholder="Type a pattern (for example prod-*)"
+                                    data-testid="route-pattern-chips"
+                                />
                                 <Combobox
                                     options={availableStackOptions}
                                     value=""
                                     onValueChange={addStack}
-                                    placeholder="Add a stack..."
+                                    placeholder="Insert known stack name..."
                                     searchPlaceholder="Search stacks..."
                                     emptyText="No stacks found."
                                 />
-                                {formStacks.length > 0 && (
-                                    <div className="flex flex-wrap gap-1.5 pt-1">
-                                        {formStacks.map(s => (
-                                            <Badge key={s} variant="secondary" className="font-mono text-xs gap-1 pr-1">
-                                                {s}
-                                                <button
-                                                    type="button"
-                                                    onClick={() => removeStack(s)}
-                                                    className="ml-0.5 rounded-full hover:bg-foreground/10 p-0.5"
-                                                >
-                                                    <X className="w-3 h-3" />
-                                                </button>
-                                            </Badge>
-                                        ))}
-                                    </div>
-                                )}
                             </div>
 
                             <div className="space-y-2">
@@ -430,9 +511,51 @@ export function NotificationRoutingSection() {
                             </div>
 
                             <div className="space-y-2">
+                                <Label>Severity <span className="text-muted-foreground font-normal text-xs">(optional)</span></Label>
+                                <Combobox
+                                    options={availableLevelOptions}
+                                    value=""
+                                    onValueChange={addLevel}
+                                    placeholder="Add a severity..."
+                                    searchPlaceholder="Search..."
+                                    emptyText="No levels left."
+                                />
+                                {formLevels.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5 pt-1">
+                                        {formLevels.map((l) => (
+                                            <Badge key={l} variant="outline" className="text-xs gap-1 pr-1">
+                                                {LEVEL_LABELS[l]}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeLevel(l)}
+                                                    className="ml-0.5 rounded-full hover:bg-foreground/10 p-0.5"
+                                                >
+                                                    <X className="w-3 h-3" />
+                                                </button>
+                                            </Badge>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="space-y-2">
                                 <Label>Channel</Label>
-                                <Tabs value={formChannelType} onValueChange={(v) => setFormChannelType(v as 'discord' | 'slack' | 'webhook')}>
-                                    <TabsList className="w-full grid grid-cols-3">
+                                <Tabs
+                                    value={formChannelType}
+                                    onValueChange={(v) => {
+                                        const next = v as 'discord' | 'slack' | 'webhook' | 'apprise';
+                                        if (next !== formChannelType) {
+                                            // Type change replaces credentials; never carry a redacted prior URL across types.
+                                            setFormChannelUrl('');
+                                            setFormAppriseTags('');
+                                            setFormAppriseUrls('');
+                                            setAppriseEndpointDirty(true);
+                                            setAppriseConfigDirty(true);
+                                        }
+                                        setFormChannelType(next);
+                                    }}
+                                >
+                                    <TabsList className="w-full grid grid-cols-4">
                                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                                             <TabsHighlightItem value="discord">
                                                 <TabsTrigger value="discord">Discord</TabsTrigger>
@@ -443,14 +566,36 @@ export function NotificationRoutingSection() {
                                             <TabsHighlightItem value="webhook">
                                                 <TabsTrigger value="webhook">Webhook</TabsTrigger>
                                             </TabsHighlightItem>
+                                            <TabsHighlightItem value="apprise">
+                                                <TabsTrigger value="apprise">Apprise</TabsTrigger>
+                                            </TabsHighlightItem>
                                         </TabsHighlight>
                                     </TabsList>
                                 </Tabs>
                                 <Input
                                     placeholder={CHANNEL_PLACEHOLDERS[formChannelType]}
                                     value={formChannelUrl}
-                                    onChange={e => setFormChannelUrl(e.target.value)}
+                                    onChange={e => {
+                                        setFormChannelUrl(e.target.value);
+                                        if (formChannelType === 'apprise') setAppriseEndpointDirty(true);
+                                    }}
                                 />
+                                {formChannelType === 'apprise' && (
+                                    <>
+                                        <Input
+                                            placeholder={isAppriseStateless ? 'Destination URLs, required for stateless mode' : 'Optional tags for keyed mode'}
+                                            value={isAppriseStateless ? formAppriseUrls : formAppriseTags}
+                                            onChange={e => {
+                                                if (isAppriseStateless) setFormAppriseUrls(e.target.value);
+                                                else setFormAppriseTags(e.target.value);
+                                                setAppriseConfigDirty(true);
+                                            }}
+                                        />
+                                        {editingId !== null && isAppriseStateless && editAppriseOriginalMode === 'stateless' && !formAppriseUrls && (
+                                            <p className="text-xs text-stat-subtitle">Leave destination URLs blank to preserve the configured destinations.</p>
+                                        )}
+                                    </>
+                                )}
                             </div>
 
                             <div className="grid grid-cols-2 gap-4">
@@ -590,11 +735,20 @@ export function NotificationRoutingSection() {
                             {route.categories && route.categories.length > 0 && route.categories.map(c => (
                                 <Badge key={c} variant="outline" className="text-[10px] font-mono">{CATEGORY_LABELS[c] ?? c}</Badge>
                             ))}
-                            {route.stack_patterns.length === 0 && (!route.label_ids || route.label_ids.length === 0) && (!route.categories || route.categories.length === 0) && (
-                                <span className="text-muted-foreground/50 text-[10px]">Matches all alerts</span>
-                            )}
+                            {route.levels && route.levels.length > 0 && route.levels.map((l) => (
+                                <Badge key={l} variant="outline" className="text-[10px]">{LEVEL_LABELS[l]}</Badge>
+                            ))}
+                            {route.stack_patterns.length === 0
+                                && (!route.label_ids || route.label_ids.length === 0)
+                                && (!route.categories || route.categories.length === 0)
+                                && (!route.levels || route.levels.length === 0)
+                                && (
+                                    route.node_id === null
+                                        ? <span className="text-muted-foreground/50 text-[10px]">Matches all alerts</span>
+                                        : <span className="text-muted-foreground/50 text-[10px]">Matches all alerts on this node</span>
+                                )}
                             <span className="text-muted-foreground/50">|</span>
-                            <span className="font-mono truncate max-w-[200px]" title={route.channel_url}>
+                            <span className="font-mono truncate max-w-[200px]" title={route.channel_type === 'apprise' ? undefined : route.channel_url}>
                                 {route.channel_url}
                             </span>
                             {route.priority !== 0 && (

@@ -287,6 +287,13 @@ export function buildSummary(
     };
 }
 
+/** Filter a full-stack preview down to one service's images and recompute the summary from that subset. */
+export function filterPreviewForService(preview: UpdatePreview, serviceName: string): UpdatePreview {
+    const images = preview.images.filter(i => i.service === serviceName);
+    const buildServices = preview.build_services.filter(s => s === serviceName);
+    return buildSummary(preview.stack_name, images, buildServices);
+}
+
 export class UpdatePreviewService {
     private static instance: UpdatePreviewService;
 

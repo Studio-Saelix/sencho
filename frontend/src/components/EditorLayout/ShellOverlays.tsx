@@ -124,6 +124,8 @@ export function ShellOverlays({
         open={updateReadiness !== null}
         stackName={updateReadiness?.stackName ?? ''}
         nodeId={updateReadiness?.nodeId ?? null}
+        serviceName={updateReadiness?.serviceName}
+        mode={updateReadiness?.mode}
         onCancel={() => setUpdateReadiness(null)}
         onProceed={() => updateReadiness?.proceed()}
       />

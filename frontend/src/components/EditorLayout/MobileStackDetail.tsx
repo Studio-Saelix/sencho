@@ -62,6 +62,10 @@ export function MobileStackDetail(props: EditorViewProps) {
         openLogViewer,
         openBashModal,
         serviceAction,
+        effectiveServices,
+        serviceUpdateStatuses,
+        serviceUpdateInProgress,
+        onRequestServiceUpdate,
         setLogsMode,
         setActiveTab,
         setGitSourceOpen,
@@ -225,6 +229,10 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 openLogViewer={openLogViewer}
                                 openBashModal={openBashModal}
                                 serviceAction={serviceAction}
+                                effectiveServices={effectiveServices}
+                                serviceUpdateStatuses={serviceUpdateStatuses}
+                                serviceUpdateInProgress={serviceUpdateInProgress}
+                                onRequestServiceUpdate={onRequestServiceUpdate}
                                 key={`${activeNode?.id ?? 'local'}:${stackName}`}
                             />
                         </div>

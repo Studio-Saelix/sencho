@@ -242,7 +242,7 @@ describe('POST /api/notifications/test', () => {
       .set('Cookie', authCookie)
       .send({ type: 'telegram', url: 'https://example.com' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('discord, slack, webhook');
+    expect(res.body.error).toContain('discord, slack, webhook, apprise');
   });
 
   it('rejects missing type with 400', async () => {
@@ -276,5 +276,78 @@ describe('POST /api/notifications/test', () => {
       .set('Cookie', authCookie)
       .send({ type: 'discord', url: 'https://' });
     expect(res.status).toBe(400);
+  });
+
+  it('dispatches keyed Apprise test with exact payload', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const res = await request(app)
+        .post('/api/notifications/test')
+        .set('Cookie', authCookie)
+        .send({ type: 'apprise', url: 'http://apprise.local/notify/test-key', config: { tags: 'ops' } });
+      expect(res.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://apprise.local/notify/test-key',
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            title: 'Sencho Alert [INFO]',
+            body: '🔌 Test Notification from Sencho!',
+            type: 'info',
+            tag: 'ops',
+          }),
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('dispatches stateless Apprise test with urls and rejects scheme-less tokens', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      const bad = await request(app)
+        .post('/api/notifications/test')
+        .set('Cookie', authCookie)
+        .send({ type: 'apprise', url: 'http://apprise.local/notify', config: { urls: 'no-scheme' } });
+      expect(bad.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      const ok = await request(app)
+        .post('/api/notifications/test')
+        .set('Cookie', authCookie)
+        .send({ type: 'apprise', url: 'http://apprise.local/notify', config: { urls: 'discord://token' } });
+      expect(ok.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://apprise.local/notify',
+        expect.objectContaining({
+          body: JSON.stringify({
+            title: 'Sencho Alert [INFO]',
+            body: '🔌 Test Notification from Sencho!',
+            type: 'info',
+            urls: 'discord://token',
+          }),
+        }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('returns sanitized details on Apprise 204 without leaking secrets', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 204 }));
+    try {
+      const res = await request(app)
+        .post('/api/notifications/test')
+        .set('Cookie', authCookie)
+        .send({ type: 'apprise', url: 'http://apprise.local/notify/secret-key', config: {} });
+      expect(res.status).toBe(500);
+      expect(JSON.stringify(res.body)).toContain('HTTP 204');
+      expect(JSON.stringify(res.body)).not.toContain('secret-key');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

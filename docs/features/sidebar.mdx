@@ -75,7 +75,7 @@ Each row gives you everything you need to read the stack at a glance, in a fixed
 - **Status pill** on the left. Two uppercase letters in mono type, or a spinner while a lifecycle action is in flight. `UP` (green) means the stack is running with nothing crashed. `DN` (red) means the stack is stopped. `PT` (amber) means the stack is partially running: at least one container is up and at least one has crashed (exited with an error, died, or is restart-looping). Hover the `PT` pill to see the running/total container count, such as `3/5 running`. A stack whose only stopped container finished cleanly stays `UP`.
 - **Stack name** in mono type, truncated with an ellipsis when the row gets tight. Rows no longer render a per-row label swatch; a stack's labels are visible from the group it's sorted into (see [Groups](#groups) above) or from the row's **Labels** submenu.
 - **Trailing indicator** in its own fixed-width slot at the far right of the name area, showing the highest-priority signal present:
-  - Pulsing fuchsia dot: an image update is available. Hover for the "Update available" tooltip.
+  - Pulsing fuchsia dot: an image update is available. Hover for the "Update available" tooltip; when per-service status is known, the tooltip names the outdated service(s).
   - Muted circle-alert icon: the last registry check failed (registry unreachable, missing credentials, or rate-limited). Hover to read the failure reason.
   - Git branch icon: a Git source update is pending and no image update is available.
 - **Hover kebab** on the right edge. On desktop, hover the row to reveal a vertical three-dot menu that opens the same actions as right-clicking. On touch viewports the kebab is always visible.

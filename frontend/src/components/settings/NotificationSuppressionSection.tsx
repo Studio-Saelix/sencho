@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -23,6 +23,7 @@ import { Plus, Trash2, Pencil, RefreshCw, X, BellOff } from 'lucide-react';
 import { SettingsCallout } from './SettingsCallout';
 import { SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { PatternChips, type PatternChipsHandle } from './PatternChips';
 
 type NotificationLevel = 'info' | 'warning' | 'error';
 type AppliesTo = 'bell' | 'external' | 'both';
@@ -118,6 +119,7 @@ export function NotificationSuppressionSection({
     const [formName, setFormName] = useState('');
     const [formNodeId, setFormNodeId] = useState<number | null>(null);
     const [formStacks, setFormStacks] = useState<string[]>([]);
+    const patternChipsRef = useRef<PatternChipsHandle>(null);
     const [formLabelIds, setFormLabelIds] = useState<number[]>([]);
     const [formCategories, setFormCategories] = useState<NotificationCategory[]>([]);
     const [formLevels, setFormLevels] = useState<NotificationLevel[]>([]);
@@ -212,6 +214,11 @@ export function NotificationSuppressionSection({
 
     const handleSave = async () => {
         if (!formName.trim()) { toast.error('Name is required.'); return; }
+        const preparedPatterns = patternChipsRef.current?.prepareSave();
+        if (!preparedPatterns?.ok) {
+            toast.error('Fix invalid stack patterns before saving.');
+            return;
+        }
         const customMs = formCustomExpiry ? new Date(formCustomExpiry).getTime() : null;
         if (formExpirationPreset === 'custom' && (customMs == null || Number.isNaN(customMs))) {
             toast.error('Choose a valid custom expiration date.');
@@ -223,7 +230,7 @@ export function NotificationSuppressionSection({
             const body = {
                 name: formName.trim(),
                 node_id: formNodeId,
-                stack_patterns: formStacks,
+                stack_patterns: preparedPatterns.patterns,
                 label_ids: formLabelIds.length > 0 ? formLabelIds : null,
                 categories: formCategories.length > 0 ? formCategories : null,
                 levels: formLevels.length > 0 ? formLevels : null,
@@ -297,7 +304,6 @@ export function NotificationSuppressionSection({
     const addStack = (stackName: string) => {
         if (stackName && !formStacks.includes(stackName)) setFormStacks((prev) => [...prev, stackName]);
     };
-    const removeStack = (stackName: string) => setFormStacks((prev) => prev.filter((s) => s !== stackName));
     const addLabel = (idStr: string) => {
         const id = Number(idStr);
         if (!Number.isNaN(id) && id > 0 && !formLabelIds.includes(id)) setFormLabelIds((prev) => [...prev, id]);
@@ -387,17 +393,14 @@ export function NotificationSuppressionSection({
 
                         <div className="space-y-2">
                             <Label>Stacks <span className="text-muted-foreground font-normal text-xs">(optional)</span></Label>
-                            <Combobox options={availableStackOptions} value="" onValueChange={addStack} placeholder="Add a stack..." searchPlaceholder="Search stacks..." emptyText="No stacks found." />
-                            {formStacks.length > 0 && (
-                                <div className="flex flex-wrap gap-1.5 pt-1">
-                                    {formStacks.map((s) => (
-                                        <Badge key={s} variant="secondary" className="font-mono text-xs gap-1 pr-1">
-                                            {s}
-                                            <button type="button" onClick={() => removeStack(s)} className="ml-0.5 rounded-full hover:bg-foreground/10 p-0.5"><X className="w-3 h-3" /></button>
-                                        </Badge>
-                                    ))}
-                                </div>
-                            )}
+                            <PatternChips
+                                ref={patternChipsRef}
+                                patterns={formStacks}
+                                onChange={setFormStacks}
+                                placeholder="Type a pattern (for example prod-*)"
+                                data-testid="mute-pattern-chips"
+                            />
+                            <Combobox options={availableStackOptions} value="" onValueChange={addStack} placeholder="Insert known stack name..." searchPlaceholder="Search stacks..." emptyText="No stacks found." />
                         </div>
 
                         <div className="space-y-2">

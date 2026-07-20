@@ -116,6 +116,12 @@ describe('StackRow', () => {
     expect(container.querySelector('.bg-update')).not.toBeNull();
   });
 
+  it('names outdated services in the update tooltip', async () => {
+    render(<StackRow {...base({ hasUpdate: true, outdatedServices: ['api', 'worker'] })} />);
+    fireEvent.pointerMove(screen.getByTestId('stack-trailing-update'));
+    expect((await screen.findAllByText('Update available: api, worker')).length).toBeGreaterThan(0);
+  });
+
   it('shows no trailing indicator for a clean ok check with no update', () => {
     const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: false, checkStatus: 'ok' })} />);
     expect(container.querySelector('.lucide-alert-circle')).toBeNull();

@@ -124,3 +124,122 @@ describe('POST /api/agents', () => {
     expect(Boolean(agents[0].enabled)).toBe(true);
   });
 });
+
+describe('Apprise agents - redaction and preserve-on-write', () => {
+  const keyedUrl = 'http://apprise.local/notify/key-secret-value';
+  const serviceUrl = 'discord://webhook-id/webhook-token?token=query-secret';
+
+  it('GET redacts keyed endpoint and never returns destination secrets', async () => {
+    DatabaseService.getInstance().upsertAgent(1, {
+      type: 'apprise',
+      url: keyedUrl,
+      enabled: true,
+      config: JSON.stringify({ tags: 'ops' }),
+    });
+
+    const res = await request(app).get('/api/agents').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body[0].url).toBe('http://apprise.local/notify/<redacted>');
+    expect(res.body[0].config).toMatchObject({ mode: 'keyed', tags: 'ops', has_urls: false });
+    expect(res.body[0].secrets_redacted).toBe(true);
+    expect(JSON.stringify(res.body)).not.toContain('key-secret-value');
+  });
+
+  it('GET for stateless mode exposes providers and url_count only', async () => {
+    DatabaseService.getInstance().upsertAgent(1, {
+      type: 'apprise',
+      url: 'http://apprise.local/notify',
+      enabled: true,
+      config: JSON.stringify({ urls: serviceUrl }),
+    });
+
+    const res = await request(app).get('/api/agents').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body[0].url).toBe('http://apprise.local/notify');
+    expect(res.body[0].config).toMatchObject({
+      mode: 'stateless',
+      has_urls: true,
+      providers: ['discord'],
+      url_count: 1,
+    });
+    expect(JSON.stringify(res.body)).not.toContain('webhook-token');
+    expect(JSON.stringify(res.body)).not.toContain('query-secret');
+  });
+
+  it('rejects posting a redacted endpoint URL', async () => {
+    DatabaseService.getInstance().upsertAgent(1, {
+      type: 'apprise',
+      url: keyedUrl,
+      enabled: true,
+      config: JSON.stringify({ tags: 'ops' }),
+    });
+
+    const res = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      type: 'apprise',
+      url: 'http://apprise.local/notify/<redacted>',
+      enabled: true,
+      config: { tags: 'ops' },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects public DTO config shapes on write', async () => {
+    const res = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      type: 'apprise',
+      url: 'http://apprise.local/notify',
+      enabled: true,
+      config: { mode: 'stateless', has_urls: true, providers: ['discord'], url_count: 1 },
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('preserves stored secrets when url and config are omitted', async () => {
+    const db = DatabaseService.getInstance();
+    db.upsertAgent(1, {
+      type: 'apprise',
+      url: keyedUrl,
+      enabled: true,
+      config: JSON.stringify({ tags: 'ops' }),
+    });
+
+    const res = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      type: 'apprise',
+      enabled: false,
+    });
+    expect(res.status).toBe(200);
+
+    const agents = db.getAgents(1);
+    expect(agents[0].url).toBe(keyedUrl);
+    expect(agents[0].config).toBe(JSON.stringify({ tags: 'ops' }));
+    expect(Boolean(agents[0].enabled)).toBe(false);
+  });
+
+  it('creates a keyed agent with no config and persists {}', async () => {
+    const res = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      type: 'apprise',
+      url: 'http://apprise.local/notify/new-key',
+      enabled: true,
+    });
+    expect(res.status).toBe(200);
+    const agent = DatabaseService.getInstance().getAgents(1).find(a => a.type === 'apprise');
+    expect(agent?.url).toBe('http://apprise.local/notify/new-key');
+    expect(agent?.config).toBe('{}');
+  });
+
+  it('rejects preserve-on-write when stored Apprise config is malformed', async () => {
+    DatabaseService.getInstance().upsertAgent(1, {
+      type: 'apprise',
+      url: keyedUrl,
+      enabled: true,
+      config: '{not-json',
+    });
+
+    const res = await request(app).post('/api/agents').set('Cookie', adminCookie).send({
+      type: 'apprise',
+      enabled: false,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/invalid/i);
+    expect(JSON.stringify(res.body)).not.toContain('key-secret-value');
+  });
+});

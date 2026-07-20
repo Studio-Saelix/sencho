@@ -428,6 +428,83 @@ describe('DockerController - pruneDanglingImages', () => {
   });
 });
 
+// ── Prune holds (): images held for a pending service-update
+// recovery must never be deleted by any image-prune path. ──────────────
+
+describe('DockerController - prune holds (isImageHeld)', () => {
+  it('pruneSystem("images") falls back to enumerate-and-delete when isImageHeld is given, skipping the held image', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-held', RepoTags: ['app:1'], Containers: 0 },
+      { Id: 'img-free', RepoTags: ['app:2'], Containers: 0 },
+    ]);
+    mockDocker.df
+      .mockResolvedValueOnce({ LayersSize: 5000 })
+      .mockResolvedValueOnce({ LayersSize: 3000 });
+    const removeFn = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getImage.mockReturnValue({ remove: removeFn });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.pruneSystem('images', undefined, (id: string) => id === 'img-held');
+
+    expect(mockDocker.pruneImages).not.toHaveBeenCalled();
+    expect(removeFn).toHaveBeenCalledTimes(1);
+    expect(mockDocker.getImage).toHaveBeenCalledWith('img-free');
+    expect(result).toEqual({ success: true, reclaimedBytes: 2000 });
+  });
+
+  it('pruneDanglingImages falls back to enumerate-and-delete when isImageHeld is given, skipping the held image', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-held', RepoTags: [], Containers: 0 },
+      { Id: 'img-free', RepoTags: ['<none>:<none>'], Containers: 0 },
+      { Id: 'img-tagged', RepoTags: ['app:1'], Containers: 0 }, // not dangling; excluded regardless of hold
+    ]);
+    mockDocker.df
+      .mockResolvedValueOnce({ LayersSize: 5000 })
+      .mockResolvedValueOnce({ LayersSize: 4000 });
+    const removeFn = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getImage.mockReturnValue({ remove: removeFn });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.pruneDanglingImages((id: string) => id === 'img-held');
+
+    expect(mockDocker.pruneImages).not.toHaveBeenCalled();
+    expect(removeFn).toHaveBeenCalledTimes(1);
+    expect(mockDocker.getImage).toHaveBeenCalledWith('img-free');
+    expect(result).toEqual({ success: true, reclaimedBytes: 1000 });
+  });
+
+  it('pruneManagedOnly("images") re-checks isImageHeld immediately before each delete', async () => {
+    mockDocker.df
+      .mockResolvedValueOnce({ LayersSize: 5000, Images: [] })
+      .mockResolvedValueOnce({ LayersSize: 4000, Images: [] });
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-held', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
+      { Id: 'img-free', Containers: 0, Size: 1000, Labels: { 'com.docker.compose.project': 'any-stack' } },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+    const removeFn = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getImage.mockReturnValue({ remove: removeFn });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.pruneManagedOnly('images', ['any-stack'], (id: string) => id === 'img-held');
+
+    expect(removeFn).toHaveBeenCalledTimes(1);
+    expect(mockDocker.getImage).toHaveBeenCalledWith('img-free');
+    expect(result.success).toBe(true);
+  });
+
+  it('pruneSystem("images") keeps the bulk Docker prune API when no isImageHeld predicate is given', async () => {
+    mockDocker.pruneImages.mockResolvedValue({ SpaceReclaimed: 999 });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.pruneSystem('images');
+
+    expect(mockDocker.pruneImages).toHaveBeenCalled();
+    expect(mockDocker.listImages).not.toHaveBeenCalled();
+    expect(result).toEqual({ success: true, reclaimedBytes: 999 });
+  });
+});
+
 // ── getClassifiedResources ─────────────────────────────────────────────
 
 describe('DockerController - getClassifiedResources', () => {

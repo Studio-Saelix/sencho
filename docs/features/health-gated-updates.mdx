@@ -35,6 +35,10 @@ Admins also see whether a [fleet snapshot](/features/fleet-backups) covers this 
 
 Every verdict keeps the **Update now** button enabled. The dialog informs the decision; it does not make it for you.
 
+On stacks with more than one Compose service, you can also open readiness for a single service from that service's header. The dialog still checks stack-wide guardrails (Compose Doctor, disk, backup, Docker), but container health, pending change, and recovery signals focus on the selected service. Sibling and dependency issues stay advisory. The toolbar **Update** action and the Updates view's stack **Apply** always update the full stack.
+
+When the selected service is build-backed and has no registry update, the proceed button reads **Rebuild** instead of **Update**. A per-service update badge appears only when a registry update is confirmed for that service.
+
 <Frame>
   <img src="/images/health-gated-updates/readiness-dialog.png" alt="Update readiness dialog with a review required verdict, showing signal rows for Compose Doctor, Drift, Current containers, Healthcheck coverage, Pending update, Local build services, Rollback backup and Node disk, the fleet snapshot row, and the Cancel and Update now buttons" />
 </Frame>
@@ -50,6 +54,8 @@ During the window, the gate checks every container that came up with the stack:
 - no container **exits**, **disappears**, or enters a **restart loop**.
 
 A clear failure ends the observation immediately. Passing requires the full window, and a healthcheck still in its start period when the window ends records the verdict as unknown rather than claiming success.
+
+After a **service-scoped** update or restore, the gate still watches the whole project, but it attributes failures: a problem on the updated service is a primary failure; a previously healthy sibling that regresses during the window is a collateral failure. Siblings that were already unhealthy before the update do not fail the gate on their own.
 
 The deploy progress modal treats the gate verdict as the real result: while the gate observes, the status reads **Verifying health** rather than claiming success, and the auto-close waits. A passed gate shows the success state; a failed or unknown gate becomes the headline result with its reason. Closing the modal never stops the observation; the gate runs server-side and its result appears on the stack timeline either way, as **health gate passed** or **health gate failed** events alongside the **update started** marker.
 

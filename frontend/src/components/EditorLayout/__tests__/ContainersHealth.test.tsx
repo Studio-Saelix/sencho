@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../Terminal', () => ({ default: () => null }));
@@ -10,6 +11,8 @@ import { ContainersHealth } from '../editor-view-blocks';
 import { copyToClipboard } from '@/lib/clipboard';
 import type { ContainerInfo } from '../EditorView';
 import type { Node } from '@/context/NodeContext';
+import type { EffectiveServiceSpec } from '@/types/effectiveServices';
+import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
 
 const LOCAL_NODE = { id: 1, type: 'local' } as Node;
 
@@ -219,5 +222,231 @@ describe('density toggle and summary strip', () => {
     // Density reset; single container shows sparklines
     expect(screen.getByText('cpu')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Compact view' })).toBeNull();
+  });
+});
+
+describe('declared-service headers (multi-service only)', () => {
+  function makeContainer(overrides: Partial<ContainerInfo> = {}): ContainerInfo {
+    return {
+      Id: overrides.Id || 'abc',
+      Names: overrides.Names || ['/app'],
+      State: overrides.State || 'running',
+      Status: overrides.Status || 'Up 1 hour',
+      Image: overrides.Image || 'nginx',
+      ...overrides,
+    } as unknown as ContainerInfo;
+  }
+
+  function spec(overrides: Partial<EffectiveServiceSpec> = {}): EffectiveServiceSpec {
+    return {
+      name: 'web',
+      declaredImage: 'nginx:latest',
+      hasBuild: false,
+      expectedReplicas: 1,
+      dependsOn: [],
+      hasHealthcheck: false,
+      ...overrides,
+    };
+  }
+
+  function status(overrides: Partial<StackServiceUpdateStatus> = {}): StackServiceUpdateStatus {
+    return {
+      service: 'web',
+      image: 'nginx:latest',
+      hasUpdate: false,
+      checkStatus: 'ok',
+      lastError: null,
+      ...overrides,
+    };
+  }
+
+  it('renders no declared-service header for a single effective service (unchanged single-service UX)', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[makeContainer({ Service: 'web' })]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec()]}
+      />,
+    );
+    // No grouped "X/Y running" service header; the flat per-container card
+    // layout (with its own pre-existing "Service actions" menu) is unchanged.
+    expect(screen.queryByText(/running$/)).toBeNull();
+    expect(screen.getByLabelText('Service actions')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'View logs' })).toBeInTheDocument();
+  });
+
+  it('renders one header per declared service and groups containers under it', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'd1', Service: 'db', State: 'running' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db', declaredImage: 'postgres:16' })]}
+      />,
+    );
+    expect(screen.getByText('web')).toBeInTheDocument();
+    expect(screen.getByText('db')).toBeInTheDocument();
+    expect(screen.getAllByLabelText('Service actions')).toHaveLength(2);
+    // Per-container service menu is hidden inside a multi-service header group.
+    expect(screen.getAllByLabelText('Open bash shell')).toHaveLength(2);
+  });
+
+  it('shows the Update badge only for the service with a confirmed update', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Service: 'web' }),
+          makeContainer({ Id: 'd1', Service: 'db' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        // db is not update-eligible (no image, no build) so it renders no
+        // Update button/badge at all, keeping the "web" button unambiguous.
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db', declaredImage: null })]}
+        serviceUpdateStatuses={[status({ service: 'web', hasUpdate: true })]}
+      />,
+    );
+    expect(screen.getByText('Update', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Update$/ })).toBeInTheDocument();
+  });
+
+  it('uses Rebuild wording with no badge for a build-backed service without a detected update', () => {
+    const onRequestServiceUpdate = vi.fn();
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Service: 'web' }),
+          makeContainer({ Id: 'd1', Service: 'db' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec({ name: 'web', hasBuild: true, declaredImage: null }), spec({ name: 'db' })]}
+        onRequestServiceUpdate={onRequestServiceUpdate}
+      />,
+    );
+    expect(screen.queryByText('Update', { selector: 'span' })).toBeNull();
+    const rebuildBtn = screen.getByRole('button', { name: /^Rebuild$/ });
+    expect(rebuildBtn).toBeInTheDocument();
+    fireEvent.click(rebuildBtn);
+    expect(onRequestServiceUpdate).toHaveBeenCalledWith('web', 'rebuild');
+  });
+
+  it('moves Start/Stop/Restart to the declared-service header menu', async () => {
+    const user = userEvent.setup();
+    const serviceAction = vi.fn();
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'd1', Service: 'db', State: 'running' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={serviceAction}
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db' })]}
+      />,
+    );
+    await user.click(screen.getAllByLabelText('Service actions')[0]);
+    await user.click(await screen.findByRole('menuitem', { name: 'Restart service' }));
+    expect(serviceAction).toHaveBeenCalledWith('restart', 'web');
+  });
+
+  it('still surfaces summary strip and density toggle on multi-service stacks', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'd1', Service: 'db', State: 'running' }),
+          makeContainer({ Id: 'd2', Service: 'db', State: 'paused' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db' })]}
+      />,
+    );
+    expect(screen.getByText(/3 containers/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 up/i)).toBeInTheDocument();
+    expect(screen.getByText(/1 paused/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Compact view' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Detailed view' })).toBeInTheDocument();
+  });
+
+  it('toggles detailed sparklines on the multi-service path', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'd1', Service: 'db', State: 'running' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db' })]}
+      />,
+    );
+    expect(screen.queryByText('cpu')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Detailed view' }));
+    expect(screen.getAllByText('cpu')).toHaveLength(2);
+  });
+
+  it('surfaces expand control on multi-service stacks when wired', () => {
+    const onToggle = vi.fn();
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'd1', Service: 'db', State: 'running' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db' })]}
+        containersExpanded={false}
+        onToggleContainersExpand={onToggle}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Expand containers' }));
+    expect(onToggle).toHaveBeenCalledTimes(1);
   });
 });

@@ -35,6 +35,23 @@ export interface ImageUpdateStatus {
 export type CheckStatus = 'ok' | 'partial' | 'failed';
 
 /**
+ * Per-service check outcome, as returned in `StackUpdateInfo.services`.
+ * Mirrors the backend's `StackServiceStatus`. Distinct from `CheckStatus`:
+ * a service with no checkable image (build-only, no declared image) is
+ * `not_checkable`, which never counts as a check failure at the stack level.
+ */
+export type ServiceCheckStatus = 'ok' | 'partial' | 'failed' | 'not_checkable';
+
+export interface StackServiceUpdateStatus {
+    service: string;
+    image: string | null;
+    runtimeImages?: string[];
+    hasUpdate: boolean;
+    checkStatus: ServiceCheckStatus;
+    lastError: string | null;
+}
+
+/**
  * Rich per-stack update status from `GET /api/image-updates/detail`. `lastError`
  * carries the failure reason when `checkStatus` is 'failed' or 'partial'.
  */
@@ -43,4 +60,6 @@ export interface StackUpdateInfo {
     checkStatus: CheckStatus;
     lastError: string | null;
     checkedAt: number;
+    /** Per-service breakdown; absent when the stack has no persisted per-service data yet. */
+    services?: StackServiceUpdateStatus[];
 }

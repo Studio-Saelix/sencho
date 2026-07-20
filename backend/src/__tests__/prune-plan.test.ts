@@ -259,6 +259,18 @@ describe('DockerController.buildPrunePlan', () => {
     // Unique bytes per image = Size - SharedSize = 100MB each, not full 1GB each.
     expect(plan.reclaimableBytes).toBe(200_000_000);
   });
+
+  it('excludes an image held for a pending service-update recovery from the plan', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-held', RepoTags: ['app:1'], Size: 100, Containers: 0 },
+      { Id: 'img-free', RepoTags: ['app:2'], Size: 100, Containers: 0 },
+    ]);
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1, (id) => id === 'img-held');
+
+    expect(plan.items.map((i) => i.id)).toEqual(['img-free']);
+  });
 });
 
 describe('DockerController.executePrunePlan', () => {
@@ -427,5 +439,28 @@ describe('DockerController.executePrunePlan', () => {
     await dc.executePrunePlan(plan, ['my-stack']);
 
     expect(remove).toHaveBeenCalledWith({ force: false });
+  });
+
+  it('re-checks isImageHeld immediately before deleting, skipping a hold that started after the plan was built', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img1', RepoTags: ['app:latest'], Size: 1000, Containers: 0 },
+    ]);
+    const imageRemove = vi.fn().mockResolvedValue(undefined);
+    mockDocker.getImage.mockReturnValue({ remove: imageRemove });
+
+    const dc = DockerController.getInstance(1);
+    const plan = await dc.buildPrunePlan(['images'], 'all', [], 1);
+    expect(plan.items.map((i) => i.id)).toEqual(['img1']);
+
+    // Bypass the rebuild-based staleness check so this isolates the
+    // immediate per-item recheck (prune holds), simulating a
+    // recovery snapshot created after the plan was built but before execute.
+    vi.spyOn(dc, 'assertPlanFresh').mockResolvedValue(plan);
+    const result = await dc.executePrunePlan(plan, [], (id) => id === 'img1');
+
+    expect(imageRemove).not.toHaveBeenCalled();
+    expect(result.outcomes).toEqual([
+      expect.objectContaining({ id: 'img1', target: 'images', status: 'skipped', reason: expect.stringMatching(/held/i) }),
+    ]);
   });
 });
