@@ -182,9 +182,10 @@ export class StackUpdateOrchestrator {
     ctx: UpdateOperationContext,
     options: StackComposeOptions,
   ): Promise<OrchestratorResult> {
-    const { recoveryId } = await ComposeService.getInstance(ctx.nodeId).updateStack(
+    const updateResult = await ComposeService.getInstance(ctx.nodeId).updateStack(
       ctx.stackName, options.terminalWs ?? undefined, options.atomic,
     );
+    const recoveryId = updateResult?.recoveryId ?? null;
     return { kind: 'stack_compose_done', recoveryId };
   }
 

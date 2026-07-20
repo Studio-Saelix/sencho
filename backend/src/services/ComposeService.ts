@@ -153,6 +153,23 @@ export class ComposeService {
     await this.assertSafePilotBindMapping(stackName);
   }
 
+  /**
+   * Render/validate the exact Compose invocation used by mutating operations
+   * (authored files, env pins, and generated Mesh override) before capture.
+   */
+  public async validateExactComposeInvocation(stackName: string): Promise<void> {
+    if (!isValidStackName(stackName)) {
+      throw new Error('Invalid stack path');
+    }
+    const baseResolved = path.resolve(this.baseDir);
+    const stackDir = path.resolve(baseResolved, stackName);
+    if (!stackDir.startsWith(baseResolved + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
+    const args = await this.authoredComposeArgs(stackName, ['config', '--quiet']);
+    await this.execute('docker', args, stackDir, undefined, true);
+  }
+
   private async authoredComposeArgs(stackName: string, action: string[]): Promise<string[]> {
     const args: string[] = ['compose'];
     const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
@@ -908,13 +925,13 @@ export class ComposeService {
         }, sendOutput);
       } catch (acquireError) {
         // Acquisition failure: abandon candidate; leave runtime untouched.
-        recoverySvc.abandon(candidate.id);
+        await recoverySvc.abandon(candidate.id);
         recoveryId = null;
         throw acquireError;
       }
 
       if (!recoverySvc.markAcquired(candidate.id)) {
-        recoverySvc.abandon(candidate.id);
+        await recoverySvc.abandon(candidate.id);
         throw new Error('Failed to mark recovery generation as acquired');
       }
 
@@ -922,13 +939,13 @@ export class ComposeService {
       sendOutput('=== Classifying legacy orphans ===\n');
       const classified = await dockerController.classifyLegacyOrphansForUpdate(stackName);
       if (classified.status === 'classification_failed') {
-        recoverySvc.abandon(candidate.id);
+        await recoverySvc.abandon(candidate.id);
         recoveryId = null;
         throw new Error(`Legacy orphan classification failed: ${classified.error}`);
       }
 
       if (!recoverySvc.handoff(candidate.id, this.nodeId, stackName)) {
-        recoverySvc.abandon(candidate.id);
+        await recoverySvc.abandon(candidate.id);
         recoveryId = null;
         throw new Error('Failed to hand off recovery generation');
       }
@@ -1011,7 +1028,7 @@ export class ComposeService {
       }
     } catch (updateError) {
       if (!handedOff && recoveryId) {
-        recoverySvc.abandon(recoveryId);
+        await recoverySvc.abandon(recoveryId);
         recoveryId = null;
       }
       if (handedOff && recoveryId) {

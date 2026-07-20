@@ -54,7 +54,7 @@ const {
   mockStartContainer: vi.fn().mockResolvedValue(undefined),
   mockStopContainer: vi.fn().mockResolvedValue(undefined),
   mockPruneSystem: vi.fn().mockResolvedValue({ success: true, reclaimedBytes: 0 }),
-  mockUpdateStack: vi.fn().mockResolvedValue(undefined),
+  mockUpdateStack: vi.fn().mockResolvedValue({ recoveryId: null }),
   mockGetStacks: vi.fn().mockResolvedValue([]),
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockResolvedValue(''),

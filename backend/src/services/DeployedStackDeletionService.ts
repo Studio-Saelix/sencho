@@ -6,6 +6,7 @@
  * sweeper removes ready tombstone tags/overrides.
  */
 import { randomUUID } from 'crypto';
+import Docker from 'dockerode';
 import fs from 'fs/promises';
 import path from 'path';
 import {
@@ -257,8 +258,15 @@ export class DeployedStackDeletionService {
     return { ok: true };
   }
 
-  /** Remove rollback tags + override paths for a ready tombstone, then drop the row. */
-  public async sweepReadyIntent(intentId: string): Promise<void> {
+  /**
+   * Remove rollback tags + override paths for a ready tombstone, then drop the row.
+   * When the node row is already gone (local-node delete), pass a preserved local
+   * Docker handle and composeDir so we never fall back to a remote default node.
+   */
+  public async sweepReadyIntent(
+    intentId: string,
+    opts?: { docker?: Docker; composeDir?: string },
+  ): Promise<void> {
     const db = DatabaseService.getInstance();
     const intent = db.getCleanupPending(intentId);
     if (!intent || intent.status !== 'ready') return;
@@ -270,41 +278,71 @@ export class DeployedStackDeletionService {
     const tags = parseJsonStringArray(intent.rollback_tags_json);
     const overridePaths = parseJsonStringArray(intent.override_paths_json);
 
-    // After a local-node delete the node row is gone; use the default local
-    // Docker socket for local_socket tombstones (absolute override paths remain valid).
-    const dockerNodeId = db.getNode(intent.node_id)
-      ? intent.node_id
-      : NodeRegistry.getInstance().getDefaultNodeId();
-    const docker = DockerController.getInstance(dockerNodeId).getDocker();
+    let docker: Docker;
+    if (opts?.docker) {
+      docker = opts.docker;
+    } else if (db.getNode(intent.node_id)) {
+      docker = DockerController.getInstance(intent.node_id).getDocker();
+    } else if (intent.target_kind === 'local_socket') {
+      // Deleted local node: local_socket tombstones always target the host Docker socket.
+      docker = new Docker();
+    } else {
+      console.warn(
+        '[DeployedStackDeletion] Cannot sweep tombstone %s: node gone and target is not local_socket',
+        sanitizeForLog(intentId),
+      );
+      return;
+    }
+
     for (const tag of tags) {
       try {
         await docker.getImage(tag).remove({ force: true });
       } catch (error) {
         console.warn(
-          '[DeployedStackDeletion] Failed to remove rollback tag %s:',
+          '[DeployedStackDeletion] Failed to remove rollback tag %s: %s',
           sanitizeForLog(tag),
-          getErrorMessage(error, 'unknown'),
+          sanitizeForLog(getErrorMessage(error, 'unknown')),
         );
       }
     }
 
+    const baseDir = opts?.composeDir
+      ?? (db.getNode(intent.node_id)
+        ? FileSystemService.getInstance(intent.node_id).getBaseDir()
+        : null);
+
     for (const overridePath of overridePaths) {
       try {
-        const baseDir = FileSystemService.getInstance(intent.node_id).getBaseDir();
-        if (!isPathWithinBase(path.resolve(overridePath), path.resolve(baseDir))) {
+        const resolved = path.resolve(overridePath);
+        const basename = path.basename(resolved);
+        if (!/^\.sencho-recovery-[a-f0-9]+\.yml$/i.test(basename)) {
+          console.warn(
+            '[DeployedStackDeletion] Refusing to delete non-recovery override: %s',
+            sanitizeForLog(overridePath),
+          );
+          continue;
+        }
+        if (baseDir && !isPathWithinBase(resolved, path.resolve(baseDir))) {
           console.warn(
             '[DeployedStackDeletion] Refusing to delete override outside compose dir: %s',
             sanitizeForLog(overridePath),
           );
           continue;
         }
-        await fs.unlink(overridePath);
+        if (!baseDir && !path.isAbsolute(resolved)) {
+          console.warn(
+            '[DeployedStackDeletion] Refusing relative override without compose dir: %s',
+            sanitizeForLog(overridePath),
+          );
+          continue;
+        }
+        await fs.unlink(resolved);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
           console.warn(
-            '[DeployedStackDeletion] Failed to delete override %s:',
+            '[DeployedStackDeletion] Failed to delete override %s: %s',
             sanitizeForLog(overridePath),
-            getErrorMessage(error, 'unknown'),
+            sanitizeForLog(getErrorMessage(error, 'unknown')),
           );
         }
       }
@@ -332,10 +370,24 @@ export class DeployedStackDeletionService {
       db.deleteNode(nodeId);
       return;
     }
+    // Preserve Docker + compose dir before the row disappears so sweep never
+    // targets a remote default node.
+    const docker = DockerController.getInstance(nodeId).getDocker();
+    const composeDir = FileSystemService.getInstance(nodeId).getBaseDir();
     const { tags, overridePaths } = this.collectNodeArtifacts(nodeId);
     const tombstoneId = randomUUID();
     db.deleteNode(nodeId, { tombstoneId, tags, overridePaths });
-    await this.sweepReadyIntent(tombstoneId);
+    NodeRegistry.getInstance().evictConnection(nodeId);
+    try {
+      await this.sweepReadyIntent(tombstoneId, { docker, composeDir });
+    } catch (error) {
+      // Node row is already gone; leave the ready tombstone for startup resume.
+      console.error(
+        '[DeployedStackDeletion] Sweep after local-node delete deferred for tombstone %s: %s',
+        sanitizeForLog(tombstoneId),
+        sanitizeForLog(getErrorMessage(error, 'unknown')),
+      );
+    }
   }
 
   /**
@@ -352,8 +404,18 @@ export class DeployedStackDeletionService {
       let dirExists = true;
       try {
         await fs.access(stackDir);
-      } catch {
-        dirExists = false;
+      } catch (accessError) {
+        const code = (accessError as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') {
+          dirExists = false;
+        } else {
+          console.warn(
+            '[DeployedStackDeletion] Startup access error for %s (not treating as absent): %s',
+            sanitizeForLog(stackName),
+            sanitizeForLog(getErrorMessage(accessError, 'unknown')),
+          );
+          continue;
+        }
       }
 
       if (!dirExists) {
@@ -364,6 +426,15 @@ export class DeployedStackDeletionService {
             sanitizeForLog(stackName),
           );
           continue;
+        }
+        try {
+          await MeshService.getInstance().optOutStack(nodeId, stackName, 'system:startup');
+        } catch (meshErr) {
+          console.warn(
+            '[DeployedStackDeletion] Startup mesh opt-out failed for %s: %s',
+            sanitizeForLog(stackName),
+            sanitizeForLog(getErrorMessage(meshErr, 'unknown')),
+          );
         }
         await this.sweepReadyIntent(intent.id);
         continue;
@@ -386,6 +457,17 @@ export class DeployedStackDeletionService {
     }
 
     for (const intent of db.listReadyCleanupPending()) {
+      if (intent.node_id != null && intent.stack_name) {
+        try {
+          await MeshService.getInstance().optOutStack(intent.node_id, intent.stack_name, 'system:startup');
+        } catch (meshErr) {
+          console.warn(
+            '[DeployedStackDeletion] Ready-resume mesh opt-out failed for %s: %s',
+            sanitizeForLog(intent.stack_name),
+            sanitizeForLog(getErrorMessage(meshErr, 'unknown')),
+          );
+        }
+      }
       await this.sweepReadyIntent(intent.id);
     }
   }

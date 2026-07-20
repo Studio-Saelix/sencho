@@ -81,7 +81,7 @@ const {
   mockHandoff: vi.fn().mockReturnValue(true),
   mockMarkReconciling: vi.fn().mockReturnValue(true),
   mockMarkImmediateVerified: vi.fn().mockReturnValue(true),
-  mockAbandon: vi.fn().mockReturnValue(true),
+  mockAbandon: vi.fn().mockResolvedValue(true),
   mockCompensateWithCandidate: vi.fn().mockResolvedValue(true),
   mockBuildUnifiedHeldImagePredicate: vi.fn().mockReturnValue(() => false),
   mockGetRecovery: vi.fn().mockReturnValue(undefined),
@@ -306,7 +306,7 @@ beforeEach(() => {
   mockHandoff.mockReturnValue(true);
   mockMarkReconciling.mockReturnValue(true);
   mockMarkImmediateVerified.mockReturnValue(true);
-  mockAbandon.mockReturnValue(true);
+  mockAbandon.mockResolvedValue(true);
   mockCompensateWithCandidate.mockResolvedValue(true);
   mockBuildUnifiedHeldImagePredicate.mockReturnValue(() => false);
   delete process.env.SENCHO_MODE;

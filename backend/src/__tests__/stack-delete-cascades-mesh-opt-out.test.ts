@@ -124,7 +124,9 @@ describe('DELETE /api/stacks/:stackName mesh opt-out cascade (F-1 / F-14)', () =
 
         expect(res.status).toBe(200);
         const sawCascadeWarning = warnSpy.mock.calls.some(args =>
-            typeof args[0] === 'string' && args[0].includes('Mesh opt-out cascade failed')
+            typeof args[0] === 'string'
+            && (args[0].includes('Mesh opt-out cascade failed')
+              || args[0].includes('Mesh opt-out failed'))
         );
         expect(sawCascadeWarning).toBe(true);
     });

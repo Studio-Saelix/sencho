@@ -232,6 +232,7 @@ export interface StackUpdateRecoveryGenerationRow {
     created_at: number;
     updated_at: number;
     created_by: string | null;
+    artifacts_retired: number;
 }
 
 /** Durable cleanup tombstone for stack/node deletion artifact sweep. */
@@ -1699,7 +1700,8 @@ export class DatabaseService {
         operation_lease_expires_at INTEGER,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
-        created_by TEXT
+        created_by TEXT,
+        artifacts_retired INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS idx_stack_update_recovery_node_stack_current
         ON stack_update_recovery_generations(node_id, stack_name, is_current);
@@ -1776,6 +1778,8 @@ export class DatabaseService {
         const maybeAddCol = (table: string, col: string, def: string) => {
             try { this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`).run(); } catch (e) { /* ignore */ }
         };
+
+        maybeAddCol('stack_update_recovery_generations', 'artifacts_retired', 'INTEGER NOT NULL DEFAULT 0');
 
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");
@@ -3592,13 +3596,13 @@ export class DatabaseService {
             `INSERT INTO stack_update_recovery_generations (
                 id, node_id, stack_name, status, phase, is_current, backup_slot_id, override_path,
                 services_json, health_gate_id, gate_retain_until, artifact_expires_at,
-                operation_lease_expires_at, created_at, updated_at, created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                operation_lease_expires_at, created_at, updated_at, created_by, artifacts_retired
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
             row.id, row.node_id, row.stack_name, row.status, row.phase, row.is_current,
             row.backup_slot_id, row.override_path, row.services_json, row.health_gate_id,
             row.gate_retain_until, row.artifact_expires_at, row.operation_lease_expires_at,
-            row.created_at, row.updated_at, row.created_by,
+            row.created_at, row.updated_at, row.created_by, row.artifacts_retired ?? 0,
         );
     }
 
@@ -3670,12 +3674,36 @@ export class DatabaseService {
         return handoff();
     }
 
-    public abandonStackUpdateRecoveryGeneration(id: string): boolean {
+
+    /** Generations whose Docker/FS artifacts can be retired (not actively held). */
+    public listStackUpdateRecoveryGenerationsForArtifactRetirement(now: number): StackUpdateRecoveryGenerationRow[] {
+        return this.db.prepare(
+            `SELECT * FROM stack_update_recovery_generations
+             WHERE artifacts_retired = 0
+               AND is_current = 0
+               AND status IN ('abandoned', 'superseded')
+               AND (artifact_expires_at IS NULL OR artifact_expires_at <= ?)
+               AND (gate_retain_until IS NULL OR gate_retain_until <= ?)`
+        ).all(now, now) as StackUpdateRecoveryGenerationRow[];
+    }
+
+    public markStackUpdateRecoveryArtifactsRetired(id: string): boolean {
         const result = this.db.prepare(
             `UPDATE stack_update_recovery_generations
-             SET status = 'abandoned', is_current = 0, updated_at = ?
-             WHERE id = ? AND status = 'candidate'`
+             SET artifacts_retired = 1, override_path = NULL, updated_at = ?
+             WHERE id = ? AND artifacts_retired = 0`
         ).run(Date.now(), id);
+        return result.changes === 1;
+    }
+
+    public abandonStackUpdateRecoveryGeneration(id: string): boolean {
+        const now = Date.now();
+        const result = this.db.prepare(
+            `UPDATE stack_update_recovery_generations
+             SET status = 'abandoned', is_current = 0, artifact_expires_at = ?,
+                 operation_lease_expires_at = NULL, updated_at = ?
+             WHERE id = ? AND status = 'candidate'`
+        ).run(now, now, id);
         return result.changes === 1;
     }
 

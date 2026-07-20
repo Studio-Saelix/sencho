@@ -57,6 +57,7 @@ describe('DeployedStackDeletionService ready transaction', () => {
       created_at: now,
       updated_at: now,
       created_by: null,
+      artifacts_retired: 0,
     };
     db().insertStackUpdateRecoveryGeneration(gen);
     const svc: ServiceUpdateRecoveryRow = {
