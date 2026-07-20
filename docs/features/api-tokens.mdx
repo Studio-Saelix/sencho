@@ -21,7 +21,7 @@ An API token is an opaque secret value (not a JWT), 56 characters long, that Sen
 The three scopes form a ladder:
 
 - **Read Only** authorises every `GET` request the underlying API exposes.
-- **Deploy Only** adds the six stack-lifecycle POSTs: deploy, down, restart, stop, start, update.
+- **Deploy Only** adds the eight stack-lifecycle POSTs: deploy, down, restart, stop, start, update, plus per-service update and restore.
 - **Full Admin** adds every other read and write on the underlying API.
 
 A separate layer sits on top: a set of universal restrictions that **no** API token can reach, regardless of scope or HTTP method. These cover identity, trust roots, billing, and interactive shell access; even a Read Only `GET` against `/api/users` or `/api/sso/config` is rejected. They require a human user session.
@@ -145,7 +145,7 @@ Authorises **every** `GET` against the API. Representative uses: list stacks, fe
 
 ### Deploy Only
 
-Authorises every `GET`, plus exactly six `POST` patterns that operate on a stack by name:
+Authorises every `GET`, plus eight `POST` patterns that operate on a stack (or one of its declared services) by name:
 
 | Method | Path pattern | Action |
 |--------|--------------|--------|
@@ -155,6 +155,8 @@ Authorises every `GET`, plus exactly six `POST` patterns that operate on a stack
 | `POST` | `/api/stacks/:name/stop` | Stop without removing. |
 | `POST` | `/api/stacks/:name/start` | Start a stopped stack. |
 | `POST` | `/api/stacks/:name/update` | Pull newer images and redeploy. |
+| `POST` | `/api/stacks/:name/services/:service/update` | Update or rebuild one declared Compose service without recreating its siblings. |
+| `POST` | `/api/stacks/:name/services/:service/restore` | Roll a single service back to a prior recovery snapshot. |
 
 Any other write (creating a stack, editing a stack file, calling a non-lifecycle action) returns `403 SCOPE_DENIED`.
 
@@ -190,6 +192,7 @@ Regardless of scope, every API token is rejected from the following routes with 
 | **Host-console session token** | Mint the short-lived ticket the browser console uses |
 | **API token self-management** | Create, list, revoke API tokens |
 | **Recovery Vault** | Configure or trigger Recovery Vault |
+| **Image channel management** | Preflight or switch the instance's image channel, acknowledge a failed switch |
 
 The rationale is the same in every case: a programmatic credential should not be able to grant itself more authority, change the trust roots that issued it, or open an interactive shell. Those actions require a live human user logged into a browser.
 
@@ -337,8 +340,8 @@ Read Only is sufficient for the notification stream.
     The scope does not authorise the method or path you called. Either widen the scope by issuing a new token, or change the call. Common cases:
 
     - Read Only attempting a `POST` of any kind.
-    - Deploy Only attempting a write that is not one of the six lifecycle actions (`deploy`, `down`, `restart`, `stop`, `start`, `update`).
-    - Any scope attempting a [universal restriction](#universal-restrictions) (user management, SSO, MFA, license, registries, console, node management, cloud backup, API-token self-management).
+    - Deploy Only attempting a write that is not one of the eight lifecycle actions (`deploy`, `down`, `restart`, `stop`, `start`, `update`, and the per-service `update`/`restore`).
+    - Any scope attempting a [universal restriction](#universal-restrictions) (user management, SSO, MFA, license, registries, console, node management, cloud backup, image channel management, API-token self-management).
   </Accordion>
 
   <Accordion title="`400 Maximum of 25 active API tokens per user`">
