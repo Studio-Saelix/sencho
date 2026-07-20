@@ -68,7 +68,12 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
     const [retries, setRetries] = useState(DEFAULT_SETTINGS.notification_dispatch_retries!);
     const [savedRetries, setSavedRetries] = useState(DEFAULT_SETTINGS.notification_dispatch_retries!);
     const [isSavingRetries, setIsSavingRetries] = useState(false);
-    const retriesDirty = retries !== savedRetries;
+    // idle: node-switch reset before first successful load; ready: trusted saved value; error: GET failed.
+    const [retriesLoadState, setRetriesLoadState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
+    const [hasLoadedRetries, setHasLoadedRetries] = useState(false);
+    const retriesFetchGenRef = useRef(0);
+    const retriesMutationGenRef = useRef(0);
+    const retriesDirty = hasLoadedRetries && retries !== savedRetries;
 
     useEffect(() => {
         onDirtyChange?.(retriesDirty);
@@ -99,30 +104,68 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
 
     const fetchRetries = async () => {
         const requestNodeId = activeNode?.id;
+        const fetchGen = ++retriesFetchGenRef.current;
+        const mutationAtStart = retriesMutationGenRef.current;
+        setRetriesLoadState('loading');
+        const isCurrent = () => (
+            activeNodeIdRef.current === requestNodeId
+            && fetchGen === retriesFetchGenRef.current
+            && retriesMutationGenRef.current === mutationAtStart
+        );
+        const restoreAfterStale = () => {
+            if (activeNodeIdRef.current !== requestNodeId) return;
+            // A newer fetch owns loading; do not fight it.
+            if (fetchGen !== retriesFetchGenRef.current) return;
+            // A newer edit/save owns the value; leave ready so edited UI stays interactive.
+            if (retriesMutationGenRef.current !== mutationAtStart) {
+                setRetriesLoadState('ready');
+            }
+        };
         try {
             const res = await apiFetch('/settings', {
                 nodeId: typeof requestNodeId === 'number' ? requestNodeId : undefined,
             });
-            if (!res.ok) return;
+            if (!isCurrent()) {
+                restoreAfterStale();
+                return;
+            }
+            if (!res.ok) {
+                setRetriesLoadState('error');
+                return;
+            }
             const data: Record<string, string> = await res.json();
-            if (activeNodeIdRef.current !== requestNodeId) return;
+            if (!isCurrent()) {
+                restoreAfterStale();
+                return;
+            }
             const next = clampRetryExtras(data.notification_dispatch_retries ?? DEFAULT_SETTINGS.notification_dispatch_retries!);
             setRetries(next);
             setSavedRetries(next);
+            setRetriesLoadState('ready');
+            setHasLoadedRetries(true);
         } catch (e) {
             console.error('Failed to fetch notification retry setting', e);
+            if (!isCurrent()) {
+                restoreAfterStale();
+                return;
+            }
+            setRetriesLoadState('error');
         }
     };
 
     useEffect(() => {
         // Reset local channel/retry state when the active node changes so a prior
         // node's values cannot flash while the replacement fetches settle.
+        retriesFetchGenRef.current += 1;
+        retriesMutationGenRef.current += 1;
         // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional node-switch reset
         setAgents(emptyAgents());
         setAppriseUrlDirty(false);
         setAppriseConfigDirty(false);
         setRetries(DEFAULT_SETTINGS.notification_dispatch_retries!);
         setSavedRetries(DEFAULT_SETTINGS.notification_dispatch_retries!);
+        setRetriesLoadState('idle');
+        setHasLoadedRetries(false);
         void fetchAgents();
         void fetchRetries();
     }, [activeNode?.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -142,6 +185,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
     const saveRetries = async () => {
         const requestNodeId = activeNode?.id;
         const submitted = clampRetryExtras(retries);
+        const mutationAtStart = retriesMutationGenRef.current;
         setIsSavingRetries(true);
         try {
             const res = await apiFetch('/settings', {
@@ -149,21 +193,41 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
                 nodeId: typeof requestNodeId === 'number' ? requestNodeId : undefined,
                 body: JSON.stringify({ notification_dispatch_retries: submitted }),
             });
+            if (activeNodeIdRef.current !== requestNodeId) return;
+            if (retriesMutationGenRef.current !== mutationAtStart) return;
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 toast.error(err?.error || err?.message || 'Something went wrong.');
                 return;
             }
-            if (activeNodeIdRef.current !== requestNodeId) return;
+            // Invalidate in-flight GETs so a late load cannot overwrite this save.
+            retriesFetchGenRef.current += 1;
+            retriesMutationGenRef.current += 1;
             setRetries(submitted);
             setSavedRetries(submitted);
+            setRetriesLoadState('ready');
+            setHasLoadedRetries(true);
             toast.success('Delivery retries saved.');
         } catch (e: unknown) {
+            if (activeNodeIdRef.current !== requestNodeId) return;
+            if (retriesMutationGenRef.current !== mutationAtStart) return;
             toast.error((e as Error)?.message || 'Network error.');
         } finally {
-            setIsSavingRetries(false);
+            if (activeNodeIdRef.current === requestNodeId && retriesMutationGenRef.current === mutationAtStart) {
+                setIsSavingRetries(false);
+            }
         }
     };
+
+    const retriesKicker =
+        retriesLoadState === 'error'
+            ? 'error'
+            : retriesDirty
+                ? 'edited'
+                : retriesLoadState === 'loading' || retriesLoadState === 'idle'
+                    ? 'loading'
+                    : 'saved';
+    const retriesControlsDisabled = readOnly || !hasLoadedRetries;
 
     const handleAgentChange = (type: string, field: keyof Agent, value: Agent[keyof Agent]) => {
         setAgents(prev => ({
@@ -360,25 +424,41 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
     return (
         <div className="flex flex-col gap-6">
             <fieldset disabled={readOnly} className="min-w-0 border-0 p-0 m-0">
-                <SettingsSection title="Delivery retries" kicker={retriesDirty ? 'edited' : 'saved'}>
+                <SettingsSection title="Delivery retries" kicker={retriesKicker}>
                     <SettingsField
                         label="Extra attempts"
-                        helper="Extra in-process attempts after a transient delivery failure (0 keeps single-shot). Fixed 1 second between attempts. Ambiguous timeouts can produce duplicate notifications."
+                        helper={
+                            retriesLoadState === 'error'
+                                ? 'Could not load delivery retries for this node. Retry after the load succeeds; default 0 is not treated as saved until then.'
+                                : 'Extra in-process attempts after a transient delivery failure (0 keeps single-shot). Fixed 1 second between attempts. Ambiguous timeouts can produce duplicate notifications.'
+                        }
                     >
                         <NumberChip
                             value={retries}
-                            onChange={(v) => setRetries(clampRetryExtras(v))}
+                            onChange={(v) => {
+                                retriesMutationGenRef.current += 1;
+                                setRetries(clampRetryExtras(v));
+                            }}
                             suffix="extra"
                             min={0}
                             max={3}
                             step={1}
-                            disabled={readOnly}
+                            disabled={retriesControlsDisabled}
                         />
                     </SettingsField>
                     <SettingsActions>
+                                                {(hasLoadedRetries || retriesLoadState === 'error') && (
+                            <Button
+                                variant="outline"
+                                onClick={() => void fetchRetries()}
+                                disabled={readOnly || isSavingRetries || retriesLoadState === 'loading'}
+                            >
+                                {retriesLoadState === 'error' ? 'Retry load' : 'Reload'}
+                            </Button>
+                        )}
                         <SettingsPrimaryButton
                             onClick={() => void saveRetries()}
-                            disabled={readOnly || !retriesDirty || isSavingRetries}
+                            disabled={retriesControlsDisabled || !retriesDirty || isSavingRetries}
                         >
                             {isSavingRetries ? (
                                 <>

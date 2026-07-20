@@ -260,6 +260,56 @@ describe('notification dispatch retries', () => {
     expect(joined).not.toContain('HTTP 500');
   });
 
+  describe('channel retry classification matrix', () => {
+    const channels: Array<{ type: 'discord' | 'slack' | 'webhook'; url: string }> = [
+      { type: 'discord', url: DISCORD },
+      { type: 'slack', url: 'https://hooks.slack.com/services/T/B/X' },
+      { type: 'webhook', url: 'https://example.com/hooks/sencho' },
+    ];
+
+    for (const channel of channels) {
+      it(`${channel.type}: does not retry non-retryable 4xx`, async () => {
+        mockGetGlobalSettings.mockReturnValue({ notification_dispatch_retries: '3' });
+        mockGetEnabledNotificationRoutes.mockReturnValue([
+          makeRoute({ channel_type: channel.type, channel_url: channel.url }),
+        ]);
+        mockFetch.mockResolvedValue({ ok: false, status: 404 });
+
+        await svc.dispatchAlert('error', 'monitor_alert', 'down');
+
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+
+      it(`${channel.type}: retries persistent 5xx for configured extras`, async () => {
+        mockGetGlobalSettings.mockReturnValue({ notification_dispatch_retries: '2' });
+        mockGetEnabledNotificationRoutes.mockReturnValue([
+          makeRoute({ channel_type: channel.type, channel_url: channel.url }),
+        ]);
+        mockFetch.mockResolvedValue({ ok: false, status: 502 });
+
+        await svc.dispatchAlert('error', 'monitor_alert', 'down');
+
+        expect(mockFetch).toHaveBeenCalledTimes(3);
+      });
+
+      it(`${channel.type}: stops after a successful retry`, async () => {
+        mockGetGlobalSettings.mockReturnValue({ notification_dispatch_retries: '2' });
+        mockGetEnabledNotificationRoutes.mockReturnValue([
+          makeRoute({ channel_type: channel.type, channel_url: channel.url }),
+        ]);
+        mockFetch
+          .mockResolvedValueOnce({ ok: false, status: 503 })
+          .mockResolvedValueOnce({ ok: true, status: 200 });
+
+        await svc.dispatchAlert('error', 'monitor_alert', 'down');
+
+        expect(mockFetch).toHaveBeenCalledTimes(2);
+        expect(mockUpdateNotificationDispatchError).not.toHaveBeenCalled();
+      });
+    }
+  });
+
+
   describe('testDispatch parity', () => {
     it('retries a retryable failure then succeeds', async () => {
       mockGetGlobalSettings.mockReturnValue({ notification_dispatch_retries: '1' });

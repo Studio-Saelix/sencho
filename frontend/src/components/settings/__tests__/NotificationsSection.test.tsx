@@ -407,7 +407,7 @@ describe('NotificationsSection', () => {
 
     it('PATCHes only notification_dispatch_retries when saving retries', async () => {
         render(<NotificationsSection />);
-        await waitFor(() => expect(screen.getByText('Delivery retries')).toBeInTheDocument());
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
         const chipButton = screen.getByRole('button', { name: /0\s*extra/i });
         await userEvent.click(chipButton);
         const input = screen.getByRole('spinbutton');
@@ -467,6 +467,102 @@ describe('NotificationsSection', () => {
         await new Promise((r) => setTimeout(r, 40));
         expect(screen.getByRole('button', { name: /0\s*extra/i })).toBeInTheDocument();
         expect(screen.queryByRole('button', { name: /3\s*extra/i })).toBeNull();
+    });
+
+    it('does not present default 0 as saved when settings GET fails', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('error')).toBeInTheDocument());
+        expect(screen.queryByText('saved')).toBeNull();
+        expect(screen.getByRole('button', { name: 'Save retries' })).toBeDisabled();
+        expect(screen.getByRole('button', { name: /0\s*extra/i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Retry load' })).toBeInTheDocument();
+    });
+
+    it('disables retry controls until the settings GET succeeds', async () => {
+        let releaseGet: (() => void) | undefined;
+        const gate = new Promise<void>((resolve) => { releaseGet = resolve; });
+
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                return {
+                    ok: true,
+                    json: async () => {
+                        await gate;
+                        return { notification_dispatch_retries: '3' };
+                    },
+                };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('loading')).toBeInTheDocument());
+        expect(screen.queryByText('saved')).toBeNull();
+        expect(screen.getByRole('button', { name: /0\s*extra/i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Save retries' })).toBeDisabled();
+
+        releaseGet?.();
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+        expect(screen.getByRole('button', { name: /3\s*extra/i })).not.toBeDisabled();
+    });
+
+    it('keeps PATCH result when a deferred Reload GET returns stale data', async () => {
+        let releaseStale: (() => void) | undefined;
+        const staleGate = new Promise<void>((resolve) => { releaseStale = resolve; });
+        let settingsGetCount = 0;
+
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                settingsGetCount += 1;
+                if (settingsGetCount === 1) {
+                    return { ok: true, json: async () => ({ notification_dispatch_retries: '0' }) };
+                }
+                return {
+                    ok: true,
+                    json: async () => {
+                        await staleGate;
+                        return { notification_dispatch_retries: '0' };
+                    },
+                };
+            }
+            if (url === '/settings' && opts?.method === 'PATCH') {
+                return { ok: true, json: async () => ({ success: true }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+
+        // Start a soft reload, then edit+save while that GET is still in flight.
+        await userEvent.click(screen.getByRole('button', { name: 'Reload' }));
+        await waitFor(() => expect(mockedFetch.mock.calls.filter(
+            ([url, opts]) => url === '/settings' && !(opts as { method?: string })?.method,
+        ).length).toBeGreaterThan(1));
+
+        await userEvent.click(screen.getByRole('button', { name: /0\s*extra/i }));
+        const input = screen.getByRole('spinbutton');
+        await userEvent.clear(input);
+        await userEvent.type(input, '2');
+        await userEvent.keyboard('{Enter}');
+        await userEvent.click(screen.getByRole('button', { name: 'Save retries' }));
+        await waitFor(() => expect(screen.getByRole('button', { name: /2\s*extra/i })).toBeInTheDocument());
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+
+        releaseStale?.();
+        await new Promise((r) => setTimeout(r, 40));
+        expect(screen.getByRole('button', { name: /2\s*extra/i })).toBeInTheDocument();
+        expect(screen.getByText('saved')).toBeInTheDocument();
     });
 
 });
