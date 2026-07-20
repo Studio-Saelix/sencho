@@ -260,6 +260,72 @@ describe('CloudBackupService — uploadSnapshot', () => {
         expect(status.error).toContain('bad creds');
     });
 
+    it('fails closed with no PutObject when a snapshot file is unavailable', async () => {
+        seedCustomProvider();
+        const db = DatabaseService.getInstance();
+        const snapshotId = db.createSnapshot('Corrupt member', 'admin', 1, 1, '[]');
+        const cipher = CryptoService.getInstance().encrypt('services: {}\n');
+        const payload = cipher.slice('enc:'.length);
+        const [iv, tag, ct] = payload.split(':');
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(snapshotId, 1, 'gateway', 'web', 'compose.yaml', `enc:${iv}:${tag}:${ct.slice(0, 3)}`);
+
+        sentSpy.mockClear();
+        await expect(CloudBackupService.getInstance().uploadSnapshot(snapshotId)).rejects.toThrow(/could not be decrypted/i);
+
+        const putCalls = sentSpy.mock.calls.filter(c => c[0].name === 'PutObjectCommand');
+        expect(putCalls).toHaveLength(0);
+        const status = CloudBackupService.getInstance().getUploadStatus(snapshotId);
+        expect(status.status).toBe('failed');
+        expect(status.error).toMatch(/could not be decrypted/i);
+    });
+
+    it('fails closed with no PutObject when a healthy sibling file exists alongside an unavailable one', async () => {
+        seedCustomProvider();
+        const db = DatabaseService.getInstance();
+        const snapshotId = db.createSnapshot('Mixed members', 'admin', 1, 1, '[]');
+        const good = CryptoService.getInstance().encrypt('services: { ok: {} }\n');
+        const bad = CryptoService.getInstance().encrypt('SECRET=long-enough-to-truncate\n');
+        const payload = bad.slice('enc:'.length);
+        const [iv, tag, ct] = payload.split(':');
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(snapshotId, 1, 'gateway', 'web', 'compose.yaml', good);
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(snapshotId, 1, 'gateway', 'web', '.env', `enc:${iv}:${tag}:${ct.slice(0, 3)}`);
+
+        sentSpy.mockClear();
+        await expect(CloudBackupService.getInstance().uploadSnapshot(snapshotId)).rejects.toThrow(/could not be decrypted/i);
+
+        const putCalls = sentSpy.mock.calls.filter(c => c[0].name === 'PutObjectCommand');
+        expect(putCalls).toHaveLength(0);
+        const status = CloudBackupService.getInstance().getUploadStatus(snapshotId);
+        expect(status.status).toBe('failed');
+        expect(status.error).toMatch(/could not be decrypted/i);
+    });
+
+    it('fails closed with no PutObject when a delimiter byte is corrupted', async () => {
+        seedCustomProvider();
+        const db = DatabaseService.getInstance();
+        const snapshotId = db.createSnapshot('Delim damage', 'admin', 1, 1, '[]');
+        const cipher = CryptoService.getInstance().encrypt('services: { ok: {} }\n');
+        const payload = cipher.slice('enc:'.length);
+        const [iv, tag, ct] = payload.split(':');
+        db.getDb().prepare(
+            'INSERT INTO fleet_snapshot_files (snapshot_id, node_id, node_name, stack_name, filename, content) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(snapshotId, 1, 'gateway', 'web', 'compose.yaml', `enc:${iv}=${tag}:${ct}`);
+
+        sentSpy.mockClear();
+        await expect(CloudBackupService.getInstance().uploadSnapshot(snapshotId)).rejects.toThrow(/could not be decrypted/i);
+
+        const putCalls = sentSpy.mock.calls.filter(c => c[0].name === 'PutObjectCommand');
+        expect(putCalls).toHaveLength(0);
+        const status = CloudBackupService.getInstance().getUploadStatus(snapshotId);
+        expect(status.status).toBe('failed');
+    });
+
     it('throws when no provider is configured', async () => {
         await expect(CloudBackupService.getInstance().uploadSnapshot(999)).rejects.toThrow(/not configured/i);
     });

@@ -158,9 +158,14 @@ Recovery Vault configuration is also admin-only. Mirroring to Recovery Vault add
 
 Snapshots are stored in Sencho's SQLite database. Captured file contents, including `.env` files, are encrypted at rest with the instance key, so a database copy never exposes stack secrets in plaintext. Compose files are typically small (under 10 KB each), so even hundreds of snapshots consume minimal disk space. Individual files larger than 1 MB are skipped and recorded as a warning to keep snapshots bounded. For very large fleets, consider periodically deleting old snapshots to keep the database lean.
 
+If a stored encrypted file cannot be decrypted (for example after on-disk corruption, including damaged ciphertext that still looks encryption-shaped), the snapshot detail view marks that file unavailable and lists it in a warning. Restore for that stack is blocked so live compose and environment files are never overwritten with that damaged data. Configured off-site upload (Recovery Vault or Custom S3) also refuses to publish an archive that would omit or fabricate those files. Intact stacks in the same snapshot remain readable and restorable. Only short, clearly non-ciphertext values that happen to start with `enc:` (for example `enc:hello`, `enc:hello-world`, or `enc:FOO_BAR=baz`) stay readable as legacy plaintext. Encryption-shaped damage remains unavailable.
+
 ## Troubleshooting
 
 <AccordionGroup>
+  <Accordion title="A snapshot file shows as Unavailable">
+    The stored ciphertext for that file could not be decrypted. Sencho keeps the rest of the snapshot readable and blocks restore for the affected stack so live compose and `.env` files are not overwritten. Configured off-site upload (Recovery Vault or Custom S3) also refuses that snapshot. Create a fresh snapshot from healthy nodes if you need a complete archive again.
+  </Accordion>
   <Accordion title="A snapshot shows skipped nodes">
     If a remote node is offline, unreachable, or its API token has expired, the node is skipped during snapshot creation. The list shows a warning icon with a count of skipped nodes, and the snapshot's detail view names each one along with the reason. Common causes are the remote Sencho instance being stopped or restarting, the node's API URL or token having been changed after it was added, or a firewall or network issue blocking the connection. Verify the remote is running and reachable, update the node's API URL and token in **Settings → Infrastructure → Nodes** if needed, then create a new snapshot.
   </Accordion>
@@ -171,7 +176,7 @@ Snapshots are stored in Sencho's SQLite database. Captured file contents, includ
     The stack was not captured in the snapshot, usually because its compose file was missing or unreadable on disk at the time the snapshot was taken. Open the snapshot's detail view to verify which stacks and files are available, and pick a different snapshot if the one you have is incomplete.
   </Accordion>
   <Accordion title="Restore all reports that some stacks failed">
-    Restore all applies each stack independently, so a failure on one stack does not stop the others. A stack is reported as failed when its node has been removed from the fleet since the snapshot was taken, when a remote node is offline or unreachable, or when its existing files cannot be written. The successful stacks are fully restored regardless. Resolve the underlying cause (re-add a removed node, bring an offline node back online) and run Restore all again, or restore the remaining stacks individually from the same snapshot.
+    Restore all applies each stack independently, so a failure on one stack does not stop the others. A stack is reported as failed when its node has been removed from the fleet since the snapshot was taken, when a remote node is offline or unreachable, when a snapshot file for that stack could not be decrypted, or when its existing files cannot be written. The successful stacks are fully restored regardless. Resolve the underlying cause (re-add a removed node, bring an offline node back online, or pick a healthy snapshot) and run Restore all again, or restore the remaining stacks individually from the same snapshot.
   </Accordion>
   <Accordion title="Recovery Vault Test reports an authentication error">
     Double-check the Access Key ID, Secret Access Key, and bucket name; one wrong character is the most common cause. Some providers require S3-compatible API access to be enabled on the bucket separately from the credentials. For MinIO, confirm the user has read/write permission on the target bucket. After correcting the values, click **Test** again before saving.

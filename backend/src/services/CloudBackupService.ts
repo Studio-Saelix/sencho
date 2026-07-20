@@ -1,5 +1,5 @@
 /**
- * CloudBackupService — off-site replication for fleet snapshots.
+ * CloudBackupService: off-site replication for fleet snapshots.
  *
  * Two providers share the same S3-compatible code path:
  *   - 'sencho' : managed Sencho Cloud Backup. Credentials provisioned by
@@ -15,9 +15,13 @@ import { Readable } from 'stream';
 import * as zlib from 'zlib';
 import * as tar from 'tar-stream';
 import axios from 'axios';
-import { DatabaseService, type FleetSnapshotFile } from './DatabaseService';
+import { DatabaseService } from './DatabaseService';
 import { CryptoService } from './CryptoService';
 import { LicenseService } from './LicenseService';
+import {
+    isAvailableSnapshotFile,
+    type AvailableSnapshotFile,
+} from '../helpers/snapshotFileDecrypt';
 import { getErrorMessage } from '../utils/errors';
 import { isDebugEnabled } from '../utils/debug';
 
@@ -255,9 +259,16 @@ export class CloudBackupService {
         const documentation = db.getSnapshotDocumentation(snapshotId);
         const objectKey = this.buildObjectKey(cfg, snapshot.id, snapshot.description, snapshot.created_at);
 
+        const availableFiles = files.filter(isAvailableSnapshotFile);
+        if (availableFiles.length !== files.length) {
+            const message = 'One or more snapshot files could not be decrypted';
+            this.setStatus(snapshotId, { status: 'failed', objectKey, error: message, updatedAt: Date.now() });
+            throw new Error(message);
+        }
+
         this.setStatus(snapshotId, { status: 'uploading', objectKey, updatedAt: Date.now() });
         try {
-            const archive = await this.buildArchive(snapshot, files, documentation);
+            const archive = await this.buildArchive(snapshot, availableFiles, documentation);
             const { client, sdk } = await this.buildS3Client(cfg);
             await client.send(new sdk.PutObjectCommand({
                 Bucket: cfg.bucket,
@@ -364,7 +375,7 @@ export class CloudBackupService {
 
     private async buildArchive(
         snapshot: { id: number; description: string; created_by: string; node_count: number; stack_count: number; skipped_nodes: string; created_at: number },
-        files: FleetSnapshotFile[],
+        files: AvailableSnapshotFile[],
         documentation = '',
     ): Promise<Buffer> {
         const pack = tar.pack();

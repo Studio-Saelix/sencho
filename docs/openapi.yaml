@@ -492,6 +492,21 @@ components:
         - $ref: "#/components/schemas/FleetSnapshot"
         - type: object
           properties:
+            fileDecryptWarnings:
+              type: array
+              description: Non-sensitive identifiers for snapshot files that could not be decrypted.
+              items:
+                type: object
+                required: [nodeId, nodeName, stackName, filename]
+                properties:
+                  nodeId:
+                    type: integer
+                  nodeName:
+                    type: string
+                  stackName:
+                    type: string
+                  filename:
+                    type: string
             nodes:
               type: array
               items:
@@ -511,12 +526,23 @@ components:
                         files:
                           type: array
                           items:
-                            type: object
-                            properties:
-                              filename:
-                                type: string
-                              content:
-                                type: string
+                            oneOf:
+                              - type: object
+                                required: [filename, content]
+                                properties:
+                                  filename:
+                                    type: string
+                                  content:
+                                    type: string
+                                    description: Decrypted file body; may be an empty string.
+                              - type: object
+                                required: [filename, unavailable]
+                                properties:
+                                  filename:
+                                    type: string
+                                  unavailable:
+                                    type: boolean
+                                    enum: [true]
 
     ScheduledTask:
       type: object
@@ -3397,10 +3423,21 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: One or more snapshot files for the stack could not be decrypted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, code]
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    enum: [SNAPSHOT_FILE_UNAVAILABLE]
         "500":
           $ref: "#/components/responses/InternalError"
-
-  # ── Scheduled Tasks ─────────────────────────────────────
   /api/scheduled-tasks:
     get:
       operationId: listScheduledTasks
