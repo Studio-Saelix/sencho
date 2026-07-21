@@ -25,6 +25,10 @@ const { masthead, nodeState } = vi.hoisted(() => ({
 vi.mock('@/context/NodeContext', () => ({
     useNodes: () => ({ activeNode: nodeState.activeNode }),
 }));
+const authState = { isAdmin: true };
+vi.mock('@/context/AuthContext', () => ({
+    useAuth: () => authState,
+}));
 vi.mock('../MastheadStatsContext', () => ({
     useMastheadStats: (stats: MastheadMetadataItem[] | null) => {
         masthead.last = stats;
@@ -64,10 +68,17 @@ describe('NotificationsSection', () => {
         mockedFetch.mockReset();
         masthead.last = null;
         nodeState.activeNode = { id: 1 };
-        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+        authState.isAdmin = true;
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string; nodeId?: number }) => {
             if (url === '/agents' && !opts?.method) return agentsResponse();
             if (url === '/agents' && opts?.method === 'POST') {
                 return { ok: true, json: async () => ({}) };
+            }
+            if (url === '/settings' && !opts?.method) {
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '0' }) };
+            }
+            if (url === '/settings' && opts?.method === 'PATCH') {
+                return { ok: true, json: async () => ({ success: true }) };
             }
             return { ok: true, json: async () => ([]) };
         });
@@ -321,6 +332,9 @@ describe('NotificationsSection', () => {
                 if (nodeState.activeNode.id === 1) return agentsResponse([REDACTED_APPRISE]);
                 return agentsResponse([]);
             }
+            if (url === '/settings' && !opts?.method) {
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '0' }) };
+            }
             return { ok: true, json: async () => ({}) };
         });
 
@@ -355,6 +369,9 @@ describe('NotificationsSection', () => {
                 }
                 return agentsResponse([]);
             }
+            if (url === '/settings' && !opts?.method) {
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '0' }) };
+            }
             return { ok: true, json: async () => ({}) };
         });
 
@@ -375,5 +392,311 @@ describe('NotificationsSection', () => {
         await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
         expect(screen.getByLabelText(/Apprise endpoint/i)).toHaveValue('');
     });
+
+    it('preserves CHANNELS masthead and loads retries with explicit nodeId', async () => {
+        render(<NotificationsSection />);
+        await waitFor(() => expect(masthead.last?.[0]).toMatchObject({ label: 'CHANNELS', value: '1/4' }));
+        await waitFor(() =>
+            expect(mockedFetch.mock.calls.some(
+                ([url, opts]) => url === '/settings' && (opts as { nodeId?: number })?.nodeId === 1,
+            )).toBe(true),
+        );
+        expect(screen.getByText('Delivery retries')).toBeInTheDocument();
+        expect(screen.getByText('0')).toBeInTheDocument();
+    });
+
+    it('PATCHes only notification_dispatch_retries when saving retries', async () => {
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+        const chipButton = screen.getByRole('button', { name: /0\s*extra/i });
+        await userEvent.click(chipButton);
+        const input = screen.getByRole('spinbutton');
+        await userEvent.clear(input);
+        await userEvent.type(input, '2');
+        await userEvent.keyboard('{Enter}');
+        await userEvent.click(screen.getByRole('button', { name: 'Save retries' }));
+        await waitFor(() => {
+            const patch = mockedFetch.mock.calls.find(
+                ([url, opts]) => url === '/settings' && (opts as { method?: string })?.method === 'PATCH',
+            );
+            expect(patch).toBeTruthy();
+            expect(JSON.parse((patch![1] as { body: string }).body)).toEqual({ notification_dispatch_retries: '2' });
+            expect((patch![1] as { nodeId?: number }).nodeId).toBe(1);
+        });
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Save retries' })).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: /Saving/i })).toBeNull();
+        expect(findAgentsPost()).toBeUndefined();
+    });
+
+    it('disables delivery retries controls for non-admins', async () => {
+        authState.isAdmin = false;
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('Delivery retries')).toBeInTheDocument());
+        expect(screen.getByRole('button', { name: 'Save retries' })).toBeDisabled();
+    });
+
+    it('ignores a stale settings body after a node switch', async () => {
+        let releaseNode1Settings: (() => void) | undefined;
+        const gate = new Promise<void>((resolve) => { releaseNode1Settings = resolve; });
+
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string; nodeId?: number | null }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                const targetId = opts?.nodeId ?? nodeState.activeNode.id;
+                if (targetId === 1) {
+                    return {
+                        ok: true,
+                        json: async () => {
+                            await gate;
+                            return { notification_dispatch_retries: '3' };
+                        },
+                    };
+                }
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '0' }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        const { rerender } = render(<NotificationsSection />);
+        nodeState.activeNode = { id: 2 };
+        rerender(<NotificationsSection />);
+        await waitFor(() =>
+            expect(mockedFetch.mock.calls.some(
+                ([url, opts]) => url === '/settings' && (opts as { nodeId?: number })?.nodeId === 2,
+            )).toBe(true),
+        );
+        releaseNode1Settings?.();
+        await new Promise((r) => setTimeout(r, 40));
+        expect(screen.getByRole('button', { name: /0\s*extra/i })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /3\s*extra/i })).toBeNull();
+    });
+
+    it('does not present default 0 as saved when settings GET fails', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('error')).toBeInTheDocument());
+        expect(screen.queryByText('saved')).toBeNull();
+        expect(screen.getByRole('button', { name: 'Save retries' })).toBeDisabled();
+        expect(screen.getByRole('button', { name: /0\s*extra/i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Retry load' })).toBeInTheDocument();
+    });
+
+    it('disables retry controls until the settings GET succeeds', async () => {
+        let releaseGet: (() => void) | undefined;
+        const gate = new Promise<void>((resolve) => { releaseGet = resolve; });
+
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                return {
+                    ok: true,
+                    json: async () => {
+                        await gate;
+                        return { notification_dispatch_retries: '3' };
+                    },
+                };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('loading')).toBeInTheDocument());
+        expect(screen.queryByText('saved')).toBeNull();
+        expect(screen.getByRole('button', { name: /0\s*extra/i })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Save retries' })).toBeDisabled();
+
+        releaseGet?.();
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+        expect(screen.getByRole('button', { name: /3\s*extra/i })).not.toBeDisabled();
+    });
+
+    it('keeps PATCH result when a deferred Reload GET returns stale data', async () => {
+        let releaseStale: (() => void) | undefined;
+        const staleGate = new Promise<void>((resolve) => { releaseStale = resolve; });
+        let settingsGetCount = 0;
+
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                settingsGetCount += 1;
+                if (settingsGetCount === 1) {
+                    return { ok: true, json: async () => ({ notification_dispatch_retries: '0' }) };
+                }
+                return {
+                    ok: true,
+                    json: async () => {
+                        await staleGate;
+                        return { notification_dispatch_retries: '0' };
+                    },
+                };
+            }
+            if (url === '/settings' && opts?.method === 'PATCH') {
+                return { ok: true, json: async () => ({ success: true }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+
+        // Start a soft reload, then edit+save while that GET is still in flight.
+        await userEvent.click(screen.getByRole('button', { name: 'Reload' }));
+        await waitFor(() => expect(mockedFetch.mock.calls.filter(
+            ([url, opts]) => url === '/settings' && !(opts as { method?: string })?.method,
+        ).length).toBeGreaterThan(1));
+
+        await userEvent.click(screen.getByRole('button', { name: /0\s*extra/i }));
+        const input = screen.getByRole('spinbutton');
+        await userEvent.clear(input);
+        await userEvent.type(input, '2');
+        await userEvent.keyboard('{Enter}');
+        await userEvent.click(screen.getByRole('button', { name: 'Save retries' }));
+        await waitFor(() => expect(screen.getByRole('button', { name: /2\s*extra/i })).toBeInTheDocument());
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+
+        releaseStale?.();
+        await new Promise((r) => setTimeout(r, 40));
+        expect(screen.getByRole('button', { name: /2\s*extra/i })).toBeInTheDocument();
+        expect(screen.getByText('saved')).toBeInTheDocument();
+    });
+
+
+    it('clears Saving after edit-during-save supersedes the PATCH apply', async () => {
+        let releasePatch: (() => void) | undefined;
+        const patchGate = new Promise<void>((resolve) => { releasePatch = resolve; });
+
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '0' }) };
+            }
+            if (url === '/settings' && opts?.method === 'PATCH') {
+                await patchGate;
+                return { ok: true, json: async () => ({ success: true }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+
+        await userEvent.click(screen.getByRole('button', { name: /0\s*extra/i }));
+        let input = screen.getByRole('spinbutton');
+        await userEvent.clear(input);
+        await userEvent.type(input, '2');
+        await userEvent.keyboard('{Enter}');
+        await userEvent.click(screen.getByRole('button', { name: 'Save retries' }));
+        await waitFor(() => expect(screen.getByRole('button', { name: /Saving/i })).toBeInTheDocument());
+
+        // Edit while the PATCH is in flight (bumps mutation gen).
+        await userEvent.click(screen.getByRole('button', { name: /2\s*extra/i }));
+        input = screen.getByRole('spinbutton');
+        await userEvent.clear(input);
+        await userEvent.type(input, '3');
+        await userEvent.keyboard('{Enter}');
+
+        releasePatch?.();
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Save retries' })).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: /Saving/i })).toBeNull();
+        expect(screen.getByRole('button', { name: /3\s*extra/i })).toBeInTheDocument();
+        expect(screen.getByText('edited')).toBeInTheDocument();
+    });
+
+    it('clears Saving when the active node changes during an in-flight PATCH', async () => {
+        let releasePatch: (() => void) | undefined;
+        const patchGate = new Promise<void>((resolve) => { releasePatch = resolve; });
+
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string; nodeId?: number }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                const id = opts?.nodeId ?? nodeState.activeNode.id;
+                return { ok: true, json: async () => ({ notification_dispatch_retries: id === 1 ? '0' : '1' }) };
+            }
+            if (url === '/settings' && opts?.method === 'PATCH') {
+                await patchGate;
+                return { ok: true, json: async () => ({ success: true }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        const { rerender } = render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+
+        await userEvent.click(screen.getByRole('button', { name: /0\s*extra/i }));
+        const input = screen.getByRole('spinbutton');
+        await userEvent.clear(input);
+        await userEvent.type(input, '2');
+        await userEvent.keyboard('{Enter}');
+        await userEvent.click(screen.getByRole('button', { name: 'Save retries' }));
+        await waitFor(() => expect(screen.getByRole('button', { name: /Saving/i })).toBeInTheDocument());
+
+        nodeState.activeNode = { id: 2 };
+        rerender(<NotificationsSection />);
+        await waitFor(() => expect(screen.queryByRole('button', { name: /Saving/i })).toBeNull());
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+        expect(screen.getByRole('button', { name: 'Save retries' })).toBeInTheDocument();
+
+        releasePatch?.();
+        await new Promise((r) => setTimeout(r, 40));
+        expect(screen.queryByRole('button', { name: /Saving/i })).toBeNull();
+        expect(screen.getByRole('button', { name: /1\s*extra/i })).toBeInTheDocument();
+    });
+
+
+
+    it('treats invalid stored notification_dispatch_retries as error, not clamped saved', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '9' }) };
+            }
+            if (url === '/settings' && opts?.method === 'PATCH') {
+                return { ok: true, json: async () => ({ success: true }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('error')).toBeInTheDocument());
+        expect(screen.queryByText('saved')).toBeNull();
+        expect(screen.getByText(/Stored delivery retries value is invalid/i)).toBeInTheDocument();
+        // Chip may show 0 as a draft, but Save must be enabled so the operator can repair.
+        expect(screen.getByRole('button', { name: 'Save retries' })).not.toBeDisabled();
+
+        await userEvent.click(screen.getByRole('button', { name: 'Save retries' }));
+        await waitFor(() => {
+            const patch = mockedFetch.mock.calls.find(
+                ([url, opts]) => url === '/settings' && (opts as { method?: string })?.method === 'PATCH',
+            );
+            expect(patch).toBeTruthy();
+            expect(JSON.parse((patch![1] as { body: string }).body)).toEqual({ notification_dispatch_retries: '0' });
+        });
+        await waitFor(() => expect(screen.getByText('saved')).toBeInTheDocument());
+        expect(screen.getByRole('button', { name: /0\s*extra/i })).toBeInTheDocument();
+    });
+
+    it('treats decimal stored notification_dispatch_retries as invalid, not truncated saved', async () => {
+        mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+            if (url === '/agents' && !opts?.method) return agentsResponse([]);
+            if (url === '/settings' && !opts?.method) {
+                return { ok: true, json: async () => ({ notification_dispatch_retries: '1.5' }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+
+        render(<NotificationsSection />);
+        await waitFor(() => expect(screen.getByText('error')).toBeInTheDocument());
+        expect(screen.queryByText('saved')).toBeNull();
+        expect(screen.queryByRole('button', { name: /1\s*extra/i })).toBeNull();
+        expect(screen.getByText(/Stored delivery retries value is invalid/i)).toBeInTheDocument();
+    });
+
 
 });

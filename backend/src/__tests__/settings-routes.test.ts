@@ -338,6 +338,64 @@ describe('health gate settings', () => {
   });
 });
 
+describe('notification_dispatch_retries setting', () => {
+  it('seeds to "0" in a fresh database', () => {
+    expect(DatabaseService.getInstance().getGlobalSettings().notification_dispatch_retries).toBe('0');
+  });
+
+  it('is exposed through the settings GET projection', async () => {
+    const res = await request(app).get('/api/settings').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.notification_dispatch_retries).toBe('0');
+  });
+
+  it('accepts integer number and digit-string writes via POST and PATCH', async () => {
+    const postNum = await request(app)
+      .post('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ key: 'notification_dispatch_retries', value: 2 });
+    expect(postNum.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().notification_dispatch_retries).toBe('2');
+
+    const patchStr = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({ notification_dispatch_retries: '3' });
+    expect(patchStr.status).toBe(200);
+    expect(DatabaseService.getInstance().getGlobalSettings().notification_dispatch_retries).toBe('3');
+
+    DatabaseService.getInstance().updateGlobalSetting('notification_dispatch_retries', '0');
+  });
+
+  it('rejects malformed values on POST and PATCH without persisting', async () => {
+    const before = DatabaseService.getInstance().getGlobalSettings().notification_dispatch_retries;
+
+    for (const value of [null, true, false, '', ' ', '1.5', '-1', 4, '4', 'abc']) {
+      const post = await request(app)
+        .post('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ key: 'notification_dispatch_retries', value });
+      expect(post.status).toBe(400);
+
+      const patch = await request(app)
+        .patch('/api/settings')
+        .set('Cookie', adminCookie)
+        .send({ notification_dispatch_retries: value });
+      expect(patch.status).toBe(400);
+    }
+
+    expect(DatabaseService.getInstance().getGlobalSettings().notification_dispatch_retries).toBe(before);
+  });
+
+  it('rejects a non-admin write with 403', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', viewerCookie)
+      .send({ key: 'notification_dispatch_retries', value: '1' });
+    expect(res.status).toBe(403);
+  });
+});
+
 describe('env_block_deploy_on_missing_required setting', () => {
   it('seeds to "0" (opt-in) in a fresh database', () => {
     expect(DatabaseService.getInstance().getGlobalSettings().env_block_deploy_on_missing_required).toBe('0');

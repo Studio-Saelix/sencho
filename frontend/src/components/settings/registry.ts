@@ -205,7 +205,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         group: 'notifications',
         label: 'Channels',
         description: 'Discord, Slack, Apprise, and custom webhook destinations for Sencho alerts.',
-        keywords: ['discord', 'slack', 'apprise', 'webhook', 'channels', 'destinations', 'alerts'],
+        keywords: ['discord', 'slack', 'apprise', 'webhook', 'channels', 'destinations', 'alerts', 'retry', 'retries'],
         tier: null,
         scope: 'node',
     },
