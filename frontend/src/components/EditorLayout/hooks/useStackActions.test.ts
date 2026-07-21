@@ -50,7 +50,6 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     setGitSourcePendingMap: vi.fn(),
     setComposeEtag: vi.fn(),
     setEnvEtag: vi.fn(),
-    setIsFileLoading: vi.fn(),
     effectiveServices: [],
     setEffectiveServices: vi.fn(),
     serviceUpdateInProgress: null,
