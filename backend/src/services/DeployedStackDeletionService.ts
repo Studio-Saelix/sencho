@@ -294,10 +294,18 @@ export class DeployedStackDeletionService {
       return;
     }
 
+    let incomplete = false;
+
     for (const tag of tags) {
       try {
         await docker.getImage(tag).remove({ force: true });
       } catch (error) {
+        const status = (error as { statusCode?: number }).statusCode;
+        const message = getErrorMessage(error, 'unknown').toLowerCase();
+        if (status === 404 || message.includes('no such image') || message.includes('not found')) {
+          continue;
+        }
+        incomplete = true;
         console.warn(
           '[DeployedStackDeletion] Failed to remove rollback tag %s: %s',
           sanitizeForLog(tag),
@@ -316,6 +324,7 @@ export class DeployedStackDeletionService {
         const resolved = path.resolve(overridePath);
         const basename = path.basename(resolved);
         if (!/^\.sencho-recovery-[a-f0-9]+\.yml$/i.test(basename)) {
+          incomplete = true;
           console.warn(
             '[DeployedStackDeletion] Refusing to delete non-recovery override: %s',
             sanitizeForLog(overridePath),
@@ -323,6 +332,7 @@ export class DeployedStackDeletionService {
           continue;
         }
         if (baseDir && !isPathWithinBase(resolved, path.resolve(baseDir))) {
+          incomplete = true;
           console.warn(
             '[DeployedStackDeletion] Refusing to delete override outside compose dir: %s',
             sanitizeForLog(overridePath),
@@ -330,6 +340,7 @@ export class DeployedStackDeletionService {
           continue;
         }
         if (!baseDir && !path.isAbsolute(resolved)) {
+          incomplete = true;
           console.warn(
             '[DeployedStackDeletion] Refusing relative override without compose dir: %s',
             sanitizeForLog(overridePath),
@@ -339,6 +350,7 @@ export class DeployedStackDeletionService {
         await fs.unlink(resolved);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          incomplete = true;
           console.warn(
             '[DeployedStackDeletion] Failed to delete override %s: %s',
             sanitizeForLog(overridePath),
@@ -348,7 +360,10 @@ export class DeployedStackDeletionService {
       }
     }
 
-    db.deleteCleanupPending(intentId);
+    // Keep the ready tombstone when cleanup is incomplete so startup can retry.
+    if (!incomplete) {
+      db.deleteCleanupPending(intentId);
+    }
   }
 
   /** Enumerate rollback tags and override paths for every stack recovery on a node. */

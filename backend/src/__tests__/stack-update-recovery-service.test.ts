@@ -167,6 +167,14 @@ describe('StackUpdateRecoveryService', () => {
   });
 
   it('does not mark restored_current when recovery probe finds crashed containers', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web',
+      scale: 1,
+      hasBuild: false,
+      declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag',
+      replicas: [{ containerId: 'c1', imageId: 'sha256:abc', repoDigest: null, state: 'running', rollbackTag: 'sencho-rb/x/web:hold' }],
+    }]);
     const row = {
       id: 'gen-2',
       node_id: 1,
@@ -176,7 +184,7 @@ describe('StackUpdateRecoveryService', () => {
       is_current: 1,
       backup_slot_id: 'b1',
       override_path: '/test/compose/my-stack/.sencho-recovery-bbbbbbbbbbbb.yml',
-      services_json: '[]',
+      services_json: servicesJson,
       health_gate_id: null,
       gate_retain_until: null,
       artifact_expires_at: null,
@@ -190,8 +198,8 @@ describe('StackUpdateRecoveryService', () => {
     const update = vi.spyOn(DatabaseService.prototype, 'updateStackUpdateRecoveryGeneration')
       .mockImplementation(() => undefined);
 
-    mockListContainers.mockResolvedValue([{ Id: 'c1', State: 'exited' }]);
-    mockInspectContainer.mockResolvedValue({ State: { ExitCode: 1 } });
+    mockListContainers.mockResolvedValue([{ Id: 'c1', State: 'exited', Labels: { 'com.docker.compose.service': 'web' } }]);
+    mockInspectContainer.mockResolvedValue({ State: { ExitCode: 0 } });
 
     vi.useFakeTimers();
     const promise = StackUpdateRecoveryService.getInstance().compensateWithCandidate(
@@ -208,5 +216,92 @@ describe('StackUpdateRecoveryService', () => {
       'gen-2',
       expect.objectContaining({ status: 'restored_current' }),
     );
+  });
+
+  it('probeRecoveredStack rejects empty runtime when expected replicas were running', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag', replicas: [],
+    }]);
+    mockListContainers.mockResolvedValue([]);
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(promise).resolves.toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('probeRecoveredStack rejects restarting and unhealthy expected containers', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag', replicas: [],
+    }]);
+
+    mockListContainers.mockResolvedValue([
+      { Id: 'c1', State: 'restarting', Labels: { 'com.docker.compose.service': 'web' } },
+    ]);
+    vi.useFakeTimers();
+    let promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(promise).resolves.toBe(false);
+    vi.useRealTimers();
+
+    mockListContainers.mockResolvedValue([
+      { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+    ]);
+    mockInspectContainer.mockResolvedValue({ State: { Status: 'running', Health: { Status: 'unhealthy' } } });
+    vi.useFakeTimers();
+    promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(promise).resolves.toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('probeRecoveredStack accepts healthy running replicas matching capture scale', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag', replicas: [],
+    }]);
+    mockListContainers.mockResolvedValue([
+      { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+    ]);
+    mockInspectContainer.mockResolvedValue({ State: { Status: 'running' } });
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(promise).resolves.toBe(true);
+    vi.useRealTimers();
+  });
+
+  it('does not mark artifacts retired when tag removal fails', async () => {
+    const row = {
+      id: 'gen-3',
+      node_id: 1,
+      stack_name: 'my-stack',
+      status: 'abandoned' as const,
+      phase: 'captured' as const,
+      is_current: 0,
+      backup_slot_id: null,
+      override_path: null,
+      services_json: JSON.stringify([{
+        serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',
+        referenceKind: 'moving_tag',
+        replicas: [{ containerId: 'c1', imageId: 'sha256:abc', repoDigest: null, state: 'running', rollbackTag: 'sencho-rb/cccccccccccc/web:hold' }],
+      }]),
+      health_gate_id: null,
+      gate_retain_until: null,
+      artifact_expires_at: Date.now() - 1,
+      operation_lease_expires_at: null,
+      created_at: Date.now(),
+      updated_at: Date.now(),
+      created_by: null,
+      artifacts_retired: 0,
+    };
+    mockRemove.mockRejectedValueOnce(Object.assign(new Error('docker busy'), { statusCode: 500 }));
+    const markRetired = vi.spyOn(DatabaseService.prototype, 'markStackUpdateRecoveryArtifactsRetired')
+      .mockReturnValue(true);
+    const ok = await StackUpdateRecoveryService.getInstance().retireGenerationArtifacts(row);
+    expect(ok).toBe(false);
+    expect(markRetired).not.toHaveBeenCalled();
   });
 });

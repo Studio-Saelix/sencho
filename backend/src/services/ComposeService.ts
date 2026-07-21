@@ -178,11 +178,22 @@ export class ComposeService {
     // directory, so deploy/update resolve the same effective config the validator did.
     args.push(...await authoredComposeEnvFileArgs(stackName, this.nodeId));
 
+    const meshEnabled = DatabaseService.getInstance().isMeshStackEnabled(this.nodeId, stackName);
     let overridePath: string | null = null;
     try {
       overridePath = await MeshService.getInstance().ensureStackOverride(this.nodeId, stackName);
     } catch (err) {
+      if (meshEnabled) {
+        throw err instanceof Error
+          ? err
+          : new Error(`Mesh override generation failed: ${String(err)}`);
+      }
       console.warn('[ComposeService] mesh override skipped:', sanitizeForLog((err as Error).message));
+    }
+    if (meshEnabled && !overridePath) {
+      throw new Error(
+        `Mesh override is required for stack "${stackName}" but could not be generated`,
+      );
     }
     if (overridePath) {
       if (filePrefix.length === 0) {

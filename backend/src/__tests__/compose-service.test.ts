@@ -24,6 +24,7 @@ const {
   mockResolveMissingExternalNetworks,
   mockCreateNetwork,
   mockAddNotificationHistory,
+  mockIsMeshStackEnabled,
   mockClassifyLegacyOrphansForUpdate,
   mockCaptureCandidate,
   mockMarkAcquired,
@@ -68,6 +69,7 @@ const {
   }),
   mockCreateNetwork: vi.fn().mockResolvedValue({ id: 'net-1' }),
   mockAddNotificationHistory: vi.fn(),
+  mockIsMeshStackEnabled: vi.fn().mockReturnValue(false),
   mockClassifyLegacyOrphansForUpdate: vi.fn().mockResolvedValue({ status: 'none' }),
   mockCaptureCandidate: vi.fn().mockResolvedValue({
     id: 'recovery-1',
@@ -139,6 +141,7 @@ vi.mock('../services/DatabaseService', () => ({
       getGitSource: () => undefined,
       getStackProjectEnvFiles: () => [],
       addNotificationHistory: mockAddNotificationHistory,
+      isMeshStackEnabled: (...args: unknown[]) => mockIsMeshStackEnabled(...args),
     }),
   },
 }));
@@ -307,6 +310,7 @@ beforeEach(() => {
   mockMarkReconciling.mockReturnValue(true);
   mockMarkImmediateVerified.mockReturnValue(true);
   mockAbandon.mockResolvedValue(true);
+  mockIsMeshStackEnabled.mockReturnValue(false);
   mockCompensateWithCandidate.mockResolvedValue(true);
   mockBuildUnifiedHeldImagePredicate.mockReturnValue(() => false);
   delete process.env.SENCHO_MODE;
@@ -647,6 +651,16 @@ describe('ComposeService - authoredComposeArgs mesh override', () => {
 });
 
 // ── deployStack ────────────────────────────────────────────────────────
+
+
+  it('fails closed when a mesh-enabled stack cannot generate its override', async () => {
+    mockIsMeshStackEnabled.mockReturnValue(true);
+    mockEnsureStackOverride.mockRejectedValue(new Error('mesh override write failed'));
+
+    const svc = ComposeService.getInstance(1);
+    await expect(svc.validateExactComposeInvocation('my-stack')).rejects.toThrow(/mesh override write failed/i);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
 
 describe('ComposeService - deployStack', () => {
   it('blocks a pilot deploy with relative binds before replacing containers when path mapping differs', async () => {

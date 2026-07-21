@@ -493,7 +493,11 @@ export class StackUpdateRecoveryService {
         throw new Error('Recovery generation has no override path');
       }
       await composeUp(row.override_path);
-      const probeOk = await this.probeRecoveredStack(row.node_id, row.stack_name);
+      const probeOk = await this.probeRecoveredStack(
+        row.node_id,
+        row.stack_name,
+        row.services_json,
+      );
       if (!probeOk) {
         DatabaseService.getInstance().updateStackUpdateRecoveryGeneration(generationId, {
           status: 'recovery_required',
@@ -520,21 +524,72 @@ export class StackUpdateRecoveryService {
     }
   }
 
-  /** Same immediate probe used after a successful update recreate. */
-  public async probeRecoveredStack(nodeId: number, stackName: string): Promise<boolean> {
+  /**
+   * Verify recovered runtime against the captured generation.
+   * Rejects absent, restarting, dead, exited, or unhealthy expected replicas.
+   */
+  public async probeRecoveredStack(
+    nodeId: number,
+    stackName: string,
+    servicesJson: string,
+  ): Promise<boolean> {
     await new Promise((resolve) => setTimeout(resolve, RECOVERY_PROBE_DELAY_MS));
     try {
+      const expected = parseServicesJson(servicesJson);
+      const expectedRunning = new Map<string, number>();
+      for (const svc of expected) {
+        if (svc.scale > 0) expectedRunning.set(svc.serviceName, svc.scale);
+      }
+
       const docker = DockerController.getInstance(nodeId).getDocker();
       const containers = await docker.listContainers({
         all: true,
         filters: { label: [`com.docker.compose.project=${stackName}`] },
       });
+
+      if (expectedRunning.size > 0 && containers.length === 0) {
+        return false;
+      }
+
+      const runningByService = new Map<string, number>();
       for (const containerInfo of containers) {
-        if (containerInfo.State === 'exited') {
-          const inspectData = await docker.getContainer(containerInfo.Id).inspect();
-          if (inspectData.State.ExitCode !== 0) return false;
+        const labels = (containerInfo.Labels ?? {}) as Record<string, string>;
+        const serviceName = labels['com.docker.compose.service'];
+        const state = (containerInfo.State || '').toLowerCase();
+
+        if (state === 'restarting' || state === 'dead') {
+          return false;
         }
-        if (containerInfo.State === 'dead') return false;
+
+        if (state === 'exited' || state === 'created' || state === 'removing') {
+          if (serviceName && expectedRunning.has(serviceName)) {
+            return false;
+          }
+          continue;
+        }
+
+        if (state !== 'running') {
+          if (serviceName && expectedRunning.has(serviceName)) {
+            return false;
+          }
+          continue;
+        }
+
+        const inspectData = await docker.getContainer(containerInfo.Id).inspect();
+        const health = inspectData.State?.Health?.Status;
+        if (health === 'unhealthy') {
+          return false;
+        }
+
+        if (serviceName) {
+          runningByService.set(serviceName, (runningByService.get(serviceName) ?? 0) + 1);
+        }
+      }
+
+      for (const [serviceName, need] of expectedRunning) {
+        if ((runningByService.get(serviceName) ?? 0) < need) {
+          return false;
+        }
       }
       return true;
     } catch (error) {
@@ -547,16 +602,22 @@ export class StackUpdateRecoveryService {
     }
   }
 
-  /** Idempotent removal of opaque tags and override files for a generation. */
-  public async retireGenerationArtifacts(row: StackUpdateRecoveryGenerationRow): Promise<void> {
-    if (row.artifacts_retired === 1) return;
+  /**
+   * Idempotent removal of opaque tags and override files for a generation.
+   * Marks artifacts_retired only when every artifact is removed or confirmed absent,
+   * so transient failures remain retryable via reconcileIncomplete.
+   */
+  public async retireGenerationArtifacts(row: StackUpdateRecoveryGenerationRow): Promise<boolean> {
+    if (row.artifacts_retired === 1) return true;
     const services = parseServicesJson(row.services_json);
-    await this.bestEffortRemoveTags(row.node_id, collectRollbackTags(services));
+    const tagsOk = await this.removeRollbackTags(row.node_id, collectRollbackTags(services));
+    let overrideOk = true;
     if (row.override_path) {
       try {
         await fs.unlink(row.override_path);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          overrideOk = false;
           console.warn(
             '[StackUpdateRecovery] Failed to delete override %s: %s',
             sanitizeForLog(row.override_path),
@@ -565,7 +626,9 @@ export class StackUpdateRecoveryService {
         }
       }
     }
+    if (!tagsOk || !overrideOk) return false;
     DatabaseService.getInstance().markStackUpdateRecoveryArtifactsRetired(row.id);
+    return true;
   }
 
   /**
@@ -593,8 +656,7 @@ export class StackUpdateRecoveryService {
       for (const row of db.listStackUpdateRecoveryGenerationsForArtifactRetirement(now)) {
         // Never retire an active/current or recovery_required hold target.
         if (row.is_current === 1 || row.status === 'recovery_required') continue;
-        await this.retireGenerationArtifacts(row);
-        retired += 1;
+        if (await this.retireGenerationArtifacts(row)) retired += 1;
       }
       if (abandoned > 0 || flagged > 0 || retired > 0) {
         console.log(
@@ -610,14 +672,22 @@ export class StackUpdateRecoveryService {
     }
   }
 
-  private async bestEffortRemoveTags(nodeId: number, tags: string[]): Promise<void> {
-    if (tags.length === 0) return;
+  /** Returns true when every tag is removed or already absent. */
+  private async removeRollbackTags(nodeId: number, tags: string[]): Promise<boolean> {
+    if (tags.length === 0) return true;
     try {
       const docker = DockerController.getInstance(nodeId).getDocker();
+      let allOk = true;
       for (const tag of tags) {
         try {
           await docker.getImage(tag).remove({ force: true });
         } catch (error) {
+          const status = (error as { statusCode?: number }).statusCode;
+          const message = getErrorMessage(error, 'unknown').toLowerCase();
+          if (status === 404 || message.includes('no such image') || message.includes('not found')) {
+            continue;
+          }
+          allOk = false;
           console.warn(
             '[StackUpdateRecovery] Failed to remove rollback tag %s: %s',
             sanitizeForLog(tag),
@@ -625,12 +695,18 @@ export class StackUpdateRecoveryService {
           );
         }
       }
+      return allOk;
     } catch (error) {
       console.warn(
         '[StackUpdateRecovery] Docker unavailable while removing tags: %s',
         sanitizeForLog(getErrorMessage(error, 'unknown')),
       );
+      return false;
     }
+  }
+
+  private async bestEffortRemoveTags(nodeId: number, tags: string[]): Promise<void> {
+    await this.removeRollbackTags(nodeId, tags);
   }
 
   private activeRecoveryTtlMs(): number {
