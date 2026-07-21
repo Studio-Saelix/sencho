@@ -15,6 +15,7 @@ import {
     type NotificationSchedule,
 } from '../helpers/notificationSchedule';
 import { readSnapshotFileRow, type SnapshotFileReadResult, type SnapshotFileRow } from '../helpers/snapshotFileDecrypt';
+import { sanitizeForLog } from '../utils/safeLog';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 
@@ -2868,8 +2869,8 @@ export class DatabaseService {
             // push that isn't strictly newer than what's stored must never overwrite it.
             if (existing.updated_at >= rule.updated_at) {
                 console.warn(
-                    `[DatabaseService] Ignoring stale suppression replica write for rule id=${rule.id} ` +
-                        `(incoming updated_at=${rule.updated_at} <= stored updated_at=${existing.updated_at})`,
+                    `[DatabaseService] Ignoring stale suppression replica write for rule id=${sanitizeForLog(rule.id)} ` +
+                        `(incoming updated_at=${sanitizeForLog(rule.updated_at)} <= stored updated_at=${sanitizeForLog(existing.updated_at)})`,
                 );
                 return;
             }
