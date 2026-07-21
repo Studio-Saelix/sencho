@@ -103,5 +103,12 @@ describe('scheduleAllowsSuppression / stored parse', () => {
     expect(scheduleAllowsSuppression(null, true, Date.now())).toBe(false);
     expect(parseStoredNotificationSchedule('{not-json')).toEqual({ kind: 'invalid' });
     expect(parseStoredNotificationSchedule(null)).toEqual({ kind: 'null' });
+    expect(parseStoredNotificationSchedule(undefined)).toEqual({ kind: 'null' });
+  });
+
+  it('treats empty and whitespace strings as invalid, not legacy null', () => {
+    expect(parseStoredNotificationSchedule('')).toEqual({ kind: 'invalid' });
+    expect(parseStoredNotificationSchedule('   ')).toEqual({ kind: 'invalid' });
+    expect(parseStoredNotificationSchedule('null')).toEqual({ kind: 'invalid' });
   });
 });

@@ -102,11 +102,25 @@ async function pushOrCleanupScheduled(node: Node, rule: NotificationSuppressionR
   }
 }
 
+async function cleanupInvalidScheduleReplica(node: Node, rule: NotificationSuppressionRule): Promise<void> {
+  // Never POST an invalid schedule (would mute all day on remotes that ignore the field).
+  // Attempt DELETE so a prior valid/unscheduled replica cannot keep muting.
+  try {
+    await deleteRuleOnNode(node, rule.id);
+    console.warn(
+      `[SuppressionSync] Corrupt schedule on rule ${rule.id}: replica removed on node "${node.name}" (id=${node.id}); not posting`,
+    );
+  } catch (err) {
+    console.error(
+      `[SuppressionSync] Corrupt schedule on rule ${rule.id}: cleanup pending on node "${node.name}" (id=${node.id}); ` +
+        `DELETE failed (${getErrorMessage(err, String(err))}). Prior replica may remain until connectivity returns`,
+    );
+  }
+}
+
 async function syncRuleToNode(node: Node, rule: NotificationSuppressionRule): Promise<void> {
   if (rule.scheduleInvalid) {
-    console.warn(
-      `[SuppressionSync] Skipping push of rule ${rule.id} to node "${node.name}": corrupt schedule; not syncing as unscheduled`,
-    );
+    await cleanupInvalidScheduleReplica(node, rule);
     return;
   }
   if (rule.schedule != null) {

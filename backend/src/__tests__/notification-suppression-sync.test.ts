@@ -155,16 +155,67 @@ describe('notificationSuppressionSync', () => {
     expect(error.mock.calls.some((c) => String(c[0]).includes('cleanup pending'))).toBe(true);
   });
 
-  it('skips sync when scheduleInvalid (does not POST as unscheduled)', async () => {
+  it('scheduleInvalid: DELETE success, no POST', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockFetch.mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+
     syncSuppressionRuleToFleet(makeRule({
       node_id: 10,
       schedule: null,
       scheduleInvalid: true,
     }));
-    await vi.waitFor(() => expect(warn).toHaveBeenCalled());
+    await vi.waitFor(() => {
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('replica removed'))).toBe(true);
+    });
+
+    expect(mockFetch.mock.calls.every((c) => (c[1] as { method: string }).method === 'DELETE')).toBe(true);
+    expect(error.mock.calls.some((c) => String(c[0]).includes('cleanup pending'))).toBe(false);
+  });
+
+  it('scheduleInvalid: DELETE 404 counts as cleanup success, no POST', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockFetch.mockResolvedValue({ ok: false, status: 404, text: async () => 'gone' });
+
+    syncSuppressionRuleToFleet(makeRule({
+      node_id: 10,
+      schedule: null,
+      scheduleInvalid: true,
+    }));
+    await vi.waitFor(() => {
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('replica removed'))).toBe(true);
+    });
+    expect(mockFetch.mock.calls.every((c) => (c[1] as { method: string }).method === 'DELETE')).toBe(true);
+  });
+
+  it('scheduleInvalid: DELETE failure logs pending cleanup, no POST', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockFetch.mockResolvedValue({ ok: false, status: 503, text: async () => 'down' });
+
+    syncSuppressionRuleToFleet(makeRule({
+      node_id: 10,
+      schedule: null,
+      scheduleInvalid: true,
+    }));
+    await vi.waitFor(() => expect(error).toHaveBeenCalled());
+    expect(mockFetch.mock.calls.every((c) => (c[1] as { method: string }).method === 'DELETE')).toBe(true);
+    expect(error.mock.calls.some((c) => String(c[0]).includes('cleanup pending'))).toBe(true);
+  });
+
+  it('scheduleInvalid: no proxy target logs pending, no POST', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockGetProxyTarget.mockReturnValue(null);
+
+    syncSuppressionRuleToFleet(makeRule({
+      node_id: 10,
+      schedule: null,
+      scheduleInvalid: true,
+    }));
+    await vi.waitFor(() => expect(error).toHaveBeenCalled());
     expect(mockFetch).not.toHaveBeenCalled();
-    expect(warn.mock.calls.some((c) => String(c[0]).includes('corrupt schedule'))).toBe(true);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('replica removed'))).toBe(false);
+    expect(error.mock.calls.some((c) => String(c[0]).includes('cleanup pending'))).toBe(true);
   });
 
   it('unscheduled-to-scheduled on unsupported target attempts DELETE', async () => {

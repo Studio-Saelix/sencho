@@ -583,6 +583,8 @@ export function NotificationSuppressionSection({
                                                     size="sm"
                                                     variant={selected ? 'default' : 'outline'}
                                                     className="h-7 px-2 text-xs"
+                                                    aria-pressed={selected}
+                                                    aria-label={label}
                                                     onClick={() => {
                                                         setFormScheduleDays((prev) =>
                                                             selected
@@ -598,12 +600,22 @@ export function NotificationSuppressionSection({
                                     </div>
                                     <div className="grid grid-cols-2 gap-2">
                                         <div className="space-y-1">
-                                            <Label className="text-xs text-muted-foreground">Start (UTC)</Label>
-                                            <Input type="time" value={formScheduleStart} onChange={(e) => setFormScheduleStart(e.target.value)} />
+                                            <Label htmlFor="mute-schedule-start" className="text-xs text-muted-foreground">Start (UTC)</Label>
+                                            <Input
+                                                id="mute-schedule-start"
+                                                type="time"
+                                                value={formScheduleStart}
+                                                onChange={(e) => setFormScheduleStart(e.target.value)}
+                                            />
                                         </div>
                                         <div className="space-y-1">
-                                            <Label className="text-xs text-muted-foreground">End (UTC)</Label>
-                                            <Input type="time" value={formScheduleEnd} onChange={(e) => setFormScheduleEnd(e.target.value)} />
+                                            <Label htmlFor="mute-schedule-end" className="text-xs text-muted-foreground">End (UTC)</Label>
+                                            <Input
+                                                id="mute-schedule-end"
+                                                type="time"
+                                                value={formScheduleEnd}
+                                                onChange={(e) => setFormScheduleEnd(e.target.value)}
+                                            />
                                         </div>
                                     </div>
                                     <p className="text-xs text-muted-foreground">

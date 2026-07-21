@@ -73,22 +73,29 @@ export function parseNotificationSchedule(raw: unknown): ParseNotificationSchedu
 }
 
 /**
- * Parse a DB column value. Missing/null → legacy null (always in window).
- * Non-null corrupt JSON → invalid (caller must not suppress).
+ * Parse a DB column value. Only SQL null / undefined → legacy null (always in window).
+ * Empty string, whitespace, or any non-null corrupt value → invalid (must not suppress).
  */
 export function parseStoredNotificationSchedule(
   raw: unknown,
 ): { kind: 'null' } | { kind: 'ok'; schedule: NotificationSchedule } | { kind: 'invalid' } {
-  if (raw == null || raw === '') return { kind: 'null' };
-  let parsed: unknown = raw;
+  if (raw == null) return { kind: 'null' };
   if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed === '') return { kind: 'invalid' };
+    let parsed: unknown;
     try {
-      parsed = JSON.parse(raw);
+      parsed = JSON.parse(trimmed);
     } catch {
       return { kind: 'invalid' };
     }
+    // JSON null is not SQL NULL; treat as corrupt rather than legacy always-on.
+    if (parsed == null) return { kind: 'invalid' };
+    const result = parseNotificationSchedule(parsed);
+    if (!result.ok) return { kind: 'invalid' };
+    return { kind: 'ok', schedule: result.schedule };
   }
-  const result = parseNotificationSchedule(parsed);
+  const result = parseNotificationSchedule(raw);
   if (!result.ok) return { kind: 'invalid' };
   return { kind: 'ok', schedule: result.schedule };
 }
