@@ -13,6 +13,8 @@ import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
 import { useSettingsDirty } from './useSettingsDirty';
+import { useNodeSettingsLoad } from './useNodeSettingsLoad';
+import { SettingsLoadGate } from './SettingsLoadError';
 import { TogglePill } from '@/components/ui/toggle-pill';
 
 interface FleetMeshSectionProps {
@@ -42,15 +44,17 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
     const showMesh = experimentalReady && experimental;
     const readOnly = !isAdmin;
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<FleetMeshFields>({ ...DEFAULT_FLEET_MESH });
-    const [isLoading, setIsLoading] = useState(false);
+    const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);
 
+    const reportDirty = isCurrentNodeLoaded && hasChanges;
+
     useEffect(() => {
-        onDirtyChange?.(hasChanges);
-    }, [hasChanges, onDirtyChange]);
+        onDirtyChange?.(reportDirty);
+    }, [reportDirty, onDirtyChange]);
 
     useMastheadStats(
-        isLoading
+        !isCurrentNodeLoaded
             ? null
             : [
                 {
@@ -62,25 +66,21 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
     );
 
     useEffect(() => {
-        const fetchSettings = async () => {
-            setIsLoading(true);
-            try {
-                const nodeRes = await apiFetch('/settings');
-                const nodeData: Record<string, string> = nodeRes.ok ? await nodeRes.json() : {};
-                const safe: FleetMeshFields = {
-                    mesh_auto_recreate: (nodeData.mesh_auto_recreate as '0' | '1') ?? DEFAULT_SETTINGS.mesh_auto_recreate,
-                    snapshot_documentation: (nodeData.snapshot_documentation as '0' | '1') ?? DEFAULT_SETTINGS.snapshot_documentation,
-                };
-                reset(safe);
-            } catch (e) {
-                console.error('Failed to fetch fleet settings', e);
-            } finally {
-                setIsLoading(false);
-            }
+        let cancelled = false;
+        setIsSaving(false);
+        void (async () => {
+            const nodeData = await load();
+            if (cancelled || !nodeData) return;
+            const safe: FleetMeshFields = {
+                mesh_auto_recreate: (nodeData.mesh_auto_recreate as '0' | '1') ?? DEFAULT_SETTINGS.mesh_auto_recreate,
+                snapshot_documentation: (nodeData.snapshot_documentation as '0' | '1') ?? DEFAULT_SETTINGS.snapshot_documentation,
+            };
+            reset(safe);
+        })();
+        return () => {
+            cancelled = true;
         };
-        fetchSettings();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeNode?.id]);
+    }, [activeNode?.id, load, reset]);
 
     const onSettingChange = <K extends keyof FleetMeshFields>(key: K, value: FleetMeshFields[K]) => {
         setSettings(prev => ({ ...prev, [key]: value }));
@@ -90,6 +90,7 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
         // When Mesh discovery is off, never write mesh_auto_recreate: a failed
         // settings read would otherwise push the default and overwrite a real
         // Mesh config the operator cannot see.
+        const saveGuard = captureSaveGuard();
         const submitted: FleetMeshFields | SnapshotOnlyFields = showMesh
             ? { ...settings }
             : { snapshot_documentation: settings.snapshot_documentation };
@@ -97,8 +98,10 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
         try {
             const res = await apiFetch('/settings', {
                 method: 'PATCH',
+                nodeId: saveGuard.nodeId,
                 body: JSON.stringify(submitted),
             });
+            if (!isSaveOwner(saveGuard)) return;
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 toast.error(err?.error || err?.message || 'Failed to save settings.');
@@ -114,15 +117,15 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
             }
             toast.success('Fleet settings saved.');
         } catch (e: unknown) {
+            if (!isSaveOwner(saveGuard)) return;
             toast.error((e as Error)?.message || 'Something went wrong.');
         } finally {
-            setIsSaving(false);
+            if (isSaveOwner(saveGuard)) setIsSaving(false);
         }
     };
 
-    if (isLoading) return <SectionSkeleton />;
-
     return (
+        <SettingsLoadGate phase={phase} isCurrentNodeLoaded={isCurrentNodeLoaded} skeleton={<SectionSkeleton />}>
         <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
             {showMesh && (
                 <SettingsSection title="Mesh data plane">
@@ -152,7 +155,7 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
 
             <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
                 {!readOnly && (
-                    <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges}>
+                    <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges || !isCurrentNodeLoaded}>
                         {isSaving ? (
                             <>
                                 <RefreshCw className="w-4 h-4 animate-spin" />
@@ -165,5 +168,6 @@ export function FleetMeshSection({ onDirtyChange }: FleetMeshSectionProps) {
                 )}
             </SettingsActions>
         </fieldset>
+        </SettingsLoadGate>
     );
 }

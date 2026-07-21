@@ -5,10 +5,13 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
+import { useNodes } from '@/context/NodeContext';
 import { RefreshCw } from 'lucide-react';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
 import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
+import { useNodeSettingsLoad } from './useNodeSettingsLoad';
+import { SettingsLoadGate } from './SettingsLoadError';
 
 function SectionSkeleton() {
     return (
@@ -21,33 +24,30 @@ function SectionSkeleton() {
 
 export function AppStoreSection() {
     const { isAdmin } = useAuth();
+    const { activeNode } = useNodes();
     const readOnly = !isAdmin;
     const [templateRegistryUrl, setTemplateRegistryUrl] = useState('');
     const serverUrl = useRef('');
-    const [isLoading, setIsLoading] = useState(false);
+    const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSavingRegistry, setIsSavingRegistry] = useState(false);
 
     useEffect(() => {
-        const fetchSettings = async () => {
-            setIsLoading(true);
-            try {
-                const res = await apiFetch('/settings');
-                if (res.ok) {
-                    const data: Record<string, string> = await res.json();
-                    const url = data.template_registry_url ?? '';
-                    setTemplateRegistryUrl(url);
-                    serverUrl.current = url;
-                }
-            } catch (e) {
-                console.error('Failed to fetch app store settings', e);
-            } finally {
-                setIsLoading(false);
-            }
+        let cancelled = false;
+        setIsSavingRegistry(false);
+        void (async () => {
+            const nodeData = await load();
+            if (cancelled || !nodeData) return;
+            const url = nodeData.template_registry_url ?? '';
+            setTemplateRegistryUrl(url);
+            serverUrl.current = url;
+        })();
+        return () => {
+            cancelled = true;
         };
-        fetchSettings();
-    }, []);
+    }, [activeNode?.id, load]);
 
     const saveRegistrySettings = async () => {
+        const saveGuard = captureSaveGuard();
         const trimmedUrl = templateRegistryUrl.trim();
         if (trimmedUrl && !/^https?:\/\/./.test(trimmedUrl)) {
             toast.error('Registry URL must start with http:// or https://');
@@ -57,26 +57,38 @@ export function AppStoreSection() {
         try {
             const res = await apiFetch('/settings', {
                 method: 'PATCH',
+                nodeId: saveGuard.nodeId,
                 body: JSON.stringify({ template_registry_url: trimmedUrl }),
             });
             if (!res.ok) {
-                const err = await res.json().catch(() => ({}));
-                toast.error(err?.error || err?.message || 'Failed to save registry settings.');
+                if (isSaveOwner(saveGuard)) {
+                    const err = await res.json().catch(() => ({}));
+                    toast.error(err?.error || err?.message || 'Failed to save registry settings.');
+                }
+                return;
+            }
+            // Always refresh the node that received the PATCH, even after a switch.
+            const refresh = await apiFetch('/templates/refresh-cache', {
+                method: 'POST',
+                nodeId: saveGuard.nodeId,
+            });
+            if (!isSaveOwner(saveGuard)) return;
+            if (!refresh.ok) {
+                toast.error('Registry saved, but refreshing the App Store cache failed.');
                 return;
             }
             serverUrl.current = templateRegistryUrl;
-            await apiFetch('/templates/refresh-cache', { method: 'POST' });
             toast.success('Registry saved. App Store will reload from the new source.');
         } catch (e: unknown) {
+            if (!isSaveOwner(saveGuard)) return;
             toast.error((e as Error)?.message || 'Failed to save registry settings.');
         } finally {
-            setIsSavingRegistry(false);
+            if (isSaveOwner(saveGuard)) setIsSavingRegistry(false);
         }
     };
 
-    if (isLoading) return <SectionSkeleton />;
-
     return (
+        <SettingsLoadGate phase={phase} isCurrentNodeLoaded={isCurrentNodeLoaded} skeleton={<SectionSkeleton />}>
         <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
             <SettingsSection title="Default registry">
                 <SettingsField
@@ -110,11 +122,11 @@ export function AppStoreSection() {
                                 variant="outline"
                                 size="sm"
                                 onClick={() => setTemplateRegistryUrl('')}
-                                disabled={isSavingRegistry || !templateRegistryUrl}
+                                disabled={isSavingRegistry || !templateRegistryUrl || !isCurrentNodeLoaded}
                             >
                                 Reset to default
                             </Button>
-                            <SettingsPrimaryButton onClick={saveRegistrySettings} disabled={isSavingRegistry}>
+                            <SettingsPrimaryButton onClick={saveRegistrySettings} disabled={isSavingRegistry || !isCurrentNodeLoaded}>
                                 {isSavingRegistry ? (
                                     <>
                                         <RefreshCw className="w-4 h-4 animate-spin" />
@@ -129,5 +141,6 @@ export function AppStoreSection() {
                 </SettingsActions>
             </SettingsSection>
         </fieldset>
+        </SettingsLoadGate>
     );
 }
