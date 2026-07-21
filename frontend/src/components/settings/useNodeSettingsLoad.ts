@@ -37,6 +37,15 @@ export function useNodeSettingsLoad(activeNodeId: number | undefined) {
     }, []);
 
     const load = useCallback(async (): Promise<Record<string, string> | null> => {
+        // Hard refresh boots with activeNode=null; a fetch for that frame is not
+        // authoritative and would toast again once the real node id settles.
+        if (activeNodeIdRef.current === undefined) {
+            abortRef.current?.abort();
+            setLoadedNodeId(undefined);
+            setPhase('loading');
+            return null;
+        }
+
         abortRef.current?.abort();
         const ac = new AbortController();
         abortRef.current = ac;

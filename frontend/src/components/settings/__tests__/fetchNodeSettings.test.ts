@@ -41,6 +41,16 @@ describe('fetchNodeSettings', () => {
         expect(mockedToast.error).not.toHaveBeenCalled();
     });
 
+    it.each([null, [], 'nope', 42, true])(
+        'returns ok false without toasting for malformed 200 body %j',
+        async (body) => {
+            mockedFetch.mockResolvedValue({ ok: true, json: async () => body });
+            const result = await fetchNodeSettings(1);
+            expect(result).toEqual({ ok: false });
+            expect(mockedToast.error).not.toHaveBeenCalled();
+        },
+    );
+
     it('returns ok false without toasting on non-ok response', async () => {
         mockedFetch.mockResolvedValue({ ok: false, status: 502, json: async () => ({}) });
         const result = await fetchNodeSettings(2);

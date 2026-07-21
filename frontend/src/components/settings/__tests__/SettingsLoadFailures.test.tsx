@@ -188,6 +188,21 @@ describe('settings load failures (dirty sections)', () => {
             expect(opts.nodeId).toBe(1);
         });
     }
+
+    it('HostAlertsSection: malformed 200 body fails closed instead of seeding defaults', async () => {
+        mockedFetch.mockResolvedValue({ ok: true, json: async () => null });
+        const onDirty = vi.fn();
+        render(<HostAlertsSection onDirtyChange={onDirty} />);
+
+        await waitFor(() => {
+            expect(screen.getByText(/could not load settings/i)).toBeTruthy();
+        });
+        expectFailedLoadToast();
+        expect(screen.queryByRole('button', { name: /save alerts/i })).toBeNull();
+        expect(screen.queryByRole('spinbutton')).toBeNull();
+        expect(patchCalls()).toHaveLength(0);
+        expect(onDirty).not.toHaveBeenCalledWith(true);
+    });
 });
 
 describe('AppStoreSection load failures', () => {

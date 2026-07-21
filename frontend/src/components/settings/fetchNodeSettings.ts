@@ -9,6 +9,11 @@ function isAbort(err: unknown, signal?: AbortSignal): boolean {
         || (err instanceof DOMException && err.name === 'AbortError');
 }
 
+/** Authoritative /settings bodies are plain objects; null and arrays must not seed defaults. */
+export function isSettingsRecord(value: unknown): value is Record<string, string> {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 /**
  * Load node-scoped settings for an explicitly captured node.
  * Does not toast: callers that own UI generation (useNodeSettingsLoad) decide
@@ -26,9 +31,13 @@ export async function fetchNodeSettings(
             console.error('Failed to load settings:', res.status);
             return { ok: false };
         }
-        const settings = await res.json() as Record<string, string>;
+        const body: unknown = await res.json();
         if (signal?.aborted) return { ok: false };
-        return { ok: true, settings };
+        if (!isSettingsRecord(body)) {
+            console.error('Failed to load settings: malformed body');
+            return { ok: false };
+        }
+        return { ok: true, settings: body };
     } catch (err) {
         if (isAbort(err, signal)) return { ok: false };
         console.error('Failed to load settings:', err);

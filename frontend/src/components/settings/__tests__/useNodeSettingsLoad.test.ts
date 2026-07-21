@@ -137,4 +137,39 @@ describe('useNodeSettingsLoad toast ownership', () => {
         expect(mockedToast.error).not.toHaveBeenCalled();
         await waitFor(() => expect(result.current.phase).toBe('ready'));
     });
+
+    it('does not fetch or toast while the active node id is still undefined', async () => {
+        const { result } = renderHook(() => useNodeSettingsLoad(undefined));
+
+        const settings = await act(() => result.current.load());
+
+        expect(settings).toBeNull();
+        expect(result.current.phase).toBe('loading');
+        expect(fetchNodeSettingsMock).not.toHaveBeenCalled();
+        expect(mockedToast.error).not.toHaveBeenCalled();
+    });
+
+    it('toasts only once when bootstrap settles from undefined to a failing node', async () => {
+        fetchNodeSettingsMock.mockResolvedValue({ ok: false });
+        const { result, rerender } = renderHook(
+            ({ id }: { id: number | undefined }) => useNodeSettingsLoad(id),
+            { initialProps: { id: undefined as number | undefined } },
+        );
+
+        await act(async () => {
+            await result.current.load();
+        });
+        expect(fetchNodeSettingsMock).not.toHaveBeenCalled();
+        expect(mockedToast.error).not.toHaveBeenCalled();
+
+        rerender({ id: 1 });
+        await act(async () => {
+            await result.current.load();
+        });
+
+        expect(fetchNodeSettingsMock).toHaveBeenCalledTimes(1);
+        expect(mockedToast.error).toHaveBeenCalledTimes(1);
+        expect(mockedToast.error).toHaveBeenCalledWith('Failed to load settings.');
+        expect(result.current.phase).toBe('error');
+    });
 });
