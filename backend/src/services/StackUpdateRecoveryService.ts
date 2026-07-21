@@ -526,7 +526,8 @@ export class StackUpdateRecoveryService {
 
   /**
    * Verify recovered runtime against the captured generation.
-   * Rejects absent, restarting, dead, exited, or unhealthy expected replicas.
+   * Rejects absent, restarting, dead, exited, or unhealthy expected replicas,
+   * image-id mismatches vs capture, and any running replica of a scale-0 service.
    */
   public async probeRecoveredStack(
     nodeId: number,
@@ -537,8 +538,22 @@ export class StackUpdateRecoveryService {
     try {
       const expected = parseServicesJson(servicesJson);
       const expectedRunning = new Map<string, number>();
+      const expectedImageIds = new Map<string, Set<string>>();
+      const scaleZeroServices = new Set<string>();
+
       for (const svc of expected) {
-        if (svc.scale > 0) expectedRunning.set(svc.serviceName, svc.scale);
+        const imageIds = new Set<string>();
+        for (const replica of svc.replicas ?? []) {
+          if (replica.imageId?.trim()) imageIds.add(replica.imageId);
+        }
+        if (svc.scale > 0) {
+          // Fail closed when we cannot verify image identity for expected runners.
+          if (imageIds.size === 0) return false;
+          expectedRunning.set(svc.serviceName, svc.scale);
+          expectedImageIds.set(svc.serviceName, imageIds);
+        } else {
+          scaleZeroServices.add(svc.serviceName);
+        }
       }
 
       const docker = DockerController.getInstance(nodeId).getDocker();
@@ -575,10 +590,23 @@ export class StackUpdateRecoveryService {
           continue;
         }
 
+        // Captured at scale 0 must stay stopped; any running replica fails the probe.
+        if (serviceName && scaleZeroServices.has(serviceName)) {
+          return false;
+        }
+
         const inspectData = await docker.getContainer(containerInfo.Id).inspect();
         const health = inspectData.State?.Health?.Status;
         if (health === 'unhealthy') {
           return false;
+        }
+
+        if (serviceName && expectedImageIds.has(serviceName)) {
+          const allowedIds = expectedImageIds.get(serviceName)!;
+          const actualImageId = typeof inspectData.Image === 'string' ? inspectData.Image : '';
+          if (!actualImageId || !allowedIds.has(actualImageId)) {
+            return false;
+          }
         }
 
         if (serviceName) {

@@ -21,7 +21,24 @@ import { MeshService } from './MeshService';
 import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
-import { isPathWithinBase } from '../utils/validation';
+import { isPathWithinBase, isValidStackName } from '../utils/validation';
+
+/**
+ * Directory that may contain recovery override files for a tombstone sweep.
+ * Stack-scoped intents are limited to `<composeDir>/<stackName>/`;
+ * node-wide intents (null stack) use the whole compose root.
+ */
+export function overrideDeletionContainmentBase(
+  composeDir: string,
+  stackName: string | null,
+): string | null {
+  const resolvedCompose = path.resolve(composeDir);
+  if (!stackName) return resolvedCompose;
+  if (!isValidStackName(stackName)) return null;
+  const stackDir = path.resolve(resolvedCompose, stackName);
+  if (!isPathWithinBase(stackDir, resolvedCompose)) return null;
+  return stackDir;
+}
 
 export interface DeleteDeployedStackInput {
   nodeId: number;
@@ -319,6 +336,17 @@ export class DeployedStackDeletionService {
         ? FileSystemService.getInstance(intent.node_id).getBaseDir()
         : null);
 
+    const containmentBase = baseDir
+      ? overrideDeletionContainmentBase(baseDir, intent.stack_name)
+      : null;
+    if (baseDir && !containmentBase) {
+      incomplete = true;
+      console.warn(
+        '[DeployedStackDeletion] Refusing override sweep: invalid stack containment for tombstone %s',
+        sanitizeForLog(intentId),
+      );
+    }
+
     for (const overridePath of overridePaths) {
       try {
         const resolved = path.resolve(overridePath);
@@ -331,10 +359,10 @@ export class DeployedStackDeletionService {
           );
           continue;
         }
-        if (baseDir && !isPathWithinBase(resolved, path.resolve(baseDir))) {
+        if (containmentBase && !isPathWithinBase(resolved, containmentBase)) {
           incomplete = true;
           console.warn(
-            '[DeployedStackDeletion] Refusing to delete override outside compose dir: %s',
+            '[DeployedStackDeletion] Refusing to delete override outside stack containment: %s',
             sanitizeForLog(overridePath),
           );
           continue;
@@ -345,6 +373,10 @@ export class DeployedStackDeletionService {
             '[DeployedStackDeletion] Refusing relative override without compose dir: %s',
             sanitizeForLog(overridePath),
           );
+          continue;
+        }
+        if (!containmentBase && baseDir) {
+          incomplete = true;
           continue;
         }
         await fs.unlink(resolved);

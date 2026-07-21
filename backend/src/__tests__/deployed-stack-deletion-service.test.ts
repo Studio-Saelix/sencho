@@ -4,6 +4,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { randomUUID } from 'crypto';
+import path from 'path';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type {
   StackUpdateRecoveryGenerationRow,
@@ -14,11 +15,12 @@ import type {
 let tmpDir: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let DeployedStackDeletionService: typeof import('../services/DeployedStackDeletionService').DeployedStackDeletionService;
+let overrideDeletionContainmentBase: typeof import('../services/DeployedStackDeletionService').overrideDeletionContainmentBase;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
-  ({ DeployedStackDeletionService } = await import('../services/DeployedStackDeletionService'));
+  ({ DeployedStackDeletionService, overrideDeletionContainmentBase } = await import('../services/DeployedStackDeletionService'));
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -135,3 +137,20 @@ describe('DeployedStackDeletionService ready transaction', () => {
     }).toThrow(/deletion in progress/i);
   });
 });
+
+describe('overrideDeletionContainmentBase', () => {
+  it('confines stack-scoped intents to the stack directory', () => {
+    expect(overrideDeletionContainmentBase('/app/compose', 'my-stack')).toBe(
+      path.resolve('/app/compose', 'my-stack'),
+    );
+    expect(overrideDeletionContainmentBase('/app/compose', null)).toBe(
+      path.resolve('/app/compose'),
+    );
+  });
+
+  it('rejects invalid stack names that could traverse', () => {
+    expect(overrideDeletionContainmentBase('/app/compose', '../other')).toBeNull();
+    expect(overrideDeletionContainmentBase('/app/compose', 'bad/name')).toBeNull();
+  });
+});
+

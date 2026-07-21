@@ -218,10 +218,18 @@ describe('StackUpdateRecoveryService', () => {
     );
   });
 
+  const capturedWebReplica = {
+    containerId: 'c1',
+    imageId: 'sha256:oldimg',
+    repoDigest: null,
+    state: 'running' as const,
+    rollbackTag: 'sencho-rb/aaaaaaaaaaaa/web:hold',
+  };
+
   it('probeRecoveredStack rejects empty runtime when expected replicas were running', async () => {
     const servicesJson = JSON.stringify([{
       serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',
-      referenceKind: 'moving_tag', replicas: [],
+      referenceKind: 'moving_tag', replicas: [capturedWebReplica],
     }]);
     mockListContainers.mockResolvedValue([]);
     vi.useFakeTimers();
@@ -234,7 +242,7 @@ describe('StackUpdateRecoveryService', () => {
   it('probeRecoveredStack rejects restarting and unhealthy expected containers', async () => {
     const servicesJson = JSON.stringify([{
       serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',
-      referenceKind: 'moving_tag', replicas: [],
+      referenceKind: 'moving_tag', replicas: [capturedWebReplica],
     }]);
 
     mockListContainers.mockResolvedValue([
@@ -249,7 +257,10 @@ describe('StackUpdateRecoveryService', () => {
     mockListContainers.mockResolvedValue([
       { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
     ]);
-    mockInspectContainer.mockResolvedValue({ State: { Status: 'running', Health: { Status: 'unhealthy' } } });
+    mockInspectContainer.mockResolvedValue({
+      Image: 'sha256:oldimg',
+      State: { Status: 'running', Health: { Status: 'unhealthy' } },
+    });
     vi.useFakeTimers();
     promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
     await vi.advanceTimersByTimeAsync(3100);
@@ -257,15 +268,62 @@ describe('StackUpdateRecoveryService', () => {
     vi.useRealTimers();
   });
 
-  it('probeRecoveredStack accepts healthy running replicas matching capture scale', async () => {
+  it('probeRecoveredStack rejects healthy containers running a mismatched image', async () => {
     const servicesJson = JSON.stringify([{
       serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',
-      referenceKind: 'moving_tag', replicas: [],
+      referenceKind: 'moving_tag', replicas: [capturedWebReplica],
     }]);
     mockListContainers.mockResolvedValue([
       { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
     ]);
-    mockInspectContainer.mockResolvedValue({ State: { Status: 'running' } });
+    mockInspectContainer.mockResolvedValue({
+      Image: 'sha256:newfailed',
+      Config: { Image: 'nginx:alpine' },
+      State: { Status: 'running' },
+    });
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(promise).resolves.toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('probeRecoveredStack rejects a running replica for a service captured at scale zero', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'worker', scale: 0, hasBuild: false, declaredImageRef: 'busybox:latest',
+      referenceKind: 'moving_tag',
+      replicas: [{
+        containerId: 'c0', imageId: 'sha256:worker', repoDigest: null, state: 'stopped',
+        rollbackTag: 'sencho-rb/aaaaaaaaaaaa/worker:hold',
+      }],
+    }]);
+    mockListContainers.mockResolvedValue([
+      { Id: 'c0', State: 'running', Labels: { 'com.docker.compose.service': 'worker' } },
+    ]);
+    mockInspectContainer.mockResolvedValue({
+      Image: 'sha256:worker',
+      State: { Status: 'running' },
+    });
+    vi.useFakeTimers();
+    const promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
+    await vi.advanceTimersByTimeAsync(3100);
+    await expect(promise).resolves.toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('probeRecoveredStack accepts healthy running replicas matching capture scale and image', async () => {
+    const servicesJson = JSON.stringify([{
+      serviceName: 'web', scale: 1, hasBuild: false, declaredImageRef: 'nginx:latest',
+      referenceKind: 'moving_tag', replicas: [capturedWebReplica],
+    }]);
+    mockListContainers.mockResolvedValue([
+      { Id: 'c1', State: 'running', Labels: { 'com.docker.compose.service': 'web' } },
+    ]);
+    mockInspectContainer.mockResolvedValue({
+      Image: 'sha256:oldimg',
+      Config: { Image: 'sencho-rb/aaaaaaaaaaaa/web:hold' },
+      State: { Status: 'running' },
+    });
     vi.useFakeTimers();
     const promise = StackUpdateRecoveryService.getInstance().probeRecoveredStack(1, 'my-stack', servicesJson);
     await vi.advanceTimersByTimeAsync(3100);
