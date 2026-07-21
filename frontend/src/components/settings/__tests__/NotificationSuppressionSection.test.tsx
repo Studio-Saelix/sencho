@@ -60,6 +60,24 @@ const scheduledRule = {
     end_minute: 360,
     tz: 'UTC',
   },
+  scheduleInvalid: false,
+  created_at: 1,
+  updated_at: 1,
+};
+
+const corruptScheduleRule = {
+  id: 43,
+  name: 'Corrupt window',
+  node_id: null,
+  stack_patterns: [],
+  label_ids: null,
+  categories: null,
+  levels: null,
+  applies_to: 'both',
+  enabled: true,
+  expires_at: null,
+  schedule: null,
+  scheduleInvalid: true,
   created_at: 1,
   updated_at: 1,
 };
@@ -267,6 +285,87 @@ describe('NotificationSuppressionSection', () => {
       expect(put).toBeTruthy();
       const body = JSON.parse((put![1] as { body: string }).body);
       expect(body.schedule).toBeNull();
+    });
+  });
+
+  it('marks a corrupt stored schedule as invalid instead of an ordinary unscheduled rule', async () => {
+    mockListRules([corruptScheduleRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Corrupt window')).toBeInTheDocument());
+    expect(screen.getByText('Invalid schedule')).toBeInTheDocument();
+  });
+
+  it('blocks saving a corrupt-schedule rule until the operator touches the weekly window', async () => {
+    mockListRules([corruptScheduleRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Corrupt window')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByTitle('Edit'));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+    expect(screen.getByLabelText(/Weekly window \(UTC\)/i)).toHaveAttribute('aria-checked', 'false');
+
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        expect.stringContaining('could not be read'),
+      );
+    });
+    const puts = mockedFetch.mock.calls.filter(
+      ([url, opts]) => url === '/notification-suppression-rules/43' && (opts as { method?: string })?.method === 'PUT',
+    );
+    expect(puts).toHaveLength(0);
+  });
+
+  it('allows saving a corrupt-schedule rule once the operator explicitly clears it', async () => {
+    mockListRules([corruptScheduleRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Corrupt window')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByTitle('Edit'));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+
+    // Explicit acknowledgement: turn the window on, then off again, to intentionally clear it.
+    await userEvent.click(screen.getByLabelText(/Weekly window \(UTC\)/i));
+    await userEvent.click(screen.getByLabelText(/Weekly window \(UTC\)/i));
+
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+    await waitFor(() => {
+      const put = mockedFetch.mock.calls.find(
+        ([url, opts]) =>
+          url === '/notification-suppression-rules/43' && (opts as { method?: string })?.method === 'PUT',
+      );
+      expect(put).toBeTruthy();
+      const body = JSON.parse((put![1] as { body: string }).body);
+      expect(body.schedule).toBeNull();
+    });
+  });
+
+  it('allows saving a corrupt-schedule rule once the operator configures a new valid schedule', async () => {
+    mockListRules([corruptScheduleRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Corrupt window')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByTitle('Edit'));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+    await enableWeeklyWindow();
+    await userEvent.click(screen.getByRole('button', { name: 'Sat' }));
+    fireEvent.change(screen.getByLabelText('Start (UTC)'), { target: { value: '02:00' } });
+    fireEvent.change(screen.getByLabelText('End (UTC)'), { target: { value: '06:00' } });
+
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+    await waitFor(() => {
+      const put = mockedFetch.mock.calls.find(
+        ([url, opts]) =>
+          url === '/notification-suppression-rules/43' && (opts as { method?: string })?.method === 'PUT',
+      );
+      expect(put).toBeTruthy();
+      const body = JSON.parse((put![1] as { body: string }).body);
+      expect(body.schedule).toEqual({
+        days: [6],
+        start_minute: 120,
+        end_minute: 360,
+        tz: 'UTC',
+      });
     });
   });
 });

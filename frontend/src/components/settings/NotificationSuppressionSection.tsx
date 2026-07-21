@@ -41,6 +41,7 @@ interface NotificationSuppressionRule {
     enabled: boolean;
     expires_at: number | null;
     schedule: MuteRuleSchedule | null;
+    scheduleInvalid: boolean;
     created_at: number;
     updated_at: number;
 }
@@ -162,6 +163,11 @@ export function NotificationSuppressionSection({
     const [formScheduleDays, setFormScheduleDays] = useState<number[]>([]);
     const [formScheduleStart, setFormScheduleStart] = useState('02:00');
     const [formScheduleEnd, setFormScheduleEnd] = useState('06:00');
+    // True when editing a rule whose stored schedule could not be read. Its window
+    // must not be silently cleared: the operator has to touch the controls first.
+    const [formScheduleInvalid, setFormScheduleInvalid] = useState(false);
+    const [formScheduleTouched, setFormScheduleTouched] = useState(false);
+    const markScheduleTouched = () => setFormScheduleTouched(true);
 
     const fetchRules = useCallback(async () => {
         try {
@@ -215,6 +221,8 @@ export function NotificationSuppressionSection({
         setFormScheduleDays([]);
         setFormScheduleStart('02:00');
         setFormScheduleEnd('06:00');
+        setFormScheduleInvalid(false);
+        setFormScheduleTouched(false);
         setEditingId(null);
         setShowForm(true);
         onPrefillConsumed?.();
@@ -235,6 +243,8 @@ export function NotificationSuppressionSection({
         setFormScheduleDays([]);
         setFormScheduleStart('02:00');
         setFormScheduleEnd('06:00');
+        setFormScheduleInvalid(false);
+        setFormScheduleTouched(false);
         setEditingId(null);
         setShowForm(false);
     };
@@ -263,11 +273,19 @@ export function NotificationSuppressionSection({
             setFormScheduleStart('02:00');
             setFormScheduleEnd('06:00');
         }
+        setFormScheduleInvalid(rule.scheduleInvalid);
+        setFormScheduleTouched(false);
         setShowForm(true);
     };
 
     const handleSave = async () => {
         if (!formName.trim()) { toast.error('Name is required.'); return; }
+        if (formScheduleInvalid && !formScheduleTouched) {
+            toast.error(
+                "This rule's stored weekly window could not be read. Turn the weekly window on to set a new schedule, or toggle it off then on to confirm clearing it.",
+            );
+            return;
+        }
         const preparedPatterns = patternChipsRef.current?.prepareSave();
         if (!preparedPatterns?.ok) {
             toast.error('Fix invalid stack patterns before saving.');
@@ -566,11 +584,18 @@ export function NotificationSuppressionSection({
                             <div className="flex items-center gap-2">
                                 <TogglePill
                                     checked={formScheduleEnabled}
-                                    onChange={setFormScheduleEnabled}
+                                    onChange={(v) => { setFormScheduleEnabled(v); markScheduleTouched(); }}
                                     id="mute-rule-schedule"
                                 />
                                 <Label htmlFor="mute-rule-schedule" className="mb-0">Weekly window (UTC)</Label>
                             </div>
+                            {formScheduleInvalid && !formScheduleTouched && (
+                                <p className="text-xs text-destructive">
+                                    Stored weekly window could not be read and was not applied (alerts have been
+                                    delivering normally). Configure a new window above, or toggle it on then off to
+                                    confirm clearing it.
+                                </p>
+                            )}
                             {formScheduleEnabled && (
                                 <div className="space-y-2 rounded-md border border-border/60 p-3">
                                     <div className="flex flex-wrap gap-1.5">
@@ -591,6 +616,7 @@ export function NotificationSuppressionSection({
                                                                 ? prev.filter((d) => d !== day)
                                                                 : [...prev, day].sort((a, b) => a - b),
                                                         );
+                                                        markScheduleTouched();
                                                     }}
                                                 >
                                                     {label}
@@ -605,7 +631,7 @@ export function NotificationSuppressionSection({
                                                 id="mute-schedule-start"
                                                 type="time"
                                                 value={formScheduleStart}
-                                                onChange={(e) => setFormScheduleStart(e.target.value)}
+                                                onChange={(e) => { setFormScheduleStart(e.target.value); markScheduleTouched(); }}
                                             />
                                         </div>
                                         <div className="space-y-1">
@@ -614,7 +640,7 @@ export function NotificationSuppressionSection({
                                                 id="mute-schedule-end"
                                                 type="time"
                                                 value={formScheduleEnd}
-                                                onChange={(e) => setFormScheduleEnd(e.target.value)}
+                                                onChange={(e) => { setFormScheduleEnd(e.target.value); markScheduleTouched(); }}
                                             />
                                         </div>
                                     </div>
@@ -672,6 +698,11 @@ export function NotificationSuppressionSection({
                                 {!rule.enabled && <Badge variant="secondary" className="text-[10px] shrink-0 text-muted-foreground">Disabled</Badge>}
                                 {rule.expires_at != null && rule.expires_at <= Date.now() && (
                                     <Badge variant="secondary" className="text-[10px] shrink-0 text-muted-foreground">Expired</Badge>
+                                )}
+                                {rule.scheduleInvalid && (
+                                    <Badge variant="destructive" className="text-[10px] shrink-0" title="Stored weekly window could not be read; alerts deliver normally until repaired in Edit">
+                                        Invalid schedule
+                                    </Badge>
                                 )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
