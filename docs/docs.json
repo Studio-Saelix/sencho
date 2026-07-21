@@ -86,17 +86,16 @@
         "groups": [
           {
             "group": "Start here",
-            "root": "getting-started/introduction",
-            "directory": "card",
             "pages": [
+              "getting-started/introduction",
               "getting-started/quickstart",
               "getting-started/configuration"
             ]
           },
           {
             "group": "Product guide",
-            "root": "features/overview",
             "pages": [
+              "features/overview",
               {
                 "group": "Core workflow",
                 "expanded": true,
