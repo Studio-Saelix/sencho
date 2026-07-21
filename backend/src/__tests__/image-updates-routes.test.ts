@@ -375,7 +375,7 @@ describe('POST /api/auto-update/execute', () => {
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
       .mockResolvedValue({ hasUpdate: true } as never);
-    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue();
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
     const gateSpy = vi.spyOn(PolicyEnforcement, 'enforcePolicyPreDeploy').mockResolvedValue({
       ok: false,
       bypassed: false,
@@ -421,7 +421,7 @@ describe('POST /api/auto-update/execute', () => {
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
       .mockResolvedValue({ hasUpdate: true } as never);
-    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue();
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
     const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-au');
     try {
       const res = await request(app)

@@ -19,6 +19,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 
 type EditorState = ReturnType<typeof useEditorViewState>;
 type StackListState = ReturnType<typeof useStackListState>;
@@ -312,6 +313,18 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.updateStack(mouseEvent);
     expect(overlayState.setPolicyBlock).not.toHaveBeenCalled();
+  });
+
+  it('toasts a deletion-in-progress message when the conflict action is delete', async () => {
+    const inProgress = JSON.stringify({
+      code: 'stack_op_in_progress',
+      inProgress: { action: 'delete', startedAt: Date.now(), user: 'admin' },
+    });
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(inProgress, { status: 409 }));
+    const { result, overlayState } = setup();
+    await act(async () => { await result.current.updateStack(mouseEvent); });
+    expect(overlayState.setPolicyBlock).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/already deleting/i));
   });
 
   it('opens the dialog with action "update" via the sidebar update entry point', async () => {

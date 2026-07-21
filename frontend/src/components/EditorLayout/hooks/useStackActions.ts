@@ -107,7 +107,7 @@ const parseFailureClassification = (value: unknown): FailureClassification | und
   return undefined;
 };
 
-type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update';
+type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'delete';
 
 interface StackOpInProgressInfo {
   action: StackOpAction;
@@ -122,6 +122,7 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   stop: 'stopping',
   start: 'starting',
   update: 'updating',
+  delete: 'deleting',
 };
 
 const VALID_STACK_OP_ACTIONS: ReadonlySet<string> = new Set(

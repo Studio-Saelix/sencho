@@ -225,23 +225,25 @@ describe('DatabaseService - notification history cap (periodic)', () => {
 
     // A chatty stack writes 600 events.
     const base = Date.now();
-    for (let i = 0; i < 600; i++) {
-      db.addNotificationHistory(0, {
-        level: 'info',
-        message: `chatty-${i}`,
-        timestamp: base + i,
-        stack_name: 'chatty',
-      });
-    }
-    // A quiet stack writes 3 events long before the chatty burst.
-    for (let i = 0; i < 3; i++) {
-      db.addNotificationHistory(0, {
-        level: 'info',
-        message: `quiet-${i}`,
-        timestamp: base - 10_000 + i,
-        stack_name: 'quiet',
-      });
-    }
+    db.transaction(() => {
+      for (let i = 0; i < 600; i++) {
+        db.addNotificationHistory(0, {
+          level: 'info',
+          message: `chatty-${i}`,
+          timestamp: base + i,
+          stack_name: 'chatty',
+        });
+      }
+      // A quiet stack writes 3 events long before the chatty burst.
+      for (let i = 0; i < 3; i++) {
+        db.addNotificationHistory(0, {
+          level: 'info',
+          message: `quiet-${i}`,
+          timestamp: base - 10_000 + i,
+          stack_name: 'quiet',
+        });
+      }
+    });
 
     // No per-insert prune: every row is present.
     const beforeCleanup = db.getNotificationHistory(0, 2000);
@@ -261,13 +263,15 @@ describe('DatabaseService - notification history cap (periodic)', () => {
     db.deleteAllNotifications(0);
 
     const base = Date.now();
-    for (let i = 0; i < 1200; i++) {
-      db.addNotificationHistory(0, {
-        level: 'info',
-        message: `system-${i}`,
-        timestamp: base + i,
-      });
-    }
+    db.transaction(() => {
+      for (let i = 0; i < 1200; i++) {
+        db.addNotificationHistory(0, {
+          level: 'info',
+          message: `system-${i}`,
+          timestamp: base + i,
+        });
+      }
+    });
 
     db.cleanupOldNotifications(30, { perStackCap: 500, perNodeUnattachedCap: 1000 });
 
@@ -279,14 +283,16 @@ describe('DatabaseService - notification history cap (periodic)', () => {
   it('keeps the newest entries per (node, stack) after periodic cap', () => {
     db.deleteAllNotifications(0);
     const base = Date.now();
-    for (let i = 0; i < 600; i++) {
-      db.addNotificationHistory(0, {
-        level: 'info',
-        message: `ordered-${i}`,
-        timestamp: base + i * 10,
-        stack_name: 'ordered',
-      });
-    }
+    db.transaction(() => {
+      for (let i = 0; i < 600; i++) {
+        db.addNotificationHistory(0, {
+          level: 'info',
+          message: `ordered-${i}`,
+          timestamp: base + i * 10,
+          stack_name: 'ordered',
+        });
+      }
+    });
 
     db.cleanupOldNotifications(30, { perStackCap: 500, perNodeUnattachedCap: 1000 });
 
@@ -301,9 +307,11 @@ describe('DatabaseService - notification history cap (periodic)', () => {
   it('uses safe defaults when called with only the retention argument', () => {
     db.deleteAllNotifications(0);
     const base = Date.now();
-    for (let i = 0; i < 600; i++) {
-      db.addNotificationHistory(0, { level: 'info', message: `d-${i}`, timestamp: base + i, stack_name: 'default' });
-    }
+    db.transaction(() => {
+      for (let i = 0; i < 600; i++) {
+        db.addNotificationHistory(0, { level: 'info', message: `d-${i}`, timestamp: base + i, stack_name: 'default' });
+      }
+    });
     // Production caller (MonitorService) only passes daysToKeep; the cap defaults must enforce the per-stack 500 limit.
     const summary = db.cleanupOldNotifications(30);
     const after = db.getNotificationHistory(0, 2000).filter((n: any) => n.stack_name === 'default');

@@ -49,6 +49,10 @@ jobs:
         working-directory: ./backend
         run: npm test
 
+      - name: Docker integration tests (dedicated Vitest config)
+        working-directory: ./backend
+        run: npm run test:docker-integration
+
       - name: Lint (ESLint)
         working-directory: ./backend
         run: npm run lint

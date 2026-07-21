@@ -16,7 +16,6 @@ import { ComposeService, getComposeRollbackInfo } from '../services/ComposeServi
 import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '../services/StackUpdateOrchestrator';
 import DockerController, { type BulkStackInfo } from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
-import { MeshService } from '../services/MeshService';
 import { CacheService, type CacheFetchOutcome } from '../services/CacheService';
 import { UpdatePreviewService } from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
@@ -38,6 +37,8 @@ import { labelInventoryOptionsFromRequest, requireRevealAdmin } from '../helpers
 import { EXPOSURE_INTENTS, type ExposureIntent } from '../services/network/types';
 import { UpdateGuardService, SingleServiceUpdateReadinessError } from '../services/UpdateGuardService';
 import { HealthGateService } from '../services/HealthGateService';
+import { DeployedStackDeletionService } from '../services/DeployedStackDeletionService';
+import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
 import { classifyFailure } from '../services/updateGuard/failureClassifier';
 import { requirePermission, checkPermission } from '../middleware/permissions';
 import { NotificationService, type NotificationCategory } from '../services/NotificationService';
@@ -99,7 +100,13 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   update: 'updating',
   rollback: 'rolling back',
   backup: 'backing up',
+  delete: 'deleting',
 };
+
+function linkStackUpdateRecoveryGate(recoveryId: string | null | undefined, healthGateId: string | null): void {
+  if (!recoveryId) return;
+  StackUpdateRecoveryService.getInstance().linkGateOrRetain(recoveryId, healthGateId);
+}
 
 function tryAcquireStackOpLock(
   req: Request,
@@ -474,7 +481,7 @@ async function runStackBulkOp(
         };
       }
       const atomic = true;
-      await StackUpdateOrchestrator.getInstance().execute(
+      const orchResult = await StackUpdateOrchestrator.getInstance().execute(
         { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'bulk', actor: user },
         { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
       );
@@ -492,6 +499,8 @@ async function runStackBulkOp(
         console.error('[Security] Post-deploy scan failed for %s:', sanitizeForLog(stackName), err),
       );
       const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null);
+      const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
+      linkStackUpdateRecoveryGate(recoveryId, healthGateId);
       return { stackName, ok: true, healthGateId };
     } else {
       const outcome = await containerActionForStack(req.nodeId, stackName, action);
@@ -929,6 +938,12 @@ stacksRouter.post('/', async (req: Request, res: Response) => {
     if (!isValidStackName(stackName)) {
       return res.status(400).json({ error: 'Stack name can only contain alphanumeric characters, hyphens, and underscores' });
     }
+    try {
+      DeployedStackDeletionService.getInstance().assertNoBlockingDeletionIntent(req.nodeId, stackName);
+    } catch (guardError) {
+      res.status(409).json({ error: getErrorMessage(guardError, 'Stack deletion in progress'), code: 'stack_deletion_in_progress' });
+      return;
+    }
     await FileSystemService.getInstance(req.nodeId).createStack(stackName);
     invalidateNodeCaches(req.nodeId);
     dlog(`[Stacks] Stack created: ${sanitizeForLog(stackName)}`);
@@ -1109,80 +1124,30 @@ stacksRouter.delete('/:stackName', async (req: Request, res: Response) => {
   const sanitizedName = sanitizeForLog(stackName);
   if (debug) console.debug(`[Stacks:debug] Delete starting`, { stackName: sanitizedName, pruneVolumes, nodeId: req.nodeId });
 
-  // Step 1: compose down. Best-effort: a stack with corrupt compose files or
-  // a temporarily-unreachable daemon should still be removable. Logged so the
-  // operator can investigate orphaned containers separately.
-  try {
-    await ComposeService.getInstance(req.nodeId).downStack(stackName);
-    if (debug) console.debug(`[Stacks:debug] Delete: down OK`, { stackName: sanitizedName });
-  } catch (downErr) {
-    console.warn('[Stacks] Compose down failed or no-op for %s:', sanitizeForLog(stackName), downErr);
-  }
+  const result = await DeployedStackDeletionService.getInstance().deleteDeployedStack({
+    nodeId: req.nodeId,
+    stackName,
+    pruneVolumes,
+    actor: req.user?.username ?? 'system',
+  });
 
-  // Step 2: volume prune (only if requested). Best-effort.
-  if (pruneVolumes) {
-    try {
-      const result = await DockerController.getInstance().pruneManagedOnly('volumes', [stackName]);
-      dlog(`[Stacks] Pruned volumes for ${sanitizeForLog(stackName)}: ${result.reclaimedBytes} bytes reclaimed`);
-    } catch (pruneErr) {
-      console.warn('[Stacks] Volume prune failed for %s, continuing delete:', sanitizeForLog(stackName), pruneErr);
+  if (!result.ok) {
+    if (result.code === 'lock_conflict') {
+      res.status(409).json({
+        error: result.error,
+        code: 'stack_op_in_progress',
+        action: result.existingAction ?? 'delete',
+      });
+      return;
     }
-  }
-
-  // Step 3: filesystem delete. If this fails the on-disk compose files are
-  // still present, so we abort BEFORE touching the database — keeping DB and
-  // FS in sync so the operator can retry. Otherwise a half-deleted stack
-  // (rows gone, files remain) becomes invisible to the UI.
-  try {
-    await FileSystemService.getInstance(req.nodeId).deleteStack(stackName);
-    if (debug) console.debug(`[Stacks:debug] Delete: fs OK`, { stackName: sanitizedName });
-  } catch (fsErr) {
-    console.error('[Stacks] File deletion failed for %s; database state untouched:', sanitizeForLog(stackName), fsErr);
-    const message = getErrorMessage(fsErr, 'Failed to remove stack files');
-    res.status(500).json({
-      error: `${message}. Stack containers may have been stopped but on-disk files remain. Retry the delete or clean the files manually.`,
-    });
+    if (result.code === 'fs_failed') {
+      res.status(500).json({
+        error: `${result.error}. Stack containers may have been stopped but on-disk files remain. Retry the delete or clean the files manually.`,
+      });
+      return;
+    }
+    res.status(500).json({ error: result.error });
     return;
-  }
-
-  // Step 4: database cleanup. Per-call idempotent; safe to run sequentially.
-  try {
-    DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
-    DatabaseService.getInstance().clearStackScanAttempts(req.nodeId, stackName);
-    DatabaseService.getInstance().deleteServiceUpdateRecoveries(req.nodeId, stackName);
-    DatabaseService.getInstance().deleteRoleAssignmentsByResource('stack', stackName);
-    DatabaseService.getInstance().deleteGitSource(stackName);
-    DatabaseService.getInstance().deleteStackDossier(req.nodeId, stackName);
-    DatabaseService.getInstance().deleteStackDriftFindings(req.nodeId, stackName);
-    DatabaseService.getInstance().deleteStackExposureIntents(req.nodeId, stackName);
-    DatabaseService.getInstance().deleteStackExposure(req.nodeId, stackName);
-    DatabaseService.getInstance().deleteStackProjectEnvFiles(req.nodeId, stackName);
-    DatabaseService.getInstance().deleteStackScans(req.nodeId, stackName);
-    if (debug) console.debug(`[Stacks:debug] Delete: db OK`, { stackName: sanitizedName });
-  } catch (dbErr) {
-    console.error('[Stacks] Database cleanup failed for %s; files already removed:', sanitizeForLog(stackName), dbErr);
-    const message = getErrorMessage(dbErr, 'Failed to clear stack database state');
-    res.status(500).json({
-      error: `${message}. Stack files have been removed; some database rows for this stack may remain. Recreating the stack with the same name will reuse those rows.`,
-    });
-    return;
-  }
-
-  // Step 5: mesh opt-out cascade. Idempotent; best-effort cleanup of derived
-  // aliases / override files. A mesh failure here must not flip the delete
-  // result, since the stack itself is already gone.
-  try {
-    await MeshService.getInstance().optOutStack(
-      req.nodeId,
-      stackName,
-      req.user?.username ?? 'system',
-    );
-  } catch (meshErr) {
-    console.warn(
-      '[Stacks] Mesh opt-out cascade failed for %s, continuing delete:',
-      sanitizeForLog(stackName),
-      meshErr,
-    );
   }
 
   invalidateNodeCaches(req.nodeId);
@@ -2267,7 +2232,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     const debug = isDebugEnabled();
     const atomic = true;
     if (debug) console.debug('[Stacks:debug] Update starting', { stackName, atomic, nodeId: req.nodeId });
-    await StackUpdateOrchestrator.getInstance().execute(
+    const orchResult = await StackUpdateOrchestrator.getInstance().execute(
       { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'manual', actor: req.user?.username ?? null },
       { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
     );
@@ -2285,6 +2250,8 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     if (debug) console.debug(`[Stacks:debug] Update finished in ${Date.now() - t0}ms`);
     ok = true;
     const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null);
+    const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
+    linkStackUpdateRecoveryGate(recoveryId, healthGateId);
     res.json({ status: 'Update completed', healthGateId });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {

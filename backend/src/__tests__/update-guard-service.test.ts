@@ -295,12 +295,11 @@ describe('UpdateGuardService.computeRollbackReadiness moving-tag wiring', () => 
     mockListContainers.mockResolvedValue([]);
   });
 
-  it('marks previous_images not_covered (overall partial) when any image uses a moving tag', async () => {
-    // Primary pinned, sidecar on a moving tag: a file rollback cannot revert it.
+  it('marks previous_images ready when any image uses a moving tag (full-stack image ID capture)', async () => {
     mockGetPreview.mockResolvedValue(preview([{ current_tag: '1.2.3' }, { current_tag: 'latest' }]));
     const report = await UpdateGuardService.getInstance().computeRollbackReadiness(0, 'app');
-    expect(report.items.find(i => i.id === 'previous_images')?.state).toBe('not_covered');
-    expect(report.overall).toBe('partial');
+    expect(report.items.find(i => i.id === 'previous_images')?.state).toBe('ready');
+    expect(report.overall).toBe('ready');
   });
 
   it('marks previous_images ready (overall ready) when every image is pinned', async () => {
