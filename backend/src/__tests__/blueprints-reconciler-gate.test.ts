@@ -246,6 +246,42 @@ describe('reconcileOne approval gate (real path)', () => {
     });
 });
 
+describe('reconcileConfirmedPlan fingerprint gate', () => {
+    it('does not deploy when approval fingerprint no longer matches live compose', async () => {
+        const node = seedNode();
+        const bp = createBp({ nodeIds: [node.id] });
+        // Simulate an approved row whose fingerprint lags a concurrent compose edit.
+        const staleFp = intentFingerprint(bp);
+        DatabaseService.getInstance().getDb().prepare(
+            `UPDATE blueprints SET compose_content = ?,
+                approval_status = 'approved',
+                approved_intent_fingerprint = ?,
+                approved_blast_json = ?,
+                approved_at = ?,
+                approved_by = 'admin'
+             WHERE id = ?`,
+        ).run(
+            'services:\n  app:\n    image: nginx:evil\n',
+            staleFp,
+            serializeApprovedBlast([{ nodeId: node.id, outcome: 'place' }]),
+            Date.now(),
+            bp.id,
+        );
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+
+        const result = await BlueprintReconciler.getInstance().reconcileConfirmedPlan(bp.id, [
+            { nodeId: node.id, action: 'create' },
+        ]);
+
+        expect(result.outcomes).toEqual([]);
+        expect(result.refused).toBe(true);
+        expect(deploySpy).not.toHaveBeenCalled();
+        expect(withdrawSpy).not.toHaveBeenCalled();
+    });
+});
+
 describe('Accept/Evict STALE_GUARD', () => {
     it('refuses Accept without a valid place approval', async () => {
         const node = seedNode();

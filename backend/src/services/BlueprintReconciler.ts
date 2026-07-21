@@ -37,6 +37,8 @@ export interface ConfirmedActionOutcome {
 
 export interface ConfirmedPlanResult {
     outcomes: ConfirmedActionOutcome[];
+    /** True when the approval gate refused execution (Apply must not claim success). */
+    refused?: boolean;
 }
 
 export interface ConfirmedOutcomeSummary {
@@ -195,12 +197,18 @@ export class BlueprintReconciler {
     ): Promise<ConfirmedPlanResult> {
         const blueprint = DatabaseService.getInstance().getBlueprint(blueprintId);
         if (!blueprint || !blueprint.enabled) {
-            return { outcomes: [] };
+            return { outcomes: [], refused: true };
         }
         const parsed = parseApprovedBlastJson(blueprint.approved_blast_json);
-        if (!parsed.ok || blueprint.approval_status !== 'approved') {
-            diagnosticLog('reconcileConfirmedPlan skipped: approval missing or invalid', { blueprintId });
-            return { outcomes: [] };
+        // Same fail-closed gate as tick reconcile: never execute when approval is
+        // missing, invalid, or the stored fingerprint no longer matches live intent.
+        if (
+            !parsed.ok
+            || blueprint.approval_status !== 'approved'
+            || blueprint.approved_intent_fingerprint !== intentFingerprint(blueprint)
+        ) {
+            diagnosticLog('reconcileConfirmedPlan skipped: approval missing, invalid, or drifted', { blueprintId });
+            return { outcomes: [], refused: true };
         }
         const authorized = filterAuthorizedExecutorActions(parsed.entries, executorActions);
         const nodes = DatabaseService.getInstance().getNodes();

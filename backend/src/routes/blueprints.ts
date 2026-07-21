@@ -18,6 +18,7 @@ import { buildBlueprintPreview, evaluateLightweightEffectiveApproval } from '../
 import {
     confirmableActionsEqual,
     deriveBlastFromConfirmableActions,
+    intentFingerprint,
     parseConfirmableActionsBody,
     serializeApprovedBlast,
 } from '../services/blueprintApproval';
@@ -427,12 +428,28 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
         }
 
         const blast = deriveBlastFromConfirmableActions(preview.confirmableActions);
-        DatabaseService.getInstance().setBlueprintApproval(id, {
+        const approved = DatabaseService.getInstance().setBlueprintApproval(id, {
             intentFingerprint: preview.planFingerprint,
             blastJson: serializeApprovedBlast(blast),
             approvedBy: req.user?.username ?? null,
         });
-        const plan = await BlueprintReconciler.getInstance().reconcileConfirmedPlan(id, preview.executorActions);
+        // planFingerprint is from an earlier preview. Concurrent compose/selector
+        // edits can invalidate it before approval persists, or the reconciler can
+        // refuse if the live gate no longer matches. Both paths clear and 409.
+        const approvalMatches = !!approved && intentFingerprint(approved) === preview.planFingerprint;
+        const plan = approvalMatches
+            ? await BlueprintReconciler.getInstance().reconcileConfirmedPlan(id, preview.executorActions)
+            : null;
+        if (!plan || plan.refused) {
+            DatabaseService.getInstance().clearBlueprintApproval(id);
+            const fresh = await buildBlueprintPreview(id);
+            res.status(409).json({
+                error: 'Preview is stale; refresh and confirm again',
+                code: 'PREVIEW_STALE',
+                preview: fresh,
+            });
+            return;
+        }
         const outcomeSummary = summarizeConfirmedOutcomes(plan.outcomes);
         res.json({
             message: messageForConfirmedOutcomes(outcomeSummary),
