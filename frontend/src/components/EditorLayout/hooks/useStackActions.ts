@@ -420,6 +420,9 @@ export function useStackActions(options: UseStackActionsOptions) {
   const selectedFileRef = useRef(stackListState.selectedFile);
   const activeNodeIdRef = useRef(activeNode?.id);
   const containersRef = useRef(editorState.containers);
+  // Same-owner arbitration: soft refresh, Retry, and detail load can overlap
+  // for one stack/node; only the newest generation may apply success or failure.
+  const containersFetchGenRef = useRef(0);
   useEffect(() => {
     selectedFileRef.current = stackListState.selectedFile;
     activeNodeIdRef.current = activeNode?.id;
@@ -432,6 +435,7 @@ export function useStackActions(options: UseStackActionsOptions) {
         clearInterval(checkUpdatesIntervalRef.current);
       }
       loadFileAbortRef.current?.abort();
+      containersFetchGenRef.current += 1;
     };
   }, []);
 
@@ -515,6 +519,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setContainers([]);
     editorState.setContainersLoadStatus('idle');
     editorState.setContainersLoadError(null);
+    containersFetchGenRef.current += 1;
     editorState.setEffectiveServices([]);
     editorState.setServiceUpdateInProgress(null);
     editorState.setIsEditing(false);
@@ -529,6 +534,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     attemptId?: string;
     expectedFile: string;
     expectedNodeId: number | undefined;
+    generation: number;
   };
 
   const ownershipStillValid = (
@@ -537,6 +543,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     if (ownership.signal?.aborted) return 'aborted';
     if (selectedFileRef.current !== ownership.expectedFile) return 'stale';
     if (activeNodeIdRef.current !== ownership.expectedNodeId) return 'stale';
+    if (containersFetchGenRef.current !== ownership.generation) return 'stale';
     if (
       ownership.attemptId !== undefined
       && detailAttemptRef.current !== ownership.attemptId
@@ -564,9 +571,13 @@ export function useStackActions(options: UseStackActionsOptions) {
   const fetchStackContainers = async (
     stackFile: string,
     mode: ContainersFetchMode,
-    ownership: ContainersFetchOwnership,
+    ownership: Omit<ContainersFetchOwnership, 'generation'>,
   ): Promise<ContainersFetchResult> => {
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
+    const owned: ContainersFetchOwnership = {
+      ...ownership,
+      generation: ++containersFetchGenRef.current,
+    };
     let headersSpan: SpanHandle | null = null;
     let bodySpan: SpanHandle | null = null;
     if (mode === 'foreground') {
@@ -574,19 +585,19 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setContainersLoadError(null);
     }
     try {
-      headersSpan = ownership.attemptId
-        ? beginSpan('fetch_headers', { attemptId: ownership.attemptId })
+      headersSpan = owned.attemptId
+        ? beginSpan('fetch_headers', { attemptId: owned.attemptId })
         : null;
       const containersRes = await apiFetch(`/stacks/${stackName}/containers`, {
-        signal: ownership.signal,
-        nodeId: ownership.expectedNodeId ?? null,
+        signal: owned.signal,
+        nodeId: owned.expectedNodeId ?? null,
       });
       const hopProxied = containersRes.headers.get('x-sencho-proxy') === '1';
       if (headersSpan !== null) {
         endSpan(headersSpan, { proxied: hopProxied, detail: { status: containersRes.status } });
         headersSpan = null;
       }
-      const afterHeaders = ownershipStillValid(ownership);
+      const afterHeaders = ownershipStillValid(owned);
       if (afterHeaders !== 'ok') {
         return { ok: false, reason: afterHeaders };
       }
@@ -595,15 +606,15 @@ export function useStackActions(options: UseStackActionsOptions) {
         applyContainersFetchFailure(mode, message);
         return { ok: false, reason: 'http', error: message };
       }
-      bodySpan = ownership.attemptId
-        ? beginSpan('body_decode', { attemptId: ownership.attemptId, proxied: hopProxied })
+      bodySpan = owned.attemptId
+        ? beginSpan('body_decode', { attemptId: owned.attemptId, proxied: hopProxied })
         : null;
       const conts: unknown = await containersRes.json();
       if (bodySpan !== null) {
         endSpan(bodySpan);
         bodySpan = null;
       }
-      const afterBody = ownershipStillValid(ownership);
+      const afterBody = ownershipStillValid(owned);
       if (afterBody !== 'ok') {
         return { ok: false, reason: afterBody };
       }
@@ -613,8 +624,8 @@ export function useStackActions(options: UseStackActionsOptions) {
         return { ok: false, reason: 'malformed', error: message };
       }
       const list = conts as ContainerInfo[];
-      const dispatchSpan = ownership.attemptId
-        ? beginSpan('state_dispatch', { attemptId: ownership.attemptId, proxied: hopProxied })
+      const dispatchSpan = owned.attemptId
+        ? beginSpan('state_dispatch', { attemptId: owned.attemptId, proxied: hopProxied })
         : null;
       editorState.setContainers(list);
       editorState.setContainersLoadStatus('success');
@@ -624,10 +635,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     } catch (error) {
       if (headersSpan !== null) endSpan(headersSpan, { outcome: 'error' });
       if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
-      if (isAbortError(error) || ownership.signal?.aborted) {
+      if (isAbortError(error) || owned.signal?.aborted) {
         return { ok: false, reason: 'aborted' };
       }
-      const afterCatch = ownershipStillValid(ownership);
+      const afterCatch = ownershipStillValid(owned);
       if (afterCatch !== 'ok') {
         return { ok: false, reason: afterCatch };
       }
@@ -869,11 +880,14 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setEditingCompose(false);
     editorState.setActiveTab('compose');
     // Clear prior stack health before the first request so compose/env hydration
-    // never shows another stack's containers or service grouping.
+    // never shows another stack's containers or service grouping. Bump the
+    // containers fetch generation so an in-flight soft refresh cannot rewrite
+    // this cleared state before loadContainerState claims a newer generation.
     editorState.setContainers([]);
     editorState.setEffectiveServices([]);
     editorState.setContainersLoadError(null);
     editorState.setContainersLoadStatus('loading');
+    containersFetchGenRef.current += 1;
     let headersSpan: SpanHandle | null = null;
     let bodySpan: SpanHandle | null = null;
     try {

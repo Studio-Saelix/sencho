@@ -169,4 +169,79 @@ describe('useDashboardData stackStatuses load states', () => {
     });
     expect(result.current.stackStatusesLoadStatus).toBe('success');
   });
+
+  it('ignores an older foreground failure after a newer same-node success', async () => {
+    const resolvers: Array<(r: Response) => void> = [];
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return new Promise<Response>((resolve) => { resolvers.push(resolve); });
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); });
+    expect(resolvers).toHaveLength(1);
+
+    act(() => { fireInvalidate({ scope: 'container' }); });
+    await act(async () => { vi.advanceTimersByTime(300); });
+    expect(resolvers).toHaveLength(2);
+
+    const newerMap = { 'web.yml': { status: 'running' as const } };
+    await act(async () => {
+      resolvers[1](okJson(newerMap));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+    expect(result.current.stackStatuses).toEqual(newerMap);
+
+    await act(async () => {
+      resolvers[0](new Response('nope', { status: 500 }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+    expect(result.current.stackStatuses).toEqual(newerMap);
+  });
+
+  it('ignores an older success after a newer same-node success', async () => {
+    const resolvers: Array<(r: Response) => void> = [];
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return new Promise<Response>((resolve) => { resolvers.push(resolve); });
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); });
+    expect(resolvers).toHaveLength(1);
+
+    act(() => { fireInvalidate({ scope: 'container' }); });
+    await act(async () => { vi.advanceTimersByTime(300); });
+    expect(resolvers).toHaveLength(2);
+
+    const newerMap = { 'web.yml': { status: 'running' as const } };
+    const olderMap = { 'old.yml': { status: 'exited' as const } };
+    await act(async () => {
+      resolvers[1](okJson(newerMap));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatuses).toEqual(newerMap);
+
+    await act(async () => {
+      resolvers[0](okJson(olderMap));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatuses).toEqual(newerMap);
+  });
 });

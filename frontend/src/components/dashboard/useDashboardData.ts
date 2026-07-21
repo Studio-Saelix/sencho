@@ -111,9 +111,15 @@ export function useDashboardData(): DashboardData {
 
   // After a successful statuses load, soft poll failures keep the prior map.
   const hadSuccessfulStatusesRef = useRef(false);
+  // Latest-request arbitration for /stacks/statuses: polling, invalidation,
+  // mount, and Retry can overlap; only the current generation may commit.
+  const stackStatusesFetchGenRef = useRef(0);
   useEffect(() => {
     hadSuccessfulStatusesRef.current = false;
   }, [nodeId]);
+  useEffect(() => () => {
+    stackStatusesFetchGenRef.current += 1;
+  }, []);
 
   // Consecutive failure counters per live-metrics endpoint. Either reaching
   // METRICS_STALE_THRESHOLD trips the metricsStale indicator; the first
@@ -202,60 +208,86 @@ export function useDashboardData(): DashboardData {
   // Stack statuses: 10s polling, resets on node change. Foreground / retry
   // expose loading and recoverable error; soft poll failures after success keep
   // the prior map so the dashboard never flashes a false empty state.
+  const isCurrentStatusesFetch = useCallback((
+    currentNodeId: number | undefined,
+    generation: number,
+  ) => (
+    nodeIdRef.current === currentNodeId
+    && stackStatusesFetchGenRef.current === generation
+  ), []);
+
   const commitStackStatusesSuccess = useCallback((
     currentNodeId: number | undefined,
+    generation: number,
     data: Record<string, StackStatusEntry>,
   ) => {
-    if (nodeIdRef.current !== currentNodeId) return;
+    if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
     setStackStatuses(data);
     setStackStatusesLoadStatus('success');
     setStackStatusesLoadError(null);
     hadSuccessfulStatusesRef.current = true;
-  }, []);
+  }, [isCurrentStatusesFetch]);
 
   const commitStackStatusesFailure = useCallback((
     currentNodeId: number | undefined,
+    generation: number,
     mode: 'foreground' | 'soft',
     failureMessage: string,
   ) => {
-    if (nodeIdRef.current !== currentNodeId) return;
+    if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
     if (mode === 'soft' && hadSuccessfulStatusesRef.current) return;
     setStackStatusesLoadStatus('error');
     setStackStatusesLoadError(failureMessage);
-  }, []);
+  }, [isCurrentStatusesFetch]);
 
   const fetchStackStatuses = useCallback(async (
     currentNodeId: number | undefined,
     mode: 'foreground' | 'soft',
   ) => {
     if (nodeIdRef.current !== currentNodeId) return;
+    const generation = ++stackStatusesFetchGenRef.current;
     if (mode === 'foreground') {
       setStackStatusesLoadStatus('loading');
       setStackStatusesLoadError(null);
     }
     try {
       const res = await apiFetch('/stacks/statuses');
-      if (nodeIdRef.current !== currentNodeId) return;
+      if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
       if (!res.ok) {
         commitStackStatusesFailure(
           currentNodeId,
+          generation,
           mode,
           `Could not load stack health (${res.status}).`,
         );
         return;
       }
       const body: unknown = await res.json();
-      if (nodeIdRef.current !== currentNodeId) return;
+      if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
       if (body && typeof body === 'object' && !Array.isArray(body)) {
-        commitStackStatusesSuccess(currentNodeId, body as Record<string, StackStatusEntry>);
+        commitStackStatusesSuccess(
+          currentNodeId,
+          generation,
+          body as Record<string, StackStatusEntry>,
+        );
         return;
       }
-      commitStackStatusesFailure(currentNodeId, mode, 'Stack health response was invalid.');
+      commitStackStatusesFailure(
+        currentNodeId,
+        generation,
+        mode,
+        'Stack health response was invalid.',
+      );
     } catch {
-      if (nodeIdRef.current !== currentNodeId) return;
-      commitStackStatusesFailure(currentNodeId, mode, 'Could not load stack health.');
+      if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
+      commitStackStatusesFailure(
+        currentNodeId,
+        generation,
+        mode,
+        'Could not load stack health.',
+      );
     }
-  }, [commitStackStatusesSuccess, commitStackStatusesFailure]);
+  }, [commitStackStatusesSuccess, commitStackStatusesFailure, isCurrentStatusesFetch]);
 
   const retryStackStatuses = useCallback(() => {
     void fetchStackStatuses(nodeIdRef.current, 'foreground');
