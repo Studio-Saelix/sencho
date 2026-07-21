@@ -3,7 +3,7 @@ title: Deep links and URLs
 description: Bookmark, share, and refresh Sencho views with real browser URLs that survive Back and Forward.
 ---
 
-Every major screen in Sencho now has a stable address in the browser bar. Refresh the page, paste a link to a teammate, or use Back and Forward without losing your place.
+Every major screen in Sencho has a stable address in the browser bar. Refresh the page, paste a link to a teammate, or use Back and Forward without losing your place.
 
 ## What gets its own URL
 
@@ -16,12 +16,22 @@ Sencho encodes the active node, the view you are on, and the deep state that vie
 | Stack detail | `/nodes/local/stacks/radarr` | Radarr's stack detail (anatomy). Sidebar entry point |
 | Compose editor | `/nodes/local/stacks/radarr/compose` | Radarr's compose.yaml Monaco editor |
 | Env tab + file | `/nodes/local/stacks/radarr/env?env=.env.prod` | Radarr's env tab with a specific env file selected |
+| Files browser | `/nodes/local/stacks/radarr/files` | Radarr's file browser (desktop; opens the compose editor instead on a phone) |
 | Resources | `/nodes/local/resources` | Resources for the active node |
 | Networking | `/nodes/local/networking` | Networking operator page for the active node |
 | Security tab | `/nodes/local/security/images` | Security view on the Images tab |
+| App Store | `/nodes/local/templates` | App Store on the active node |
+| Logs | `/nodes/local/logs` | Cross-fleet log aggregation |
+| Update | `/nodes/local/updates` | Fleet-wide update check |
+| Console | `/nodes/local/host-console` | Host Console, a limited-availability operator surface documented on its own page when enabled on an instance |
+| Audit | `/nodes/local/audit` | Audit history |
 | Settings section | `/nodes/local/settings/nodes` | Settings on the Nodes section |
 | Fleet tab | `/nodes/local/fleet/snapshots` | Fleet on the Snapshots tab (desktop) |
 | Schedules filter | `/nodes/local/schedules?node=3` | Scheduled operations filtered to node `3` |
+
+Fleet, Logs, Update, Schedules, and Audit are gated by role or license tier and are hub-only: their URLs redirect to the dashboard while a remote node is active. Console is also gated, but is reachable against any node, remote included. See [Multi-Node Fleet](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active) for the hub-only list and [RBAC & User Management](/features/rbac) for the full permission matrix.
+
+Fleet tab URLs are stable slugs that do not always match the tab's on-screen label. For example the **Status** tab uses the `configuration` segment and the **Map** tab uses the `dependencies` segment.
 
 Remote nodes use a slug derived from the node name and id (for example `/nodes/nas-box-42/dashboard`). The default local node keeps the short `local` slug.
 
@@ -29,13 +39,12 @@ Remote nodes use a slug derived from the node name and id (for example `/nodes/n
 
 Clicking a stack in the sidebar opens **stack detail** at `/nodes/<node>/stacks/<stack>` (anatomy on the right). Opening the compose, env, or files editor appends that tab to the path:
 
-- `/stacks/radarr` — detail
-- `/stacks/radarr/compose` — compose.yaml editor
-- `/stacks/radarr/env` — env editor
-- `/stacks/radarr/files` — file browser (desktop)
+- `/stacks/radarr`: detail
+- `/stacks/radarr/compose`: compose.yaml editor
+- `/stacks/radarr/env`: env editor
+- `/stacks/radarr/files`: file browser (desktop)
 
 Closing the Monaco editor returns you to the detail URL for that stack.
-
 
 ## Env tab URLs
 
@@ -45,6 +54,7 @@ Sencho encodes env file selection in the `?env=` query on the Env tab only:
 - **Non-default files use basenames only:** `?env=.env.prod`, never a server filesystem path.
 - **Legacy bookmarks:** older links that used an absolute path in `?env=` still open the matching file by basename. Sencho normalizes the URL to basename form when the address bar updates.
 - **Unknown basenames:** if `?env=` does not match any file on the stack, Sencho opens the default env file.
+- **No env files:** a stack with no env file at all has no Env tab. Opening `/env` on it stays on the compose editor instead.
 
 Compose and Files routes never carry `?env=`.
 
@@ -74,7 +84,9 @@ On a phone, Home and the stack list are distinct URLs even though both relate to
 
 On desktop, opening the stack list at `/nodes/local/stacks` canonicalizes to `/nodes/local/dashboard` because the sidebar stack list is part of the home layout on a wide screen.
 
-Settings follows the same list/detail split: `/nodes/local/settings` is the section list; `/nodes/local/settings/<section>` opens a section directly.
+Settings follows a similar split, but only on a phone: `/nodes/local/settings` opens the section list, and `/nodes/local/settings/<section>` opens a section directly. On desktop, `/nodes/local/settings` always normalizes straight to `/nodes/local/settings/appearance`; there is no bare section-list state to land on.
+
+Fleet, Resources, Security, App Store, Logs, Update, Audit, and Schedules keep the exact same URL between desktop and phone, each rendering a phone-optimized screen at that path. Console also keeps the same URL on a phone, reflowing the terminal rather than switching to a dedicated phone screen.
 
 On a phone, `/nodes/local/stacks/<stack>/files` opens the compose editor instead. Sencho does not expose a separate file-browser URL on a phone.
 
@@ -86,6 +98,6 @@ Some in-app state is intentionally not encoded:
 
 ## Tips
 
-- Use the global search palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) as today; navigation still updates the URL when you pick a page, node, or stack.
+- Use the global search palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) to jump anywhere; navigation still updates the URL when you pick a page, node, or stack.
 - Deep links use stack directory names (the name you see in the sidebar), not internal compose filenames.
 - Opening Sencho at `/` sends you to the active node's dashboard once you are signed in.

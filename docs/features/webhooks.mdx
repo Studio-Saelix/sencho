@@ -34,7 +34,7 @@ Open **Settings → Automation → Webhooks** and click **Create webhook**. The 
 After you click **Create**, the new webhook's secret appears once in a green callout titled **Webhook created. Copy your secret now.** Copy it before dismissing the callout; once you navigate away, it cannot be retrieved. The configured-webhooks list always shows the secret in masked form (`********` plus the last four characters).
 
 <Frame>
-  <img src="/images/webhooks/webhooks-secret-reveal.png" alt="Green success callout after creating a webhook, showing the full secret in a monospace block, a Copy button, and a Dismiss button. Below the callout, the configured-webhooks list shows the new webhook card with its trigger URL and masked secret." />
+  <img src="/images/webhooks/webhooks-secret-reveal.png" alt="Green success callout after creating a webhook, showing the full secret in a monospace block and a Copy button next to a Dismiss button. Below the callout, the configured-webhooks list shows the new webhook card with its trigger URL, masked secret, and Recent executions expanded to show one successful deploy entry with its timestamp and duration." />
 </Frame>
 
 ### Available actions
@@ -52,10 +52,10 @@ After you click **Create**, the new webhook's secret appears once in a green cal
 
 Each configured webhook renders as a card showing the webhook name, an **action** badge, a **stack** badge, a **node** badge, an enable toggle, and a delete button. Below the header are a labeled **Trigger URL** row with a copy button, a labeled **Secret** row showing the masked secret, and a **Recent executions** disclosure that expands inline.
 
-The masthead above the section reports total **Webhooks** and how many are **Enabled**.
+The masthead carries `SCOPE` (`global`), `WEBHOOKS` (total), and `ENABLED` (count).
 
 <Frame>
-  <img src="/images/webhooks/webhooks-settings.png" alt="Configured webhooks section with two webhook cards. The first card has Recent executions expanded, showing several deploy entries with timestamps and durations and one restart entry that failed with an error message. The second card is collapsed. The masthead at the top shows WEBHOOKS 2 and ENABLED 2." />
+  <img src="/images/webhooks/webhooks-settings.png" alt="Configured webhooks section with two webhook cards, each showing its name, action badge, stack badge, node badge, an On toggle, and a delete icon. The first card's Recent executions is collapsed; the second card's is expanded, showing one successful deploy entry with its timestamp and duration. The masthead at the top shows SCOPE global, WEBHOOKS 2, and ENABLED 2." />
 </Frame>
 
 From a webhook card you can:
@@ -101,6 +101,12 @@ By default, the webhook executes the action configured at creation time. You can
 ```
 
 Valid override values are: `deploy`, `restart`, `stop`, `start`, `pull`, `git-pull`. An unknown value is rejected with `400 Bad Request` before execution is queued.
+
+### Concurrency and the per-stack lock
+
+Deploy, Restart, Stop, Start, and Pull & Update share the same per-stack lock as manual actions started from the UI. If the stack already has one of those operations in flight when the webhook fires, Sencho still returns `202 Accepted`, but the action itself is skipped rather than queued behind the running one. The skip shows up in **Recent executions** as a failed entry with a message like `Skipped "stack-name": another operation (deploy) is already in progress.` Retry the trigger once the in-flight operation finishes.
+
+Git source sync is the exception: it waits for an in-progress pull or apply on the same stack to finish rather than skipping (see [Local edits vs Git](/features/git-sources#local-edits-vs-git)).
 
 ### Responses
 
@@ -179,6 +185,10 @@ Sencho retains the last 100 executions per webhook and surfaces the 20 most rece
 
   <Accordion title="The action returns 202 but the stack does not change.">
     A 202 means the action was accepted, not that it produced a visible change. **Pull & Update** is a no-op if the registry has no newer image for any service in the stack; **Start** is a no-op on an already-running stack. Check the stack's **Activity** sheet to confirm what actually ran, and the webhook's **Recent executions** for the action's status and duration.
+  </Accordion>
+
+  <Accordion title="Recent executions shows 'Skipped ... another operation is already in progress'.">
+    The webhook's action shares the stack's per-stack lock with manual actions from the UI. The webhook fired while a manual deploy, update, restart, stop, start, rollback, or backup on the same stack was still running, so Sencho skipped the webhook's action rather than queuing it behind the running one. Retry the trigger once the in-flight operation finishes. Git source sync does not hit this path; it waits for the in-progress operation instead of skipping.
   </Accordion>
 
   <Accordion title="My trigger returns 429 'Too many webhook triggers'.">

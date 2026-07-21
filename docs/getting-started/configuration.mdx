@@ -14,7 +14,7 @@ Operational settings (host alerts, data retention, image-update automation, mesh
 | `COMPOSE_DIR` | Absolute path to the directory that contains your Compose stacks. Every subdirectory inside becomes a stack in Sencho. Falls back to `/app/compose` if unset, but per the [1:1 path rule](#compose-directory-the-11-path-rule) you should always set this explicitly to match the host path you mount. |
 
 <Note>
-  **JWT_SECRET is generated automatically.** Sencho creates a secure random signing key during initial setup and stores it in its database. You do not need to provide one.
+  **The JWT signing secret is generated automatically.** Sencho creates a secure random signing key during initial setup and stores it in its database. There is no environment variable for it: you cannot set or override it, and you do not need to.
 </Note>
 
 ### How Sencho organizes your compose directory
@@ -35,6 +35,7 @@ When you point `COMPOSE_DIR` at a directory, Sencho expects each stack to live i
 | `SENCHO_USER` | *(unset)* | When set to a username present inside the container (`sencho` is pre-created for this purpose), the entrypoint drops privileges to that user at startup instead of running as `root`. See [Running as a non-root user](#running-as-a-non-root-user) below. |
 | `API_RATE_LIMIT` | `200` | Global API requests per minute per user session. Applies in production only; development uses a fixed higher cap. Authenticated requests are keyed by user ID, unauthenticated by IP. Internal node-to-node traffic bypasses this limit. |
 | `API_POLLING_RATE_LIMIT` | `300` | Rate limit for dashboard polling endpoints, in requests per minute. Applies in production only; development uses a fixed higher cap. Raise it for environments with many concurrent browser sessions behind shared NAT. |
+| `SENCHO_UPLOAD_DIR` | OS temp dir (`sencho-uploads` subfolder) | Staging directory for file uploads in the Stack file editor. Uploads spool to disk here, outside `COMPOSE_DIR`, before being written to their final location. Set this if your OS temp partition is too small for the uploads you expect. |
 
 ## Advanced environment variables
 
@@ -43,10 +44,14 @@ These tune optional subsystems. Most deployments never set them; the defaults ar
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TRIVY_BIN` | *(unset)* | Path to a host-installed [Trivy](/operations/trivy-setup) binary for image vulnerability scanning. Sencho prefers a managed install under `DATA_DIR/bin/trivy`, then this path, then `trivy` on `PATH`. |
+| `TRIVY_CACHE_DIR` | `DATA_DIR/trivy-cache` | Directory where Trivy caches its vulnerability database. Move it onto a different volume if `DATA_DIR` is space-constrained. |
 | `SENCHO_MESH_SUBNET` | *(auto)* | CIDR for this node's `sencho_mesh` network. When unset, Sencho picks the first free `/24` from its candidate list or adopts an existing mesh subnet. Set one only to avoid an overlap with another network on the host. See [Sencho Mesh](/features/sencho-mesh). |
+| `SENCHO_MESH_RECONCILE_INTERVAL_MS` | `60000` | How often the central instance re-checks proxy-mode mesh tunnels to detect a peer that rebooted. Lower it for faster peer-reboot detection at the cost of more frequent checks. See [Sencho Mesh](/features/sencho-mesh). |
+| `SENCHO_MESH_PROXY_TUNNEL_IDLE_MS` | `0` | Idle timeout before a proxy-mode mesh tunnel tears down and reopens on demand. `0` keeps the tunnel open for the life of the connection. See [Sencho Mesh](/features/sencho-mesh). |
 | `GITSOURCE_MAX_CLONE_BYTES` | `104857600` | Maximum bytes a single [Git Source](/features/git-sources) clone may download before it is aborted (100 MB). A shallow Compose clone is tiny; raise it only if you track Compose files in a legitimately large repository. |
 | `SENCHO_PUBLIC_URL` | *(request host)* | Set on the primary instance. Its externally reachable `http(s)://` URL, no trailing slash, baked into pilot enrollment so remote agents dial the public hostname rather than the address the admin used at setup. |
-| `SENCHO_COMPOSE_STALL_TIMEOUT_MS` | `600000` | Idle-output backstop for deploy and update Compose steps (pull and recreate). If a step produces no output for this long while still running, Sencho stops it so a hung image pull surfaces a clear failure and the in-app recovery actions instead of spinning. Raise it on slow links or for heavy local image builds. |
+| `SENCHO_COMPOSE_COMMAND_TIMEOUT_MS` | `1800000` | Hard timeout for a single Compose command (pull, up, down) during deploy and update, in milliseconds (30 minutes). Sencho kills the command and reports failure if it runs longer than this, regardless of whether it is still producing output. Raise it only for very large images or slow storage. |
+| `SENCHO_COMPOSE_STALL_TIMEOUT_MS` | `600000` | Idle-output backstop for deploy and update Compose steps (pull and recreate), separate from the hard timeout above. If a step produces no output for this long while still running, Sencho stops it so a hung image pull surfaces a clear failure and the in-app recovery actions instead of spinning. Raise it on slow links or for heavy local image builds. |
 | `SENCHO_ZFS_ARCSTATS_PATH` | *(auto)* | Path **inside the container** to the OpenZFS ARC kstat file, for [ZFS ARC-aware host memory](#zfs-arc-aware-host-memory). Sencho checks this path first, then `/host/proc/spl/kstat/zfs/arcstats`, then `/proc/spl/kstat/zfs/arcstats`. Set it only when your ARC stats live at a non-standard path. |
 
 Running a remote host as a pilot agent uses four more variables (`SENCHO_MODE`, `SENCHO_PRIMARY_URL`, `SENCHO_ENROLL_TOKEN`, and `SENCHO_PILOT_CA_FILE`), set only on the remote agent container. Sencho bakes them into the enrollment Compose file it generates, so you rarely write them by hand. See [Pilot Agent](/features/pilot-agent) for the full enrollment walkthrough.
@@ -117,6 +122,7 @@ If you use SSO, configure your identity providers via environment variables:
 | `SSO_OIDC_GOOGLE_ENABLED` | Enable Google SSO |
 | `SSO_OIDC_GITHUB_ENABLED` | Enable GitHub SSO |
 | `SSO_OIDC_OKTA_ENABLED` | Enable Okta SSO |
+| `SSO_OIDC_CUSTOM_ENABLED` | Enable a custom OIDC provider (Keycloak, Authentik, Authelia, Zitadel, and others) |
 | `SSO_CALLBACK_URL` | External base URL for OAuth callbacks (required behind reverse proxy) |
 
 For end-to-end provider setup walkthroughs, see the [SSO Quickstart →](/getting-started/sso-quickstart). For the full feature reference, see [SSO Authentication →](/features/sso).

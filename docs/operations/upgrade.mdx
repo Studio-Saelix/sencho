@@ -24,10 +24,14 @@ docker stop sencho && docker rm sencho
 # Re-run your original docker run command
 ```
 
-Sencho will apply any necessary database migrations automatically on startup. No manual steps are required.
+<Tip>
+  Sencho is also mirrored on GitHub Container Registry at `ghcr.io/studio-saelix/sencho:latest` with the same tags and digests as Docker Hub. Pull from whichever registry your environment prefers.
+</Tip>
+
+Sencho applies any necessary database migrations automatically on startup. No manual steps are required.
 
 <Note>
-  Remote nodes can be updated directly from the Fleet View without dropping to a shell. See [Remote Updates](/features/remote-updates) for details.
+  Remote nodes can be updated directly from the Fleet View without dropping to a shell. See [Remote Updates](/features/remote-updates) for details. Admiral **Hardened Build** installs use a different, entitlement-gated update path instead of the manual steps above; see [Updating the local (gateway) node](/features/remote-updates#updating-the-local-gateway-node) for that flow.
 </Note>
 
 ---
@@ -37,11 +41,11 @@ Sencho will apply any necessary database migrations automatically on startup. No
 Sencho handles all schema changes internally. When the application starts, it checks whether the database needs updating and applies any pending migrations automatically. This covers:
 
 - **New tables and columns** for features introduced in newer versions
-- **Legacy config migration** from very early versions that used a JSON config file
-- **Admin account migration** from single-admin storage to the multi-user system
-- **Encryption of sensitive values** (node API tokens, registry credentials) that were previously stored in plaintext
+- **Config import** from an on-disk JSON config file, if one exists from a manual setup
+- **Admin account consolidation** into the multi-user system
+- **Encryption of node API tokens** stored in plaintext (registry credentials are always stored encrypted, so they need no migration)
 - **SSO and RBAC setup** for single sign-on provider config and role-based access
-- **Legacy cleanup** of obsolete fields from pre-0.7 versions (SSH/TLS columns)
+- **Obsolete column cleanup**, removing unused SSH/TLS configuration columns no longer read or written by the current schema
 - **Blueprint rollout approval** columns (`approval_status`, intent fingerprint, and blast JSON). Existing Blueprints start **pending**. Automatic reconciliation and enforcement pause until an admin opens **Apply now**, reviews the rollout preview, and confirms. New installs behave the same way for each Blueprint until the first confirmation.
 
 You never need to run SQL commands, migration scripts, or any manual database operations.
@@ -67,12 +71,10 @@ See the [Backup & Restore guide](/operations/backup) for full backup procedures.
 If you prefer to control exactly which version you run, pin the image tag in your `docker-compose.yml`:
 
 ```yaml
-image: saelix/sencho:0.38.0
+image: saelix/sencho:0.96.0
 ```
 
-
-
-Fleet can update semver pins directly from the Node updates sheet: it rewrites the tag to the selected release before recreating the container. Digest pins and compose values that use variable interpolation must be changed manually before Fleet can update the node.
+Fleet can update semver pins directly from the [Node updates](/features/remote-updates) sheet: it rewrites the tag to the selected release before recreating the container. Digest pins and compose values that use variable interpolation must be changed manually before Fleet can update the node.
 
 Check [GitHub Releases](https://github.com/studio-saelix/sencho/releases) for available versions and changelogs.
 

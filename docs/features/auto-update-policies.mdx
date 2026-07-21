@@ -75,6 +75,8 @@ Once the cause is resolved, the next check (on the interval, or via **Recheck**)
 On multi-service stacks, the Updates view can also apply a single service when that service has a confirmed image update. Scheduled auto-update, webhook pull, and bulk update always refresh the full stack.
 5. Use **Recheck** in the hero to force an immediate registry poll across every reachable node. A 2-minute per-node cooldown applies, and the toast tells you how many nodes were triggered, rate-limited, or failed.
 
+**Apply now** runs the same update path as every other update trigger on a stack: Sencho takes an atomic backup of the compose and env files first, pulls the updated registry images (or rebuilds from source for services that declare `build:`, then pulls the rest), and recreates the containers. See [Controlling a running stack](/features/stack-management#controlling-a-running-stack) for exactly how a build-aware update differs from a plain pull. Once the containers are up, the [post-update health gate](/features/health-gated-updates#the-post-update-health-gate) observes them for a configurable window and records a passed, failed, or unknown verdict on the stack's timeline, the same as a manual update from the editor toolbar or sidebar.
+
 ## Risk badges
 
 | Badge | Color | When it appears |
@@ -117,6 +119,8 @@ Auto-update is a first-class action in the Schedules view. To create a recurring
 
 The task lives alongside restart, prune, snapshot, and scan tasks in the same timeline and table. Run history, notifications, and the Run Now button behave the same as for every other scheduled action. See [Scheduled Operations](/features/scheduled-operations) for details.
 
+A scheduled run applies an update the same way **Apply now** does: an atomic backup first, then the pull or build-aware rebuild, then the [post-update health gate](/features/health-gated-updates) observing the result. A schedule never bypasses a [deploy enforcement](/features/deploy-enforcement) policy: a run that a policy would block fails with the policy violation recorded in the run history, rather than applying partway.
+
 ## Multi-node support
 
 The readiness board shows pending updates from every node in your fleet in a single view, regardless of which node is selected in the sidebar. You do not need to switch nodes to inspect what is pending elsewhere.
@@ -127,13 +131,15 @@ Each node group renders its own card grid under a header showing the node name, 
 
 For each stack with a pending image update, Sencho computes a preview by:
 
-1. Parsing the compose file to enumerate every pullable image reference.
+1. Parsing the compose file to enumerate every service that pulls a registry image (a service declaring only `build:`, with no `image:` key, has no registry reference to check and is excluded from this preview).
 2. Calling the registry with your configured credentials to fetch the current tag list and remote digest.
 3. Picking the highest semver tag greater than the current tag (keeping the same prefix and suffix). If the highest available tag matches the current one but the remote digest has changed, the card surfaces as a `Rebuild available` update. Sencho checks both a newer semver tag and a digest change behind the same tag; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
 4. Scoring the overall stack by the most severe image bump. Any major bump marks the stack as blocked.
 5. Normalizing Docker Hub library paths so credentials and changelog lookups resolve correctly.
 
 The preview is recomputed each time the readiness board loads, so it reflects the live state of your registries and local images.
+
+A stack that mixes registry images and `build:` services still gets a card, scored from its registry images. Triggering **Update** on that stack, from this board or a schedule, always rebuilds the `build:` services from source in the same run, whether or not the registry portion has a pending update. See [Controlling a running stack](/features/stack-management#controlling-a-running-stack) for what a build-aware update runs.
 
 ## Troubleshooting
 
@@ -162,4 +168,30 @@ The preview is recomputed each time the readiness board loads, so it reflects th
   <Accordion title='Disk usage barely changed after an update'>
     Automatic cleanup reclaims dangling (untagged) image layers only. A long-running host accumulates other reclaimable data (stopped containers, unused volumes and networks, build cache) that this toggle does not touch. Run a full prune from the [Resources](/features/resources) view, or schedule a prune task, to reclaim the rest.
   </Accordion>
+  <Accordion title='A scheduled auto-update did not apply and the run history shows a policy error'>
+    A [deploy enforcement](/features/deploy-enforcement) policy blocked the update, the same way it would block a manual one. The run history and the dispatched alert name the policy and the matching image findings. Review the findings and either clear them or adjust the policy, then let the next scheduled run or a manual **Apply now** retry.
+  </Accordion>
 </AccordionGroup>
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="Health-gated updates" icon="heart-pulse" href="/features/health-gated-updates">
+    The readiness check before an update and the post-update health gate that every apply path, including auto-update, runs through.
+  </Card>
+  <Card title="Atomic deployments" icon="rotate" href="/features/atomic-deployments">
+    How Sencho backs up compose and env files before each update and rolls back automatically on failure.
+  </Card>
+  <Card title="Deploy enforcement" icon="shield-check" href="/features/deploy-enforcement">
+    Set risk policies that block or require review before a manual or scheduled update can apply.
+  </Card>
+  <Card title="Stack management" icon="layer-group" href="/features/stack-management#controlling-a-running-stack">
+    The full set of lifecycle actions on a stack, including how a build-aware update differs from a plain pull.
+  </Card>
+  <Card title="Scheduled operations" icon="calendar-clock" href="/features/scheduled-operations">
+    How the Auto-update Stack and Auto-update All Stacks on Node tasks fit into the shared scheduling system.
+  </Card>
+  <Card title="Vulnerability scanning" icon="shield-halved" href="/features/vulnerability-scanning#tags-vs-digests">
+    Why a same-tag digest change surfaces as a rebuild instead of a version diff.
+  </Card>
+</CardGroup>

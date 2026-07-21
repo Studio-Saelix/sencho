@@ -25,11 +25,13 @@ homelab-dossier/
 - **`index.md`** lists every node with its type, reachability, and stack count, plus an explicit section for any node that was skipped and why.
 - **`network.md`** aggregates across the fleet: a **port map**, **volume map**, and **network map**, an **environment checklist** by stack, an **access-URL inventory**, and a **VLAN / static IP / firewall** table. The last two are populated from your Stack Dossier notes.
 - **`nodes/<node>.md`** summarises a node and links to its stacks.
-- **`stacks/<node>--<stack>.md`** is the same combined document the Stack Dossier's own export produces: generated anatomy followed by your operator notes.
+- **`stacks/<node>--<stack>.md`** combines that stack's generated anatomy with your operator notes, in the same format as the Stack Dossier's own export (see below for the one section it omits).
 
 ## Generated facts and your notes
 
 Everything Sencho can derive (services, published ports, volumes, networks, restart policy, env file and its variable count, missing `${VAR}` references, and Git source) is generated live from each stack's current Compose file, so it never drifts. Everything Sencho cannot infer (purpose, owner, access URLs, static IP, VLAN, firewall, reverse proxy, backup, upgrade, and recovery notes) comes from the Stack Dossier you maintain per stack. Stacks without notes are still included, documented from their generated facts alone.
+
+When the Networking tab capability is available on a node, each of that node's stack pages also includes a network exposure summary (stack-level exposure intent and per-service port reachability), the same section the [Stack Dossier](/features/stack-dossier) export shows. The Fleet Dossier does not include the Storage tab's storage summary, even when that capability is available and a stack's own Stack Dossier export would show it; download that stack's individual dossier if you need its storage summary.
 
 ## Unreachable nodes
 
@@ -44,8 +46,12 @@ As with the Stack Dossier, the generated facts only ever carry env variable **na
 Administrators can export the fleet dossier:
 
 1. Open the **Fleet** view.
-2. Click **Export Dossier** in the toolbar.
+2. Click **Export Dossier** in the toolbar, next to Refresh.
 3. Your browser downloads `homelab-dossier.zip`. Unzip it wherever you keep documentation.
+
+<Frame>
+  <img src="/images/fleet-dossier/fleet-dossier-toolbar.png" alt="Fleet view toolbar showing the Export Dossier button next to Refresh, above the node grid" />
+</Frame>
 
 ## Troubleshooting
 
@@ -61,5 +67,11 @@ Administrators can export the fleet dossier:
   </Accordion>
   <Accordion title="The same stack name appears under two nodes">
     Dossiers and stacks are scoped per node, so a stack with the same name on two nodes exports as two separate pages, each prefixed with its node (for example `local--radarr.md` and `media-node--radarr.md`).
+  </Accordion>
+  <Accordion title="A stack page is missing its storage summary">
+    The Fleet Dossier only ever includes a network exposure summary per stack, never a storage summary, regardless of which capabilities are active on that node. Download the stack's own dossier from its Dossier tab to get the storage summary alongside the same generated facts and notes.
+  </Accordion>
+  <Accordion title="The export fails immediately with an error toast">
+    This means the export could not even enumerate your fleet, for example the local node's connection dropped mid-export or your session expired. Unlike a single unreachable remote node, which is skipped and noted in `index.md`, this stops the whole export. Confirm you are still signed in and the local node is reachable, then try again.
   </Accordion>
 </AccordionGroup>

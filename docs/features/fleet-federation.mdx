@@ -3,57 +3,59 @@ title: "Fleet Federation"
 description: "Operator-driven placement controls: cordon nodes and pin blueprints to specific nodes."
 ---
 
-The **Federation** tab is the placement-control surface for fleets running [Blueprints](/features/blueprint-model). It lets you steer where new deployments land without rewriting selectors or labels: mark a node unschedulable for new work, or force a specific blueprint to remain on a specific node regardless of selector matches. Federation builds on the Blueprints reconciler, so the controls described here only affect blueprint-managed deployments.
+The **Federation** tab is the placement-control surface for fleets running [Blueprints](/features/blueprint-model). It lets you steer where new deployments land without rewriting selectors or labels: mark a node unschedulable for new work, or force a specific blueprint to remain on a specific node regardless of selector matches. Federation builds on the Blueprints reconciler, so the controls described here only affect blueprint-managed deployments, and every placement change they cause still has to pass through the same rollout-confirmation gate as any other Blueprint change.
 
 Federation lives under **Fleet → Federation**.
 
-<Frame>
-  <img src="/images/fleet-federation/federation-tab.png" alt="Fleet → Federation tab on a fleet with one cordoned node. The Cordoned nodes section reads '1 of 7' with the hint 'TOGGLE ON EACH NODE CARD' and lists sencho-test-01 with a REMOTE chip, a timestamp ('since 5/18/2026, 5:50:28 PM'), and the operator-supplied reason 'Patching kernel, back online in 30m'. The Pin policy section below reads 'Force a blueprint onto a specific node, overriding its selector.' and shows the empty-state message 'No blueprints yet. Create one in the Deployments tab to manage placement here.'" />
+<Frame caption="Fleet → Federation on a fleet with one cordoned node (Opsix, with a reason) and one blueprint in the Pin policy table.">
+  <img src="/images/fleet-federation/federation-tab-overview.png" alt="Fleet → Federation tab on a four-node fleet. The Cordoned nodes section reads '1 of 4' with the hint 'TOGGLE ON EACH NODE CARD' and lists Opsix with a remote chip, a timestamp, and the operator-supplied reason 'Draining for docs walkthrough, back online shortly'. The Pin policy section below reads 'Force a blueprint onto a specific node, overriding its selector.' and shows one row for the blueprint docs-federation-demo, its selector summary '1 node', an (unpinned) dropdown, and an Effective column reading '1 node'." />
 </Frame>
 
 <Note>
-Federation placement controls (cordon, uncordon, pin, and unpin) are available on every tier. Cordon and pin mutations require an admin user role, or the node-admin role for cordon when scoped to that node.
+Cordon and pin mutations require an admin user role, or the node-admin role for cordon when scoped to that node.
 </Note>
 
 ## Placement control, not placement automation
 
 Sencho's blueprint reconciler resolves selectors automatically: when a node grows a matching label, the blueprint deploys; when the label is removed, the blueprint is withdrawn (or `evict_blocked` for stateful workloads). That works well until you need to override the automatic decision: take a node out of rotation for maintenance, keep a stack pinned to one host, or hold ground while you migrate. Federation gives you those overrides as explicit operator actions.
 
-The model is deliberate: Sencho proposes placements; you confirm or override them. The reconciler never moves an existing deployment in response to cordon or pin. Cordon affects only *new* placements, and pin only changes which node the reconciler considers desired. Eviction from non-pinned nodes still flows through the existing state-review and confirmation prompts.
+The model is deliberate in two layers. First, Sencho proposes placements; you confirm or override them with cordon and pin. The reconciler never moves an existing deployment in response to cordon or pin by itself: cordon affects only *new* placements, and pin only changes which node the reconciler considers desired. Second, changing what the reconciler *wants* to do is not the same as authorizing it to act. Every Blueprint carries a rollout-approval gate ([Blueprints § Apply on demand](/features/blueprint-model#apply-on-demand)): the reconciler only executes place or remove actions that an operator already reviewed and confirmed in a rollout preview. Pinning or unpinning a blueprint always clears that approval, because the pin is part of what Sencho fingerprints as the blueprint's operational intent. Cordoning or uncordoning a node does not touch the blueprint's approval directly, but uncordoning can surface a brand-new placement that was never part of a confirmed plan, and that new placement waits for confirmation the same way a pin change does.
 
-In practice, Federation hands you four operator decisions:
+In practice, Federation hands you four operator decisions, each of which still ends at a rollout preview before the fleet actually changes:
 
 - **Don't schedule new work here for a while.** Cordon a node.
-- **Anchor this blueprint to one host.** Pin a blueprint.
-- **Hand the decision back to the reconciler.** Uncordon or unpin.
-- **Ride out a migration.** Combine pin (on the destination) with cordon (on the source) so the source drains naturally and the destination becomes the new home.
+- **Anchor this blueprint to one host.** Pin a blueprint, then confirm the rollout.
+- **Hand the decision back to the reconciler.** Uncordon or unpin, then confirm the rollout if it surfaces a new placement.
+- **Ride out a migration.** Combine pin (on the destination) with cordon (on the source) so the source drains naturally and the destination becomes the new home once you confirm.
 
 ## Key capabilities
 
 ### Cordon a node
 
-Cordon marks a node as unschedulable. From the moment a node is cordoned, the reconciler skips it for new placements; existing stacks keep running, drift checks keep running, and revision bumps still redeploy in place. The cordon is visible to every tier (the read-only `Cordoned` pill on the node card) so operators can see why a node is not picking up new work. Uncordon to lift the restriction.
+Cordon marks a node as unschedulable. From the moment a node is cordoned, the reconciler stops proposing it for new placements: existing stacks keep running, drift checks keep running, and revision bumps still redeploy in place on that node. Because cordon only *removes* a node from consideration, it needs no separate confirmation; the effect is visible on the node's next reconciliation tick without an Apply now / Confirm Apply round trip. The cordon is visible to every role (the read-only `Cordoned` pill on the node card) so operators can see why a node is not picking up new work. Uncordoning is different: it can make the node newly eligible for a blueprint that targets it, and that eligibility is a real fleet mutation, so it goes through the same rollout preview as any other new placement (see [Behaviour and lifecycle](#behaviour-and-lifecycle) below).
 
-The cordon reason is free-form text (up to 256 characters). It surfaces in the Federation tab summary, in the cordon pill's tooltip on the node card, and on the audit log row for the action.
+The cordon reason is free-form text (up to 256 characters). It surfaces in the Federation tab summary and in the cordon pill's tooltip on the node card. The action itself is recorded in the audit log with the summary "Cordoned node" or "Uncordoned node."
 
 ### Pin a blueprint to a node
 
 Pinning a blueprint forces the reconciler to treat that blueprint as desired only on a single specific node, regardless of what its selector says. The pin overrides the selector entirely. Pin is the right tool when a workload depends on local state, must run on a specific host (a gateway, an integration target), or is in the middle of a host-to-host migration.
 
-When the target node is removed from the fleet, the pin clears automatically and the blueprint reverts to its selector behaviour on the next reconciliation tick.
+Selecting a node from the **Pinned to** dropdown saves the pin immediately, but pinning also clears the blueprint's rollout approval: the reconciler will not create the deployment on the new target, or remove it from any node the pin no longer covers, until you open that blueprint in **Fleet → Deployments** and confirm a rollout preview. The Federation tab's **Effective** column shows what the reconciler will pursue once authorized, which is not necessarily what is running right now if a confirmation is still pending.
+
+When the target node is removed from the fleet, the pin clears automatically and the blueprint reverts to its selector behaviour, again subject to a fresh confirmation before anything actually redeploys.
 
 ### Audit visibility
 
-Cordon, uncordon, and pin actions all flow through Sencho's standard audit log. Each action records the actor, the affected resource, and the optional reason (for cordon). Filter the **Audit** view by `node.cordon`, `node.uncordon`, or `blueprint.pin` to see the full history.
+Cordon, uncordon, and pin all flow through Sencho's standard audit log, alongside every other mutating request. Each row records the actor, the HTTP method and path, and a short summary: "Cordoned node," "Uncordoned node," or "Updated blueprint pin." There is no separate action-name filter for these events; use the free-text search box on the **Audit** view (it matches against the path and the summary) to find them, for example by searching "cordon" or "pin."
 
 ## Prerequisites
 
 | Requirement | Why it matters |
 |-------------|----------------|
-| **Community or Admiral on the control instance** | Federation placement is part of the Compose-first control plane. Remote nodes inherit the control instance tier through the [proxy tier assertion](/features/multi-node#license-enforcement-across-nodes). |
 | **Admin or node-admin role** | Pin policy edits require admin. Cordon and uncordon require `node:manage` (admin, or node-admin when scoped to that node). Operator and viewer roles can read cordon state but cannot toggle it. |
 | **At least one Blueprint defined** | The Pin policy table is empty until you create a blueprint under **Fleet → Deployments**. Cordon does not require any blueprints; it only suppresses *new* placements from blueprints that exist later. |
-| **Active connection to each remote node** | Cordon state is written to the control instance's local database, but it only takes effect once the reconciler runs against the fleet's current node set. A remote node that is `Offline` still carries its cordon flag and resumes honouring it as soon as it comes back. |
+| **A confirmed rollout after any pin change** | Setting or clearing a pin only declares intent. The actual create/remove on the fleet waits for **Apply now → Confirm Apply** on the blueprint's detail sheet, same as any other change to the blueprint's operational intent. See [Blueprints § Apply on demand](/features/blueprint-model#apply-on-demand). |
+| **Active connection to each remote node** | Cordon state is written to the control instance's local database, but it only takes effect once the reconciler runs against the fleet's current node set. A remote node that is `Offline` still carries its cordon flag and resumes honouring it as soon as it comes back. An offline node also blocks Confirm Apply on any pin that targets it, since the rollout preview elevates an unreachable target to a blocker. |
 
 ## Step by step
 
@@ -61,23 +63,19 @@ Cordon, uncordon, and pin actions all flow through Sencho's standard audit log. 
 
 Open **Fleet → Overview**. On the card for the node you want to cordon, click the kebab menu (`⋯`) in the top-right corner and choose **Cordon node**.
 
-<Frame>
-  <img src="/images/fleet-federation/node-card-kebab-cordon.png" alt="Fleet Overview grid with the kebab menu open on a sencho-test-01 node card. The menu surfaces three items: Edit node, Delete node, and Cordon node (Ban icon). Other node cards (Local, Opsix, Pitt-Moba, sencho-pilot-test, sencho-test-02, SLX-Mars) are visible behind the open menu." />
-</Frame>
-
 A confirmation dialog opens with an optional reason field. The reason is free-form text up to 256 characters; type a short note that will help the rest of your team understand why the node is out of rotation.
 
-<Frame>
-  <img src="/images/fleet-federation/cordon-modal-with-reason.png" alt="Cordon confirmation dialog titled 'Cordon sencho-test-01'. The description reads 'Mark this node as unschedulable. New blueprint deployments will skip it. Existing deployments remain in place.' A 'Reason (optional)' text field is populated with 'Patching kernel, back online in 30m'. Cancel and 'Cordon node' buttons sit in the dialog footer." />
+<Frame caption="Cordon confirmation dialog with a reason filled in.">
+  <img src="/images/fleet-federation/cordon-confirm-dialog.png" alt="Cordon confirmation dialog titled 'Cordon Opsix'. The description reads 'Mark this node as unschedulable. New blueprint deployments will skip it. Existing deployments remain in place.' A 'Reason (optional)' text field is populated with 'Draining for docs walkthrough, back online shortly'. Cancel and 'Cordon node' buttons sit in the dialog footer." />
 </Frame>
 
 Click **Cordon node** to commit. The card immediately gains a `Cordoned` pill, and the Federation tab's Cordoned nodes summary picks the node up on the next refresh.
 
-<Frame>
-  <img src="/images/fleet-federation/node-card-cordoned-badge.png" alt="Fleet Overview grid with the sencho-test-01 node card showing the amber 'Cordoned' pill alongside the existing Online, remote, version, and Update available badges. Surrounding node cards (Local, Opsix, Pitt-Moba, sencho-pilot-test, sencho-test-02, SLX-Mars) have no cordon indicator." />
+<Frame caption="Node card carrying the Cordoned pill after confirming.">
+  <img src="/images/fleet-federation/node-card-cordoned-badge.png" alt="Fleet Overview grid with the Opsix node card showing the amber 'Cordoned' pill alongside the existing Online, remote, and version badges. The Local, Pitt-Moba, and SLX-Mars cards have no cordon indicator." />
 </Frame>
 
-Use **Uncordon node** from the same menu to lift the restriction. Uncordoning opens a short confirmation that reads *"Re-enable this node for new blueprint placements. Existing deployments are unchanged."* Confirming clears the flag and the pill disappears on the next refresh.
+Use **Uncordon node** from the same menu to lift the restriction. Uncordoning opens a short confirmation that reads *"Re-enable this node for new blueprint placements. Existing deployments are unchanged."* Confirming clears the flag and the pill disappears on the next refresh. If a blueprint's selector now matches the newly uncordoned node, that new placement waits in a `reapproval required` state until you confirm it in the blueprint's rollout preview.
 
 ### Pin a blueprint to a node
 
@@ -87,41 +85,61 @@ Open **Fleet → Federation** and find the blueprint row in the **Pin policy** t
 |---|---|
 | **Blueprint** | Name and short description. |
 | **Selector** | The selector you would otherwise match against, kept for context. |
-| **Pinned to** | A dropdown listing every node in the fleet plus an *(unpinned)* option. Changing it saves immediately and triggers a reconciliation. |
-| **Effective** | The desired set the reconciler will actually use: the pinned node when set, the selector summary otherwise. |
+| **Pinned to** | A dropdown listing every node in the fleet plus an *(unpinned)* option. A cordoned node is labelled inline (`Node · cordoned`) so you can see at a glance that pinning it will override the cordon. |
+| **Effective** | The desired set the reconciler will pursue once authorized: the pinned node when set, the selector summary otherwise. This is a live computation, not a status of what is currently deployed. |
 
-Select a node from the **Pinned to** dropdown to pin. Select *(unpinned)* to clear the pin and hand the decision back to the reconciler. The change saves on selection (no separate Save button), and the **Effective** column updates in place.
+<Frame caption="The Pinned to dropdown open, with the cordoned node labelled inline.">
+  <img src="/images/fleet-federation/pin-dropdown-cordoned-hint.png" alt="Pinned to dropdown open for the docs-federation-demo blueprint, listing (unpinned), Local, 'Opsix · cordoned', Pitt-Moba, and SLX-Mars as options." />
+</Frame>
 
-When a pin is active, the blueprint's [drift mode](/features/blueprint-model#drift-policy) and stateful classification still apply on the pinned node. Pin only changes *where* the blueprint is desired, not *how* it is reconciled there. The blueprint detail sheet renders a small read-only banner (`Pinned to <node>. Selector is overridden.`) and the deployment table marks the pinned row with a `Pinned` indicator so the override is obvious anywhere the blueprint surfaces.
+Select a node from the **Pinned to** dropdown to pin. Select *(unpinned)* to clear the pin and hand the decision back to the reconciler. The selection itself saves immediately, a toast confirms it, and the **Effective** column updates in place.
+
+<Frame caption="Pin saved. A toast confirms the write and the Effective column now reads the pinned node.">
+  <img src="/images/fleet-federation/pin-applied-toast.png" alt="Federation tab with a success toast reading 'docs-federation-demo pinned to Opsix'. The Pin policy row's Pinned to cell now reads 'Opsix · cordoned' and the Effective column reads 'pin: Opsix'." />
+</Frame>
+
+Saving the pin does **not** deploy anything yet. Go to **Fleet → Deployments**, open the blueprint, and click **Apply now**. Sencho opens a rollout preview listing the place and remove actions the pin change produces, any warnings or blockers, and a running Safe / Warnings / Blockers count. Click **Confirm Apply** to authorize and execute the plan.
+
+<Frame caption="Rollout preview for a first, unblocked deploy: one safe placement, one warning, zero blockers.">
+  <img src="/images/fleet-federation/rollout-preview-safe.png" alt="Confirm rollout dialog for blueprint docs-federation-demo reading 'Enabled blueprints still need this confirmation before the reconciler mutates the fleet.' Summary line reads Safe 1, Warnings 1, Blockers 0, pending. A Warnings section lists 'no persistent volumes detected'. A Changes section lists 'Local (local/online) · create · safe: New placement'. Cancel and Confirm Apply buttons sit in the footer, Confirm Apply enabled." />
+</Frame>
+
+If the pin target is unreachable, the preview elevates that placement to a blocker and disables **Confirm Apply** until the node is reachable again or you change the pin:
+
+<Frame caption="Rollout preview after pinning to an offline node: the new placement is a blocker, so Confirm Apply is disabled.">
+  <img src="/images/fleet-federation/rollout-preview-blocked.png" alt="Confirm rollout dialog reading Safe 0, Warnings 2, Blockers 1, pending. A Blockers section reads 'demo-remote: New placement [remote/unknown: Remote node cached as offline or unknown]'. A Warnings section lists 'Local: Deploy in flight (leaving selector)' and 'no persistent volumes detected'. The Changes list shows the in-flight Local row and the blocked demo-remote create. The Confirm Apply button is greyed out and disabled." />
+</Frame>
+
+When a pin is active and confirmed, the blueprint's [drift mode](/features/blueprint-model#drift-policy) and stateful classification still apply on the pinned node. Pin only changes *where* the blueprint is desired, not *how* it is reconciled there. The blueprint detail sheet renders a small read-only banner (`Pinned to <node>. Selector is overridden.`) and the deployment table marks the pinned row with a `Pinned` indicator so the override is obvious anywhere the blueprint surfaces.
 
 ### Verify
 
 After cordoning or pinning, check the verification surfaces:
 
-- **Cordon:** the node card carries a `Cordoned` pill in the Fleet → Overview grid, and the node appears in the Federation tab's *Cordoned nodes* section with the timestamp and reason. The audit log records a `node.cordon` event.
-- **Pin:** the Pin policy row's **Effective** column reads the pinned node, the blueprint detail sheet shows the override banner, and the deployment table marks the pinned row. The audit log records a `blueprint.pin` event.
+- **Cordon:** the node card carries a `Cordoned` pill in the Fleet → Overview grid, and the node appears in the Federation tab's *Cordoned nodes* section with the timestamp and reason. The audit log records a "Cordoned node" entry.
+- **Pin:** the Pin policy row's **Effective** column reads the pinned node, the blueprint detail sheet shows the override banner, and the deployment table marks the pinned row once the rollout has been confirmed. Until it is confirmed, the blueprint's catalog tile and detail sheet footer show **pending** or **reapproval required**. The audit log records an "Updated blueprint pin" entry for the pin write itself.
 
 ## Behaviour and lifecycle
 
-| Action | Takes effect | Persists across restart |
-|---|---|---|
-| Cordon | Next reconciliation tick, for new placement and state-review decisions only | Yes |
-| Uncordon | Next reconciliation tick | Yes (the flag is cleared, not just hidden) |
-| Pin | Immediate; the next reconciliation tick treats the pinned node as the only desired target | Yes |
-| Unpin | Immediate; the reconciler reverts to selector behaviour | Yes (cleared) |
-| Pinned node deleted | Pin clears automatically as part of node deletion housekeeping | Yes (cleared) |
+| Action | Takes effect | Requires a confirmed rollout | Persists across restart |
+|---|---|---|---|
+| Cordon | Next reconciliation tick, for new placement and state-review decisions only | No, cordon only removes a candidate placement | Yes |
+| Uncordon | Node becomes newly eligible on the next tick | Yes, if that eligibility produces a new create/update action | Yes (the flag is cleared, not just hidden) |
+| Pin | Saved immediately; clears the blueprint's rollout approval | Yes, always, because the pin is part of the blueprint's fingerprinted intent | Yes |
+| Unpin | Saved immediately; clears the blueprint's rollout approval | Yes, always, for the same reason | Yes (cleared) |
+| Pinned node deleted | Pin clears automatically as part of node deletion housekeeping | Yes, for whatever placement change follows | Yes (cleared) |
 
 The reconciler only re-evaluates cordon when it is deciding where a blueprint should run *next* or whether the live state matches the desired state. Drift checks against existing containers, revision-driven redeploys, and manual deploys initiated from the stack editor all bypass the cordon flag by design. The flag is a hint to the placement layer, not a quarantine on the node.
 
-The **Effective** column in the Pin policy table is computed live each time the page loads. It is not stored; only the pin itself persists.
+The **Effective** column in the Pin policy table is computed live each time the page loads. It is not stored, and it does not mean "currently running": it shows the node the reconciler will pursue once it has an authorized plan to act on. Only the pin itself, and the blueprint's approval state, persist.
 
 ## Security and audit
 
-Federation mutations require an admin user role, or the node-admin role for cordon when scoped to that node. The `Cordoned` pill on the node card stays visible at every tier as a read-only signal, so operators without placement permissions can still see why a node is skipping new work.
+Federation mutations require an admin user role, or the node-admin role for cordon when scoped to that node. The `Cordoned` pill on the node card stays visible at every role as a read-only signal, so operators without placement permissions can still see why a node is skipping new work.
 
-Every cordon, uncordon, and pin action is captured in the audit log. Each row carries the actor, the action (`node.cordon`, `node.uncordon`, `blueprint.pin`), the affected resource, and the cordon reason where applicable. Filter the **Audit** view by these action names for the full history.
+Every cordon, uncordon, and pin write is captured in the audit log with the actor, the request path, the status code, and a short summary. There is no dedicated action-name taxonomy for these events (no `node.cordon` or `blueprint.pin` filter); search the **Audit** view's free-text box for "cordon" or "pin" to find the relevant rows, or narrow by the `POST`/`PUT` method filter.
 
-Federation is hub-only. The cordon flag and the pin live on the control instance, and the blueprint reconciler that reads them also runs on the control instance. Cordoning a remote node does not require any change on the remote itself.
+Federation is hub-only. The cordon flag and the pin live on the control instance, and the blueprint reconciler that reads them also runs on the control instance. Cordoning a remote node does not require any change on the remote itself. The confirm-before-mutate gate described above is a fleet-wide Blueprints property, not something Federation adds on top; Federation's cordon and pin writes are simply two of the inputs that can change what a blueprint's next confirmed rollout will do.
 
 ## Limitations and non-goals
 
@@ -129,45 +147,52 @@ Federation v1 ships the two controls above and nothing more. The following are d
 
 - **Drain node.** Evacuating all blueprints from a node depends on volume migration, which is operator-driven for stateful workloads in the current release.
 - **Capacity planning.** Predictive resource utilisation belongs to a later iteration once there is real-world fleet usage data to calibrate against.
-- **Auto-eviction on cordon.** Cordon never withdraws or evicts an existing deployment. Use the deployment table for explicit withdraw or eviction confirmations.
-- **In-place-redeploy block.** Cordon does not stop revision-driven redeploys on the cordoned node. Bumping a blueprint's revision still redeploys the existing stack in place on every node where it already runs, cordoned or not.
+- **Auto-eviction on cordon.** Cordon never withdraws or evicts an existing deployment. Use the deployment table for explicit withdraw or eviction confirmations, which themselves require an authorized remove outcome from a confirmed rollout.
+- **In-place-redeploy block.** Cordon does not stop revision-driven redeploys on the cordoned node. Bumping a blueprint's revision still redeploys the existing stack in place on every node where it already runs, cordoned or not, once that revision change is confirmed.
 - **Manual deploy interception.** Cordon affects the blueprint reconciler only. A manual deploy initiated from the stack editor still lands on whichever node you target.
 - **Drift-mode override.** Pin does not change the blueprint's drift policy or stateful classification on the pinned node. Both flow through unchanged.
+- **Automatic pin execution.** Pinning or unpinning never deploys or withdraws anything by itself. It only changes what the next rollout preview will propose; you still confirm it.
 - **Reason length.** The cordon reason is capped at 256 characters and stored verbatim.
 
 ## Practical workflows
 
 ### Take a node out of rotation for OS patching
 
-Cordon the node with a reason that names the work (e.g. *"Patching kernel, back online in 30m"*). The Federation tab summary and the node-card tooltip surface that reason for the rest of your team. Existing stacks keep running while you reboot and patch; new blueprint placements skip the node until you uncordon.
+Cordon the node with a reason that names the work (e.g. *"Patching kernel, back online in 30m"*). The Federation tab summary and the node-card tooltip surface that reason for the rest of your team. Existing stacks keep running while you reboot and patch; new blueprint placements skip the node until you uncordon, and even then nothing deploys onto it until you confirm the resulting rollout.
 
 ### Migrate a stack between hosts
 
-Pin the blueprint to the destination node first. The next reconciliation tick deploys onto the destination. Once health checks pass on the destination, withdraw the original deployment from the source via the deployment table. The pin holds the workload on the destination while you tear down the source, so there is no window where the reconciler can reverse the move.
+Pin the blueprint to the destination node, then open the blueprint in **Fleet → Deployments** and confirm the rollout preview. That single confirmation both authorizes the new placement on the destination and authorizes withdrawing (or, for a stateful blueprint, flagging for eviction) the node the pin no longer covers. Once health checks pass on the destination, withdraw or evict the original deployment from the deployment table if it did not clear automatically. The pin holds the workload on the destination while you tear down the source, so there is no window where the reconciler can reverse the move on its own; the only remaining step is the explicit confirmation you already made.
 
 ### Anchor a gateway-only blueprint
 
-Pin a gateway blueprint (reverse proxy, ingress, tunnel) to the node that owns the public IP. Even if the selector matches a second node, the pin overrides; only the gateway host receives the deployment. If the gateway node is also cordoned for maintenance, the pin wins: the blueprint stays on the pinned node even while it is otherwise unschedulable.
+Pin a gateway blueprint (reverse proxy, ingress, tunnel) to the node that owns the public IP, then confirm the rollout. Even if the selector matches a second node, the pin overrides; only the gateway host receives the deployment. If the gateway node is also cordoned for maintenance, the pin wins: the blueprint stays on the pinned node even while it is otherwise unschedulable.
 
 ## Pin overrides cordon
 
-Cordon governs automatic placement; pin is an explicit operator decision. When the two collide (a blueprint pinned to a cordoned node), pin wins. The blueprint stays on (or deploys onto) the pinned node even though the node is otherwise unschedulable. This keeps cordon's cost predictable: cordoning a node cannot silently break a workload you already chose to anchor there. If you want to remove the workload too, unpin the blueprint or withdraw it explicitly.
+Cordon governs automatic placement; pin is an explicit operator decision. When the two collide (a blueprint pinned to a cordoned node), pin wins. The blueprint stays on (or, once confirmed, deploys onto) the pinned node even though the node is otherwise unschedulable. This keeps cordon's cost predictable: cordoning a node cannot silently break a workload you already chose to anchor there. If you want to remove the workload too, unpin the blueprint or withdraw it explicitly (subject to the same confirmation rule as any other removal).
 
 ### Pinning a stateful blueprint
 
-Pinning a stateful blueprint that is currently deployed on multiple nodes shrinks the desired set to one node. On the next reconciliation tick, the non-pinned deployments enter `evict_blocked` and wait for an explicit eviction confirmation. This is the same flow that protects stateful workloads from automatic withdraw when a selector changes. Confirm each eviction from the deployment table or unpin the blueprint to restore the original desired set.
+Pinning a stateful blueprint that is currently deployed on multiple nodes shrinks the desired set to one node. Once you confirm the resulting rollout, the non-pinned deployments enter `evict_blocked` and wait for an explicit eviction confirmation from the deployment table. This is the same flow that protects stateful workloads from automatic withdraw when a selector changes. Confirm each eviction from the deployment table or unpin the blueprint to restore the original desired set.
 
 ## Troubleshooting
 
 <AccordionGroup>
+  <Accordion title="I pinned a blueprint (or uncordoned a node) but nothing deployed">
+    This is expected. Pinning, unpinning, and any placement change that uncordoning surfaces only update what the reconciler *wants* to do; they never execute on their own. Open the blueprint in **Fleet → Deployments**, click **Apply now**, review the rollout preview, and click **Confirm Apply**. Until you do, the blueprint's catalog tile and detail sheet footer show **pending** or **reapproval required**.
+  </Accordion>
+  <Accordion title="Confirm Apply is disabled in the rollout preview">
+    A blocker is present. The most common cause after a pin change is an offline or unreachable target node: the preview elevates a create or remove action on an offline node to a blocker and disables Confirm Apply until it clears. Check the node's status in Fleet → Overview, or change the pin to a reachable node. An in-progress deploy on another node (`Deploy in flight`) surfaces as a warning, not a blocker, and does not by itself block confirmation.
+  </Accordion>
   <Accordion title="A blueprint refuses to deploy on a node that matches its selector">
-    Check whether the node is cordoned. Cordoned nodes are excluded from new placements; the Federation tab summary lists every cordoned node and the reason. Uncordon the node to re-enable automatic placement, or pin the blueprint explicitly to deploy onto a cordoned node.
+    Check whether the node is cordoned. Cordoned nodes are excluded from new placements; the Federation tab summary lists every cordoned node and the reason. Uncordon the node to make it eligible again, then confirm the resulting rollout preview, or pin the blueprint explicitly to deploy onto a cordoned node (also subject to confirmation).
   </Accordion>
   <Accordion title="A cordoned node still received a new deployment">
-    Check whether the blueprint is pinned to that node. Pin overrides cordon by design, so a blueprint pinned to a cordoned node still deploys on the next reconciliation tick. Unpin the blueprint to restore selector-driven placement, then cordon will be honoured.
+    Check whether the blueprint is pinned to that node. Pin overrides cordon by design, so a blueprint pinned to a cordoned node still deploys once the pin's rollout is confirmed. Unpin the blueprint to restore selector-driven placement, then cordon will be honoured.
   </Accordion>
   <Accordion title="A pinned blueprint deployed somewhere unexpected">
-    The pin is the source of truth. Open Federation and confirm the **Pinned to** value matches your intent. The **Effective** column shows what the reconciler will use. Selector matches are ignored while a pin is set.
+    The pin is the source of truth. Open Federation and confirm the **Pinned to** value matches your intent. The **Effective** column shows what the reconciler will pursue once authorized. Selector matches are ignored while a pin is set.
   </Accordion>
   <Accordion title="Pinning a blueprint left rows in evict_blocked on the other nodes">
     That is the stateful guard working as intended. The reconciler does not auto-evict stateful workloads; each leftover deployment must be confirmed from the deployment table, just like a selector change would require. Unpinning the blueprint restores the original desired set if you want to keep all of them.
@@ -176,13 +201,16 @@ Pinning a stateful blueprint that is currently deployed on multiple nodes shrink
     The Fleet Overview grid polls every 30 seconds, so the `Cordoned` pill can lag the action by up to that long. The Federation tab summary and the audit log update immediately; if the audit log shows the cordon action but the badge is still missing, click **Refresh** on the Fleet page to force an immediate re-fetch.
   </Accordion>
   <Accordion title="The Federation tab is not visible">
-    Federation is available on every tier under **Fleet → Federation**. Cordon and pin mutations require an admin user (or node-admin for cordon on nodes they manage). If the tab is missing, refresh the Fleet page; if controls are read-only, sign in as an admin.
+    Federation lives under **Fleet → Federation** on every Sencho instance. Cordon and pin mutations require an admin user (or node-admin for cordon on nodes they manage). If the tab is missing, refresh the Fleet page; if controls are read-only, sign in as an admin.
   </Accordion>
   <Accordion title="The Pin policy table is empty even though I created blueprints">
     Federation reads from the same Blueprints registry that powers **Fleet → Deployments**. If the Deployments tab shows blueprints but Federation does not, refresh the Fleet page (the Pin policy table caches its source list when the tab mounts). If Deployments is also empty, no blueprint has been saved yet; create one there first.
   </Accordion>
   <Accordion title="A pinned node was deleted">
-    The pin clears automatically when its target node is removed from the fleet. The blueprint reverts to its selector behaviour on the next reconciliation tick. There is no manual cleanup step.
+    The pin clears automatically when its target node is removed from the fleet. The blueprint reverts to its selector behaviour, subject to a fresh rollout confirmation before anything actually redeploys. There is no manual cleanup step.
+  </Accordion>
+  <Accordion title="I can't find 'node.cordon' or 'blueprint.pin' in the Audit filters">
+    Those action names don't exist. Sencho's audit log records the HTTP method, path, and a plain-language summary ("Cordoned node," "Uncordoned node," "Updated blueprint pin") rather than a fixed action taxonomy. Use the Audit view's search box with a keyword like "cordon" or "pin" instead of a formal filter value.
   </Accordion>
 </AccordionGroup>
 
@@ -198,7 +226,7 @@ Federation is one tab in a larger Fleet view, and it focuses on a narrow slice o
 | [Sencho Mesh](/features/sencho-mesh) | Cross-node container networking so a service on one node can reach a service on another by alias. | Mesh routes packets between containers; Federation decides which nodes receive blueprint deployments. |
 | [Fleet Actions](/features/fleet-actions) | Bulk operations across labelled nodes (restart, stop). | Fleet Actions runs imperative operations on existing deployments; Federation steers declarative placement decisions. |
 | [Fleet Sync](/features/fleet-sync) | Push-only replication of security policies (scan policies, CVE suppressions) from a control instance to replica instances. | Fleet Sync replicates *security state*, not placement; the two features do not interact. |
-| [Blueprints](/features/blueprint-model) | The declarative deployment model whose reconciler Federation steers. | Required reading: without Blueprints, Federation has nothing to do. |
+| [Blueprints](/features/blueprint-model) | The declarative deployment model whose reconciler Federation steers, including the rollout-preview and Confirm Apply mechanic every Federation change flows through. | Required reading: without Blueprints, Federation has nothing to do, and the confirm step described throughout this page is defined there. |
 | [Licensing](/features/licensing) | Community and Admiral plans. | How fleet capabilities relate to plans. |
 
 Federation is not Fleet Sync, not Mesh, and not the remote-node proxy. The cordon flag affects only declarative blueprint deployments, not manually deployed stacks. If you are looking for a way to take an entire node fully out of service (existing deployments included), see the deployment table's withdraw flow on each affected blueprint; cordon by itself is intentionally non-destructive.
