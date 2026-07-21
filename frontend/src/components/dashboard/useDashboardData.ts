@@ -114,6 +114,11 @@ export function useDashboardData(): DashboardData {
   // Latest-request arbitration for /stacks/statuses: polling, invalidation,
   // mount, and Retry can overlap; only the current generation may commit.
   const stackStatusesFetchGenRef = useRef(0);
+  // Soft poll/invalidation must not start while any statuses request is in
+  // flight. Fixed-interval ticks would otherwise bump generation forever and
+  // starve a slow foreground hydration. Foreground (mount/retry/node change)
+  // always starts and supersedes obsolete work.
+  const stackStatusesInFlightRef = useRef(false);
   useEffect(() => {
     hadSuccessfulStatusesRef.current = false;
   }, [nodeId]);
@@ -245,7 +250,9 @@ export function useDashboardData(): DashboardData {
     mode: 'foreground' | 'soft',
   ) => {
     if (nodeIdRef.current !== currentNodeId) return;
+    if (mode === 'soft' && stackStatusesInFlightRef.current) return;
     const generation = ++stackStatusesFetchGenRef.current;
+    stackStatusesInFlightRef.current = true;
     if (mode === 'foreground') {
       setStackStatusesLoadStatus('loading');
       setStackStatusesLoadError(null);
@@ -286,6 +293,12 @@ export function useDashboardData(): DashboardData {
         mode,
         'Could not load stack health.',
       );
+    } finally {
+      // Only the latest generation clears the gate. A superseded request that
+      // finishes later must not reopen soft polling while a newer fetch is live.
+      if (stackStatusesFetchGenRef.current === generation) {
+        stackStatusesInFlightRef.current = false;
+      }
     }
   }, [commitStackStatusesSuccess, commitStackStatusesFailure, isCurrentStatusesFetch]);
 
