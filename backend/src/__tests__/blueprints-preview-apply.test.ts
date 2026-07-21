@@ -221,6 +221,51 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
         expect(stored.approved_intent_fingerprint).toBeNull();
     });
 
+    it('reports live pending approval when approval is cleared during reconcile', async () => {
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send(validBlueprintBody(node.id));
+        expect(created.status).toBe(201);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+
+        vi.mocked(BlueprintReconciler.getInstance().reconcileConfirmedPlan).mockImplementationOnce(async (id) => {
+            // Concurrent edit invalidated approval while the confirmed snapshot ran.
+            DatabaseService.getInstance().clearBlueprintApproval(id);
+            return {
+                outcomes: [{
+                    nodeId: node.id,
+                    nodeName: node.name,
+                    action: 'create',
+                    status: 'ok',
+                }],
+            };
+        });
+
+        const res = await request(app)
+            .post(`/api/blueprints/${created.body.id}/apply`)
+            .set('Cookie', adminCookie)
+            .send({
+                planFingerprint: preview.body.planFingerprint,
+                actions: preview.body.confirmableActions,
+            });
+        expect(res.status).toBe(200);
+        expect(res.body.effectiveApproval).toBe('pending');
+        expect(res.body.message).toMatch(/approval is no longer current/i);
+        expect(res.body.outcomes).toHaveLength(1);
+        expect(res.body.outcomes[0].status).toBe('ok');
+        expect(res.body.outcomeSummary.ok).toBe(1);
+
+        const stored = DatabaseService.getInstance().getBlueprint(created.body.id)!;
+        expect(stored.approval_status).toBe('pending');
+    });
+
     it('returns failed outcomes without pretending the rollout was clean', async () => {
         const node = seedNode();
         counter += 1;

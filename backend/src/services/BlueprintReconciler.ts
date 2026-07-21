@@ -80,6 +80,17 @@ export function messageForConfirmedOutcomes(summary: ConfirmedOutcomeSummary): s
     return 'Rollout confirmed';
 }
 
+/** Apply finished a confirmed snapshot, but live approval is no longer current. */
+export function messageForSnapshotFinishedWithStaleApproval(summary: ConfirmedOutcomeSummary): string {
+    if (summary.failed > 0) {
+        return 'Confirmed snapshot finished with node failures; approval is no longer current';
+    }
+    if (summary.pending > 0) {
+        return 'Confirmed snapshot finished with actions still in progress; approval is no longer current';
+    }
+    return 'Confirmed snapshot finished; approval is no longer current';
+}
+
 function mapDeployOutcome(
     base: { nodeId: number; nodeName: string; action: PreviewAction },
     result: DeployOutcome,

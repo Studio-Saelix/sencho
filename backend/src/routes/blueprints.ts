@@ -11,6 +11,7 @@ import { BlueprintService } from '../services/BlueprintService';
 import {
     BlueprintReconciler,
     messageForConfirmedOutcomes,
+    messageForSnapshotFinishedWithStaleApproval,
     summarizeConfirmedOutcomes,
 } from '../services/BlueprintReconciler';
 import { BlueprintAnalyzer } from '../services/BlueprintAnalyzer';
@@ -18,6 +19,7 @@ import { buildBlueprintPreview, evaluateLightweightEffectiveApproval } from '../
 import {
     confirmableActionsEqual,
     deriveBlastFromConfirmableActions,
+    evaluateEffectiveApproval,
     intentFingerprint,
     parseConfirmableActionsBody,
     serializeApprovedBlast,
@@ -450,11 +452,20 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
             });
             return;
         }
+        // Snapshot deploy may finish after a concurrent edit cleared approval.
+        // Report live effectiveApproval; do not hardcode "approved".
+        const live = DatabaseService.getInstance().getBlueprint(id);
+        const { effectiveApproval } = live
+            ? evaluateEffectiveApproval(live, preview.executorActions)
+            : { effectiveApproval: 'pending' as const };
         const outcomeSummary = summarizeConfirmedOutcomes(plan.outcomes);
+        const message = effectiveApproval === 'approved'
+            ? messageForConfirmedOutcomes(outcomeSummary)
+            : messageForSnapshotFinishedWithStaleApproval(outcomeSummary);
         res.json({
-            message: messageForConfirmedOutcomes(outcomeSummary),
+            message,
             blueprintId: id,
-            effectiveApproval: 'approved',
+            effectiveApproval,
             outcomes: plan.outcomes,
             outcomeSummary,
         });
