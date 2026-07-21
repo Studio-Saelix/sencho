@@ -206,4 +206,42 @@ describe('BlueprintService remote deploy', () => {
         expect(delSpy.mock.calls[0][0]).toMatch(/\/api\/stacks\//);
         expect(DatabaseService.getInstance().getDeployment(bp.id, node.id)).toBeUndefined();
     });
+
+    it('does not clear hub role assignments when withdrawing a remote deployment', async () => {
+        const bcrypt = await import('bcrypt');
+        const db = DatabaseService.getInstance();
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = db.getNode(node.id)!;
+        const bpObj = db.getBlueprint(bp.id)!;
+        db.upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            applied_revision: bpObj.revision,
+        });
+
+        const hash = await bcrypt.hash('password123', 1);
+        const userId = db.addUser({
+            username: `remote-wd-rbac-${counter}`, password_hash: hash, role: 'viewer',
+        });
+        db.addRoleAssignment({
+            user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: bpObj.name,
+        });
+
+        vi.spyOn(axios, 'get').mockResolvedValue({ status: 404, data: {} });
+        vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: {} });
+        const delSpy = vi.spyOn(axios, 'delete').mockResolvedValue({ status: 200, data: {} });
+        const rbacSpy = vi.spyOn(db, 'deleteRoleAssignmentsByResource');
+
+        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('withdrawn');
+        expect(delSpy.mock.calls[0][0]).toMatch(/\/api\/stacks\//);
+        expect(rbacSpy).not.toHaveBeenCalled();
+        expect(db.getAllRoleAssignments(userId)
+            .some((a) => a.resource_type === 'stack' && a.resource_id === bpObj.name)).toBe(true);
+
+        db.deleteUser(userId);
+    });
 });
