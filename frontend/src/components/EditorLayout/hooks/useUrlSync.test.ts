@@ -554,6 +554,76 @@ describe('useUrlSync', () => {
     pushSpy.mockRestore();
   });
 
+  it('writes dashboard URL after leaving a deleted editor stack', () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr');
+    const pushSpy = vi.spyOn(window.history, 'pushState');
+
+    const { rerender } = renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          activeView: 'editor',
+          selectedFile: 'radarr',
+          files: ['radarr'],
+        }),
+      },
+    );
+
+    act(() => {
+      rerender(makeOpts({
+        activeView: 'dashboard',
+        selectedFile: null,
+        files: [],
+      }));
+    });
+
+    const paths = [
+      ...pushSpy.mock.calls.map((call) => String(call[2] ?? '')),
+      window.location.pathname,
+    ];
+    expect(paths.some((p) => p === '/nodes/local/dashboard')).toBe(true);
+    expect(window.location.pathname).not.toContain('/stacks/radarr');
+
+    pushSpy.mockRestore();
+  });
+
+  it('writes mobile stack-list URL after leaving a deleted editor stack', () => {
+    window.history.replaceState({ senchoIdx: 0 }, '', '/nodes/local/stacks/radarr');
+    const pushSpy = vi.spyOn(window.history, 'pushState');
+
+    const { rerender } = renderHook(
+      (props) => useUrlSync(props),
+      {
+        initialProps: makeOpts({
+          activeView: 'editor',
+          selectedFile: 'radarr',
+          files: ['radarr'],
+          isMobile: true,
+          mobileSurface: 'detail',
+        }),
+      },
+    );
+
+    act(() => {
+      rerender(makeOpts({
+        activeView: 'dashboard',
+        selectedFile: null,
+        files: [],
+        isMobile: true,
+        mobileSurface: 'list',
+      }));
+    });
+
+    const paths = [
+      ...pushSpy.mock.calls.map((call) => String(call[2] ?? '')),
+      window.location.pathname,
+    ];
+    expect(paths.some((p) => p === '/nodes/local/stacks')).toBe(true);
+    expect(window.location.pathname).not.toContain('/stacks/radarr');
+
+    pushSpy.mockRestore();
+  });
+
   it('opens Monaco when hydrating /compose deep link', async () => {
     const loadFileForRoute = vi.fn().mockResolvedValue({ ok: true, envFiles: [] });
     const applyEditorRouteState = vi.fn();
