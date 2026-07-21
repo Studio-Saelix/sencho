@@ -3,10 +3,10 @@ title: Stack Activity
 description: Per-stack event log showing deploys, restarts, config changes, and alerts, each attributed to the user or system process that triggered them.
 ---
 
-The **Activity** tab in the right-hand **Anatomy** panel gives you a timestamped record of everything that happened to the selected stack: deploys, restarts, stops, starts, image updates, drift events, and health gate outcomes. Every entry is attributed to the user or background process that triggered it, so you always have full operational context at a glance. The **files** and **edit** buttons on the same header strip belong to the panel as a whole and stay available regardless of which tab is active.
+The **Activity** tab in the right-hand **Anatomy** panel gives you a timestamped record of everything that happened to the selected stack: deploys, restarts, stops, starts, take-downs, image updates, drift events, and health gate outcomes. Every entry is attributed to the user or background process that triggered it, so you always have full operational context at a glance. The **files** and **Edit compose** buttons on the same header strip belong to the panel as a whole and stay available regardless of which tab is active.
 
 <Frame>
-  <img src="/images/stack-activity/activity-tab-populated.png" alt="Activity tab with the ACTIVITY tab selected in the header strip showing ANATOMY, ACTIVITY, DOSSIER, DRIFT, ENVIRONMENT, NETWORKING, DOCTOR, STORAGE tabs. Under a TODAY header, three events appear: 'plex deployed by admin' with a rocket icon 52m ago, 'plex updated by admin' with an up-arrow icon 12h ago, and 'plex update started by admin' with an up-arrow icon 12h ago." />
+  <img src="/images/stack-activity/activity-tab-populated.png" alt="Activity tab with the ACTIVITY tab selected in the header strip showing ANATOMY, ACTIVITY, DOSSIER, DRIFT, ENVIRONMENT, COMPOSE LABELS, NETWORKING, DOCTOR, STORAGE tabs. Under a YESTERDAY header, three events appear: 'plex updated by admin' with an up-arrow icon 17h ago, 'plex update started by admin' with an up-arrow icon 17h ago, and '[Node: Local] Stack &quot;plex&quot; has image updates available.' via Image Update 1d ago." />
 </Frame>
 
 ## What you'll see
@@ -15,20 +15,23 @@ Each entry in the activity list contains four pieces of information:
 
 | Field | Description |
 |-------|-------------|
-| **Icon** | Category of the event (deploy, restart, stop, start, image update, drift, and others) |
+| **Icon** | Category of the event (deploy, restart, stop, start, take down, image update, drift, and others) |
 | **Message** | What happened, for example `plex deployed`. Sensitive values such as tokens, secrets, basic-auth credentials, and bearer tokens are redacted before storage |
 | **Attribution** | `by <username>` for user-initiated actions; `via <Subsystem>` for events triggered by background processes such as Auto-Heal or the Scheduler |
 | **Time** | Relative time since the event: `just now`, `5m ago`, `2h ago`, `3d ago` |
 
+If a [notification mute rule](/features/alerts-notifications#mute-rules) blocks delivery of a matching alert, the entry still appears here with a **Suppressed** badge next to the message. Hovering the badge shows which rule matched. Suppression only affects delivery to the bell and external channels; the activity row itself is never suppressed.
+
 ## Event categories
 
-Ten categories have a dedicated icon. Any other notification scoped to a stack (deploy failures, scan findings, monitor alerts) also flows into the timeline and renders with a generic activity icon. Automatic creation of missing external networks during deploy writes a history-only activity row (`network_auto_created`) on the stack timeline; it does not appear in the notification bell.
+Eleven categories have a dedicated icon. Any other notification scoped to a stack (deploy failures, scan findings, monitor alerts) also flows into the timeline and renders with a generic activity icon. Automatic creation of missing external networks during deploy writes a history-only activity row (`network_auto_created`) on the stack timeline; it does not appear in the notification bell.
 
 | Category | Example message |
 |----------|-----------------|
 | Deploy succeeded | `plex deployed` |
 | Stack restarted | `dozzle restarted` |
 | Stack stopped | `radarr stopped` |
+| Stack taken down | `radarr taken down` (or `radarr taken down (volumes removed)` when the take-down included volume removal) |
 | Stack started | `radarr started` |
 | Image update applied | `Auto-update: stack "dozzle" updated with new images` |
 | Drift detected | `Drift detected on sonarr: 2 findings` |
@@ -72,7 +75,7 @@ Two states can make the tab look empty, and they mean different things:
 
 Sencho attributes every recorded event to the actor that performed it:
 
-- **User-initiated actions** (deploy, restart, stop, start, image update triggered from a button or the API): the actor is the authenticated username, shown as `by <username>`.
+- **User-initiated actions** (deploy, restart, stop, start, take down, image update triggered from a button or the API): the actor is the authenticated username, shown as `by <username>`.
 - **Background subsystems**: the actor is the subsystem name, shown as `via <Subsystem>`.
 
 | Background subsystem | Displayed as |
@@ -120,6 +123,6 @@ Cleanup runs on the same schedule as container-metrics cleanup, so retention app
     These are two distinct events. The first is a manual restart; the second is Auto-Heal restarting the container after a separate unhealthy-duration breach. Each event is its own entry with its own actor. Two rows here are correct behavior, not a duplicate.
   </Accordion>
   <Accordion title="Operational events don't appear in the notification bell dropdown">
-    The notification bell surfaces system alerts and error-level events. User-initiated operational events (start, stop, restart, deploy, update) appear exclusively in the per-stack Activity tab, keeping the global tray focused on conditions that need your attention.
+    The notification bell surfaces system alerts and error-level events. User-initiated operational events (start, stop, restart, take down, deploy, update) appear exclusively in the per-stack Activity tab, keeping the global tray focused on conditions that need your attention.
   </Accordion>
 </AccordionGroup>

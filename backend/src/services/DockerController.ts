@@ -24,6 +24,7 @@ import {
 import type { NetworkingNetworkBase } from './network/networkingTypes';
 import { isPathWithinBase } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
+import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { describeSpawnError } from '../utils/spawnErrors';
 import { authoredComposeFileArgs, authoredComposeEnvFileArgs } from '../utils/authoredComposeArgs';
@@ -2255,6 +2256,57 @@ class DockerController {
       } catch {
         return [];
       }
+    }
+  }
+
+  /**
+   * Strict Result API for full-stack updates. Never converts Compose-ps + fallback
+   * failure into empty success. Compose-managed containers are never orphan IDs.
+   */
+  public async classifyLegacyOrphansForUpdate(
+    stackName: string,
+  ): Promise<
+    | { status: 'none' }
+    | { status: 'orphans'; ids: string[] }
+    | { status: 'classification_failed'; error: string }
+  > {
+    const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
+    const toIds = (list: Array<{ Id?: string }>) =>
+      list.filter((c): c is { Id: string } => typeof c.Id === 'string' && c.Id.length > 0)
+        .map((c) => c.Id);
+
+    const fallbackOrphans = async (): Promise<
+      | { status: 'none' }
+      | { status: 'orphans'; ids: string[] }
+      | { status: 'classification_failed'; error: string }
+    > => {
+      try {
+        const ids = toIds(await this.smartFallback(stackName, stackDir));
+        return ids.length === 0 ? { status: 'none' } : { status: 'orphans', ids };
+      } catch (fallbackError) {
+        return {
+          status: 'classification_failed',
+          error: getErrorMessage(fallbackError, 'Legacy orphan classification failed'),
+        };
+      }
+    };
+
+    try {
+      const composeContainers = await this.fetchComposePsContainers(stackName, stackDir);
+      // Compose already manages this stack: no legacy orphan cleanup (same as deploy).
+      if (composeContainers.length > 0) return { status: 'none' };
+      return await fallbackOrphans();
+    } catch (error) {
+      const execError = error as NodeJS.ErrnoException & { stderr?: string };
+      const mapped = describeSpawnError(execError, { command: 'docker compose ps' });
+      const detail = execError.stderr || mapped.message || getErrorMessage(error, 'docker compose ps failed');
+      console.error('Docker Compose Error for %s:', sanitizeForLog(stackName), sanitizeForLog(detail));
+      // Unlike getLegacyOrphanContainersByStack, never convert dual failure into empty success.
+      const fallback = await fallbackOrphans();
+      if (fallback.status === 'classification_failed') {
+        return { status: 'classification_failed', error: String(detail) };
+      }
+      return fallback;
     }
   }
 

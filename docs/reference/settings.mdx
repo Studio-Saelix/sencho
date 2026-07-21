@@ -15,10 +15,10 @@ Open the Settings Hub by clicking the **Profile** icon in the top bar and select
 | Group | What it covers |
 |-------|----------------|
 | **Personal** | Account, Appearance |
-| **Access** | License, Users, SSO, API Tokens |
-| **Infrastructure** | Nodes, Fleet, Registries, Recovery Vault, App Store, Stacks |
+| **Access** | Admiral Account, Users, SSO, API Tokens |
+| **Infrastructure** | Nodes, Stacks, Fleet, Registries, Recovery Vault, App Store |
 | **Monitoring** | Host Alerts, Container Alerts, Docker & Storage |
-| **Notifications** | Channels, Notification Routing |
+| **Notifications** | Channels, Notification Routing, Mute Rules |
 | **Automation** | Image update checks, Webhooks |
 | **Organization** | Labels |
 | **Operations** | Data Retention, Developer Diagnostics, Recovery |
@@ -37,7 +37,7 @@ Every section renders inside the same masthead-and-sidebar layout. The masthead 
 | **SCOPE** `operator` / `browser` / `global` | Setting applies to your account (`operator`), to this browser only (`browser`, for browser-local sections such as Appearance), or to the whole instance (`global`, every other non-node group) |
 | **NODE** `<node name>` | Setting is per-node and is currently being edited against this node |
 | **EDITED** `<count>` pending / `saved` | The current section has unsaved changes |
-| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (Admiral Account); `OPERATORS` (Users); `CHANNELS` (Channels); `ROUTES` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `PROVIDER`, `USED`, `SNAPSHOTS` (Recovery Vault); `DEV MODE` (Developer Diagnostics) |
+| Section-specific stats | Each section can publish its own pills: `2FA on`/`off` and `BACKUP <n> left` (Account); `PLAN`, `DURATION`, `TRIAL <n>d left`, `RENEWS`, `STATUS` (Admiral Account); `OPERATORS` (Users); `PROVIDERS`, `ENABLED` (SSO); `CHANNELS` (Channels); `ROUTES`, `ENABLED` (Notification Routing); `WEBHOOKS` and `ENABLED` (Webhooks); `LABELS` (Labels); `PROVIDER`, `USED` (Recovery Vault); `DEV MODE` (Developer Diagnostics) |
 
 ### Quick search
 
@@ -74,10 +74,10 @@ The Account section manages password and two-factor authentication for the opera
 | Field | Description |
 |-------|-------------|
 | **Current password** | Your existing password. Required to change any auth setting. |
-| **New password** | Minimum 8 characters. 12 or more is recommended. |
+| **New password** | 8 characters minimum, enforced. The strength indicator recommends 12+ characters with mixed case and a number, but this is guidance only. |
 | **Confirm new password** | Must match New password. |
 
-Click **Update password** to apply. Existing sessions remain valid.
+Click **Update password** to apply. Your current session stays signed in; every other session for this account is invalidated immediately.
 
 ### Two-factor authentication
 
@@ -126,34 +126,49 @@ Control how Sencho looks and how dense the workspace feels. Each browser remembe
 
 ### Theme and typography
 
-The **Mode** (Dim, OLED, Light, Auto) and **Accent** (one of eight hues) set the surface palette and data color; **Border brightness** tunes every hairline. The **Interface font**, **Data font**, and **Text size** are yours to change; the heading style follows your Visual style choice.
+A live preview card shows a sample fleet-status tile so you can see a color choice before committing to it. The **Mode** (Dim, OLED, Light, Auto) and **Accent** (one of eight hues) set the surface palette and data color; **Border brightness** tunes every hairline.
 
-### Density
+| Control | Options |
+|---------|---------|
+| **Interface font** | Geist, IBM Plex, or Hanken. The sans face for body text, labels, navigation, and buttons. Heading style follows your Visual style choice. |
+| **Data font** | Geist Mono, Plex Mono, or Fira Code. The monospace face for terminal output, stats, codes, and timestamps. |
+| **Text size** | Scales the whole interface from a single root multiplier. Default 1.00x. |
 
-| Value | When to pick it |
-|-------|-----------------|
-| **Comfortable** | Default spacing. Roomier rows and tiles for review and orientation. |
-| **Compact** | Tighter rows and tiles. Fits more stacks, tasks, and audit entries on screen at once. |
+### Display
 
-Density affects the dashboard stack table, the resource gauge strip, the Settings Hub sidebar, the Schedules and Audit Log tables, and every other data table in Sencho. Typography, color, and layout structure stay the same; only vertical padding compresses.
+| Control | What it does |
+|---------|--------------|
+| **Density** | **Comfortable** (default spacing, roomier rows and tiles for review and orientation) or **Compact** (tighter rows and tiles, fits more stacks, tasks, and audit entries on screen at once). Affects the dashboard stack table, the resource gauge strip, the Settings Hub sidebar, the Schedules and Audit Log tables, and every other data table in Sencho. Typography, color, and layout structure stay the same; only vertical padding compresses. |
+| **Log chip color** | **Unified** uses the accent color for every service's log chip. **Per service** assigns each service a stable label color for faster visual scanning across a busy log stream. |
+
+### Navigation
+
+| Control | What it does |
+|---------|--------------|
+| **Navigation style** | **Smart bar** (recommended default): primary destinations stay visible in the top bar and the rest live under **More**. **Classic bar** keeps the full horizontal strip of destinations. **Compact launcher** puts every destination in a menu, with optional quick links. |
+| **Top navigation labels** | On by default. Shows text labels beside the top navigation icons; turn off for a more compact bar with icons only. |
 
 Deploy-progress behavior and the diff-preview-before-save step are stack workflow preferences and live in their own [Stacks](#stacks) section under Infrastructure.
 
 ---
 
-## License
+## Admiral Account
 
 **Scope:** Operator-facing, but reflects the instance license
 
-Activate, view, or deactivate the license for this Sencho control plane. The masthead publishes a **PLAN** pill showing the current tier, a **TRIAL** pill with days remaining if a trial is active, a **RENEWS** pill with the next renewal date, and a **STATUS** pill if the license is in an unusual state (expired, error).
+Activate, view, or deactivate the license for this Sencho control plane, and see which image channel it is tracking. The masthead publishes a **PLAN** pill showing the current tier, a **DURATION** pill (for example `lifetime` or a renewal cadence), a **TRIAL** pill with days remaining if a trial is active, a **RENEWS** pill with the next renewal date, and a **STATUS** pill if the license is in an unusual state (expired, error).
 
 <Frame>
-  <img src="/images/settings/settings-license.png" alt="License section showing the Plan, Customer, Product, License key, and Deactivate action" />
+  <img src="/images/settings/settings-license.png" alt="Admiral Account section showing the Plan, image channel, Customer, Product, and License key" />
 </Frame>
 
 | Element | Description |
 |---------|-------------|
-| **Plan** | The active tier (Sencho Community, Sencho Admiral, or Sencho Admiral (Trial)) with a tier badge. |
+| **Sencho Admiral** | The active license on this control plane, with a tier badge. Community instances see an upgrade prompt here instead. |
+| **Recovery Vault** | Whether the current subscription includes Recovery Vault entitlement. |
+| **Hardened Build** | Switches this control plane between the Community image channel and the Admiral Hardened Build channel. Review entitlement and registry access before switching; see [Plans](/features/licensing#feature-breakdown) for what Hardened Build changes. |
+| **Current image** | The image reference this control plane is currently running, so you can confirm which channel took effect after a switch. |
+| **Channel** | The active image channel (Community or Hardened). |
 | **Customer** | The customer name on file with Lemon Squeezy (paid plans only). |
 | **Product** | The product (paid plans only). |
 | **License key** | The active key, masked to the last four characters. |
@@ -161,6 +176,8 @@ Activate, view, or deactivate the license for this Sencho control plane. The mas
 | **Manage subscription** | Opens the Lemon Squeezy customer portal to update payment, view invoices, or cancel. |
 | **Deactivate** | Releases the key from this instance and reverts to Community features. |
 | **See pricing** | Direct link to the pricing page; visible on Community or when an existing license has expired. |
+
+Lemon Squeezy manages billing for Admiral subscriptions; the customer portal link and invoice history live there, not in Sencho.
 
 See [Licensing & Billing](/features/licensing) for the full walkthrough including trial activation.
 
@@ -297,10 +314,14 @@ Click **Save settings** to apply.
 **Scope:** Per-node (applies to the currently selected node)
 
 <Frame>
-  <img src="/images/settings/settings-fleet.png" alt="Fleet section showing the Mesh data plane and Documentation snapshots subsections" />
+  <img src="/images/settings/settings-fleet.png" alt="Fleet section showing the Documentation snapshots subsection" />
 </Frame>
 
 ### Mesh data plane
+
+<Note>
+  This subsection is not on every installation. It appears once mesh discovery is turned on for this control plane.
+</Note>
 
 | Setting | Default | Description |
 |---------|---------|-------------|
@@ -338,7 +359,7 @@ See [Private Registries](/features/private-registries) for the full walkthrough.
 
 **Scope:** Global, admin-only
 
-Mirror fleet snapshots to Recovery Vault or any S3-compatible storage so a control-plane loss does not take the recovery history with it. The masthead publishes a **PROVIDER** pill (`sencho` / `s3` / `disabled`), a **USED** pill showing storage consumption, and a **SNAPSHOTS** pill with the cloud object count.
+Mirror fleet snapshots to Recovery Vault or any S3-compatible storage so a control-plane loss does not take the recovery history with it. The masthead publishes a **PROVIDER** pill (`sencho` / `s3` / `disabled`) and a **USED** pill showing storage consumption; the object count appears inline in the Storage used row.
 
 <Frame>
   <img src="/images/settings/settings-cloud-backup.png" alt="Recovery Vault section with Recovery Vault mode selected" />
@@ -517,7 +538,7 @@ See [Webhooks](/features/webhooks) for the full walkthrough including authentica
 
 **Scope:** Per-node
 
-Create, edit, and delete labels used to organize and filter stacks across your fleet. Each label has a name and one of ten available colors. Up to 100 labels per node. The masthead publishes a **LABELS** pill with the current and maximum counts.
+Create, edit, and delete labels used to organize and filter stacks across your fleet. Each label has a name and one of ten available colors. Up to 50 labels per node. The masthead publishes a **LABELS** pill with the current and maximum counts.
 
 See [Stack Labels](/features/stack-labels) for the full walkthrough.
 
@@ -704,7 +725,7 @@ Links to help resources, with an additional channel for Admiral operators.
 
 | Channel | Tier | Description |
 |---------|------|-------------|
-| **Priority Email Support** | Admiral | Direct email support during business hours (Mon–Fri 09:00–17:00 America/New_York). We aim to first-respond within one business day. This is an operational target, not an SLA. |
+| **Priority Email Support** | Admiral | Direct email support during business hours (Mon–Fri 09:00–17:00 America/New_York). We aim to first-respond within one business day. This is not a contractual SLA or 24/7 service. |
 
 Community operators see an upgrade callout with a link to the pricing page in place of the support channels.
 

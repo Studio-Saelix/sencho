@@ -210,6 +210,10 @@ export default function EditorLayout() {
   // useViewNavigationState needs onNavigateToDashboard -> resetEditorState
   // but stackActions isn't created until after navState
   const resetEditorStateRef = useRef<() => void>(() => {});
+  // Mobile state is declared after useStackActions; this ref is assigned once
+  // pendingDetailStack / mobileView exist so delete-of-open-stack can flip to
+  // the list surface without reordering the hook graph.
+  const onDeletedOpenStackRef = useRef<() => void>(() => {});
 
   const navState = useViewNavigationState({
     onNavigateToDashboard: () => resetEditorStateRef.current(),
@@ -284,6 +288,7 @@ export default function EditorLayout() {
       return can('stack:edit', 'stack', stackName);
     },
     canOfferVolumeRemoval,
+    onDeletedOpenStack: () => onDeletedOpenStackRef.current(),
   });
 
   // Wire the ref now that stackActions is available
@@ -377,6 +382,10 @@ export default function EditorLayout() {
   const [pendingDetailStack, setPendingDetailStack] = useState<string | null>(null);
   const [pendingAnatomyTab, setPendingAnatomyTab] = useState<'networking' | 'doctor' | 'dossier' | 'drift' | undefined>();
   const [fleetUpdatesIntent, setFleetUpdatesIntent] = useState<{ tab: 'nodes' | 'changelog' } | null>(null);
+  onDeletedOpenStackRef.current = () => {
+    setPendingDetailStack(null);
+    setMobileView('list');
+  };
 
   const handleFleetUpdatesIntentConsumed = useCallback(() => setFleetUpdatesIntent(null), []);
 

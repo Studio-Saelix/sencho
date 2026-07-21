@@ -24,6 +24,17 @@ const {
   mockResolveMissingExternalNetworks,
   mockCreateNetwork,
   mockAddNotificationHistory,
+  mockIsMeshStackEnabled,
+  mockClassifyLegacyOrphansForUpdate,
+  mockCaptureCandidate,
+  mockMarkAcquired,
+  mockHandoff,
+  mockMarkReconciling,
+  mockMarkImmediateVerified,
+  mockAbandon,
+  mockCompensateWithCandidate,
+  mockBuildUnifiedHeldImagePredicate,
+  mockGetRecovery,
 } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockGetContainersByStack: vi.fn().mockResolvedValue([]),
@@ -58,6 +69,24 @@ const {
   }),
   mockCreateNetwork: vi.fn().mockResolvedValue({ id: 'net-1' }),
   mockAddNotificationHistory: vi.fn(),
+  mockIsMeshStackEnabled: vi.fn().mockReturnValue(false),
+  mockClassifyLegacyOrphansForUpdate: vi.fn().mockResolvedValue({ status: 'none' }),
+  mockCaptureCandidate: vi.fn().mockResolvedValue({
+    id: 'recovery-1',
+    node_id: 1,
+    stack_name: 'my-stack',
+    status: 'candidate',
+    phase: 'captured',
+    override_path: '/test/compose/my-stack/.sencho-recovery-abc.yml',
+  }),
+  mockMarkAcquired: vi.fn().mockReturnValue(true),
+  mockHandoff: vi.fn().mockReturnValue(true),
+  mockMarkReconciling: vi.fn().mockReturnValue(true),
+  mockMarkImmediateVerified: vi.fn().mockReturnValue(true),
+  mockAbandon: vi.fn().mockResolvedValue(true),
+  mockCompensateWithCandidate: vi.fn().mockResolvedValue(true),
+  mockBuildUnifiedHeldImagePredicate: vi.fn().mockReturnValue(() => false),
+  mockGetRecovery: vi.fn().mockReturnValue(undefined),
 }));
 
 vi.mock('child_process', () => ({ spawn: mockSpawn, execFile: vi.fn() }));
@@ -89,6 +118,7 @@ vi.mock('../services/DockerController', () => ({
     getInstance: () => ({
       getContainersByStack: mockGetContainersByStack,
       getLegacyOrphanContainersByStack: mockGetLegacyOrphanContainersByStack,
+      classifyLegacyOrphansForUpdate: mockClassifyLegacyOrphansForUpdate,
       removeContainers: mockRemoveContainers,
       pruneDanglingImages: mockPruneDanglingImages,
       createNetwork: mockCreateNetwork,
@@ -111,6 +141,7 @@ vi.mock('../services/DatabaseService', () => ({
       getGitSource: () => undefined,
       getStackProjectEnvFiles: () => [],
       addNotificationHistory: mockAddNotificationHistory,
+      isMeshStackEnabled: (...args: unknown[]) => mockIsMeshStackEnabled(...args),
     }),
   },
 }));
@@ -149,6 +180,24 @@ vi.mock('../services/MeshService', () => ({
     getInstance: () => ({ ensureStackOverride: mockEnsureStackOverride }),
   },
 }));
+
+vi.mock('../services/StackUpdateRecoveryService', () => ({
+  StackUpdateRecoveryService: {
+    getInstance: () => ({
+      captureCandidate: mockCaptureCandidate,
+      markAcquired: mockMarkAcquired,
+      handoff: mockHandoff,
+      markReconciling: mockMarkReconciling,
+      markImmediateVerified: mockMarkImmediateVerified,
+      abandon: mockAbandon,
+      compensateWithCandidate: mockCompensateWithCandidate,
+      buildUnifiedHeldImagePredicate: mockBuildUnifiedHeldImagePredicate,
+      get: mockGetRecovery,
+      linkGateOrRetain: vi.fn(),
+    }),
+  },
+}));
+
 
 vi.mock('../services/SelfIdentityService', () => ({
   default: {
@@ -247,6 +296,23 @@ beforeEach(() => {
     declaredExternalCount: 0,
   });
   mockCreateNetwork.mockResolvedValue({ id: 'net-1' });
+  mockClassifyLegacyOrphansForUpdate.mockResolvedValue({ status: 'none' });
+  mockCaptureCandidate.mockResolvedValue({
+    id: 'recovery-1',
+    node_id: 1,
+    stack_name: 'my-stack',
+    status: 'candidate',
+    phase: 'captured',
+    override_path: '/test/compose/my-stack/.sencho-recovery-abc.yml',
+  });
+  mockMarkAcquired.mockReturnValue(true);
+  mockHandoff.mockReturnValue(true);
+  mockMarkReconciling.mockReturnValue(true);
+  mockMarkImmediateVerified.mockReturnValue(true);
+  mockAbandon.mockResolvedValue(true);
+  mockIsMeshStackEnabled.mockReturnValue(false);
+  mockCompensateWithCandidate.mockResolvedValue(true);
+  mockBuildUnifiedHeldImagePredicate.mockReturnValue(() => false);
   delete process.env.SENCHO_MODE;
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
@@ -585,6 +651,16 @@ describe('ComposeService - authoredComposeArgs mesh override', () => {
 });
 
 // ── deployStack ────────────────────────────────────────────────────────
+
+
+  it('fails closed when a mesh-enabled stack cannot generate its override', async () => {
+    mockIsMeshStackEnabled.mockReturnValue(true);
+    mockEnsureStackOverride.mockRejectedValue(new Error('mesh override write failed'));
+
+    const svc = ComposeService.getInstance(1);
+    await expect(svc.validateExactComposeInvocation('my-stack')).rejects.toThrow(/mesh override write failed/i);
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
 
 describe('ComposeService - deployStack', () => {
   it('blocks a pilot deploy with relative binds before replacing containers when path mapping differs', async () => {
@@ -987,7 +1063,7 @@ describe('ComposeService - updateStack build-aware', () => {
     expect(spawnArgs.some(args => args.includes('pull') && !args.includes('--ignore-buildable'))).toBe(true);
   });
 
-  it('rolls back compose files when a build step fails during atomic update', async () => {
+  it('abandons recovery and leaves runtime untouched when acquire fails before handoff', async () => {
     mockLoadStackBuildServices.mockResolvedValueOnce(['app']);
     let spawnCount = 0;
     mockSpawn.mockImplementation(() => {
@@ -1004,8 +1080,12 @@ describe('ComposeService - updateStack build-aware', () => {
     const error = await result;
 
     expect(error).not.toBeNull();
-    expect(mockRestoreStackFiles).toHaveBeenCalled();
-    expect(getComposeRollbackInfo(error)?.attempted).toBe(true);
+    expect(mockAbandon).toHaveBeenCalledWith('recovery-1');
+    expect(mockHandoff).not.toHaveBeenCalled();
+    expect(mockRemoveContainers).not.toHaveBeenCalled();
+    expect(mockCompensateWithCandidate).not.toHaveBeenCalled();
+    const spawnArgs = mockSpawn.mock.calls.map(c => c[1] as string[]);
+    expect(spawnArgs.some(args => args.includes('up'))).toBe(false);
   });
 });
 
@@ -1106,7 +1186,7 @@ describe('ComposeService - updateStack prune-on-update', () => {
 
     // The update already succeeded before the prune ran, so a prune failure
     // must neither reject nor trigger the atomic restore.
-    await expect(promise).resolves.toBeUndefined();
+    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1' });
     expect(mockRestoreStackFiles).not.toHaveBeenCalled();
   });
 
@@ -1120,7 +1200,7 @@ describe('ComposeService - updateStack prune-on-update', () => {
     const promise = svc.updateStack('my-stack');
     await vi.advanceTimersByTimeAsync(3100);
 
-    await expect(promise).resolves.toBeUndefined();
+    await expect(promise).resolves.toEqual({ recoveryId: 'recovery-1' });
   });
 });
 
@@ -1428,19 +1508,10 @@ describe('ComposeService - idle-output stall backstop', () => {
     await promise;
   });
 
-  it('preserves STACK_STALLED_OUTPUT through the atomic rollback wrapper', async () => {
+  it('surfaces STACK_STALLED_OUTPUT on acquire stall without runtime compensation', async () => {
     process.env.SENCHO_COMPOSE_STALL_TIMEOUT_MS = '1000';
     const pullProc = createMockProcess();
-    let call = 0;
-    // First spawn is the stalling pull; later spawns (the rollback restore's
-    // `up`) close cleanly, proving the restore is not idle-timeout armed.
-    mockSpawn.mockImplementation(() => {
-      call += 1;
-      if (call === 1) return pullProc;
-      const p = createMockProcess();
-      Promise.resolve().then(() => p.emit('close', 0));
-      return p;
-    });
+    mockSpawn.mockImplementation(() => pullProc);
 
     const svc = ComposeService.getInstance(1);
     const result = svc.updateStack('my-stack', undefined, true).then(() => null, (e: Error) => e);
@@ -1451,7 +1522,10 @@ describe('ComposeService - idle-output stall backstop', () => {
     const error = await result;
     expect(error).not.toBeNull();
     expect(error!.message).toContain('STACK_STALLED_OUTPUT');
-    expect(getComposeRollbackInfo(error)).toMatchObject({ attempted: true });
+    // Acquire failure is pre-handoff: abandon candidate, do not wrap as ComposeRollbackError.
+    expect(getComposeRollbackInfo(error)).toBeNull();
+    expect(mockAbandon).toHaveBeenCalledWith('recovery-1');
+    expect(mockCompensateWithCandidate).not.toHaveBeenCalled();
   });
 });
 
@@ -1578,5 +1652,43 @@ describe('ComposeService - streamLogs', () => {
       ['logs', '-f', '-t', '--tail', '100', 'mystack-redis-1'],
       expect.anything(),
     );
+  });
+});
+
+
+describe('ComposeService - updateStack safe ordering', () => {
+  it('never broad-removes Compose-managed containers before up', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockGetContainersByStack.mockResolvedValue([{ Id: 'should-not-remove' }]);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.updateStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(mockGetContainersByStack).not.toHaveBeenCalled();
+    expect(mockRemoveContainers).not.toHaveBeenCalled();
+    expect(mockCaptureCandidate).toHaveBeenCalled();
+    expect(mockClassifyLegacyOrphansForUpdate).toHaveBeenCalledWith('my-stack');
+    expect(mockHandoff).toHaveBeenCalled();
+  });
+
+  it('removes only classified orphans after handoff', async () => {
+    setupAutoCloseSpawn();
+    mockListContainers.mockResolvedValue([]);
+    mockClassifyLegacyOrphansForUpdate.mockResolvedValueOnce({
+      status: 'orphans',
+      ids: ['orphan-1'],
+    });
+    mockRemoveContainers.mockResolvedValueOnce([{ id: 'orphan-1', success: true }]);
+
+    const svc = ComposeService.getInstance(1);
+    const promise = svc.updateStack('my-stack');
+    await vi.advanceTimersByTimeAsync(3100);
+    await promise;
+
+    expect(mockHandoff).toHaveBeenCalled();
+    expect(mockRemoveContainers).toHaveBeenCalledWith(['orphan-1']);
   });
 });

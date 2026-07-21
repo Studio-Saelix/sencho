@@ -27,6 +27,7 @@ The verdict is computed from signals Sencho already tracks, so the check is fast
 - **Current containers**: a container that is already unhealthy, restarting, or crashed before the update makes the result hard to evaluate; the dialog asks you to look first.
 - **Healthcheck coverage**: how many services define healthchecks, which determines how thoroughly the post-update health gate can verify the result.
 - **Pending update**: the [update preview](/features/auto-update-policies) classifies the pending change. A major version bump asks for review; patch updates and same-tag refreshes pass quietly.
+- **Local build services**: any service built from a local Dockerfile instead of pulled from a registry. The update rebuilds these from source, which depends on the local Dockerfile context and can take longer than a plain pull; this signal never blocks the verdict.
 - **Rollback backup**: whether a backup slot exists and how old it is. A missing backup is only a note, because the update itself creates a fresh one when it starts.
 - **Node disk**: disk usage near or above the node's alert threshold warns you before a large pull fills the disk.
 
@@ -39,7 +40,7 @@ On stacks with more than one Compose service, you can also open readiness for a 
 When the selected service is build-backed and has no registry update, the proceed button reads **Rebuild** instead of **Update**. A per-service update badge appears only when a registry update is confirmed for that service.
 
 <Frame>
-  <img src="/images/health-gated-updates/readiness-dialog.png" alt="Update readiness dialog showing the verdict chip, signal rows for Compose Doctor, Drift, Current containers, Healthcheck coverage, Pending update, Rollback backup and Node disk, the fleet snapshot row with its checkbox, and the Cancel and Update now buttons" />
+  <img src="/images/health-gated-updates/readiness-dialog.png" alt="Update readiness dialog with a review required verdict, showing signal rows for Compose Doctor, Drift, Current containers, Healthcheck coverage, Pending update, Local build services, Rollback backup and Node disk, the fleet snapshot row, and the Cancel and Update now buttons" />
 </Frame>
 
 ## The post-update health gate

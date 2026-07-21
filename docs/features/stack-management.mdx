@@ -115,10 +115,10 @@ The image tag is taken from the final positional argument (for example `nginx:al
 **Troubleshooting conversion:**
 
 <Frame>
-  <img src="/images/stack-management/convert-tab-error.png" alt="Error toast shown above the New stack dialog when the converter cannot parse the input" />
+  <img src="/images/stack-management/convert-tab-error.png" alt="Error toast in the bottom-right corner reading 'Could not parse command' while the New stack dialog stays open" />
 </Frame>
 
-If the converter cannot produce a usable compose file, the request fails with a clear error toast. Common causes:
+If the converter cannot produce a usable compose file, the request fails and a toast notification appears in the bottom-right corner. Common causes:
 
 - **Not a docker run command.** The input must begin with `docker run` and include an image reference. Free-form text, `docker compose` commands, and shell pipelines are rejected.
 - **Unrecognized flag.** The parser supports the flags listed above. Rare flags (such as `--userns`, `--ipc`, custom runtime options) are not recognized. Remove the flag, convert the rest, and add it back by hand in the editor.
@@ -178,7 +178,7 @@ Click any group header to collapse or expand it. The group's stack count appears
 Opening a stack puts identity and state front and center.
 
 <Frame>
-  <img src="/images/stack-view/identity-header.png" alt="Stack identity header showing breadcrumb, title, state pill, and action row" />
+  <img src="/images/stack-view/identity-header.png" alt="Stack identity header showing breadcrumb, title, state pill, and action row for the plex stack" />
 </Frame>
 
 The header answers two questions at a glance:
@@ -191,7 +191,7 @@ The header answers two questions at a glance:
   - `running` (green) when no healthcheck is defined.
   - `exited` (red) when no containers are up.
 
-The action row below the title keeps everyday lifecycle controls visible. The **More actions** overflow holds Rollback, Scan config, and Delete; the next sections cover both surfaces.
+The action row below the title keeps everyday lifecycle controls visible. The **More actions** overflow holds Rollback, Scan config, Mute, and Delete; the next sections cover both surfaces.
 
 If Sencho discovers its own compose project as a stack (because the deployment directory lives inside `COMPOSE_DIR`), that stack is treated as the running Sencho instance: deploy, update, stop, down, and delete are disabled in the UI and refused by the API. Use **Fleet → Node Update** to upgrade Sencho. Compose Doctor flags the condition during preflight.
 
@@ -210,7 +210,7 @@ The same links button appears on update cards in [Auto-Update Policies](/feature
 Below the header, each container in the stack gets a single row that answers "is this piece working, and how do I reach it?" When the stack has multiple containers, a summary strip appears above the list showing total, running, paused, and unhealthy counts, along with a **Compact / Detailed** toggle. Compact mode shows status, name, uptime, port, and action buttons; detailed mode (the default) adds CPU, memory, and network I/O sparklines.
 
 <Frame>
-  <img src="/images/stack-view/containers.png" alt="CONTAINERS section showing a container card with health badge, uptime, port mapping, open link, and CPU, memory, and network stat tiles" />
+  <img src="/images/stack-view/containers.png" alt="Container card for the plex service showing health badge, uptime, port mapping, open link, action icons, and CPU, memory, and network stat tiles" />
 </Frame>
 
 Each row includes:
@@ -235,7 +235,7 @@ Single-service stacks keep the existing flat container layout; service headers d
 The logs area at the bottom of the stack view has two modes. Toggle between them with the segmented control in the top-right of the panel; your choice is remembered for next time.
 
 <Frame>
-  <img src="/images/stack-view/logs-viewer.png" alt="Logs panel in Structured mode with toolbar, level filter pills, and timestamped INFO log rows" />
+  <img src="/images/stack-view/logs-viewer.png" alt="Logs panel in Structured mode for the plex stack with toolbar, level filter pills, and timestamped INFO log rows" />
 </Frame>
 
 **Structured** (default) parses every line into a DOM row with three columns: local time, level badge, and message. Level detection is automatic:
@@ -256,10 +256,10 @@ The structured viewer holds up to 10,000 lines; older entries are dropped from t
 
 ## Anatomy panel
 
-The right column of the stack view is a tabbed panel. Tabs appear only when the data they need is available.
+The right column of the stack view is a tabbed panel: Anatomy, Activity, Dossier, Drift, Environment, Compose Labels, Networking, Doctor, and Storage. Tabs appear only when the data they need is available, and the row scrolls horizontally (with a chevron button) when there are more tabs than fit.
 
 <Frame>
-  <img src="/images/stack-view/anatomy-panel.png" alt="Anatomy panel showing all eight tabs: Anatomy, Activity, Dossier, Drift, Environment, Networking, Doctor, and Storage, with the Networking tab active" />
+  <img src="/images/stack-view/anatomy-panel.png" alt="Anatomy panel with the Anatomy tab active, showing services, ports, volumes, restart, env_file, network, and source rows plus the tab row" />
 </Frame>
 
 The **Files** and **Edit compose** buttons sit to the right of the tab row.
@@ -281,9 +281,11 @@ Each row maps one compose concept to the value it resolves to right now:
 
 A footer card under the rows surfaces the first published port as a clickable **EXPOSED** link, so you can jump straight to the running app.
 
-If an image update is available, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows. Registry updates name each image with a pending update and show its version transition (`27.1.4 → 27.1.5`), risk classification (`safe · patch`, `minor`, or `major · review required`), and an **apply** button. Build-only stacks show **Rebuild available** with a **Rebuild & Update** button instead of a version bump. Mixed stacks (registry images plus local builds) show both signals. Major bumps show a rose banner and require explicit review before applying.
+If an image update is available, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows. Registry updates name each image with a pending update and show its version transition (for example `27.1.4 -> 27.1.5`); the detail line below reads `patch · safe to apply` (green), `minor · review recommended` (amber), or `major · breaking changes possible` (rose), followed by an **apply** button. Build-only stacks show **Rebuild available** instead of a version bump, with a **Rebuild & Update** button. A stack that mixes registry images and local builds still shows a single banner, with the rebuild note folded into the same detail line. Major bumps use the rose styling and are worth reviewing before applying.
 
 Rebuilds can take longer than a registry pull and depend on the local Dockerfile context, network access, and base-image availability. Atomic rollback restores compose and env files only; previously built image layers are not rolled back automatically.
+
+A separate amber **scan** banner appears here if the most recent post-deploy vulnerability scan failed or was skipped for one or more images; deploys are never blocked by a scan failure. See [Vulnerability Scanning](/features/vulnerability-scanning).
 
 ### Activity
 
@@ -309,6 +311,10 @@ An inventory of every environment variable the stack uses, organized by status:
 
 Variables that look like secrets (tokens, passwords, keys) are marked with a lock icon. When the stack references multiple env files, use the file picker in the tab header to switch between them.
 
+### Compose Labels
+
+Reconciles the Docker labels declared in the compose file against the labels present on each running container, per service, with a provenance badge (Compose file, Image, Runtime, or System) on every entry. These are Docker labels read by external automation such as Watchtower or Traefik, distinct from Sencho's own organizational Stack Labels (see [Stack Labels](/features/stack-labels)). See [Docker Label Audit](/features/docker-label-audit) for the full reconciliation model and the fleet-wide equivalent.
+
 ### Networking
 
 Shows the stack's defined networks, external network attachments, and the driver for each, along with an exposure-intent classification per service. A Runtime Drift row confirms whether the running network topology matches what the compose file declares. See [Compose Networking](/features/compose-networking).
@@ -324,7 +330,7 @@ Runs preflight checks against the compose file and reports findings grouped by s
 | **Warning** | Best-practice deviation worth reviewing |
 | **Info** | Informational observation, no action required |
 
-Each finding includes the affected service, a description, and a remediation suggestion. Click the refresh button to rerun the checks. See [Compose Doctor](/features/compose-doctor).
+Each finding includes the affected service, a description, and a remediation suggestion. Click **run preflight** to rerun the checks. When the last run found blocker or high-risk findings, the **Doctor** tab label shows a small red or amber dot until you rerun preflight or dismiss the summary banner. See [Compose Doctor](/features/compose-doctor).
 
 ### Storage
 
@@ -362,6 +368,7 @@ The stack header groups actions by frequency of use. The most common action is t
 | Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. |
 | Overflow | **Rollback** | Restores backup | Reverts compose and env files to the pre-deploy snapshot and redeploys. Only shown when a backup exists. |
 | Overflow | **Scan config** | Trivy config scan | Scans the compose file for misconfigurations (admin role). |
+| Overflow | **Mute** | Creates a mute rule | Quick presets to mute notifications, deploy-success noise, or monitor alerts for this stack, plus a link to manage its mute rules in full. See [Alerts and Notifications](/features/alerts-notifications). |
 | Overflow | **Delete** | `down --volumes` + removes files | Stops and removes containers and volumes, then deletes the stack directory. |
 
 **When stopped:**
@@ -433,24 +440,25 @@ Click the kebab on a stack row in the sidebar to open its context menu. The menu
 - **Auto-Heal** (`H`): configure auto-recovery for this stack. See [Auto-Heal Policies](/features/auto-heal-policies).
 - **Check updates** (`U`): force an image update check now.
 - **Open App** (`↗`): open the stack's web interface in a new tab. Shown only when the stack is running and exposes a web port.
+- **Mute** (`›`): quick presets to mute notifications, deploy-success noise, or monitor alerts for this stack, plus a link to manage its mute rules in full. See [Alerts and Notifications](/features/alerts-notifications).
 
 **organize**
 
-- **Labels** (`›`): assign or remove labels. See [Stack Labels](/features/stack-labels).
-- **Pin to top** (`P`): pin or unpin the stack from the **PINNED** group at the top of the list.
+- **Labels** (`L ›`): assign or remove labels. See [Stack Labels](/features/stack-labels).
+- **Pin to top** (`P`): pins the stack to the **PINNED** group at the top of the list; toggles to **Unpin** once pinned.
 
 **lifecycle**
 
+- **Deploy** (`⌘↵`): shown when stopped, in place of Stop and Restart.
 - **Stop** (`⌘.`): shown when running.
-- **Take down** (`⌘↓`): shown when the stack has been deployed (running, partial, or exited). Opens a confirmation dialog; optional volume removal is offered when the active node supports it.
 - **Restart** (`⌘R`): shown when running.
 - **Update** (`⌘↑`): pulls the latest image tags and redeploys.
-- **Schedule task**: open the scheduler pre-filled for this stack; pick **Auto-update Stack** to set up unattended image updates on your own cadence. See [Scheduled Operations](/features/scheduled-operations) and [Auto-Update Policies](/features/auto-update-policies).
-- **Deploy** (`⌘↵`): shown when stopped, in place of Stop and Restart.
+- **Take down** (`⌘↓`): shown when the stack has been deployed (running, partial, or exited). Opens a confirmation dialog; optional volume removal is offered when the active node supports it. Disabled for the stack running Sencho itself.
+- **Schedule task**: admin only. Opens the scheduler pre-filled for this stack; pick **Auto-update Stack** to set up unattended image updates on your own cadence. See [Scheduled Operations](/features/scheduled-operations) and [Auto-Update Policies](/features/auto-update-policies).
 
 **destructive**
 
-- **Delete** (`⌘⌫`): admin only.
+- **Delete** (`⌘⌫`): admin only. Disabled for the stack running Sencho itself.
 
 Items are disabled while another operation is in progress on that stack.
 

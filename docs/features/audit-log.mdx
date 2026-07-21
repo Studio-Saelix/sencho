@@ -4,7 +4,7 @@ description: Track every mutating action on your Sencho instance with a searchab
 ---
 
 <Note>
-  Community keeps a rolling 14-day recent-activity audit API window. The Audit navigation view, CSV and JSON export, anomaly detection, and configurable retention beyond the recent window require a Sencho **Admiral** license.
+  Community keeps a rolling 14-day recent-activity audit API window, but has no **Audit** tab in navigation to browse it. The Audit navigation view, CSV and JSON export, anomaly detection, and configurable retention beyond the recent window all require a Sencho **Admiral** license.
 </Note>
 
 <Note>
@@ -37,10 +37,11 @@ Expanding a row in the Table view reveals additional detail:
 
 ### Example actions tracked
 
-- Stack lifecycle: deploy, stop, start, restart, update, rollback, delete
+- Stack lifecycle: deploy, take down, start, stop, restart, update, rollback, delete
 - Stack creation, file edits, env file changes, label changes
 - Per-service lifecycle (start, stop, restart of an individual compose service)
 - Container operations: start, stop, restart
+- Label management: create, update, delete, and label-based bulk actions
 - Node management: add, update, delete, cordon, uncordon
 - Fleet operations: backup creation, restore, deletion, single-node and fleet-wide updates
 - Fleet replica role changes (re-anchor, demote to control)
@@ -48,10 +49,11 @@ Expanding a row in the Table view reveals additional detail:
 - Blueprint federation pin updates
 - Recovery Vault: config update, connection test, provisioning, snapshot upload, snapshot deletion
 - User management: create, update, delete, role assignment and removal
-- Password changes and node token generation
+- Password changes, two-factor authentication reset, and node token generation
 - License activation and deactivation
 - Webhook and notification agent configuration
 - Notification route management and testing
+- Notification suppression rule management
 - SSO configuration changes and connection tests
 - API token creation and revocation
 - Registry credential management
@@ -64,9 +66,9 @@ Expanding a row in the Table view reveals additional detail:
 
 ## Viewing the audit log
 
-The **Audit** view in navigation is an Admiral governance surface: it appears for users whose role grants the `system:audit` permission (by default **Admin** or **Auditor**). Community still has a rolling **14-day recent-activity** audit API window; Admiral adds the full Audit view, statistics, export, anomaly annotations, and configurable retention beyond that window.
+The **Audit** view in navigation is an Admiral governance surface: the tab itself only appears on an Admiral license, and Community accounts have no navigation entry point to Audit at all, though the underlying recent-activity API stays reachable directly. On Admiral, the tab is further limited to users whose role grants the `system:audit` permission, which by default means **Admin** or **Auditor**.
 
-Navigate to the **Audit** tab in the sidebar when it is available for your role and plan. On Admiral the feed in that view is scoped to the last 14 days by default unless you configure longer retention; export and anomaly detection come with Admiral.
+Navigate to the **Audit** tab in the top navigation when it is available for your role and plan. The feed then shows your full retained history rather than any fixed lookback window; retention defaults to 90 days and is configurable up to 365.
 
 The page has two views, toggled from the segmented control in the card header: **Stream** (default) and **Table**. The card subtitle reports the total number of entries that match the current filters.
 
@@ -75,7 +77,7 @@ The page has two views, toggled from the segmented control in the card header: *
 Stream gives you an at-a-glance read on activity. A signal rail at the top summarizes the last 24 hours across four tiles, and the feed below groups entries by day with severity dots, relative times, and inline anomaly callouts.
 
 <Frame>
-  <img src="/images/audit-log/audit-stream.png" alt="Audit Log Stream view with the four-tile signal rail (Events 111 +91% vs 7d avg, Actors 1, Failure rate 9% with sparkline, Peak hour 06:00) above a day-banded chronological feed of admin POST and DELETE entries." />
+  <img src="/images/audit-log/audit-stream.png" alt="Audit Log Stream view with the four-tile signal rail (Events 53 +218% vs 7d avg, Actors 2, Failure rate 0%, Peak hour 21:00) above a day-banded chronological feed of admin POST and DELETE entries, including a first seen anomaly flag on one entry." />
 </Frame>
 
 **Signal rail tiles:**
@@ -96,11 +98,11 @@ Rows colored in rose or amber indicate failures; the tinting makes spikes of err
 Table keeps the full-featured detail grid for power users: exact timestamps, method badges, action summaries, and status codes in fixed columns. Clicking any row expands it to show the full request path, IP address, node ID, and entry ID.
 
 <Frame>
-  <img src="/images/audit-log/audit-log-overview.png" alt="Audit Log Table view with a filter strip (search box, All Methods dropdown, From and To date pickers) above a six-column table of admin POST, PUT, and DELETE entries against /api/blueprints, /api/notifications, and /api/stacks." />
+  <img src="/images/audit-log/audit-log-overview.png" alt="Audit Log Table view with a filter strip (search box, All Methods dropdown, From and To date pickers) above a six-column table of admin POST and DELETE entries against /api/webhooks, /api/notifications, and /api/scheduled-tasks." />
 </Frame>
 
 <Frame>
-  <img src="/images/audit-log/audit-log-expanded.png" alt="Audit Log Table view with the second row expanded to reveal Request Path /api/stacks/plex/restart, IP Address ::ffff:192.0.2.10, Node ID 1, and Entry ID #820 in a four-cell detail strip." />
+  <img src="/images/audit-log/audit-log-expanded.png" alt="Audit Log Table view with the second row expanded to reveal Request Path /api/webhooks/4, IP Address ::ffff:203.0.113.10, Node ID 1, and Entry ID #2472 in a four-cell detail strip." />
 </Frame>
 
 Both views share the **Refresh** button and the **Export** dropdown in the card header, and both paginate at 50 entries per page with chevron controls at the bottom of the feed or table.
@@ -145,6 +147,10 @@ Exports are capped at 10,000 entries per download. To export a larger window, na
 
 ## Auditor role
 
+<Note>
+  Assigning the **Auditor** role requires a Sencho **Admiral** license; Community can assign **Admin** or **Viewer** only.
+</Note>
+
 The **Auditor** role provides read-only access to the audit log without granting any administrative privileges. Auditors can:
 
 - View the full audit log
@@ -166,12 +172,12 @@ On Admiral, audit log entries are automatically pruned based on your configured 
 
 To change the retention period:
 
-1. Open **Settings · Operations · Developer Diagnostics**
-2. In the **Data retention** card, set the **Audit log** value (1 to 365 days)
+1. Open **Settings · Operations · Data Retention**
+2. Set the **Audit log** value (1 to 365 days)
 3. Click **Save settings**
 
 <Frame>
-  <img src="/images/audit-log/data-retention.png" alt="Data retention card with three rows: Container metrics 24 hrs, Notification log 30 days, and Audit log 90 days." />
+  <img src="/images/audit-log/data-retention.png" alt="Data Retention settings page with retention rows for Container metrics (24 hrs), Notification log (30 days), Scan history per digest (50 scans), Remove scans for deleted images and stacks (on), and Audit log (90 days)." />
 </Frame>
 
 Cleanup runs automatically as part of Sencho's periodic maintenance cycle.
@@ -183,8 +189,8 @@ Sensitive database values (such as remote node API tokens) are encrypted at rest
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="The Audit tab is missing from the sidebar">
-    The Audit tab is an Admiral governance view shown to users whose role grants the `system:audit` permission. By default that means **Admin** or **Auditor**. If you are signed in as a Deployer or Viewer, ask an admin to assign you the Auditor role from **Settings · Users**. Community still has a rolling 14-day recent-activity audit API window; export, anomaly detection, and retention beyond the recent window come with Admiral.
+  <Accordion title="The Audit tab is missing from the navigation">
+    The Audit tab is an Admiral governance view: it only appears on an Admiral license, and on Community it is not shown at all, regardless of role. On Admiral, the tab is further limited to users whose role grants the `system:audit` permission, by default **Admin** or **Auditor**. If you are on Admiral but signed in as a Deployer or Viewer, ask an admin to assign you the Auditor role from **Settings · Users**. The recent-activity API stays reachable on Community even without a navigation entry point to it.
   </Accordion>
   <Accordion title="Stream view shows everything but I want to filter to a specific user, action, or date">
     Filters live in **Table view only**. Toggle the segmented control in the card header from **Stream** to **Table** and the search box, method dropdown, and From / To date pickers will appear above the grid. Switching back to Stream clears the filter strip but does not remember the last filter.

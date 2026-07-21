@@ -1,10 +1,10 @@
 ---
 title: "Docker Label Audit"
 sidebarTitle: Label audit
-description: "Audit Docker and Compose labels that drive external automation across the fleet and inside each stack."
+description: "Audit Docker and Compose labels that drive external automation across your fleet and inside each stack, with source provenance and Compose-vs-runtime reconciliation."
 ---
 
-Docker labels are metadata declared on Compose services or attached to running containers. They are different from Sencho Stack Labels used for organizing stacks and Node Labels used for Blueprint placement.
+Docker labels are metadata declared on Compose services or attached to running containers. They are different from [Stack Labels](/features/stack-labels) used for organizing stacks in the sidebar and Node Labels used for Blueprint placement.
 
 Sencho surfaces two read-only audit views for these labels:
 
@@ -13,7 +13,14 @@ Sencho surfaces two read-only audit views for these labels:
 
 ## Fleet Docker Labels tab
 
-Open **Fleet** and select the **Docker Labels** tab (after **Map**). The panel is titled **Docker label audit** and offers two layouts:
+Open **Fleet** and select the **Docker Labels** tab, which appears after **Map**. The panel is titled **Docker label audit** and offers two layouts:
+
+<Frame>
+  <img
+    src="/images/docker-label-audit/fleet-by-container.png"
+    alt="Fleet Docker Labels tab in the By container layout, listing every container across four nodes with its stack, node, state, and label count, plus an Open stack link"
+  />
+</Frame>
 
 | View | What it shows |
 |------|----------------|
@@ -22,35 +29,127 @@ Open **Fleet** and select the **Docker Labels** tab (after **Map**). The panel i
 
 Use the search box to filter by label key, value, container name, stack, or node. When a container belongs to a known stack, **Open stack** jumps to that stack in the editor.
 
+### Label provenance
+
 Every label carries a provenance badge so you can tell where it came from:
 
-- **Image** for labels inherited from the container image (for example OCI `org.opencontainers.image.*` metadata)
-- **Present at runtime** for other labels set on the running container
-- **Docker Compose system label** for keys starting with `com.docker.compose.`
-- **Unknown** when a container or its image could not be inspected
+| Badge | Meaning |
+|-------|---------|
+| **Image** | Inherited from the container image (for example OCI `org.opencontainers.image.*` metadata) |
+| **Present at runtime** | Set on the running container by something other than the image or Compose's own bookkeeping |
+| **Docker Compose system label** | A key starting with `com.docker.compose.` (project name, service, config hash, and similar bookkeeping Compose attaches to every container it creates) |
+| **Unknown** | The container or its image could not be inspected, so provenance cannot be determined |
 
-The fleet view reads container-level metadata and does not open the compose file, so it cannot tell a Compose-declared label from any other label set on the container: labels you declared in Compose appear here as **Present at runtime**. To see which labels come from the compose file, use the per-stack **Compose Labels** tab below. When a container or its image cannot be inspected, the affected labels show as **Unknown** and the panel names the nodes it could not fully inspect.
+<Frame>
+  <img
+    src="/images/docker-label-audit/fleet-container-expanded.png"
+    alt="An expanded container row in the By container layout showing individual label rows, each with its key, value, and a provenance badge such as Image or Docker Compose system label"
+  />
+</Frame>
 
-In the **By label** layout, open the **Filters** popover next to the search box. The **Defined by** section lists toggle pills for each provenance type present in the data (**Image**, **Runtime**, **System**, and **Unknown** when present). Turn a pill off to hide that source; the button shows a count badge while any filter is active, and **Clear filters** resets the popover. Automation tools such as Watchtower, Diun, and Traefik read these labels, so the audit makes it easy to confirm which containers are opted in or out.
+The Fleet view reads container-level metadata only; it never opens the compose file, so it cannot tell a Compose-declared label from any other label set on the container. A label you declared under a service's `labels:` block in Compose appears here as **Present at runtime**, indistinguishable from a label some other process attached to the container. To see which labels genuinely come from the compose file, use the per-stack [Compose Labels tab](#stack-compose-labels-tab) below, which renders the compose model and can make that distinction.
+
+### Filtering by source
+
+In the **By label** layout, open the **Filters** popover next to the search box. The **Defined by** section lists a toggle pill for each provenance type actually present in the current data (only the sources your fleet's labels use appear, so a fleet with no unattributable labels never shows an **Unknown** pill). Turn a pill off to hide that source; the Filters button shows a count badge while any pill is off, and **Clear filters** resets the popover.
+
+<Frame>
+  <img
+    src="/images/docker-label-audit/fleet-by-label-filters.png"
+    alt="The By label layout with the Filters popover open, showing a Defined by section with Image and System toggle pills, above a list of key=value rows each tagged with a container chip and provenance badge"
+  />
+</Frame>
+
+Automation tools such as Watchtower, Diun, and Traefik read Docker labels to decide which containers to act on. Grouping **By label** makes it easy to confirm, fleet-wide, which containers carry a given automation label and which do not.
+
+### Partial or unreachable nodes
+
+A banner appears above the table whenever the fleet-wide fetch was incomplete:
+
+- **Could not reach *node*.** The node did not respond to the label-inventory request, whether because it is offline, the network call timed out, or (on a mixed-version fleet) the node does not implement the endpoint at all. That node contributes no rows to either layout.
+- **Some containers or images could not be inspected on *node*.** The node responded, but `docker inspect` failed for one or more containers or their images on that node. The affected labels show the **Unknown** provenance badge instead of being silently dropped.
+
+Both conditions can appear together across different nodes in the same fleet. The rest of the data from healthy nodes is still shown; the banner only names what is missing.
 
 Runtime labels are static until the container is recreated. Changes declared in Compose require save and redeploy before they appear on running containers.
 
 ## Stack Compose Labels tab
 
-Inside the stack editor, open the **Compose Labels** tab in the anatomy strip. For each service you see:
+Inside the stack editor, open the **Compose Labels** tab in the anatomy strip.
 
-- **Declared in Compose** labels from the effective rendered compose model
-- **Present at runtime** labels read from each running replica, each with its provenance badge (Compose, Image, or runtime)
-- Reconciliation hints: **only in Compose**, **only on running container**, **present in both**, or **value changed** when a key is declared and running but the values differ
+<Frame>
+  <img
+    src="/images/docker-label-audit/stack-compose-labels.png"
+    alt="Stack Compose Labels tab showing a service card with a badge reading '24 only on running container', followed by label rows each showing a key, value, and a Docker Compose system label or Image provenance badge"
+  />
+</Frame>
 
-Because this tab renders the compose model, it can identify Compose-declared labels accurately. A toolbar at the top combines a **search box** with a **Filters** popover. The search matches label keys and values as well as service and container names. The popover has a **Defined by** section with toggle pills for each provenance present (**Compose File**, **Image**, **Runtime**, **System**) and a **Services** section to show or hide individual service cards when the stack has more than one service. The Filters button shows a count badge for active facet and service filters; **Clear filters** resets both sections. Matching a service or container name reveals that parent's labels even when the text does not match a specific key or value. Reconciliation counts always reflect only the labels currently visible.
+Because this tab renders the effective compose model instead of only reading container metadata, it can tell a Compose-declared label from a runtime one with confidence. For each service you see:
 
-When Compose cannot be fully rendered, the panel warns that declared labels may be incomplete but still shows whatever runtime data is available. If a replica cannot be inspected, it is flagged with **Runtime labels unavailable** and the panel notes that provenance may be incomplete.
+- **Declared in Compose** labels, read from the effective rendered compose model
+- **Present at runtime** labels, read from each running replica, each with its own provenance badge (Compose, Image, Runtime, or System)
+- Reconciliation hints per replica: **only in Compose** (declared but not present on the container), **only on running container** (present but not declared, including Compose's own system labels and any image labels), **present in both**, or **value changed** when a key is declared and running but the values differ
 
-## Sensitive values
+A toolbar combines a **search box** with a **Filters** popover. The search matches label keys and values as well as service and container names; matching a service or container name reveals that parent's labels even when the text does not match a specific key or value. The popover has a **Defined by** section with a toggle pill for each provenance present (**Compose File**, **Image**, **Runtime**, **System**) and, only when the stack has more than one service, a **Services** section to show or hide individual service cards. The Filters button shows a count badge for active facet and service filters; **Clear filters** resets both sections. Reconciliation counts always reflect only the labels currently visible, so filtering down to one provenance also narrows the badge counts to match.
 
-Some label keys look like secrets (for example keys containing `token`, `password`, or `auth`). Their values are redacted by default. Admins can reveal full values with the **Reveal** control, which re-fetches the inventory with elevated read access.
+When Compose cannot be fully rendered, the panel warns that declared labels may be incomplete. Concretely: the **Declared in Compose** section shows nothing for that stack, reconciliation hints are skipped entirely, and every runtime label other than Compose's own system labels falls back to **Unknown** provenance rather than a guessed value. Runtime data itself is still shown. If a specific replica cannot be inspected, that replica is flagged **Runtime labels unavailable** instead, while the rest of the stack's services and replicas render normally.
 
-## Editing labels
+## Sensitivity and redaction
 
-Compose label editing from these panels is not available yet. To change labels today, edit the compose file directly and redeploy the stack.
+A label key that looks like it names a secret is redacted by default. The classification is a heuristic based on the label's key name, not its value; the same logic used by the [Environment Guardrails](/features/environment-guardrails) inventory applies here, so a key containing a whole-word segment like `token`, `password`, `secret`, `key`, `credential`, or `auth` is flagged. Two Docker/Compose-specific patterns are added on top: Traefik's `basicauth` and `digestauth` middleware label keys are always treated as secret, since their values embed inline credentials regardless of what the rest of the key is named. Like the environment classifier, it errs toward marking things as secret: a false positive only hides a value the audit never needed to show.
+
+A redacted value displays a lock icon in place of the real text. Admins can reveal full values with the **Reveal** control next to a redacted label, which re-fetches the inventory with elevated read access for that view. Reveal has no corresponding hide action: once revealed, the view stays revealed until you navigate away or reload, and each of the Fleet and Stack views tracks this independently, so revealing values in one does not reveal them in the other.
+
+## Capability gating
+
+Both tabs require the active node to report the `container-label-inventory` capability; a node running an older Sencho release does not advertise it, and the tab is hidden entirely until the node is updated. There is no tier gate: Docker Label Audit is available on every plan.
+
+For the **Fleet** tab specifically, the gate is evaluated against the active (normally local) node, not every enrolled node individually. A remote fleet node that lacks the capability does not hide the whole tab; instead, that node's containers fail to fetch and it shows up in the ["Could not reach" banner](#partial-or-unreachable-nodes) alongside any other unreachable node.
+
+## Limitations
+
+- **Read-only.** Neither view can add, edit, or remove a label. To change a label, edit the compose file directly and redeploy the stack; see [Editing the stack](/features/editor).
+- **Live, not stored.** Every time you open a tab, switch layouts, or press Refresh, Sencho re-fetches current state from Docker. There is no history and no point-in-time snapshot to compare against.
+- **Fleet cannot attribute Compose provenance.** The Fleet tab only ever sees container-level metadata, so a Compose-declared label and an unrelated runtime label are indistinguishable there. Use the Stack Compose Labels tab when you need to know for certain whether a label came from Compose.
+- **Provenance depends on successful inspection.** A container or image that Docker cannot inspect (permissions, a removed image, a slow or unresponsive daemon) yields **Unknown** provenance for its otherwise-unattributed labels rather than a guess.
+- **Runtime labels are a snapshot of the running container.** A label change in Compose has no effect on what is shown here until the affected container is recreated.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="A label I declared in Compose shows as Present at runtime in the Fleet view">
+    This is expected. The Fleet Docker Labels tab reads only container-level metadata and has no access to the compose file, so it cannot confirm a label originated in Compose; anything it cannot attribute to the image or to Compose's own system labels is shown as **Present at runtime**. Open the stack's **Compose Labels** tab instead, which renders the compose model and correctly shows the same label under **Declared in Compose**.
+  </Accordion>
+  <Accordion title="Some labels show Unknown provenance">
+    Provenance for a label falls back to **Unknown** when Sencho could not inspect the container or its image on that node. Confirm the node's Docker daemon is reachable and that the image referenced by the container still exists locally, then press **Refresh**.
+  </Accordion>
+  <Accordion title="The Docker Labels or Compose Labels tab is not visible">
+    Both tabs require the active node to report the `container-label-inventory` capability. A node running an older version of Sencho does not advertise it, so the tab is hidden for that node until it is updated. See [Capability gating](#capability-gating).
+  </Accordion>
+  <Accordion title="I don't see a Reveal button on a redacted value">
+    Revealing secret-like label values requires an admin role. If you are signed in as an admin and still do not see **Reveal**, the label may not be classified as redacted (or already has been revealed for this view). See [Sensitivity and redaction](#sensitivity-and-redaction).
+  </Accordion>
+  <Accordion title="The Compose Labels tab warns it could not fully render Compose">
+    This means `docker compose config` failed for the stack, the same render step [Compose Doctor](/features/compose-doctor) depends on. While unresolved, the **Declared in Compose** section is empty and reconciliation hints do not appear; runtime data is still shown, with **Unknown** provenance. Fix the underlying Compose or environment problem (check Compose Doctor's report on the same stack) and reopen the tab.
+  </Accordion>
+  <Accordion title="A container shows 'Runtime labels unavailable'">
+    Sencho could not inspect that specific replica, so its runtime labels and reconciliation hints are skipped rather than shown as false gaps. The rest of the stack's services and replicas are unaffected. Confirm the container still exists and the node's Docker daemon is reachable, then reopen the tab.
+  </Accordion>
+</AccordionGroup>
+
+## Related features
+
+<CardGroup cols={2}>
+  <Card title="Stack Labels" icon="tag" href="/features/stack-labels">
+    A different, editable kind of label: per-node tags used to group stacks in the sidebar, unrelated to Docker/Compose labels.
+  </Card>
+  <Card title="Compose Doctor" icon="stethoscope" href="/features/compose-doctor">
+    Renders the same effective Compose model to check for deploy-blocking problems, separate from label reconciliation.
+  </Card>
+  <Card title="Environment Guardrails" icon="key" href="/features/environment-guardrails">
+    Uses the same key-name heuristic to flag likely-secret environment variables without ever exposing a value.
+  </Card>
+  <Card title="Node Compatibility" icon="puzzle-piece" href="/features/node-compatibility">
+    How capability gating works across a fleet with mixed Sencho versions.
+  </Card>
+</CardGroup>

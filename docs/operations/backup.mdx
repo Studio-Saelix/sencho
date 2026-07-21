@@ -19,10 +19,10 @@ Default path: `/app/data` inside the container, mapped to wherever you mounted i
 
 Contains:
 - `sencho.db` - SQLite database with all settings, users, nodes, alerts, metrics history, and notification config
-- `encryption.key` - Key used to encrypt sensitive values (registry credentials, node API tokens) stored in the database
+- `encryption.key` - Key used to encrypt sensitive values stored in the database: registry credentials, node tokens for remote nodes, Git source credentials, [Fleet Secrets](/features/fleet-secrets) bundles, SSO and MFA secrets, Recovery Vault credentials, and the contents of every [Fleet Snapshot](/features/fleet-backups)
 
 <Warning>
-  Both files are required for a full restore. If you restore `sencho.db` without the matching `encryption.key`, any encrypted values in the database will be unreadable and you will need to re-enter registry credentials and re-generate node API tokens.
+  Both files are required for a full restore. If you restore `sencho.db` without the matching `encryption.key`, every encrypted value in the database becomes permanently unreadable: registry credentials, remote node tokens, Git source and Fleet Secrets bundles, SSO/MFA configuration, and the compose file contents inside any existing fleet snapshot. There is no way to recover this data without the original key; you would need to re-enter each credential, re-enroll remote nodes, and re-capture any snapshots you rely on.
 </Warning>
 
 ### 2. Compose directory (`COMPOSE_DIR`)
@@ -57,7 +57,7 @@ docker start sencho
 
 ### SQLite online backup (without stopping)
 
-SQLite supports hot backups via its `.backup` command. This is safe to run while Sencho is running:
+SQLite supports hot backups via its `.backup` command. This is safe to run while Sencho is running, and requires the `sqlite3` CLI to be installed on the host:
 
 ```bash
 sqlite3 /path/to/sencho-data/sencho.db ".backup '/path/to/backup/sencho.db'"
@@ -65,13 +65,23 @@ sqlite3 /path/to/sencho-data/sencho.db ".backup '/path/to/backup/sencho.db'"
 
 Remember to also copy `encryption.key` from the same directory.
 
+### Built-in backup command (no host tooling required)
+
+Sencho ships an equivalent online backup as a CLI command that runs inside the container, so you do not need `sqlite3` on the host:
+
+```bash
+docker compose exec sencho node dist/cli/backupData.js [destination-dir]
+```
+
+With no destination argument it writes a timestamped folder under `DATA_DIR/backups`, copies `sencho.db` and `encryption.key` together, and records the action in the audit log. See [Emergency command-line recovery](/operations/emergency-cli#back-up-the-data-directory) for the full command reference.
+
 ### Automated daily backup (cron example)
 
 ```cron
 0 3 * * * cp /path/to/sencho-data/encryption.key /backups/encryption.key && sqlite3 /path/to/sencho-data/sencho.db ".backup '/backups/sencho-$(date +\%Y\%m\%d).db'" && find /backups -name "sencho-*.db" -mtime +30 -delete
 ```
 
-This copies the encryption key, backs up the database at 3 AM daily, and deletes database backups older than 30 days.
+This copies the encryption key, backs up the database at 3 AM daily, and deletes database backups older than 30 days. If the host does not have `sqlite3` installed, substitute `docker compose exec sencho node dist/cli/backupData.js /backups/sencho-$(date +\%Y\%m\%d)` for the same effect.
 
 ---
 
@@ -130,7 +140,7 @@ docker compose up -d
 
 ### Step 4: Update remote node references
 
-If other Sencho instances were pointing to your old host as a remote node, update their node config to use the new host's IP or hostname. Generate a new API token on the restored instance and distribute it.
+If other Sencho instances were pointing to your old host as a remote node, update their node config to use the new host's IP or hostname. Node tokens are JWTs signed with a secret stored in `sencho.db`, so any token issued before the move is copied along with your data and keeps working automatically; you only need to update the URL, not regenerate the token. Generate a fresh one from **Settings → Infrastructure → Nodes** only if you want to rotate it for its own sake.
 
 ### Step 5: Verify
 

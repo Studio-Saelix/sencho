@@ -20,7 +20,7 @@ Policies live next to your stack-level alert rules in the stack's **Monitor** sh
 ## Prerequisites
 
 - For **healthcheck-based** healing, containers must declare a `HEALTHCHECK` in the Dockerfile or a `healthcheck` block in `docker-compose.yml` so they report a Docker health status. **Crash-based** healing needs no healthcheck: any container that exits with a non-zero code qualifies.
-- You must be signed in as an admin.
+- Viewing existing policies and their history is open to every signed-in role. Creating, toggling, or deleting a policy requires the admin role.
 
 <Note>
   Crash healing acts on crashes Sencho observes while it is running. A container that crashed before Sencho started is left for you to inspect rather than restarted automatically.
@@ -34,7 +34,7 @@ Policies live next to your stack-level alert rules in the stack's **Monitor** sh
 4. Click **Add Policy**. The new policy appears in **Active policies** above the form, with its enable toggle already on.
 
 <Frame>
-  <img src="/images/auto-heal-policies/sheet.png" alt="The Stack › PLEX › MONITOR sheet on the Auto-heal tab, showing one All-services policy in the ACTIVE POLICIES section with its ON toggle, and the ADD NEW POLICY form below with Service, Unhealthy for, Cooldown, Max restarts / hr, and Auto-disable after fields, plus the Add Policy button" />
+  <img src="/images/auto-heal-policies/sheet.png" alt="The Stack › plex › Monitor sheet on the Auto-heal tab, showing one policy scoped to the plex service in the Active policies section with its ON toggle, and the Add new policy form below with Service, Unhealthy for, Cooldown, Max restarts / hr, and Auto-disable after fields, plus the Add Policy button" />
 </Frame>
 
 You can add as many policies to a stack as you need. Each policy is evaluated independently.
@@ -53,6 +53,7 @@ You can add as many policies to a stack as you need. Each policy is evaluated in
 
 - **All services** applies the policy to every container in the stack that reports `unhealthy`. Containers are matched by the `com.docker.compose.service` label.
 - A **named service** scopes the policy to the containers for that Compose service only. Multiple policies can coexist on the same stack, so you can keep an aggressive policy on one service while running a more permissive default for the rest.
+- If an **All services** policy and a named-service policy both cover the same container, only one restart fires for that container per evaluation pass. Give the two policies different thresholds deliberately if you want predictable behavior; otherwise whichever policy is evaluated first claims the restart.
 
 ## Safety rails
 
@@ -68,10 +69,10 @@ Each policy has four safety rails built in. They run before any restart.
 
 ## Managing policies
 
-Each row in **Active policies** shows the service it targets, a compact summary of the thresholds, and three controls on the right: an **ON/OFF** toggle, a chevron that expands the history panel, and a trash icon that deletes the policy.
+Each row in **Active policies** shows the service it targets and a compact summary of the thresholds. Every signed-in role sees the row and can expand its history; the **ON/OFF** toggle and the delete icon are visible only to admins.
 
 <Frame>
-  <img src="/images/auto-heal-policies/policy-row.png" alt="Single Auto-heal policy row showing the threshold summary, ON toggle, history chevron, and delete button" />
+  <img src="/images/auto-heal-policies/policy-row.png" alt="Single Auto-heal policy row showing the plex threshold summary, ON toggle, history chevron, and delete button" />
 </Frame>
 
 - **Toggle a policy off** to pause evaluation without losing its configuration. This is useful when you need to take a service down for maintenance without auto-heal interfering.
@@ -83,7 +84,7 @@ Each row in **Active policies** shows the service it targets, a compact summary 
 Expand the chevron on any policy to reveal its history. Each entry shows the timestamp, the container that was acted on, a colored action label, and a one-line reason.
 
 <Frame>
-  <img src="/images/auto-heal-policies/recent-activity.png" alt="Active policy row with the Recent activity panel expanded, showing No history yet" />
+  <img src="/images/auto-heal-policies/recent-activity.png" alt="The plex policy row with the Recent activity panel expanded, showing No history yet" />
 </Frame>
 
 The action label tells you what Auto-Heal did or, if it chose not to act, why it skipped.
@@ -137,7 +138,7 @@ The dashboard's **Configuration status** card surfaces an **Auto-heal policies**
     Two safety rails are designed to stop this: the **Max restarts / hr** cap and the **Auto-disable after (failures)** threshold. If a container is unhealthy immediately after each restart, lower the cap and the failure threshold while you investigate the root cause in the container's logs. You can also raise **Unhealthy for (minutes)** so transient blips do not count against the policy.
   </Accordion>
 
-  <Accordion title="I cannot see the Auto-heal tab on a stack">
-    Configuring Auto-Heal Policies requires an admin sign-in. If the **Auto-heal** tab is not present on the **Monitor** sheet, confirm you are signed in as an admin.
+  <Accordion title="I don't see the Add new policy form, or the ON/OFF toggle and delete icon">
+    The **Auto-heal** tab itself is visible to every signed-in role, including viewers, so you can always check what is configured and browse history. Creating a policy, toggling it on or off, and deleting it are admin-only actions; a non-admin role sees the policy list and its history but not those controls. Confirm you are signed in as an admin under **Settings → Users** if you expect to make changes.
   </Accordion>
 </AccordionGroup>

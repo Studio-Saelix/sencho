@@ -7,6 +7,8 @@ The **Networking** tab in the right-hand **Anatomy** panel answers two questions
 
 The tab is read-only with respect to stack deployments: it never alters a container, a Compose file, or an existing network attachment. Two write operations are available: setting the stack's *exposure intent* (stored separately so Sencho can flag mismatches over time) and creating a new Docker network on the active node, which is available to admins and covered in [Creating networks](#creating-networks) below.
 
+This tab stays stack-scoped: it models one deployment at a time. For a node-wide inventory of every Docker network, an interactive topology graph, and cross-stack findings, see the [Networking](/features/networking) page instead. A **view node networking** link at the bottom of this tab jumps there directly.
+
 Compose Networking reads structure: network names, service-to-network membership, published ports, network modes, and the *names* of environment variables and labels, never their values. A secret injected through `environment:` or `env_file:` never appears in the view or the logs. One caveat: a structural field assembled by interpolating a secret (a network `name:`, a published port, or an `extra_hosts` entry built from `${VAR}`) is resolved before the inspector reads it, so its value does show. Keep secrets in `environment:` or `env_file:` rather than interpolating them into structural fields. See [Environment and Secrets Guardrails](/features/environment-guardrails).
 
 <img
@@ -26,7 +28,7 @@ The tab appears only when the active node reports that it supports Compose Netwo
 <Frame>
   <img
     src="/images/compose-networking/networking-tab-location.png"
-    alt="The Anatomy panel tab strip showing ANATOMY, ACTIVITY, DOSSIER, DRIFT, ENVIRONMENT, NETWORKING (active and underlined), DOCTOR, STORAGE tabs alongside FILES and EDIT action buttons"
+    alt="The Anatomy panel tab strip scrolled to show DRIFT, ENVIRONMENT, COMPOSE LABELS, NETWORKING (active, highlighted), DOCTOR with an unread-findings dot, and STORAGE tabs, alongside FILES and EDIT COMPOSE action buttons"
   />
 </Frame>
 
@@ -65,7 +67,7 @@ Exposure intent is how you tell Sencho what a stack *should* be reachable from, 
 | **temporary** | A short-lived exposure (a label for tracking only, not a functional configuration). |
 | **unknown** | Not yet classified. |
 
-**How inheritance works:** a service with no intent of its own inherits the stack's. In the per-service row, the **inherit** pill is selected when no override is set; an arrow indicator shows the intent the service inherits from the stack. Clearing a service's override returns it to **inherit**. Clearing the stack's intent returns it to unclassified.
+**How inheritance works:** the stack row's pill options end in **unset**, which clears the stack-level classification entirely. The per-service row's pills end in **inherit** instead: a service with no override of its own takes on the stack's intent, shown by an arrow indicator next to the inherit pill (for example, `→ reverse-proxy`). Selecting inherit on a service clears its override; selecting unset on the stack clears the stack's classification.
 
 **Permissions:** editing the intent requires stack edit access. With read-only access you can see the current classification but not change it.
 
@@ -171,7 +173,7 @@ When Compose Doctor is available on the active node, a prompt at the bottom of t
 
 See [Compose Doctor](/features/compose-doctor) for the complete check set and severity levels.
 
-A **View node networking** link near the bottom of the tab opens the node-wide [Networking](/features/networking) page, for when you want to see this stack's networks in the context of every other stack sharing them.
+A **view node networking** link near the bottom of the tab opens the [Networking](/features/networking) operator page for the active node, scoped to node-wide inventory, topology, and findings rather than this one stack, for when you want to see this stack's networks in the context of every other stack sharing them.
 
 ## Creating networks
 
@@ -182,7 +184,7 @@ A **View node networking** link near the bottom of the tab opens the node-wide [
   />
 </Frame>
 
-Admins can create a new Docker network from the stack **Networking** tab or from the node [Networking](/features/networking) operator page using the **create network** button in the panel header.
+Admins can create a new Docker network directly from the Networking tab using the **create network** button in the panel header. This is the same dialog available from the node-wide [Networking](/features/networking) operator page.
 
 | Field | Required | Description |
 |-------|----------|-------------|
@@ -236,14 +238,14 @@ After the network is created, the Networking tab refreshes automatically. The ne
 ## Related
 
 <CardGroup cols={2}>
+  <Card title="Networking" icon="network-wired" href="/features/networking">
+    The node-wide operator page: full network inventory, an interactive topology graph, and cross-stack findings, independent of which stack they belong to.
+  </Card>
   <Card title="Compose Doctor" icon="stethoscope" href="/features/compose-doctor">
     Runs preflight checks against the same effective model, including the five exposure-aware findings that rely on the intents set in the Networking tab.
   </Card>
   <Card title="Drift Detection" icon="code-compare" href="/features/stack-drift">
     Shows the same four runtime drift types with a persistent history, so you can see when drift first appeared and when it cleared.
-  </Card>
-  <Card title="Resources Hub" icon="network-wired" href="/features/resources">
-    Host-wide view of every Docker network and container attachment on the node, independent of which stack they belong to.
   </Card>
   <Card title="Environment and Secrets Guardrails" icon="shield-halved" href="/features/environment-guardrails">
     Documents which fields Sencho reads and which it redacts, and how to keep secrets safe from interpolation into structural fields.

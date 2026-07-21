@@ -7,6 +7,7 @@ import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { requireAdmin, requirePaid } from '../middleware/tierGates';
 import { enrollmentLimiter } from '../middleware/rateLimiters';
+import { DeployedStackDeletionService } from '../services/DeployedStackDeletionService';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
@@ -401,7 +402,14 @@ nodesRouter.delete('/:id', async (req: Request, res: Response) => {
     // local node, or one with no active connection). Mirrors the re-enroll path.
     MeshProxyTunnelDialer.getInstance().closeBridge(id, 'node deleted');
     PilotTunnelManager.getInstance().closeTunnel(id, PilotCloseCode.NormalClosure, 'node deleted');
-    DatabaseService.getInstance().deleteNode(id);
+    // Local-socket nodes: ready tombstone + recovery-row retirement in the same
+    // transaction as the node delete, then sweep tags/paths. Remote hub records
+    // create no Docker cleanup tombstone.
+    if (existing.type === 'local') {
+      await DeployedStackDeletionService.getInstance().deleteLocalNode(id);
+    } else {
+      DatabaseService.getInstance().deleteNode(id);
+    }
     NodeRegistry.getInstance().evictConnection(id);
     NodeRegistry.getInstance().notifyNodeRemoved(id);
     CacheService.getInstance().invalidate(`${REMOTE_META_NAMESPACE}:${id}`);

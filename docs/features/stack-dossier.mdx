@@ -24,11 +24,11 @@ The top of the tab shows a read-only summary derived live from the stack's Compo
 | Fact | What is shown | Source |
 |------|--------------|--------|
 | **Services** | Names of declared services | Compose file service keys |
-| **Ports** | Count and all published host ports across all services | `ports:` entries, host-side bindings only |
+| **Ports** | A count of every `ports:` entry declared across services, followed by each port number | `ports:` entries. The count is not filtered to host-published mappings: a container-only port (declared without a host side) is counted and listed the same way as a published one. |
 | **Volumes** | Count of mounted volumes | `volumes:` references across services |
-| **Network** | Stack's primary network name and type (for example, `arr-net · bridge`) | Compose network definitions |
+| **Network** | Stack's primary network name, shown with a fixed `bridge` label (for example, `arr-net · bridge`) | Compose network definitions. The `bridge` label is fixed text, not read from the network's actual driver. |
 | **Restart** | Restart policy of the first service with one set | `restart:` key |
-| **Env file** | The env file path, its variable count, and names of any `${VAR}` with no supplied value | `.env` / `env_file:` at the stack root |
+| **Env file** | The env file path, its variable count, and a count of any `${VAR}` with no supplied value. The Markdown export additionally lists the missing variable names; the live tab shows the count only. | `.env` / `env_file:` at the stack root |
 | **Source** | `local`, or the Git remote URL, branch, and path when the stack is linked | Stack's git source configuration |
 
 **Multi-file Compose stacks:** when a stack has a Git source with multiple Compose files, Sencho merges them (equivalent to `docker compose config`) before reading facts. Services, ports, and volumes shown in the Generated Facts reflect the merged result, not any individual file.
@@ -80,7 +80,7 @@ Two actions in the tab header produce a single Markdown document combining the g
 - **copy md** copies the document to the clipboard.
 - **download** saves it as `<stack-name>-dossier.md`.
 
-The exported document always includes the Generated Facts and all Operator Notes. When the Networking tab capability is available on the active node, the export also includes a network exposure summary. When the Storage tab capability is available, the export also includes a storage summary. Both additions are automatic when the capability is present.
+The exported document always includes the Generated Facts and all Operator Notes. When the active node advertises the [Compose Networking](/features/compose-networking) capability, the export also includes a network exposure summary; when it advertises the [Storage Portability](/features/compose-storage) capability, the export also includes a storage summary. Both additions are automatic when the capability is present, but each summary is fetched fresh at export time rather than cached, so a capable, up-to-date node can still omit a section if that fetch fails. See Troubleshooting below.
 
 The export is clean Markdown that reads well in Git, Obsidian, BookStack, a README, or stored alongside a backup. The generated facts never include `.env` values, only variable names and counts. Your operator notes are exported exactly as you write them, so treat them like any document you might share and avoid pasting secrets you do not want in the export.
 
@@ -106,6 +106,10 @@ Fleet Snapshots can optionally capture dossier notes alongside Compose files. Wh
 
 Events from the Drift tab (drift detected, drift resolved) appear in the stack's **Activity** timeline alongside deploys and restarts, giving a chronological view of when the stack drifted and when it recovered.
 
+### Rollback readiness
+
+At the bottom of the Dossier tab, on nodes that advertise the `update-guard` capability, a **Rollback readiness** section reports an overall **Ready**, **Partial**, or **Not ready** state for the stack, built from six signals: whether a compose backup exists, whether that backup covers the stack's env file, whether the image tag is pinned or moving, whether the last deploy succeeded, whether any service defines a healthcheck, and an explicit note that application data in named volumes and bind mounts is never restored by a rollback. It shares the same capability-plus-fetch-failure behavior described above for the Networking and Storage export summaries. See [Health-Gated Updates](/features/health-gated-updates#rollback-readiness) for what each signal means and how to act on it.
+
 ## Permissions and per-node scoping
 
 Any authenticated user with `stack:read` permission can view a stack's dossier. Read-only users see all fields and the export buttons, but no Save button appears.
@@ -120,7 +124,6 @@ Dossiers are stored per stack and per node. A stack named `plex` on your home no
 - **Documentation drift checks Access URLs only.** The port-validity check applies only to the Access URLs field. It does not validate other fields or check hostnames.
 - **No history on operator notes.** The dossier stores only the current version of each field. Sencho does not record change history for operator notes. Use a version-controlled wiki or Git if you need note history.
 - **Export requires a parseable Compose file.** When the Compose file cannot be parsed, the export buttons are disabled. Operator notes are unaffected and still save normally.
-- **Rollback readiness requires a specific capability.** The rollback readiness section is shown only when the `update-guard` capability is active for the node.
 
 ## Accessing the Dossier tab
 
@@ -154,7 +157,7 @@ The Anatomy panel is visible in the right column when a stack is open and the ed
     When a stack's compose file publishes a port through a variable such as `${PLEX_PORT}:32400`, Sencho does not know the resolved value from the Compose source, so it treats that port as unverifiable and stays quiet. If your access URL refers to the same port and a warning still appears, the URL's port does not match any statically declared published port. Either update the URL or pin the port in the Compose file.
   </Accordion>
   <Accordion title="The networking or storage summary is missing from the export">
-    The Markdown export includes a network exposure summary and a storage summary only when the corresponding capabilities are available on the active node. If those sections are missing, the capabilities are not enabled for that node. The core generated facts and all operator notes are always included regardless of capabilities.
+    A missing section has one of two causes. Either the active node does not currently advertise the [Compose Networking](/features/compose-networking) or [Storage Portability](/features/compose-storage) capability, because it is running an older Sencho build or was briefly unreachable when Sencho last checked, or the node does have the capability but the on-demand fetch for that summary failed at export time (a transient API, proxy, or Docker issue). Retry the export before assuming the node needs an upgrade. The core generated facts and all operator notes are always included regardless of either cause.
   </Accordion>
   <Accordion title="Dossier notes were not restored after a fleet snapshot restore">
     Fleet snapshot restore has two steps: restoring Compose files and optionally restoring dossier notes. Notes are restored only when you explicitly choose to restore them at restore time. If you did not select that option, or if the original snapshot was captured without documentation enabled, the notes will not be present. To restore notes, choose a snapshot that includes documentation and confirm the notes restore option during the restore flow.

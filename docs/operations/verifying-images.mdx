@@ -131,6 +131,19 @@ Each release publishes two moving tags plus one immutable tag, so you can choose
 
 For production, pin to `X.Y.Z` or `X.Y` and verify the signature on every pull. For staging or development, `latest` is fine.
 
+### Integration tag (post-merge, pre-release)
+
+Every push to `main` publishes the current integration build so you can pull and smoke-test the exact code queued for the next release before it is ever tagged. This tag is GHCR-only, published to a separate package from the release image, and carries no signature, SBOM, or VEX attestation.
+
+| Tag | Example | Updates on |
+|---|---|---|
+| `dev` | `ghcr.io/studio-saelix/sencho-dev:dev` | Every push to `main` |
+| `dev-<sha>` | `ghcr.io/studio-saelix/sencho-dev:dev-a1b2c3d` | Never (immutable per build) |
+
+<Note>
+The `:dev` image is not for production. It is unsigned, is never published to Docker Hub, and does not carry the SBOM, provenance, or VEX attestations described above.
+</Note>
+
 ### Preview tags (pre-merge only)
 
 Maintainers publish these from open PRs for external validation. They are unsigned and not for production.

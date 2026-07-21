@@ -1,6 +1,6 @@
 ---
 title: Deploy Progress
-description: Stream live output from stack deploy, update, install, restart, stop, and scan operations with a structured log view, a minimizable pill, and an optional inline status band.
+description: Stream live output from stack deploy, update, install, restart, stop, take down, and node scan operations with a structured log view, a minimizable pill, and an optional inline status band.
 ---
 
 When you trigger a stack operation that runs through `docker compose` or the Docker Engine, Sencho opens a live progress view that streams output as it happens. Each line becomes a timestamped row with a stage badge so you can track the deployment lifecycle as it runs. The progress view appears as a centered modal overlay by default or as a quiet status band on the stack detail when you prefer a less intrusive style. Either way, the view can be minimized to a floating pill that follows you across navigation so you can leave the App Store mid-install and still see the status from any screen.
@@ -24,8 +24,8 @@ The modal opens automatically when you trigger an action. It floats centered in 
 
 ### What the modal shows
 
-- **Header**: the action verb (Deploying, Updating, Installing, Restarting, Stopping, Scanning), the stack name in monospace truncated at 200 px, and an elapsed-time chip that appears once the connection moves past the initial **Connecting...** state.
-- **Status indicator** in the upper right: one of `Connecting...` while the stream attaches, a live `<n> lines` counter while output is flowing, `Succeeded · closes in <n>s` after a clean finish, or the failure message itself when the run errors out. If the live stream cannot attach or drops, the indicator switches to `Live progress unavailable` and the operation keeps running in the background.
+- **Header**: the action verb (Deploying, Updating, Installing, Restarting, Stopping, Taking down, Scanning), the stack name in monospace truncated at 200 px, and an elapsed-time chip that appears once the connection moves past the initial **Connecting...** state.
+- **Status indicator** in the upper right: one of `Connecting...` while the stream attaches, a live `<n> lines` counter while output is flowing, `Succeeded` with a `closes in <n>s` countdown after a clean finish, or the failure message itself when the run errors out. If the live stream cannot attach or drops, the indicator switches to `Live progress unavailable` and the operation keeps running in the background.
 - **Structured log body**: one row per output line. Each row carries a timestamp, a fixed-width stage badge, and the log message. Error rows have a destructive left border and tinted background so they stand out without scanning.
 - **Footer**: a `Raw output` / `Hide raw` toggle on the left, with **Minimize** and **Close** buttons on the right.
 
@@ -48,10 +48,10 @@ When the gate passes, the success state and 4-second auto-close resume. When the
 
 Closing or minimizing the modal never stops the observation. The gate runs to completion in the background regardless of what happens to the progress view.
 
-The health gate activates only for **deploy** and **update** actions. Restart, stop, and scan do not trigger it.
+The health gate activates only for **Deploy** and **Update** actions; no other action triggers it.
 
 <Frame>
-  <img src="/images/deploy-progress/modal-health-gate.png" alt="Deploy progress modal showing the health gate observing banner with an elapsed counter, the green health gate passed banner below it, and the full structured log body." />
+  <img src="/images/deploy-progress/modal-health-gate.png" alt="Deploy progress modal showing the health gate observing banner with an elapsed counter above a fully populated structured log body." />
 </Frame>
 
 ## Stage badges
@@ -77,12 +77,12 @@ Each log row is classified by content. Most lines render as **LOG** because the 
 Click **Raw output** in the footer to expand a raw terminal panel beneath the structured rows. The raw view shows the unprocessed compose stream, including the progress bars and ANSI-formatted output that the structured parser does not render. Clicking the toggle a second time (now labelled **Hide raw**) collapses the panel.
 
 <Frame>
-  <img src="/images/deploy-progress/modal-raw-output.png" alt="Deploy progress modal with the Raw output panel expanded, showing structured rows above and the green-on-black raw terminal stream below." />
+  <img src="/images/deploy-progress/modal-raw-output.png" alt="Deploy progress modal with the Raw output panel expanded, showing structured rows and the health gate passed banner above the monospace raw terminal stream below." />
 </Frame>
 
 ## Auto-close on success
 
-When an action completes successfully, the status indicator switches to `Succeeded · closes in <n>s` and a 4-second countdown begins. Hover anywhere over the modal to pause the countdown; moving the cursor away restarts a fresh 4 seconds. Clicking **Close** dismisses the modal immediately.
+When an action completes successfully, the status indicator switches to a green `Succeeded` label with a `closes in <n>s` countdown next to it, and a 4-second countdown begins. Hover anywhere over the modal to pause the countdown; moving the cursor away restarts a fresh 4 seconds. Clicking **Close** dismisses the modal immediately.
 
 When the [health gate](#health-gate) is observing the stack after a deploy or update, the modal withholds the success verdict: the status indicator shows **Verifying health** instead of **Succeeded**, and the auto-close waits for the gate result. A passed gate resumes the countdown; a failed or unknown result keeps the modal open until you close it manually.
 
@@ -108,10 +108,10 @@ Click **Minimize** to collapse the modal to a small status pill anchored at the 
 
 The pill is mounted as a portal, so it persists across navigation: leave the App Store mid-install and the pill follows you to the dashboard, the editor, or any other view.
 
-Minimizing, closing, or navigating away never cancels the operation. The progress view only displays output; the deploy, update, or stop runs to completion on its own. If you dismiss the view while live output is flowing, the run still finishes in the background, and its success or failure lands in your notifications.
+Minimizing, closing, or navigating away never cancels the operation. The progress view only displays output; the triggering action runs to completion on its own. If you dismiss the view while live output is flowing, the run still finishes in the background, and its success or failure lands in your notifications.
 
 <Frame>
-  <img src="/images/deploy-progress/pill.png" alt="Minimized deploy progress pill anchored at the bottom center of the dashboard, showing the brand-colored pulsing dot and the text 'Updating dozzle'." />
+  <img src="/images/deploy-progress/pill.png" alt="Minimized deploy progress pill, showing the pulsing status dot and the action verb followed by the stack name in monospace." />
 </Frame>
 
 ## Inline style
@@ -135,32 +135,32 @@ When you navigate away from the stack detail while an operation is running, the 
 
 ## Recovery actions
 
-When a deploy or update fails, times out, or its outcome is ambiguous, the stack page offers safe next steps so you can fix the stack in place. On desktop a small **Update failed** chip appears in the stack card; click it to open a menu of recovery actions. On a phone the same actions show as an inline card on the stack detail. Either way, it shows the failed action, the error, and how long the operation ran, and it works whether or not the progress modal is enabled.
+When a **deploy**, **update**, **restart**, or **rollback** fails, times out, or its outcome is ambiguous, the stack page offers safe next steps so you can fix the stack in place. On desktop a small chip naming the failed action (for example **Deploy failed** or **Update failed**) appears in the stack card; click it to open a menu of recovery actions. On a phone the same actions show as an inline card on the stack detail. Either way, it shows the failed action, the error, and how long the operation ran, and it works whether or not the progress modal is enabled.
 
 The available actions are:
 
 - **Retry** the failed operation.
-- **Restart** the stack.
-- **Roll back** to the previous version, shown only when a backup exists for the stack.
+- **Restart** the stack, shown for any failure other than a failed restart itself.
+- **Roll back** to the previous version, shown only when a backup exists and the failure wasn't itself a rollback.
 - **Refresh** to re-read the live container status after the failure.
 - **Copy details** to put the stack name, node, action, error, elapsed time, and last output line on your clipboard for a bug report.
 
-Retry, Restart, and Roll back require deploy permission on the stack. After a failed or stalled operation, Sencho refreshes the container state automatically so the page reflects reality, and it never leaves the action stuck in an endless spinner.
+Retry, Restart, and Roll back require deploy permission on the stack. **Stop**, **Take down**, **Install**, and **Scan this node** failures do not produce a recovery entry. After a failed or stalled operation, Sencho refreshes the container state automatically so the page reflects reality, and it never leaves the action stuck in an endless spinner.
 
 ## Supported entry points
 
 The progress view opens for the following actions:
 
-- **Deploy**, **Update**, **Restart**, **Stop** from the stack editor's action bar.
+- **Deploy**, **Update**, **Restart**, **Stop**, **Take down** from the stack editor's action bar, sidebar context menu, or confirmation dialogs.
 - **Install** from the App Store.
 - **Apply** from a Git Source panel when the apply request includes a deploy.
-- **Scanning** a stack's image configuration.
+- **Scan this node** from the Security page's Overview tab, covering the vulnerability, secret, and compose-misconfiguration scan types you select. See [Vulnerability Scanning](/features/vulnerability-scanning#scanning-a-whole-node-at-once) for what each scan type checks.
 
-Of those, **Deploy**, **Update**, **Install**, and Git **Apply** route through `docker compose up` and produce a populated structured-log body. **Restart** and **Stop** call the Docker Engine directly to act on existing containers; they bypass compose, so the modal opens, registers `0 lines`, and finishes. **Scanning** streams its own output as LOG rows.
+Of those, **Deploy**, **Update**, **Install**, **Take down**, and Git **Apply** route through `docker compose up` or `docker compose down` and produce a populated structured-log body. **Restart** and **Stop** call the Docker Engine directly to act on existing containers; they bypass compose, so the modal opens, registers `0 lines`, and finishes. **Scan this node** streams its own sanitized progress lines (counts and rule IDs, never raw secret values) as LOG rows.
 
-The [health gate](#health-gate) activates only after **Deploy** and **Update**; it does not fire for Restart, Stop, Install, Git Apply, or Scanning.
+The [health gate](#health-gate) activates only after **Deploy** and **Update**; it does not fire for Restart, Stop, Take down, Install, Git Apply, or Scan this node.
 
-The HTTP API exposes **Take down** as `POST /api/stacks/:name/down`. The stack header, sidebar context menu, and confirmation dialog call this endpoint. Compose output streams through the same progress modal as Deploy and Update. Optional `?removeVolumes=true` removes compose volumes when the node advertises support.
+**Take down** is exposed over the HTTP API as `POST /api/stacks/:name/down`, with an optional `?removeVolumes=true` to remove compose volumes when the node advertises support.
 
 ## Troubleshooting
 
@@ -186,8 +186,8 @@ The HTTP API exposes **Take down** as `POST /api/stacks/:name/down`. The stack h
   <Accordion title="The health gate is blocking the modal from closing">
     The modal withholds auto-close while the health gate is observing containers and whenever the gate result is failed or unknown. A failed or unknown gate means the containers did not stay healthy through the observation window; the modal stays open so you can see the reason. Use the recovery actions on the stack page to retry, restart, or roll back. Clicking **Close** on the modal dismisses it manually at any time; it does not cancel the gate observation if it is still running.
   </Accordion>
-  <Accordion title="No health gate appeared after a restart or scan">
-    The health gate only fires after **deploy** and **update** actions. Restart, stop, install, git apply, and scan complete without a post-operation observation period. If you want health monitoring after a restart, deploy or update the stack instead.
+  <Accordion title="No health gate appeared after a restart or a node scan">
+    The health gate only fires after **deploy** and **update** actions. Restart, stop, take down, install, Git apply, and Scan this node complete without a post-operation observation period. If you want health monitoring after a restart, deploy or update the stack instead.
   </Accordion>
   <Accordion title="I changed the deploy progress setting but it did not take effect">
     The settings live in `localStorage`: the on/off toggle under `sencho.deploy-feedback.enabled` and the Modal/Inline choice under `sencho.deploy-feedback.style`. Both apply to the current tab without a reload, and other tabs in the same browser pick up the change through a `storage` event. Deploy progress defaults to on in Modal style, so only an explicit choice changes it. If a tab still does not honour the setting, refresh that tab. The settings do not sync across browsers or devices; each one carries its own choice.

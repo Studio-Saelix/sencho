@@ -76,6 +76,9 @@
       "display": "simple"
     }
   },
+  "interaction": {
+    "drilldown": false
+  },
   "navigation": {
     "tabs": [
       {
@@ -83,17 +86,16 @@
         "groups": [
           {
             "group": "Start here",
-            "root": "getting-started/introduction",
-            "directory": "card",
             "pages": [
+              "getting-started/introduction",
               "getting-started/quickstart",
               "getting-started/configuration"
             ]
           },
           {
             "group": "Product guide",
-            "root": "features/overview",
             "pages": [
+              "features/overview",
               {
                 "group": "Core workflow",
                 "expanded": true,
@@ -184,9 +186,8 @@
           },
           {
             "group": "Operations",
-            "root": "operations/self-hosting",
-            "directory": "accordion",
             "pages": [
+              "operations/self-hosting",
               "operations/upgrade",
               "operations/backup",
               "operations/recovery",
@@ -199,9 +200,8 @@
           },
           {
             "group": "Reference",
-            "root": "reference/settings",
-            "directory": "accordion",
             "pages": [
+              "reference/settings",
               "features/licensing",
               "reference/security",
               "reference/contact"

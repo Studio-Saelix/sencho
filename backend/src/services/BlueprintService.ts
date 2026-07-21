@@ -10,6 +10,7 @@ import {
 } from './DatabaseService';
 import { ComposeService } from './ComposeService';
 import { StackOpLockService, stackOpSkipMessage, type StackOpAction } from './StackOpLockService';
+import { DeployedStackDeletionService } from './DeployedStackDeletionService';
 import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
@@ -463,32 +464,17 @@ export class BlueprintService {
     }
 
     private async withdrawLocal(blueprint: Blueprint, node: Node): Promise<void> {
-        // Hold the per-stack lock across both the compose down and the directory
-        // delete so a withdraw cannot race a manual operation, nor tear the
-        // files out from under one that starts mid-withdraw.
-        const lock = await StackOpLockService.getInstance().runExclusive(
-            node.id, blueprint.name, 'down', 'system',
-            async () => {
-                try {
-                    await ComposeService.getInstance(node.id).downStack(blueprint.name);
-                } catch (err) {
-                    // best-effort: continue to delete the directory even if down fails
-                    console.warn(`[BlueprintService] downStack failed for "${blueprint.name}" on node ${node.id}: ${BlueprintService.formatError(err)}`);
-                }
-                if (await this.stackDirExists(node.id, blueprint.name)) {
-                    await FileSystemService.getInstance(node.id).deleteStack(blueprint.name);
-                }
-                // Remove the exposure descriptor so a withdrawn blueprint
-                // stack does not leave a stale row that escalates posture.
-                try {
-                    DatabaseService.getInstance().deleteStackExposure(node.id, blueprint.name);
-                } catch (e) {
-                    console.warn(`[BlueprintService] deleteStackExposure failed for "${blueprint.name}" on node ${node.id}: ${BlueprintService.formatError(e)}`);
-                }
-            },
-        );
-        if (!lock.ran) {
-            throw new Error(stackOpSkipMessage(blueprint.name, lock.existing.action));
+        const result = await DeployedStackDeletionService.getInstance().deleteDeployedStack({
+            nodeId: node.id,
+            stackName: blueprint.name,
+            pruneVolumes: false,
+            actor: 'system:blueprint',
+        });
+        if (!result.ok) {
+            if (result.code === 'lock_conflict') {
+                throw new Error(result.error);
+            }
+            throw new Error(result.error);
         }
     }
 

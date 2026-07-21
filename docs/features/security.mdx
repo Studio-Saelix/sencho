@@ -8,7 +8,12 @@ capabilities that power [vulnerability scanning](/features/vulnerability-scannin
 center, so you can answer "what should I look at first?" without hunting through other pages. It is
 scoped to the active node: the findings and scanner status you see reflect whichever node is selected.
 
-The page is organized into tabs.
+<Frame>
+  <img src="/images/security/overview.png" alt="Security page Overview tab with an Action needed masthead reading '3 actions: fixable findings, detected secrets' and CRITICAL/HIGH/LAST SCAN stat tiles, a Why Action needed review-queue card, a 30-day risk trend chart, an Action posture breakdown, and a Scan this node button." />
+</Frame>
+
+The page is organized into tabs: Overview, Images, Compose risks, Secrets, Policies, Suppressions,
+History, and Scanner setup.
 
 ## Overview
 
@@ -26,6 +31,12 @@ Raw Critical and High counts stay visible next to the posture as **scanner detec
 posture itself: a vulnerable component being present is not the same as a reachable, exploitable risk.
 The masthead carries a standing note to that effect, and posture weighs fix availability, exploit
 intelligence, and triage decisions rather than raw severity alone.
+
+An admin on a node with a ready scanner sees a **Scan this node** button above the review queue. It
+opens a popover to pick any combination of image vulnerabilities, image secrets, and Compose
+misconfigurations, then runs a node-wide scan in the [deploy progress](/features/deploy-progress)
+modal; a partial failure across images or stacks surfaces as a warning toast rather than reading as
+clean.
 
 Below the masthead, a **Review queue** card leads the overview when actions or review items exist.
 When the posture is Action needed the card is titled **Why Action needed** and lists each concrete
@@ -49,33 +60,61 @@ clear "overview unavailable" state and the other tabs keep working.
 
 ## Images
 
+<Frame>
+  <img src="/images/security/images-tab.png" alt="Security page Images tab listing scanned images with Image, Findings, Last scan, Severity, and Actions columns; findings show critical/high counts and fixable totals, and one row shows a Clean badge." />
+</Frame>
+
 Image findings list every scanned image on the active node with its highest severity. Selecting an
-image opens the full scan report, where you can review vulnerabilities, triage a CVE, and export an
-SBOM. Each finding carries evidence tags so you can tell scary from exploitable at a glance:
-known-exploited (KEV), EPSS exploitation probability, the CVSS score, and vendor "will not fix"
-status, alongside whether a fix is available.
+image opens the full scan report, where you can review vulnerabilities, triage a CVE, compare against
+another scan, and export a CSV, a SARIF file, or an SBOM. Each finding carries evidence tags so you can
+tell scary from exploitable at a glance: known-exploited (KEV), EPSS exploitation probability, the
+CVSS score, and vendor "will not fix" status, alongside whether a fix is available.
+
+<Frame>
+  <img src="/images/security/scan-report.png" alt="Vulnerability scan report sheet for nginx:latest showing 340 vulnerabilities, a Critical/High/Medium/Low summary, Compare/CSV/SARIF/SBOM export buttons, and a findings table with CVE, package, severity, installed version, and per-row EPSS and CVSS evidence tags." />
+</Frame>
 
 ## Compose risks
 
+<Frame>
+  <img src="/images/security/compose-risks.png" alt="Security page Compose risks tab in its empty state, with intro text describing privileged containers, Docker socket mounts, host networking, and broad capabilities, and a 'No Compose risks found' message prompting a node scan or per-stack config scan." />
+</Frame>
+
 Compose risks surface the security misconfigurations Trivy finds in your stack definitions rather than
-image CVEs: privileged containers, Docker socket mounts, host networking, broad host bind mounts, public
-database ports, and containers running as root. Each entry opens its scan report with the specific
-findings and how to fix them. This is a security audit of the Compose file; for deploy-readiness checks
-(port conflicts, missing bind paths, unset variables, no healthcheck), use
-[Compose Doctor](/features/compose-doctor) from the stack page instead.
+image CVEs, such as privileged containers, Docker socket mounts, host networking, or broad
+capabilities. Each entry opens its scan report with the specific findings and how to fix them. This is
+a security audit of the Compose file; for deploy-readiness checks (port conflicts, missing bind paths,
+unset variables, no healthcheck), use [Compose Doctor](/features/compose-doctor) from the stack page
+instead.
 
 ## Secrets
+
+<Frame>
+  <img src="/images/security/secrets.png" alt="Security page Secrets tab listing an image with detected secret findings and a severity badge that opens the scan report's Secrets tab." />
+</Frame>
 
 The secrets tab lists images where Trivy detected exposed credentials or keys, and opens straight to
 the secret findings for a scan.
 
 ## Policies
 
-The Policies tab manages deploy-enforcement scan policies: severity thresholds that block or warn on a
-deploy, scoped by stack pattern. See
-[scan policies](/features/vulnerability-scanning#scan-policies) for the full configuration.
+<Frame>
+  <img src="/images/security/add-policy.png" alt="New policy dialog with a Name field, an optional glob-style Stack pattern field, Block conditions toggles for Severity threshold, Known-exploited (KEV), and Fixable Critical/High, a Block on deploy toggle, and an Enabled toggle." />
+</Frame>
+
+The Policies tab manages deploy-enforcement scan policies: a policy names one or more block
+conditions (a severity threshold, a known-exploited CVE, a fixable Critical or High finding), scoped
+to a glob-style stack pattern or left blank to apply fleet-wide. Turning **Block on deploy** off keeps
+a policy evaluating and alerting without rejecting the deploy. A separate **Honor suppressions in
+deploy blocks** switch, off by default, decides whether a suppressed CVE still counts toward a block.
+See [scan policies](/features/vulnerability-scanning#scan-policies) for the full configuration
+reference.
 
 ## Suppressions
+
+<Frame>
+  <img src="/images/security/suppressions.png" alt="Security page Suppressions tab with a CVE suppressions section (Export VEX and Add suppression buttons) and a Misconfig acknowledgements section (Add acknowledgement button), both showing empty states." />
+</Frame>
 
 CVE suppressions and misconfiguration acknowledgements are managed here, the same controls available
 in Settings. These are governed by the local instance, so this tab is shown when you are on the local
@@ -88,9 +127,22 @@ export the fleet's triage decisions as an OpenVEX document for use with other to
 
 ## History
 
-The History tab lists completed scans for the active node in an inline table. Prefer digest identity when a digest is stored (short digest as the primary label, image reference as the subtitle); config and other scans without a digest show the image reference. Search matches image references or digests. Select two scans to compare. The **Scan history** button in the [Resources Hub](/features/resources) is a shortcut to the same place. For how tags and digests relate, see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
+<Frame>
+  <img src="/images/security/history.png" alt="Security page History tab listing completed scans with a short digest as the primary label and image reference as the subtitle, plus Last scanned, Trigger, Severity, Findings, Fixable, and Action columns, a search box, and a Compare (0/2) button." />
+</Frame>
+
+The History tab lists completed scans for the active node in an inline table. Prefer digest identity
+when a digest is stored (short digest as the primary label, image reference as the subtitle); config
+and other scans without a digest show the image reference. Search matches image references or
+digests. Select two scans to compare. The **Scan history** button in the
+[Resources Hub](/features/resources) is a shortcut to the same place. For how tags and digests relate,
+see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
 
 ## Scanner setup
+
+<Frame>
+  <img src="/images/security/scanner-setup.png" alt="Security page Scanner setup tab showing an Installed (managed) Vulnerability Scanner card at version v0.72.0 with an Uninstall link, and three toggles: Auto-update Trivy (on), Pre-deploy scan advisory (off), and Exploit intelligence KEV plus EPSS (on)." />
+</Frame>
 
 Scanner setup manages the Trivy binary for the active node: install the managed binary, update it when
 a new release is available, and toggle automatic updates. Trivy is installed independently on each
@@ -99,6 +151,23 @@ node. See [Installing Trivy](/operations/trivy-setup) for the full setup options
 It also toggles **exploit intelligence**: a daily background fetch of the CISA KEV catalog and FIRST
 EPSS scores that powers the known-exploited and EPSS evidence tags. It degrades gracefully when
 offline and can be turned off for air-gapped or firewalled hosts.
+
+A third, admin-only toggle, off by default, enables the **pre-deploy scan advisory**: an opt-in review
+step that shows each image's latest scan severity before a manual deploy runs from the editor. It is
+visibility only and never blocks a deploy on its own; see
+[Pre-deploy scan advisory](/features/vulnerability-scanning#pre-deploy-scan-advisory) for how it
+behaves and how it differs from a blocking policy on the Policies tab.
+
+## On a phone
+
+<Frame>
+  <img src="/images/security/mobile.png" alt="Mobile Security page with a masthead-led SECURITY kicker, an Action needed state word, a horizontally scrollable tab strip, a full-width Scan this node button, CRITICAL/HIGH/LAST SCAN tiles, and the Why Action needed review queue." />
+</Frame>
+
+Security uses the bespoke mobile masthead pattern: no top bar, a scrollable tab strip mirroring the
+desktop tab order, and the same panels underneath. The scanner-detections note moves into the
+masthead's info affordance, and the node-scan launcher becomes a full-width button at the top of the
+Overview panel.
 
 ## What stays where
 

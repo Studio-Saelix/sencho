@@ -3,14 +3,14 @@ title: Fleet View
 description: Monitor every node in your Sencho deployment from one screen, drill into stacks and containers, and orchestrate Sencho version updates across the fleet.
 ---
 
-The **Fleet** tab is the single page you open when you want to see the whole estate at once: every node's health, every stack, every container, and which boxes need a Sencho update. It is the home for fleet-wide tabs that go beyond monitoring (Snapshots, Status, Deployments, Routing, Federation, Actions, Secrets), each linking out to its own dedicated page.
+The **Fleet** tab is the single page you open when you want to see the whole estate at once: every node's health, every stack, every container, and which boxes need a Sencho update. It is the home for fleet-wide tabs that go beyond monitoring (Snapshots, Docker Labels, Deployments, Routing, Federation, Actions, Secrets), each linking out to its own dedicated page.
 
 <Note>
   Fleet is hub-only and is hidden from the nav strip when a remote node is the active selection. See [Multi-Node Management](/features/multi-node#what-top-level-views-show-when-a-remote-node-is-active).
 </Note>
 
 <Frame>
-  <img src="/images/fleet-view/fleet-overview.png" alt="Fleet page showing the masthead with the editorial 'The fleet' word, a meta line reading '8 nodes · 8 online · last sync 12s', a '1 critical' reasons line, and CPU / MEM / CONTAINERS stat tiles next to a 1-alert counter. Below, the eight-tab strip starts at Overview and ends at Secrets. Under that, the toolbar (search, sort, filters, Grid/Topology toggle) sits above a grid of node cards: a pinned Local card with a cyan ★ Local rail and an Online badge plus version chip, then Opsix, Pitt-Moba, sencho-pilot-test (with an Update available badge and Update to v0.76.3 button), and four more remote cards." />
+  <img src="/images/fleet-view/fleet-overview.png" alt="Fleet page showing the masthead with the editorial 'The fleet' word, a meta line reading '4 nodes · 4 online · last sync 5s', and CPU / MEM / CONTAINERS stat tiles next to a 0-alert counter. Below, the tab strip runs Overview, Snapshots, Status, Map, Docker Labels, Deployments, Federation, Actions. Under that, the toolbar (collapsed search icon, sort, filters, Grid/Topology toggle, Node Update, Manage nodes) sits above a grid of four node cards: a pinned Local card with a cyan ★ Local rail, an Online badge, a version chip, and a 'Networking · exposed' pill, followed by Opsix, Pitt-Moba, and SLX-Mars." />
 </Frame>
 
 ## Page layout
@@ -21,9 +21,8 @@ The page has three rails stacked top to bottom: a status masthead, a tab strip p
 
 A single rail summarises the state of every registered node so you can read the whole estate without scrolling.
 
-- A **state word** that always reads `The fleet`, set in the editorial italic display face. The word changes color with the fleet's overall state: foreground when **Healthy** (every node online, none critical), warning when **Degraded** (any node offline), destructive when **Critical** (any online node above the CPU or disk threshold).
-- A **pulsing dot** in the same colour, with a soft halo. The dot is solid when Healthy and pulses when Degraded or Critical, so motion only appears when something needs attention.
-- A **rail tint** down the left edge of the masthead that mirrors the state colour, plus a subtle gradient wash across the bar.
+- A **state word** that always reads `The fleet`, set in the editorial display face. The word changes color with the fleet's overall state: foreground when **Healthy** (every node online, none critical), warning when **Degraded** (any node offline), destructive when **Critical** (any online node above the CPU or disk threshold).
+- A **rail tint** down the left edge of the masthead that mirrors the state colour, plus a subtle gradient wash across the bar. When Healthy, the rail carries a slow ambient shimmer; when Degraded or Critical, it switches to a steady glow instead, so an alert state reads as calm, sustained emphasis rather than a distracting pulse.
 - A **meta line** in uppercase mono tracking that reads `<n> nodes · <m> online · last sync Xs`, where the sync delta uses compact units (`s` / `m` / `h`). While data is loading the line reads `syncing…` instead.
 - A **reasons line** below the meta line that names exactly what is wrong, e.g. `1 offline · 1 critical`. The reasons line is hidden when the fleet is Healthy.
 - Three **stat tiles** on the right edge, in mono tabular numerals:
@@ -38,14 +37,15 @@ A single rail summarises the state of every registered node so you can read the 
 
 ### Tabs
 
-The Fleet view is a tab strip. Every tier sees Overview, Status, Map, Deployments, Federation, and Actions. Snapshots appears for admins. Routing and Secrets are limited-availability fleet surfaces and are not part of the default tab strip. A vertical separator after **Status** divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
+The Fleet view is a tab strip. Every tier sees Overview, Status, Map, Docker Labels, Deployments, Federation, and Actions. Snapshots appears for admins. Routing and Secrets are limited-availability fleet surfaces and are not part of the default tab strip. A vertical separator after **Docker Labels** (or after **Map** when Docker Labels is not present) divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
 
 | Tab | Tier | What it does |
 |-----|------|--------------|
 | **Overview** | Community | The grid or topology view of every node and its health. Covered in the next section. |
-| **Snapshots** | Community | Snapshot every compose file across the fleet. See [Fleet-Wide Backups](/features/fleet-backups). |
+| **Snapshots** | Community (admin role) | Snapshot every compose file across the fleet. See [Fleet-Wide Backups](/features/fleet-backups). |
 | **Status** | Community | One card per node summarising which automations and security features are configured. Covered below. |
 | **Map** | Community | A read-only map of how stacks, services, networks, volumes, and ports relate across the fleet, with anomaly flags. Covered below. |
+| **Docker Labels** | Community | Estate-wide audit of Docker and Compose labels across every node. See [Docker Label Audit](/features/docker-label-audit). |
 | **Deployments** | Community | Blueprint deployments and reconciler state. See [Blueprints](/features/blueprint-model). |
 | **Routing** | Limited availability | Cross-node service routing via Sencho Mesh when that surface is enabled on the instance. See [Sencho Mesh](/features/sencho-mesh). |
 | **Federation** | Community | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
@@ -54,13 +54,14 @@ The Fleet view is a tab strip. Every tier sees Overview, Status, Map, Deployment
 
 ### Action buttons
 
-Three buttons sit next to the tab strip in the top-right corner. They are visible from every tab, not just Overview.
+Two buttons sit next to the tab strip in the top-right corner. They are visible from every tab, not just Overview.
 
 | Button | What it does |
 |--------|--------------|
-| **Check Updates** | Opens the [Node Updates sheet](#node-updates) where you can manage Sencho version updates across the fleet. |
 | **Refresh** | Forces an immediate re-fetch of fleet data. The icon spins while the refresh is in flight; the button is disabled until it completes. |
-| **Add node** | Opens the same Add Node dialog as **Settings · Infrastructure · Nodes** so you can register a new node without leaving the Fleet page. Admin-only. After saving a remote proxy node, a connection test runs automatically and the result toasts in (success or saved-but-unreachable). |
+| **Export Dossier** | Admin-only. Walks every node and stack and downloads a `homelab-dossier.zip` Markdown archive of the whole fleet. See [Fleet Dossier](/features/fleet-dossier). |
+
+The **Node Update** and **Manage nodes** buttons live in the Overview tab's own toolbar rather than this shared row; see [Toolbar](#toolbar) below.
 
 ## The Overview tab
 
@@ -68,15 +69,17 @@ Overview is the default tab and is where most operators spend their time. It off
 
 ### Toolbar
 
-In **Grid** mode the toolbar exposes search, sort, filters, and the view toggle. In **Topology** mode only the view toggle remains (the grid-only controls collapse).
+In **Grid** mode the toolbar exposes search, sort, filters, and the view toggle. In **Topology** mode only the view toggle remains (the grid-only controls collapse). **Node Update** and **Manage nodes** sit at the end of the row in both modes.
 
 | Control | Behaviour |
 |---------|-----------|
-| **Search** | Real-time filter that matches against node names and the names of stacks deployed on each node. Typing `plex` keeps only nodes that have a `plex` stack; typing `dev` keeps only nodes whose name contains `dev`. |
+| **Search** | Collapsed to a single icon button by default; click it to expand the input (it stays expanded while a query is entered and collapses again on blur once cleared). Filters in real time against node names and the names of stacks deployed on each node. Typing `plex` keeps only nodes that have a `plex` stack; typing `dev` keeps only nodes whose name contains `dev`. |
 | **Sort** | Combobox with five orderings: Name, CPU Usage, Memory Usage, Containers, Status. The selection persists in the browser. |
 | **Direction toggle** | Arrow button next to the sort combobox. The icon rotates 180° and the title flips between *Switch to ascending* / *Switch to descending* to confirm the current direction. |
-| **Filters** | Popover with four sections: **Status** (All / Online / Offline), **Type** (All / Local / Remote), **Severity** (Critical Only toggle), and **Tags** (multi-select of fleet label palette, only visible if labels exist). The button shows a count badge for active filters; a **Clear all filters** action appears at the bottom of the popover when at least one filter is set. |
-| **Grid / Topology** | Segmented control on the right, with a Grid icon and a Topology icon. The control resets to Grid when the page is reloaded. |
+| **Filters** | Popover with five sections: **Status** (All / Online / Offline), **Type** (All / Local / Remote), **Severity** (Critical Only toggle), **Networking** (All / Exposed / Unknown / Drift, matching the [networking badge](#grid-view) on each card), and **Tags** (multi-select of fleet label palette, only visible if labels exist). The button shows a count badge for active filters; a **Clear all filters** action appears at the bottom of the popover when at least one filter is set. All filter and sort selections persist in the browser. |
+| **Grid / Topology** | Segmented control, with a Grid icon and a Topology icon. The control resets to Grid when the page is reloaded. |
+| **Node Update** | Opens the [Node Updates sheet](#node-updates) and immediately re-checks every node's version, same as **Recheck** inside the sheet. |
+| **Manage nodes** | Admin-only. Navigates to **Settings → Infrastructure → Nodes**, where you register, edit, or remove nodes. |
 
 ### Grid view
 
@@ -89,12 +92,15 @@ Every node renders as a card. The local node is pinned at the top of the grid wi
 | **Type badge** | Outline pill reading `local` or `remote`. |
 | **Version badge** | The node's Sencho version in mono tabular numerals (e.g. `v0.76.3`). Hidden if the node cannot report a version. |
 | **Update available** badge | Warning pill shown when a newer Sencho release is published for this node. |
+| **Pinned** badge | Shown instead of **Update available** when the node's own Sencho image is pinned to a digest (or an unrecognised pin) and cannot be updated automatically from here. A tooltip explains why. |
 | **Critical** badge | Destructive pill with a triangle icon, surfaced when the online node is above 90% CPU or 90% disk. |
 | **Cordoned** badge | Warning pill with a Ban icon, surfaced when the node is cordoned. The badge tooltip carries the cordon reason or the default *Unschedulable: new blueprint deployments skip this node*. See [Fleet Federation](/features/fleet-federation) for the full cordon and pin flow. |
-| **Updating / Updated / Failed** badge | Update progress indicator, shown only while or just after an update flows through. Failed states surface inline retry and dismiss buttons and a cursor-following error tooltip. |
+| **Networking** badge | Warning pill reading `Networking · exposed`, `Networking · drift`, or `Networking · unknown exposure`, shown when the node has a stack with published ports, detected network drift, or unresolved exposure. Click it to jump to that node's Networking page. |
+| **Updating / Updated / Failed / Timed out** badge | Update progress indicator, shown only while or just after an update flows through. Failed and timed-out states surface inline retry and dismiss buttons and a cursor-following error tooltip. |
+| **Skipped** badge | Shown on the card when an available update has been deferred from the [Node Updates sheet](#node-updates); the same skip state is reflected there. |
 | **Container stats grid** | Three cells: **Running** (active containers), **Stopped** (exited containers), **Stacks** (count, or `-` if the node has not reported). Hidden on offline nodes. |
 | **CPU / RAM / Disk bars** | Each row shows the metric icon, the percent (CPU) or `used / total` (RAM, Disk), and a horizontal bar that tints amber at 60%, destructive at 80% (CPU/RAM), or amber at 75% / destructive at 90% (Disk). Hidden on offline nodes. |
-| **Update to v…** button | Outline button that runs along the bottom of the card when an update is available. The label includes the latest version. |
+| **Update to v…** button | Admin-only outline button that runs along the bottom of the card when an update is available. The label includes the latest version. |
 | **Stack details** trigger | Footer button that toggles the stack drill-down. The label carries the stack count for the node. |
 
 Offline nodes render dimmed, with no stats grid, no usage bars, and no update affordance.
@@ -108,25 +114,27 @@ Every card carries a three-dot **Node actions** kebab in the top-right corner. T
 | **Edit node** | Opens the Edit dialog prefilled with the node's connection details. For proxy-mode remotes, saving with a changed API URL or token re-runs the connection test automatically. |
 | **Delete node** | Opens a destructive confirmation. The local (default) node has no Delete option. Deleting a remote only removes it from this console; the remote instance and its containers are untouched. |
 | **Cordon node** / **Uncordon node** | Marks the node unschedulable so new blueprint deployments skip it. Existing deployments keep running. Requires the `node:manage` permission (admin, or node-admin when scoped to that node). |
+| **Mute** submenu | Mute node notifications, mute update notifications, mute monitor alerts for this node, or open the full mute-rule manager. Shown to whoever can manage mute rules for the node. See [Alerts & Notifications](/features/alerts-notifications). |
 
-Edit and delete remain admin-only. Users without `node:manage` and without edit/delete affordances see no kebab on the card.
+Edit and delete remain admin-only. Users without `node:manage`, without mute permission, and without edit/delete affordances see no kebab on the card.
 
 ### Topology view
 
 Switch the segmented control to **Topology** to swap the grid for a hub-and-spoke graph. The local node sits in the centre with a cyan ring and the remotes radiate outward; the layout is computed automatically from the registered fleet.
 
 <Frame>
-  <img src="/images/fleet-view/fleet-topology.png" alt="Fleet Topology view with the Local node card boxed in cyan in the centre showing 'CRITICAL · LOCAL' status pills, 16 cores CPU bar, RAM and DISK bars in destructive red, and '15 stacks · 17 running' below. Six remote node cards radiate to the right (SLX-Mars, sencho-test-03, sencho-test-02, sencho-test-01, sencho-pilot-test, Pitt-Moba, Opsix) each showing their CPU/MEM/DISK bars and stack summary. Cyan connector lines run from the local node to each remote. ReactFlow zoom controls sit at the bottom-left and the navigator minimap is pinned to the bottom-right." />
+  <img src="/images/fleet-view/fleet-topology.png" alt="Fleet Topology view in Hub layout. The Local node card sits at the centre with an Online pill, a 'prod' label pill, CPU / MEM / DISK bars, and '15 stacks · 16 running' below. Three remote cards radiate to the right (SLX-Mars, Pitt-Moba, Opsix), each with an Online pill, a 'dev' label pill where assigned, CPU/MEM/DISK bars, a stack/running summary, and a millisecond latency reading. Cyan connector lines run from the local node to each remote. ReactFlow zoom controls sit at the bottom-left and the navigator minimap is pinned to the bottom-right." />
 </Frame>
 
 Each node card in the topology graph carries:
 
 - A **status pill** at the top reading `Online`, `Critical`, or `Offline`, with a coloured dot.
 - A **Local** or **Remote** label in the top-right.
-- A **lightning icon** when the node is critical; the card frame mutes when the node is offline.
+- A **lightning icon** when the node is critical; a clock icon when a pilot-tunnel node's heartbeat has gone stale; the card frame mutes when the node is offline.
 - The node name with a server icon.
+- A row of **node label** pills, when the node carries any (matching the labels set in **Settings · Infrastructure · Nodes**), with a `+N` overflow tooltip past the first few.
 - Three compact **CPU / MEM / DISK** bars with the percent value at the right of each row.
-- A footer line summarising stacks and running containers, e.g. `3 stacks · 4 running`.
+- A footer line summarising stacks and running containers, e.g. `3 stacks · 4 running`, plus a round-trip latency in milliseconds for online remotes.
 
 **Connector lines** colour by the link's health: cyan when both ends are online, warning when the remote is critical, dashed and muted when the remote is offline.
 
@@ -151,7 +159,7 @@ Assign labels in **Settings · Infrastructure · Nodes** to drive Grouped mode. 
 Click **Stack details** on any online node card to expand the stack list. The right side of the row carries a `<n> stacks` counter once the list has loaded.
 
 <Frame>
-  <img src="/images/fleet-view/fleet-drill-down.png" alt="Fleet grid with the Opsix node card expanded. The node header shows 4 running, 0 stopped, 3 stacks, and CPU / RAM / Disk usage bars. Below, the Stack details list shows three stacks (saelix-app-ca, saelix-app-wa, saelix-db). saelix-app-ca and saelix-db are expanded, each showing one container row with a green running dot, the container name, a 'running' state badge, the image tag, and an 'Up 2 weeks' status string." />
+  <img src="/images/fleet-view/fleet-drill-down.png" alt="Fleet grid with the Opsix node card's Stack details expanded, showing three stacks (saelix-app-ca, saelix-app-wa, saelix-db) each with a fleet label dot. saelix-db is expanded to show one container row with a green running dot, the container name, a 'running' state badge, the image tag mariadb:10.11, and an 'Up 6 weeks' status string." />
 </Frame>
 
 Each stack row carries the stack name, an expand chevron, a `running / total` container count, and any **fleet label dots** colour-coded from the node's label palette (when labels are configured for the stack).
@@ -183,10 +191,10 @@ A subtle `Auto-refreshing every 30 seconds` line at the bottom of the page confi
 The **Status** tab gives you a fleet-wide rollup of which automations and security features are configured on every node, without having to open each node's settings individually.
 
 <Frame>
-  <img src="/images/fleet-view/fleet-status-tab.png" alt="Fleet Status tab with eight node cards in a three-column grid. The Local card is in the top-left and shows the full eight-row summary (Agents None, Alert rules None, Auto-heal None, Webhooks None, MFA Off, Scanning None, Backup Enabled, Crash detect On). Opsix, Pitt-Moba, SLX-Mars, sencho-test-01/02/03 each show a six-row summary that omits MFA and Backup. The sencho-pilot-test card is offline and shows the muted message 'Node is unreachable. Configuration unavailable.'" />
+  <img src="/images/fleet-view/fleet-status-tab.png" alt="Fleet Status tab with four node cards. The Local card shows the full eight-row summary (Agents 1 active, Alert rules None, Auto-heal 1/1, Webhooks None, MFA Off, Scanning None, Backup Enabled, Crash detect On). Opsix, Pitt-Moba, and SLX-Mars each show a seven-row summary that omits MFA and Backup but adds a Policy sync row reading 'In sync'." />
 </Frame>
 
-Online nodes render a two-column summary grid with up to eight rows:
+Online nodes render a two-column summary grid with up to nine rows:
 
 | Row | What it shows | Visibility |
 |-----|---------------|------------|
@@ -198,6 +206,7 @@ Online nodes render a two-column summary grid with up to eight rows:
 | **Scanning** | Active vulnerability-scan policies, formatted `<n> policy/policies` | Always (when not gated) |
 | **Backup** | `Enabled` or `Disabled` | Local node only |
 | **Crash detect** | `On` or `Off` | Always |
+| **Policy sync** | `In sync`, or a `degraded` / `paused` pill with a tooltip naming the cause. See [Fleet Sync](/features/fleet-sync). | Remote nodes that have received at least one sync push |
 
 Offline nodes show a muted card with the heading and the message `Node is unreachable. Configuration unavailable.` The Online or Offline indicator in the card header confirms reachability at the time of the last fetch.
 
@@ -239,10 +248,10 @@ The map is fleet-wide: the control instance gathers each node's view and merges 
 
 ## Node Updates
 
-Click **Check Updates** in the page header to open the **Node Updates** sheet. From here you can read every node's current Sencho version, see which nodes have an update available, and trigger updates one node at a time or across the whole fleet. The sheet has two tabs: **Nodes** (the node table and summary) and **Changelog** (release notes for the available Sencho version, fetched from the GitHub Releases page).
+Click **Node Update** in the Overview tab's toolbar to open the **Node Updates** sheet. From here you can read every node's current Sencho version, see which nodes have an update available, and trigger updates one node at a time or across the whole fleet. The sheet has two tabs: **Nodes** (the node table and summary) and **Changelog** (release notes for the available Sencho version, fetched from the GitHub Releases page).
 
 <Frame>
-  <img src="/images/fleet-view/fleet-node-updates.png" alt="Node updates sheet titled 'Node updates · 8 nodes · 1 update available'. A Recheck button and an 'Update all (1)' button sit in the header. Below them, four summary cards read '7 Up to date', '1 Available', '0 Updating', '0 Failed'. A 'Filter nodes…' search box sits above the node table, which has columns Node / Type / Current / Latest / Status. Seven rows show a green 'Up to date' badge; the sencho-pilot-test row reports Current 'unknown' and surfaces an Update button on the right. The footer reads 'LATEST VERSION v0.76.3'." />
+  <img src="/images/fleet-view/fleet-node-updates.png" alt="Node updates sheet titled 'Node updates · 4 nodes · 0 updates available'. A Recheck button sits in the header. Below it, four summary cards read '4 Up to date', '0 Available', '0 Updating', '0 Failed'. A 'Filter nodes…' search box sits above the node table, which has columns Node / Type / Current / Latest / Status; all four rows (Local, Opsix, Pitt-Moba, SLX-Mars) show a green 'Up to date' badge at v0.95.0. The footer reads 'LATEST VERSION v0.95.0'." />
 </Frame>
 
 ### Header actions
@@ -292,7 +301,7 @@ When you click **Update** on a remote row, Sencho dispatches the update command 
 When you click **Update** on the local row, a confirmation dialog appears first ("Update local node"). Confirming kicks off the same pull-and-recreate flow on the local Sencho instance. Because the gateway is restarting itself, a full-screen reconnecting overlay takes over the browser tab. The overlay polls `/api/health` every 3 seconds and dismisses itself once the new gateway answers. If the gateway has not returned within 5 minutes the overlay switches to a *Taking longer than expected* state with a **Reload to check** button rather than waiting indefinitely. A large image pull can legitimately run past that window, so this state is not a failure on its own.
 
 <Note>
-  Triggering updates (per-row and **Update all**), skipping versions, and unskipping versions all require the **admin** role. Viewer and operator roles can read update status, the changelog, and the skipping state but cannot change them.
+  **Recheck**, triggering updates (per-row and **Update all**), skipping versions, and unskipping versions all require the **admin** role. Viewer and operator roles can read update status, the changelog, and the skipping state but cannot change them or force a recheck.
 </Note>
 
 ## How fleet data is fetched
