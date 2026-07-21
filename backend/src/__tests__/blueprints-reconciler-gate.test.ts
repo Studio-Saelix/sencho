@@ -280,6 +280,35 @@ describe('reconcileConfirmedPlan fingerprint gate', () => {
         expect(deploySpy).not.toHaveBeenCalled();
         expect(withdrawSpy).not.toHaveBeenCalled();
     });
+
+    it('deploys authorized actions when approval fingerprint matches live intent', async () => {
+        const authorized = seedNode();
+        const unauthorized = seedNode();
+        const bp = createBp({ nodeIds: [authorized.id, unauthorized.id] });
+        approvePlace(bp.id, [authorized.id]);
+
+        const deploySpy = vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({ status: 'active' });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({ status: 'withdrawn' });
+
+        const result = await BlueprintReconciler.getInstance().reconcileConfirmedPlan(bp.id, [
+            { nodeId: authorized.id, action: 'create' },
+            { nodeId: unauthorized.id, action: 'create' },
+        ]);
+
+        expect(result.refused).toBeFalsy();
+        expect(deploySpy).toHaveBeenCalledTimes(1);
+        expect(deploySpy).toHaveBeenCalledWith(
+            expect.objectContaining({ id: bp.id, compose_content: bp.compose_content }),
+            expect.objectContaining({ id: authorized.id }),
+        );
+        expect(withdrawSpy).not.toHaveBeenCalled();
+        expect(result.outcomes).toEqual([{
+            nodeId: authorized.id,
+            nodeName: authorized.name,
+            action: 'create',
+            status: 'ok',
+        }]);
+    });
 });
 
 describe('Accept/Evict STALE_GUARD', () => {
