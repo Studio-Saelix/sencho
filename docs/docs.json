@@ -76,6 +76,9 @@
       "display": "simple"
     }
   },
+  "interaction": {
+    "drilldown": false
+  },
   "navigation": {
     "tabs": [
       {
@@ -184,9 +187,8 @@
           },
           {
             "group": "Operations",
-            "root": "operations/self-hosting",
-            "directory": "accordion",
             "pages": [
+              "operations/self-hosting",
               "operations/upgrade",
               "operations/backup",
               "operations/recovery",
@@ -199,9 +201,8 @@
           },
           {
             "group": "Reference",
-            "root": "reference/settings",
-            "directory": "accordion",
             "pages": [
+              "reference/settings",
               "features/licensing",
               "reference/security",
               "reference/contact"
