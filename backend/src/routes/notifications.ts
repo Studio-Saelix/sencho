@@ -18,8 +18,13 @@ import {
 } from '../helpers/notificationChannels';
 import { parseStackPatternsInput } from '../helpers/stackPattern';
 import {
+  parseNotificationSchedule,
+  type NotificationSchedule,
+} from '../helpers/notificationSchedule';
+import {
   deleteSuppressionRuleFromFleet,
   syncSuppressionRuleToFleet,
+  syncSuppressionRuleUpdateToFleet,
 } from '../helpers/notificationSuppressionSync';
 import { isDebugEnabled } from '../utils/debug';
 import { logDebugTiming } from '../utils/requestTiming';
@@ -109,6 +114,27 @@ function validateExpiresAt(expires_at: unknown, res: Response): number | null | 
   return expires_at;
 }
 
+/**
+ * Resolve schedule with presence semantics.
+ * Create/replica omit → null; PUT omit → undefined (preserve); null clears; object validates.
+ */
+function resolveScheduleField(
+  schedule: unknown,
+  opts: { present: boolean; isCreate: boolean },
+  res: Response,
+): NotificationSchedule | null | undefined | false {
+  if (!opts.present) {
+    return opts.isCreate ? null : undefined;
+  }
+  if (schedule === null) return null;
+  const parsed = parseNotificationSchedule(schedule);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return false;
+  }
+  return parsed.schedule;
+}
+
 function normalizeStoredLevels(levels: unknown): ('info' | 'warning' | 'error')[] | null {
   if (!Array.isArray(levels) || levels.length === 0) return null;
   return levels as ('info' | 'warning' | 'error')[];
@@ -135,7 +161,7 @@ function parseSuppressionRuleBody(
   req: Request,
   res: Response,
   isCreate: boolean,
-): Omit<NotificationSuppressionRule, 'id' | 'created_at' | 'updated_at'> | null {
+): Omit<NotificationSuppressionRule, 'id' | 'created_at' | 'updated_at' | 'scheduleInvalid'> | null {
   const {
     name,
     node_id: rawNodeId,
@@ -146,6 +172,7 @@ function parseSuppressionRuleBody(
     applies_to,
     enabled,
     expires_at,
+    schedule,
   } = req.body;
 
   if (isCreate && (!name || typeof name !== 'string' || !name.trim())) {
@@ -183,6 +210,12 @@ function parseSuppressionRuleBody(
   const expiresAtResult = validateExpiresAt(expires_at, res);
   if (expiresAtResult === false) return null;
 
+  const scheduleResult = resolveScheduleField(schedule, {
+    present: 'schedule' in req.body,
+    isCreate,
+  }, res);
+  if (scheduleResult === false) return null;
+
   if (enabled !== undefined && typeof enabled !== 'boolean') {
     res.status(400).json({ error: 'enabled must be a boolean' });
     return null;
@@ -198,6 +231,7 @@ function parseSuppressionRuleBody(
     applies_to: (appliesToResult ?? 'both') as NotificationSuppressionAppliesTo,
     enabled: enabled !== false,
     expires_at: expiresAtResult ?? null,
+    schedule: scheduleResult ?? null,
   };
 }
 
@@ -508,9 +542,26 @@ notificationSuppressionRouter.post('/replica', authMiddleware, (req: Request, re
       res.status(400).json({ error: patterns.error });
       return;
     }
+    if (!validateLabelIds(rule.label_ids, res)) return;
+    if (!validateCategories(rule.categories, res, VALID_SUPPRESSION_CATEGORIES)) return;
+    if (!validateLevels(rule.levels, res)) return;
+    const scheduleResult = resolveScheduleField(rule.schedule, {
+      present: 'schedule' in rule,
+      isCreate: true,
+    }, res);
+    if (scheduleResult === false) return;
+
     DatabaseService.getInstance().upsertNotificationSuppressionRuleReplica({
       ...rule,
       stack_patterns: patterns.patterns,
+      label_ids: Array.isArray(rule.label_ids) && rule.label_ids.length > 0 ? rule.label_ids : null,
+      categories: Array.isArray(rule.categories) && rule.categories.length > 0 ? rule.categories : null,
+      levels: normalizeStoredLevels(rule.levels),
+      schedule: scheduleResult ?? null,
+      scheduleInvalid: false,
+      enabled: rule.enabled !== false,
+      expires_at: rule.expires_at ?? null,
+      node_id: rule.node_id ?? null,
     });
     res.json({ success: true });
   } catch (error) {
@@ -583,6 +634,7 @@ notificationSuppressionRouter.put('/:id', authMiddleware, (req: Request, res: Re
       applies_to,
       enabled,
       expires_at,
+      schedule,
     } = req.body;
 
     if (name !== undefined && (typeof name !== 'string' || !name.trim())) {
@@ -626,12 +678,21 @@ notificationSuppressionRouter.put('/:id', authMiddleware, (req: Request, res: Re
       validatedExpiresAt = result;
     }
 
+    let validatedSchedule: NotificationSchedule | null | undefined;
+    if ('schedule' in req.body) {
+      const result = resolveScheduleField(schedule, { present: true, isCreate: false }, res);
+      if (result === false) return;
+      validatedSchedule = result;
+    }
+
     if (enabled !== undefined && typeof enabled !== 'boolean') {
       res.status(400).json({ error: 'enabled must be a boolean' });
       return;
     }
 
-    const updates: Partial<Omit<NotificationSuppressionRule, 'id' | 'created_at'>> = { updated_at: Date.now() };
+    const updates: Partial<Omit<NotificationSuppressionRule, 'id' | 'created_at' | 'scheduleInvalid'>> = {
+      updated_at: Date.now(),
+    };
     if (name !== undefined) updates.name = name.trim();
     if (validatedNodeId !== undefined) updates.node_id = validatedNodeId;
     if (cleanedPatterns !== undefined) updates.stack_patterns = cleanedPatterns;
@@ -641,11 +702,12 @@ notificationSuppressionRouter.put('/:id', authMiddleware, (req: Request, res: Re
     if (validatedAppliesTo !== undefined) updates.applies_to = validatedAppliesTo;
     if (enabled !== undefined) updates.enabled = enabled;
     if (validatedExpiresAt !== undefined) updates.expires_at = validatedExpiresAt;
+    if (validatedSchedule !== undefined) updates.schedule = validatedSchedule;
 
     const db = DatabaseService.getInstance();
     db.updateNotificationSuppressionRule(id, updates);
     const updated = db.getNotificationSuppressionRule(id)!;
-    syncSuppressionRuleToFleet(updated);
+    syncSuppressionRuleUpdateToFleet(existing, updated);
     console.log(`[Suppression] Rule ${id} updated`);
     res.json(updated);
   } catch (error) {

@@ -293,6 +293,138 @@ describe('Notification suppression - CRUD', () => {
       });
     expect(ok.status).toBe(200);
     expect(DatabaseService.getInstance().getNotificationSuppressionRule(9001)?.stack_patterns).toEqual(['prod-*']);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(9001)?.schedule).toBeNull();
     DatabaseService.getInstance().deleteNotificationSuppressionRule(9001);
+
+    const omitSched = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 9003,
+          name: 'replica-omit-sched',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(omitSched.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(9003)?.schedule).toBeNull();
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(9003);
+  });
+
+  it('schedule: create omit null; PUT preserve; null clear; canonicalize days; reject invalid', async () => {
+    const omitted = await request(app)
+      .post('/api/notification-suppression-rules')
+      .set('Cookie', authCookie)
+      .send({ name: 'sched omit', applies_to: 'both' });
+    expect(omitted.status).toBe(201);
+    expect(omitted.body.schedule).toBeNull();
+    const id = omitted.body.id as number;
+
+    const withSched = await request(app)
+      .put(`/api/notification-suppression-rules/${id}`)
+      .set('Cookie', authCookie)
+      .send({
+        schedule: { days: [3, 1], start_minute: 60, end_minute: 120, tz: 'UTC' },
+      });
+    expect(withSched.status).toBe(200);
+    expect(withSched.body.schedule).toEqual({
+      days: [1, 3],
+      start_minute: 60,
+      end_minute: 120,
+      tz: 'UTC',
+    });
+
+    const preserved = await request(app)
+      .put(`/api/notification-suppression-rules/${id}`)
+      .set('Cookie', authCookie)
+      .send({ enabled: false });
+    expect(preserved.status).toBe(200);
+    expect(preserved.body.schedule).toEqual({
+      days: [1, 3],
+      start_minute: 60,
+      end_minute: 120,
+      tz: 'UTC',
+    });
+
+    const cleared = await request(app)
+      .put(`/api/notification-suppression-rules/${id}`)
+      .set('Cookie', authCookie)
+      .send({ schedule: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.schedule).toBeNull();
+
+    const bad = await request(app)
+      .put(`/api/notification-suppression-rules/${id}`)
+      .set('Cookie', authCookie)
+      .send({ schedule: { days: [1], start_minute: 10, end_minute: 10, tz: 'UTC' } });
+    expect(bad.status).toBe(400);
+
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(id);
+  });
+
+  it('replica rejects invalid schedule and accepts valid schedule', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    const bad = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 9002,
+          name: 'replica-sched',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          schedule: { days: [1], start_minute: 0, end_minute: 0, tz: 'UTC' },
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(bad.status).toBe(400);
+
+    const ok = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 9002,
+          name: 'replica-sched',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          schedule: { days: [6], start_minute: 1320, end_minute: 120, tz: 'UTC' },
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(ok.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(9002)?.schedule).toEqual({
+      days: [6],
+      start_minute: 1320,
+      end_minute: 120,
+      tz: 'UTC',
+    });
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(9002);
   });
 });

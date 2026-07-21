@@ -447,9 +447,10 @@ Create notification suppression rules that mute or drop matching alerts from the
 | **Severity** | Info, warning, and/or error levels to suppress. |
 | **Apply to** | Bell only, external channels only, or both. |
 | **Expiration** | Forever, 1 hour, 24 hours, or a custom timestamp. |
+| **Weekly window (UTC)** | Optional recurring weekly window. Off means no window (always eligible while enabled and unexpired). ACTIVE counts still reflect enabled and unexpired rules, not whether the window is currently open. |
 | **Enabled** toggle | Disable a rule without deleting it. |
 
-See [Mute Rules](/features/alerts-notifications#mute-rules) for the full walkthrough, compose-first shortcuts, and bell quick-mute.
+See [Mute Rules](/features/alerts-notifications#mute-rules) for the full walkthrough, weekly-window semantics, best-effort fleet sync, and bell quick-mute.
 
 ---
 
