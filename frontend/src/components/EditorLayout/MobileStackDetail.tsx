@@ -233,6 +233,9 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 serviceUpdateStatuses={serviceUpdateStatuses}
                                 serviceUpdateInProgress={serviceUpdateInProgress}
                                 onRequestServiceUpdate={onRequestServiceUpdate}
+                                containersLoadStatus={props.containersLoadStatus}
+                                containersLoadError={props.containersLoadError}
+                                onRetryContainersLoad={props.onRetryContainersLoad}
                                 key={`${activeNode?.id ?? 'local'}:${stackName}`}
                             />
                         </div>

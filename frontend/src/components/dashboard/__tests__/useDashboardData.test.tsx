@@ -112,3 +112,61 @@ describe('useDashboardData state-invalidate handling', () => {
     expect(apiFetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('useDashboardData stackStatuses load states', () => {
+  it('reaches success with an empty map without treating deferral as empty UI state', async () => {
+    let resolveStatuses: ((r: Response) => void) | null = null;
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return new Promise<Response>((resolve) => { resolveStatuses = resolve; });
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); });
+    expect(result.current.stackStatusesLoadStatus).toBe('loading');
+
+    await act(async () => {
+      resolveStatuses?.(okJson({}));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+    expect(result.current.stackStatuses).toEqual({});
+  });
+
+  it('surfaces error on failed statuses fetch and recovers on retry', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(new Response('nope', { status: 500 }));
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(result.current.stackStatusesLoadStatus).toBe('error');
+
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({}));
+      return Promise.resolve(okJson(null));
+    });
+
+    await act(async () => {
+      result.current.retryStackStatuses();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+  });
+});

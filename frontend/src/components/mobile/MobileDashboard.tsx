@@ -141,6 +141,63 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
     ? `avg ${cpuAvg.toFixed(0)}% last 10m · peak ${cpuPeak.toFixed(0)}%${cpuPeakLabel ? ` @ ${cpuPeakLabel}` : ''}`
     : 'collecting metrics…';
 
+  let stackHealthBody: ReactNode;
+  if (data.stackStatusesLoadStatus === 'idle' || data.stackStatusesLoadStatus === 'loading') {
+    stackHealthBody = (
+      <p className="px-1 py-4 font-mono text-[12px] text-stat-subtitle">Loading stacks…</p>
+    );
+  } else if (data.stackStatusesLoadStatus === 'error') {
+    stackHealthBody = (
+      <div className="flex flex-col items-start gap-2 px-1 py-4">
+        <p className="font-mono text-[12px] text-stat-subtitle">
+          {data.stackStatusesLoadError ?? 'Could not load stack health.'}
+        </p>
+        <button
+          type="button"
+          onClick={data.retryStackStatuses}
+          className="font-mono text-[12px] text-brand underline-offset-2 hover:underline"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  } else if (visibleRows.length === 0) {
+    stackHealthBody = (
+      <p className="px-1 py-4 font-mono text-[12px] text-stat-subtitle">No stacks yet.</p>
+    );
+  } else {
+    stackHealthBody = (
+      <div className="flex flex-col gap-px">
+        {visibleRows.map(row => (
+          <button
+            key={row.file}
+            type="button"
+            onClick={() => onNavigateToStack(row.file)}
+            className={`flex min-h-11 items-center gap-2.5 rounded-[7px] px-2.5 py-[9px] text-left ${ROW_TINT[row.state]}`}
+          >
+            <StateDot tone={ROW_TONE[row.state]} size={7} glow={row.state !== 'healthy'} />
+            <span className="min-w-0 flex-1">
+              <span className="block truncate font-mono text-[13px] text-stat-value">{row.name}</span>
+              <span className="block truncate font-mono text-[10px] text-stat-icon">{activeNodeName}</span>
+            </span>
+            <span className="block h-[18px] w-[60px] shrink-0">
+              {row.points.length > 1 ? (
+                <MSparkline values={row.points} height={18} color={ROW_STROKE[row.state]} peak={false} />
+              ) : (
+                <span className="block h-full w-full border-b border-dashed border-hairline" />
+              )}
+            </span>
+            <span
+              className={`w-[34px] shrink-0 text-right font-mono tabular-nums text-[12px] ${row.cpu >= 80 ? 'text-warning' : 'text-stat-subtitle'}`}
+            >
+              {`${row.cpu.toFixed(0)}%`}
+            </span>
+          </button>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <Masthead
@@ -202,38 +259,7 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
           <SectionHead right={<button type="button" onClick={onViewAllStacks} className="text-brand">view all →</button>}>
             stack health
           </SectionHead>
-          {visibleRows.length === 0 ? (
-            <p className="px-1 py-4 font-mono text-[12px] text-stat-subtitle">No stacks yet.</p>
-          ) : (
-            <div className="flex flex-col gap-px">
-              {visibleRows.map(row => (
-                <button
-                  key={row.file}
-                  type="button"
-                  onClick={() => onNavigateToStack(row.file)}
-                  className={`flex min-h-11 items-center gap-2.5 rounded-[7px] px-2.5 py-[9px] text-left ${ROW_TINT[row.state]}`}
-                >
-                  <StateDot tone={ROW_TONE[row.state]} size={7} glow={row.state !== 'healthy'} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate font-mono text-[13px] text-stat-value">{row.name}</span>
-                    <span className="block truncate font-mono text-[10px] text-stat-icon">{activeNodeName}</span>
-                  </span>
-                  <span className="block h-[18px] w-[60px] shrink-0">
-                    {row.points.length > 1 ? (
-                      <MSparkline values={row.points} height={18} color={ROW_STROKE[row.state]} peak={false} />
-                    ) : (
-                      <span className="block h-full w-full border-b border-dashed border-hairline" />
-                    )}
-                  </span>
-                  <span
-                    className={`w-[34px] shrink-0 text-right font-mono tabular-nums text-[12px] ${row.cpu >= 80 ? 'text-warning' : 'text-stat-subtitle'}`}
-                  >
-                    {`${row.cpu.toFixed(0)}%`}
-                  </span>
-                </button>
-              ))}
-            </div>
-          )}
+          {stackHealthBody}
         </div>
       </div>
     </div>

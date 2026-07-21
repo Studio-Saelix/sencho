@@ -42,6 +42,11 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     setEditingCompose: vi.fn(),
     setActiveTab: vi.fn(),
     setContainers: vi.fn(),
+    containers: [],
+    containersLoadStatus: 'idle' as const,
+    containersLoadError: null as string | null,
+    setContainersLoadStatus: vi.fn(),
+    setContainersLoadError: vi.fn(),
     setEnvFiles: vi.fn(),
     setSelectedEnvFile: vi.fn(),
     setEnvExists: vi.fn(),
@@ -1192,5 +1197,70 @@ describe('useStackActions.openStackApp', () => {
   it('does nothing when the stack has no published port', () => {
     const { clickCount } = openAndCaptureHref({});
     expect(clickCount).toBe(0);
+  });
+});
+
+describe('container fetch contract', () => {
+  it('soft refresh prior empty transitions to error instead of confirmed empty', async () => {
+    const setContainersLoadStatus = vi.fn();
+    const setContainersLoadError = vi.fn();
+    vi.mocked(apiFetch).mockResolvedValue(new Response('fail', { status: 500 }));
+    const { result } = setup({
+      editorState: {
+        containers: [],
+        containersLoadStatus: 'success',
+        containersLoadError: null,
+        setContainersLoadStatus,
+        setContainersLoadError,
+      } as never,
+    });
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.refreshSelectedContainers('web', 'web.yml');
+    });
+    expect(ok).toBe(false);
+    expect(setContainersLoadStatus).toHaveBeenCalledWith('error');
+    expect(setContainersLoadError).toHaveBeenCalled();
+  });
+
+  it('soft refresh preserves prior non-empty containers on failure', async () => {
+    const setContainers = vi.fn();
+    const prior = [{ Id: 'abc', Names: ['/web'], State: 'running' }];
+    vi.mocked(apiFetch).mockResolvedValue(new Response('fail', { status: 500 }));
+    const { result } = setup({
+      editorState: {
+        containers: prior,
+        containersLoadStatus: 'success',
+        containersLoadError: null,
+        setContainers,
+      } as never,
+    });
+    await act(async () => {
+      await result.current.refreshSelectedContainers('web', 'web.yml');
+    });
+    expect(setContainers).not.toHaveBeenCalled();
+  });
+
+  it('malformed 200 is not treated as success empty in foreground retry', async () => {
+    const setContainersLoadStatus = vi.fn();
+    const setContainersLoadError = vi.fn();
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ not: 'an-array' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const { result } = setup({
+      editorState: {
+        containers: [],
+        setContainersLoadStatus,
+        setContainersLoadError,
+        setContainers: vi.fn(),
+      } as never,
+    });
+    await act(async () => {
+      await result.current.retryContainersLoad();
+    });
+    expect(setContainersLoadStatus).toHaveBeenCalledWith('error');
   });
 });

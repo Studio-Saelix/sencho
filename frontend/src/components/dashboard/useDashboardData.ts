@@ -9,6 +9,7 @@ import type {
   StackStatusEntry,
   DashboardData,
   StackCpuSeries,
+  StackStatusesLoadStatus,
 } from './types';
 
 const DEFAULT_STATS: Stats = { active: 0, managed: 0, unmanaged: 0, exited: 0, total: 0 };
@@ -98,6 +99,8 @@ export function useDashboardData(): DashboardData {
   const [systemStats, setSystemStats] = useState<SystemStats | null>(null);
   const [metrics, setMetrics] = useState<MetricPoint[]>([]);
   const [stackStatuses, setStackStatuses] = useState<Record<string, StackStatusEntry>>({});
+  const [stackStatusesLoadStatus, setStackStatusesLoadStatus] = useState<StackStatusesLoadStatus>('idle');
+  const [stackStatusesLoadError, setStackStatusesLoadError] = useState<string | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
   const [metricsStale, setMetricsStale] = useState(false);
 
@@ -105,6 +108,12 @@ export function useDashboardData(): DashboardData {
   // after a node switch has already triggered a new effect cycle.
   const nodeIdRef = useRef(nodeId);
   useEffect(() => { nodeIdRef.current = nodeId; }, [nodeId]);
+
+  // After a successful statuses load, soft poll failures keep the prior map.
+  const hadSuccessfulStatusesRef = useRef(false);
+  useEffect(() => {
+    hadSuccessfulStatusesRef.current = false;
+  }, [nodeId]);
 
   // Consecutive failure counters per live-metrics endpoint. Either reaching
   // METRICS_STALE_THRESHOLD trips the metricsStale indicator; the first
@@ -190,19 +199,79 @@ export function useDashboardData(): DashboardData {
     return cleanup;
   }, [nodeId, fetchJson]);
 
-  // Stack statuses: 10s polling, resets on node change
+  // Stack statuses: 10s polling, resets on node change. Foreground / retry
+  // expose loading and recoverable error; soft poll failures after success keep
+  // the prior map so the dashboard never flashes a false empty state.
+  const commitStackStatusesSuccess = useCallback((
+    currentNodeId: number | undefined,
+    data: Record<string, StackStatusEntry>,
+  ) => {
+    if (nodeIdRef.current !== currentNodeId) return;
+    setStackStatuses(data);
+    setStackStatusesLoadStatus('success');
+    setStackStatusesLoadError(null);
+    hadSuccessfulStatusesRef.current = true;
+  }, []);
+
+  const commitStackStatusesFailure = useCallback((
+    currentNodeId: number | undefined,
+    mode: 'foreground' | 'soft',
+    failureMessage: string,
+  ) => {
+    if (nodeIdRef.current !== currentNodeId) return;
+    if (mode === 'soft' && hadSuccessfulStatusesRef.current) return;
+    setStackStatusesLoadStatus('error');
+    setStackStatusesLoadError(failureMessage);
+  }, []);
+
+  const fetchStackStatuses = useCallback(async (
+    currentNodeId: number | undefined,
+    mode: 'foreground' | 'soft',
+  ) => {
+    if (nodeIdRef.current !== currentNodeId) return;
+    if (mode === 'foreground') {
+      setStackStatusesLoadStatus('loading');
+      setStackStatusesLoadError(null);
+    }
+    try {
+      const res = await apiFetch('/stacks/statuses');
+      if (nodeIdRef.current !== currentNodeId) return;
+      if (!res.ok) {
+        commitStackStatusesFailure(
+          currentNodeId,
+          mode,
+          `Could not load stack health (${res.status}).`,
+        );
+        return;
+      }
+      const body: unknown = await res.json();
+      if (nodeIdRef.current !== currentNodeId) return;
+      if (body && typeof body === 'object' && !Array.isArray(body)) {
+        commitStackStatusesSuccess(currentNodeId, body as Record<string, StackStatusEntry>);
+        return;
+      }
+      commitStackStatusesFailure(currentNodeId, mode, 'Stack health response was invalid.');
+    } catch {
+      if (nodeIdRef.current !== currentNodeId) return;
+      commitStackStatusesFailure(currentNodeId, mode, 'Could not load stack health.');
+    }
+  }, [commitStackStatusesSuccess, commitStackStatusesFailure]);
+
+  const retryStackStatuses = useCallback(() => {
+    void fetchStackStatuses(nodeIdRef.current, 'foreground');
+  }, [fetchStackStatuses]);
+
   useEffect(() => {
     setStackStatuses({}); // eslint-disable-line react-hooks/set-state-in-effect
+    setStackStatusesLoadStatus('loading');
+    setStackStatusesLoadError(null);
     const currentNodeId = nodeId;
-    const fetchStatuses = async () => {
-      if (nodeIdRef.current !== currentNodeId) return;
-      const data = await fetchJson<Record<string, StackStatusEntry>>('/stacks/statuses');
-      if (data && nodeIdRef.current === currentNodeId) setStackStatuses(data);
-    };
-    fetchStatuses();
-    const cleanup = visibilityInterval(fetchStatuses, 10000);
+    void fetchStackStatuses(currentNodeId, 'foreground');
+    const cleanup = visibilityInterval(() => {
+      void fetchStackStatuses(currentNodeId, 'soft');
+    }, 10000);
     return cleanup;
-  }, [nodeId, fetchJson]);
+  }, [nodeId, fetchStackStatuses]);
 
   // React to live `state-invalidate` signals from /ws/notifications: when a
   // Docker container event fires (start/stop/die/restart/health), the layout
@@ -219,10 +288,9 @@ export function useDashboardData(): DashboardData {
     let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
     const refresh = async () => {
       if (!active || nodeIdRef.current !== currentNodeId) return;
-      const [statsData, sysData, statusesData] = await Promise.all([
+      const [statsData, sysData] = await Promise.all([
         fetchJson<Stats>('/stats'),
         fetchJson<SystemStats>('/system/stats'),
-        fetchJson<Record<string, StackStatusEntry>>('/stacks/statuses'),
       ]);
       // Re-check after the await: an unmount or node switch may have
       // happened while the fetches were in flight, in which case the
@@ -233,7 +301,7 @@ export function useDashboardData(): DashboardData {
         setLastSyncAt(Date.now());
       }
       if (sysData) setSystemStats(sysData);
-      if (statusesData) setStackStatuses(statusesData);
+      await fetchStackStatuses(currentNodeId, 'soft');
     };
     const onInvalidate = () => {
       if (!active || nodeIdRef.current !== currentNodeId) return;
@@ -249,7 +317,7 @@ export function useDashboardData(): DashboardData {
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
       if (invalidateTimer) clearTimeout(invalidateTimer);
     };
-  }, [nodeId, fetchJson]);
+  }, [nodeId, fetchJson, fetchStackStatuses]);
 
   const stackCpuSeries = useMemo<Record<string, StackCpuSeries>>(() => {
     if (metrics.length === 0) return {};
@@ -337,6 +405,9 @@ export function useDashboardData(): DashboardData {
     systemStats,
     metrics,
     stackStatuses,
+    stackStatusesLoadStatus,
+    stackStatusesLoadError,
+    retryStackStatuses,
     lastSyncAt,
     nodeCount: nodes.length,
     stackCpuSeries,

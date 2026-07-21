@@ -105,6 +105,8 @@ export default function EditorLayout() {
     envFiles,
     selectedEnvFile,
     containers,
+    containersLoadStatus,
+    containersLoadError,
     activeTab, setActiveTab,
     logsMode, setLogsMode,
     gitSourceOpen, setGitSourceOpen,
@@ -607,6 +609,9 @@ export default function EditorLayout() {
       stackName={stackName}
       isDarkMode={isDarkMode}
       containers={containers}
+      containersLoadStatus={containersLoadStatus}
+      containersLoadError={containersLoadError}
+      onRetryContainersLoad={() => { void stackActions.retryContainersLoad(); }}
       containerStats={containerStats}
       containerStatsError={containerStatsError}
       content={content}
