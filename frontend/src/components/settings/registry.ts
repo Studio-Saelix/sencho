@@ -92,7 +92,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         id: 'sso',
         group: 'access',
         label: 'SSO',
-        description: 'Single sign-on via SAML or OIDC identity providers.',
+        description: 'Single sign-on via OIDC or LDAP identity providers.',
         keywords: ['saml', 'oidc', 'okta', 'entra', 'azure', 'login'],
         tier: null,
         scope: 'global',

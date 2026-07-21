@@ -35,7 +35,7 @@ function spec(name: string): EffectiveServiceSpec {
 
 beforeEach(() => {
   state.updateStack.mockReset();
-  state.updateStack.mockResolvedValue(undefined);
+  state.updateStack.mockResolvedValue({ recoveryId: null });
   state.model = null;
 });
 
@@ -85,8 +85,9 @@ describe('StackUpdateOrchestrator stack branch', () => {
       { nodeId: 0, stackName: 'web', target: { scope: 'stack' }, trigger: 'manual', actor: 'tester' },
       { atomic: true, terminalWs: null },
     );
-    expect(result).toEqual({ kind: 'stack_compose_done' });
+    expect(result).toEqual({ kind: 'stack_compose_done', recoveryId: null });
     expect(state.updateStack).toHaveBeenCalledWith('web', undefined, true);
+    // recoveryId is forwarded from ComposeService.updateStack
   });
 });
 

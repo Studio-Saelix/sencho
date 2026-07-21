@@ -19,6 +19,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 
 type EditorState = ReturnType<typeof useEditorViewState>;
 type StackListState = ReturnType<typeof useStackListState>;
@@ -101,6 +102,8 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
     setPreDeployAdvisory: vi.fn(),
     openSelfStackProtected: vi.fn(),
     setDiffPreview: vi.fn(),
+    stackToDelete: null,
+    closeDeleteDialog: vi.fn(),
     ...over,
   } as unknown as OverlayState;
 }
@@ -115,17 +118,24 @@ function setup(over: {
   editorState?: Partial<EditorState>;
   overlay?: Partial<OverlayState>;
   stackList?: Partial<StackListState>;
+  navState?: Partial<NavState>;
   getLastDeployOutputLine?: (stackName: string) => string | undefined;
   hasUpdateGuard?: boolean;
   canEditStack?: (stackNameOrFilename: string) => boolean;
   activeNode?: Parameters<typeof useStackActions>[0]['activeNode'];
   setActiveNode?: Parameters<typeof useStackActions>[0]['setActiveNode'];
+  onDeletedOpenStack?: () => void;
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
-  const navState = { setActiveView: vi.fn() } as unknown as NavState;
+  const navState = {
+    activeView: 'editor',
+    setActiveView: vi.fn(),
+    ...over.navState,
+  } as unknown as NavState;
   const overlayState = makeOverlay(over.overlay);
   const setActiveNode = over.setActiveNode ?? vi.fn();
+  const onDeletedOpenStack = over.onDeletedOpenStack ?? vi.fn();
 
   const { result } = renderHook(() =>
     useStackActions({
@@ -141,9 +151,10 @@ function setup(over: {
       diffPreviewEnabled: false,
       hasUpdateGuard: over.hasUpdateGuard ?? false,
       canEditStack: over.canEditStack ?? (() => true),
+      onDeletedOpenStack,
     }),
   );
-  return { result, editorState, stackListState, overlayState, setActiveNode };
+  return { result, editorState, stackListState, overlayState, navState, setActiveNode, onDeletedOpenStack };
 }
 
 describe('useStackActions.saveFile', () => {
@@ -181,7 +192,7 @@ describe('useStackActions.saveFile', () => {
       useStackActions({
         editorState,
         stackListState,
-        navState: { setActiveView: vi.fn() } as unknown as NavState,
+        navState: { activeView: 'editor', setActiveView: vi.fn() } as unknown as NavState,
         overlayState: makeOverlay(),
         activeNode: { id: 1, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'],
         setActiveNode: vi.fn(),
@@ -190,6 +201,7 @@ describe('useStackActions.saveFile', () => {
         getLastDeployOutputLine: () => undefined,
         diffPreviewEnabled: false,
         canEditStack: () => true,
+        onDeletedOpenStack: vi.fn(),
       }),
     );
     const ok = await result.current.saveFile();
@@ -312,6 +324,18 @@ describe('useStackActions policy-block dialog wiring', () => {
     const { result, overlayState } = setup();
     await result.current.updateStack(mouseEvent);
     expect(overlayState.setPolicyBlock).not.toHaveBeenCalled();
+  });
+
+  it('toasts a deletion-in-progress message when the conflict action is delete', async () => {
+    const inProgress = JSON.stringify({
+      code: 'stack_op_in_progress',
+      inProgress: { action: 'delete', startedAt: Date.now(), user: 'admin' },
+    });
+    vi.mocked(apiFetch).mockResolvedValueOnce(new Response(inProgress, { status: 409 }));
+    const { result, overlayState } = setup();
+    await act(async () => { await result.current.updateStack(mouseEvent); });
+    expect(overlayState.setPolicyBlock).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/already deleting/i));
   });
 
   it('opens the dialog with action "update" via the sidebar update entry point', async () => {
@@ -1192,5 +1216,148 @@ describe('useStackActions.openStackApp', () => {
   it('does nothing when the stack has no published port', () => {
     const { clickCount } = openAndCaptureHref({});
     expect(clickCount).toBe(0);
+  });
+});
+
+describe('useStackActions.deleteStack', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('leaves the editor for dashboard when deleting the open stack by filename', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const { result, stackListState, overlayState, navState, onDeletedOpenStack } = setup({
+      overlay: { stackToDelete: 'web.yml' },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+      navState: { activeView: 'editor' },
+    });
+
+    await act(async () => {
+      await result.current.deleteStack(false);
+    });
+
+    expect(apiFetch).toHaveBeenCalledWith('/stacks/web.yml', { method: 'DELETE' });
+    expect(stackListState.setSelectedFile).toHaveBeenCalledWith(null);
+    expect(navState.setActiveView).toHaveBeenCalledWith('dashboard');
+    expect(navState.setActiveView).toHaveBeenCalledTimes(1);
+    expect(onDeletedOpenStack).toHaveBeenCalledTimes(1);
+    expect(overlayState.closeDeleteDialog).toHaveBeenCalled();
+    expect(stackListState.refreshStacks).toHaveBeenCalled();
+  });
+
+  it('clears isFileLoading on delete-leave so the URL writer is not blocked', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const { result, editorState } = setup({
+      overlay: { stackToDelete: 'web.yml' },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+      editorState: { isFileLoading: true },
+      navState: { activeView: 'editor' },
+    });
+
+    await act(async () => {
+      await result.current.deleteStack(false);
+    });
+
+    expect(editorState.setIsFileLoading).toHaveBeenCalledWith(false);
+  });
+
+  it('leaves the editor when sidebar delete passes a basename', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const { result, stackListState, navState, onDeletedOpenStack } = setup({
+      overlay: { stackToDelete: 'web' },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+      navState: { activeView: 'editor' },
+    });
+
+    await act(async () => {
+      await result.current.deleteStack(false);
+    });
+
+    expect(apiFetch).toHaveBeenCalledWith('/stacks/web', { method: 'DELETE' });
+    expect(stackListState.setSelectedFile).toHaveBeenCalledWith(null);
+    expect(navState.setActiveView).toHaveBeenCalledWith('dashboard');
+    expect(onDeletedOpenStack).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not navigate when deleting a different stack', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const { result, stackListState, navState, onDeletedOpenStack } = setup({
+      overlay: { stackToDelete: 'other.yml' },
+      stackList: {
+        selectedFile: 'web.yml',
+        files: ['web.yml', 'other.yml'],
+      },
+      navState: { activeView: 'editor' },
+    });
+
+    await act(async () => {
+      await result.current.deleteStack(false);
+    });
+
+    expect(stackListState.setSelectedFile).not.toHaveBeenCalledWith(null);
+    expect(navState.setActiveView).not.toHaveBeenCalled();
+    expect(onDeletedOpenStack).not.toHaveBeenCalled();
+    expect(stackListState.refreshStacks).toHaveBeenCalled();
+  });
+
+  it('clears selection without navigating when the matching stack is hidden behind another view', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const { result, stackListState, navState, onDeletedOpenStack } = setup({
+      overlay: { stackToDelete: 'web.yml' },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+      navState: { activeView: 'resources' },
+    });
+
+    await act(async () => {
+      await result.current.deleteStack(false);
+    });
+
+    expect(stackListState.setSelectedFile).toHaveBeenCalledWith(null);
+    expect(navState.setActiveView).not.toHaveBeenCalled();
+    expect(onDeletedOpenStack).not.toHaveBeenCalled();
+    expect(stackListState.refreshStacks).toHaveBeenCalled();
+  });
+
+  it('does not reset or navigate on a non-OK delete response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('boom', { status: 500 }));
+    const { toast } = await import('@/components/ui/toast-store');
+    const { result, stackListState, overlayState, navState, onDeletedOpenStack } = setup({
+      overlay: { stackToDelete: 'web.yml' },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+      navState: { activeView: 'editor' },
+    });
+
+    await act(async () => {
+      await result.current.deleteStack(false);
+    });
+
+    expect(stackListState.setSelectedFile).not.toHaveBeenCalledWith(null);
+    expect(navState.setActiveView).not.toHaveBeenCalled();
+    expect(onDeletedOpenStack).not.toHaveBeenCalled();
+    expect(overlayState.closeDeleteDialog).not.toHaveBeenCalled();
+    expect(stackListState.refreshStacks).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalled();
+  });
+
+  it('does not navigate on a self-stack-protected response', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ code: 'self_stack_protected' }), { status: 409 }),
+    );
+    const { result, stackListState, overlayState, navState, onDeletedOpenStack } = setup({
+      overlay: { stackToDelete: 'web.yml' },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+      navState: { activeView: 'editor' },
+    });
+
+    await act(async () => {
+      await result.current.deleteStack(false);
+    });
+
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
+    expect(overlayState.closeDeleteDialog).toHaveBeenCalled();
+    expect(stackListState.setSelectedFile).not.toHaveBeenCalledWith(null);
+    expect(navState.setActiveView).not.toHaveBeenCalled();
+    expect(onDeletedOpenStack).not.toHaveBeenCalled();
+    expect(stackListState.refreshStacks).not.toHaveBeenCalled();
   });
 });

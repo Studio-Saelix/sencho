@@ -17,8 +17,12 @@
   [![Latest release](https://img.shields.io/github/v/release/studio-saelix/sencho?label=release)](https://github.com/studio-saelix/sencho/releases)
   [![Docker Pulls](https://img.shields.io/docker/pulls/saelix/sencho)](https://hub.docker.com/r/saelix/sencho)
   [![CI](https://github.com/studio-saelix/sencho/actions/workflows/ci.yml/badge.svg)](https://github.com/studio-saelix/sencho/actions/workflows/ci.yml)
+  [![CodeQL](https://github.com/studio-saelix/sencho/actions/workflows/codeql.yml/badge.svg)](https://github.com/studio-saelix/sencho/actions/workflows/codeql.yml)
   [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
-  [![Discussions](https://img.shields.io/github/discussions/studio-saelix/sencho)](https://github.com/studio-saelix/sencho/discussions)
+  [![Last commit](https://img.shields.io/github/last-commit/studio-saelix/sencho)](https://github.com/studio-saelix/sencho/commits/main)
+  [![Open issues](https://img.shields.io/github/issues/studio-saelix/sencho)](https://github.com/studio-saelix/sencho/issues)
+  [![Website](https://img.shields.io/website?url=https%3A%2F%2Fsencho.io&label=website)](https://sencho.io)
+  [![Docs](https://img.shields.io/website?url=https%3A%2F%2Fdocs.sencho.io&label=docs)](https://docs.sencho.io)
 </div>
 
 <br />
@@ -35,11 +39,11 @@
 
 ## What Sencho is
 
-Sencho is for homelab operators, small DevOps teams, and platform engineers who run services on Docker Compose, want a graphical interface without giving up file-on-disk workflows, and need to manage more than one machine without SSH gymnastics or a VPN.
+Sencho is a Docker Compose control plane for DevOps engineers, platform teams, and system administrators who run services on Compose and need a real operational surface: a graphical interface that does not give up file-on-disk workflows, and the ability to manage more than one machine without SSH gymnastics or a VPN.
 
-It runs as a single container on your hardware and gives you a UI for the work you currently do over SSH on compose stacks: deploying, editing files, watching logs, restarting containers, browsing volumes, and recovering from failures. Your compose files stay on the host filesystem and remain the source of truth.
+It runs as a single container on your hardware and provides a UI for common Compose operations: deploying, editing files, watching logs, restarting containers, browsing volumes, and recovering from failures. Your compose files stay on the host filesystem and remain the source of truth.
 
-A Sencho instance is autonomous. To manage another machine, you install a second Sencho on it and connect them with a long-lived API token; the primary dashboard then acts as an authenticated HTTP and WebSocket proxy across your fleet. Use TLS, a VPN, or a private network for any untrusted link. Each node still uses its local Docker socket (see Quick start), but Sencho does not require SSH and does not expose a remote Docker socket on the network. For nodes behind NAT or strict firewalls, the Pilot Agent establishes a single outbound WebSocket tunnel to the primary, so the remote host opens no inbound port at all.
+Multi-node was part of the architecture from the start, not bolted on later: every Sencho instance is the same autonomous node, whether it runs alone or as one of many in a fleet. To manage another machine, you install a second Sencho on it and connect them with a long-lived API token; the primary dashboard then acts as an authenticated HTTP and WebSocket proxy across your fleet. Use TLS, a VPN, or a private network for any untrusted link. Each node still uses its local Docker socket (see Quick start), but Sencho does not require SSH and does not expose a remote Docker socket on the network. For nodes behind NAT or strict firewalls, the Pilot Agent establishes a single outbound WebSocket tunnel to the primary, so the remote host opens no inbound port at all.
 
 Sencho is free, open-source software under AGPLv3. Everything below is included in the Community tier with unlimited nodes and users.
 
@@ -48,15 +52,18 @@ Sencho is free, open-source software under AGPLv3. Everything below is included 
 ## Capabilities
 
 ### Stacks
-- Full Compose lifecycle: create, deploy, restart, stop, pull
+- Full Compose lifecycle: create, deploy, restart, stop, take down, pull
 - Atomic deployments with automatic rollback on failure
 - Monaco editor with diff preview before save and one-click rollback to any prior deploy
 - [Health-gated updates](https://docs.sencho.io/features/health-gated-updates) that hold a rollout until health checks pass, with stalled-update detection and in-app recovery
 - [Git-sourced stacks](https://docs.sencho.io/features/git-sources) pulled and synced from any repository, with ordered multi-file Compose
 - [File explorer](https://docs.sencho.io/features/stack-file-explorer) for compose, env, and supporting files, with move and rename across directories
+- [Drift detection](https://docs.sencho.io/features/stack-drift) that compares running containers against the effective Compose model and flags exactly what changed
+- [Environment and secrets guardrails](https://docs.sencho.io/features/environment-guardrails) that inventory every variable a stack uses and flag missing or duplicate values, without ever exposing a value
+- [Storage portability](https://docs.sencho.io/features/compose-storage) checks that show whether a stack's mounts can move cleanly to another node before you move it
 - [Compose Doctor](https://docs.sencho.io/features/compose-doctor) preflight checks that catch compose problems before deploy
 - [Stack labels](https://docs.sencho.io/features/stack-labels) for grouping and bulk operations
-- [App Store](https://docs.sencho.io/features/app-store) with LinuxServer.io templates
+- [App Store](https://docs.sencho.io/features/app-store) with LinuxServer.io templates by default, or any custom Portainer-compatible registry
 
 ### Observability
 - Aggregated [log search and stream](https://docs.sencho.io/features/global-observability) across every container in the fleet
@@ -73,6 +80,8 @@ Sencho is free, open-source software under AGPLv3. Everything below is included 
 - [Fleet Federation](https://docs.sencho.io/features/fleet-federation): cordon nodes and pin Blueprints to specific hosts
 - [Fleet Actions](https://docs.sencho.io/features/fleet-actions): bulk label operations, fleet-wide stop-by-label, and fleet-wide prune
 - [Fleet Dossier](https://docs.sencho.io/features/fleet-dossier): export the whole fleet as a single browsable Markdown archive
+- [Docker Label Audit](https://docs.sencho.io/features/docker-label-audit) across every node, for labels that drive external automation
+- [Remote updates](https://docs.sencho.io/features/remote-updates): pull the latest image and recreate any node in the fleet from the Fleet view, no SSH session required
 - Node labels and grouping
 - [Pilot Agent](https://docs.sencho.io/features/pilot-agent) for nodes behind NAT or strict firewalls
 - Node compatibility checks before deploying
@@ -91,21 +100,22 @@ Sencho is free, open-source software under AGPLv3. Everything below is included 
 - [Security overview](https://docs.sencho.io/features/security) with a chart-led scan summary, sortable images, and searchable scan history
 - [Vulnerability scanning](https://docs.sencho.io/features/vulnerability-scanning) via Trivy, with on-demand node-wide scans, VEX-based suppression, SARIF export, and SBOM upload
 - [Compose network inspector](https://docs.sencho.io/features/compose-networking) with an exposure-intent guard for unintended published ports
-- Scan policy packs for reusable security rules
+- Node-wide network inventory, topology, and exposure findings across every stack on a node
+- [Scan policies](https://docs.sencho.io/features/vulnerability-scanning#scan-policies) that set severity thresholds and can block a deploy
 - [Private registries](https://docs.sencho.io/features/private-registries) for Docker Hub, GHCR, and custom registries, plus [deploy enforcement](https://docs.sencho.io/features/deploy-enforcement) for non-compliant images
 - [API tokens](https://docs.sencho.io/features/api-tokens) for automation
 
 ### Operations
 - Off-site stack archives via [custom S3-compatible storage](https://docs.sencho.io/operations/backup)
-- [Notification routing](https://docs.sencho.io/features/alerts-notifications#notification-routing) to Slack, Discord, email, and webhooks
-- [Global search](https://docs.sencho.io/features/global-search) across stacks, containers, and services
+- [Notification routing](https://docs.sencho.io/features/alerts-notifications#notification-routing) to Slack, Discord, and any generic webhook
+- [Global search](https://docs.sencho.io/features/global-search) across pages, nodes, and every stack in the fleet
 - [Resources view](https://docs.sencho.io/features/resources) for images, volumes, and networks with scoped prune actions
 
 ---
 
 ### Before you install
 
-Sencho talks to Docker through the host's `/var/run/docker.sock`. Mounting this socket grants Sencho the same privilege as `sudo docker` on the host. This is the same model used by Portainer, Dockge, Komodo, and other Compose dashboards. If your threat model requires stricter isolation, see [running with a non-root container user](https://docs.sencho.io/operations/self-hosting#non-root-user) and front Sencho with a reverse proxy that enforces authentication.
+Sencho talks to Docker through the host's `/var/run/docker.sock`. Mounting this socket grants Sencho the same privilege as `sudo docker` on the host. This is the same model used by Portainer, Dockge, Komodo, and other Compose dashboards. If your threat model requires stricter isolation, see [running with a non-root container user](https://docs.sencho.io/getting-started/configuration#container-user) and front Sencho with a reverse proxy that enforces authentication.
 
 ## Quick start
 
@@ -191,6 +201,7 @@ Sencho does not emit telemetry, analytics, or crash reports, and makes no outbou
 ## Documentation, community, and license
 
 - **Documentation:** [docs.sencho.io](https://docs.sencho.io)
+- **Blog:** [sencho.io/blog](https://sencho.io/blog)
 - **Known limitations:** [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)
 - **If something breaks:** the [Recovery guide](https://docs.sencho.io/operations/recovery) covers getting back to a working state when Sencho, a deploy, sign-in, Docker, or a node fails.
 - **Community:** [GitHub Discussions](https://github.com/studio-saelix/sencho/discussions)

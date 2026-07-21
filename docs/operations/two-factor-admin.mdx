@@ -32,6 +32,16 @@ After confirming:
 
 Tell the user to re-enrol from **Settings · Account · Two-factor authentication · Set up 2FA** as soon as they are back in. The account is unprotected until they do.
 
+<Warning>
+  The shield icon is not hidden on your own row. If you use it on yourself, it signs you out immediately, the same as it does for any other user, and you sign back in with your password alone. If you still have a working authenticator or a backup code, disabling from **Settings · Account · Two-factor authentication** instead keeps your session alive, since that flow proves possession first and reseals your session under the new token version.
+</Warning>
+
+## Lockout after failed attempts
+
+A reset is also the fix for a user locked out by repeated bad codes, not just a lost authenticator. Five wrong TOTP or backup-code submissions in a row during sign-in lock the account for 15 minutes. The lockout blocks further sign-in attempts only; any session the user already has open keeps working.
+
+Waiting out the 15 minutes clears the lockout on its own. If the user needs back in sooner, or you are not sure whether they are locked out or genuinely lost their authenticator, an administrator reset from **Settings · Users** clears both: it removes the enrolment entirely, which also drops any in-progress lockout.
+
 ## Emergency recovery from the command line
 
 If every administrator has lost access to 2FA and no one can sign in through the UI, reset the admin account directly on the host running Sencho.

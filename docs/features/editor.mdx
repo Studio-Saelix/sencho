@@ -27,6 +27,10 @@ The top card on the left holds the stack's identity and primary controls.
 
 The action bar runs every state transition for the whole stack. The primary buttons (**Start**, **Restart**, **Stop**, **Take down** when running, **Update**) require the `stack:deploy` permission; the **Delete** entry in the kebab dropdown requires the `stack:delete` permission. The bar still appears when only **Delete** is authorised so the operator has a way to remove the stack.
 
+<Note>
+  If a stack is the Sencho instance you are currently signed into, its deploy/delete actions are protected: clicking any of them opens a **Sencho instance protected** dialog instead of running the action. Update Sencho from **Fleet → Node Update**, or move Sencho's own compose project outside `COMPOSE_DIR` to manage it as a normal stack.
+</Note>
+
 | Button | Behavior |
 |--------|----------|
 | **Start** / **Restart** | A single button that becomes **Restart** when at least one container is running and **Start** otherwise. |
@@ -62,6 +66,13 @@ Below the action bar, the **CONTAINERS** section lists every container the stack
 ### Service actions
 
 When the container has a compose service name attached, an extra `⋮` button appears at the right of the row. It opens **Restart service**, **Stop service**, or **Start service** depending on the current state. Service actions affect a single service; for full-stack operations use the action bar above.
+
+### Multi-container stacks
+
+Stacks with more than one container gain a summary strip above the container list: a total count plus `up`, `paused`, and `unhealthy` counts (only the non-zero ones show). Two view controls sit beside it:
+
+- **Compact / Detailed** toggles whether the CPU/Mem/Net sparkline grid renders under every container row. Detailed is the default for a single-container stack; multi-container stacks default to Compact.
+- **Expand containers** collapses the Logs pane so the container list fills the whole left column. Expanding containers and expanding logs (below) are mutually exclusive; opening one closes the other.
 
 ## Anatomy panel
 
@@ -99,6 +110,12 @@ The Anatomy tab lists:
 
 When an image update is available, or the stack declares services with a local `build:` section, an inline banner appears at the top of the panel. Registry updates follow version-bump severity: `safe to apply` (patch), `review recommended` (minor), `breaking changes possible` (major), or `review required` when the bump cannot be classified. Build-only stacks show **Rebuild available** with a **Rebuild & Update** button. The banner runs the same operation as the action bar's **Update**; it is hidden for roles that lack the `stack:edit` permission and when the bump is flagged as blocked.
 
+If the most recent post-deploy vulnerability scan for this stack failed, partially failed, or was skipped, a dismissible amber banner appears below the update banner (`Last post-deploy scan failed.`, `...partially failed.`, or `Post-deploy scan did not run.`). See [Vulnerability Scanning](/features/vulnerability-scanning) for what triggers a post-deploy scan.
+
+<Frame>
+  <img src="/images/editor/scan-status-banner.png" alt="Anatomy panel showing a post-deploy scan failed banner below the compose facts" />
+</Frame>
+
 ## Editor mode
 
 Clicking **Edit compose** in the Anatomy strip opens an editable Monaco workspace. Creating a new empty stack does the same automatically.
@@ -113,7 +130,7 @@ The editor card has three tabs:
 |-----|---------|
 | `compose.yaml` | YAML editor with syntax highlighting. Always available. |
 | `.env` | Environment file editor with syntax highlighting. Disabled when the stack has no env file. |
-| **Files** | Browseable directory tree for the stack folder. See the dedicated [Stack File Explorer](/features/stack-file-explorer) page for permissions, upload caps, and protected-file behavior. |
+| **Files** | Browseable directory tree for the stack folder. See the dedicated [Stack File Explorer](/features/stack-file-explorer) page for permissions, upload caps, and protected-file behavior. A full-screen toggle appears next to **Close editor** while this tab is active, collapsing the left column so the file tree and editor use the full width. |
 
 Above the editor area, the toolbar carries:
 
@@ -173,7 +190,7 @@ Below the Command Center the left column reserves the rest of its height for the
 | **Structured** | Parses each line for an ISO 8601 timestamp and severity (info, warn, err) and renders rows with filter chips (`all`, `info`, `warn`, `err`) and a counter on the active level. Strips ANSI control codes and auto-follows new lines while you stay at the bottom; scrolling up reveals a **resume follow** button. The buffer is capped at 10,000 lines and the **Download logs** button writes the current buffer to a `.txt` file. |
 | **Raw terminal** | A full xterm.js terminal that streams the combined container output verbatim with ANSI color preserved. Press `Ctrl+F` to open the inline find bar. The scrollback is 10,000 lines and a download button is available in the toolbar. |
 
-Both modes connect to the same WebSocket and switch instantly without losing the stream.
+Both modes connect to the same WebSocket and switch instantly without losing the stream. In Structured mode, an **Expand logs** button next to **Download logs** collapses the Command Center card so the log pane fills the left column; click again (now **Collapse logs**) to bring the Command Center back. This control is mutually exclusive with the container-list **Expand containers** toggle above.
 
 ## Log viewer
 
@@ -233,6 +250,9 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
   </Accordion>
   <Accordion title="Switching nodes prompts me to discard unsaved changes">
     The editor blocks a silent loss of in-progress edits. Click **Cancel** to return to the original node with your edits intact; click **Discard** to abandon them and proceed to the other node.
+  </Accordion>
+  <Accordion title='"Sencho instance protected" dialog when I try to stop, update, or delete a stack'>
+    That stack is running the Sencho instance you are signed into, and its deploy/delete actions are blocked to prevent locking yourself out. Update Sencho from **Fleet → Node Update** instead. To manage the stack normally, move its compose project to a directory outside `COMPOSE_DIR`.
   </Accordion>
   <Accordion title='"Stats unavailable" chip on the container list'>
     The stats WebSocket failed to open, or closed unexpectedly. This usually means the Docker daemon on the node is unreachable. Container status, action buttons, and logs continue to work; only live CPU / memory / network rates pause.

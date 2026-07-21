@@ -7,7 +7,7 @@ When you manage [multiple nodes](/features/multi-node), each running its own Sen
 
 ## How it works
 
-Every Sencho instance exposes a public `GET /api/meta` endpoint that advertises its version and a list of **capabilities**, one flag per feature it implements. When you switch to a node, your control instance fetches that node's metadata and caches it (briefly on the server, and for 5 minutes on success or 30 seconds on failure in the dashboard), so the version pill and the per-feature gates stay in sync without re-hitting the remote on every navigation. Testing a node from **Settings · Nodes**, or a node finishing an update, refreshes its metadata right away rather than waiting for the cache to expire.
+Every Sencho instance exposes a public `GET /api/meta` endpoint that advertises its version and a list of **capabilities**, one flag per feature it implements. When you switch to a node, your control instance fetches that node's metadata and caches it (3 minutes on the server, and 5 minutes on success or 30 seconds on failure in the dashboard), so the version pill and the per-feature gates stay in sync without re-hitting the remote on every navigation. Testing a node from **Settings · Nodes**, or a node finishing an update, refreshes its metadata right away rather than waiting for the cache to expire.
 
 Features whose capability is missing from the active node's list are replaced by a lock card naming the missing feature and prompting you to upgrade the node. Core features (stack management, containers, resources, logs) work on every Sencho version and are never gated this way.
 
@@ -22,17 +22,17 @@ Features whose capability is missing from the active node's list are replaced by
 The node switcher popover shows each node's Sencho version next to its type chip, separated by a middle dot.
 
 <Frame>
-  <img src="/images/node-compatibility/node-switcher-versions.png" alt="Node switcher popover listing seven nodes. The Local row reads LOCAL · v0.81.11 with a star icon for the default node. Three remote rows read REMOTE · v0.81.11. The sencho-pilot-test row reads AGENT · SEEN 20M AGO · v0.76.9, calling out that this node is on an older release than the rest of the fleet." />
+  <img src="/images/node-compatibility/node-switcher-versions.png" alt="Node switcher popover listing four connected nodes. The Local row reads LOCAL · v0.95.0 with a star icon for the default node. The Opsix row reads REMOTE · v0.95.0. The Pitt-Moba and SLX-Mars rows read REMOTE only, with no version pill, because this dashboard session has not switched to them yet." />
 </Frame>
 
-A node's version pill appears once Sencho has fetched its metadata. The metadata cache populates the first time you visit a node, so freshly-enrolled remotes may show their type chip alone until you switch to them once. A node that does not return metadata at all shows no version pill on either visit.
+A node's version pill appears once Sencho has fetched its metadata. The metadata cache populates the first time you visit a node, so a node you have not switched to yet in the current session shows its type chip alone, with no version pill, until you do. A node that does not return metadata at all shows no version pill on either visit.
 
 ### Lock card on unsupported features
 
 When the active node does not advertise a capability that a feature needs, the feature panel is replaced by a centered lock card.
 
 <Frame>
-  <img src="/images/node-compatibility/lock-card.png" alt="Capability lock card centered in the editor area. A circular icon badge holds an Unplug glyph at the top. Below it, a title reads Host Console is not available on this node and a body line reads sencho-pilot-test is running v0.76.9. Upgrade the node to use this feature." />
+  <img src="/images/node-compatibility/lock-card.png" alt="Capability lock card centered in the editor area. A circular icon badge holds an Unplug glyph at the top. Below it, a title reads Audit Log is not available on this node and a body line reads Local is running v0.95.0. Upgrade the node to use this feature." />
 </Frame>
 
 The card carries the feature name, the node name, and (when known) the running version, so you can see at a glance what is missing and where. When the node has not reported a version, the body line drops the version and reads "*node-name* does not advertise this capability. Upgrade the node to use this feature." instead. The gated panel itself does not load; the lock card replaces it, which keeps slow capability-heavy views from briefly flashing into view before being hidden.
@@ -42,7 +42,7 @@ The card carries the feature name, the node name, and (when known) the running v
 When you test a remote node from **Settings · Nodes**, the Connection Details panel that appears under the table lists the node's running Sencho version alongside its OS, architecture, container count, image count, and CPU count.
 
 <Frame>
-  <img src="/images/node-compatibility/connection-test-version.png" alt="Connection Details panel for sencho-test-01 showing Instance: Remote Sencho, Sencho: v0.81.11, OS: Remote, Arch: Remote, Containers: 1, Images: 21, CPUs: 1, with a wifi-style icon in the heading." />
+  <img src="/images/node-compatibility/connection-test-version.png" alt="Connection Details panel for Opsix showing Instance: Remote Sencho, Sencho: v0.95.0, OS: Remote, Arch: Remote, Containers: 4, Images: 4, CPUs: 2, with a wifi-style icon in the heading." />
 </Frame>
 
 This is the most direct way to confirm what version a remote node is on without switching to it first.
@@ -66,6 +66,7 @@ Every Sencho release ships with a static list of capabilities. The current list 
 | `network-topology` | Network topology view |
 | `notifications` | Alert notifications |
 | `notification-routing` | Notification routing rules |
+| `notification-suppression` | Mute rules |
 | `host-console` | Host Console |
 | `container-exec` | Container exec terminal |
 | `audit-log` | Audit log |
@@ -77,15 +78,31 @@ Every Sencho release ships with a static list of capabilities. The current list 
 | `self-update` | Self-update from the dashboard |
 | `vulnerability-scanning` | Image vulnerability scanning |
 | `compose-doctor` | Compose Doctor preflight |
-| `compose-networking` | Stack Networking tab and node Networking overview |
+| `update-guard` | Pre-update rollback-readiness dialog |
+| `compose-networking` | Stack Networking tab |
+| `env-inventory` | Stack Environment tab (env var inventory) |
+| `container-label-inventory` | Stack Compose Labels tab and Fleet label filters |
+| `project-env-files` | Project-level env file selection in the Environment tab |
+| `compose-storage` | Stack Storage tab (volume explorer) |
+| `cross-node-rbac` | Role enforcement on requests forwarded to a remote node |
+| `stack-down-remove-volumes` | The "also remove volumes" option on Take Down |
 | `guided-external-network-preflight` | Guided missing-external-network check before deploy |
 | `service-scoped-update` | Per-service update, rebuild, and restore on multi-service stacks |
 
 <Note>
-  `vulnerability-scanning` is advertised only when the Trivy binary is present on the node. If a node does not have Trivy installed, it omits this capability and the scanning UI is replaced by a lock card.
+  `vulnerability-scanning` is advertised only when the Trivy binary is present on the node. If a node has no scanner installed, it omits this capability and the scanning UI is replaced by a lock card whose body reads "Install a scanner from the Scanner setup tab." instead of the generic upgrade message.
 </Note>
 
-Nodes that do not advertise `guided-external-network-preflight` keep legacy deploy behavior (no guided missing-external dialog). When the capability is present but the check cannot run, deploy fails closed instead of guessing.
+<Note>
+  A node connected in [Pilot Agent](/features/multi-node#add-a-remote-node-pilot-agent) mode never advertises `host-console`, even after upgrading, because that feature's control-to-agent path is not yet wired through the enrollment tunnel. This is the one capability gap that upgrading the node cannot close; it only closes on a Distributed API Proxy connection.
+</Note>
+
+A handful of capabilities gate a smaller piece of behavior rather than a whole panel, so a missing one falls back to an older behavior instead of a lock card:
+
+- Nodes that do not advertise `guided-external-network-preflight` keep legacy deploy behavior (no guided missing-external dialog). When the capability is present but the check cannot run, deploy fails closed instead of guessing.
+- Nodes that do not advertise `service-scoped-update` fall back to the legacy per-container layout on multi-service stacks: no declared-service headers, and no per-service update, rebuild, or restore.
+- Nodes that do not advertise `update-guard` run manual updates directly, with no pre-update rollback-readiness dialog.
+- `cross-node-rbac` is a security boundary, not a convenience: the control instance refuses to forward a non-admin request, or a confirmed stop-by-label, to a remote node that does not advertise it. This stops a mixed-version fleet from letting a lower-privileged action escalate on an un-upgraded node.
 
 ## Handling nodes that do not advertise metadata
 

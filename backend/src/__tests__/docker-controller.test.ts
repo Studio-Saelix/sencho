@@ -1714,3 +1714,23 @@ describe('DockerController - getLegacyOrphanContainersByStack', () => {
     fallbackSpy.mockRestore();
   });
 });
+
+describe('DockerController - classifyLegacyOrphansForUpdate', () => {
+  it('returns none when compose ps already manages containers', async () => {
+    // Reuse the same mocks as getLegacyOrphanContainersByStack tests in this file.
+    const { default: DockerController } = await import('../services/DockerController');
+    const dc = DockerController.getInstance(1);
+    vi.spyOn(dc as any, 'fetchComposePsContainers').mockResolvedValue([{ ID: 'c1' }]);
+    await expect(dc.classifyLegacyOrphansForUpdate('my-stack')).resolves.toEqual({ status: 'none' });
+  });
+
+  it('returns classification_failed when compose ps and fallback both fail', async () => {
+    const { default: DockerController } = await import('../services/DockerController');
+    const dc = DockerController.getInstance(1);
+    vi.spyOn(dc as any, 'fetchComposePsContainers').mockRejectedValue(new Error('compose boom'));
+    vi.spyOn(dc as any, 'smartFallback').mockRejectedValue(new Error('fallback boom'));
+    const result = await dc.classifyLegacyOrphansForUpdate('my-stack');
+    expect(result.status).toBe('classification_failed');
+  });
+});
+

@@ -545,6 +545,11 @@ export class FileSystemService {
   }
 
   async createStack(stackName: string): Promise<void> {
+    if (DatabaseService.getInstance().hasBlockingDeletionIntent(this.nodeId, stackName)) {
+      throw new Error(
+        `Stack "${stackName}" has a deletion in progress and cannot be created until cleanup finishes.`,
+      );
+    }
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);
 

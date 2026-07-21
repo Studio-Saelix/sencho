@@ -12,12 +12,12 @@ Sencho is [AGPLv3](https://github.com/studio-saelix/sencho/blob/main/LICENSE) op
 
 ## Plans
 
-| Tier | Annual (per mo, billed yearly) | Monthly | Seats |
-|------|--------------------------------|---------|-------|
-| **Community** | Free | Free | Unlimited |
-| **Admiral** | $8.25 | $12 | Unlimited |
+| Tier | Price | Seats |
+|------|-------|-------|
+| **Community** | Free forever | Unlimited |
+| **Admiral** | Business assurance, arranged with Studio Saelix | Unlimited |
 
-See [the pricing page](https://sencho.io/pricing) for current pricing.
+Admiral is arranged directly with Studio Saelix rather than a self-serve checkout. See [the pricing page](https://sencho.io/pricing) for the current feature comparison, or email **[hello@sencho.io](mailto:hello@sencho.io)** to start a conversation.
 
 ### Feature breakdown
 
@@ -49,7 +49,7 @@ See [the pricing page](https://sencho.io/pricing) for current pricing.
 
 **Admiral** is the official business assurance plan from Studio Saelix. It includes everything in Community, plus:
 
-- **Hardened Build:** an Admiral image channel with published supply-chain assurance artifacts
+- **Hardened Build:** an Admiral image channel with published supply-chain assurance artifacts, switched from **Settings → Admiral Account**; see [Switching to Hardened Build](#switching-to-hardened-build) below
 - **Managed continuity:** Recovery Vault (a managed, off-site snapshot allowance)
 - **Assurance and support:** priority email support and Studio Saelix-backed continuity for production fleets
 - **Governance:** advanced RBAC roles (Deployer, Node Admin, Auditor), scoped permissions per stack or node, and audit log export (CSV, JSON), anomaly detection, and configurable retention beyond the recent window
@@ -58,20 +58,11 @@ See [the pricing page](https://sencho.io/pricing) for current pricing.
 
 **Planned assurance services** (not available today; no delivery date committed): Release Safety Channel, Production Assurance Reports, and Fleet Beacon.
 
-## Free trial
+## Getting an Admiral license
 
-Sencho offers a **14-day Admiral trial** so you can evaluate Admiral assurance (priority support path, Recovery Vault, Hardened Build, governance depth including advanced RBAC, LDAP / Active Directory, and audit export) with your real infrastructure before committing. The trial is offered on the monthly and annual Admiral plans.
+Admiral is arranged directly with Studio Saelix rather than through a self-serve checkout. Email **[hello@sencho.io](mailto:hello@sencho.io)**, or click **Get in touch** on [the pricing page](https://sencho.io/pricing), to talk through pricing and a trial period for your fleet. However you receive it, your license key arrives by email and activates the same way, described next in [Activating your license](#activating-your-license).
 
-To start a trial:
-
-1. Visit the [pricing page](https://sencho.io/pricing).
-2. Switch to the **Annual** or **Monthly** billing tab.
-3. Click **Start 14-day trial** on the **Admiral** card.
-4. Complete the checkout. A valid card is required for verification; you are not charged until the trial ends.
-5. Your license key is emailed to you within a few minutes.
-6. Activate the key in the Sencho dashboard as described in [Activating your license](#activating-your-license).
-
-When your trial ends, the card you provided is automatically charged and your plan continues as a paid Admiral subscription. To avoid being charged, cancel from the **Manage subscription** button in **Settings → Admiral Account** (or from your receipt email) any time before day 14.
+A trial license activates and behaves exactly like a full Admiral license: every Admiral feature is unlocked immediately, and the only difference is the countdown shown in [The Plan section](#the-plan-section) below. What happens when the trial ends is part of your agreement with Studio Saelix; check your activation email or ask your sales contact.
 
 <Tip>
   Fresh installs land on the **Community** tier until you activate a license key. All Community features (unlimited nodes, compose editor, global logs, alerts, Custom OIDC, and more) are available immediately.
@@ -82,7 +73,7 @@ When your trial ends, the card you provided is automatically charged and your pl
 Open **Settings → Admiral Account** in the Sencho dashboard. When the license is not active, the **Activate** section sits below the Plan card:
 
 <Frame>
-  <img src="/images/licensing/license-activate-section.png" alt="The Activate section of the License page on a Community-tier instance, with a License key input field and an Activate button on the right" />
+  <img src="/images/licensing/license-activate-section.png" alt="The Activate section of the Admiral Account page on a Community-tier instance, with a License key input field and an Activate button on the right" />
 </Frame>
 
 1. Paste your key into the **License key** field.
@@ -92,38 +83,64 @@ Sencho validates the key and activates your plan. If activation fails, the toast
 
 ## The Plan section
 
-When a license is active, **Settings → Admiral Account** opens on the **Plan** section. The page masthead at the top exposes three stat pills, and the section below lists the metadata for the active license.
+**Settings → Admiral Account** opens on the **Plan** section. The page masthead exposes stat pills that vary by license state, and the section below lists your plan details and current image channel.
 
 <Frame>
-  <img src="/images/licensing/license-admiral-active.png" alt="License page showing an active Sencho Admiral license, with the Plan section listing the Customer, Product, and masked License key fields and a Deactivate button" />
+  <img src="/images/licensing/license-admiral-active.png" alt="Admiral Account page showing an active lifetime Sencho Admiral license, with Plan, Recovery Vault, Hardened Build, Current image, and Channel rows, plus Customer, Product, and masked License key fields and a Deactivate button" />
 </Frame>
 
-The masthead pills are:
+The masthead pills:
 
 | Pill | Meaning |
 |------|---------|
-| **SCOPE** | Reads `operator` when you are signed in as an admin. |
+| **SCOPE** | Always `global`: a license applies to the whole control plane, not a single node. |
 | **PLAN** | The current tier: `community` or `admiral`. Trial licenses show `admiral`. |
-| **RENEWS** / **TRIAL** / **STATUS** | `RENEWS: <date>` for active subscriptions, `TRIAL: Xd left` for trials, and `STATUS: expired` for expired licenses. |
+| **RENEWS** | Shown for an active, non-lifetime subscription with a renewal date. |
+| **DURATION** | Shown as `lifetime` in place of RENEWS for a legacy license with no expiry. |
+| **TRIAL** | `Xd left` while a trial is active. |
+| **STATUS** | `expired` for an expired license. |
+
+Community and disabled licenses show only the SCOPE and PLAN pills.
 
 The **Plan** card lists:
 
-- **Tier name** (e.g. `Sencho Admiral`) with a short status line, such as "Active license on this control plane", "Trial: X days remaining", or "Your license has expired."
-- **Customer**: the customer name on the purchase.
-- **Product**: the purchased product (e.g. `Sencho Admiral`).
-- **License key**: the last four characters of your key, displayed as `****-****-****-XXXX`. The full key is never re-displayed after activation.
+- **Tier name** (`Sencho Community` or `Sencho Admiral`) with a status line, such as "Community plan. Full AGPLv3 self-hosted control plane.", "Active license on this control plane.", "Trial: X days remaining.", "Your Admiral license has expired...", or "Your license has been disabled...".
+- **License** (Community only): a link to view the AGPLv3 source on GitHub.
+- **Recovery Vault** (Admiral only): confirms the entitlement is included in your subscription.
+- **Hardened Build** (Admiral only): a **Switch to Hardened** button; see [Switching to Hardened Build](#switching-to-hardened-build) below.
+- **Current image** and **Channel**: the image reference and channel (`Community` or `Hardened`) this control plane is currently running.
+- **Customer**, **Product**, and **License key** (active licenses only): purchase metadata and your key masked to its last four characters (`****-****-****-XXXX`). The full key is never re-displayed after activation.
+
+## Switching to Hardened Build
+
+Hardened Build is a separate, entitlement-gated image channel available to Admiral instances: a Studio Saelix-published image with supply-chain assurance artifacts, distinct from the default Community image. Access is checked live against Studio Saelix's assurance service every time you use it, not just against your Admiral tier, so an Admiral license alone does not guarantee Hardened Build is enabled for your account.
+
+To switch:
+
+1. Open **Settings → Admiral Account** from an interactive admin session. API tokens cannot manage image channels.
+2. Click **Switch to Hardened** in the Plan card.
+3. Sencho checks your entitlement and registry access, then opens a review dialog listing the **current** image, the **target** Hardened image, your **registry** access status, the **compose path** that will be edited, and the **pin kind** (tag or digest). If the entitlement check fails, you'll see "Hardened image access is unavailable"; contact Studio Saelix.
+4. Confirm the switch. Sencho pulls the Hardened image using credentials from [Registries](/features/private-registries), rewrites your compose file, and recreates the service. This restarts Sencho.
+
+Back up first (a fleet snapshot or a copy of your compose file) since this rewrites your compose file and restarts the control plane. If the switch fails partway through, the Plan card shows an **Image operation** field with the failure reason and an **Acknowledge failure** button, which clears the failed state so you can retry.
+
+<Note>
+  Once a node is on the Hardened channel, only an interactive admin session on that node can pull further Hardened updates. Fleet's remote **Update all** and per-node **Update** actions cannot update a Hardened node from elsewhere in the fleet; update it directly on that node's own dashboard instead.
+</Note>
 
 ## Managing your subscription
 
-When the license is an active subscription, the Plan section action row exposes **Manage subscription** alongside **Deactivate**. **Manage subscription** opens the billing portal in a new tab, where you can update your payment method, view invoices, cancel, or switch plans.
+For an active, non-lifetime subscription, the Plan section's action row exposes **Manage subscription** alongside **Deactivate**. **Manage subscription** opens the Lemon Squeezy billing portal in a new tab, where you can update your payment method, view invoices, cancel, or switch plans.
 
 The same portal is reachable from the profile menu in the top-right corner of the app:
 
 <Frame>
-  <img src="/images/licensing/profile-menu.png" alt="Profile dropdown popover showing an identity header with the admin role and Admiral tier badges, a navigation strip with Settings, Documentation, and Feedback entries, an Appearance theme picker, and a Log Out button" />
+  <img src="/images/licensing/profile-menu.png" alt="Profile dropdown popover showing the avatar initials, an Admin role badge, and an Admiral tier badge, followed by Settings, Documentation, and Open New Issue links and a Log Out button" />
 </Frame>
 
-Click your initials in the top-right corner to open the popover. For active subscription licenses, a **Billing** row appears between **Settings** and **Documentation** that opens the same portal as **Manage subscription**.
+Click your initials in the top-right corner to open the popover. For an active, non-lifetime subscription, a **Billing** row appears between **Settings** and **Documentation** that opens the same portal as **Manage subscription**.
+
+Legacy lifetime licenses show only **Deactivate** in the Plan card, no **Manage subscription** button, and no **Billing** row in the profile menu, since there is no recurring subscription for Lemon Squeezy to manage.
 
 ## License validation
 
@@ -131,20 +148,23 @@ Active licenses are re-validated every **72 hours**. If your instance goes offli
 
 ## License states
 
-The License page renders differently depending on the license status:
+The Admiral Account page renders differently depending on the license status:
 
 | Status | Plan section | Activate section | Pricing section |
 |--------|--------------|------------------|-----------------|
 | **Community** | `Sencho Community` with "Community plan. Full AGPLv3 self-hosted control plane." | Visible | Visible |
-| **Trial** | `Sencho Admiral (Trial)` with a countdown chip | Visible (so a paid key can replace the trial) | Hidden |
-| **Active subscription** | Tier name with Customer, Product, License key, plus `Manage subscription` and `Deactivate` | Hidden | Hidden |
+| **Trial** | `Sencho Admiral (Trial)` with a countdown chip | Visible (so a full key can replace the trial) | Hidden |
+| **Active subscription** | Tier name with Customer, Product, License key, **Manage subscription**, and **Deactivate** | Hidden | Hidden |
+| **Active, lifetime** | Same as an active subscription, but no **Manage subscription** button since there's no subscription to manage | Hidden | Hidden |
 | **Expired** | `Sencho Community` with "Your Admiral license has expired. Renew to restore Admiral assurance (priority support, Recovery Vault, Hardened Build, and governance)." and a destructive **Status: Expired** field | Visible | Visible |
 | **Disabled** | `Sencho Community` with "Your license has been disabled. Contact support for assistance." | Visible | Visible |
 
-The **Pricing** section, when visible, holds a single **See pricing** button that opens [the pricing page](https://sencho.io/pricing) in a new tab so you can pick a tier and billing cadence.
+The **Recovery Vault** and **Hardened Build** rows in the Plan card only appear once a license resolves to Admiral (active, trial, or lifetime); Community, expired, and disabled states never show them.
+
+The **Pricing** section, when visible, holds a single **See pricing** button that opens [the pricing page](https://sencho.io/pricing) in a new tab.
 
 <Frame>
-  <img src="/images/licensing/license-community.png" alt="License page on a Community-tier instance, with the masthead showing SCOPE operator and PLAN community, then the Plan section reading 'Sencho Community · Community plan. Full AGPLv3 self-hosted control plane.', the Activate section with the License key input, and the Pricing section with the See pricing button" />
+  <img src="/images/licensing/license-community.png" alt="Admiral Account page on a Community-tier instance, with the masthead showing SCOPE global and PLAN community, the Plan section reading 'Sencho Community · Community plan. Full AGPLv3 self-hosted control plane.' with a View source link, the Activate section with the License key input, and the Pricing section with the See pricing button" />
 </Frame>
 
 ## Multi-node license enforcement

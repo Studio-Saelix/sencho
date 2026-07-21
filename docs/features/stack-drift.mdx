@@ -81,6 +81,10 @@ If the Compose file declares a tag (`:latest`, `:1.25`) and the running containe
 
 A Compose port range such as `8000-8002:8000-8002` is compared conservatively. Because the runtime expands ranges into individual ports, the comparison can read as a difference even when the deployment is correct. Sencho errs toward surfacing the possible difference rather than hiding it.
 
+### Network findings and the Networking tab
+
+The **network-undeclared** and **network-missing** findings reuse the same comparison the stack's [Networking](/features/compose-networking) tab uses, so the two surfaces never disagree about a network attachment. The difference is history: this tab persists findings in the drift ledger over time, while the Networking tab always shows the current live state with no history. A stack with an open network finding also counts toward the **Drift** chip in the Fleet Overview's Networking filter group, so a network-attachment mismatch is visible both per-stack here and across the fleet there.
+
 ## When drift is recorded
 
 **Opening the tab** runs the spatial engine and displays the current state. It does not write anything to the ledger or update the history.
@@ -117,19 +121,23 @@ Drift events also appear in the stack's **Activity** tab alongside deploys, rest
 
 <img
   src="/images/stack-drift/drift-tab-location.png"
-  alt="The tab bar at the top of the Anatomy panel showing Anatomy, Activity, Dossier, Drift, Environment, Networking, Doctor, and Files tabs with Drift selected"
+  alt="The tab bar in the stack detail view showing Anatomy, Activity, Dossier, Drift, Environment, and Compose Labels tabs with Drift selected, and separate Files and Edit compose buttons to the right"
 />
 
 1. Click any stack in the sidebar to open it.
-2. In the right-hand Anatomy panel, switch to the **Drift** tab.
+2. In the right-hand panel, switch to the **Drift** tab. If the tab row doesn't fit the panel width, scroll it to reveal Drift alongside the stack's other tabs (Anatomy, Activity, Dossier, Environment, Networking, and so on).
 3. Read the status badge and any findings.
 4. Click **re-check** after editing the Compose file or after a manual Docker operation to refresh the ledger.
 
-On mobile, the same report appears under the **Compose** section of the stack detail view.
+**Files** and **Edit compose** are separate buttons next to the tab row, not tabs themselves; they open the file browser and the compose editor respectively.
+
+On mobile, the same report appears under the **Compose** segment of the stack detail view.
 
 ## Requirements
 
 Drift detection is available on all plans with no additional configuration. As long as the stack has a Compose file and Docker is reachable on the node, the tab is functional.
+
+Viewing the tab requires read access to the stack; any role that can see a stack (including read-only **viewer** and **auditor** roles) can open the Drift tab. Clicking **re-check** requires the same read-level access, so a read-only role can still trigger a ledger write (new findings recorded, resolved findings cleared, an Activity event logged) even though it cannot edit or deploy the stack.
 
 ## Limitations
 
@@ -185,5 +193,8 @@ Drift detection is available on all plans with no additional configuration. As l
   </Card>
   <Card title="Blueprint Model" icon="drafting-compass" href="/features/blueprint-model">
     Blueprints have a separate policy-based drift mode (observe, suggest, enforce) distinct from the runtime drift detection described on this page.
+  </Card>
+  <Card title="Compose Networking" icon="diagram-project" href="/features/compose-networking">
+    The Networking tab's runtime drift section uses the same network comparison as the findings on this page, without the persisted history.
   </Card>
 </CardGroup>

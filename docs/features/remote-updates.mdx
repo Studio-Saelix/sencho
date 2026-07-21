@@ -11,6 +11,10 @@ This page covers the mechanism: prerequisites, what happens on a node during an 
   Triggering an update (per-row or **Update all**) requires the **admin** role. Viewer and operator roles can read update status but cannot dispatch updates.
 </Note>
 
+<Note>
+  This is the Sencho self-update feature, reached from the Fleet tab. The top-level **Update** nav item is a different feature: it tracks pending Docker image updates for your own stacks (Plex, Radarr, and the rest), not the Sencho binary itself. See [Health-Gated Updates](/features/health-gated-updates) for that page.
+</Note>
+
 ## Prerequisites
 
 A node can self-update when all of the following are true:
@@ -23,13 +27,13 @@ Nodes deployed with `docker run`, with hand-rolled systemd units, or with orches
 
 ## Anatomy at a glance
 
-Open the **Fleet** tab and click **Check Updates** in the page header to open the **Node updates** sheet. The sheet lists every registered node with its current and latest Sencho version, the cluster-wide summary, and the action buttons.
+Open the **Fleet** tab and click **Node Update** in the Overview toolbar to open the **Node updates** sheet. The sheet lists every registered node with its current and latest Sencho version, the cluster-wide summary, and the action buttons, split across two tabs: **Nodes** (the table and summary) and **Changelog** (release notes for the latest published version, pulled from GitHub Releases).
 
 <Frame>
-  <img src="/images/fleet-view/fleet-node-updates.png" alt="Node updates sheet titled 'Node updates · 8 nodes · 8 updates available'. Recheck and 'Update all (7)' buttons sit under the header. Four summary cards read '0 Up to date', '8 Available', '0 Updating', '0 Failed'. A 'Filter nodes…' search box sits above a table with columns Node / Type / Current / Latest / Status. Eight rows show every node at v0.76.6 with an Update button on the right. The sencho-pilot-test row reports Current as 'unknown'. The footer reads 'LATEST VERSION v0.76.7'." />
+  <img src="/images/fleet-view/fleet-node-updates.png" alt="Node updates sheet titled 'Node updates · 4 nodes · 0 updates available'. A Recheck button sits under the header, above Nodes and Changelog tabs. Four summary cards read '4 Up to date', '0 Available', '0 Updating', '0 Failed'. A 'Filter nodes…' search box sits above a table with columns Node / Type / Current / Latest / Status; all four rows (Local, Opsix, Pitt-Moba, SLX-Mars) show a green 'Up to date' badge at v0.95.0. The footer reads 'LATEST VERSION v0.95.0'." />
 </Frame>
 
-For the per-control breakdown of the sheet (header actions, summary cards, table columns, footer), see [Fleet View · Node Updates](/features/fleet-view#node-updates).
+For the per-control breakdown of the sheet (header actions, summary cards, table columns, skip/unskip, changelog tab), see [Fleet View · Node Updates](/features/fleet-view#node-updates).
 
 ## Triggering a remote update
 
@@ -38,25 +42,25 @@ There are two surfaces that initiate an update on a remote node:
 - The **Update** button on a row inside the Node updates sheet.
 - The **Update to vX.Y.Z** outline button along the bottom of any online node card on the Fleet grid.
 
-The **Skip** button next to Update hides the update prompt for that node and excludes it from **Update all** until a newer version is released. The skip is per-node and per-version: when the next Sencho release comes out, the skip clears automatically and the update surfaces again. Skipping requires the admin role.
+The **Skip** button next to Update hides the update prompt for that node and excludes it from **Update all** until a newer version is released; the row shows a **Skipped vX.Y.Z** badge with an **Unskip** button to bring the prompt back early. The skip is per-node and per-version: when the next Sencho release comes out, the skip clears automatically and the update surfaces again. Skipping and unskipping both require the admin role.
 
 <Frame>
-  <img src="/images/fleet-view/node-card-update-available.png" alt="Node card for the Opsix remote showing an Online badge, the version chip 'v0.76.6', a warning 'Update available' pill, the Running / Stopped / Stacks counters (4 / 0 / 3), CPU / RAM / Disk usage bars, and an outline 'Update to v0.76.7' button across the bottom of the card." />
+  <img src="/images/fleet-view/node-card-opsix-online.png" alt="Node card for the Opsix remote showing an Online badge, the version chip 'v0.95.0', the Running / Stopped / Stacks counters (4 / 0 / 3), and CPU / RAM / Disk usage bars." />
 </Frame>
 
-Either surface dispatches the same backend call. While the call is in flight, the button reads **Triggering...** with a spinning icon, then settles into the **Updating** badge once the gateway has accepted the request.
+When an update is available, this same card gains a warning **Update available** pill next to the version chip and an outline **Update to vX.Y.Z** button across the bottom (not pictured above, since every node in this fleet is currently up to date). Either surface dispatches the same backend call. While the call is in flight, the button reads **Triggering...** with a spinning icon, then settles into the **Updating** badge once the gateway has accepted the request.
 
 The gateway switches to a fast 5-second polling loop while any node is in the `Updating` state, so the badge advances in near real time without waiting for the next 30-second fleet refresh.
 
 ## Updating the local (gateway) node
 
-Updating the gateway is special because the dashboard is hosted by the very container that is about to restart. Clicking **Update** on the local row, or **Update to vX.Y.Z** on the Local card, opens a confirmation step before anything happens on disk.
+Updating the gateway is special because the dashboard is hosted by the very container that is about to restart. Clicking **Update** on the local row, or **Update to vX.Y.Z** on the Local card, opens a confirmation dialog (kicker **LOCAL · UPDATE**, title **Update local node**, with **Cancel** and **Update & restart** buttons) before anything happens on disk. The body text depends on how the compose file pins the image: for a semver pin it names the exact rewrite (for example, "This install pins `saelix/sencho:0.94.1`. Updating rewrites it to `saelix/sencho:0.95.0`..."); for a floating tag it reads more generally ("Pulls Sencho v0.95.0 and restarts the server..."). Both variants end with the same note that the dashboard briefly disconnects and reconnects automatically.
 
-<Frame>
-  <img src="/images/fleet-view/local-update-confirm.png" alt="Alert dialog with kicker 'LOCAL · UPDATE', heading 'Update local node', body 'Pulls the latest Sencho image and restarts the server. The dashboard briefly disconnects and reconnects automatically when the update completes.', and two buttons: Cancel and 'Update & restart'." />
-</Frame>
+<Note>
+  If the local node is running the Admiral **Hardened Build** image instead of a Community image, clicking **Update** here runs a different, entitlement-gated switch flow instead of the compose-repin steps below: it requires an authenticated browser session (not an API token) and can fail with its own codes (`entitlement_denied`, `preflight_mismatch`, `compose_unavailable`, `registry_access_unavailable`) surfaced on the same **Failed** badge. See [Licensing · Feature breakdown](/features/licensing#feature-breakdown) for what Hardened Build is.
+</Note>
 
-After **Update & restart** is confirmed:
+After **Update & restart** is confirmed on a Community-channel install:
 
 1. The browser captures the gateway's current boot timestamp from `/api/health`.
 2. The server classifies the compose image pin. For semver pins it pulls the target release, stages a rewritten compose file, and spawns a short-lived helper container that copies the file onto the host and runs `docker compose up -d --force-recreate`.
@@ -65,7 +69,7 @@ After **Update & restart** is confirmed:
 
 If the pull or compose rewrite fails before the container restarts, the overlay dismisses within a few seconds and surfaces the error in a toast instead of waiting for the full reconnect timeout.
 
-If the new container does not come up within 5 minutes, the overlay surfaces an **Update timed out** message with a *Try Reloading* button so the page is never left waiting indefinitely. If the gateway can detect that the update did not even start (for example, the image pull failed before the helper container could spawn) it surfaces a **Failed** badge with the underlying error on the Local card. The badge appears as soon as the helper writes its error file, or by the 3-minute mark at the latest, instead of waiting for the full 5-minute timeout.
+If the new container does not come up within 5 minutes, the overlay surfaces a **Taking longer than expected** message with a **Reload to check** button so the page is never left waiting indefinitely; this is not necessarily a failure, since a large image pull can legitimately run past that window. If the gateway can detect that the update did not even start (for example, the image pull failed before the helper container could spawn) it surfaces a **Failed** badge with the underlying error on the Local card. The badge appears as soon as the helper writes its error file, or by the 3-minute mark at the latest, instead of waiting for the full 5-minute timeout.
 
 <Note>
   The self-update helper container inherits all bind mounts from the main Sencho container 1:1. If your `docker-compose.yml` references `env_file`, `configs`, or `secrets` outside the compose working directory, those host paths must be mounted into the Sencho container at the *same container path* as on the host. See [Troubleshooting](/operations/troubleshooting#local-self-update-fails-with-env-file-not-found) if you encounter `env file not found` errors during a local update.
@@ -77,6 +81,9 @@ If the new container does not come up within 5 minutes, the overlay surfaces an 
 Fleet self-update respects how each node compose file declares the Sencho image. Semver pins are rewritten to the target release before recreate. Floating tags such as latest are pulled without changing the compose file. Digest pins and unresolved interpolated values block automatic updates; those rows show a **Pinned** badge instead of an **Update** button.
 
 The image pull always runs before any compose rewrite, so a failed pull never leaves the compose file half-updated.
+
+A node running the Admiral **Hardened Build** image is a deliberate exception: it is digest-pinned like any other locked reference, but it does not show the **Pinned** badge and its **Update** button stays available, because that path routes through the Hardened Build's own entitlement-gated switch instead of a compose repin. See the note in [Updating the local (gateway) node](#updating-the-local-gateway-node) above.
+
 ## What happens during an update
 
 For both local and remote nodes, an update goes through the same three steps:
@@ -123,7 +130,7 @@ The header of the sheet exposes a **Recheck** button that does three things in o
     The self-update helper container is launched with the same bind-mount set as the main Sencho container, but only paths that are explicitly mounted are visible inside the helper. If your `docker-compose.yml` references an `env_file` (or `configs`, or `secrets`) at a host path that is *not* mounted into the Sencho container, the helper cannot read it and the recreate step fails. Mount the referenced host directory into the Sencho container at the same container path (the 1:1 rule), redeploy Sencho once, and retry the update. The full walk-through with example mounts is in [Troubleshooting](/operations/troubleshooting#local-self-update-fails-with-env-file-not-found).
   </Accordion>
   <Accordion title="The reconnecting overlay never clears">
-    The overlay polls `/api/health` every 3 seconds for up to 5 minutes. If it has not cleared by then, the new container is either still pulling a very large image, refusing to start, or crashing on boot. Open a host shell on the gateway and run `docker logs <sencho-container>` to inspect the boot output, then `docker ps` to confirm a new container ID is running. The overlay's *Try Reloading* button bypasses the timer once the container is healthy again.
+    The overlay polls `/api/health` every 3 seconds for up to 5 minutes. If it has not cleared by then, the new container is either still pulling a very large image, refusing to start, or crashing on boot. Open a host shell on the gateway and run `docker logs <sencho-container>` to inspect the boot output, then `docker ps` to confirm a new container ID is running. The overlay's **Reload to check** button bypasses the timer once the container is healthy again.
   </Accordion>
   <Accordion title="A remote shows 'Failed' after about 3 minutes">
     The remote answered the dispatch but did not restart in time. The two most common causes are a registry pull error (rate limit, private-registry auth missing, network egress blocked) or a Compose file that fails validation under the new version. Open a shell on the remote and run `docker compose pull` followed by `docker compose up -d` against the Sencho working directory; the error printed there is the same one Sencho captured. Click **Retry** on the row once the cause is fixed.

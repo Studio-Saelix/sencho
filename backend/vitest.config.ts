@@ -5,7 +5,7 @@ export default defineConfig({
     environment: 'node',
     // Only run TypeScript sources - exclude the compiled dist/ output.
     include: ['src/__tests__/**/*.test.ts'],
-    exclude: ['dist/**', 'node_modules/**'],
+    exclude: ['dist/**', 'node_modules/**', 'src/__tests__/docker-integration/**'],
     // Build the baseline DB (schema + migrations + admin seed) once; each
     // test file's setupTestDb copies it instead of re-running migrations.
     globalSetup: ['./src/__tests__/helpers/vitestGlobalSetup.ts'],

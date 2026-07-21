@@ -11,7 +11,7 @@ The **Logs** tab aggregates output from the containers Sencho manages into a sin
 </Note>
 
 <Frame>
-  <img src="/images/global-observability/global-observability-overview.png" alt="Global Observability page with the live logs masthead, four-tile signal rail, filter strip, and a feed body showing day-banded rows in info green and error rose." />
+  <img src="/images/global-observability/global-observability-overview.png" alt="Global Observability page with the 'Streaming' masthead, four-tile signal rail, filter strip, and a feed body showing a mix of info, warning, and error rows from several containers." />
 </Frame>
 
 ## Status masthead
@@ -19,30 +19,30 @@ The **Logs** tab aggregates output from the containers Sencho manages into a sin
 The masthead at the top of the page is the single place to read the stream's current condition.
 
 <Frame>
-  <img src="/images/global-observability/masthead.png" alt="Logs masthead with the kicker 'LIVE LOGS · NODE · LOCAL', the state word 'Streaming' in editorial italics next to a pulsing brand-cyan dot, and the meta tiles 'LAST EVENT NOW' and 'SESSION 1M 43S' on the right." />
+  <img src="/images/global-observability/masthead.png" alt="Logs masthead with the kicker 'LIVE LOGS · NODE · LOCAL', the state word 'Idle' in editorial display type against a steady gray left edge rail, and the meta tiles 'LAST EVENT NOW' and 'SESSION 0M 10S' on the right." />
 </Frame>
 
 It carries:
 
 - A **kicker** in uppercase mono tracking that reads `LIVE LOGS · NODE · LOCAL`, a reminder that the feed is the hub's own managed containers.
-- A **pulsing dot** that mirrors the stream tone: brand cyan and pulsing while events arrive within the live window, gray and steady when the stream goes quiet, solid rose when the underlying SSE connection has errored.
-- A **state word** set in the editorial display face: `Streaming` while the dot is live, `Idle` when the stream has gone quiet, `Offline` when the connection has failed.
+- A **left edge rail** that mirrors the stream tone: brand cyan and shimmering while events arrive within the live window, gray and steady when the stream goes quiet, solid rose when the underlying SSE connection has errored.
+- A **state word** set in the editorial display face, tinted to match the rail: `Streaming` while the rail shimmers cyan, `Idle` when the stream has gone quiet, `Offline` when the connection has failed.
 - A **LAST EVENT** stat that names the band of the most recent event using the same vocabulary as the feed (`NOW`, `2M AGO`, `1H AGO`, then the calendar date), so you can see how stale the latest line is at a glance.
 - A **SESSION** stat counting how long this Logs tab has been open, formatted with uppercase letter suffixes: `1H 43M` once the session crosses an hour, `0M 12S` under it.
 
-The state word flips to `Idle` after ten seconds without an event. That is a feature of the readout, not the stream: the SSE connection stays open in the background and the dot will pulse cyan again on the next event.
+The state word flips to `Idle` after ten seconds without an event. That is a feature of the readout, not the stream: the SSE connection stays open in the background and the rail will shimmer cyan again on the next event.
 
 ## Signal rail
 
 A four-tile rail directly under the masthead summarizes the current buffer.
 
 <Frame>
-  <img src="/images/global-observability/signal-rail.png" alt="Four-tile signal rail: 'EVENTS / MIN' showing 20 with a 60-second sparkline, 'ERRORS' showing 418 in destructive red, 'WARNINGS' showing 9 in amber, 'CONTAINERS' showing 8 in stat-value white." />
+  <img src="/images/global-observability/signal-rail.png" alt="Four-tile signal rail: 'EVENTS / MIN' showing 5 with a sparkline beside the number, 'ERRORS' showing 247 in destructive red, 'WARNINGS' showing 17 in amber, 'CONTAINERS' showing 11 in stat-value white." />
 </Frame>
 
 | Tile | What it shows |
 |------|---------------|
-| **EVENTS / MIN** | Total events received in the last sixty seconds, with a 60-bucket sparkline (one bucket per second) under the number. The sparkline shifts left every tick so you read it as a live rhythm rather than a static chart. |
+| **EVENTS / MIN** | Total events received in the last sixty seconds, with a 60-bucket sparkline (one bucket per second) beside the number. The sparkline shifts left every tick so you read it as a live rhythm rather than a static chart. |
 | **ERRORS** | Count of `ERROR`-level lines in the buffer. Tints destructive red whenever the count is above zero; otherwise the number sits in subtitle gray. |
 | **WARNINGS** | Count of `WARN`-level lines in the buffer. Tints warning amber whenever the count is above zero; otherwise the number sits in subtitle gray. |
 | **CONTAINERS** | Count of distinct container names present in the in-memory buffer (after the **Clear** cutoff). Containers whose last entry has aged out of the buffer drop out of the count. |
@@ -71,14 +71,14 @@ Filters AND together and run in the browser, so there is no per-keystroke round-
 The body of the page is a chronological list of every log line in the buffer that passes the current filter.
 
 <Frame>
-  <img src="/images/global-observability/feed-bands.png" alt="Feed body showing day band headers '3M AGO' and '2M AGO' between groups of rows. Each row shows a green INFO dot, a 24-hour timestamp, a cyan container name (seerr, profilarr), and the raw log message." />
+  <img src="/images/global-observability/feed-bands.png" alt="Feed body showing the '1H AGO' band header between groups of rows, all from the radarr container. Info rows show a green dot and no row tint; one row shows a warning-amber dot with the row's whole background tinted amber." />
 </Frame>
 
 Each row carries:
 
 - A small **severity dot** tinted by detected level: success green for `INFO`, warning amber for `WARN`, destructive rose with a soft glow for `ERROR`.
 - A **timestamp** in 24-hour local time (`HH:MM:SS`), set in tabular nums so columns line up across rows.
-- A **container name** in brand cyan. Hover to see the full `<stack>/<container>` path in a tooltip; the displayed name is the compose service name with the project prefix and replica suffix stripped.
+- A **container name** in brand cyan. Hover to see the full `<stack>/<container>` path in a tooltip; the displayed name is the compose service name with the project prefix stripped, and the `-1` / `_1` replica suffix removed for a service's first replica. A service scaled beyond one replica keeps its numeric suffix (`worker-2`, `worker-3`) so you can tell the copies apart.
 - A **message** containing the raw log output. `STDERR`-source lines render in destructive rose; `STDOUT`-source lines render in stat-value white.
 
 A row's whole-row tint follows its detected level. Error rows pick up a subtle destructive wash, warning rows pick up an amber wash, info rows have no tint and gain a subtle accent on hover. The detected level is independent of the source, so an `STDOUT` line that contains the word `ERROR:` still gets the rose row tint.
@@ -96,7 +96,7 @@ The viewport autoscrolls to follow new rows. If you scroll up to read older entr
 A floating control strip is anchored to the bottom-right of the feed.
 
 <Frame>
-  <img src="/images/global-observability/paused-resume-chip.png" alt="Floating control strip with a brand-cyan '22 NEW · RESUME' pill on the left and the Pause/Clear/Download chip group on the right. The Pause button shows a play icon and the label 'RESUME', indicating the stream is currently paused." />
+  <img src="/images/global-observability/paused-resume-chip.png" alt="Floating control strip with a brand-cyan '29 NEW · RESUME' pill on the left and the Resume/Clear/Download chip group on the right. The toggle shows a play icon and the label 'RESUME', indicating the stream is currently paused." />
 </Frame>
 
 | Action | What it does |
@@ -110,10 +110,10 @@ A floating control strip is anchored to the bottom-right of the feed.
 The **Level** segmented control drops the feed to a single severity. Pairing it with **Stacks** is a fast way to investigate a misbehaving stack.
 
 <Frame>
-  <img src="/images/global-observability/error-only-filter.png" alt="Logs page with the Level filter set to 'Error'. The feed shows only error-tinted rows from the sencho and radarr containers, with day bands '6M AGO' through 'NOW' visible." />
+  <img src="/images/global-observability/error-only-filter.png" alt="Logs page with Stacks narrowed to radarr and the Level filter set to Error. The feed shows only the two matching error-tinted rows, under a '3H AGO' band header." />
 </Frame>
 
-The level on each row is detected from the message body, not the stream source. Sencho's parser scans the line for keywords (`info`, `debug`, `warn`, `error`) and structured fields (`level=...`, `[INFO]`, `Exception:`) before falling back to a source-based default of `STDERR → ERROR`, `STDOUT → INFO`. That means an `STDOUT` line containing `ERROR:` classifies as `ERROR` (and gets the rose tint), and an `STDERR` line containing `info` classifies as `INFO` (and gets the green dot).
+The level on each row is detected from the message body, not the stream source. Sencho's parser checks three tiers in order and stops at the first match: first `info` / `debug` / `trace` keywords or structured fields (`level=info`, `[INFO]`), then `warn` / `warning`, then `error` / `fatal` / `crit` / `critical` / `panic` or a leading `Exception:`. Only when none of those match does it fall back to a source-based default of `STDERR → ERROR`, `STDOUT → INFO`. The INFO tier is checked first, so it wins even on an `STDERR` line: an `STDERR` line containing `info` classifies as `INFO` (and gets the green dot), while an `STDOUT` line containing `ERROR:` falls through every tier to the ERROR match (and gets the rose tint).
 
 ## How streaming works
 
@@ -129,7 +129,7 @@ Three budgets keep the page responsive even on a chatty host:
 
 - **Buffer** of two thousand entries in the browser's memory. As new events arrive past the cap, the oldest entries are dropped. The buffer keeps filling while the feed is paused, so a long pause does not stretch memory unbounded.
 - **Rendered rows** capped at three hundred. Beyond that, the `Showing last 300 of <n>` banner appears so you know more matches exist behind the slice.
-- **Followed containers** capped per stream. When the hub manages more containers than the cap, the feed follows the first set and posts a `Following <n> of <m> managed containers` notice so you know the feed is truncated; use the per-container log viewer for the rest.
+- **Followed containers** capped at sixty per stream. When the hub manages more than sixty containers, the feed follows the first sixty and posts a `Following <n> of <m> managed containers; <count> not shown` line into the feed itself (as a synthetic warning row from a `sencho` entry, not a passive banner) so you know the feed is truncated; use the per-container log viewer for the rest.
 
 When you need to chase older lines than the buffer holds, jump to the [per-container log viewer](/features/editor#log-viewer) in the Editor tab or run `docker compose logs` from the [Host Console](/features/host-console).
 
@@ -160,8 +160,8 @@ The page is built from several independent loops so the masthead and the sparkli
   <Accordion title="The masthead reads 'Offline' and a 'Failed to fetch logs. Retrying...' banner is visible">
     The polling fallback got an HTTP error when it tried to read `/api/logs/global`. Check that the host's Docker daemon is reachable on the socket Sencho is configured to use. The page retries the request every five seconds; once it succeeds, the banner clears on its own.
   </Accordion>
-  <Accordion title="The dot is gray and the state reads 'Idle' even though logs are appearing further down the page">
-    `Idle` only checks whether an event has arrived in the last ten seconds. If your fleet is genuinely quiet (a maintenance window, a single low-traffic container), the dot rests gray and the band headers in the feed roll up to `2M AGO`, `5M AGO`, and so on. The next event flips the dot back to brand cyan and the state word back to `Streaming` on the next one-second tick.
+  <Accordion title="The masthead rail is gray and the state reads 'Idle' even though logs are appearing further down the page">
+    `Idle` only checks whether an event has arrived in the last ten seconds. If your fleet is genuinely quiet (a maintenance window, a single low-traffic container), the rail rests gray and the band headers in the feed roll up to `2M AGO`, `5M AGO`, and so on. The next event flips the rail back to a shimmering brand cyan and the state word back to `Streaming` on the next one-second tick.
   </Accordion>
   <Accordion title="A line that says 'ERROR' renders without the rose row tint">
     Severity is detected once per line by scanning the message body. Some loggers print `ERROR` as part of a stack trace header on a line that does not itself match the parser's keyword set, in which case the line is classified by its source: `STDOUT` falls back to `INFO`. To force the row to your preferred level, change the application's log format to something the parser recognises (`level=error`, `[ERROR]`, or a leading `Error:` / `Exception:`). The behavior is intentional: it keeps a noisy `STDOUT` line that quotes the word `ERROR` from polluting the error count.
@@ -172,8 +172,14 @@ The page is built from several independent loops so the masthead and the sparkli
   <Accordion title="Clear hid the rows but a few old lines came back a moment later">
     **Clear** records the click time and hides every row whose timestamp is earlier than that moment, but the SSE stream keeps delivering events whose timestamps were generated by Docker before the click. A line emitted at `16:51:43.987` that arrives at the browser at `16:51:44.020` will still pass the filter even if you clicked **Clear** at `16:51:44.000`. The lag is normally a few hundred milliseconds; click **Clear** again to hide them.
   </Accordion>
+  <Accordion title="A line shows stray fragments like [36m or [0m in the message">
+    Some applications color their console output with ANSI escape sequences. Sencho strips the non-printable escape character so it cannot corrupt the terminal-style rendering, but the printable characters that followed it (the color code and the closing reset, e.g. `[36m` or `[0m`) are left in the message text. This is cosmetic only; it does not affect level detection or search. If the noise bothers you, disable colored logging in the source application (most loggers respect `NO_COLOR` or a `--no-color` flag) or configure it to log JSON instead.
+  </Accordion>
+  <Accordion title="A scaled service's container name still shows a number, like worker-2">
+    The replica-suffix strip only removes a trailing `-1` or `_1`, the suffix Docker Compose assigns to a service's first replica. Additional replicas (`-2`, `-3`, and so on) keep their numeric suffix so you can tell the copies apart in the feed and in the Stacks filter.
+  </Accordion>
   <Accordion title="A container I expect is missing from the feed">
-    The feed shows the containers Sencho manages (those started from its compose directory). A container started outside Sencho, or one belonging to a stack on a different node, does not appear. Open it from the [per-container log viewer](/features/editor#log-viewer) in the Editor, or use the [Host Console](/features/host-console) for ad-hoc `docker compose logs`.
+    The feed shows the containers Sencho manages (those started from its compose directory). A container started outside Sencho, or one belonging to a stack on a different node, does not appear. If the hub manages more than sixty containers, only the first sixty are followed; check for the `Following <n> of <m> managed containers` row. Either way, open the missing container from the [per-container log viewer](/features/editor#log-viewer) in the Editor, or use the [Host Console](/features/host-console) for ad-hoc `docker compose logs`.
   </Accordion>
   <Accordion title="A row says a log stream ended unexpectedly">
     When one container's follow stream drops (the container was removed, or the Docker daemon hiccuped), the feed posts a single warning row for that container and stops following it; the other containers keep streaming. Reopen the Logs tab to re-attach to every managed container.

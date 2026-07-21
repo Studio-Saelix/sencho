@@ -12,6 +12,8 @@ import { MonitorService } from '../services/MonitorService';
 import { AutoHealService } from '../services/AutoHealService';
 import { HealthGateService } from '../services/HealthGateService';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
+import { DeployedStackDeletionService } from '../services/DeployedStackDeletionService';
+import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
 import { FleetSyncRetryService } from '../services/FleetSyncRetryService';
 import { DockerEventManager } from '../services/DockerEventManager';
 import TrivyService, { sweepStaleTrivyTempDirs } from '../services/TrivyService';
@@ -133,6 +135,16 @@ export async function startServer(server: Server): Promise<void> {
 
   // Initialize the license service before any tier-gated code can run.
   LicenseService.getInstance().initialize();
+
+  // Deletion-intent reconciliation must finish before mutation-capable
+  // background services or HTTP accept traffic that could recreate a stack
+  // name still covered by a prepared/ready tombstone.
+  try {
+    await DeployedStackDeletionService.getInstance().reconcileAtStartup();
+  } catch (err) {
+    console.error('[Startup] Deployed stack deletion reconcile failed:', (err as Error).message);
+  }
+  StackUpdateRecoveryService.getInstance().start();
 
   // Synchronous starts: schedule background timers and continue. None of
   // these fire their first tick for at least a few seconds, so they

@@ -6,7 +6,7 @@ description: Manage, group, pin, and bulk-act on your stacks from the primary si
 The stack sidebar is your command center for every stack on the active node. Stacks are grouped by label, frequently used stacks can be pinned to the top, search fans out across all connected remote nodes, bulk mode lets you act on several stacks at once, and an activity ticker at the bottom surfaces ongoing operations and recent events.
 
 <Frame>
-  <img src="/images/sidebar/sidebar-overview.png" alt="Stack sidebar showing the Sencho logo with version tag, the NODE LOCAL node switcher, Create Stack button plus bulk mode and scan-folder icons, the Search stacks input, ALL/UP/DOWN/UPDATES filter chips, a starred PINNED group at top, label groups MEDIA and UTILITIES with stack rows each showing a status pill and label dots, and the activity ticker at the bottom reading LIVE VIEW STACK" />
+  <img src="/images/sidebar/sidebar-overview.png" alt="Stack sidebar showing the Sencho logo with version tag, the NODE LOCAL node switcher, Create Stack button plus bulk mode and scan-folder icons, the Search stacks input, ALL/UP/DOWN/UPDATES filter chips, label groups MEDIA, UTILITIES, NETWORK, DATABASE, and UNLABELED with stack rows showing status pills and fuchsia update dots, and the activity ticker at the bottom reading LIVE VIEW STACK" />
 </Frame>
 
 ## Layout
@@ -28,33 +28,41 @@ Four chips sit below the search box. Each shows a live count to the right of its
 - **All**: every stack on the node.
 - **Up**: stacks that are running with nothing crashed. A stack whose only stopped container finished cleanly (an init job that exited without error) still counts as up.
 - **Down**: stacks that need attention, whether fully stopped or running with at least one crashed container (the `PT` state described below).
-- **Updates**: stacks with at least one image update available. The chip renders in orange when the count is non-zero so you can spot pending updates at a glance. The Updates chip and the trailing update indicators on stack rows are controlled by the Image Update Checks [sidebar setting](/reference/settings#image-update-checks---sidebar). When the setting is off, the chip and indicators are hidden.
+- **Updates**: stacks with at least one image update available. The chip renders in fuchsia when the count is non-zero, matching the fuchsia update dot on stack rows, so you can spot pending updates at a glance. The Updates chip and the trailing update indicators on stack rows are controlled by the Image Update Checks [sidebar setting](/reference/settings#sidebar). When the setting is off, the chip and indicators are hidden.
+
+Counts reflect your current search text as well as the active node: typing into **Search stacks...** narrows every chip's count to the matching stacks, not the node's full total.
 
 <Frame>
-  <img src="/images/sidebar/sidebar-filter-chips.png" alt="Filter chip row showing ALL (15), Up (15), Down (0), and Updates (1) with the Updates chip highlighted in orange and a collapse toggle icon on the right" />
+  <img src="/images/sidebar/sidebar-filter-chips.png" alt="Filter chip row showing ALL (15), Up (15), Down (0), and Updates (3) with the Updates chip highlighted in fuchsia and a collapse toggle icon on the right" />
 </Frame>
 
 Click the **−** icon on the right to collapse the chip row when you need more vertical room; it becomes a **+** icon you click to bring the chips back. The collapsed state is remembered in your browser.
 
+## First run
+
+When the active node has no stacks yet, the list area below the filter chips replaces the empty groups with a discovery prompt: it reads your compose directory and offers **Adopt existing files** for compose files it finds, or **New stack** and **Scan stacks folder** when there's nothing to adopt. See [Adopt existing files](/features/stack-management#adopt-existing-files) for the full compose-discovery workflow.
+
 ## Groups
 
 Stacks are grouped by label. Groups are sorted by size (most populated first), then alphabetically. Stacks with multiple labels appear in every matching group so you always see the full fleet membership per label. Stacks without labels appear in an **Unlabeled** group at the bottom. Click a group header to collapse or expand it; the collapsed state is remembered per node.
+
+Each label group header also carries a small kebab button for muting that label's notifications, visible to admins on nodes that support notification suppression. See [Stack Labels](/features/stack-labels#sidebar-grouping) for how grouping and label management work, and [Mute Rules](/features/alerts-notifications#mute-rules) for what the mute presets create.
 
 ## Cross-node search
 
 When you type anything into **Search stacks...**, Sencho fans the query out to every connected remote node at the same time. Results from other nodes appear below the local list under an **Other nodes** section, separated by a dividing line.
 
 <Frame>
-  <img src="/images/sidebar/sidebar-cross-node-search.png" alt="Sidebar with a search query showing local results in label groups, then a dividing line and an OTHER NODES section listing stacks from three remote nodes with their status pills and external-link arrows" />
+  <img src="/images/sidebar/sidebar-cross-node-search.png" alt="Sidebar with a search query showing local results in label groups, then a dividing line and an OTHER NODES section listing stacks from three remote nodes (Opsix, Pitt-Moba, SLX-Mars) with their status pills and external-link arrows" />
 </Frame>
 
 Each reachable node shows its matching stacks with a status pill and an external-link arrow. Clicking a remote result switches the active node to that instance and opens the stack immediately.
 
-If one or more nodes did not respond during the search, a collapsible warning row appears showing how many nodes were unreachable. Expand it to see which nodes failed and why.
+If one or more nodes did not respond during the search, a collapsible warning row appears showing how many nodes were unreachable. Expand it to see which nodes failed and why. Nodes Sencho already shows as offline are skipped before the search starts, so they never appear in the results or in this warning; check [Fleet](/features/fleet-view) if you expected to find a stack there.
 
 ## Pinning
 
-Right-click a stack and choose **Pin to top**. Pinned stacks sit in a dedicated **★ PINNED** group at the very top of the list. Up to 10 stacks can be pinned per node; pinning an 11th evicts the oldest. Right-click a pinned stack and choose **Unpin** to remove it.
+Right-click a stack and choose **Pin to top**. Pinned stacks sit in a dedicated **★ PINNED** group at the very top of the list. Up to 10 stacks can be pinned per node; pinning an 11th evicts the oldest and shows a confirmation toast reading **Pinned. Unpinned oldest (max 10).** Right-click a pinned stack and choose **Unpin** to remove it.
 
 <Frame>
   <img src="/images/sidebar/sidebar-pinned.png" alt="Sidebar with a starred PINNED group at the top containing plex, followed by the MEDIA group and other label groups below" />
@@ -65,16 +73,15 @@ Right-click a stack and choose **Pin to top**. Pinned stacks sit in a dedicated 
 Each row gives you everything you need to read the stack at a glance, in a fixed column order:
 
 - **Status pill** on the left. Two uppercase letters in mono type, or a spinner while a lifecycle action is in flight. `UP` (green) means the stack is running with nothing crashed. `DN` (red) means the stack is stopped. `PT` (amber) means the stack is partially running: at least one container is up and at least one has crashed (exited with an error, died, or is restart-looping). Hover the `PT` pill to see the running/total container count, such as `3/5 running`. A stack whose only stopped container finished cleanly stays `UP`.
-- **Stack name** in mono type, truncated with an ellipsis when the row gets tight.
-- **Label dots** to the right of the name. Up to three colored dots represent the stack's labels. If a stack carries more than three labels, a **+N** counter appears for the extras.
+- **Stack name** in mono type, truncated with an ellipsis when the row gets tight. Rows no longer render a per-row label swatch; a stack's labels are visible from the group it's sorted into (see [Groups](#groups) above) or from the row's **Labels** submenu.
 - **Trailing indicator** in its own fixed-width slot at the far right of the name area, showing the highest-priority signal present:
-  - Pulsing orange dot: an image update is available. Hover for the update tooltip; when per-service status is known, the tooltip names the outdated service(s).
+  - Pulsing fuchsia dot: an image update is available. Hover for the "Update available" tooltip; when per-service status is known, the tooltip names the outdated service(s).
   - Muted circle-alert icon: the last registry check failed (registry unreachable, missing credentials, or rate-limited). Hover to read the failure reason.
   - Git branch icon: a Git source update is pending and no image update is available.
 - **Hover kebab** on the right edge. On desktop, hover the row to reveal a vertical three-dot menu that opens the same actions as right-clicking. On touch viewports the kebab is always visible.
 
 <Frame>
-  <img src="/images/sidebar/sidebar-row-anatomy.png" alt="Four stack rows in the MEDIA group: bazarr (UP, purple label dot), plex (UP, purple label dot), radarr (UP, one label dot followed by an orange pulsing update indicator), and seerr (UP, purple label dot)" />
+  <img src="/images/sidebar/sidebar-row-anatomy.png" alt="Four stack rows in the UTILITIES group: dozzle (UP, fuchsia pulsing update indicator), maintainerr (UP), profilarr (UP), and unpackerr (UP)" />
 </Frame>
 
 ## Bulk mode
@@ -84,19 +91,19 @@ Click the **Bulk mode** icon next to **Create Stack** (or press <kbd>B</kbd>) to
 - **Start**, **Stop**, **Restart** apply the action to every selected stack.
 - **Update** pulls the latest images for every selected stack.
 
-Click rows to toggle their selection. The toolbar header shows a running count. Click the **×** in the toolbar to clear the selection, and click the icon again (or press <kbd>B</kbd>) to leave bulk mode.
+Click rows to toggle their selection, or press <kbd>Ctrl</kbd>+<kbd>A</kbd> (<kbd>Cmd</kbd>+<kbd>A</kbd> on macOS) to select every stack currently matching your search text and active filter chip. The toolbar header shows a running count. Click the **×** in the toolbar to clear the selection while staying in bulk mode. Click the **Bulk mode** icon again or press <kbd>B</kbd> to leave bulk mode, or press <kbd>Esc</kbd> to leave bulk mode and clear the selection in one step.
 
 <Frame>
-  <img src="/images/sidebar/sidebar-bulk-mode.png" alt="Sidebar in bulk mode: the stacked-rows icon in the action row is highlighted in brand color, a sticky toolbar shows 2 selected with a clear X button and Start/Stop/Restart/Update action buttons, and every stack row has a checkbox visible with bazarr and sonarr checked" />
+  <img src="/images/sidebar/sidebar-bulk-mode.png" alt="Sidebar in bulk mode: the stacked-rows icon in the action row is highlighted in brand color, a sticky toolbar shows 2 selected with a clear X button and Start/Stop/Restart/Update action buttons, and every stack row has a checkbox visible with radarr and sonarr checked" />
 </Frame>
 
 ## Context menu
 
 Right-click any stack (or open the kebab that appears on hover) for its context menu. Items are grouped by purpose:
 
-- **Inspect**: **Alerts**, **Auto-Heal**, **Check updates**, and **Open App** (only appears when the stack is running and exposes a browser-reachable port).
-- **Organize**: **Labels** opens a submenu listing every label on the node with a checkmark next to each one already assigned to this stack. Click any label to toggle it. The submenu also offers **New label** for inline creation (when you have edit permission and the node is under its label limit) and **Manage labels...** to open the full label settings. Below the Labels entry: **Pin to top** or **Unpin**.
-- **Lifecycle**: **Deploy** (when stopped), **Stop**, **Restart**, **Update** (when running), and **Schedule task** (admin only, opens the Schedules view with this stack pre-selected).
+- **Inspect**: **Alerts**, **Auto-Heal**, **Check updates**, **Open App** (only appears when the stack is running and exposes a browser-reachable port), and **Mute** (admins only, on nodes that support notification suppression). Mute opens a submenu with **Mute notifications for this stack**, **Mute deploy success noise**, **Mute monitor alerts for this stack**, and **Manage stack mute rules**; see [Mute Rules](/features/alerts-notifications#mute-rules) for what each preset creates.
+- **Organize**: **Labels** opens a submenu listing every label on the node with a checkmark next to each one already assigned to this stack. Click any label to toggle it. The submenu also offers **New label** for inline creation (when you have edit permission and the node is under its label limit), **Manage labels...** to open the full label settings, and (admins only, on nodes that support notification suppression) a **Mute label…** submenu for quieting any label's notifications. See [Stack Labels](/features/stack-labels) for the full label workflow. Below the Labels entry: **Pin to top** or **Unpin**.
+- **Lifecycle**: **Deploy** (when stopped), **Stop**, **Restart**, **Update** (when running), **Take down** (stops the stack and removes its containers and compose-created networks while keeping compose files on disk; opens a confirmation), and **Schedule task** (admin only, opens the Schedules view with this stack pre-selected).
 - **Destructive**: **Delete** (only shown when you have permission to delete this stack).
 
 <Note>
@@ -104,12 +111,12 @@ Right-click any stack (or open the kebab that appears on hover) for its context 
 </Note>
 
 <Frame>
-  <img src="/images/sidebar/sidebar-context-menu.png" alt="Right-click context menu on a running stack with four labeled sections: INSPECT with Alerts, Auto-Heal, Check updates, and Open App; ORGANIZE with Labels (submenu arrow) and Pin to top; LIFECYCLE with Stop, Restart, Update, and Schedule task; and DESTRUCTIVE with Delete in red" />
+  <img src="/images/sidebar/sidebar-context-menu.png" alt="Right-click context menu on a running stack with four labeled sections: INSPECT with Alerts, Auto-Heal, Check updates, Open App, and Mute; ORGANIZE with Labels (submenu arrow) and Pin to top; LIFECYCLE with Stop, Restart, Update, Take down, and Schedule task; and DESTRUCTIVE with Delete in red" />
 </Frame>
 
 ## Keyboard shortcuts
 
-Shortcuts fire on the currently selected stack. They are blocked while a text input is focused or the global command palette is open.
+Most shortcuts fire on the currently selected stack. The bulk mode shortcuts below are the exception and work without a selection. All shortcuts are blocked while a text input is focused or the global command palette is open.
 
 ### Lifecycle
 
@@ -132,7 +139,18 @@ On macOS, use <kbd>Cmd</kbd> in place of <kbd>Ctrl</kbd>.
 | <kbd>H</kbd> | Open the auto-heal sheet |
 | <kbd>U</kbd> | Check for image updates |
 | <kbd>P</kbd> | Pin or unpin the stack |
+
+### Bulk mode
+
+These do not require a selected stack.
+
+| Shortcut | Action |
+|----------|--------|
 | <kbd>B</kbd> | Toggle bulk mode |
+| <kbd>Ctrl</kbd>+<kbd>A</kbd> | In bulk mode, select every stack matching the current search and filter chip |
+| <kbd>Esc</kbd> | In bulk mode, exit and clear the selection |
+
+On macOS, use <kbd>Cmd</kbd> in place of <kbd>Ctrl</kbd>.
 
 ## Activity ticker
 
@@ -162,10 +180,16 @@ Click the ticker in any other state to navigate directly to the linked view.
     Confirm the active filter chip is **All** so a status filter is not hiding the row. Clear the **Search stacks...** box in case a stale query is filtering the list. Then click the **Scan stacks folder** icon next to **Create Stack** to re-index the compose directory on disk.
   </Accordion>
   <Accordion title="Pinning is not sticking past the 10th stack">
-    Each node has a 10-stack pin limit. When you pin an 11th stack, the oldest pin is automatically evicted so the new one fits. Unpin a stack you no longer need before adding another, or accept that the oldest will roll off.
+    Each node has a 10-stack pin limit. When you pin an 11th stack, the oldest pin is automatically evicted so the new one fits, and a toast confirms which one rolled off. Unpin a stack you no longer need before adding another, or accept that the oldest will roll off.
   </Accordion>
   <Accordion title="Keyboard shortcuts are not firing">
-    Shortcuts only fire when a stack row is selected in the sidebar (one row is highlighted). They are blocked while a text input is focused or the global command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) is open. Click a stack row, then try the shortcut again.
+    Most shortcuts only fire when a stack row is selected in the sidebar (one row is highlighted); click a row and try again. <kbd>B</kbd>, <kbd>Ctrl</kbd>+<kbd>A</kbd>, and <kbd>Esc</kbd> are the exception and work without a selection. Every shortcut is blocked while a text input is focused or the global command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd>) is open.
+  </Accordion>
+  <Accordion title="A stack row no longer shows its label as a colored dot">
+    Stack rows show only the status pill and name; per-row label dots were removed. To see or change a stack's labels, look at which group it's sorted into, or right-click the row (or use its kebab) and open the **Labels** submenu. See [Stack Labels](/features/stack-labels) for the full picture.
+  </Accordion>
+  <Accordion title="Mute is missing from a stack's context menu">
+    Mute (and the label group header's mute kebab) only render for admins on nodes that support notification suppression. Sign in with an admin account, or update the node if it's running a version that predates notification suppression.
   </Accordion>
   <Accordion title="The filter chips disappeared from the sidebar">
     Click the **+** icon to the right of the search box to bring them back. The chip row collapses to a **−** / **+** toggle, and the state is remembered in your browser, so an earlier collapse persists across reloads until you expand it again.
@@ -178,5 +202,8 @@ Click the ticker in any other state to navigate directly to the linked view.
   </Accordion>
   <Accordion title="Cross-node search shows some nodes as unreachable">
     Sencho tried to reach those nodes during the search but they did not respond. The node may be offline, its connection credentials may have expired, or a network change may have interrupted the link. Open the Fleet view to check each node's status, or go to Settings and test the connection from the Nodes panel.
+  </Accordion>
+  <Accordion title="A stack on a node I know is offline never shows up in search, and there's no unreachable warning for it either">
+    Nodes Sencho already shows as offline are skipped before the fan-out starts, so they're excluded from both the results and the unreachable warning rather than counted as a failed attempt. Reconnect the node first, then search again.
   </Accordion>
 </AccordionGroup>
