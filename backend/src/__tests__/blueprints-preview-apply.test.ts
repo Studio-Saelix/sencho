@@ -144,6 +144,49 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
         expect(stored.updated_at).toBe(created.body.updated_at);
     });
 
+    it('returns PREVIEW_STALE when compose drifts between preview and approval persist', async () => {
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send(validBlueprintBody(node.id));
+        expect(created.status).toBe(201);
+
+        const preview = await request(app)
+            .get(`/api/blueprints/${created.body.id}/preview`)
+            .set('Cookie', adminCookie);
+        expect(preview.status).toBe(200);
+
+        const db = DatabaseService.getInstance();
+        const originalSet = db.setBlueprintApproval.bind(db);
+        vi.spyOn(db, 'setBlueprintApproval').mockImplementation((id, input) => {
+            // Concurrent edit landed compose v2 before approval was written; Apply
+            // still persists the v1 fingerprint onto that row.
+            db.getDb().prepare('UPDATE blueprints SET compose_content = ? WHERE id = ?').run(
+                'services:\n  app:\n    image: nginx:evil\n',
+                id,
+            );
+            return originalSet(id, input);
+        });
+
+        const reconcileSpy = vi.mocked(BlueprintReconciler.getInstance().reconcileConfirmedPlan);
+        const res = await request(app)
+            .post(`/api/blueprints/${created.body.id}/apply`)
+            .set('Cookie', adminCookie)
+            .send({
+                planFingerprint: preview.body.planFingerprint,
+                actions: preview.body.confirmableActions,
+            });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('PREVIEW_STALE');
+        expect(reconcileSpy).not.toHaveBeenCalled();
+
+        const stored = DatabaseService.getInstance().getBlueprint(created.body.id)!;
+        expect(stored.approval_status).toBe('pending');
+        expect(stored.approved_intent_fingerprint).toBeNull();
+    });
+
     it('returns failed outcomes without pretending the rollout was clean', async () => {
         const node = seedNode();
         counter += 1;

@@ -198,8 +198,15 @@ export class BlueprintReconciler {
             return { outcomes: [] };
         }
         const parsed = parseApprovedBlastJson(blueprint.approved_blast_json);
-        if (!parsed.ok || blueprint.approval_status !== 'approved') {
-            diagnosticLog('reconcileConfirmedPlan skipped: approval missing or invalid', { blueprintId });
+        // Same fail-closed gate as tick reconcile: a concurrent edit can leave
+        // approval_status=approved with a fingerprint that no longer matches the
+        // current compose/selector. Never execute against drifted intent.
+        if (
+            !parsed.ok
+            || blueprint.approval_status !== 'approved'
+            || blueprint.approved_intent_fingerprint !== intentFingerprint(blueprint)
+        ) {
+            diagnosticLog('reconcileConfirmedPlan skipped: approval missing, invalid, or drifted', { blueprintId });
             return { outcomes: [] };
         }
         const authorized = filterAuthorizedExecutorActions(parsed.entries, executorActions);

@@ -18,6 +18,7 @@ import { buildBlueprintPreview, evaluateLightweightEffectiveApproval } from '../
 import {
     confirmableActionsEqual,
     deriveBlastFromConfirmableActions,
+    intentFingerprint,
     parseConfirmableActionsBody,
     serializeApprovedBlast,
 } from '../services/blueprintApproval';
@@ -427,11 +428,24 @@ blueprintsRouter.post('/:id/apply', async (req: Request, res: Response): Promise
         }
 
         const blast = deriveBlastFromConfirmableActions(preview.confirmableActions);
-        DatabaseService.getInstance().setBlueprintApproval(id, {
+        const approved = DatabaseService.getInstance().setBlueprintApproval(id, {
             intentFingerprint: preview.planFingerprint,
             blastJson: serializeApprovedBlast(blast),
             approvedBy: req.user?.username ?? null,
         });
+        // Preview held an in-memory blueprint across awaits (name-conflict checks).
+        // A concurrent edit can change compose/selector after that snapshot was
+        // validated; refuse to keep an approval that no longer matches live intent.
+        if (!approved || intentFingerprint(approved) !== preview.planFingerprint) {
+            DatabaseService.getInstance().clearBlueprintApproval(id);
+            const fresh = await buildBlueprintPreview(id);
+            res.status(409).json({
+                error: 'Preview is stale; refresh and confirm again',
+                code: 'PREVIEW_STALE',
+                preview: fresh,
+            });
+            return;
+        }
         const plan = await BlueprintReconciler.getInstance().reconcileConfirmedPlan(id, preview.executorActions);
         const outcomeSummary = summarizeConfirmedOutcomes(plan.outcomes);
         res.json({
