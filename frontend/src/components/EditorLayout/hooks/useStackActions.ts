@@ -168,6 +168,13 @@ interface UseStackActionsOptions {
   canEditStack: (stackNameOrFilename: string) => boolean;
   /** Fail-closed: true only when active node meta explicitly lists stack-down-remove-volumes. */
   canOfferVolumeRemoval?: boolean;
+  /**
+   * Mobile (and any shell-owned) cleanup after deleting the stack that is
+   * currently open in the editor. EditorLayout clears pending detail and
+   * flips to the stack list surface. Required: the sole production caller
+   * owns that state, and an optional callback would silently skip it.
+   */
+  onDeletedOpenStack: () => void;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -390,6 +397,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     hasServiceScopedUpdate = false,
     canEditStack,
     canOfferVolumeRemoval = false,
+    onDeletedOpenStack,
   } = options;
 
   const pendingStackLoadRef = useRef<string | null>(null);
@@ -493,6 +501,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     // previous node's data.
     loadFileAbortRef.current?.abort();
     loadFileAbortRef.current = null;
+    // loadFileCore's finally skips clearing loading when the signal is aborted,
+    // so clear it here. Otherwise useUrlSync's writer stays blocked after a
+    // delete-leave (or any other reset) that aborts a mid-flight load.
+    editorState.setIsFileLoading(false);
     stackListState.setSelectedFile(null);
     editorState.setContent('');
     editorState.setOriginalContent('');
@@ -1767,8 +1779,17 @@ export function useStackActions(options: UseStackActionsOptions) {
       }
       toast.success('Stack deleted successfully!');
       overlayState.closeDeleteDialog();
-      if (stackListState.selectedFile === stackToDelete) {
+      const selected = stackListState.selectedFile;
+      const stripExt = (name: string) => name.replace(/\.(yml|yaml)$/, '');
+      // Always clear a deleted selection, even when another top-level view is
+      // visible (Resources, Networking, etc.). Leaving that view is gated on
+      // the editor being the active surface below.
+      if (selected != null && stripExt(selected) === stripExt(deleteKey)) {
         resetEditorState();
+        if (navState.activeView === 'editor') {
+          navState.setActiveView('dashboard');
+          onDeletedOpenStack();
+        }
       }
       await stackListState.refreshStacks();
     } catch (error) {
