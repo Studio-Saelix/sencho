@@ -427,4 +427,75 @@ describe('Notification suppression - CRUD', () => {
     });
     DatabaseService.getInstance().deleteNotificationSuppressionRule(9002);
   });
+
+  it('replica forces node_id to null regardless of the payload value', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    const res = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 9004,
+          name: 'replica-scoped',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: 5,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(9004)?.node_id).toBeNull();
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(9004);
+  });
+
+  it('replica ignores a stale write with an older updated_at than the stored row', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const replicaRule = (overrides: Record<string, unknown>) => ({
+      id: 9005,
+      name: 'replica-race',
+      applies_to: 'both',
+      stack_patterns: [],
+      node_id: null,
+      label_ids: null,
+      categories: null,
+      levels: null,
+      enabled: true,
+      expires_at: null,
+      created_at: 1,
+      ...overrides,
+    });
+
+    const first = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ name: 'v2-newer', updated_at: 2000 }) });
+    expect(first.status).toBe(200);
+
+    const stale = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ name: 'v1-delayed-stale', updated_at: 1000 }) });
+    expect(stale.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(9005)?.name).toBe('v2-newer');
+
+    const newer = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ name: 'v3-newest', updated_at: 3000 }) });
+    expect(newer.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(9005)?.name).toBe('v3-newest');
+
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(9005);
+  });
 });

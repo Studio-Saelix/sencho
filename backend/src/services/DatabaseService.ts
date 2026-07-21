@@ -2782,6 +2782,15 @@ export class DatabaseService {
         const scheduleJson = rule.schedule ? JSON.stringify(rule.schedule) : null;
         const existing = this.getNotificationSuppressionRule(rule.id);
         if (existing) {
+            // Fleet sync is fire-and-forget with no delivery ordering guarantee: a
+            // delayed older push must never overwrite a state we already know is newer.
+            if (existing.updated_at >= rule.updated_at) {
+                console.warn(
+                    `[DatabaseService] Ignoring stale suppression replica write for rule id=${rule.id} ` +
+                        `(incoming updated_at=${rule.updated_at} <= stored updated_at=${existing.updated_at})`,
+                );
+                return;
+            }
             this.db.prepare(
                 `UPDATE notification_suppression_rules SET
                     name = ?, node_id = ?, stack_patterns = ?, label_ids = ?, categories = ?, levels = ?,

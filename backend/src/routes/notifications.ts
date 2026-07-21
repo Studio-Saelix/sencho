@@ -561,7 +561,9 @@ notificationSuppressionRouter.post('/replica', authMiddleware, (req: Request, re
       scheduleInvalid: false,
       enabled: rule.enabled !== false,
       expires_at: rule.expires_at ?? null,
-      node_id: rule.node_id ?? null,
+      // Replicas are always node-agnostic on the receiving node: the hub's node_id
+      // is a hub-local scoping concept and never trustworthy as a foreign key here.
+      node_id: null,
     });
     res.json({ success: true });
   } catch (error) {
