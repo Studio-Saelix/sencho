@@ -11,6 +11,10 @@ Sencho's [Vulnerability Scanning](/features/vulnerability-scanning) feature uses
 
 Once Trivy is available through any of these options, the scanning UI appears automatically.
 
+<Note>
+Trivy is installed independently on each node. In a fleet, the Scanner setup tab manages the scanner for whichever node is active, so repeat one of the options above on every node you want to scan images on.
+</Note>
+
 ## Why Trivy is not bundled
 
 Trivy's vulnerability database updates multiple times per day and is around 100 MB. Bundling Trivy would force every Sencho instance to carry an out-of-date database in its image, then re-download on first scan. Keeping Trivy external lets you:
@@ -28,7 +32,7 @@ Sencho can install and manage Trivy for you without any extra bind mounts or env
 3. Wait for the status to flip to **Installed (managed)**. The version appears next to the badge.
 
 <Frame>
-  <img src="/images/vulnerability-scanning/trivy-settings-card.png" alt="Vulnerability Scanner card on the Security page Scanner setup tab, with Install Trivy button" />
+  <img src="/images/vulnerability-scanning/trivy-settings-card.png" alt="Vulnerability Scanner card on the Security page Scanner setup tab, showing a managed install with the Auto-update Trivy, Pre-deploy scan advisory, and Exploit intelligence toggles" />
 </Frame>
 
 Behind the scenes:
@@ -49,7 +53,7 @@ The install, update, and uninstall buttons and the **Auto-update Trivy** toggle 
 
 ### Removing the managed install
 
-Click **Uninstall** next to the status badge. Sencho removes the binary from `/app/data/bin/trivy`. The vulnerability database cache at `/app/data/trivy-cache` is left in place in case you reinstall later; delete it manually if you want to reclaim the disk space.
+Click **Uninstall** next to the status badge and confirm in the dialog. Sencho removes the binary from `/app/data/bin/trivy`; vulnerability scanning stops working until Trivy is reinstalled or a host binary is provided. The vulnerability database cache at `/app/data/trivy-cache` is left in place in case you reinstall later; delete it manually if you want to reclaim the disk space.
 
 ## Option 2: Installing Trivy on the host
 
@@ -57,8 +61,8 @@ Click **Uninstall** next to the status badge. Sencho removes the binary from `/a
 
 ```bash
 sudo apt-get install wget gnupg
-wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
-echo "deb https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
+wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" | sudo tee /etc/apt/sources.list.d/trivy.list
 sudo apt-get update
 sudo apt-get install trivy
 ```
@@ -66,12 +70,12 @@ sudo apt-get install trivy
 ### Linux (RHEL / Fedora)
 
 ```bash
-sudo rpm --import https://aquasecurity.github.io/trivy-repo/rpm/public.key
 echo "[trivy]
 name=Trivy repository
 baseurl=https://aquasecurity.github.io/trivy-repo/rpm/releases/\$basearch/
 gpgcheck=1
-enabled=1" | sudo tee /etc/yum.repos.d/trivy.repo
+enabled=1
+gpgkey=https://aquasecurity.github.io/trivy-repo/rpm/public.key" | sudo tee /etc/yum.repos.d/trivy.repo
 sudo dnf install trivy
 ```
 
@@ -91,7 +95,7 @@ The command should print a `Version: X.Y.Z` line. Note the path that `which triv
 
 ## Making a host-installed Trivy available to Sencho
 
-If you already installed Trivy on the host (Option 2) and prefer to manage it externally, Sencho runs inside a container and looks for `trivy` on its own `PATH`. There are two ways to expose it:
+If you already installed Trivy on the host (Option 2) and prefer to manage it externally, Sencho looks for a binary in this order: the managed install, then the path in `TRIVY_BIN` if set, then `trivy` on the container's own `PATH`. There are two ways to expose a host binary:
 
 ### Bind mount the host binary
 
@@ -119,7 +123,20 @@ The `trivy-cache` volume persists the vulnerability database across Sencho conta
 
 Adjust the first path if `which trivy` on the host prints something other than `/usr/local/bin/trivy` (for example `/usr/bin/trivy` on some distributions).
 
-### Option 3: Build a custom Sencho image
+### Mounting to a non-PATH location
+
+If you would rather not put the binary on `PATH` inside the container, mount it anywhere and point `TRIVY_BIN` at it instead:
+
+```yaml
+services:
+  sencho:
+    volumes:
+      - /opt/trivy/trivy:/opt/trivy/trivy:ro
+    environment:
+      - TRIVY_BIN=/opt/trivy/trivy
+```
+
+## Option 3: Build a custom Sencho image
 
 If the host's Trivy binary is not ABI-compatible with the Sencho container (for example because you are running macOS host binaries or a different glibc version), install Trivy inside the image instead:
 
@@ -180,10 +197,16 @@ Trivy supports offline use through pre-built database bundles.
 
 Plan to refresh the bundle on a schedule (weekly is typical) so CVE data stays current.
 
+The Scanner setup tab also has an **Exploit intelligence (KEV + EPSS)** toggle, on by default, that independently reaches `cisa.gov` and `api.first.org` once a day to prioritize findings. It is unrelated to the Trivy database bundle above, so turn it off separately if the host must not make any outbound calls at all.
+
 ## Verifying Sencho detects Trivy
 
 1. Open the **Security** page → **Scanner setup** tab. The **Vulnerability Scanner** card shows the current status and version.
-2. Open the **Resources** tab. If Trivy is detected, a shield icon appears in the Actions column of the **Images** panel next to the delete icon on every row.
+2. Open the **Resources** page → **Images** tab. If Trivy is detected, a shield icon appears in the Action column next to the delete icon on every row with a tag.
+
+<Frame>
+  <img src="/images/vulnerability-scanning/resources-badges.png" alt="Resources page Images tab with the scan (shield) icon in the Action column of every row" />
+</Frame>
 
 If the scanner shows as not installed after using Option 2 or 3, see the troubleshooting section below.
 
@@ -203,7 +226,7 @@ Verify the binary is visible from inside the container:
 docker exec sencho trivy --version
 ```
 
-If the command returns "not found", the mount path inside the container is wrong. The binary must be on `PATH`. Both `/usr/local/bin/trivy` and `/usr/bin/trivy` work.
+If the command returns "not found", the mount path inside the container is wrong. The binary must either be on `PATH` (`/usr/local/bin/trivy` and `/usr/bin/trivy` both work) or match the path set in `TRIVY_BIN`.
 
 ### Binary exists but reports an exec format error
 
@@ -215,7 +238,7 @@ The first scan after a Trivy install downloads the vulnerability database. Expec
 
 ### Install button is hidden
 
-The install button is hidden when a host-installed Trivy is already detected on `PATH`. Remove the host binary (or drop the bind mount) to switch to the managed install. The button also requires the admin role; viewer accounts see the scanner status only.
+The install button is hidden when a host-installed Trivy is already detected, whether via `TRIVY_BIN` or on `PATH`. Remove the host binary (or drop the bind mount and unset `TRIVY_BIN`) to switch to the managed install. The button also requires the admin role; viewer accounts see the scanner status only.
 
 ### Private registry images fail to scan
 
