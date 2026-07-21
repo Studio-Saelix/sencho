@@ -168,14 +168,16 @@ Traefik handles WebSocket upgrades automatically for HTTP/1.1 backends, so no ex
 
 **Symptom:** A node you added shows a red or gray status dot.
 
-**Checks in order:**
+Sencho connects to a remote node one of two ways: **Distributed API Proxy** mode (the primary reaches out to the remote's API URL) or **Pilot Agent** mode (the remote dials an outbound tunnel to the primary, so no inbound port is needed on the remote). The checks below cover Proxy mode; if the node is a Pilot Agent, see [Pilot Agent troubleshooting](/features/pilot-agent#troubleshooting) for the tunnel-specific causes (expired enrollment token, agent container not running, blocked outbound HTTPS).
+
+**Checks in order (Distributed API Proxy mode):**
 
 1. **Is the remote Sencho instance running?** SSH to that machine and verify.
 2. **Is the API URL correct?** It must include the protocol and port (e.g. `http://192.168.1.20:3001`). Open it in a browser; you should see a JSON response from `/api/health`.
-3. **Is the token correct?** Tokens are long JWT strings. Even one missing character will cause auth to fail. Regenerate the token on the remote instance and update the node config.
+3. **Is the token correct?** Tokens are long JWT strings. Even one missing character will cause auth to fail. Regenerating the token on the remote instance invalidates the previous one, so update the saved node config with the new value.
 4. **Is there a firewall blocking the port?** The primary Sencho host must be able to reach the remote host's Sencho port.
 
-To re-test connectivity after making changes, open **Profile > Settings > Nodes** and click the **wifi icon** on the node row.
+To re-test connectivity after making changes, open **Settings · Infrastructure · Nodes** and click **Test Connection** on the node row. See the [Multi-Node Management troubleshooting section](/features/multi-node#troubleshooting) for additional connectivity scenarios.
 
 ---
 
@@ -232,8 +234,7 @@ To re-test connectivity after making changes, open **Profile > Settings > Nodes*
 
 1. **Is your primary instance licensed?** Open **Settings → Admiral Account** on the primary instance and verify it shows an active Admiral license. Remote nodes inherit the primary's tier; if the primary is on Community, all remote nodes will be Community too.
 2. **Is the remote node's token valid?** An expired or revoked token prevents the license tier from being transmitted. Regenerate the token on the remote instance and update the node config on the primary.
-3. **Is the remote node running an up-to-date version of Sencho?** Distributed license enforcement requires both the primary and remote instances to be on a compatible version. Update the remote node if it's outdated.
-4. **Are you accessing the remote node directly?** If you navigate directly to the remote Sencho instance's URL (bypassing the primary), it uses its own local license. License inheritance only works through the primary's proxy.
+3. **Are you accessing the remote node directly?** If you navigate directly to the remote Sencho instance's URL (bypassing the primary), it uses its own local license. License inheritance only works through the primary's proxy.
 
 ---
 
@@ -263,12 +264,9 @@ To re-test connectivity after making changes, open **Profile > Settings > Nodes*
 
 **Symptom:** A stack appears in the sidebar with no status indicator (shown as "--"), but clicking on it reveals running containers with active stats.
 
-**Cause:** The sidebar status check matches containers by their Docker Compose project label. A mismatch can happen when:
+**Cause:** The sidebar status check matches containers by their Docker Compose project label. A mismatch can happen when the compose file declares a top-level `name:` field that overrides the default project name.
 
-- The compose file declares a top-level `name:` field that overrides the default project name.
-- Containers were created before Sencho reorganized compose files into subdirectories, so their labels still reference the old layout.
-
-**Fix:** Update to the latest version of Sencho. The status check uses multiple fallback strategies (project name mapping, service name, and config file paths) to match containers regardless of how they were originally started.
+**Fix:** The status check uses multiple fallback strategies (project name mapping, service name, and config file paths) to match containers regardless of how they were originally started, so this usually resolves itself on the next status refresh. If it persists, confirm the containers are actually part of this stack's compose project with `docker compose -f /path/to/your/stack/compose.yaml ps`.
 
 ---
 
@@ -280,7 +278,7 @@ To re-test connectivity after making changes, open **Profile > Settings > Nodes*
 
 - Names must be non-empty and cannot contain only whitespace.
 - Allowed characters: letters, numbers, hyphens (`-`), underscores (`_`), and dots (`.`).
-- Names must start with a letter, number, or underscore. They cannot start with a dot or hyphen.
+- Names must start with a letter or number. They cannot start with a dot, hyphen, or underscore.
 
 | Name | Valid? | Reason |
 |------|--------|--------|
@@ -288,6 +286,7 @@ To re-test connectivity after making changes, open **Profile > Settings > Nodes*
 | `app_net.v2` | Yes | |
 | `.hidden` | No | Cannot start with a dot |
 | `-leading` | No | Cannot start with a hyphen |
+| `_leading` | No | Cannot start with an underscore |
 | `my network` | No | Spaces not allowed |
 | `net/work` | No | Slashes not allowed |
 
@@ -366,7 +365,7 @@ volumes:
   - /var/run/docker.sock:/var/run/docker.sock
 ```
 
-Nodes running very old Sencho versions that predate the capability system need to be updated manually first. After that, future updates can be triggered from the dashboard.
+After adding the mount and redeploying the remote, it advertises the capability and future updates can be triggered from the dashboard.
 
 ---
 
@@ -406,7 +405,7 @@ docker compose pull && docker compose up -d
 
 1. **Immediate failure:** The gateway could not reach the remote node's update endpoint, or the remote node rejected the request. Common reasons include network issues, expired API tokens, or the remote node not supporting self-update.
 
-2. **Delayed failure (after ~90 seconds):** The update was accepted by the remote node, but the node never restarted. This usually means the image pull failed on the remote host. The error message will read: *"Update may have failed. The node is still running and its version has not changed."*
+2. **Delayed failure (after ~3 minutes):** The update was accepted by the remote node, but the node never restarted. This usually means the image pull failed on the remote host. The error message will read: *"Update may have failed. The node is still running and its version has not changed."*
 
 **Fix:**
 
@@ -456,35 +455,18 @@ After adding the missing volume mount, restart Sencho and retry the update.
 
 ---
 
-## First remote update always times out on old nodes
-
-**Symptom:** After triggering a remote update on a node running a very old Sencho version (pre-v0.39.3), the node successfully restarts with the new version, but the dashboard shows **Timed out** or **Failed** instead of **Updated**.
-
-**Cause:** The gateway detects update completion using three signals: a version change, a process restart (via `startedAt`), or temporary offline detection. Nodes running Sencho versions older than v0.39.3 report their version as `"unknown"` and do not include `startedAt` in their metadata. If the container restart is brief enough that the gateway does not detect the node going offline, none of the three signals fire.
-
-**Fix:** This only affects the **first** update from a very old version. After the update completes (even though the dashboard may show "Failed" or "Timed out"), the remote node will be running the latest version with proper version reporting and restart detection. Future updates triggered from the dashboard will complete normally.
-
-1. Click **Dismiss** on the badge to clear the state.
-2. Click **Recheck** to verify the node is now running the latest version.
-3. If the node still shows "unknown", update it manually on the remote host:
-
-```bash
-docker compose pull && docker compose up -d
-```
-
----
-
 ## Remote node version shows "unknown"
 
 **Symptom:** A remote node appears online in the Fleet View but its version badge is missing or the Node Updates modal shows "unknown" in the current version column.
 
 **Common causes:**
 
-1. **Network issue:** The gateway cannot reach the remote node's `/api/meta` endpoint. Check that the API URL configured for the node is correct and accessible from the gateway host.
-2. **Old Sencho version:** Nodes running Sencho versions older than v0.39.0 do not report a version in their metadata. Update the remote node manually to resolve this.
-3. **Development build:** If running from source, ensure you have run `npm install` in the backend directory so the `predev` hook regenerates the version file.
+1. **Network issue:** The gateway cannot reach the remote node's `/api/meta` endpoint within its 5-second timeout. Check that the API URL configured for the node is correct and accessible from the gateway host.
+2. **Development build:** If running from source, ensure you have run `npm install` in the backend directory so the `predev` hook regenerates the version file.
 
-**To verify:** Open your browser's developer tools and check the response from `GET /api/fleet/update-status`. Each node's `version` field should contain a semver string (e.g., `"0.39.4"`). If it shows `null`, the gateway could not determine the remote's version.
+If a triggered update never resolves once the underlying cause above is fixed, click **Dismiss** on the badge to clear the stuck state, then **Recheck** to re-scan the fleet.
+
+**To verify:** Open your browser's developer tools and check the response from `GET /api/fleet/update-status`. Each node's `version` field should contain a semver string (e.g., `"0.96.0"`). If it shows `null`, the gateway could not determine the remote's version.
 
 ---
 
@@ -494,7 +476,7 @@ docker compose pull && docker compose up -d
 
 **Checks:**
 
-1. **At least one label must exist**: Labels are managed in **Profile > Settings > Labels**. Create at least one label before assigning it to stacks.
+1. **At least one label must exist**: Labels are managed in **Settings · Organization · Labels**. Create at least one label before assigning it to stacks.
 2. **Assignments are saved**: Open the stack's context menu, choose **Labels**, and confirm the label is checked. Pills appear in the sidebar once at least one label is assigned.
 
 ---
@@ -506,7 +488,7 @@ docker compose pull && docker compose up -d
 **Checks:**
 
 1. **Stack name match**: The stack name in the routing rule must match exactly. Stack names are case-sensitive and correspond to the directory name in your compose folder.
-2. **Rule is enabled**: Check that the route's toggle is turned on in **Profile > Settings > Notifications > Notification Routing**.
+2. **Rule is enabled**: Check that the route's toggle is turned on in **Settings · Notifications · Notification Routing**.
 
 ---
 
@@ -522,7 +504,7 @@ docker compose pull && docker compose up -d
 
 **Symptom:** LDAP connection test fails with a TLS/certificate error.
 
-**Fix:** If your LDAP server uses a self-signed certificate, toggle off "Verify TLS certificate" in **Profile > Settings > SSO**. For production, install a trusted certificate instead.
+**Fix:** If your LDAP server uses a self-signed certificate, toggle off "Verify TLS certificate" in **Settings · SSO**. For production, install a trusted certificate instead.
 
 ---
 
@@ -544,7 +526,7 @@ docker compose pull && docker compose up -d
 
 **Cause:** SSO providers only appear on the login page when they are both **configured** (saved with valid credentials) and **enabled** (toggle is on).
 
-**Fix:** Open **Profile > Settings > SSO** and verify the provider has an **Active** badge and its toggle is enabled.
+**Fix:** Open **Settings · SSO** and verify the provider has an **Active** badge and its toggle is enabled.
 
 ---
 
@@ -607,13 +589,6 @@ The backend logs all route errors and service failures to stdout. This is the fi
 
 **Symptom:** The **From Docker Run** tab in the Create Stack dialog returns an error toast saying the command could not be parsed.
 
-**Cause:** The input is not a well-formed `docker run` command, or it uses a flag the converter does not recognize.
+**Cause:** The input is not a well-formed `docker run` command, uses a flag the converter does not recognize, or exceeds the length limit.
 
-**Fix:**
-
-- Make sure the command starts with `docker run` and ends with an image reference (e.g. `nginx:alpine`).
-- Check the [list of supported flags](/features/stack-management#supported-flags). Rare flags (such as `--userns` or custom runtime options) are not recognized. Remove the flag before converting and add it back manually in the editor afterwards.
-- Collapse multi-line commands into a single line. Mixed quoting across `\`-continued lines is a common source of parse errors.
-- Commands longer than 8192 characters are rejected. Trim anything non-essential and run the converter on the reduced command.
-
-When only part of a command is supported, convert what you can, paste the resulting YAML into the **Empty** tab as a starting point, and hand-edit the rest in `compose.yaml`.
+See [Convert from a docker run command](/features/stack-management#convert-from-a-docker-run-command) for the full list of supported flags and every rejection cause, including the exact size limit and the fix for quoting issues in multi-line commands.

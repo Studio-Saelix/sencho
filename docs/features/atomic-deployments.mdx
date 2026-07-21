@@ -28,15 +28,17 @@ Atomic deployments wrap:
 
 A scheduled image-update task uses the same atomic wrapper as a manual update, so a recurring update still takes a backup and rolls back automatically when a container crashes. Scheduled lifecycle actions (start, stop, restart) change no stack configuration and run `docker compose` directly without a backup.
 
+[Blueprint](/features/blueprint-model) deploys are a separate, fleet-wide desired-state path and do not use this atomic wrapper: a failed Blueprint apply is not backed up or rolled back automatically.
+
 ## Manual rollback
 
 The stack editor's action bar has a **More actions** overflow menu (the three-dot icon next to **Update**). **Rollback** sits at the top, with the most recent backup's timestamp beneath the label. Selecting it restores the backed-up files and re-runs `docker compose up -d` non-atomically, so the rollback does not nest inside another atomic wrapper and overwrite the good backup with the just-failed state.
 
 <Frame>
-  <img src="/images/atomic-deployments/rollback-menu.png" alt="Stack editor header for the plex stack, with the More actions overflow menu open. The menu shows three entries: Rollback at the top with the backup timestamp beneath the label, then Scan config, then Delete." />
+  <img src="/images/atomic-deployments/rollback-menu.png" alt="Stack editor header for the plex stack, with the More actions overflow menu open. Rollback sits at the top with the backup timestamp beneath the label, followed by Scan config, a Mute submenu for the stack's notifications, and Delete." />
 </Frame>
 
-The menu entry is hidden when no backup exists for the stack, for example on a freshly created stack that has never been deployed. It is also hidden for users who lack the `stack:deploy` permission; the backend enforces that check as the authoritative guard.
+The menu entry is hidden when no backup exists for the stack, for example on a freshly created stack that has never been deployed. It is also hidden for users who lack the `stack:deploy` permission; the backend enforces that check as the authoritative guard. The **Mute** entry next to it controls notification suppression for the stack and is unrelated to atomic deployments; see [Alerts & Notifications](/features/alerts-notifications).
 
 After a failed deploy or update, the stack page also surfaces a **Roll back** button in the recovery panel alongside Retry, Restart, and Refresh. This is the same rollback action, triggered in response to a failure rather than invoked on demand. See [Deploy Progress](/features/deploy-progress#recovery-actions) for the full recovery actions reference.
 
@@ -52,7 +54,11 @@ Before a restore overwrites anything, Sencho re-hashes each backed-up file and c
 
 ## Rollback readiness
 
-The **Stack Dossier** includes a **Rollback readiness** panel: a pre-flight read on whether rolling back will actually fix the problem. It evaluates several signals: whether a previous compose file exists and how old it is, whether a previous `.env` was captured, whether image tags are pinned or moving (moving tags are not reverted), the age of the last successful deploy, and whether healthchecks are defined to verify recovery. It also notes that application data (database rows, uploaded files, anything in a named volume) is outside the scope of any revert.
+The **Stack Dossier** includes a **Rollback readiness** panel: a pre-flight read on whether rolling back will actually fix the problem. It carries an overall verdict (**Ready**, **Partial**, or **Not ready**) and evaluates five signals: whether a previous compose file exists and how old it is, whether a previous `.env` was captured, whether the previous image tag is pinned or moving (moving tags are not reverted), the age of the last successful deploy, and whether healthchecks are defined to verify recovery. A sixth, always-shown note covers application data: named volumes and bind-mounted data (database rows, uploaded files, anything outside the compose and env files) are outside the scope of any revert.
+
+<Frame>
+  <img src="/images/atomic-deployments/rollback-readiness.png" alt="Rollback readiness panel in the Stack Dossier for the plex stack, showing a Partial verdict badge and five signal rows: Previous compose file (ready), Previous env file (ready), Previous image tag (a moving tag warning naming the rollback target), Last successful deploy (ready), and Healthchecks (missing)." />
+</Frame>
 
 Check this panel in the dossier before rolling back a stack that has been running for a while. A rollback reverts only the compose and env files; if the problem is in a volume or in a database migration that already ran, rolling back the compose file alone will not help. See [Stack Dossier](/features/stack-dossier) for the full readout.
 
@@ -65,7 +71,7 @@ Check this panel in the dossier before rolling back a stack that has been runnin
     The entry is also hidden for users who lack the `stack:deploy` permission. Ask an admin to grant `stack:deploy` through **Settings · Access** if the entry does not appear.
   </Accordion>
   <Accordion title="The deploy succeeded but a service crashed seconds later">
-    The health probe is a 3-second window after `docker compose up -d` returns. Crashes after that window are out of scope for atomic rollback, because Sencho cannot tell a late exit apart from a normal restart. The [health gate](/features/health-gated-updates) covers exactly this period: it observes the stack for a configurable window after the update, records a verdict on the stack timeline, and offers a manual rollback when containers do not stay healthy. For ongoing health beyond that, use **Auto-Heal Policies** to restart unhealthy containers automatically and **Alert Rules** to page you when a container exits unexpectedly.
+    The health probe is a 3-second window after `docker compose up -d` returns. Crashes after that window are out of scope for atomic rollback, because Sencho cannot tell a late exit apart from a normal restart. The [health gate](/features/health-gated-updates) covers exactly this period: it observes the stack for a configurable window after the update, records a verdict on the stack timeline, and offers a manual rollback when containers do not stay healthy. For ongoing health beyond that, use [Auto-Heal Policies](/features/auto-heal-policies) to restart unhealthy containers automatically and [per-stack alert rules](/features/alerts-notifications#per-stack-alert-rules) to page you when a container exits unexpectedly.
   </Accordion>
   <Accordion title="The deploy progress modal showed 'Rollback failed. Manual intervention may be required'">
     This message means the auto-rollback attempted to restore the backup and re-deploy, but the restore step or the re-deploy itself errored out. The backup files are still at `<DATA_DIR>/backups/<nodeId>/<stack>/`. To recover:

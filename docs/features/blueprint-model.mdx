@@ -8,7 +8,7 @@ A **Blueprint** bundles a `docker-compose.yml` with a node selector and a drift 
 Blueprints live under **Fleet · Deployments**.
 
 <Note>
-  Blueprints are available on every tier as Sencho's Compose-first orchestration model. Creating, editing, withdrawing, and applying blueprints requires an admin role; operators and viewers can read the catalog and the detail sheet. Pinning a blueprint to a specific node lives under **Fleet · Federation** on every tier (admin role required).
+  Blueprints are Sencho's Compose-first orchestration model. Creating, editing, withdrawing, and applying blueprints requires an admin role; operators and viewers can read the catalog and the detail sheet. Pinning a blueprint to a specific node lives under **Fleet · Federation** (admin role required).
 </Note>
 
 <Frame caption="Fleet · Deployments catalog with blueprint tiles, the All / Drifted / Observe / Suggest / Enforce filter chips, and the New Blueprint action in the top-right.">
@@ -47,7 +47,6 @@ Drift detection runs on every tick for every Active deployment regardless of pol
 
 | Requirement | Detail |
 |---|---|
-| License tier | **Community** to read, create, edit, withdraw, apply, and pin blueprints. |
 | User role | **Admin** to create, edit, withdraw, accept, and apply. Operators and viewers can read the catalog and the detail sheet. Pinning requires admin. |
 | Nodes | At least one node that the selector resolves to. Remote nodes need a healthy proxy connection; see [Multi-node management](/features/multi-node) and [Pilot Agent](/features/pilot-agent) for enrollment. |
 | Compose YAML | Valid `docker-compose.yml`, 96 KiB or fewer. |
@@ -88,8 +87,8 @@ Before a local Blueprint deploy starts, Sencho applies the same pre-deploy [vuln
 
 **New Blueprint** opens a single editor dialog with everything inline: name and description fields, a Monaco YAML editor with the classification banner sitting above it, the selector picker (Labels or Specific nodes), the drift policy cards, and the Reconciler enabled toggle.
 
-<Frame caption="The Blueprint editor. Compose YAML on the left with the classification banner pinned above it; selector mode tabs, drift policy cards, and the Reconciler enabled toggle below.">
-  <img src="/images/blueprint-model/editor-dialog.png" alt="Blueprint editor dialog with classification banner, selector, and drift policy" />
+<Frame caption="The Blueprint editor. Name and description fields, the classification banner pinned above the compose editor, and the Specific nodes selector below. Drift policy cards and the Reconciler enabled toggle sit further down in the same scrollable dialog.">
+  <img src="/images/blueprint-model/editor-dialog.png" alt="Blueprint editor dialog with name, description, classification banner, compose editor, and node selector" />
 </Frame>
 
 ### Classification banner
@@ -103,7 +102,7 @@ The banner above the YAML editor shows what Sencho found when it parsed your com
 Click the signals toggle on the right of the banner (`1 SIGNAL`, `2 SIGNALS`, etc.) to expand the list of reasons Sencho classified the way it did, line by line.
 
 <Frame caption="The classification banner expanded. The signals list shows the exact rule that fired for each detected mount, volume, or external reference.">
-  <img src="/images/blueprint-model/classification-banner.png" alt="Classification banner in the Stateless · portable variant with one signal expanded" />
+  <img src="/images/blueprint-model/classification-banner.png" alt="Classification banner in the Stateful · pins to data variant with two signals expanded" />
 </Frame>
 
 ### Selector
@@ -130,7 +129,7 @@ The three policy cards in the editor map exactly to the three modes the reconcil
 
 Even **Observe** keeps Sencho honest about what it found: the deployment row shows "drifted 3h ago: service caddy exited code 1". Silence would forfeit Sencho's authority over your fleet.
 
-For **stateful** blueprints under Enforce, Sencho declines auto-fixes that would destroy named volumes (for example, when you rename a volume in the compose). The drift downgrades to Suggest semantics for that event with the reason `auto-fix declined: would destroy volume data`.
+Enforce's auto-fix only ever redeploys the blueprint's *current* revision to correct container-level drift (a stopped or crashed container, for example). A compose edit never reaches that auto-fix path on a stateful or state-unknown blueprint: any revision change re-enters **Awaiting confirmation** on every targeted node first, regardless of drift mode, so a human always signs off before a new revision touches existing data. See [Lifecycle: status transitions](#lifecycle-status-transitions).
 
 ## The detail sheet
 
@@ -195,7 +194,7 @@ Raw `POST /api/blueprints/:id/apply` clients must send `{ planFingerprint, actio
 
 ### Edit
 
-Click **Edit** on the detail sheet. Editing the compose bumps the revision. Stateless blueprints redeploy on the next reconciliation tick. Stateful and state-unknown blueprints re-enter **Awaiting confirmation** on every targeted node so the operator can decide whether the new revision is safe for each node's local data. Stateful blueprints also follow the volume-destroying-drift rule under Enforce: a compose change that would destroy named volumes downgrades to Suggest for that event.
+Click **Edit** on the detail sheet. Editing the compose bumps the revision. Stateless blueprints redeploy on the next reconciliation tick. Stateful and state-unknown blueprints re-enter **Awaiting confirmation** on every targeted node so the operator can decide whether the new revision is safe for each node's local data, whether or not the change actually touches a volume.
 
 ### Confirm a stateful first deploy
 
@@ -227,7 +226,7 @@ In the deployment table, click **Withdraw** on the node's row. For stateless blu
 
 ### Delete the blueprint
 
-Stateless blueprints withdraw all deployments and then delete in a single click. Stateful blueprints with active or pending deployments refuse to delete to avoid silent orphans. Withdraw each deployment explicitly first, then delete.
+Click **Delete** on the detail sheet, then type the blueprint's name to confirm. Stateless deployments, and any deployment that never made it past **Awaiting confirmation**, are withdrawn for you as part of the delete. A stateful or state-unknown blueprint with a deployment that is live on a node refuses to delete; withdraw that deployment from the deployment table first, so you choose the snapshot-or-destroy path for its data, then delete the blueprint.
 
 ## Federation: pin a blueprint to a single node
 
@@ -254,7 +253,7 @@ Both events route through the standard alert pipeline. Configure delivery channe
 
 ## Security and trust boundaries
 
-**Who can do what.** The license tier and the user role together determine the available actions. Reading the catalog, the detail sheet, and the deployment status is available on every tier. Creating, editing, withdrawing, accepting a stateful deploy, and applying on demand require the admin role. Pinning a blueprint requires the admin role.
+**Who can do what.** The user role determines the available actions. Reading the catalog, the detail sheet, and the deployment status is open to every role. Creating, editing, withdrawing, accepting a stateful deploy, and applying on demand require the admin role. Pinning a blueprint requires the admin role.
 
 **The marker file is the trust root.** The reconciler will only deploy into, modify, or withdraw a directory that carries a `.blueprint.json` marker whose blueprint ID matches. A pre-existing directory with no marker, or a marker referencing a different blueprint, surfaces as **Name conflict** and is never modified.
 
@@ -302,7 +301,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
 
 **Single-node managed Postgres.** A stateful `pg-fleet` blueprint with a `nodes` selector pointing at one database node and drift mode **Suggest**. The first deploy enters **Awaiting confirmation** so the operator chooses **Deploy fresh**. Subsequent compose changes (image bump, config change) re-enter **Awaiting confirmation** on the same node so the operator can decide whether the new revision is safe for the existing volume. Drift on the running container fires a `blueprint_drift_detected` notification but never auto-redeploys.
 
-**Pin a blueprint to a specific node despite the selector.** Open **Fleet · Federation**, find the blueprint in the pin policy table, and pick the target node from the **Pinned to** dropdown. The pin overrides the selector for that blueprint, deploys only to the pinned node, and also overrides cordon on that node. Useful for relocating a stateful service to a specific host without rewriting the selector. Clear the pin to restore selector-driven placement.
+**Pin a blueprint to a specific node despite the selector.** Open **Fleet · Federation**, find the blueprint in the pin policy table, and pick the target node from the **Pinned to** dropdown. The pin saves immediately but also clears approval, so nothing moves until you open the blueprint here in Deployments, click **Apply now**, and **Confirm Apply**. Once confirmed, the pin overrides the selector for that blueprint, deploys only to the pinned node, and also overrides cordon on that node. Useful for relocating a stateful service to a specific host without rewriting the selector. Clear the pin (and confirm again) to restore selector-driven placement.
 
 **Observe-only audit blueprint.** A stateless monitoring stack (Vector, Promtail, a Prometheus exporter) with drift mode **Observe**. Drift is recorded silently in the deployment table; no notification fires and no auto-fix runs. Useful when you want Sencho to track placement and detect divergence on a low-signal stack without paging anyone.
 
@@ -328,7 +327,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     The deployment row moves to **Failed** and records the Docker or registry error. Resolve the daemon, socket, registry credentials, rate limit, disk, or volume-permission issue on the affected node, then click **Apply now**. Watch that node's stack activity and security scan status after retry.
   </Accordion>
   <Accordion title="Drift is reported but never gets corrected">
-    Confirm the drift policy is **Enforce** and that **Reconciler enabled** is on. Open the detail sheet to check the row's status and the most recent drift summary. If the drift was caused by a compose change that would destroy named volumes, Enforce intentionally downgrades to Suggest semantics for that event. Either change the compose to one that preserves the volumes, or withdraw the deployment with explicit operator confirmation and let the new revision deploy fresh.
+    Confirm the drift policy is **Enforce** and that **Reconciler enabled** is on. Open the detail sheet to check the row's status and the most recent drift summary. If the row is sitting in **Awaiting confirmation** instead of **Drifted**, that is expected: a compose edit on a stateful or state-unknown blueprint never auto-corrects under any drift mode, including Enforce. It always waits for an explicit **Confirm deploy** so a human signs off before the new revision touches that node's data. Enforce's auto-fix only applies to container-level drift (a stopped or crashed container) on a deployment that is already **Active**.
   </Accordion>
   <Accordion title="'Apply now' is greyed out">
     **Apply now** requires the blueprint to be enabled. Open the detail sheet, click **Enable** to flip the reconciler back on, then click **Apply now**. The button is also disabled while the detail sheet is in edit mode; save or cancel the edit first.

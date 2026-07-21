@@ -6,12 +6,12 @@ description: Browse, filter, scan, and clean up Docker images, volumes, and unma
 The **Resources** tab shows everything Docker is storing on your host, broken down by ownership, with one-click cleanup and on-demand vulnerability scanning.
 
 <Frame>
-  <img src="/images/resources/resources-reclaim.png" alt="Resources Hub with the You can reclaim banner, Docker Disk Footprint treemap, Quick Clean panel, and the Images tab populated below" />
+  <img src="/images/resources/resources-reclaim.png" alt="Resources Hub with the You can reclaim banner, Docker Disk Footprint tiles, Quick Clean panel, and the Images tab populated below" />
 </Frame>
 
 ## Reclaim hero
 
-When there is reclaimable disk space (unused images, stopped containers, or dangling volumes), an amber banner leads the view with the total amount you can free and a `·`-separated breakdown of what contributes to it (for example, `16 unused images · 10 dangling volumes`). Click **Review & prune** to open a confirmation dialog that lists the exact items that will be removed (capped in the preview with an "and N more" note when the list is long). Confirm only after the plan is ready; Sencho rechecks the list at execute time and skips anything that is no longer eligible.
+When there is reclaimable disk space (unused images, stopped containers, or dangling volumes), an amber banner leads the view with the total amount you can free and a `·`-separated breakdown of what contributes to it (for example, `2 unused images · 10 dangling volumes`). Click **Review & prune** to open a confirmation dialog that lists the exact items that will be removed (capped in the preview with an "and N more" note when the list is long). Confirm only after the plan is ready; Sencho rechecks the list at execute time and skips anything that is no longer eligible.
 
 The hero stays hidden when there is nothing to reclaim, keeping the view focused on the rest of your inventory.
 
@@ -25,15 +25,15 @@ To keep the banner off for a node entirely, open **Settings → Monitoring → D
 
 ## Docker Disk Footprint
 
-The left card under the hero shows how your Docker disk usage is distributed:
+The left card under the hero breaks down your Docker disk usage into three tiles:
 
-| Segment | Meaning |
-|---------|---------|
+| Tile | Meaning |
+|------|---------|
 | **Sencho managed** (green) | Images and volumes used by stacks in your `COMPOSE_DIR` |
 | **External** (amber) | Images and volumes used by Docker projects outside Sencho |
 | **Reclaimable** (neutral) | Unused images, stopped containers, and dangling volumes safe to delete |
 
-Each segment shows its size and its share of the total footprint. Tile area is proportional to bytes. Click any segment to filter the resource tabs below to that category.
+Each tile shows its size and its share of the total footprint as a percentage. The layout itself is fixed (Sencho managed on the left, External and Reclaimable stacked on the right); tile size does not scale with the percentage, so read the numbers rather than the proportions. Click any tile to filter the resource tabs below to that category.
 
 ## Quick Clean
 
@@ -56,11 +56,13 @@ A confirmation dialog appears before any destructive prune. Sencho first builds 
 
 ## Resource tabs
 
-Below the hero, three tabs partition your inventory: **images**, **volumes**, and **Unmanaged**. The Unmanaged tab shows a count badge whenever orphan containers are detected.
+Below the hero, three tabs partition your inventory: **Images**, **Volumes**, and **Unmanaged**. The Unmanaged tab shows a count badge whenever orphan containers are detected.
 
 Network inventory, topology, inspect, and findings live on the dedicated [Networking](/features/networking) page. **Quick Clean** still includes **Prune Dead Networks**.
 
-A **Scan history** button sits on the right of the tab strip when image vulnerability scanning is configured for the node. It takes you to the [Security page](/features/security) History tab so you can review past results without launching a new scan. See [Vulnerability scanning](/features/vulnerability-scanning) for the full workflow.
+Each of the first three tabs shares the same toolbar pattern: a collapsible search (click the magnifying glass to open a text filter, matching by name or repository tag) and an **All / Managed / External** filter with a live count on each chip. Sortable columns toggle ascending/descending order when clicked.
+
+A **Scan history** button sits on the right of the Images tab's toolbar when image vulnerability scanning is configured for the node. It takes you to the [Security page](/features/security) History tab so you can review past results without launching a new scan. See [Vulnerability scanning](/features/vulnerability-scanning) for the full workflow.
 
 <Note>
   Sencho protects its own image, network, and named volumes from accidental deletion. The matching rows carry a **Sencho** pill alongside the managed status and the delete control is disabled.
@@ -68,14 +70,14 @@ A **Scan history** button sits on the right of the tab strip when image vulnerab
 
 ### Images
 
-Lists all Docker images on the host with their ID, repository tag, size, and status.
+Lists all Docker images on the host with their ID, repository tag, size, and status. Click **Repository:Tag**, **Size**, or **Status** to sort.
 
-**Filter chips:** `All`, `Managed`, `External`. Each chip shows the matching count, for example `All 31 · Managed 14 · External 17`.
+**Filter chips:** `All`, `Managed`, `External`. Each chip shows the matching count, for example `All 18 · Managed 15 · External 3`.
 
 **Status column** combines two pieces of information per row:
 
 - A usage badge: `In Use` plus one chip per Sencho stack that uses the image (click a chip to open that stack), `In Use` plus `External` when it runs only in another Docker project, or `Unused` when no container references it.
-- A severity badge from any image scan: `Clean`, `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, or `UNKNOWN`. Click the badge to open the scan results.
+- A severity badge from any image scan: `Clean` (no findings at all), a CVE severity (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`, or `UNKNOWN`), or `Findings` (no CVEs, but a secret or misconfiguration finding). Click the badge to open the scan results.
 
 **Per-row actions** sit on the right:
 
@@ -87,28 +89,29 @@ Lists all Docker images on the host with their ID, repository tag, size, and sta
 
 Click the eye icon on any image row to open a detail sheet with these sections:
 
+<Frame>
+  <img src="/images/resources/resources-image-inspect.png" alt="Image inspect sheet showing the Used by, Overview, Config, and Layers sections for a running image" />
+</Frame>
+
 - **Used by** lists every Sencho stack that references the image (chips open that stack). Sourced from the Resources inventory, so it stays visible while inspect loads or if inspect fails.
-- **Overview** lists the ID, size, creation date, architecture and OS, author, and all repository tags.
+- **Overview** lists the ID (with a copy button), size, creation date, architecture and OS, author, and all repository tags.
 - **Config** shows the default `Cmd`, `Entrypoint`, `WorkingDir`, `User`, exposed ports, environment variables, and labels. Env vars and labels are collapsible.
 - **Layers** lists the layer history in build order. Each row shows the layer index, size, age, and the build command (`CreatedBy`). Empty layers (metadata-only, zero bytes) are dimmed.
-- **Registry tags** (admins) lists remote tag names from a matching configured registry. See [Private registries](/features/private-registries#browse-tags-from-resources) for credential and failure behavior. Vulnerability history and caching use the image digest when available; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
+- **Registry tags** (admins) lists remote tag names from a matching configured registry, with a **Load more** button when the registry has additional pages. See [Private registries](/features/private-registries#browse-tags-from-resources) for credential and failure behavior. Vulnerability history and caching use the image digest when available; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
 
 The inspect sheet is available to all roles. Registry tag browsing is admin-only.
 
 ### Volumes
 
 <Frame>
-  <img src="/images/resources/resources-volumes-tab.png" alt="Volumes tab with Largest 5 and Recently changed landing cards above the volume list" />
+  <img src="/images/resources/resources-volumes-tab.png" alt="Volumes tab with the search and filter toolbar above the volume list" />
 </Frame>
 
-Lists all Docker volumes with name, driver, mount point, and managed status.
-
-A two-card landing strip sits above the table:
-
-- **Largest 5** ranks volumes by on-disk size, with the total volume count alongside.
-- **Recently changed** highlights volumes created or touched in the last 24 hours, with relative timestamps such as `24m ago`.
+Lists all Docker volumes with name, driver, mount point, and managed status. Click **Name** or **Driver** to sort.
 
 **Filter chips:** `All`, `Managed`, `External`, each with its count.
+
+Anonymous volumes (Docker-generated 64-character hash names, typical of a container that declares a volume without naming it) show a shortened label with an **anonymous** chip so the table stays readable; hover the name for the full hash.
 
 <Warning>
   Deleting a volume is permanent. Any data stored in it will be lost. Always back up important volume data before pruning.
@@ -116,7 +119,7 @@ A two-card landing strip sits above the table:
 
 #### Browse volume contents
 
-Click the folder icon on any volume row (admin-only) to open a read-only browser for that volume. The panel shows a directory tree on the left and a file viewer on the right.
+Click the folder icon on any volume row (admin-only) to open a read-only browser for that volume. The panel shows a directory tree on the left and a file viewer on the right. For an anonymous volume, a band above the tree shows the full 64-character name with a copy button, since the sheet's title and breadcrumb only show the shortened form.
 
 - **Read only.** No edits, no writes, no deletions. The browser launches a short-lived helper container with the volume mounted read-only.
 - **Size cap.** Files are read up to 5 MB. Larger files show a truncation banner.
@@ -131,7 +134,7 @@ Click the folder icon on any volume row (admin-only) to open a read-only browser
 ### Unmanaged
 
 <Frame>
-  <img src="/images/resources/resources-unmanaged-tab.png" alt="Unmanaged tab with Select all checkbox, Purge Selected action, and a container row grouped under External Project: sencho" />
+  <img src="/images/resources/resources-unmanaged-tab.png" alt="Unmanaged tab showing the No unmanaged containers success state" />
 </Frame>
 
 Lists containers running on the host that are not part of any Sencho-managed stack: containers started with `docker run`, or Compose projects outside your `COMPOSE_DIR`. The tab shows a count badge when any are detected. The running Sencho container itself is excluded from this list so it cannot be purged by accident.

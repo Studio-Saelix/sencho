@@ -45,23 +45,23 @@ Tiles are sorted by GitHub star count, descending. Click any tile to open the de
 On small screens, the App Store adapts to a single-column layout. The masthead shows the store label, the total app count, the category count, and an action menu for navigation. Templates are listed alphabetically rather than by star count, and the category sidebar and featured hero are not shown on mobile.
 
 <Frame>
-  <img src="/images/app-store/app-store-mobile.png" alt="App Store on a mobile device: status masthead showing APP STORE, 202 apps, and 12 categories, with an alphabetical single-column template list below" />
+  <img src="/images/app-store/app-store-mobile.png" alt="App Store on a mobile device: status masthead showing APP STORE, 201 apps, and 12 categories, with an alphabetical single-column template list below" />
 </Frame>
 
 ## Deploying a template
 
-The deployment sheet slides in from the right. The header carries a breadcrumb (`App store › <template>`), the template name in the cockpit display face, and a meta line that combines the supported architectures, the GitHub star count, and the target node name when you are deploying to a remote node.
+The deployment sheet slides in from the right. The header carries a breadcrumb (`App store › <template>`), the template name as the sheet's title, and a meta line built from whichever of these the registry and deploy target supply: architecture chips, the GitHub star count, and the target node name when you are deploying to a remote node.
 
 ### About
 
-The first section is a description block with the template logo, the full description, a **Read more** / **Read less** toggle, and a row of secondary metadata: architecture chips (for example `amd64`, `arm64`), GitHub stars, a **Source** link to the template's repository, and a **Docs** link to the project's official documentation when the registry provides one.
+The first section is a description block with the template logo, the full description, a **Read more** / **Read less** toggle, and a row of secondary metadata: the GitHub star count, and, when the registry payload includes them, architecture chips (for example `amd64`, `arm64`), a **Source** link to the template's repository, and a **Docs** link to the project's official documentation. The bundled LinuxServer.io registry currently supplies only the star count here; a custom registry populates the rest when its template JSON includes `architectures`, `github_url`, and `docs_url`.
 
 ### Essentials tab
 
 The **Essentials** tab is intentionally minimal: a single **Stack Name** field and a hint that the template's defaults will be used as-is. Click **Deploy {template}** to ship it.
 
 <Frame>
-  <img src="/images/app-store/deploy-sheet-essentials.png" alt="Deployment sheet open on the Essentials tab, showing the App store breadcrumb, the template hero, an About panel with Read more, the Stack Name field pre-filled with the template slug, and the Deploy with defaults hint card" />
+  <img src="/images/app-store/deploy-sheet-essentials.png" alt="Deployment sheet open on the Essentials tab for qbittorrent, showing the App store breadcrumb, the About panel with Read more, the Stack Name field pre-filled with the template slug, and the Deploy with defaults hint card" />
 </Frame>
 
 The stack name pre-fills with the template slug (lowercased, hyphens, no spaces). You can change it; the same [naming rules](/features/stack-management#creating-a-stack) apply.
@@ -75,7 +75,7 @@ For anything beyond the defaults, switch to **Advanced**.
 The **Advanced** tab exposes every knob the template declares. Every field is pre-populated with the template's recommended value, so customisation is additive rather than required.
 
 <Frame>
-  <img src="/images/app-store/deploy-sheet-advanced.png" alt="Deployment sheet on the Advanced tab for radarr, showing Ports with a host port input, Volumes with three container mount points and editable host paths, and Environment Variables with PUID and PGID defaults" />
+  <img src="/images/app-store/deploy-sheet-advanced.png" alt="Deployment sheet on the Advanced tab for qbittorrent, showing three host port inputs, a single Volumes mount point, Environment Variables with PUID, PGID, and Timezone, a Custom variables row, and the Security scan checkbox" />
 </Frame>
 
 #### Ports
@@ -98,7 +98,11 @@ For each container mount point the template declares, type the **host path** whe
 
 #### Environment variables
 
-Each template declares the variables it expects. Sencho pre-fills sensible defaults where it can, and adds three baseline LinuxServer.io conventions automatically when the template does not already define them: **PUID** (`1000`), **PGID** (`1000`), and **TZ**, seeded from your browser's reported timezone.
+Each template can declare the variables it expects, and Sencho pre-fills defaults where the registry supplies them. Every deploy also adds three baseline LinuxServer.io conventions automatically when the template does not already define them: **PUID** (`1000`), **PGID** (`1000`), and **TZ**, seeded from your browser's reported timezone.
+
+<Note>
+  With the bundled LinuxServer.io registry, these three baseline variables are currently the only ones that appear in this section, regardless of the app: template-specific variables (a password, an API key, a subdomain) are not pulled through from that registry today. Check the app's own documentation (linked from its GitHub page) for the variables it needs and set them yourself using **Custom variables** below. A custom registry that supplies its own `env` array in its template JSON is not affected by this and populates the section normally.
+</Note>
 
 #### Custom variables
 
@@ -147,7 +151,7 @@ By default Sencho uses LinuxServer.io's hosted catalogue. To point at your own:
 2. Type your catalogue URL into **Registry URL**. The URL must start with `http://` or `https://` and serve a JSON array of template objects in the [Portainer v2 template format](https://documentation.portainer.io/v2.0-be/api/templates/).
 3. Click **Save & refresh**. Sencho persists the new URL and immediately invalidates the template cache so the App Store reloads from the new source.
 
-A small chip under the input reads **using custom registry** when an override is set and **using default** when the field is empty. Click **Reset to default** to clear the override and fall back to LinuxServer.io.
+A hint next to the **Save & refresh** button reads **using custom registry** when an override is set and **using default** when the field is empty. Click **Reset to default** to clear the override and fall back to LinuxServer.io.
 
 The default registry display at the top of the page is informational only; you cannot remove the LinuxServer.io fallback, and Sencho uses it whenever the custom field is empty.
 
@@ -165,6 +169,9 @@ The default registry display at the top of the page is informational only; you c
   </Accordion>
   <Accordion title="The Security checkbox is missing from the Advanced tab">
     The **Scan images for vulnerabilities after deploy** checkbox renders only when the active node reports that Trivy is installed. Configure scanning per the [Vulnerability Scanning](/features/vulnerability-scanning) page, then reopen the deployment sheet. Even with the checkbox missing, the rest of the Advanced tab works exactly the same; you just lose the post-deploy scan trigger.
+  </Accordion>
+  <Accordion title="An app needs a variable that isn't in Environment Variables">
+    Some apps require a variable Sencho doesn't pre-fill for you, most commonly a password (code-server's `PASSWORD`, for example). With the bundled LinuxServer.io registry, the Environment Variables section only ever shows the PUID/PGID/TZ baseline, not the app's own declared variables. Check the app's GitHub page (linked from its LinuxServer.io listing) for the full variable list, then add what you need through **Custom variables** on the Advanced tab before deploying. If you skip a required variable like a password, the app typically starts with no authentication rather than failing to start, so add it up front rather than discovering the gap afterward.
   </Accordion>
 </AccordionGroup>
 

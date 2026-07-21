@@ -12,6 +12,7 @@ const {
   mockGetEnabledNotificationSuppressionRules,
   mockUpdateNotificationSuppressionMatch,
   mockBroadcast,
+  mockGetGlobalSettings,
 } = vi.hoisted(() => ({
   mockGetEnabledNotificationRoutes: vi.fn().mockReturnValue([]),
   mockGetEnabledAgents: vi.fn().mockReturnValue([]),
@@ -27,6 +28,7 @@ const {
   mockGetEnabledNotificationSuppressionRules: vi.fn().mockReturnValue([]),
   mockUpdateNotificationSuppressionMatch: vi.fn(),
   mockBroadcast: vi.fn(),
+  mockGetGlobalSettings: vi.fn().mockReturnValue({ notification_dispatch_retries: '0' }),
 }));
 
 vi.mock('../services/DatabaseService', () => ({
@@ -39,6 +41,7 @@ vi.mock('../services/DatabaseService', () => ({
       updateNotificationDispatchError: mockUpdateNotificationDispatchError,
       getEnabledNotificationSuppressionRules: mockGetEnabledNotificationSuppressionRules,
       updateNotificationSuppressionMatch: mockUpdateNotificationSuppressionMatch,
+      getGlobalSettings: mockGetGlobalSettings,
     }),
   },
 }));
