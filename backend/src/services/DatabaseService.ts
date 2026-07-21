@@ -2783,7 +2783,7 @@ export class DatabaseService {
         const existing = this.getNotificationSuppressionRule(rule.id);
         if (existing) {
             // Fleet sync is fire-and-forget with no delivery ordering guarantee: a
-            // delayed older push must never overwrite a state we already know is newer.
+            // push that isn't strictly newer than what's stored must never overwrite it.
             if (existing.updated_at >= rule.updated_at) {
                 console.warn(
                     `[DatabaseService] Ignoring stale suppression replica write for rule id=${rule.id} ` +

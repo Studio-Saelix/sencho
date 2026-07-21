@@ -489,6 +489,13 @@ describe('Notification suppression - CRUD', () => {
     expect(stale.status).toBe(200);
     expect(DatabaseService.getInstance().getNotificationSuppressionRule(9005)?.name).toBe('v2-newer');
 
+    const tie = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ name: 'v2-tie-same-timestamp', updated_at: 2000 }) });
+    expect(tie.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(9005)?.name).toBe('v2-newer');
+
     const newer = await request(app)
       .post('/api/notification-suppression-rules/replica')
       .set('Authorization', `Bearer ${token}`)
