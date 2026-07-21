@@ -282,7 +282,7 @@ export function NotificationSuppressionSection({
         if (!formName.trim()) { toast.error('Name is required.'); return; }
         if (formScheduleInvalid && !formScheduleTouched) {
             toast.error(
-                "This rule's stored weekly window could not be read. Turn the weekly window on to set a new schedule, or toggle it off then on to confirm clearing it.",
+                "This rule's stored weekly window could not be read. Turn the weekly window on to set a new schedule, or toggle it on then off to confirm clearing it.",
             );
             return;
         }

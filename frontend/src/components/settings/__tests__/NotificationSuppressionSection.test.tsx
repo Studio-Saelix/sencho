@@ -368,4 +368,29 @@ describe('NotificationSuppressionSection', () => {
       });
     });
   });
+
+  it('does not carry the invalid-schedule save gate over to a later edit of a different, valid rule', async () => {
+    mockListRules([corruptScheduleRule, scheduledRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Corrupt window')).toBeInTheDocument());
+
+    const editButtons = screen.getAllByTitle('Edit');
+    await userEvent.click(editButtons[0]);
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    await userEvent.click(screen.getAllByTitle('Edit')[1]);
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+
+    await waitFor(() => {
+      const put = mockedFetch.mock.calls.find(
+        ([url, opts]) =>
+          url === '/notification-suppression-rules/42' && (opts as { method?: string })?.method === 'PUT',
+      );
+      expect(put).toBeTruthy();
+    });
+    expect(toast.error).not.toHaveBeenCalledWith(expect.stringContaining('could not be read'));
+  });
 });
