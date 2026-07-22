@@ -123,11 +123,14 @@ Open **Settings · Notifications · Mute Rules** and click **+ Add mute rule**.
 | **Severity** *(optional)* | One or more of info, warning, or error. Empty matches any severity. |
 | **Apply to** | **Bell**, **External**, or **Both**. Bell skips the notification popover WebSocket push. External skips routing rules and global channels. |
 | **Expiration** | Forever, 1 hour, 24 hours, or a custom date. Expired rules stop matching automatically. |
+| **Weekly window (UTC)** *(optional)* | Recurring weekly maintenance window. Choose one or more start days and a UTC start/end time. The rule only mutes while the window is active. Same-day windows use an inclusive start and exclusive end. Cross-midnight windows (for example Sat 22:00 to Sun 02:00) list only the start day. Leave off for always-on mute (subject to expiration). |
 | **Enabled** | Toggle the rule without deleting it. |
 
 All non-empty matchers must match (AND). Suppressed alerts are still written to stack activity history; only delivery is affected. When a mute rule blocks delivery, the activity row shows a **Suppressed** badge with the matched rule name in a tooltip.
 
-Rules you create on the control instance replicate to remote nodes so alerts emitted on a remote stack honor the same suppression. From the bell, admins can open a row menu and choose **Mute this category**, **Mute notifications like this**, or **Mute this stack** to create a quick rule with default **Both** targeting. The same presets are available from stack menus (sidebar, stack header, activity tab), fleet node cards, and label groups.
+Rules you create on the control instance replicate to remote nodes so alerts emitted on a remote stack honor the same suppression. Replication is best-effort. Remotes that do not support weekly windows do not receive scheduled replicas as all-day mutes: Sencho skips the push and attempts to remove any prior replica. If a remote is unreachable, cleanup may stay pending until connectivity returns and you re-save or clear the rule. Before downgrading a node past a release that introduced weekly windows, clear every weekly window (or disable those rules) so an older binary does not treat them as always-on.
+
+From the bell, admins can open a row menu and choose **Mute this category**, **Mute notifications like this**, or **Mute this stack** to create a quick rule with default **Both** targeting and no weekly window. The same presets are available from stack menus (sidebar, stack header, activity tab), fleet node cards, and label groups.
 
 ### Built-in bell quieting (not a mute rule)
 

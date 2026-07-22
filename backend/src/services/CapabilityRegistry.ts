@@ -36,6 +36,7 @@ export const CAPABILITIES = [
   'notifications',
   'notification-routing',
   'notification-suppression',
+  'notification-suppression-schedule',
   'host-console',
   'host-console-community',
   'container-exec',
@@ -76,6 +77,10 @@ export const HOST_CONSOLE_CAPABILITY = 'host-console' as const satisfies Capabil
 
 /** Host Console works without a paid license on this node. */
 export const HOST_CONSOLE_COMMUNITY_CAPABILITY = 'host-console-community' as const satisfies Capability;
+
+/** Remotes that evaluate weekly maintenance windows on mute/suppression replicas. */
+export const NOTIFICATION_SUPPRESSION_SCHEDULE_CAPABILITY =
+  'notification-suppression-schedule' as const satisfies Capability;
 
 /** Capability for optional `?removeVolumes=true` on POST /stacks/:name/down. */
 export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' as const satisfies Capability;
