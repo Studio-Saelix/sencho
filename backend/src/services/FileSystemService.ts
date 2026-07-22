@@ -578,6 +578,34 @@ export class FileSystemService {
     }
   }
 
+  /**
+   * Remove non-canonical root Compose filenames so discovery cannot shadow
+   * compose.yaml. Filename set is fixed inside this method. ENOENT is success;
+   * other unlink failures are logged and skipped.
+   */
+  async removeAlternateRootComposeFiles(stackName: string): Promise<void> {
+    const stackDir = this.resolveStackDir(stackName);
+    await this.assertRealWithinBase(stackDir);
+    const baseResolved = path.resolve(this.baseDir);
+    for (const file of IMPORT_COMPOSE_FILENAMES) {
+      if (file === 'compose.yaml') continue;
+      // Containment barrier at the unlink sink (same pattern as rollback orphan removal).
+      const target = path.resolve(baseResolved, path.join(stackDir, file));
+      if (!target.startsWith(baseResolved + path.sep)) {
+        throw Object.assign(new Error('Path escapes compose directory'), { code: 'INVALID_PATH' });
+      }
+      try {
+        await fsPromises.unlink(target);
+      } catch (e: unknown) {
+        if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        console.warn(
+          `[FileSystemService] Could not remove alternate compose file ${sanitizeForLog(file)} in stack ${sanitizeForLog(stackName)}:`,
+          sanitizeForLog((e as Error)?.message ?? String(e)),
+        );
+      }
+    }
+  }
+
   public async deleteStack(stackName: string): Promise<void> {
     const stackDir = this.resolveStackDir(stackName);
     await this.assertRealWithinBase(stackDir);

@@ -36,6 +36,7 @@ export const CAPABILITIES = [
   'notifications',
   'notification-routing',
   'notification-suppression',
+  'notification-suppression-schedule',
   'host-console',
   'container-exec',
   'audit-log',
@@ -69,6 +70,10 @@ export const CAPABILITIES = [
 export const CROSS_NODE_RBAC_CAPABILITY = 'cross-node-rbac';
 
 export type Capability = (typeof CAPABILITIES)[number];
+
+/** Remotes that evaluate weekly maintenance windows on mute/suppression replicas. */
+export const NOTIFICATION_SUPPRESSION_SCHEDULE_CAPABILITY =
+  'notification-suppression-schedule' as const satisfies Capability;
 
 /** Capability for optional `?removeVolumes=true` on POST /stacks/:name/down. */
 export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' as const satisfies Capability;

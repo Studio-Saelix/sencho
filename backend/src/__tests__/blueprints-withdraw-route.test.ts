@@ -137,7 +137,7 @@ describe('POST /api/blueprints/:id/withdraw/:nodeId', () => {
             .all(res.body.snapshotId) as Array<{ stack_name: string; filename: string; content: string; node_id: number }>;
         expect(fileRows).toHaveLength(1);
         expect(fileRows[0].stack_name).toBe(bp.name);
-        expect(fileRows[0].filename).toBe('docker-compose.yml');
+        expect(fileRows[0].filename).toBe('compose.yaml');
         // Content is encrypted at rest; it decrypts back to the captured compose.
         const { CryptoService } = await import('../services/CryptoService');
         expect(CryptoService.getInstance().isEncrypted(fileRows[0].content)).toBe(true);

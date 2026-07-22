@@ -120,7 +120,15 @@ describe('BlueprintService remote deploy', () => {
         expect(postSpy.mock.calls[0][0]).toMatch(/\/api\/blueprints\/apply-local$/);
         expect(postSpy.mock.calls[1][0]).toMatch(/\/api\/stacks$/);
         expect(putSpy).toHaveBeenCalledTimes(2); // compose + marker
+        const composePutUrl = String(putSpy.mock.calls[0][0]);
+        const markerPutUrl = String(putSpy.mock.calls[1][0]);
+        expect(composePutUrl).toMatch(/[?&]path=compose\.yaml(?:&|$)/);
+        expect(markerPutUrl).toMatch(/[?&]path=\.blueprint\.json(?:&|$)/);
         expect(postSpy.mock.calls[2][0]).toMatch(/\/deploy$/);
+        const [composePutOrder, markerPutOrder] = putSpy.mock.invocationCallOrder;
+        const deployOrder = postSpy.mock.invocationCallOrder[2];
+        expect(composePutOrder).toBeLessThan(markerPutOrder);
+        expect(markerPutOrder).toBeLessThan(deployOrder);
     });
 
     it('maps a remote apply lock-conflict (409) to status=failed', async () => {

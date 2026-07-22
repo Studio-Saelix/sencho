@@ -18,6 +18,7 @@ import type { StacksLoadStatus } from '@/components/EditorLayout/hooks/useStackL
 import { Button } from '@/components/ui/button';
 import { useLabelMuteActions } from '@/hooks/useMuteRuleActions';
 import { LabelGroupMuteKebab } from '@/components/mute/MuteMenuItems';
+import { isStacksListLoading } from './stacksLoadUi';
 
 interface RemoteNodeResult {
   nodeId: number;
@@ -169,7 +170,7 @@ export function StackList(props: StackListProps & StackListBulkProps) {
 
   useStackKeyboardShortcuts(selectedFile, buildMenuCtx);
 
-  if (isLoading) {
+  if (isStacksListLoading(isLoading, stacksLoadStatus)) {
     return (
       <div className="space-y-2 px-2 mt-2">
         <Skeleton className="h-8 w-full" />
@@ -196,10 +197,15 @@ export function StackList(props: StackListProps & StackListBulkProps) {
     );
   }
 
-  // First-run prompt only when the node has no stacks at all: no search text and
-  // no active filter chip, so a filter that happens to match nothing does not
-  // masquerade as an empty fleet.
-  if (files.length === 0 && !searchQuery.trim() && filterChip === 'all') {
+  // First-run prompt only after a successful list load with zero stacks: no
+  // search text and no active filter chip, so a filter that matches nothing is
+  // not mistaken for an empty fleet, and idle/loading never looks like first-run.
+  if (
+    stacksLoadStatus === 'success'
+    && files.length === 0
+    && !searchQuery.trim()
+    && filterChip === 'all'
+  ) {
     return (
       <DiscoveryEmptyState
         onOpenAdopt={onOpenAdopt}

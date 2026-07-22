@@ -10,7 +10,12 @@ import { EXPOSURE_INTENTS, type ExposureIntent } from './network/types';
 import { HIGH_EPSS_THRESHOLD } from './securityPosture';
 import type { BackendScheduledAction } from './scheduledActionRegistry';
 import { stackPatternMatches } from '../helpers/stackPattern';
+import {
+    parseStoredNotificationSchedule,
+    type NotificationSchedule,
+} from '../helpers/notificationSchedule';
 import { readSnapshotFileRow, type SnapshotFileReadResult, type SnapshotFileRow } from '../helpers/snapshotFileDecrypt';
+import { sanitizeForLog } from '../utils/safeLog';
 
 export type { SnapshotFileReadResult } from '../helpers/snapshotFileDecrypt';
 
@@ -753,6 +758,10 @@ export interface NotificationSuppressionRule {
     applies_to: NotificationSuppressionAppliesTo;
     enabled: boolean;
     expires_at: number | null;
+    /** Null = always in window (legacy). Ignored when scheduleInvalid. */
+    schedule: NotificationSchedule | null;
+    /** True when stored JSON is non-null but corrupt; must not suppress. */
+    scheduleInvalid: boolean;
     created_at: number;
     updated_at: number;
 }
@@ -2195,7 +2204,12 @@ export class DatabaseService {
             );
             CREATE INDEX IF NOT EXISTS idx_notification_suppression_enabled
                 ON notification_suppression_rules(enabled, expires_at);
+            CREATE TABLE IF NOT EXISTS notification_suppression_rule_tombstones (
+                id INTEGER PRIMARY KEY,
+                deleted_at INTEGER NOT NULL
+            );
         `);
+        this.tryAddColumn('notification_suppression_rules', 'schedule', 'TEXT NULL');
     }
 
     private migrateNotificationHistoryContext(): void {
@@ -2786,6 +2800,12 @@ export class DatabaseService {
     // --- Notification Suppression Rules ---
 
     private parseNotificationSuppressionRule(row: Record<string, unknown>): NotificationSuppressionRule {
+        const stored = parseStoredNotificationSchedule(row.schedule);
+        if (stored.kind === 'invalid') {
+            console.warn(
+                `[DatabaseService] Ignoring corrupt notification suppression schedule on rule id=${row.id as number}`,
+            );
+        }
         return {
             id: row.id as number,
             name: row.name as string,
@@ -2797,6 +2817,8 @@ export class DatabaseService {
             applies_to: row.applies_to as NotificationSuppressionAppliesTo,
             enabled: row.enabled === 1,
             expires_at: row.expires_at != null ? (row.expires_at as number) : null,
+            schedule: stored.kind === 'ok' ? stored.schedule : null,
+            scheduleInvalid: stored.kind === 'invalid',
             created_at: row.created_at as number,
             updated_at: row.updated_at as number,
         };
@@ -2822,10 +2844,10 @@ export class DatabaseService {
     }
 
     public createNotificationSuppressionRule(
-        rule: Omit<NotificationSuppressionRule, 'id'>,
+        rule: Omit<NotificationSuppressionRule, 'id' | 'scheduleInvalid'>,
     ): NotificationSuppressionRule {
         const result = this.db.prepare(
-            'INSERT INTO notification_suppression_rules (name, node_id, stack_patterns, label_ids, categories, levels, applies_to, enabled, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO notification_suppression_rules (name, node_id, stack_patterns, label_ids, categories, levels, applies_to, enabled, expires_at, schedule, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         ).run(
             rule.name,
             rule.node_id ?? null,
@@ -2836,6 +2858,7 @@ export class DatabaseService {
             rule.applies_to,
             rule.enabled ? 1 : 0,
             rule.expires_at ?? null,
+            rule.schedule ? JSON.stringify(rule.schedule) : null,
             rule.created_at,
             rule.updated_at,
         );
@@ -2843,12 +2866,22 @@ export class DatabaseService {
     }
 
     public upsertNotificationSuppressionRuleReplica(rule: NotificationSuppressionRule): void {
+        const scheduleJson = rule.schedule ? JSON.stringify(rule.schedule) : null;
         const existing = this.getNotificationSuppressionRule(rule.id);
         if (existing) {
+            // Fleet sync is fire-and-forget with no delivery ordering guarantee: a
+            // push that isn't strictly newer than what's stored must never overwrite it.
+            if (existing.updated_at >= rule.updated_at) {
+                console.warn(
+                    `[DatabaseService] Ignoring stale suppression replica write for rule id=${sanitizeForLog(rule.id)} ` +
+                        `(incoming updated_at=${sanitizeForLog(rule.updated_at)} <= stored updated_at=${sanitizeForLog(existing.updated_at)})`,
+                );
+                return;
+            }
             this.db.prepare(
                 `UPDATE notification_suppression_rules SET
                     name = ?, node_id = ?, stack_patterns = ?, label_ids = ?, categories = ?, levels = ?,
-                    applies_to = ?, enabled = ?, expires_at = ?, updated_at = ?
+                    applies_to = ?, enabled = ?, expires_at = ?, schedule = ?, updated_at = ?
                  WHERE id = ?`,
             ).run(
                 rule.name,
@@ -2860,15 +2893,26 @@ export class DatabaseService {
                 rule.applies_to,
                 rule.enabled ? 1 : 0,
                 rule.expires_at ?? null,
+                scheduleJson,
                 rule.updated_at,
                 rule.id,
             );
             return;
         }
+        const tombstone = this.db.prepare(
+            'SELECT deleted_at FROM notification_suppression_rule_tombstones WHERE id = ?',
+        ).get(rule.id) as { deleted_at: number } | undefined;
+        if (tombstone) {
+            console.warn(
+                `[DatabaseService] Ignoring suppression replica write for rule id=${sanitizeForLog(rule.id)}: ` +
+                    `this id was deleted at ${sanitizeForLog(tombstone.deleted_at)} and must not be recreated`,
+            );
+            return;
+        }
         this.db.prepare(
             `INSERT INTO notification_suppression_rules
-                (id, name, node_id, stack_patterns, label_ids, categories, levels, applies_to, enabled, expires_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                (id, name, node_id, stack_patterns, label_ids, categories, levels, applies_to, enabled, expires_at, schedule, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
             rule.id,
             rule.name,
@@ -2880,6 +2924,7 @@ export class DatabaseService {
             rule.applies_to,
             rule.enabled ? 1 : 0,
             rule.expires_at ?? null,
+            scheduleJson,
             rule.created_at,
             rule.updated_at,
         );
@@ -2887,7 +2932,7 @@ export class DatabaseService {
 
     public updateNotificationSuppressionRule(
         id: number,
-        updates: Partial<Omit<NotificationSuppressionRule, 'id' | 'created_at'>>,
+        updates: Partial<Omit<NotificationSuppressionRule, 'id' | 'created_at' | 'scheduleInvalid'>>,
     ): void {
         const fields: string[] = [];
         const values: unknown[] = [];
@@ -2901,6 +2946,10 @@ export class DatabaseService {
         if (updates.applies_to !== undefined) { fields.push('applies_to = ?'); values.push(updates.applies_to); }
         if (updates.enabled !== undefined) { fields.push('enabled = ?'); values.push(updates.enabled ? 1 : 0); }
         if ('expires_at' in updates) { fields.push('expires_at = ?'); values.push(updates.expires_at ?? null); }
+        if ('schedule' in updates) {
+            fields.push('schedule = ?');
+            values.push(updates.schedule ? JSON.stringify(updates.schedule) : null);
+        }
         if (updates.updated_at !== undefined) { fields.push('updated_at = ?'); values.push(updates.updated_at); }
 
         if (fields.length === 0) return;
@@ -2909,7 +2958,18 @@ export class DatabaseService {
     }
 
     public deleteNotificationSuppressionRule(id: number): number {
-        return this.db.prepare('DELETE FROM notification_suppression_rules WHERE id = ?').run(id).changes;
+        const changes = this.db.prepare('DELETE FROM notification_suppression_rules WHERE id = ?').run(id).changes;
+        // Fleet sync has no delivery ordering guarantee: a replica POST for this id can
+        // still be in flight. Record the delete permanently (ids are AUTOINCREMENT and
+        // never reused) so upsertNotificationSuppressionRuleReplica refuses to resurrect it.
+        // Tombstone unconditionally, even when changes is 0: deleteRuleOnNode issues this
+        // same DELETE for capability/invalid-schedule cleanup against remotes that may never
+        // have received the rule yet, and a reordered POST behind that DELETE must not create it.
+        this.db.prepare(
+            `INSERT INTO notification_suppression_rule_tombstones (id, deleted_at) VALUES (?, ?)
+             ON CONFLICT(id) DO UPDATE SET deleted_at = excluded.deleted_at`,
+        ).run(id, Date.now());
+        return changes;
     }
 
     // --- Global Settings ---

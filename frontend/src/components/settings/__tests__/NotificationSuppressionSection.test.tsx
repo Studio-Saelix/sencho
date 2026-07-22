@@ -1,8 +1,8 @@
 /**
- * NotificationSuppressionSection stack pattern chips.
+ * NotificationSuppressionSection stack pattern chips and weekly schedule UI.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
@@ -38,9 +38,66 @@ vi.mock('@/lib/muteRules', () => ({
 }));
 
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 import { NotificationSuppressionSection } from '../NotificationSuppressionSection';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
+
+const scheduledRule = {
+  id: 42,
+  name: 'Weekend mute',
+  node_id: null,
+  stack_patterns: ['prod-*'],
+  label_ids: null,
+  categories: null,
+  levels: null,
+  applies_to: 'both',
+  enabled: true,
+  expires_at: null,
+  schedule: {
+    days: [6],
+    start_minute: 120,
+    end_minute: 360,
+    tz: 'UTC',
+  },
+  scheduleInvalid: false,
+  created_at: 1,
+  updated_at: 1,
+};
+
+const corruptScheduleRule = {
+  id: 43,
+  name: 'Corrupt window',
+  node_id: null,
+  stack_patterns: [],
+  label_ids: null,
+  categories: null,
+  levels: null,
+  applies_to: 'both',
+  enabled: true,
+  expires_at: null,
+  schedule: null,
+  scheduleInvalid: true,
+  created_at: 1,
+  updated_at: 1,
+};
+
+function mockListRules(rules: unknown[] = []) {
+  mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
+    if (url === '/notification-suppression-rules' && !opts?.method) {
+      return { ok: true, json: async () => rules };
+    }
+    if (url === '/stacks') return { ok: true, json: async () => ['staging'] };
+    if (url === '/labels') return { ok: true, json: async () => [] };
+    if (url === '/notification-suppression-rules' && opts?.method === 'POST') {
+      return { ok: true, json: async () => ({ id: 1 }) };
+    }
+    if (typeof url === 'string' && url.startsWith('/notification-suppression-rules/') && opts?.method === 'PUT') {
+      return { ok: true, json: async () => ({ id: 42 }) };
+    }
+    return { ok: true, json: async () => ([]) };
+  });
+}
 
 async function openMuteForm() {
   render(<NotificationSuppressionSection />);
@@ -49,20 +106,16 @@ async function openMuteForm() {
   await waitFor(() => expect(screen.getByRole('dialog', { name: /New mute rule/i })).toBeInTheDocument());
 }
 
+async function enableWeeklyWindow() {
+  await userEvent.click(screen.getByLabelText(/Weekly window \(UTC\)/i));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Sat' })).toBeInTheDocument());
+}
+
 describe('NotificationSuppressionSection', () => {
   beforeEach(() => {
     mockedFetch.mockReset();
-    mockedFetch.mockImplementation(async (url: string, opts?: { method?: string }) => {
-      if (url === '/notification-suppression-rules' && !opts?.method) {
-        return { ok: true, json: async () => [] };
-      }
-      if (url === '/stacks') return { ok: true, json: async () => ['staging'] };
-      if (url === '/labels') return { ok: true, json: async () => [] };
-      if (url === '/notification-suppression-rules' && opts?.method === 'POST') {
-        return { ok: true, json: async () => ({ id: 1 }) };
-      }
-      return { ok: true, json: async () => ([]) };
-    });
+    vi.mocked(toast.error).mockClear();
+    mockListRules([]);
   });
 
   it('posts normalized stack patterns and null levels', async () => {
@@ -128,5 +181,216 @@ describe('NotificationSuppressionSection', () => {
       );
       expect(posts).toHaveLength(0);
     });
+  });
+
+  it('posts a weekly UTC schedule with accessible day and time controls', async () => {
+    await openMuteForm();
+
+    await userEvent.type(screen.getByPlaceholderText(/Mute staging/i), 'Sat window');
+    await userEvent.type(screen.getByPlaceholderText(/Type a pattern/i), 'prod-*{Enter}');
+    await enableWeeklyWindow();
+
+    const sat = screen.getByRole('button', { name: 'Sat' });
+    expect(sat).toHaveAttribute('aria-pressed', 'false');
+    await userEvent.click(sat);
+    expect(sat).toHaveAttribute('aria-pressed', 'true');
+
+    expect(screen.getByLabelText('Start (UTC)')).toHaveAttribute('id', 'mute-schedule-start');
+    expect(screen.getByLabelText('End (UTC)')).toHaveAttribute('id', 'mute-schedule-end');
+    fireEvent.change(screen.getByLabelText('Start (UTC)'), { target: { value: '02:00' } });
+    fireEvent.change(screen.getByLabelText('End (UTC)'), { target: { value: '06:00' } });
+
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+    await waitFor(() => {
+      const post = mockedFetch.mock.calls.find(
+        ([url, opts]) => url === '/notification-suppression-rules' && (opts as { method?: string })?.method === 'POST',
+      );
+      expect(post).toBeTruthy();
+      const body = JSON.parse((post![1] as { body: string }).body);
+      expect(body.schedule).toEqual({
+        days: [6],
+        start_minute: 120,
+        end_minute: 360,
+        tz: 'UTC',
+      });
+    });
+  });
+
+  it('blocks scheduled create when no weekday is selected', async () => {
+    await openMuteForm();
+
+    await userEvent.type(screen.getByPlaceholderText(/Mute staging/i), 'No days');
+    await userEvent.type(screen.getByPlaceholderText(/Type a pattern/i), 'prod-*{Enter}');
+    await enableWeeklyWindow();
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('Select at least one day for the weekly window.');
+    });
+    const posts = mockedFetch.mock.calls.filter(
+      ([url, opts]) => url === '/notification-suppression-rules' && (opts as { method?: string })?.method === 'POST',
+    );
+    expect(posts).toHaveLength(0);
+  });
+
+  it('hydrates edit form from an existing schedule and keeps it on PUT', async () => {
+    mockListRules([scheduledRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Weekend mute')).toBeInTheDocument());
+    expect(screen.getByText(/UTC Sat 02:00-06:00/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByTitle('Edit'));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+
+    expect(screen.getByLabelText(/Weekly window \(UTC\)/i)).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('button', { name: 'Sat' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByLabelText('Start (UTC)')).toHaveValue('02:00');
+    expect(screen.getByLabelText('End (UTC)')).toHaveValue('06:00');
+
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+    await waitFor(() => {
+      const put = mockedFetch.mock.calls.find(
+        ([url, opts]) =>
+          url === '/notification-suppression-rules/42' && (opts as { method?: string })?.method === 'PUT',
+      );
+      expect(put).toBeTruthy();
+      const body = JSON.parse((put![1] as { body: string }).body);
+      expect(body.schedule).toEqual({
+        days: [6],
+        start_minute: 120,
+        end_minute: 360,
+        tz: 'UTC',
+      });
+    });
+  });
+
+  it('clears schedule to null when weekly window is turned off on edit', async () => {
+    mockListRules([scheduledRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Weekend mute')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByTitle('Edit'));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+    await userEvent.click(screen.getByLabelText(/Weekly window \(UTC\)/i));
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Sat' })).not.toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+    await waitFor(() => {
+      const put = mockedFetch.mock.calls.find(
+        ([url, opts]) =>
+          url === '/notification-suppression-rules/42' && (opts as { method?: string })?.method === 'PUT',
+      );
+      expect(put).toBeTruthy();
+      const body = JSON.parse((put![1] as { body: string }).body);
+      expect(body.schedule).toBeNull();
+    });
+  });
+
+  it('marks a corrupt stored schedule as invalid instead of an ordinary unscheduled rule', async () => {
+    mockListRules([corruptScheduleRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Corrupt window')).toBeInTheDocument());
+    expect(screen.getByText('Invalid schedule')).toBeInTheDocument();
+  });
+
+  it('blocks saving a corrupt-schedule rule until the operator touches the weekly window', async () => {
+    mockListRules([corruptScheduleRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Corrupt window')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByTitle('Edit'));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+    expect(screen.getByLabelText(/Weekly window \(UTC\)/i)).toHaveAttribute('aria-checked', 'false');
+
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        expect.stringContaining('could not be read'),
+      );
+    });
+    const puts = mockedFetch.mock.calls.filter(
+      ([url, opts]) => url === '/notification-suppression-rules/43' && (opts as { method?: string })?.method === 'PUT',
+    );
+    expect(puts).toHaveLength(0);
+  });
+
+  it('allows saving a corrupt-schedule rule once the operator explicitly clears it', async () => {
+    mockListRules([corruptScheduleRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Corrupt window')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByTitle('Edit'));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+
+    // Explicit acknowledgement: turn the window on, then off again, to intentionally clear it.
+    await userEvent.click(screen.getByLabelText(/Weekly window \(UTC\)/i));
+    await userEvent.click(screen.getByLabelText(/Weekly window \(UTC\)/i));
+
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+    await waitFor(() => {
+      const put = mockedFetch.mock.calls.find(
+        ([url, opts]) =>
+          url === '/notification-suppression-rules/43' && (opts as { method?: string })?.method === 'PUT',
+      );
+      expect(put).toBeTruthy();
+      const body = JSON.parse((put![1] as { body: string }).body);
+      expect(body.schedule).toBeNull();
+    });
+  });
+
+  it('allows saving a corrupt-schedule rule once the operator configures a new valid schedule', async () => {
+    mockListRules([corruptScheduleRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Corrupt window')).toBeInTheDocument());
+
+    await userEvent.click(screen.getByTitle('Edit'));
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+    await enableWeeklyWindow();
+    await userEvent.click(screen.getByRole('button', { name: 'Sat' }));
+    fireEvent.change(screen.getByLabelText('Start (UTC)'), { target: { value: '02:00' } });
+    fireEvent.change(screen.getByLabelText('End (UTC)'), { target: { value: '06:00' } });
+
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+    await waitFor(() => {
+      const put = mockedFetch.mock.calls.find(
+        ([url, opts]) =>
+          url === '/notification-suppression-rules/43' && (opts as { method?: string })?.method === 'PUT',
+      );
+      expect(put).toBeTruthy();
+      const body = JSON.parse((put![1] as { body: string }).body);
+      expect(body.schedule).toEqual({
+        days: [6],
+        start_minute: 120,
+        end_minute: 360,
+        tz: 'UTC',
+      });
+    });
+  });
+
+  it('does not carry the invalid-schedule save gate over to a later edit of a different, valid rule', async () => {
+    mockListRules([corruptScheduleRule, scheduledRule]);
+    render(<NotificationSuppressionSection />);
+    await waitFor(() => expect(screen.getByText('Corrupt window')).toBeInTheDocument());
+
+    const editButtons = screen.getAllByTitle('Edit');
+    await userEvent.click(editButtons[0]);
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    await userEvent.click(screen.getAllByTitle('Edit')[1]);
+    await waitFor(() => expect(screen.getByRole('dialog', { name: /Edit mute rule/i })).toBeInTheDocument());
+    await userEvent.click(screen.getByRole('button', { name: /Create|Update/i }));
+
+    await waitFor(() => {
+      const put = mockedFetch.mock.calls.find(
+        ([url, opts]) =>
+          url === '/notification-suppression-rules/42' && (opts as { method?: string })?.method === 'PUT',
+      );
+      expect(put).toBeTruthy();
+    });
+    expect(toast.error).not.toHaveBeenCalledWith(expect.stringContaining('could not be read'));
   });
 });

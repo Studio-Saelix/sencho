@@ -78,6 +78,8 @@ export function RolloutPreviewDialog({
             const { failed = 0, pending = 0 } = result.outcomeSummary ?? {};
             if (failed > 0) {
                 toast.warning(result.message || 'Rollout confirmed with node failures');
+            } else if (result.effectiveApproval !== 'approved') {
+                toast.warning(result.message || 'Confirmed snapshot finished; approval is no longer current');
             } else if (pending > 0) {
                 toast.info(result.message || 'Rollout confirmed; some actions are still in progress');
             } else {
