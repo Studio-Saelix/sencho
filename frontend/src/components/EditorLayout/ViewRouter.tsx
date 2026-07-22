@@ -1,8 +1,11 @@
 import { Suspense, lazy, type ReactNode } from 'react';
+import { Unplug } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/context/AuthContext';
-import { useExperimental } from '@/hooks/useExperimental';
-import { PaidGate } from '../PaidGate';
+import { useLicense } from '@/context/LicenseContext';
+import { useNodes } from '@/context/NodeContext';
+import { resolveHostConsoleCapability } from '@/lib/routing/hostConsoleCapability';
+import { LockCard } from '../ui/LockCard';
 import { CapabilityGate } from '../CapabilityGate';
 import { HubOnlyGate } from '../HubOnlyGate';
 import LazyBoundary from '../LazyBoundary';
@@ -147,7 +150,8 @@ export function ViewRouter({
     quickLinkCandidates,
 }: ViewRouterProps): ReactNode {
     const { can } = useAuth();
-    const { experimental, experimentalReady } = useExperimental();
+    const { isPaid, licenseReady } = useLicense();
+    const { activeNode, activeNodeMeta } = useNodes();
     if (activeView === 'settings') {
         return (
             <SettingsPage
@@ -184,20 +188,37 @@ export function ViewRouter({
         );
     }
     if (activeView === 'host-console') {
-        // Discovery + paid/RBAC: hide until experimental discovery is on,
-        // then mirror backend gates (system:console admin-only + PaidGate +
-        // capability). Nav is already gated the same way; this stops a
-        // deep link from mounting a console the operator cannot use.
-        if (!experimentalReady || !experimental) return null;
+        // RBAC + mixed-version capability. Do not mount HostConsole until
+        // remote meta resolves (optimistic hasCapability would open a doomed
+        // WebSocket when a Community hub targets a remote that only advertises
+        // legacy host-console).
         if (!can('system:console')) return null;
+        const capState = resolveHostConsoleCapability({
+            isRemote: activeNode?.type === 'remote',
+            isPaid,
+            licenseReady,
+            activeNodeMeta,
+        });
+        if (capState === 'loading') return <ViewSkeleton />;
+        if (capState === 'locked') {
+            const nodeName = activeNode?.name ?? 'this node';
+            const version = activeNodeMeta?.version;
+            let versionHint = `${nodeName} does not advertise this capability.`;
+            if (version && version !== 'unknown' && version !== '0.0.0-dev') {
+                versionHint = `${nodeName} is running v${version}.`;
+            }
+            return (
+                <LockCard
+                    icon={Unplug}
+                    title="Host Console is not available on this node"
+                    body={`${versionHint} Upgrade the node to use this feature.`}
+                />
+            );
+        }
         return (
-            <PaidGate>
-                <CapabilityGate capability="host-console" featureName="Host Console">
-                    <LazyView>
-                        <HostConsole stackName={selectedFile} onClose={onHostConsoleClose} />
-                    </LazyView>
-                </CapabilityGate>
-            </PaidGate>
+            <LazyView>
+                <HostConsole stackName={selectedFile} onClose={onHostConsoleClose} />
+            </LazyView>
         );
     }
     // Stack workspace: keep a loading shell while the stack URL hydrates.

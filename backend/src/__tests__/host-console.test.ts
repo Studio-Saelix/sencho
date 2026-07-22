@@ -380,6 +380,23 @@ describe('POST /api/system/console-token', () => {
     expect(typeof res.body.token).toBe('string');
   });
 
+  it('returns 200 for an admin on Community (no paid gate)', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    const spy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+    try {
+      const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
+      const res = await request(app)
+        .post('/api/system/console-token')
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(200);
+      expect(typeof res.body.token).toBe('string');
+      const decoded = jwt.verify(res.body.token, TEST_JWT_SECRET) as { scope?: string };
+      expect(decoded.scope).toBe('console_session');
+    } finally {
+      spy.mockReturnValue('paid');
+    }
+  });
+
   it('returns 403 for non-admin user (viewer role)', async () => {
     // Create a viewer user in the DB
     const { DatabaseService } = await import('../services/DatabaseService');

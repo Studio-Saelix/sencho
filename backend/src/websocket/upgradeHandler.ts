@@ -20,6 +20,8 @@ import { validateApiToken, touchApiTokenLastUsed } from '../utils/apiTokenAuth';
 import { isDebugEnabled } from '../utils/debug';
 import { PROXY_TIER_HEADER } from '../services/license-headers';
 import { isLicenseTier, normalizeTier } from '../services/license-normalize';
+import { HOST_CONSOLE_COMMUNITY_CAPABILITY } from '../services/CapabilityRegistry';
+import { remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
 
 function parseCookies(req: IncomingMessage): Record<string, string> {
   const header = req.headers.cookie || '';
@@ -68,8 +70,15 @@ export function remoteWsForwardAllowed(
   if (ctx.isProxyToken) return false;
   // console_session is pre-gated as admin at issuance (routes/console.ts).
   if (ctx.decoded.scope === 'console_session') return true;
+  // Reject opaque API tokens on remote Host Console forward (would mint
+  // console_session and get a host shell). Local denial is enforced in
+  // attachUpgrade before handleHostConsoleWs. Container exec (/ws) keeps
+  // its existing full-admin API-token allow.
+  if (pathname.startsWith('/api/system/host-console') && ctx.wsApiTokenScope) {
+    return false;
+  }
   // A read-only/deploy-only api_token is already rejected for these paths by
-  // the scope gate; only full-admin survives to here.
+  // the scope gate; only full-admin survives to here (container exec /ws).
   if (ctx.wsApiTokenScope) return ctx.wsApiTokenScope === 'full-admin';
   const role = ctx.wsResolvedUser?.role;
   if (!role) return false;
@@ -243,6 +252,23 @@ export function attachUpgrade(
         if (!remoteWsForwardAllowed(pathname, { wsResolvedUser, wsApiTokenScope, isProxyToken, decoded })) {
           return reject(socket, 403, 'Forbidden');
         }
+        // Community hubs require host-console-community before forwarding Host
+        // Console (marks remotes that no longer paid-gate the console path).
+        // Admiral hubs skip the probe for legacy host-console peers. Fail
+        // closed on probe errors; never fall through to local handlers for a
+        // named remote.
+        if (
+          pathname.startsWith('/api/system/host-console')
+          && LicenseService.getInstance().getTier() !== 'paid'
+        ) {
+          const communityCapable = await remoteAdvertisesCapability(
+            nodeId,
+            HOST_CONSOLE_COMMUNITY_CAPABILITY,
+          );
+          if (!communityCapable) {
+            return reject(socket, 403, 'Forbidden');
+          }
+        }
         // Resolve the proxy target through NodeRegistry so pilot-mode nodes
         // (empty api_url + api_token, loopback bridge instead) and proxy-mode
         // nodes share one dispatch path. Mirrors proxy/remoteNodeProxy.ts.
@@ -264,6 +290,11 @@ export function attachUpgrade(
       }
 
       if (pathname.startsWith('/api/system/host-console')) {
+        // Opaque API tokens never open a local host shell (parity with the
+        // remote forward gate). Do not rely on missing wsResolvedUser alone.
+        if (wsApiTokenScope) {
+          return reject(socket, 403, 'Forbidden');
+        }
         handleHostConsoleWs(req, socket, head, {
           nodeId,
           decoded,

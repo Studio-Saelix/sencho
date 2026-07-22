@@ -28,12 +28,6 @@ function isVisuallyDiscoverable(item: AppNavItem, reachCtx: ReachabilityContext)
     // Settings is always discoverable in the launcher when the operator can open Settings.
     return true;
   }
-  // Console: fail-closed visual discovery until /meta settles and the flag is on.
-  // URL normalization still uses isViewHidden cold-load deferral separately.
-  if (item.value === 'host-console') {
-    if (!reachCtx.experimentalReady || !reachCtx.experimental) return false;
-    return !isViewHidden(item.value, reachCtx);
-  }
   return !isViewHidden(item.value, reachCtx);
 }
 

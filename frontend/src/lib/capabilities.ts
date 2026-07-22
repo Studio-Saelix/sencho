@@ -15,6 +15,7 @@ export const CAPABILITIES = [
   'notification-routing',
   'notification-suppression',
   'host-console',
+  'host-console-community',
   'container-exec',
   'audit-log',
   'scheduled-ops',
@@ -38,6 +39,12 @@ export const CAPABILITIES = [
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
+
+/** Legacy Host Console advertisement (Admiral hubs still accept this on remotes). */
+export const HOST_CONSOLE_CAPABILITY = 'host-console' as const satisfies Capability;
+
+/** Host Console works without a paid license on this node. */
+export const HOST_CONSOLE_COMMUNITY_CAPABILITY = 'host-console-community' as const satisfies Capability;
 
 export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' as const satisfies Capability;
 export const GUIDED_EXTERNAL_NETWORK_PREFLIGHT_CAPABILITY = 'guided-external-network-preflight' as const satisfies Capability;

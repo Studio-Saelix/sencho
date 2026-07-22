@@ -21,8 +21,8 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
   beforeAll(async () => {
     vi.restoreAllMocks();
     tmpDir = await setupTestDb();
-    // Host console requires the paid tier; mock the license so the tier gate
-    // passes for the admin/accepted cases. Individual tests override as needed.
+    // Host console is available on every tier for admins; mock paid so other
+    // suites that share LicenseService state stay stable.
     const { LicenseService } = await import('../services/LicenseService');
     getTierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
     const mod = await import('../index');
@@ -78,10 +78,28 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
     expect(await expectRejected(ws)).toBe(403);
   });
 
-  it('rejects an admin on the Community tier (403)', async () => {
+  it('accepts a Community-tier admin', async () => {
     getTierSpy.mockReturnValueOnce('community');
     const ws = new WebSocket(wsUrl(), { headers: { Cookie: `sencho_token=${adminToken()}` } });
-    expect(await expectRejected(ws)).toBe(403);
+    const opened = await new Promise<boolean>((resolve) => {
+      ws.on('open', () => { ws.close(); resolve(true); });
+      ws.on('error', () => resolve(false));
+      ws.on('unexpected-response', () => resolve(false));
+    });
+    expect(opened).toBe(true);
+  });
+
+  it('accepts a console_session Bearer on Community (remote bridge mint path)', async () => {
+    getTierSpy.mockReturnValueOnce('community');
+    const { mintConsoleSession } = await import('../helpers/consoleSession');
+    const token = mintConsoleSession(TEST_USERNAME);
+    const ws = new WebSocket(wsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const opened = await new Promise<boolean>((resolve) => {
+      ws.on('open', () => { ws.close(); resolve(true); });
+      ws.on('error', () => resolve(false));
+      ws.on('unexpected-response', () => resolve(false));
+    });
+    expect(opened).toBe(true);
   });
 
   it('accepts an admin on Admiral and records an open audit row', async () => {

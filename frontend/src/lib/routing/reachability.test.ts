@@ -49,25 +49,25 @@ describe('reachability', () => {
     expect(isViewHidden('fleet', noFleet)).toBe(true);
   });
 
-  it('preserves paid views when license metadata failed', () => {
-    const licenseError = ctx({ licenseStatus: 'error', experimental: true });
+  it('preserves host-console when authz is not ready', () => {
+    const licenseError = ctx({ licenseStatus: 'error', can: (a) => a === 'system:console' });
     expect(isViewHidden('host-console', licenseError)).toBe(false);
   });
 
-  it('does not apply experimental hide to host-console until experimentalReady', () => {
-    const loading = ctx({ experimental: false, experimentalReady: false, isPaid: true, isAdmin: true });
-    expect(isViewHidden('host-console', loading)).toBe(false);
+  it('hides host-console without system:console when ready', () => {
+    const noConsole = ctx({ can: () => false, isPaid: false, experimental: false });
+    expect(isViewHidden('host-console', noConsole)).toBe(true);
+    expect(normalizeHiddenView('host-console', noConsole)).toBe('dashboard');
   });
 
-  it('hides host-console when experimental is ready and off even for paid admin', () => {
-    const off = ctx({ experimental: false, experimentalReady: true, isPaid: true, isAdmin: true });
-    expect(isViewHidden('host-console', off)).toBe(true);
-    expect(normalizeHiddenView('host-console', off)).toBe('dashboard');
-  });
-
-  it('keeps host-console when experimental is on for paid admin', () => {
-    const on = ctx({ experimental: true, experimentalReady: true, isPaid: true, isAdmin: true });
-    expect(isViewHidden('host-console', on)).toBe(false);
+  it('keeps host-console for system:console regardless of tier or experimental', () => {
+    const community = ctx({
+      isPaid: false,
+      experimental: false,
+      experimentalReady: true,
+      can: (a) => a === 'system:console',
+    });
+    expect(isViewHidden('host-console', community)).toBe(false);
   });
 
   it('hides routing and secrets fleet tabs only after experimentalReady when off', () => {

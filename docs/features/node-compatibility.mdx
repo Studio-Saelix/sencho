@@ -67,7 +67,8 @@ Every Sencho release ships with a static list of capabilities. The current list 
 | `notifications` | Alert notifications |
 | `notification-routing` | Notification routing rules |
 | `notification-suppression` | Mute rules |
-| `host-console` | Host Console |
+| `host-console` | Host Console (legacy advertisement retained for mixed-version fleets) |
+| `host-console-community` | Host Console without a paid-license requirement on this node |
 | `container-exec` | Container exec terminal |
 | `audit-log` | Audit log |
 | `scheduled-ops` | Scheduled operations |
@@ -94,7 +95,7 @@ Every Sencho release ships with a static list of capabilities. The current list 
 </Note>
 
 <Note>
-  A node connected in [Pilot Agent](/features/multi-node#add-a-remote-node-pilot-agent) mode never advertises `host-console`, even after upgrading, because that feature's control-to-agent path is not yet wired through the enrollment tunnel. This is the one capability gap that upgrading the node cannot close; it only closes on a Distributed API Proxy connection.
+  A node connected in [Pilot Agent](/features/multi-node#add-a-remote-node-pilot-agent) mode never advertises `host-console` or `host-console-community`, even after upgrading, because that feature's control-to-agent path is not yet wired through the enrollment tunnel. This is the one capability gap that upgrading the node cannot close; it only closes on a Distributed API Proxy connection.
 </Note>
 
 A handful of capabilities gate a smaller piece of behavior rather than a whole panel, so a missing one falls back to an older behavior instead of a lock card:
