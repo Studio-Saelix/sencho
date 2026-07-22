@@ -45,7 +45,10 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
       const localPromise = apiFetch('/notifications', { localOnly: true } as Parameters<typeof apiFetch>[1]);
       const remotePromises = remoteNodes.map(n => fetchForNode('/notifications', n.id));
 
-      const all: NotificationItem[] = [];
+      // Only successful legs replace their node slice. A failed/non-OK/decode-failed
+      // leg is not treated as an empty list; that node's cached rows stay until a
+      // later successful response (including an intentional empty list).
+      const successfulSlices = new Map<number, NotificationItem[]>();
 
       const instrument = !notificationsReadyRef.current;
       const headersSpan = instrument ? beginSpan('fetch_headers', { background: true }) : null;
@@ -59,8 +62,15 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
           if (bodySpan !== null) endSpan(bodySpan);
           bodySpan = null;
           const dispatchSpan = instrument ? beginSpan('state_dispatch', { background: true }) : null;
-          data.forEach(n => all.push({ ...n, nodeId: localNode?.id ?? -1, nodeName: localNode?.name ?? 'Local' }));
+          const localId = localNode?.id ?? -1;
+          const localName = localNode?.name ?? 'Local';
+          successfulSlices.set(
+            localId,
+            data.map(n => ({ ...n, nodeId: localId, nodeName: localName })),
+          );
           if (dispatchSpan !== null) endSpan(dispatchSpan);
+        } else {
+          console.error(`[Notifications] local fetch HTTP ${localRes.status}`);
         }
       } catch (e) {
         if (headersSpan !== null) endSpan(headersSpan, { outcome: 'error' });
@@ -75,18 +85,38 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
 
       // Remotes settle in the background; they never gate the milestone above.
       const remoteNodeResults = await Promise.allSettled(remotePromises);
-      for (let i = 0; i < remoteNodes.length; i++) {
+      for (const [i, rn] of remoteNodes.entries()) {
         const result = remoteNodeResults[i];
-        if (result?.status === 'fulfilled' && result.value.ok) {
+        if (result.status !== 'fulfilled') {
+          console.error(`[Notifications] remote fetch error (${rn.name}):`, result.reason);
+          continue;
+        }
+        if (!result.value.ok) {
+          console.error(`[Notifications] remote fetch HTTP ${result.value.status} (${rn.name})`);
+          continue;
+        }
+        try {
           const data = await result.value.json() as Omit<NotificationItem, 'nodeId' | 'nodeName'>[];
-          const rn = remoteNodes[i];
-          data.forEach(n => all.push({ ...n, nodeId: rn.id, nodeName: rn.name }));
+          successfulSlices.set(
+            rn.id,
+            data.map(n => ({ ...n, nodeId: rn.id, nodeName: rn.name })),
+          );
+        } catch (e) {
+          console.error(`[Notifications] remote fetch decode error (${rn.name}):`, e);
         }
       }
 
       if (generation !== notificationFetchGeneration.current) return;
-      all.sort((a, b) => b.timestamp - a.timestamp);
-      setNotifications(all);
+      // Keep failed/offline node slices; drop rows for nodes no longer in the roster.
+      const activeNodeIds = new Set(currentNodes.map(n => n.id));
+      setNotifications(prev => {
+        const preserved = prev.filter(n =>
+          n.nodeId == null
+          || (activeNodeIds.has(n.nodeId) && !successfulSlices.has(n.nodeId)),
+        );
+        const replaced = [...successfulSlices.values()].flat();
+        return [...preserved, ...replaced].sort((a, b) => b.timestamp - a.timestamp);
+      });
     } catch (e) {
       console.error('[Notifications] fetch error:', e);
     }
@@ -238,7 +268,9 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
               window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { ...msg, nodeId: rn.id } }));
               onStateInvalidateRef.current();
               if (msg.scope === 'notifications') {
-                reconcileNotificationsInvalidateRef.current(msg, rn.id);
+                // Remote payloads use the remote's local DB node ID. Hub UI state
+                // is keyed by rn.id, so always reconcile with the hub node ID.
+                reconcileNotificationsInvalidateRef.current({ ...msg, nodeId: rn.id });
               } else if (msg.scope === 'image-updates' && msg.action === 'stack-updated') {
                 onImageUpdatesChangeRef.current();
               }
