@@ -24,6 +24,7 @@ Sencho encodes the active node, the view you are on, and the deep state that vie
 | Logs | `/nodes/local/logs` | Cross-fleet log aggregation |
 | Update | `/nodes/local/updates` | Fleet-wide update check |
 | Console | `/nodes/local/host-console` | Host Console (admin role) |
+| Console in a stack | `/nodes/local/host-console/radarr` | Host Console rooted in the Radarr stack directory |
 | Audit | `/nodes/local/audit` | Audit history |
 | Settings section | `/nodes/local/settings/nodes` | Settings on the Nodes section |
 | Fleet tab | `/nodes/local/fleet/snapshots` | Fleet on the Snapshots tab (desktop) |
@@ -86,7 +87,7 @@ On desktop, opening the stack list at `/nodes/local/stacks` canonicalizes to `/n
 
 Settings follows a similar split, but only on a phone: `/nodes/local/settings` opens the section list, and `/nodes/local/settings/<section>` opens a section directly. On desktop, `/nodes/local/settings` always normalizes straight to `/nodes/local/settings/appearance`; there is no bare section-list state to land on.
 
-Fleet, Resources, Security, App Store, Logs, Update, Audit, and Schedules keep the exact same URL between desktop and phone, each rendering a phone-optimized screen at that path. Console also keeps the same URL on a phone, reflowing the terminal rather than switching to a dedicated phone screen.
+Fleet, Resources, Security, App Store, Logs, Update, Audit, and Schedules keep the exact same URL between desktop and phone, each rendering a phone-optimized screen at that path. Console also keeps the same URL on a phone (`/nodes/<node>/host-console`), but Host Console is a desktop-oriented terminal: open it on a wider screen for a full interactive session.
 
 On a phone, `/nodes/local/stacks/<stack>/files` opens the compose editor instead. Sencho does not expose a separate file-browser URL on a phone.
 

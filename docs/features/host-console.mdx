@@ -27,6 +27,14 @@ The Host Console gives you a real terminal session on the Sencho host, streamed 
 
 Click **Console** in the top navigation bar. The session starts immediately in the `COMPOSE_DIR` root. If a stack is selected in the sidebar, the terminal opens directly inside that stack's directory instead, and a small back button appears in the masthead so you can return to the stack editor.
 
+You can also open Console from a bookmark or shared link. Every Console view has a stable URL under [Deep links and URLs](/features/deep-links):
+
+- `/nodes/local/host-console` opens Host Console on the local node at the compose root
+- `/nodes/local/host-console/radarr` opens the same terminal rooted in the Radarr stack directory
+- Remote nodes use their node slug the same way (for example `/nodes/nas-box-42/host-console`)
+
+Console requires the **admin** role. The URL stays in the address bar on a phone, but Host Console is meant for a desktop browser.
+
 ## Cockpit layout
 
 The Console page is a vertical stack of two surfaces.
@@ -105,6 +113,6 @@ The Host Console is one of the most powerful features in Sencho and is treated a
   </Accordion>
 
   <Accordion title="Console tab is not visible">
-    Console appears for users with the **admin** role. If you are an admin and still do not see it, refresh the page. On a remote node, the Console tab may show a lock card when that node does not support Host Console (for example a Pilot Agent node, or an older Distributed API Proxy node that has not been upgraded).
+    Console appears for users with the **admin** role. If you are an admin and still do not see it, refresh the page. On a remote node, the Console tab may show a lock card when that node does not support Host Console (for example a Pilot Agent node, or a Distributed API Proxy node that does not advertise Host Console).
   </Accordion>
 </AccordionGroup>
