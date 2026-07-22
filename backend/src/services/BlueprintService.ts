@@ -21,7 +21,8 @@ import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { sanitizeForLog } from '../utils/safeLog';
 
 const MARKER_FILENAME = '.blueprint.json';
-const COMPOSE_FILENAME = 'docker-compose.yml';
+/** On-disk compose name for Blueprint applies. Must match createStack scaffold and Sencho discovery priority. */
+const COMPOSE_FILENAME = 'compose.yaml';
 const REMOTE_HTTP_TIMEOUT_MS = 30_000;
 
 function isDeveloperModeEnabled(): boolean {
@@ -447,6 +448,9 @@ export class BlueprintService {
                 }
                 await fs.writeStackFile(stackName, COMPOSE_FILENAME, composeContent);
                 await fs.writeStackFile(stackName, MARKER_FILENAME, markerContent);
+                // Clear lower-priority compose siblings so discovery cannot shadow compose.yaml.
+                // Local + modern apply-local only; legacy remote has no sibling DELETE.
+                await fs.removeAlternateRootComposeFiles(stackName);
                 await assertPolicyGateAllows(
                     stackName,
                     nodeId,

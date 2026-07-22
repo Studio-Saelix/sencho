@@ -407,6 +407,7 @@ describe('BlueprintService per-stack lock', () => {
         // without touching the real filesystem or Docker.
         vi.spyOn(FileSystemService.prototype, 'createStack').mockResolvedValue(undefined);
         const writeSpy = vi.spyOn(FileSystemService.prototype, 'writeStackFile').mockResolvedValue(undefined);
+        const cleanupSpy = vi.spyOn(FileSystemService.prototype, 'removeAlternateRootComposeFiles').mockResolvedValue(undefined);
         const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue(undefined);
 
         const outcome = await BlueprintService.getInstance().deployToNode(bp, node);
@@ -416,14 +417,19 @@ describe('BlueprintService per-stack lock', () => {
             source: 'blueprint',
             actor: 'system:blueprint',
         });
-        // Compose is written first, then the marker, both before the deploy.
+        // Compose is written first, then the marker, both before sibling cleanup and deploy.
         expect(writeSpy).toHaveBeenCalledTimes(2);
+        expect(writeSpy.mock.calls[0][1]).toBe('compose.yaml');
         expect(writeSpy.mock.calls[0][2]).toBe(bp.compose_content);
+        expect(writeSpy.mock.calls[1][1]).toBe('.blueprint.json');
         expect(writeSpy.mock.calls[1][2]).toContain('"blueprintId"');
+        expect(cleanupSpy).toHaveBeenCalledWith(bp.name);
         const [composeOrder, markerOrder] = writeSpy.mock.invocationCallOrder;
+        const [cleanupOrder] = cleanupSpy.mock.invocationCallOrder;
         const [deployOrder] = deploySpy.mock.invocationCallOrder;
         expect(composeOrder).toBeLessThan(markerOrder);
-        expect(markerOrder).toBeLessThan(deployOrder);
+        expect(markerOrder).toBeLessThan(cleanupOrder);
+        expect(cleanupOrder).toBeLessThan(deployOrder);
     });
 
     it('deploy skips, writes no stack files, and records failed when the stack lock is held', async () => {

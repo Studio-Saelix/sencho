@@ -215,6 +215,9 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
         expect(change.action).toBe('blocked_name_conflict');
         expect(change.severity).toBe('blocker');
         expect(preview.body.summary.blocker).toBeGreaterThan(0);
+        // Name-conflict detection must not mutate unmanaged alternate compose files.
+        expect(fs.readFileSync(path.join(stackDir, 'docker-compose.yml'), 'utf-8'))
+            .toBe('services:\n  app:\n    image: nginx\n');
     });
 
     it('blocks rename while a non-withdrawn deployment exists', async () => {

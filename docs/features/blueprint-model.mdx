@@ -3,7 +3,7 @@ title: "Blueprints"
 description: "Fleet-wide compose templates that Sencho keeps in sync across the nodes you choose, with stateless or stateful classification, drift detection, and three response modes."
 ---
 
-A **Blueprint** bundles a `docker-compose.yml` with a node selector and a drift policy. Every minute Sencho compares the live state on each targeted node against the blueprint's desired revision, and either reports the drift, dispatches a notification, or auto-corrects, depending on the mode you picked. You declare a stack once; Sencho handles the distribution and the reconciliation loop.
+A **Blueprint** bundles Compose YAML with a node selector and a drift policy. Every minute Sencho compares the live state on each targeted node against the blueprint's desired revision, and either reports the drift, dispatches a notification, or auto-corrects, depending on the mode you picked. You declare a stack once; Sencho handles the distribution and the reconciliation loop.
 
 Blueprints live under **Fleet · Deployments**.
 
@@ -49,7 +49,7 @@ Drift detection runs on every tick for every Active deployment regardless of pol
 |---|---|
 | User role | **Admin** to create, edit, withdraw, accept, and apply. Operators and viewers can read the catalog and the detail sheet. Pinning requires admin. |
 | Nodes | At least one node that the selector resolves to. Remote nodes need a healthy proxy connection; see [Multi-node management](/features/multi-node) and [Pilot Agent](/features/pilot-agent) for enrollment. |
-| Compose YAML | Valid `docker-compose.yml`, 96 KiB or fewer. |
+| Compose YAML | Valid Compose YAML, 96 KiB or fewer. |
 | Blueprint name | 1 to 64 characters matching `^[a-z0-9][a-z0-9_-]*$`. The name doubles as the stack directory on every targeted node. Rename is blocked while any non-withdrawn deployment or guard exists. |
 | Selector | A `labels` or `nodes` selector with up to 200 entries per side. An empty resolved set is allowed but produces no deployments. |
 | Compose directory | Per-node compose directory must be writable. Remote nodes must accept the controlling instance's bearer token; this is the same channel the rest of the fleet management already uses. |
@@ -74,7 +74,7 @@ The first time you visit the tab, the catalog is empty and a three-step explaine
 |---|---|
 | **Name** | Used as the stack directory on every targeted node (`<COMPOSE_DIR>/<blueprint-name>/`). Lowercase letters, digits, hyphens, and underscores only. Rename is allowed only when every deployment is withdrawn (or there are none); live placements and guards block rename. |
 | **Description** | Short prose for the catalog tile and the detail header. |
-| **Compose** | Standard `docker-compose.yml`. The same file ships to every targeted node. Sencho parses it on save and classifies the blueprint as stateless, stateful, or unknown. The YAML must parse successfully and stay under 96 KiB. |
+| **Compose** | Standard Compose YAML. The same content ships to every targeted node as `compose.yaml`. Sencho parses it on save and classifies the blueprint as stateless, stateful, or unknown. The YAML must parse successfully and stay under 96 KiB. |
 | **Selector** | Either label expressions (any-of plus all-of) or a list of node IDs picked by hand. |
 | **Drift policy** | Observe, Suggest, or Enforce. Drift detection always runs; only the response differs. |
 | **Reconciler enabled** | Toggle the reconciliation loop without deleting the blueprint. The **Disable** button on the detail sheet flips this toggle off; **Enable** turns it back on. Useful when you want to pause auto-deploys without losing the configuration. |
@@ -321,7 +321,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
     Sencho accepts valid YAML up to 96 KiB. Split very large compose files into smaller blueprints or move generated content out of the Blueprint. Do not paste secrets into the compose body; use environment files or [Fleet Secrets](/features/fleet-secrets) where appropriate.
   </Accordion>
   <Accordion title="A remote node is offline or disconnected during apply">
-    The row moves to **Failed** with the remote error. Reconnect the node (see [Pilot Agent](/features/pilot-agent) and [Multi-node management](/features/multi-node)), verify whether the stack directory contains `docker-compose.yml` and `.blueprint.json`, then click **Apply now**. If the directory exists without a matching marker, Sencho treats it as a name conflict until you rename or remove the remote stack manually.
+    The row moves to **Failed** with the remote error. Reconnect the node (see [Pilot Agent](/features/pilot-agent) and [Multi-node management](/features/multi-node)), verify whether the stack directory contains `compose.yaml` and `.blueprint.json`, then click **Apply now**. If the directory exists without a matching marker, Sencho treats it as a name conflict until you rename or remove the remote stack manually.
   </Accordion>
   <Accordion title="A Docker daemon or registry failure surfaced during apply">
     The deployment row moves to **Failed** and records the Docker or registry error. Resolve the daemon, socket, registry credentials, rate limit, disk, or volume-permission issue on the affected node, then click **Apply now**. Watch that node's stack activity and security scan status after retry.
