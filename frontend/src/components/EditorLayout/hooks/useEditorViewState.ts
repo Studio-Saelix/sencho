@@ -31,6 +31,8 @@ export function useEditorViewState() {
   const [envFiles, setEnvFiles] = useState<string[]>([]);
   const [selectedEnvFile, setSelectedEnvFile] = useState<string>('');
   const [containers, setContainers] = useState<ContainerInfo[]>([]);
+  const [containersLoadStatus, setContainersLoadStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+  const [containersLoadError, setContainersLoadError] = useState<string | null>(null);
   // Declared-service facts for the loaded stack, from the effective Compose
   // model. Empty for a single-service stack, an older node without the
   // service-scoped-update capability, or a render failure; all three cases
@@ -67,6 +69,8 @@ export function useEditorViewState() {
     envFiles, setEnvFiles,
     selectedEnvFile, setSelectedEnvFile,
     containers, setContainers,
+    containersLoadStatus, setContainersLoadStatus,
+    containersLoadError, setContainersLoadError,
     effectiveServices, setEffectiveServices,
     serviceUpdateInProgress, setServiceUpdateInProgress,
     activeTab, setActiveTab,

@@ -11,6 +11,7 @@ import { StackList, type StackListProps } from './StackList';
 import type { FilterChip } from './sidebar-types';
 import type { BulkAction } from '@/hooks/useBulkStackActions';
 import type { SidebarActivitySummary } from './useSidebarActivitySummary';
+import { isStacksListSettled } from './stacksLoadUi';
 
 export interface StackSidebarProps {
   isDarkMode: boolean;
@@ -99,7 +100,11 @@ export function StackSidebar(props: StackSidebarProps) {
           />
         )}
         <ScrollArea block className="flex-1 px-2 pb-2">
-          <div data-stacks-loaded={list.isLoading ? 'false' : 'true'}>
+          <div
+            data-stacks-loaded={
+              isStacksListSettled(list.isLoading, list.stacksLoadStatus) ? 'true' : 'false'
+            }
+          >
             <StackList {...list} bulkMode={bulkMode} selectedFiles={selectedFiles} onToggleSelect={onToggleSelect} />
           </div>
         </ScrollArea>

@@ -14,17 +14,16 @@ vi.mock('@/context/NodeContext', () => ({
   useNodes: () => useNodesMock(),
 }));
 
-// `visibilityInterval` from the live utils library uses
-// `document.visibilityState`, which jsdom treats as `prerender` until a
-// listener is attached. The polling tests below assert mount-time fetches and
-// the debounced refetch path; the long-running interval ticks themselves are
-// covered by the existing useNextAutoUpdateRun suite. Replace with a no-op
-// cleanup so the hook does not retain a real timer across tests.
+// Statuses soft-poll uses visibilityInterval (setInterval). Use a real timer so
+// tests can advance past the 10s cadence; skip document.visibility wiring.
 vi.mock('@/lib/utils', async () => {
   const actual = await vi.importActual<typeof import('@/lib/utils')>('@/lib/utils');
   return {
     ...actual,
-    visibilityInterval: () => () => {},
+    visibilityInterval: (fn: () => void, ms: number) => {
+      const id = setInterval(fn, ms);
+      return () => clearInterval(id);
+    },
   };
 });
 
@@ -110,5 +109,277 @@ describe('useDashboardData state-invalidate handling', () => {
     await act(async () => { vi.advanceTimersByTime(500); });
 
     expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('useDashboardData stackStatuses load states', () => {
+  it('reaches success with an empty map without treating deferral as empty UI state', async () => {
+    let resolveStatuses: ((r: Response) => void) | null = null;
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return new Promise<Response>((resolve) => { resolveStatuses = resolve; });
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); });
+    expect(result.current.stackStatusesLoadStatus).toBe('loading');
+
+    await act(async () => {
+      resolveStatuses?.(okJson({}));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+    expect(result.current.stackStatuses).toEqual({});
+  });
+
+  it('surfaces error on failed statuses fetch and recovers on retry', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(new Response('nope', { status: 500 }));
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(result.current.stackStatusesLoadStatus).toBe('error');
+
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') return Promise.resolve(okJson({}));
+      return Promise.resolve(okJson(null));
+    });
+
+    await act(async () => {
+      result.current.retryStackStatuses();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+  });
+
+  it('ignores an older soft success after a newer foreground retry', async () => {
+    const resolvers: Array<(r: Response) => void> = [];
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return new Promise<Response>((resolve) => { resolvers.push(resolve); });
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); });
+    expect(resolvers).toHaveLength(1);
+
+    await act(async () => {
+      resolvers[0](okJson({}));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+
+    act(() => { fireInvalidate({ scope: 'container' }); });
+    await act(async () => { vi.advanceTimersByTime(300); });
+    expect(resolvers).toHaveLength(2);
+
+    await act(async () => {
+      result.current.retryStackStatuses();
+      await Promise.resolve();
+    });
+    expect(resolvers).toHaveLength(3);
+
+    const softMap = { 'old.yml': { status: 'exited' as const } };
+    const retryMap = { 'web.yml': { status: 'running' as const } };
+    await act(async () => {
+      resolvers[1](okJson(softMap));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatuses).toEqual({});
+
+    await act(async () => {
+      resolvers[2](okJson(retryMap));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+    expect(result.current.stackStatuses).toEqual(retryMap);
+  });
+
+  it('ignores an older soft failure after a newer foreground retry success', async () => {
+    const resolvers: Array<(r: Response) => void> = [];
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return new Promise<Response>((resolve) => { resolvers.push(resolve); });
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); });
+    expect(resolvers).toHaveLength(1);
+
+    await act(async () => {
+      resolvers[0](okJson({}));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    act(() => { fireInvalidate({ scope: 'container' }); });
+    await act(async () => { vi.advanceTimersByTime(300); });
+    expect(resolvers).toHaveLength(2);
+
+    await act(async () => {
+      result.current.retryStackStatuses();
+      await Promise.resolve();
+    });
+    expect(resolvers).toHaveLength(3);
+
+    const retryMap = { 'web.yml': { status: 'running' as const } };
+    await act(async () => {
+      resolvers[2](okJson(retryMap));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatuses).toEqual(retryMap);
+
+    await act(async () => {
+      resolvers[1](new Response('nope', { status: 500 }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+    expect(result.current.stackStatuses).toEqual(retryMap);
+  });
+
+  it('lets a slow foreground statuses response commit after soft poll and invalidate ticks', async () => {
+    const resolvers: Array<(r: Response) => void> = [];
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return new Promise<Response>((resolve) => { resolvers.push(resolve); });
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); });
+    expect(resolvers).toHaveLength(1);
+    expect(result.current.stackStatusesLoadStatus).toBe('loading');
+
+    act(() => { fireInvalidate({ scope: 'container' }); });
+    await act(async () => { vi.advanceTimersByTime(300); });
+    expect(resolvers).toHaveLength(1);
+
+    await act(async () => { vi.advanceTimersByTime(10000); });
+    expect(resolvers).toHaveLength(1);
+    await act(async () => { vi.advanceTimersByTime(10000); });
+    expect(resolvers).toHaveLength(1);
+
+    const settled = { 'web.yml': { status: 'running' as const } };
+    await act(async () => {
+      resolvers[0](okJson(settled));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+    expect(result.current.stackStatuses).toEqual(settled);
+  });
+
+  it('turns a soft poll failure into a recoverable error when the prior success was empty', async () => {
+    const resolvers: Array<(r: Response) => void> = [];
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return new Promise<Response>((resolve) => { resolvers.push(resolve); });
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); });
+    expect(resolvers).toHaveLength(1);
+
+    // Foreground load settles on confirmed-empty.
+    await act(async () => {
+      resolvers[0](okJson({}));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+    expect(result.current.stackStatuses).toEqual({});
+
+    // A subsequent soft poll fails: this must not stay a silent empty state.
+    act(() => { fireInvalidate({ scope: 'container' }); });
+    await act(async () => { vi.advanceTimersByTime(300); });
+    expect(resolvers).toHaveLength(2);
+
+    await act(async () => {
+      resolvers[1](new Response('nope', { status: 500 }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.stackStatusesLoadStatus).toBe('error');
+  });
+
+  it('drops a malformed per-stack entry instead of crashing, keeping the rest of a valid response', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(okJson({
+          'web.yml': { status: 'running' },
+          'broken.yml': null,
+          'also-broken.yml': 'running',
+        }));
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.stackStatusesLoadStatus).toBe('success');
+    expect(result.current.stackStatuses).toEqual({ 'web.yml': { status: 'running' } });
+  });
+
+  it('treats a non-empty response where every entry is malformed as an error, not confirmed-empty', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(okJson({ 'a.yml': null, 'b.yml': 'running' }));
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.stackStatusesLoadStatus).toBe('error');
+    expect(result.current.stackStatuses).toEqual({});
   });
 });
