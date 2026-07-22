@@ -256,6 +256,7 @@ export default function EditorLayout() {
     markAllRead,
     deleteNotification,
     clearAllNotifications,
+    removeNotificationsForStack,
   } = useNotifications({
     nodes,
     onStateInvalidate: scheduleStateInvalidateRefresh,
@@ -289,6 +290,7 @@ export default function EditorLayout() {
     },
     canOfferVolumeRemoval,
     onDeletedOpenStack: () => onDeletedOpenStackRef.current(),
+    removeNotificationsForStack,
   });
 
   // Wire the ref now that stackActions is available

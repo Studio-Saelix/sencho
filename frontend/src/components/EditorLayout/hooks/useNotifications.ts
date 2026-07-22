@@ -28,8 +28,12 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
   // Its spans instrument only that first fetch so later polls do not pollute the
   // report.
   const notificationsReadyRef = useRef(false);
+  // Monotonic generation so a slow pre-removal fetch cannot overwrite state
+  // after removeNotificationsForStack (or a newer fetch) has already run.
+  const notificationFetchGeneration = useRef(0);
 
   const fetchNotifications = async () => {
+    const generation = ++notificationFetchGeneration.current;
     try {
       const currentNodes = nodesRef.current;
       const localNode = currentNodes.find(n => n.type === 'local');
@@ -80,6 +84,7 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
         }
       }
 
+      if (generation !== notificationFetchGeneration.current) return;
       all.sort((a, b) => b.timestamp - a.timestamp);
       setNotifications(all);
     } catch (e) {
@@ -89,6 +94,33 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
 
   const fetchNotificationsRef = useRef(fetchNotifications);
   fetchNotificationsRef.current = fetchNotifications;
+
+  const purgeStackNotifications = (nodeId: number, stackName: string) => {
+    notificationFetchGeneration.current += 1;
+    setNotifications(prev =>
+      prev.filter(n => n.nodeId !== nodeId || n.stack_name !== stackName),
+    );
+  };
+
+  const tryPurgeDeletedStackFromInvalidate = (
+    msg: { action?: unknown; nodeId?: unknown; stackName?: unknown },
+    fallbackNodeId?: number,
+  ) => {
+    if (msg.action !== 'stack-deleted' || typeof msg.stackName !== 'string') return;
+    const nodeId = typeof msg.nodeId === 'number' ? msg.nodeId : fallbackNodeId;
+    if (nodeId === undefined) return;
+    purgeStackNotifications(nodeId, msg.stackName);
+  };
+
+  const reconcileNotificationsInvalidate = (
+    msg: { action?: unknown; nodeId?: unknown; stackName?: unknown },
+    fallbackNodeId?: number,
+  ) => {
+    tryPurgeDeletedStackFromInvalidate(msg, fallbackNodeId);
+    void fetchNotificationsRef.current();
+  };
+  const reconcileNotificationsInvalidateRef = useRef(reconcileNotificationsInvalidate);
+  reconcileNotificationsInvalidateRef.current = reconcileNotificationsInvalidate;
 
   // Local notification WebSocket with exponential-backoff reconnect.
   useEffect(() => {
@@ -125,7 +157,9 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
           } else if (msg.type === 'state-invalidate') {
             window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: msg }));
             onStateInvalidateRef.current();
-            if (msg.scope === 'image-updates' && msg.action === 'stack-updated') {
+            if (msg.scope === 'notifications') {
+              reconcileNotificationsInvalidateRef.current(msg);
+            } else if (msg.scope === 'image-updates' && msg.action === 'stack-updated') {
               onImageUpdatesChangeRef.current();
             }
           }
@@ -203,7 +237,9 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
             } else if (msg.type === 'state-invalidate') {
               window.dispatchEvent(new CustomEvent('sencho:state-invalidate', { detail: { ...msg, nodeId: rn.id } }));
               onStateInvalidateRef.current();
-              if (msg.scope === 'image-updates' && msg.action === 'stack-updated') {
+              if (msg.scope === 'notifications') {
+                reconcileNotificationsInvalidateRef.current(msg, rn.id);
+              } else if (msg.scope === 'image-updates' && msg.action === 'stack-updated') {
                 onImageUpdatesChangeRef.current();
               }
             }
@@ -324,5 +360,6 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
     markAllRead,
     deleteNotification,
     clearAllNotifications,
+    removeNotificationsForStack: purgeStackNotifications,
   } as const;
 }
