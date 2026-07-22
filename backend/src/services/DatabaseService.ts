@@ -2204,6 +2204,10 @@ export class DatabaseService {
             );
             CREATE INDEX IF NOT EXISTS idx_notification_suppression_enabled
                 ON notification_suppression_rules(enabled, expires_at);
+            CREATE TABLE IF NOT EXISTS notification_suppression_rule_tombstones (
+                id INTEGER PRIMARY KEY,
+                deleted_at INTEGER NOT NULL
+            );
         `);
         this.tryAddColumn('notification_suppression_rules', 'schedule', 'TEXT NULL');
     }
@@ -2895,6 +2899,16 @@ export class DatabaseService {
             );
             return;
         }
+        const tombstone = this.db.prepare(
+            'SELECT deleted_at FROM notification_suppression_rule_tombstones WHERE id = ?',
+        ).get(rule.id) as { deleted_at: number } | undefined;
+        if (tombstone) {
+            console.warn(
+                `[DatabaseService] Ignoring suppression replica write for rule id=${sanitizeForLog(rule.id)}: ` +
+                    `this id was deleted at ${sanitizeForLog(tombstone.deleted_at)} and must not be recreated`,
+            );
+            return;
+        }
         this.db.prepare(
             `INSERT INTO notification_suppression_rules
                 (id, name, node_id, stack_patterns, label_ids, categories, levels, applies_to, enabled, expires_at, schedule, created_at, updated_at)
@@ -2944,7 +2958,18 @@ export class DatabaseService {
     }
 
     public deleteNotificationSuppressionRule(id: number): number {
-        return this.db.prepare('DELETE FROM notification_suppression_rules WHERE id = ?').run(id).changes;
+        const changes = this.db.prepare('DELETE FROM notification_suppression_rules WHERE id = ?').run(id).changes;
+        // Fleet sync has no delivery ordering guarantee: a replica POST for this id can
+        // still be in flight. Record the delete permanently (ids are AUTOINCREMENT and
+        // never reused) so upsertNotificationSuppressionRuleReplica refuses to resurrect it.
+        // Tombstone unconditionally, even when changes is 0: deleteRuleOnNode issues this
+        // same DELETE for capability/invalid-schedule cleanup against remotes that may never
+        // have received the rule yet, and a reordered POST behind that DELETE must not create it.
+        this.db.prepare(
+            `INSERT INTO notification_suppression_rule_tombstones (id, deleted_at) VALUES (?, ?)
+             ON CONFLICT(id) DO UPDATE SET deleted_at = excluded.deleted_at`,
+        ).run(id, Date.now());
+        return changes;
     }
 
     // --- Global Settings ---
