@@ -1,9 +1,7 @@
 import { useLicense } from '@/context/LicenseContext';
 import { TierBadge } from '@/components/TierBadge';
-import { Book, Bug, Mail, ExternalLink, Crown } from 'lucide-react';
+import { Book, Bug, Mail, ExternalLink } from 'lucide-react';
 import { SettingsSection } from './SettingsSection';
-import { SettingsCallout } from './SettingsCallout';
-import { SettingsPrimaryButton } from './SettingsActions';
 
 interface ResourceLinkProps {
     icon: React.ReactNode;
@@ -70,22 +68,6 @@ export function SupportSection() {
                         />
                     </div>
                 </SettingsSection>
-            )}
-
-            {!isPaid && (
-                <SettingsCallout
-                    icon={<Crown className="h-4 w-4" />}
-                    title="Need direct support?"
-                    subtitle="Admiral includes priority email support during published support hours."
-                    action={
-                        <SettingsPrimaryButton
-                            size="sm"
-                            onClick={() => window.open('https://sencho.io/#pricing', '_blank')}
-                        >
-                            View plans
-                        </SettingsPrimaryButton>
-                    }
-                />
             )}
         </div>
     );

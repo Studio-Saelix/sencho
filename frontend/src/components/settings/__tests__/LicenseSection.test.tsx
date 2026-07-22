@@ -111,3 +111,27 @@ describe('LicenseSection assurance copy', () => {
         expect(screen.queryByText(/Release Safety|Fleet Beacon|Production Assurance/i)).toBeNull();
     });
 });
+
+describe('LicenseSection pricing link', () => {
+    beforeEach(() => {
+        useLicenseMock.mockReset();
+    });
+
+    it('hides the pricing section on Community tier', () => {
+        mockLicense(baseLicense());
+        render(<LicenseSection />);
+        expect(screen.queryByText('See pricing')).toBeNull();
+    });
+
+    it('shows the pricing section for an expired license', () => {
+        mockLicense(
+            baseLicense({
+                tier: 'community',
+                status: 'expired',
+            }),
+            false,
+        );
+        render(<LicenseSection />);
+        expect(screen.getByText('See pricing')).toBeTruthy();
+    });
+});
