@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Sparkline } from '@/components/ui/sparkline';
-import { ArrowUp, ArrowDown, ChevronLeft, ChevronRight, Layers } from 'lucide-react';
+import { AlertCircle, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, Layers, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { StackStatusEntry, MetricPoint, StackCpuSeries } from './types';
+import { Skeleton } from '@/components/ui/skeleton';
+import type { StackStatusEntry, MetricPoint, StackCpuSeries, StackStatusesLoadStatus } from './types';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
 import { aggregateCurrentUsage } from './aggregateCurrentUsage';
 import { classifyRow, type RowState } from './classifyRow';
@@ -11,6 +12,9 @@ import { updateAvailableBadge, updateAvailableLabel } from '@/lib/updateAvailabl
 
 interface StackHealthTableProps {
   stackStatuses: Record<string, StackStatusEntry>;
+  stackStatusesLoadStatus: StackStatusesLoadStatus;
+  stackStatusesLoadError: string | null;
+  onRetryStackStatuses?: () => void;
   metrics: MetricPoint[];
   stackCpuSeries: Record<string, StackCpuSeries>;
   onNavigateToStack: (stackFile: string) => void;
@@ -84,6 +88,9 @@ const sparkStroke: Record<RowState, string> = {
 
 export function StackHealthTable({
   stackStatuses,
+  stackStatusesLoadStatus,
+  stackStatusesLoadError,
+  onRetryStackStatuses,
   metrics,
   stackCpuSeries,
   onNavigateToStack,
@@ -172,6 +179,36 @@ export function StackHealthTable({
   const needsPagination = rows.length > PAGE_SIZE;
 
   const stackCount = Object.keys(stackStatuses).length;
+
+  if (stackStatusesLoadStatus === 'idle' || stackStatusesLoadStatus === 'loading') {
+    return (
+      <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel p-5 space-y-3">
+        <Skeleton className="h-6 w-40" />
+        <Skeleton className="h-10 w-full" />
+        <Skeleton className="h-10 w-full" />
+        <Skeleton className="h-10 w-full" />
+      </div>
+    );
+  }
+
+  if (stackStatusesLoadStatus === 'error') {
+    return (
+      <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel py-10">
+        <div className="flex flex-col items-center justify-center gap-3 text-stat-subtitle">
+          <AlertCircle className="h-8 w-8 text-stat-icon" strokeWidth={1.5} aria-hidden />
+          <p className="text-sm text-center px-4">
+            {stackStatusesLoadError ?? 'Could not load stack health.'}
+          </p>
+          {onRetryStackStatuses && (
+            <Button type="button" variant="outline" size="sm" onClick={onRetryStackStatuses}>
+              <RefreshCw className="w-4 h-4" />
+              Retry
+            </Button>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (stackCount === 0) {
     return (

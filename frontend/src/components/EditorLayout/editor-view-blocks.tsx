@@ -21,9 +21,12 @@ import {
     List,
     Maximize2,
     Minimize2,
+    AlertCircle,
+    RefreshCw
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/button';
+import { Skeleton } from '../ui/skeleton';
 import { CardTitle } from '../ui/card';
 import {
     DropdownMenu,
@@ -317,6 +320,9 @@ export interface ContainersHealthProps {
     onRequestServiceUpdate?: (serviceName: string, mode: 'update' | 'rebuild') => void;
     containersExpanded?: boolean;
     onToggleContainersExpand?: () => void;
+    containersLoadStatus?: 'idle' | 'loading' | 'success' | 'error';
+    containersLoadError?: string | null;
+    onRetryContainersLoad?: () => void;
 }
 
 // Per-container health strip: status badge, uptime, ports, and CPU/Mem/Net
@@ -336,6 +342,9 @@ export function ContainersHealth({
     onRequestServiceUpdate,
     containersExpanded,
     onToggleContainersExpand,
+    containersLoadStatus = 'success',
+    containersLoadError = null,
+    onRetryContainersLoad,
 }: ContainersHealthProps) {
     // Multi-service only (§12): a single-service stack keeps the existing flat
     // layout untouched, including its per-container Start/Stop/Restart kebab.
@@ -642,6 +651,35 @@ export function ContainersHealth({
                         );
     };
 
+    const showConfirmedEmpty = containersLoadStatus === 'success' && safeContainers.length === 0;
+
+    if (containersLoadStatus === 'idle' || containersLoadStatus === 'loading') {
+        return (
+            <div className="space-y-2">
+                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-16 w-full" />
+                <Skeleton className="h-16 w-full" />
+            </div>
+        );
+    }
+
+    if (containersLoadStatus === 'error') {
+        return (
+            <div className="rounded-lg border border-card-border bg-card/40 p-4 text-center">
+                <AlertCircle className="mx-auto mb-2 h-8 w-8 text-muted-foreground" aria-hidden />
+                <p className="mb-3 text-sm text-muted-foreground">
+                    {containersLoadError ?? 'Could not load containers.'}
+                </p>
+                {onRetryContainersLoad && (
+                    <Button type="button" variant="outline" size="sm" onClick={onRetryContainersLoad}>
+                        <RefreshCw className="h-4 w-4" />
+                        Retry
+                    </Button>
+                )}
+            </div>
+        );
+    }
+
     return (
         <div>
             {containerStatsError && safeContainers.length > 0 && (
@@ -754,7 +792,7 @@ export function ContainersHealth({
                         );
                     })}
                 </div>
-            ) : safeContainers.length === 0 ? (
+            ) : showConfirmedEmpty ? (
                 <div className="text-muted-foreground text-sm">No containers running for this stack.</div>
             ) : (
                 <div className="flex flex-col gap-2">

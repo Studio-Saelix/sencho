@@ -43,6 +43,11 @@ function makeEditorState(over: Partial<EditorState> = {}): EditorState {
     setEditingCompose: vi.fn(),
     setActiveTab: vi.fn(),
     setContainers: vi.fn(),
+    containers: [],
+    containersLoadStatus: 'idle' as const,
+    containersLoadError: null as string | null,
+    setContainersLoadStatus: vi.fn(),
+    setContainersLoadError: vi.fn(),
     setEnvFiles: vi.fn(),
     setSelectedEnvFile: vi.fn(),
     setEnvExists: vi.fn(),
@@ -1216,6 +1221,258 @@ describe('useStackActions.openStackApp', () => {
   it('does nothing when the stack has no published port', () => {
     const { clickCount } = openAndCaptureHref({});
     expect(clickCount).toBe(0);
+  });
+});
+
+
+describe('container fetch contract', () => {
+  beforeEach(() => {
+    vi.mocked(apiFetch).mockReset();
+  });
+
+  it('soft refresh prior empty transitions to error instead of confirmed empty', async () => {
+    const setContainersLoadStatus = vi.fn();
+    const setContainersLoadError = vi.fn();
+    vi.mocked(apiFetch).mockResolvedValue(new Response('fail', { status: 500 }));
+    const { result } = setup({
+      editorState: {
+        containers: [],
+        containersLoadStatus: 'success',
+        containersLoadError: null,
+        setContainersLoadStatus,
+        setContainersLoadError,
+      } as never,
+    });
+    let ok = true;
+    await act(async () => {
+      ok = await result.current.refreshSelectedContainers('web', 'web.yml');
+    });
+    expect(ok).toBe(false);
+    expect(setContainersLoadStatus).toHaveBeenCalledWith('error');
+    expect(setContainersLoadError).toHaveBeenCalled();
+  });
+
+  it('soft refresh preserves prior non-empty containers on failure', async () => {
+    const setContainers = vi.fn();
+    const prior = [{ Id: 'abc', Names: ['/web'], State: 'running' }];
+    vi.mocked(apiFetch).mockResolvedValue(new Response('fail', { status: 500 }));
+    const { result } = setup({
+      editorState: {
+        containers: prior,
+        containersLoadStatus: 'success',
+        containersLoadError: null,
+        setContainers,
+      } as never,
+    });
+    await act(async () => {
+      await result.current.refreshSelectedContainers('web', 'web.yml');
+    });
+    expect(setContainers).not.toHaveBeenCalled();
+  });
+
+  it('malformed 200 is not treated as success empty in foreground retry', async () => {
+    const setContainersLoadStatus = vi.fn();
+    const setContainersLoadError = vi.fn();
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ not: 'an-array' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const { result } = setup({
+      editorState: {
+        containers: [],
+        setContainersLoadStatus,
+        setContainersLoadError,
+        setContainers: vi.fn(),
+      } as never,
+    });
+    await act(async () => {
+      await result.current.retryContainersLoad();
+    });
+    expect(setContainersLoadStatus).toHaveBeenCalledWith('error');
+  });
+
+  it('same-owner soft refreshes: older success does not overwrite newer', async () => {
+    const resolvers: Array<(r: Response) => void> = [];
+    vi.mocked(apiFetch).mockImplementation((endpoint: unknown) => {
+      if (typeof endpoint === 'string' && endpoint.includes('/containers')) {
+        return new Promise<Response>((resolve) => { resolvers.push(resolve); });
+      }
+      return Promise.resolve(new Response('[]', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    });
+    const setContainers = vi.fn();
+    const setContainersLoadStatus = vi.fn();
+    const { result } = setup({
+      editorState: {
+        containers: [],
+        containersLoadStatus: 'success',
+        containersLoadError: null,
+        setContainers,
+        setContainersLoadStatus,
+        setContainersLoadError: vi.fn(),
+      } as never,
+    });
+
+    let olderPromise!: Promise<boolean>;
+    let newerPromise!: Promise<boolean>;
+    await act(async () => {
+      olderPromise = result.current.refreshSelectedContainers('web', 'web.yml');
+    });
+    await act(async () => {
+      newerPromise = result.current.refreshSelectedContainers('web', 'web.yml');
+    });
+    expect(resolvers).toHaveLength(2);
+
+    const older = [{ Id: 'old', Names: ['/old'], State: 'running' }];
+    const newer = [{ Id: 'new', Names: ['/new'], State: 'running' }];
+    const json = (body: unknown) => new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+    await act(async () => {
+      resolvers[1](json(newer));
+      await newerPromise;
+    });
+    expect(setContainers).toHaveBeenLastCalledWith(newer);
+    expect(setContainersLoadStatus).toHaveBeenCalledWith('success');
+
+    setContainers.mockClear();
+    setContainersLoadStatus.mockClear();
+    await act(async () => {
+      resolvers[0](json(older));
+      await olderPromise;
+    });
+    expect(setContainers).not.toHaveBeenCalled();
+    expect(setContainersLoadStatus).not.toHaveBeenCalled();
+  });
+
+  it('deferred response after stack switch does not apply setters', async () => {
+    let resolveContainers: ((r: Response) => void) | null = null;
+    vi.mocked(apiFetch).mockImplementation((endpoint: unknown) => {
+      if (typeof endpoint === 'string' && endpoint.includes('/containers')) {
+        return new Promise<Response>((resolve) => { resolveContainers = resolve; });
+      }
+      return Promise.resolve(new Response('[]', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    });
+    const setContainers = vi.fn();
+    const setContainersLoadStatus = vi.fn();
+    const editorState = makeEditorState({
+      containers: [],
+      containersLoadStatus: 'success',
+      containersLoadError: null,
+      setContainers,
+      setContainersLoadStatus,
+      setContainersLoadError: vi.fn(),
+    });
+    const { result, rerender } = renderHook(
+      ({ selectedFile }) =>
+        useStackActions({
+          editorState,
+          stackListState: makeStackListState({ selectedFile }),
+          navState: { setActiveView: vi.fn() } as unknown as NavState,
+          overlayState: makeOverlay(),
+          activeNode: { id: 1, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'],
+          setActiveNode: vi.fn(),
+          nodes: [],
+          runWithLog,
+          getLastDeployOutputLine: () => undefined,
+          diffPreviewEnabled: false,
+          canEditStack: () => true,
+          onDeletedOpenStack: vi.fn(),
+        }),
+      { initialProps: { selectedFile: 'web.yml' as string | null } },
+    );
+
+    let refreshPromise!: Promise<boolean>;
+    await act(async () => {
+      refreshPromise = result.current.refreshSelectedContainers('web', 'web.yml');
+    });
+    expect(resolveContainers).not.toBeNull();
+
+    rerender({ selectedFile: 'api.yml' });
+    await act(async () => { await Promise.resolve(); });
+
+    await act(async () => {
+      resolveContainers?.(new Response(JSON.stringify([{ Id: 'stale', Names: ['/web'], State: 'running' }]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+      await refreshPromise;
+    });
+    expect(setContainers).not.toHaveBeenCalled();
+    expect(setContainersLoadStatus).not.toHaveBeenCalledWith('success');
+  });
+
+  it('deferred response after node switch does not apply setters', async () => {
+    let resolveContainers: ((r: Response) => void) | null = null;
+    vi.mocked(apiFetch).mockImplementation((endpoint: unknown) => {
+      if (typeof endpoint === 'string' && endpoint.includes('/containers')) {
+        return new Promise<Response>((resolve) => { resolveContainers = resolve; });
+      }
+      return Promise.resolve(new Response('[]', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+    });
+    const setContainers = vi.fn();
+    const setContainersLoadStatus = vi.fn();
+    const editorState = makeEditorState({
+      containers: [],
+      containersLoadStatus: 'success',
+      containersLoadError: null,
+      setContainers,
+      setContainersLoadStatus,
+      setContainersLoadError: vi.fn(),
+    });
+    type NodeArg = Parameters<typeof useStackActions>[0]['activeNode'];
+    const { result, rerender } = renderHook(
+      ({ activeNode }) =>
+        useStackActions({
+          editorState,
+          stackListState: makeStackListState({ selectedFile: 'web.yml' }),
+          navState: { setActiveView: vi.fn() } as unknown as NavState,
+          overlayState: makeOverlay(),
+          activeNode,
+          setActiveNode: vi.fn(),
+          nodes: [],
+          runWithLog,
+          getLastDeployOutputLine: () => undefined,
+          diffPreviewEnabled: false,
+          canEditStack: () => true,
+          onDeletedOpenStack: vi.fn(),
+        }),
+      {
+        initialProps: {
+          activeNode: { id: 1, type: 'local' } as NodeArg,
+        },
+      },
+    );
+
+    let refreshPromise!: Promise<boolean>;
+    await act(async () => {
+      refreshPromise = result.current.refreshSelectedContainers('web', 'web.yml');
+    });
+
+    rerender({ activeNode: { id: 2, type: 'remote', api_url: 'http://192.168.1.50:1852' } as NodeArg });
+    await act(async () => { await Promise.resolve(); });
+
+    await act(async () => {
+      resolveContainers?.(new Response(JSON.stringify([{ Id: 'stale', Names: ['/web'], State: 'running' }]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }));
+      await refreshPromise;
+    });
+    expect(setContainers).not.toHaveBeenCalled();
+    expect(setContainersLoadStatus).not.toHaveBeenCalledWith('success');
   });
 });
 

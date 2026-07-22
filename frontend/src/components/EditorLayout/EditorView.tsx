@@ -135,6 +135,9 @@ export interface EditorViewProps {
     envFiles: string[];
     selectedEnvFile: string;
     isFileLoading: boolean;
+    containersLoadStatus?: 'idle' | 'loading' | 'success' | 'error';
+    containersLoadError?: string | null;
+    onRetryContainersLoad?: () => void;
     backupInfo: { exists: boolean; timestamp: number | null };
     gitSourcePendingMap: Record<string, boolean>;
     notifications: NotificationItem[];
@@ -244,6 +247,9 @@ export function EditorView(props: EditorViewProps) {
         envFiles,
         selectedEnvFile,
         isFileLoading,
+        containersLoadStatus = 'success',
+        containersLoadError = null,
+        onRetryContainersLoad,
         backupInfo,
         gitSourcePendingMap,
         notifications,
@@ -475,6 +481,9 @@ export function EditorView(props: EditorViewProps) {
                                     onRequestServiceUpdate={onRequestServiceUpdate}
                                     containersExpanded={containersExpanded}
                                     onToggleContainersExpand={toggleContainersExpand}
+                                    containersLoadStatus={containersLoadStatus}
+                                    containersLoadError={containersLoadError}
+                                    onRetryContainersLoad={onRetryContainersLoad}
                                     key={`${activeNode?.id ?? 'local'}:${stackName}`}
                                 />
                             </ScrollArea>
@@ -494,6 +503,9 @@ export function EditorView(props: EditorViewProps) {
                                 serviceUpdateStatuses={serviceUpdateStatuses}
                                 serviceUpdateInProgress={serviceUpdateInProgress}
                                 onRequestServiceUpdate={onRequestServiceUpdate}
+                                containersLoadStatus={containersLoadStatus}
+                                containersLoadError={containersLoadError}
+                                onRetryContainersLoad={onRetryContainersLoad}
                                 key={`${activeNode?.id ?? 'local'}:${stackName}`}
                             />
                         </CardContent>
