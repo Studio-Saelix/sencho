@@ -197,8 +197,9 @@ RUN mkdir -p /build
 # Patch otel/sdk and exporters from v1.42.0 → v1.43.0 to clear CVE-2026-39883
 # and CVE-2026-39882, bump containerd/v2 from v2.2.3 → v2.2.5 to clear
 # CVE-2026-46680 plus the CVE-2026-53488 / 53489 / 53492 cluster, and bump
-# google.golang.org/grpc to v1.82.1 to clear GHSA-hrxh-6v49-42gf. All are
-# targeted patch-level security bumps with no breaking API changes.
+# google.golang.org/grpc to v1.82.1 to clear GHSA-hrxh-6v49-42gf. The otel and
+# containerd bumps are patch-level; the grpc bump is a minor security release.
+# None introduce breaking API changes.
 RUN --mount=type=cache,id=go-mod,sharing=locked,target=/go/pkg/mod \
     go get go.opentelemetry.io/otel@v1.43.0 \
            go.opentelemetry.io/otel/sdk@v1.43.0 \
