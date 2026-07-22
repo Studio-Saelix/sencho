@@ -287,7 +287,11 @@ export function StackHealthTable({
               <span className="min-w-0 truncate font-mono text-sm text-stat-value">{row.name}</span>
               {row.hasUpdate && (
                 <span className="shrink-0" title={updateAvailableLabel(row.outdatedServices)}>
-                  <CircleArrowUp className="h-3.5 w-3.5 text-brand" strokeWidth={2} />
+                  <CircleArrowUp
+                    className="h-3.5 w-3.5 text-brand"
+                    strokeWidth={2}
+                    aria-label={updateAvailableLabel(row.outdatedServices)}
+                  />
                 </span>
               )}
             </span>
