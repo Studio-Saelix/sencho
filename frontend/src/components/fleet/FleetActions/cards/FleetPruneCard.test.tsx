@@ -112,3 +112,126 @@ it('surfaces an error toast when the prune returns non-ok', async () => {
   await user.click(screen.getByRole('button', { name: 'Dry run' }));
   await waitFor(() => expect(toastError).toHaveBeenCalledWith('prune blew up'));
 });
+
+function estimateCallCount(): number {
+  return mockedFetch.mock.calls.filter(c => c[0] === '/fleet/prune/estimate').length;
+}
+
+it('re-fetches the estimate after a partial-success real prune', async () => {
+  const user = userEvent.setup();
+  let estimatePhase: 'pre' | 'post' = 'pre';
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/prune/estimate') {
+      if (estimatePhase === 'pre') {
+        return Promise.resolve(jsonResponse(200, {
+          totalBytes: 1024,
+          perNode: [{ nodeId: 1, nodeName: 'central', reclaimableBytes: 1024, reachable: true }],
+        }));
+      }
+      return Promise.resolve(jsonResponse(200, {
+        totalBytes: 0,
+        perNode: [{ nodeId: 1, nodeName: 'central', reclaimableBytes: 0, reachable: true }],
+      }));
+    }
+    if (url === '/fleet/labels/fleet-prune') {
+      // One target succeeded before a later failure left the node unreachable.
+      // reachable:false must not suppress the refresh (target.success is the signal).
+      return Promise.resolve(jsonResponse(200, {
+        results: [{
+          nodeId: 1,
+          nodeName: 'central',
+          reachable: false,
+          error: 'transport failed after images',
+          targets: [
+            { target: 'images', success: true, reclaimedBytes: 1024 },
+            { target: 'volumes', success: false, reclaimedBytes: 0, error: 'unreachable' },
+          ],
+        }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+
+  render(<FleetPruneCard nodes={nodes} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Prune fleet' })).toBeEnabled());
+  expect(screen.getByText('~ 1 KB reclaimable')).toBeInTheDocument();
+  expect(screen.getByText('1 KB')).toBeInTheDocument();
+  const callsBeforePrune = estimateCallCount();
+
+  await user.click(screen.getByRole('button', { name: 'Prune fleet' }));
+  const dialog = await screen.findByRole('alertdialog');
+  estimatePhase = 'post';
+  await user.click(within(dialog).getByRole('button', { name: 'Prune managed' }));
+
+  await waitFor(() => expect(estimateCallCount()).toBe(callsBeforePrune + 1));
+  const postEstimateCall = [...mockedFetch.mock.calls].reverse().find(c => c[0] === '/fleet/prune/estimate');
+  expect(postEstimateCall).toBeTruthy();
+  expect(JSON.parse(postEstimateCall![1].body)).toEqual({ targets: ['images'], scope: 'managed' });
+  await waitFor(() => expect(screen.getByText('0 reclaimable')).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText('0 Bytes')).toBeInTheDocument());
+});
+
+it('does not re-fetch the estimate after a dry run', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/prune/estimate') {
+      return Promise.resolve(jsonResponse(200, {
+        totalBytes: 1024,
+        perNode: [{ nodeId: 1, nodeName: 'central', reclaimableBytes: 1024, reachable: true }],
+      }));
+    }
+    if (url === '/fleet/labels/fleet-prune') {
+      return Promise.resolve(jsonResponse(200, {
+        results: [{
+          nodeId: 1,
+          nodeName: 'central',
+          reachable: true,
+          targets: [{ target: 'images', success: true, reclaimedBytes: 4096, dryRun: true }],
+        }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+
+  render(<FleetPruneCard nodes={nodes} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Prune fleet' })).toBeEnabled());
+  const callsBefore = estimateCallCount();
+  await user.click(screen.getByRole('button', { name: 'Dry run' }));
+  await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+  // Debounce window: a refresh would schedule another estimate within 350ms.
+  await new Promise(r => setTimeout(r, 500));
+  expect(estimateCallCount()).toBe(callsBefore);
+});
+
+it('does not re-fetch the estimate when every target fails on a 2xx response', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/prune/estimate') {
+      return Promise.resolve(jsonResponse(200, {
+        totalBytes: 1024,
+        perNode: [{ nodeId: 1, nodeName: 'central', reclaimableBytes: 1024, reachable: true }],
+      }));
+    }
+    if (url === '/fleet/labels/fleet-prune') {
+      return Promise.resolve(jsonResponse(200, {
+        results: [{
+          nodeId: 1,
+          nodeName: 'central',
+          reachable: true,
+          targets: [{ target: 'images', success: false, reclaimedBytes: 0, error: 'A prune is already running on this node' }],
+        }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+
+  render(<FleetPruneCard nodes={nodes} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Prune fleet' })).toBeEnabled());
+  const callsBefore = estimateCallCount();
+  await user.click(screen.getByRole('button', { name: 'Prune fleet' }));
+  const dialog = await screen.findByRole('alertdialog');
+  await user.click(within(dialog).getByRole('button', { name: 'Prune managed' }));
+  await waitFor(() => expect(toastError).toHaveBeenCalled());
+  await new Promise(r => setTimeout(r, 500));
+  expect(estimateCallCount()).toBe(callsBefore);
+});

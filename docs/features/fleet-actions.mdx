@@ -139,7 +139,7 @@ Scope is a segmented control with two options:
 
 ### Live estimate and behaviour
 
-- Changing a target or the scope re-triggers a debounced call to `POST /api/fleet/prune/estimate`, which walks the same Docker enumeration the destructive path uses so the estimate matches what pruning would actually reclaim. **Prune fleet** stays disabled until the estimate resolves: you cannot confirm a destructive fleet-wide prune with no context on what it will reclaim.
+- Changing a target or the scope re-triggers a debounced call to `POST /api/fleet/prune/estimate`, which walks the same Docker enumeration the destructive path uses so the estimate matches what pruning would actually reclaim. A completed real prune that succeeds on at least one target re-triggers the same estimate so the toolbar total and per-node list reflect post-prune Docker state. **Prune fleet** stays disabled until the estimate resolves: you cannot confirm a destructive fleet-wide prune with no context on what it will reclaim.
 - Each remote node receives one `POST /api/system/prune/system` call per selected target, with a 120-second timeout. If a transport error fires for one target, the remaining targets on that node are short-circuited with the same error rather than retried, so a dead node doesn't absorb the full multi-target timeout budget.
 - Local nodes serialize against a per-node lock (`bulk-prune:<nodeId>`). A second fleet prune launched against the same local node while the first is still in flight returns *A prune is already running on this node* for each target.
 - Reclaimed bytes are reported by the Docker daemon and are approximate. Per-node rows in the results panel sum the per-target reclaim; the per-target children show how much each individual prune actually freed.

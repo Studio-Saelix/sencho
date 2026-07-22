@@ -48,6 +48,9 @@ export function FleetPruneCard({ nodes }: Props) {
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<ResultRow[]>([]);
   const [estimate, setEstimate] = useState<EstimateState>({ kind: 'idle' });
+  // Bumped after a real prune mutates at least one target so the estimate
+  // effect re-runs without changing targets/scope.
+  const [estimateEpoch, setEstimateEpoch] = useState(0);
 
   const toggleTarget = (target: PruneTarget) => {
     setTargets(prev => {
@@ -92,7 +95,7 @@ export function FleetPruneCard({ nodes }: Props) {
       cancelled = true;
       if (estimateDebounceRef.current) clearTimeout(estimateDebounceRef.current);
     };
-  }, [targets, scope]);
+  }, [targets, scope, estimateEpoch]);
 
   async function run(opts: { dryRun: boolean }) {
     if (targets.size === 0) return;
@@ -113,6 +116,13 @@ export function FleetPruneCard({ nodes }: Props) {
         return;
       }
       const apiResults = (body.results as FleetPruneNodeResult[]) ?? [];
+      // HTTP 200 still arrives when every target fails; only a successful
+      // target means Docker state changed and the live estimate is stale.
+      // Scan targets independently of node.reachable (an early remote target
+      // can succeed before a later transport error marks the node unreachable).
+      if (!opts.dryRun && apiResults.some(node => node.targets.some(target => target.success))) {
+        setEstimateEpoch(e => e + 1);
+      }
       const rows: ResultRow[] = apiResults.map((node) => {
         const totalBytes = node.targets.reduce((sum, t) => sum + (t.reclaimedBytes ?? 0), 0);
         const allOk = node.reachable && node.targets.every(t => t.success);
