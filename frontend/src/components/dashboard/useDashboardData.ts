@@ -123,13 +123,12 @@ export function useDashboardData(): DashboardData {
   const nodeIdRef = useRef(nodeId);
   useEffect(() => { nodeIdRef.current = nodeId; }, [nodeId]);
 
-  // After a successful statuses load, soft poll failures keep the prior map --
-  // but only when that prior map was non-empty. Mirrors stackStatuses so the
-  // soft-failure handler (a non-reactive callback) can tell a confirmed-empty
-  // state from a populated one without depending on the map identity.
-  const hadSuccessfulStatusesRef = useRef(false);
-  const stackStatusesRef = useRef<Record<string, StackStatusEntry>>({});
-  useEffect(() => { stackStatusesRef.current = stackStatuses; }, [stackStatuses]);
+  // Whether the last committed success held a non-empty map. Soft poll failures
+  // keep the prior map only in that case; a confirmed-empty fleet must surface a
+  // recoverable error instead. Set from each committed success and reset on node
+  // change, so commitStackStatusesFailure (a useCallback that does not depend on
+  // stackStatuses) can read it without the map identity.
+  const hadNonEmptyStatusesRef = useRef(false);
   // Latest-request arbitration for /stacks/statuses: polling, invalidation,
   // mount, and Retry can overlap; only the current generation may commit.
   const stackStatusesFetchGenRef = useRef(0);
@@ -139,7 +138,7 @@ export function useDashboardData(): DashboardData {
   // always starts and supersedes obsolete work.
   const stackStatusesInFlightRef = useRef(false);
   useEffect(() => {
-    hadSuccessfulStatusesRef.current = false;
+    hadNonEmptyStatusesRef.current = false;
   }, [nodeId]);
   useEffect(() => () => {
     stackStatusesFetchGenRef.current += 1;
@@ -249,7 +248,7 @@ export function useDashboardData(): DashboardData {
     setStackStatuses(data);
     setStackStatusesLoadStatus('success');
     setStackStatusesLoadError(null);
-    hadSuccessfulStatusesRef.current = true;
+    hadNonEmptyStatusesRef.current = Object.keys(data).length > 0;
   }, [isCurrentStatusesFetch]);
 
   const commitStackStatusesFailure = useCallback((
@@ -262,11 +261,7 @@ export function useDashboardData(): DashboardData {
     // Soft: prior non-empty rows stay visible on a transient failure. Prior
     // confirmed-empty becomes a recoverable error so a soft failure can never
     // look identical to "no stacks".
-    if (
-      mode === 'soft'
-      && hadSuccessfulStatusesRef.current
-      && Object.keys(stackStatusesRef.current).length > 0
-    ) return;
+    if (mode === 'soft' && hadNonEmptyStatusesRef.current) return;
     setStackStatusesLoadStatus('error');
     setStackStatusesLoadError(failureMessage);
   }, [isCurrentStatusesFetch]);
@@ -298,13 +293,29 @@ export function useDashboardData(): DashboardData {
       const body: unknown = await res.json();
       if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
       if (body && typeof body === 'object' && !Array.isArray(body)) {
-        // Drop any entry that isn't a well-formed StackStatusEntry (null, a
-        // bare string, or an object missing `status`) rather than trusting
-        // the whole map -- one bad entry must not crash or misrepresent the
-        // rest of a valid response.
+        // Drop any entry isValidStatusEntry rejects rather than trusting the
+        // whole map: one bad entry must not crash or misrepresent the rest of
+        // a valid response.
+        const rawEntries = Object.entries(body as Record<string, unknown>);
         const sanitized: Record<string, StackStatusEntry> = {};
-        for (const [file, entry] of Object.entries(body as Record<string, unknown>)) {
-          if (isValidStatusEntry(entry)) sanitized[file] = entry;
+        for (const [file, entry] of rawEntries) {
+          if (isValidStatusEntry(entry)) {
+            sanitized[file] = entry;
+          } else {
+            console.error('[Dashboard] Dropped malformed stack status entry:', file, entry);
+          }
+        }
+        // A non-empty map where every entry failed validation is a malformed
+        // response, not a confirmed-empty fleet: committing it as success
+        // would be indistinguishable from a genuine empty fleet.
+        if (rawEntries.length > 0 && Object.keys(sanitized).length === 0) {
+          commitStackStatusesFailure(
+            currentNodeId,
+            generation,
+            mode,
+            'Stack health response was invalid.',
+          );
+          return;
         }
         commitStackStatusesSuccess(currentNodeId, generation, sanitized);
         return;

@@ -364,4 +364,22 @@ describe('useDashboardData stackStatuses load states', () => {
     expect(result.current.stackStatusesLoadStatus).toBe('success');
     expect(result.current.stackStatuses).toEqual({ 'web.yml': { status: 'running' } });
   });
+
+  it('treats a non-empty response where every entry is malformed as an error, not confirmed-empty', async () => {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stats') return Promise.resolve(okJson(STATS_PAYLOAD));
+      if (endpoint === '/system/stats') return Promise.resolve(okJson(SYS_PAYLOAD));
+      if (endpoint === '/metrics/historical') return Promise.resolve(okJson([]));
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(okJson({ 'a.yml': null, 'b.yml': 'running' }));
+      }
+      return Promise.resolve(okJson(null));
+    });
+
+    const { result } = renderHook(() => useDashboardData());
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(result.current.stackStatusesLoadStatus).toBe('error');
+    expect(result.current.stackStatuses).toEqual({});
+  });
 });

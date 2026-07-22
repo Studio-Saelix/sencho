@@ -234,15 +234,22 @@ export function useStackListState() {
       setStacksLoadError(null);
     }
 
+    // Tracks the most recently committed list for this attempt: `files` (the
+    // render-time closure) is stale once the list itself has just succeeded
+    // within this same call, e.g. the list decodes fine but the follow-up
+    // /stacks/statuses decode then throws. Seeded from `files` so a failure
+    // that happens before the list ever loads still consults the prior state.
+    let latestFileList = files;
+
     // Soft (background) failure keeps a non-empty list visible, matching the
-    // container-fetch soft-failure contract. A list that was already confirmed
-    // empty must not stay masquerading as empty: it becomes a recoverable
-    // error instead, since a soft failure is otherwise indistinguishable from
-    // "still no stacks".
+    // soft-failure handling in applyContainersFetchFailure (useStackActions.ts).
+    // A list that was already confirmed empty must not stay masquerading as
+    // empty: it becomes a recoverable error instead, since a soft failure is
+    // otherwise indistinguishable from "still no stacks".
     const applyStacksFailure = (message: string): string[] => {
-      if (background && hadSuccessfulListRef.current && files.length > 0) {
+      if (background && hadSuccessfulListRef.current && latestFileList.length > 0) {
         setStacksLoadError(message);
-        return files;
+        return latestFileList;
       }
       setFiles([]);
       setFilesNodeId(fetchNodeId);
@@ -269,6 +276,7 @@ export function useStackListState() {
         return applyStacksFailure('Stack list response was invalid.');
       }
       const fileList: string[] = data;
+      latestFileList = fileList;
       const listDispatch = beginSpan('state_dispatch', { attemptId, background, proxied });
       setFiles(fileList);
       setFilesNodeId(fetchNodeId);
