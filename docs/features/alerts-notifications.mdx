@@ -7,14 +7,14 @@ description: Threshold and event alerts for your fleet, dispatched to Discord, S
 Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and an external channel you configure. This page covers everything from configuring channels to writing per-stack threshold rules, routing alerts to dedicated channels with routing rules, and tuning retention.
 
 <Frame>
-  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel with NODE Local in the header, a Delivery retries row showing Extra attempts 0 and a Save retries button, Discord Slack Webhook and Apprise tabs with Apprise selected, Enabled off, an empty Apprise endpoint placeholder, and Test beside Save." />
+  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel with NODE Local in the header, Discord Slack Webhook and Apprise tabs with Apprise selected, Enabled off, an empty Apprise endpoint placeholder, Test beside Save, and a Delivery retries section below showing Extra attempts 0 and a Save retries button." />
 </Frame>
 
 ## Notification channels
 
 Open **Settings · Notifications · Channels** to configure Discord, Slack, custom webhook, and Apprise channels. Each channel is per-node, so switching the active node via the node picker reloads the panel against that node's stored settings. The masthead carries a `CHANNELS` stat showing how many of the four slots are enabled.
 
-Above the channel tabs, **Delivery retries** sets how many extra in-process attempts (0 to 3) Sencho makes after a transient delivery failure on that node. The default is `0` (single-shot). Extra attempts wait a fixed one second between tries. Admin role is required to change the value.
+Below the channel tabs, **Delivery retries** sets how many extra in-process attempts (0 to 3) Sencho makes after a transient delivery failure on that node. The default is `0` (single-shot). Extra attempts wait a fixed one second between tries. Admin role is required to change the value.
 
 Each Discord, Slack, and Webhook tab carries an **Enabled** toggle, a **Webhook URL** input (HTTPS only), and **Test** / **Save**. The Apprise tab uses an **Apprise endpoint** instead: keyed `/notify/{key}` shows optional **Tags**; stateless `/notify` shows **Destination URLs**. The kicker on each tab toggles between `enabled` and `off` so you can see at a glance which slots are wired up.
 
