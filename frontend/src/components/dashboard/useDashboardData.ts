@@ -91,6 +91,20 @@ export function buildNetHistory(
 // is chosen so a single transient hiccup does not trip the indicator.
 const METRICS_STALE_THRESHOLD = 3;
 
+const VALID_STACK_STATUS_VALUES = new Set(['running', 'exited', 'unknown', 'partial']);
+
+// A malformed per-stack entry (null, a bare string, or an object missing
+// `status`) must never reach the table renderer, which indexes straight into
+// `entry.status` and other fields without a null check.
+function isValidStatusEntry(value: unknown): value is StackStatusEntry {
+  return (
+    !!value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && VALID_STACK_STATUS_VALUES.has((value as { status?: unknown }).status as string)
+  );
+}
+
 export function useDashboardData(): DashboardData {
   const { activeNode, nodes } = useNodes();
   const nodeId = activeNode?.id;
@@ -109,8 +123,13 @@ export function useDashboardData(): DashboardData {
   const nodeIdRef = useRef(nodeId);
   useEffect(() => { nodeIdRef.current = nodeId; }, [nodeId]);
 
-  // After a successful statuses load, soft poll failures keep the prior map.
+  // After a successful statuses load, soft poll failures keep the prior map --
+  // but only when that prior map was non-empty. Mirrors stackStatuses so the
+  // soft-failure handler (a non-reactive callback) can tell a confirmed-empty
+  // state from a populated one without depending on the map identity.
   const hadSuccessfulStatusesRef = useRef(false);
+  const stackStatusesRef = useRef<Record<string, StackStatusEntry>>({});
+  useEffect(() => { stackStatusesRef.current = stackStatuses; }, [stackStatuses]);
   // Latest-request arbitration for /stacks/statuses: polling, invalidation,
   // mount, and Retry can overlap; only the current generation may commit.
   const stackStatusesFetchGenRef = useRef(0);
@@ -240,7 +259,14 @@ export function useDashboardData(): DashboardData {
     failureMessage: string,
   ) => {
     if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
-    if (mode === 'soft' && hadSuccessfulStatusesRef.current) return;
+    // Soft: prior non-empty rows stay visible on a transient failure. Prior
+    // confirmed-empty becomes a recoverable error so a soft failure can never
+    // look identical to "no stacks".
+    if (
+      mode === 'soft'
+      && hadSuccessfulStatusesRef.current
+      && Object.keys(stackStatusesRef.current).length > 0
+    ) return;
     setStackStatusesLoadStatus('error');
     setStackStatusesLoadError(failureMessage);
   }, [isCurrentStatusesFetch]);
@@ -272,11 +298,15 @@ export function useDashboardData(): DashboardData {
       const body: unknown = await res.json();
       if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
       if (body && typeof body === 'object' && !Array.isArray(body)) {
-        commitStackStatusesSuccess(
-          currentNodeId,
-          generation,
-          body as Record<string, StackStatusEntry>,
-        );
+        // Drop any entry that isn't a well-formed StackStatusEntry (null, a
+        // bare string, or an object missing `status`) rather than trusting
+        // the whole map -- one bad entry must not crash or misrepresent the
+        // rest of a valid response.
+        const sanitized: Record<string, StackStatusEntry> = {};
+        for (const [file, entry] of Object.entries(body as Record<string, unknown>)) {
+          if (isValidStatusEntry(entry)) sanitized[file] = entry;
+        }
+        commitStackStatusesSuccess(currentNodeId, generation, sanitized);
         return;
       }
       commitStackStatusesFailure(

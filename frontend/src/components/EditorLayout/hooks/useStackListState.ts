@@ -234,6 +234,23 @@ export function useStackListState() {
       setStacksLoadError(null);
     }
 
+    // Soft (background) failure keeps a non-empty list visible, matching the
+    // container-fetch soft-failure contract. A list that was already confirmed
+    // empty must not stay masquerading as empty: it becomes a recoverable
+    // error instead, since a soft failure is otherwise indistinguishable from
+    // "still no stacks".
+    const applyStacksFailure = (message: string): string[] => {
+      if (background && hadSuccessfulListRef.current && files.length > 0) {
+        setStacksLoadError(message);
+        return files;
+      }
+      setFiles([]);
+      setFilesNodeId(fetchNodeId);
+      setStacksLoadStatus('error');
+      setStacksLoadError(message);
+      return [];
+    };
+
     const headersSpan = beginSpan('fetch_headers', { attemptId, background });
     let bodySpan: SpanHandle | null = null;
     try {
@@ -242,22 +259,16 @@ export function useStackListState() {
       endSpan(headersSpan, { proxied, detail: { status: res.status } });
       if (stale()) { abortAttempt(attemptId); return []; }
       if (!res.ok) {
-        const message = `Could not load stacks (${res.status})`;
-        if (background && hadSuccessfulListRef.current) {
-          setStacksLoadError(message);
-          return files;
-        }
-        setFiles([]);
-        setFilesNodeId(fetchNodeId);
-        setStacksLoadStatus('error');
-        setStacksLoadError(message);
-        return [];
+        return applyStacksFailure(`Could not load stacks (${res.status})`);
       }
       bodySpan = beginSpan('body_decode', { attemptId, background, proxied });
       const data = await res.json();
       endSpan(bodySpan);
       bodySpan = null;
-      const fileList: string[] = Array.isArray(data) ? data : [];
+      if (!Array.isArray(data)) {
+        return applyStacksFailure('Stack list response was invalid.');
+      }
+      const fileList: string[] = data;
       const listDispatch = beginSpan('state_dispatch', { attemptId, background, proxied });
       setFiles(fileList);
       setFilesNodeId(fetchNodeId);
@@ -344,15 +355,7 @@ export function useStackListState() {
       if (listSucceeded && !background) {
         markMilestone('list_hydrated', { attemptId, outcome: 'error', proxied });
       }
-      if (background && hadSuccessfulListRef.current) {
-        setStacksLoadError(message);
-        return files;
-      }
-      setFiles([]);
-      setFilesNodeId(fetchNodeId);
-      setStacksLoadStatus('error');
-      setStacksLoadError(message);
-      return [];
+      return applyStacksFailure(message);
     } finally {
       setIsLoading(false);
     }
