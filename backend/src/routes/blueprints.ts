@@ -535,7 +535,7 @@ blueprintsRouter.post('/:id/withdraw/:nodeId', async (req: Request, res: Respons
                     nodeId: node.id,
                     nodeName: node.name,
                     stackName: blueprint.name,
-                    filename: 'docker-compose.yml',
+                    filename: 'compose.yaml',
                     content: compose,
                 }]);
             } catch (snapErr) {
