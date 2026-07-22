@@ -179,4 +179,19 @@ describe('AppearanceSection', () => {
         expect(screen.getByText('Top navigation labels')).toBeTruthy();
         expect(screen.queryByText('Quick links')).toBeNull();
     });
+
+    it('shows the Classic bar retiring callout only while Classic is selected', () => {
+        localStorage.clear();
+        render(<AppearanceSection />);
+        expect(screen.queryByText('Classic bar retiring')).toBeNull();
+
+        fireEvent.click(screen.getByRole('radio', { name: 'Classic bar' }));
+        expect(screen.getByText('Classic bar retiring')).toBeTruthy();
+        expect(
+            screen.getByText('Classic bar will be removed soon. Your preference is kept until then.'),
+        ).toBeTruthy();
+
+        fireEvent.click(screen.getByRole('radio', { name: 'Compact launcher' }));
+        expect(screen.queryByText('Classic bar retiring')).toBeNull();
+    });
 });

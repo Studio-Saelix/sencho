@@ -459,6 +459,14 @@ export function AppearanceSection({
             </SettingsSection>
 
             <SettingsSection title="Navigation" kicker="this browser">
+                {topNavMode === 'classic' ? (
+                    <SettingsCallout
+                        tone="warn"
+                        icon={<Info className="h-4 w-4" strokeWidth={1.5} />}
+                        title="Classic bar retiring"
+                        subtitle="Classic bar will be removed soon. Your preference is kept until then."
+                    />
+                ) : null}
                 <SettingsField
                     label="Navigation style"
                     helper="Smart bar is the recommended default: primary destinations stay visible, and the rest live under More. Classic keeps the full horizontal strip. Compact launcher puts destinations in a menu with optional quick links."
