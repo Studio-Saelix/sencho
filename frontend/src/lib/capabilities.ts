@@ -14,6 +14,7 @@ export const CAPABILITIES = [
   'notifications',
   'notification-routing',
   'notification-suppression',
+  'notification-suppression-schedule',
   'host-console',
   'container-exec',
   'audit-log',

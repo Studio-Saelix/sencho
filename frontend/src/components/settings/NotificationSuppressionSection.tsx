@@ -40,8 +40,40 @@ interface NotificationSuppressionRule {
     applies_to: AppliesTo;
     enabled: boolean;
     expires_at: number | null;
+    schedule: MuteRuleSchedule | null;
+    scheduleInvalid: boolean;
     created_at: number;
     updated_at: number;
+}
+
+type MuteRuleSchedule = {
+    days: number[];
+    start_minute: number;
+    end_minute: number;
+    tz: 'UTC';
+};
+
+const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+
+function minuteToTimeInput(minute: number): string {
+    const h = Math.floor(minute / 60);
+    const m = minute % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+function timeInputToMinute(value: string): number | null {
+    const match = /^(\d{2}):(\d{2})(?::\d{2})?$/.exec(value);
+    if (!match) return null;
+    const h = Number(match[1]);
+    const m = Number(match[2]);
+    if (h > 23 || m > 59) return null;
+    return h * 60 + m;
+}
+
+function formatScheduleSummary(schedule: MuteRuleSchedule | null): string | null {
+    if (!schedule) return null;
+    const days = schedule.days.map((d) => DAY_LABELS[d] ?? String(d)).join(', ');
+    return `UTC ${days} ${minuteToTimeInput(schedule.start_minute)}-${minuteToTimeInput(schedule.end_minute)}`;
 }
 
 const LEVEL_LABELS: Record<NotificationLevel, string> = {
@@ -127,6 +159,15 @@ export function NotificationSuppressionSection({
     const [formEnabled, setFormEnabled] = useState(true);
     const [formExpirationPreset, setFormExpirationPreset] = useState<ExpirationPreset>('forever');
     const [formCustomExpiry, setFormCustomExpiry] = useState('');
+    const [formScheduleEnabled, setFormScheduleEnabled] = useState(false);
+    const [formScheduleDays, setFormScheduleDays] = useState<number[]>([]);
+    const [formScheduleStart, setFormScheduleStart] = useState('02:00');
+    const [formScheduleEnd, setFormScheduleEnd] = useState('06:00');
+    // True when editing a rule whose stored schedule could not be read. Its window
+    // must not be silently cleared: the operator has to touch the controls first.
+    const [formScheduleInvalid, setFormScheduleInvalid] = useState(false);
+    const [formScheduleTouched, setFormScheduleTouched] = useState(false);
+    const markScheduleTouched = () => setFormScheduleTouched(true);
 
     const fetchRules = useCallback(async () => {
         try {
@@ -176,6 +217,12 @@ export function NotificationSuppressionSection({
         });
         setFormExpirationPreset('forever');
         setFormCustomExpiry('');
+        setFormScheduleEnabled(false);
+        setFormScheduleDays([]);
+        setFormScheduleStart('02:00');
+        setFormScheduleEnd('06:00');
+        setFormScheduleInvalid(false);
+        setFormScheduleTouched(false);
         setEditingId(null);
         setShowForm(true);
         onPrefillConsumed?.();
@@ -192,6 +239,12 @@ export function NotificationSuppressionSection({
         setFormEnabled(true);
         setFormExpirationPreset('forever');
         setFormCustomExpiry('');
+        setFormScheduleEnabled(false);
+        setFormScheduleDays([]);
+        setFormScheduleStart('02:00');
+        setFormScheduleEnd('06:00');
+        setFormScheduleInvalid(false);
+        setFormScheduleTouched(false);
         setEditingId(null);
         setShowForm(false);
     };
@@ -209,11 +262,30 @@ export function NotificationSuppressionSection({
         setFormEnabled(rule.enabled);
         setFormExpirationPreset(preset);
         setFormCustomExpiry(customMs != null ? new Date(customMs).toISOString().slice(0, 16) : '');
+        if (rule.schedule) {
+            setFormScheduleEnabled(true);
+            setFormScheduleDays([...rule.schedule.days]);
+            setFormScheduleStart(minuteToTimeInput(rule.schedule.start_minute));
+            setFormScheduleEnd(minuteToTimeInput(rule.schedule.end_minute));
+        } else {
+            setFormScheduleEnabled(false);
+            setFormScheduleDays([]);
+            setFormScheduleStart('02:00');
+            setFormScheduleEnd('06:00');
+        }
+        setFormScheduleInvalid(rule.scheduleInvalid);
+        setFormScheduleTouched(false);
         setShowForm(true);
     };
 
     const handleSave = async () => {
         if (!formName.trim()) { toast.error('Name is required.'); return; }
+        if (formScheduleInvalid && !formScheduleTouched) {
+            toast.error(
+                "This rule's stored weekly window could not be read. Turn the weekly window on to set a new schedule, or toggle it on then off to confirm clearing it.",
+            );
+            return;
+        }
         const preparedPatterns = patternChipsRef.current?.prepareSave();
         if (!preparedPatterns?.ok) {
             toast.error('Fix invalid stack patterns before saving.');
@@ -223,6 +295,30 @@ export function NotificationSuppressionSection({
         if (formExpirationPreset === 'custom' && (customMs == null || Number.isNaN(customMs))) {
             toast.error('Choose a valid custom expiration date.');
             return;
+        }
+
+        let schedule: MuteRuleSchedule | null = null;
+        if (formScheduleEnabled) {
+            if (formScheduleDays.length === 0) {
+                toast.error('Select at least one day for the weekly window.');
+                return;
+            }
+            const startMinute = timeInputToMinute(formScheduleStart);
+            const endMinute = timeInputToMinute(formScheduleEnd);
+            if (startMinute == null || endMinute == null) {
+                toast.error('Enter valid UTC start and end times.');
+                return;
+            }
+            if (startMinute === endMinute) {
+                toast.error('Weekly window start and end must differ.');
+                return;
+            }
+            schedule = {
+                days: [...new Set(formScheduleDays)].sort((a, b) => a - b),
+                start_minute: startMinute,
+                end_minute: endMinute,
+                tz: 'UTC',
+            };
         }
 
         setSaving(true);
@@ -237,6 +333,7 @@ export function NotificationSuppressionSection({
                 applies_to: formAppliesTo,
                 enabled: formEnabled,
                 expires_at: expirationFromPreset(formExpirationPreset, customMs),
+                schedule,
             };
 
             const url = editingId
@@ -483,6 +580,77 @@ export function NotificationSuppressionSection({
                             )}
                         </div>
 
+                        <div className="space-y-2">
+                            <div className="flex items-center gap-2">
+                                <TogglePill
+                                    checked={formScheduleEnabled}
+                                    onChange={(v) => { setFormScheduleEnabled(v); markScheduleTouched(); }}
+                                    id="mute-rule-schedule"
+                                />
+                                <Label htmlFor="mute-rule-schedule" className="mb-0">Weekly window (UTC)</Label>
+                            </div>
+                            {formScheduleInvalid && !formScheduleTouched && (
+                                <p className="text-xs text-destructive">
+                                    Stored weekly window could not be read and was not applied (alerts have been
+                                    delivering normally). Configure a new window above, or toggle it on then off to
+                                    confirm clearing it.
+                                </p>
+                            )}
+                            {formScheduleEnabled && (
+                                <div className="space-y-2 rounded-md border border-border/60 p-3">
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {DAY_LABELS.map((label, day) => {
+                                            const selected = formScheduleDays.includes(day);
+                                            return (
+                                                <Button
+                                                    key={label}
+                                                    type="button"
+                                                    size="sm"
+                                                    variant={selected ? 'default' : 'outline'}
+                                                    className="h-7 px-2 text-xs"
+                                                    aria-pressed={selected}
+                                                    aria-label={label}
+                                                    onClick={() => {
+                                                        setFormScheduleDays((prev) =>
+                                                            selected
+                                                                ? prev.filter((d) => d !== day)
+                                                                : [...prev, day].sort((a, b) => a - b),
+                                                        );
+                                                        markScheduleTouched();
+                                                    }}
+                                                >
+                                                    {label}
+                                                </Button>
+                                            );
+                                        })}
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div className="space-y-1">
+                                            <Label htmlFor="mute-schedule-start" className="text-xs text-muted-foreground">Start (UTC)</Label>
+                                            <Input
+                                                id="mute-schedule-start"
+                                                type="time"
+                                                value={formScheduleStart}
+                                                onChange={(e) => { setFormScheduleStart(e.target.value); markScheduleTouched(); }}
+                                            />
+                                        </div>
+                                        <div className="space-y-1">
+                                            <Label htmlFor="mute-schedule-end" className="text-xs text-muted-foreground">End (UTC)</Label>
+                                            <Input
+                                                id="mute-schedule-end"
+                                                type="time"
+                                                value={formScheduleEnd}
+                                                onChange={(e) => { setFormScheduleEnd(e.target.value); markScheduleTouched(); }}
+                                            />
+                                        </div>
+                                    </div>
+                                    <p className="text-xs text-muted-foreground">
+                                        Outside this window the rule does not mute. Cross-midnight windows use the start day only.
+                                    </p>
+                                </div>
+                            )}
+                        </div>
+
                         <div className="flex items-center gap-2">
                             <TogglePill checked={formEnabled} onChange={setFormEnabled} id="mute-rule-enabled" />
                             <span className="text-sm text-stat-value select-none">
@@ -531,6 +699,11 @@ export function NotificationSuppressionSection({
                                 {rule.expires_at != null && rule.expires_at <= Date.now() && (
                                     <Badge variant="secondary" className="text-[10px] shrink-0 text-muted-foreground">Expired</Badge>
                                 )}
+                                {rule.scheduleInvalid && (
+                                    <Badge variant="destructive" className="text-[10px] shrink-0" title="Stored weekly window could not be read; alerts deliver normally until repaired in Edit">
+                                        Invalid schedule
+                                    </Badge>
+                                )}
                             </div>
                             <div className="flex items-center gap-1 shrink-0">
                                 <TogglePill checked={rule.enabled} onChange={() => handleToggleEnabled(rule)} className="scale-75" />
@@ -553,6 +726,12 @@ export function NotificationSuppressionSection({
                             )}
                             <span className="text-muted-foreground/50">|</span>
                             <span className="tabular-nums">Expires: {formatExpiry(rule.expires_at)}</span>
+                            {formatScheduleSummary(rule.schedule) && (
+                                <>
+                                    <span className="text-muted-foreground/50">|</span>
+                                    <span className="tabular-nums">{formatScheduleSummary(rule.schedule)}</span>
+                                </>
+                            )}
                         </div>
                     </div>
                 ))}

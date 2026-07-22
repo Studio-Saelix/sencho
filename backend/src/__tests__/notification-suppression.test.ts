@@ -73,6 +73,8 @@ function makeSuppressionRule(overrides: Record<string, unknown> = {}) {
     applies_to: 'both' as const,
     enabled: true,
     expires_at: null as number | null,
+    schedule: null as null,
+    scheduleInvalid: false,
     created_at: Date.now(),
     updated_at: Date.now(),
     ...overrides,
@@ -175,5 +177,75 @@ describe('NotificationService - suppression logic', () => {
       'https://discord.com/api/webhooks/123/abc',
       expect.objectContaining({ method: 'POST' }),
     );
+  });
+
+  it('suppresses inside weekly window and records match', async () => {
+    // Monday 2026-07-20 03:00 UTC inside 02:00-06:00 Mon window
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-07-20T03:00:00.000Z'));
+    mockGetEnabledNotificationSuppressionRules.mockReturnValue([
+      makeSuppressionRule({
+        categories: ['monitor_alert'],
+        applies_to: 'both',
+        schedule: { days: [1], start_minute: 120, end_minute: 360, tz: 'UTC' },
+      }),
+    ]);
+    mockGetEnabledAgents.mockReturnValue([{ type: 'slack', url: 'https://hooks.slack.com/x', enabled: true }]);
+
+    await svc.dispatchAlert('error', 'monitor_alert', 'Crash', { stackName: 'my-app' });
+
+    expect(mockBroadcast).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockUpdateNotificationSuppressionMatch).toHaveBeenCalled();
+    expect(mockGetEnabledNotificationSuppressionRules).toHaveBeenCalledWith(Date.parse('2026-07-20T03:00:00.000Z'));
+  });
+
+  it('does not suppress outside weekly window', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-07-20T12:00:00.000Z'));
+    mockGetEnabledNotificationSuppressionRules.mockReturnValue([
+      makeSuppressionRule({
+        categories: ['monitor_alert'],
+        applies_to: 'both',
+        schedule: { days: [1], start_minute: 120, end_minute: 360, tz: 'UTC' },
+      }),
+    ]);
+    mockGetEnabledAgents.mockReturnValue([{ type: 'slack', url: 'https://hooks.slack.com/x', enabled: true }]);
+
+    await svc.dispatchAlert('error', 'monitor_alert', 'Crash', { stackName: 'my-app' });
+
+    expect(mockBroadcast).toHaveBeenCalled();
+    expect(mockFetch).toHaveBeenCalled();
+    expect(mockUpdateNotificationSuppressionMatch).not.toHaveBeenCalled();
+  });
+
+  it('does not suppress when stored schedule is invalid', async () => {
+    mockGetEnabledNotificationSuppressionRules.mockReturnValue([
+      makeSuppressionRule({
+        categories: ['monitor_alert'],
+        applies_to: 'both',
+        schedule: null,
+        scheduleInvalid: true,
+      }),
+    ]);
+    mockGetEnabledAgents.mockReturnValue([{ type: 'slack', url: 'https://hooks.slack.com/x', enabled: true }]);
+
+    await svc.dispatchAlert('error', 'monitor_alert', 'Crash', { stackName: 'my-app' });
+
+    expect(mockBroadcast).toHaveBeenCalled();
+    expect(mockFetch).toHaveBeenCalled();
+    expect(mockUpdateNotificationSuppressionMatch).not.toHaveBeenCalled();
+  });
+
+  it('does not suppress when scheduled rule is expired relative to atMs', async () => {
+    const atMs = Date.parse('2026-07-20T03:00:00.000Z');
+    vi.spyOn(Date, 'now').mockReturnValue(atMs);
+    // getEnabled already filters expiry; empty list simulates expired
+    mockGetEnabledNotificationSuppressionRules.mockReturnValue([]);
+    mockGetEnabledAgents.mockReturnValue([{ type: 'slack', url: 'https://hooks.slack.com/x', enabled: true }]);
+
+    await svc.dispatchAlert('error', 'monitor_alert', 'Crash', { stackName: 'my-app' });
+
+    expect(mockGetEnabledNotificationSuppressionRules).toHaveBeenCalledWith(atMs);
+    expect(mockBroadcast).toHaveBeenCalled();
+    expect(mockFetch).toHaveBeenCalled();
   });
 });
