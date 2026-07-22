@@ -16,6 +16,14 @@ export type MuteRuleDraft = {
     applies_to?: MuteRuleAppliesTo;
     enabled?: boolean;
     expires_at?: number | null;
+    schedule?: MuteRuleSchedule | null;
+};
+
+export type MuteRuleSchedule = {
+    days: number[];
+    start_minute: number;
+    end_minute: number;
+    tz: 'UTC';
 };
 
 export const MUTE_RULES_CHANGED_EVENT = 'sencho:mute-rules-changed';
@@ -28,6 +36,7 @@ const DEFAULT_BODY = {
     applies_to: 'both' as MuteRuleAppliesTo,
     enabled: true,
     expires_at: null as number | null,
+    schedule: null as MuteRuleSchedule | null,
     node_id: null as number | null,
     stack_patterns: [] as string[],
     label_ids: null as number[] | null,

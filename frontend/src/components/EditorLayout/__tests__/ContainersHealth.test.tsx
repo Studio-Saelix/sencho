@@ -450,3 +450,63 @@ describe('declared-service headers (multi-service only)', () => {
     expect(onToggle).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('containers load states', () => {
+  it('does not show empty copy while loading', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        containersLoadStatus="loading"
+      />,
+    );
+    expect(screen.queryByText(/No containers running for this stack/i)).toBeNull();
+    expect(screen.queryByText(/No containers running for this service/i)).toBeNull();
+  });
+
+  it('shows confirmed empty only after success', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        containersLoadStatus="success"
+      />,
+    );
+    expect(screen.getByText(/No containers running for this stack/i)).toBeInTheDocument();
+  });
+
+  it('shows error and invokes retry once', async () => {
+    const onRetry = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ContainersHealth
+        safeContainers={[]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        containersLoadStatus="error"
+        containersLoadError="Could not load containers."
+        onRetryContainersLoad={onRetry}
+      />,
+    );
+    expect(screen.queryByText(/No containers running for this stack/i)).toBeNull();
+    await user.click(screen.getByRole('button', { name: /retry/i }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+});

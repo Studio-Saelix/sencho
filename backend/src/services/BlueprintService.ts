@@ -10,6 +10,7 @@ import {
 } from './DatabaseService';
 import { ComposeService } from './ComposeService';
 import { StackOpLockService, stackOpSkipMessage, type StackOpAction } from './StackOpLockService';
+import { DeployedStackDeletionService } from './DeployedStackDeletionService';
 import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
@@ -20,7 +21,8 @@ import { BlueprintAnalyzer } from './BlueprintAnalyzer';
 import { sanitizeForLog } from '../utils/safeLog';
 
 const MARKER_FILENAME = '.blueprint.json';
-const COMPOSE_FILENAME = 'docker-compose.yml';
+/** On-disk compose name for Blueprint applies. Must match createStack scaffold and Sencho discovery priority. */
+const COMPOSE_FILENAME = 'compose.yaml';
 const REMOTE_HTTP_TIMEOUT_MS = 30_000;
 
 function isDeveloperModeEnabled(): boolean {
@@ -446,6 +448,9 @@ export class BlueprintService {
                 }
                 await fs.writeStackFile(stackName, COMPOSE_FILENAME, composeContent);
                 await fs.writeStackFile(stackName, MARKER_FILENAME, markerContent);
+                // Clear lower-priority compose siblings so discovery cannot shadow compose.yaml.
+                // Local + modern apply-local only; legacy remote has no sibling DELETE.
+                await fs.removeAlternateRootComposeFiles(stackName);
                 await assertPolicyGateAllows(
                     stackName,
                     nodeId,
@@ -463,32 +468,17 @@ export class BlueprintService {
     }
 
     private async withdrawLocal(blueprint: Blueprint, node: Node): Promise<void> {
-        // Hold the per-stack lock across both the compose down and the directory
-        // delete so a withdraw cannot race a manual operation, nor tear the
-        // files out from under one that starts mid-withdraw.
-        const lock = await StackOpLockService.getInstance().runExclusive(
-            node.id, blueprint.name, 'down', 'system',
-            async () => {
-                try {
-                    await ComposeService.getInstance(node.id).downStack(blueprint.name);
-                } catch (err) {
-                    // best-effort: continue to delete the directory even if down fails
-                    console.warn(`[BlueprintService] downStack failed for "${blueprint.name}" on node ${node.id}: ${BlueprintService.formatError(err)}`);
-                }
-                if (await this.stackDirExists(node.id, blueprint.name)) {
-                    await FileSystemService.getInstance(node.id).deleteStack(blueprint.name);
-                }
-                // Remove the exposure descriptor so a withdrawn blueprint
-                // stack does not leave a stale row that escalates posture.
-                try {
-                    DatabaseService.getInstance().deleteStackExposure(node.id, blueprint.name);
-                } catch (e) {
-                    console.warn(`[BlueprintService] deleteStackExposure failed for "${blueprint.name}" on node ${node.id}: ${BlueprintService.formatError(e)}`);
-                }
-            },
-        );
-        if (!lock.ran) {
-            throw new Error(stackOpSkipMessage(blueprint.name, lock.existing.action));
+        const result = await DeployedStackDeletionService.getInstance().deleteDeployedStack({
+            nodeId: node.id,
+            stackName: blueprint.name,
+            pruneVolumes: false,
+            actor: 'system:blueprint',
+        });
+        if (!result.ok) {
+            if (result.code === 'lock_conflict') {
+                throw new Error(result.error);
+            }
+            throw new Error(result.error);
         }
     }
 

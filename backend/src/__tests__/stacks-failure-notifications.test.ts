@@ -270,7 +270,7 @@ describe('health gate begin call sites', () => {
   });
 
   it('begins a gate after a manual update and returns its id', async () => {
-    mockUpdateStack.mockResolvedValue(undefined);
+    mockUpdateStack.mockResolvedValue({ recoveryId: null });
     const res = await request(app)
       .post('/api/stacks/myapp/update')
       .set('Cookie', authCookie)
@@ -281,7 +281,7 @@ describe('health gate begin call sites', () => {
   });
 
   it('begins a gate per stack in a bulk update and carries ids in the results', async () => {
-    mockUpdateStack.mockResolvedValue(undefined);
+    mockUpdateStack.mockResolvedValue({ recoveryId: null });
     const res = await request(app)
       .post('/api/stacks/bulk')
       .set('Cookie', authCookie)
@@ -490,7 +490,7 @@ describe('deploy_failure notification on /update error', () => {
   });
 
   it('uses trusted proxy tier headers for remote atomic updates', async () => {
-    mockUpdateStack.mockResolvedValue(undefined);
+    mockUpdateStack.mockResolvedValue({ recoveryId: null });
     const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
 
     const res = await request(app)

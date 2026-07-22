@@ -9,6 +9,7 @@ import type {
   StackStatusEntry,
   DashboardData,
   StackCpuSeries,
+  StackStatusesLoadStatus,
 } from './types';
 
 const DEFAULT_STATS: Stats = { active: 0, managed: 0, unmanaged: 0, exited: 0, total: 0 };
@@ -90,6 +91,20 @@ export function buildNetHistory(
 // is chosen so a single transient hiccup does not trip the indicator.
 const METRICS_STALE_THRESHOLD = 3;
 
+const VALID_STACK_STATUS_VALUES = new Set(['running', 'exited', 'unknown', 'partial']);
+
+// A malformed per-stack entry (null, a bare string, or an object missing
+// `status`) must never reach the table renderer, which indexes straight into
+// `entry.status` and other fields without a null check.
+function isValidStatusEntry(value: unknown): value is StackStatusEntry {
+  return (
+    !!value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && VALID_STACK_STATUS_VALUES.has((value as { status?: unknown }).status as string)
+  );
+}
+
 export function useDashboardData(): DashboardData {
   const { activeNode, nodes } = useNodes();
   const nodeId = activeNode?.id;
@@ -98,6 +113,8 @@ export function useDashboardData(): DashboardData {
   const [systemStats, setSystemStats] = useState<SystemStats | null>(null);
   const [metrics, setMetrics] = useState<MetricPoint[]>([]);
   const [stackStatuses, setStackStatuses] = useState<Record<string, StackStatusEntry>>({});
+  const [stackStatusesLoadStatus, setStackStatusesLoadStatus] = useState<StackStatusesLoadStatus>('idle');
+  const [stackStatusesLoadError, setStackStatusesLoadError] = useState<string | null>(null);
   const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
   const [metricsStale, setMetricsStale] = useState(false);
 
@@ -105,6 +122,27 @@ export function useDashboardData(): DashboardData {
   // after a node switch has already triggered a new effect cycle.
   const nodeIdRef = useRef(nodeId);
   useEffect(() => { nodeIdRef.current = nodeId; }, [nodeId]);
+
+  // Whether the last committed success held a non-empty map. Soft poll failures
+  // keep the prior map only in that case; a confirmed-empty fleet must surface a
+  // recoverable error instead. Set from each committed success and reset on node
+  // change, so commitStackStatusesFailure (a useCallback that does not depend on
+  // stackStatuses) can read it without the map identity.
+  const hadNonEmptyStatusesRef = useRef(false);
+  // Latest-request arbitration for /stacks/statuses: polling, invalidation,
+  // mount, and Retry can overlap; only the current generation may commit.
+  const stackStatusesFetchGenRef = useRef(0);
+  // Soft poll/invalidation must not start while any statuses request is in
+  // flight. Fixed-interval ticks would otherwise bump generation forever and
+  // starve a slow foreground hydration. Foreground (mount/retry/node change)
+  // always starts and supersedes obsolete work.
+  const stackStatusesInFlightRef = useRef(false);
+  useEffect(() => {
+    hadNonEmptyStatusesRef.current = false;
+  }, [nodeId]);
+  useEffect(() => () => {
+    stackStatusesFetchGenRef.current += 1;
+  }, []);
 
   // Consecutive failure counters per live-metrics endpoint. Either reaching
   // METRICS_STALE_THRESHOLD trips the metricsStale indicator; the first
@@ -190,19 +228,136 @@ export function useDashboardData(): DashboardData {
     return cleanup;
   }, [nodeId, fetchJson]);
 
-  // Stack statuses: 10s polling, resets on node change
+  // Stack statuses: 10s polling, resets on node change. Foreground / retry
+  // expose loading and recoverable error; soft poll failures after success keep
+  // the prior map so the dashboard never flashes a false empty state.
+  const isCurrentStatusesFetch = useCallback((
+    currentNodeId: number | undefined,
+    generation: number,
+  ) => (
+    nodeIdRef.current === currentNodeId
+    && stackStatusesFetchGenRef.current === generation
+  ), []);
+
+  const commitStackStatusesSuccess = useCallback((
+    currentNodeId: number | undefined,
+    generation: number,
+    data: Record<string, StackStatusEntry>,
+  ) => {
+    if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
+    setStackStatuses(data);
+    setStackStatusesLoadStatus('success');
+    setStackStatusesLoadError(null);
+    hadNonEmptyStatusesRef.current = Object.keys(data).length > 0;
+  }, [isCurrentStatusesFetch]);
+
+  const commitStackStatusesFailure = useCallback((
+    currentNodeId: number | undefined,
+    generation: number,
+    mode: 'foreground' | 'soft',
+    failureMessage: string,
+  ) => {
+    if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
+    // Soft: prior non-empty rows stay visible on a transient failure. Prior
+    // confirmed-empty becomes a recoverable error so a soft failure can never
+    // look identical to "no stacks".
+    if (mode === 'soft' && hadNonEmptyStatusesRef.current) return;
+    setStackStatusesLoadStatus('error');
+    setStackStatusesLoadError(failureMessage);
+  }, [isCurrentStatusesFetch]);
+
+  const fetchStackStatuses = useCallback(async (
+    currentNodeId: number | undefined,
+    mode: 'foreground' | 'soft',
+  ) => {
+    if (nodeIdRef.current !== currentNodeId) return;
+    if (mode === 'soft' && stackStatusesInFlightRef.current) return;
+    const generation = ++stackStatusesFetchGenRef.current;
+    stackStatusesInFlightRef.current = true;
+    if (mode === 'foreground') {
+      setStackStatusesLoadStatus('loading');
+      setStackStatusesLoadError(null);
+    }
+    try {
+      const res = await apiFetch('/stacks/statuses');
+      if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
+      if (!res.ok) {
+        commitStackStatusesFailure(
+          currentNodeId,
+          generation,
+          mode,
+          `Could not load stack health (${res.status}).`,
+        );
+        return;
+      }
+      const body: unknown = await res.json();
+      if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
+      if (body && typeof body === 'object' && !Array.isArray(body)) {
+        // Drop any entry isValidStatusEntry rejects rather than trusting the
+        // whole map: one bad entry must not crash or misrepresent the rest of
+        // a valid response.
+        const rawEntries = Object.entries(body as Record<string, unknown>);
+        const sanitized: Record<string, StackStatusEntry> = {};
+        for (const [file, entry] of rawEntries) {
+          if (isValidStatusEntry(entry)) {
+            sanitized[file] = entry;
+          } else {
+            console.error('[Dashboard] Dropped malformed stack status entry:', file, entry);
+          }
+        }
+        // A non-empty map where every entry failed validation is a malformed
+        // response, not a confirmed-empty fleet: committing it as success
+        // would be indistinguishable from a genuine empty fleet.
+        if (rawEntries.length > 0 && Object.keys(sanitized).length === 0) {
+          commitStackStatusesFailure(
+            currentNodeId,
+            generation,
+            mode,
+            'Stack health response was invalid.',
+          );
+          return;
+        }
+        commitStackStatusesSuccess(currentNodeId, generation, sanitized);
+        return;
+      }
+      commitStackStatusesFailure(
+        currentNodeId,
+        generation,
+        mode,
+        'Stack health response was invalid.',
+      );
+    } catch {
+      if (!isCurrentStatusesFetch(currentNodeId, generation)) return;
+      commitStackStatusesFailure(
+        currentNodeId,
+        generation,
+        mode,
+        'Could not load stack health.',
+      );
+    } finally {
+      // Only the latest generation clears the gate. A superseded request that
+      // finishes later must not reopen soft polling while a newer fetch is live.
+      if (stackStatusesFetchGenRef.current === generation) {
+        stackStatusesInFlightRef.current = false;
+      }
+    }
+  }, [commitStackStatusesSuccess, commitStackStatusesFailure, isCurrentStatusesFetch]);
+
+  const retryStackStatuses = useCallback(() => {
+    void fetchStackStatuses(nodeIdRef.current, 'foreground');
+  }, [fetchStackStatuses]);
+
   useEffect(() => {
     setStackStatuses({}); // eslint-disable-line react-hooks/set-state-in-effect
+    setStackStatusesLoadStatus('loading');
+    setStackStatusesLoadError(null);
     const currentNodeId = nodeId;
-    const fetchStatuses = async () => {
-      if (nodeIdRef.current !== currentNodeId) return;
-      const data = await fetchJson<Record<string, StackStatusEntry>>('/stacks/statuses');
-      if (data && nodeIdRef.current === currentNodeId) setStackStatuses(data);
-    };
-    fetchStatuses();
-    const cleanup = visibilityInterval(fetchStatuses, 10000);
+    void fetchStackStatuses(currentNodeId, 'foreground');
+    const cleanup = visibilityInterval(() => {
+      void fetchStackStatuses(currentNodeId, 'soft');
+    }, 10000);
     return cleanup;
-  }, [nodeId, fetchJson]);
+  }, [nodeId, fetchStackStatuses]);
 
   // React to live `state-invalidate` signals from /ws/notifications: when a
   // Docker container event fires (start/stop/die/restart/health), the layout
@@ -219,10 +374,9 @@ export function useDashboardData(): DashboardData {
     let invalidateTimer: ReturnType<typeof setTimeout> | null = null;
     const refresh = async () => {
       if (!active || nodeIdRef.current !== currentNodeId) return;
-      const [statsData, sysData, statusesData] = await Promise.all([
+      const [statsData, sysData] = await Promise.all([
         fetchJson<Stats>('/stats'),
         fetchJson<SystemStats>('/system/stats'),
-        fetchJson<Record<string, StackStatusEntry>>('/stacks/statuses'),
       ]);
       // Re-check after the await: an unmount or node switch may have
       // happened while the fetches were in flight, in which case the
@@ -233,7 +387,7 @@ export function useDashboardData(): DashboardData {
         setLastSyncAt(Date.now());
       }
       if (sysData) setSystemStats(sysData);
-      if (statusesData) setStackStatuses(statusesData);
+      await fetchStackStatuses(currentNodeId, 'soft');
     };
     const onInvalidate = () => {
       if (!active || nodeIdRef.current !== currentNodeId) return;
@@ -249,7 +403,7 @@ export function useDashboardData(): DashboardData {
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
       if (invalidateTimer) clearTimeout(invalidateTimer);
     };
-  }, [nodeId, fetchJson]);
+  }, [nodeId, fetchJson, fetchStackStatuses]);
 
   const stackCpuSeries = useMemo<Record<string, StackCpuSeries>>(() => {
     if (metrics.length === 0) return {};
@@ -337,6 +491,9 @@ export function useDashboardData(): DashboardData {
     systemStats,
     metrics,
     stackStatuses,
+    stackStatusesLoadStatus,
+    stackStatusesLoadError,
+    retryStackStatuses,
     lastSyncAt,
     nodeCount: nodes.length,
     stackCpuSeries,

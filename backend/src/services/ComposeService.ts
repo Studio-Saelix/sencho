@@ -143,6 +143,33 @@ export class ComposeService {
    * same `authoredComposeFileArgs` prefix directly but intentionally omit the mesh
    * override, rendering the user's authored model without mesh injection.
    */
+  /** Public wrapper for dual-arg assembly and recovery Compose invocations. */
+  public async buildAuthoredComposeArgs(stackName: string, action: string[]): Promise<string[]> {
+    return this.authoredComposeArgs(stackName, action);
+  }
+
+  public async validateStackForMutation(stackName: string): Promise<void> {
+    await this.assertRequiredEnvPresent(stackName);
+    await this.assertSafePilotBindMapping(stackName);
+  }
+
+  /**
+   * Render/validate the exact Compose invocation used by mutating operations
+   * (authored files, env pins, and generated Mesh override) before capture.
+   */
+  public async validateExactComposeInvocation(stackName: string): Promise<void> {
+    if (!isValidStackName(stackName)) {
+      throw new Error('Invalid stack path');
+    }
+    const baseResolved = path.resolve(this.baseDir);
+    const stackDir = path.resolve(baseResolved, stackName);
+    if (!stackDir.startsWith(baseResolved + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
+    const args = await this.authoredComposeArgs(stackName, ['config', '--quiet']);
+    await this.execute('docker', args, stackDir, undefined, true);
+  }
+
   private async authoredComposeArgs(stackName: string, action: string[]): Promise<string[]> {
     const args: string[] = ['compose'];
     const filePrefix = authoredComposeFileArgs(stackName, this.nodeId);
@@ -151,11 +178,22 @@ export class ComposeService {
     // directory, so deploy/update resolve the same effective config the validator did.
     args.push(...await authoredComposeEnvFileArgs(stackName, this.nodeId));
 
+    const meshEnabled = DatabaseService.getInstance().isMeshStackEnabled(this.nodeId, stackName);
     let overridePath: string | null = null;
     try {
       overridePath = await MeshService.getInstance().ensureStackOverride(this.nodeId, stackName);
     } catch (err) {
+      if (meshEnabled) {
+        throw err instanceof Error
+          ? err
+          : new Error(`Mesh override generation failed: ${String(err)}`);
+      }
       console.warn('[ComposeService] mesh override skipped:', sanitizeForLog((err as Error).message));
+    }
+    if (meshEnabled && !overridePath) {
+      throw new Error(
+        `Mesh override is required for stack "${stackName}" but could not be generated`,
+      );
     }
     if (overridePath) {
       if (filePrefix.length === 0) {
@@ -799,7 +837,50 @@ export class ComposeService {
     startStream();
   }
 
-  async updateStack(stackName: string, ws?: WebSocket, atomic?: boolean): Promise<void> {
+
+  /**
+   * Authored (+ mesh) compose args with an optional recovery override layered LAST.
+   * Used for pinned lifecycle / compensation ups (`--pull never --no-build`).
+   */
+  public async buildComposeArgsWithRecoveryOverride(
+    stackName: string,
+    action: string[],
+    recoveryOverridePath: string | null,
+  ): Promise<string[]> {
+    const withSentinel = await this.authoredComposeArgs(stackName, ['__SENCHO_ACTION_SENTINEL__']);
+    const idx = withSentinel.indexOf('__SENCHO_ACTION_SENTINEL__');
+    const prefix = idx >= 0 ? withSentinel.slice(0, idx) : withSentinel;
+    const out = [...prefix];
+    if (recoveryOverridePath) {
+      if (!out.includes('-f')) {
+        const fsSvc = FileSystemService.getInstance(this.nodeId);
+        const baseFilename = await fsSvc.getComposeFilename(stackName);
+        out.push('-f', baseFilename);
+        try {
+          const userOverride = await fsSvc.getOverrideFilename(stackName);
+          if (userOverride) out.push('-f', userOverride);
+        } catch (err) {
+          const code = (err as { code?: string }).code;
+          if (code === 'INVALID_STACK_NAME' || code === 'INVALID_PATH' || code === 'SYMLINK_ESCAPE') {
+            throw err;
+          }
+          console.warn(
+            '[ComposeService] could not resolve user compose override for recovery args:',
+            sanitizeForLog((err as Error).message),
+          );
+        }
+      }
+      out.push('-f', recoveryOverridePath);
+    }
+    out.push(...action);
+    return out;
+  }
+
+  async updateStack(
+    stackName: string,
+    ws?: WebSocket,
+    atomic?: boolean,
+  ): Promise<{ recoveryId: string | null }> {
     await this.assertRequiredEnvPresent(stackName);
     await this.assertSafePilotBindMapping(stackName);
     const stackDir = path.join(this.baseDir, stackName);
@@ -810,48 +891,106 @@ export class ComposeService {
       if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
     };
 
-    if (atomic) {
-      await this.createAtomicBackup(stackName, 'update', sendOutput);
-    }
+    // Dynamic import avoids a static cycle (recovery imports getComposeCommandTimeoutMs).
+    const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+    const recoverySvc = StackUpdateRecoveryService.getInstance();
+    let recoveryId: string | null = null;
+    let handedOff = false;
 
     try {
-      try {
-        const dockerController = DockerController.getInstance(this.nodeId);
-        const legacyContainers = await dockerController.getContainersByStack(stackName);
-        if (legacyContainers && legacyContainers.length > 0) {
-          sendOutput(`=== Cleaning up existing containers for clean update ===\n`);
-          await dockerController.removeContainers(legacyContainers.map((c: any) => c.Id));
-        }
-      } catch (e) {
-        console.warn('Failed to clean up legacy containers for %s:', sanitizeForLog(stackName), e);
-      }
+      sendOutput('=== Validating stack for update ===\n');
+      sendOutput('=== Capturing rollback generation ===\n');
+      const candidate = await recoverySvc.captureCandidate({
+        nodeId: this.nodeId,
+        stackName,
+        createdBy: null,
+      });
+      recoveryId = candidate.id;
 
       const buildServices = await loadStackBuildServices(this.nodeId, stackName);
       const buildAware = buildServices.length > 0;
 
-      await this.withRegistryAuth(async (env) => {
-        if (buildAware) {
-          sendOutput('=== Building images ===\n');
-          await this.execute('docker', await this.authoredComposeArgs(stackName, ['build', '--pull']), stackDir, ws, true, env, getComposeStallTimeoutMs());
+      try {
+        await this.withRegistryAuth(async (env) => {
+          if (buildAware) {
+            sendOutput('=== Building images ===\n');
+            await this.execute(
+              'docker',
+              await this.authoredComposeArgs(stackName, ['build', '--pull']),
+              stackDir, ws, true, env, getComposeStallTimeoutMs(),
+            );
+            sendOutput('=== Pulling registry images ===\n');
+            await this.execute(
+              'docker',
+              await this.authoredComposeArgs(stackName, ['pull', '--ignore-buildable']),
+              stackDir, ws, true, env, getComposeStallTimeoutMs(),
+            );
+          } else {
+            sendOutput('=== Pulling latest images ===\n');
+            await this.execute(
+              'docker',
+              await this.authoredComposeArgs(stackName, ['pull']),
+              stackDir, ws, true, env, getComposeStallTimeoutMs(),
+            );
+          }
+        }, sendOutput);
+      } catch (acquireError) {
+        // Acquisition failure: abandon candidate; leave runtime untouched.
+        await recoverySvc.abandon(candidate.id);
+        recoveryId = null;
+        throw acquireError;
+      }
 
-          sendOutput('=== Pulling registry images ===\n');
-          await this.execute('docker', await this.authoredComposeArgs(stackName, ['pull', '--ignore-buildable']), stackDir, ws, true, env, getComposeStallTimeoutMs());
-        } else {
-          sendOutput('=== Pulling latest images ===\n');
-          await this.execute('docker', await this.authoredComposeArgs(stackName, ['pull']), stackDir, ws, true, env, getComposeStallTimeoutMs());
-        }
-
-        sendOutput('=== Recreating containers ===\n');
-        await this.execute('docker', await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']), stackDir, ws, true, env, getComposeStallTimeoutMs());
-      }, sendOutput);
-
-      // Post-Update Health Probe
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      if (!recoverySvc.markAcquired(candidate.id)) {
+        await recoverySvc.abandon(candidate.id);
+        throw new Error('Failed to mark recovery generation as acquired');
+      }
 
       const dockerController = DockerController.getInstance(this.nodeId);
+      sendOutput('=== Classifying legacy orphans ===\n');
+      const classified = await dockerController.classifyLegacyOrphansForUpdate(stackName);
+      if (classified.status === 'classification_failed') {
+        await recoverySvc.abandon(candidate.id);
+        recoveryId = null;
+        throw new Error(`Legacy orphan classification failed: ${classified.error}`);
+      }
+
+      if (!recoverySvc.handoff(candidate.id, this.nodeId, stackName)) {
+        await recoverySvc.abandon(candidate.id);
+        recoveryId = null;
+        throw new Error('Failed to hand off recovery generation');
+      }
+      handedOff = true;
+      if (!recoverySvc.markReconciling(candidate.id)) {
+        throw new Error('Failed to mark recovery generation as reconciling after handoff');
+      }
+
+      if (classified.status === 'orphans') {
+        sendOutput(`=== Removing ${classified.ids.length} legacy orphan container(s) ===\n`);
+        const results = await dockerController.removeContainers(classified.ids);
+        const failed = results.filter((r) => !r.success);
+        if (failed.length > 0) {
+          throw new Error(
+            `Failed to remove ${failed.length} legacy orphan container(s) after handoff`,
+          );
+        }
+      }
+
+      await this.withRegistryAuth(async (env) => {
+        sendOutput('=== Recreating containers ===\n');
+        await this.execute(
+          'docker',
+          await this.authoredComposeArgs(stackName, ['up', '-d', '--remove-orphans']),
+          stackDir, ws, true, env, getComposeStallTimeoutMs(),
+        );
+      }, sendOutput);
+
+      // Immediate verification probe
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+
       const containers = await dockerController.getDocker().listContainers({
         all: true,
-        filters: { label: [`com.docker.compose.project=${stackName}`] }
+        filters: { label: [`com.docker.compose.project=${stackName}`] },
       });
 
       for (const containerInfo of containers) {
@@ -859,56 +998,90 @@ export class ComposeService {
           const container = dockerController.getDocker().getContainer(containerInfo.Id);
           const inspectData = await container.inspect();
           const exitCode = inspectData.State.ExitCode;
-
           if (exitCode !== 0) {
             throw this.createContainerCrashError(exitCode);
           }
         }
       }
 
+      if (!recoverySvc.markImmediateVerified(candidate.id)) {
+        console.warn(
+          '[ComposeService] Could not CAS immediate_verified for recovery %s',
+          sanitizeForLog(candidate.id),
+        );
+      }
+
       sendOutput('=== Stack updated successfully ===\n');
-      // Opt-out (default ON): after a clean update, prune the node's dangling
-      // (untagged) image layers, including the one this pull just orphaned. Read
-      // fresh each run so a remote node honors its own setting. Wrapped so a
-      // prune failure can never reach the atomic-rollback catch below.
+
+      // Defer prune until gate retention / gate link: only prune when no active holds
+      // would be violated. Still honor prune_on_update, but use unified holds so
+      // candidate/current rollback images are retained.
       try {
         const pruneOnUpdate = DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1';
         if (pruneOnUpdate) {
-          // Dynamic import: ServiceUpdateRecoveryService imports getComposeCommandTimeoutMs
-          // from this module, so a static import here would be circular.
-          const { ServiceUpdateRecoveryService } = await import('./ServiceUpdateRecoveryService');
-          const isImageHeld = ServiceUpdateRecoveryService.getInstance().buildHeldImagePredicate(this.nodeId);
+          const isImageHeld = recoverySvc.buildUnifiedHeldImagePredicate(this.nodeId);
           const result = await DockerController.getInstance(this.nodeId).pruneDanglingImages(isImageHeld);
-          // The Docker prune API does not report SpaceReclaimed on the containerd
-          // image store, so only show the figure when the daemon actually returns one.
           const reclaimed = result.reclaimedBytes > 0
             ? ` · reclaimed ${(result.reclaimedBytes / (1024 * 1024)).toFixed(1)} MB`
             : '';
           sendOutput(`=== Pruned dangling images${reclaimed} ===\n`);
         }
       } catch (pruneError) {
-        console.warn('Failed to prune dangling images after update for %s:', sanitizeForLog(stackName), pruneError);
+        console.warn(
+          'Failed to prune dangling images after update for %s:',
+          sanitizeForLog(stackName),
+          pruneError,
+        );
       }
-      if (debug) console.debug(`[ComposeService:debug] updateStack completed in ${Date.now() - t0}ms`, { stackName });
+
+      if (debug) {
+        console.debug(`[ComposeService:debug] updateStack completed in ${Date.now() - t0}ms`, { stackName });
+      }
     } catch (updateError) {
-      if (atomic) {
-        sendOutput('\n=== Update failed - restoring previous compose and env files ===\n');
-        const rolledBack = await this.restoreAtomicBackup(stackName, stackDir, ws, sendOutput);
+      if (!handedOff && recoveryId) {
+        await recoverySvc.abandon(recoveryId);
+        recoveryId = null;
+      }
+      if (handedOff && recoveryId) {
+        sendOutput('\n=== Update failed - restoring previous runtime from recovery generation ===\n');
+        const rolledBack = await recoverySvc.compensateWithCandidate(
+          recoveryId,
+          async (overridePath) => {
+            await this.withRegistryAuth(async (env) => {
+              await this.execute(
+                'docker',
+                await this.buildComposeArgsWithRecoveryOverride(
+                  stackName,
+                  ['up', '-d', '--remove-orphans', '--pull', 'never', '--no-build'],
+                  overridePath,
+                ),
+                stackDir,
+                ws,
+                true,
+                env,
+                getComposeStallTimeoutMs(),
+              );
+            }, sendOutput);
+          },
+        );
         throw new ComposeRollbackError(updateError, true, rolledBack);
       }
+      // Pre-handoff failure: abandon already handled on acquire/classify; runtime untouched.
       throw updateError;
     }
-    // Reached only on a successful update; re-baseline so temporal drift compares
-    // against what is now deployed (see deployStack for why this lives here), then
-    // reconcile the ledger against the updated runtime.
+
     await DriftLedgerService.getInstance().recordBaseline(this.nodeId, stackName);
     await DriftLedgerService.getInstance().reconcileStack(this.nodeId, stackName);
     try {
       await this.refreshExposureCache(stackName);
     } catch (err) {
-      console.warn('[ComposeService] Exposure refresh failed after update for %s:',
-        sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(err, 'unknown')));
+      console.warn(
+        '[ComposeService] Exposure refresh failed after update for %s:',
+        sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(err, 'unknown')),
+      );
     }
+    return { recoveryId };
   }
 
   /**

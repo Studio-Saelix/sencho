@@ -6,6 +6,7 @@ import {
   beginSpan,
   endSpan,
   flushPendingCommit,
+  markMilestone,
   type PendingCommit,
   type SpanHandle,
 } from '@/lib/hydrationTiming';
@@ -22,7 +23,7 @@ import type { RunWithLogParams } from '@/context/DeployFeedbackContext';
 import { parsePath } from '@/lib/router/senchoRoute';
 import { resolveEnvFilePath } from '@/lib/router/envRoute';
 import type { EditorTab, RouteStackLoadResult } from '@/lib/router/routeTypes';
-import type { StackAction, RecoverableAction, FailureClassification } from '../EditorView';
+import type { StackAction, RecoverableAction, FailureClassification, ContainerInfo } from '../EditorView';
 import type { NotificationItem } from '../../dashboard/types';
 import type { PolicyBlockPayload, PolicyBlockableAction } from '../../stack/PolicyBlockDialog';
 import type {
@@ -107,7 +108,7 @@ const parseFailureClassification = (value: unknown): FailureClassification | und
   return undefined;
 };
 
-type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update';
+type StackOpAction = 'deploy' | 'down' | 'restart' | 'stop' | 'start' | 'update' | 'delete';
 
 interface StackOpInProgressInfo {
   action: StackOpAction;
@@ -122,6 +123,7 @@ const STACK_OP_PRESENT_PARTICIPLE: Record<StackOpAction, string> = {
   stop: 'stopping',
   start: 'starting',
   update: 'updating',
+  delete: 'deleting',
 };
 
 const VALID_STACK_OP_ACTIONS: ReadonlySet<string> = new Set(
@@ -167,6 +169,13 @@ interface UseStackActionsOptions {
   canEditStack: (stackNameOrFilename: string) => boolean;
   /** Fail-closed: true only when active node meta explicitly lists stack-down-remove-volumes. */
   canOfferVolumeRemoval?: boolean;
+  /**
+   * Mobile (and any shell-owned) cleanup after deleting the stack that is
+   * currently open in the editor. EditorLayout clears pending detail and
+   * flips to the stack list surface. Required: the sole production caller
+   * owns that state, and an optional callback would silently skip it.
+   */
+  onDeletedOpenStack: () => void;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -389,6 +398,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     hasServiceScopedUpdate = false,
     canEditStack,
     canOfferVolumeRemoval = false,
+    onDeletedOpenStack,
   } = options;
 
   const pendingStackLoadRef = useRef<string | null>(null);
@@ -414,12 +424,27 @@ export function useStackActions(options: UseStackActionsOptions) {
   // activeView unchanged) still re-run the commit effect.
   const [detailVisibleEpoch, setDetailVisibleEpoch] = useState(0);
 
+  // Live ownership for container fetches: render-closure comparisons after an
+  // await can accept a response for a stack/node that is no longer active.
+  const selectedFileRef = useRef(stackListState.selectedFile);
+  const activeNodeIdRef = useRef(activeNode?.id);
+  const containersRef = useRef(editorState.containers);
+  // Same-owner arbitration: soft refresh, Retry, and detail load can overlap
+  // for one stack/node; only the newest generation may apply success or failure.
+  const containersFetchGenRef = useRef(0);
+  useEffect(() => {
+    selectedFileRef.current = stackListState.selectedFile;
+    activeNodeIdRef.current = activeNode?.id;
+    containersRef.current = editorState.containers;
+  });
+
   useEffect(() => {
     return () => {
       if (checkUpdatesIntervalRef.current !== null) {
         clearInterval(checkUpdatesIntervalRef.current);
       }
       loadFileAbortRef.current?.abort();
+      containersFetchGenRef.current += 1;
     };
   }, []);
 
@@ -492,6 +517,10 @@ export function useStackActions(options: UseStackActionsOptions) {
     // previous node's data.
     loadFileAbortRef.current?.abort();
     loadFileAbortRef.current = null;
+    // loadFileCore's finally skips clearing loading when the signal is aborted,
+    // so clear it here. Otherwise useUrlSync's writer stays blocked after a
+    // delete-leave (or any other reset) that aborts a mid-flight load.
+    editorState.setIsFileLoading(false);
     stackListState.setSelectedFile(null);
     editorState.setContent('');
     editorState.setOriginalContent('');
@@ -501,9 +530,136 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setSelectedEnvFile('');
     editorState.setEnvExists(false);
     editorState.setContainers([]);
+    editorState.setContainersLoadStatus('idle');
+    editorState.setContainersLoadError(null);
+    containersFetchGenRef.current += 1;
     editorState.setEffectiveServices([]);
     editorState.setServiceUpdateInProgress(null);
     editorState.setIsEditing(false);
+  };
+
+  type ContainersFetchMode = 'foreground' | 'soft';
+  type ContainersFetchResult =
+    | { ok: true; containers: ContainerInfo[] }
+    | { ok: false; reason: 'http' | 'malformed' | 'network' | 'aborted' | 'stale'; error?: string };
+  type ContainersFetchOwnership = {
+    signal?: AbortSignal;
+    attemptId?: string;
+    expectedFile: string;
+    expectedNodeId: number | undefined;
+    generation: number;
+  };
+
+  const ownershipStillValid = (
+    ownership: ContainersFetchOwnership,
+  ): 'ok' | 'aborted' | 'stale' => {
+    if (ownership.signal?.aborted) return 'aborted';
+    if (selectedFileRef.current !== ownership.expectedFile) return 'stale';
+    if (activeNodeIdRef.current !== ownership.expectedNodeId) return 'stale';
+    if (containersFetchGenRef.current !== ownership.generation) return 'stale';
+    if (
+      ownership.attemptId !== undefined
+      && detailAttemptRef.current !== ownership.attemptId
+    ) {
+      return 'stale';
+    }
+    return 'ok';
+  };
+
+  const applyContainersFetchFailure = (mode: ContainersFetchMode, message: string) => {
+    if (mode === 'foreground') {
+      editorState.setContainers([]);
+      editorState.setContainersLoadStatus('error');
+      editorState.setContainersLoadError(message);
+      return;
+    }
+    // Soft: prior non-empty cards stay visible. Prior confirmed-empty becomes a
+    // recoverable error so soft failure never keeps "No containers running".
+    if (containersRef.current.length === 0) {
+      editorState.setContainersLoadStatus('error');
+      editorState.setContainersLoadError(message);
+    }
+  };
+
+  const fetchStackContainers = async (
+    stackFile: string,
+    mode: ContainersFetchMode,
+    ownership: Omit<ContainersFetchOwnership, 'generation'>,
+  ): Promise<ContainersFetchResult> => {
+    const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
+    const owned: ContainersFetchOwnership = {
+      ...ownership,
+      generation: ++containersFetchGenRef.current,
+    };
+    let headersSpan: SpanHandle | null = null;
+    let bodySpan: SpanHandle | null = null;
+    if (mode === 'foreground') {
+      editorState.setContainersLoadStatus('loading');
+      editorState.setContainersLoadError(null);
+    }
+    try {
+      headersSpan = owned.attemptId
+        ? beginSpan('fetch_headers', { attemptId: owned.attemptId })
+        : null;
+      const containersRes = await apiFetch(`/stacks/${stackName}/containers`, {
+        signal: owned.signal,
+        nodeId: owned.expectedNodeId ?? null,
+      });
+      const hopProxied = containersRes.headers.get('x-sencho-proxy') === '1';
+      if (headersSpan !== null) {
+        endSpan(headersSpan, { proxied: hopProxied, detail: { status: containersRes.status } });
+        headersSpan = null;
+      }
+      const afterHeaders = ownershipStillValid(owned);
+      if (afterHeaders !== 'ok') {
+        return { ok: false, reason: afterHeaders };
+      }
+      if (!containersRes.ok) {
+        const message = `Could not load containers (${containersRes.status}).`;
+        applyContainersFetchFailure(mode, message);
+        return { ok: false, reason: 'http', error: message };
+      }
+      bodySpan = owned.attemptId
+        ? beginSpan('body_decode', { attemptId: owned.attemptId, proxied: hopProxied })
+        : null;
+      const conts: unknown = await containersRes.json();
+      if (bodySpan !== null) {
+        endSpan(bodySpan);
+        bodySpan = null;
+      }
+      const afterBody = ownershipStillValid(owned);
+      if (afterBody !== 'ok') {
+        return { ok: false, reason: afterBody };
+      }
+      if (!Array.isArray(conts)) {
+        const message = 'Container list response was invalid.';
+        applyContainersFetchFailure(mode, message);
+        return { ok: false, reason: 'malformed', error: message };
+      }
+      const list = conts as ContainerInfo[];
+      const dispatchSpan = owned.attemptId
+        ? beginSpan('state_dispatch', { attemptId: owned.attemptId, proxied: hopProxied })
+        : null;
+      editorState.setContainers(list);
+      editorState.setContainersLoadStatus('success');
+      editorState.setContainersLoadError(null);
+      if (dispatchSpan !== null) endSpan(dispatchSpan);
+      return { ok: true, containers: list };
+    } catch (error) {
+      if (headersSpan !== null) endSpan(headersSpan, { outcome: 'error' });
+      if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
+      if (isAbortError(error) || owned.signal?.aborted) {
+        return { ok: false, reason: 'aborted' };
+      }
+      const afterCatch = ownershipStillValid(owned);
+      if (afterCatch !== 'ok') {
+        return { ok: false, reason: afterCatch };
+      }
+      console.error('Failed to load containers:', error);
+      const message = 'Could not load containers.';
+      applyContainersFetchFailure(mode, message);
+      return { ok: false, reason: 'network', error: message };
+    }
   };
 
   // Re-sync the open stack's container list. Used after both successful and
@@ -511,20 +667,36 @@ export function useStackActions(options: UseStackActionsOptions) {
   // longer reflect reality. Returns true only when the live list was fetched;
   // false on a non-applicable stack, a non-ok response, or a network error, so
   // callers (e.g. the recovery panel's Refresh) can report the real outcome.
-  const refreshSelectedContainers = async (stackName: string, stackFile: string): Promise<boolean> => {
-    if (stackListState.selectedFile !== stackFile) return false;
-    try {
-      const res = await apiFetch(`/stacks/${stackName}/containers`);
-      if (!res.ok) return false;
-      const conts = await res.json();
-      editorState.setContainers(Array.isArray(conts) ? conts : []);
-      return true;
-    } catch {
-      // Non-critical when called from an action's failure path: refreshStacks(true)
-      // in the caller's finally still reconciles the sidebar status.
-      return false;
-    }
+  // stackName is kept for call-site clarity; the fetch derives the name from stackFile.
+  const refreshSelectedContainers = async (_stackName: string, stackFile: string): Promise<boolean> => {
+    if (selectedFileRef.current !== stackFile) return false;
+    const result = await fetchStackContainers(stackFile, 'soft', {
+      expectedFile: stackFile,
+      expectedNodeId: activeNodeIdRef.current,
+    });
+    return result.ok;
   };
+
+  const retryContainersLoad = async () => {
+    const stackFile = selectedFileRef.current;
+    if (!stackFile) return;
+    await fetchStackContainers(stackFile, 'foreground', {
+      expectedFile: stackFile,
+      expectedNodeId: activeNodeIdRef.current,
+    });
+  };
+
+  const loadContainerState = (
+    filename: string,
+    signal?: AbortSignal,
+    attemptId?: string,
+  ): Promise<ContainersFetchResult> =>
+    fetchStackContainers(filename, 'foreground', {
+      signal,
+      attemptId,
+      expectedFile: filename,
+      expectedNodeId: activeNodeIdRef.current,
+    });
 
   // Stack operations whose failure produces a recovery panel. A failed
   // stop/start/delete is not recoverable through retry/restart/rollback.
@@ -646,50 +818,6 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const loadContainerState = async (
-    filename: string,
-    signal?: AbortSignal,
-    attemptId?: string,
-    proxied?: boolean,
-  ): Promise<number> => {
-    let headersSpan: SpanHandle | null = null;
-    let bodySpan: SpanHandle | null = null;
-    try {
-      headersSpan = attemptId
-        ? beginSpan('fetch_headers', { attemptId, proxied })
-        : null;
-      const containersRes = await apiFetch(`/stacks/${filename}/containers`, { signal });
-      const hopProxied = containersRes.headers.get('x-sencho-proxy') === '1' || proxied === true;
-      if (headersSpan !== null) {
-        endSpan(headersSpan, { proxied: hopProxied, detail: { status: containersRes.status } });
-        headersSpan = null;
-      }
-      if (signal?.aborted) return 0;
-      bodySpan = attemptId
-        ? beginSpan('body_decode', { attemptId, proxied: hopProxied })
-        : null;
-      const conts = await containersRes.json();
-      if (bodySpan !== null) {
-        endSpan(bodySpan);
-        bodySpan = null;
-      }
-      const list = Array.isArray(conts) ? conts : [];
-      const dispatchSpan = attemptId
-        ? beginSpan('state_dispatch', { attemptId, proxied: hopProxied })
-        : null;
-      editorState.setContainers(list);
-      if (dispatchSpan !== null) endSpan(dispatchSpan);
-      return list.length;
-    } catch (error) {
-      if (headersSpan !== null) endSpan(headersSpan, { outcome: 'error' });
-      if (bodySpan !== null) endSpan(bodySpan, { outcome: 'error' });
-      if (isAbortError(error)) return 0;
-      console.error('Failed to load containers:', error);
-      editorState.setContainers([]);
-      return 0;
-    }
-  };
-
   const loadBackupState = async (filename: string, signal?: AbortSignal) => {
     try {
       const backupRes = await apiFetch(`/stacks/${filename}/backup`, { signal });
@@ -764,6 +892,15 @@ export function useStackActions(options: UseStackActionsOptions) {
     editorState.setIsEditing(false);
     editorState.setEditingCompose(false);
     editorState.setActiveTab('compose');
+    // Clear prior stack health before the first request so compose/env hydration
+    // never shows another stack's containers or service grouping. Bump the
+    // containers fetch generation so an in-flight soft refresh cannot rewrite
+    // this cleared state before loadContainerState claims a newer generation.
+    editorState.setContainers([]);
+    editorState.setEffectiveServices([]);
+    editorState.setContainersLoadError(null);
+    editorState.setContainersLoadStatus('loading');
+    containersFetchGenRef.current += 1;
     let headersSpan: SpanHandle | null = null;
     let bodySpan: SpanHandle | null = null;
     try {
@@ -791,13 +928,22 @@ export function useStackActions(options: UseStackActionsOptions) {
       detailVisiblePendingRef.current = { attemptId, token: filename, proxied };
       setDetailVisibleEpoch((n) => n + 1);
       const envFiles = await loadEnvState(filename, signal);
-      const containerCount = await loadContainerState(filename, signal, attemptId, proxied);
+      const containersResult = await loadContainerState(filename, signal, attemptId);
       if (!signal.aborted) {
-        detailContainersPendingRef.current = {
-          attemptId,
-          token: `${filename}:${containerCount}`,
-          proxied,
-        };
+        if (containersResult.ok) {
+          detailContainersPendingRef.current = {
+            attemptId,
+            token: `${filename}:${containersResult.containers.length}`,
+            proxied,
+          };
+        } else if (containersResult.reason !== 'aborted' && containersResult.reason !== 'stale') {
+          markMilestone('detail_containers_ready', {
+            attemptId,
+            outcome: 'error',
+            proxied,
+            detail: { reason: containersResult.reason },
+          });
+        }
       }
       await loadBackupState(filename, signal);
       await loadEffectiveServicesState(filename, signal);
@@ -826,6 +972,8 @@ export function useStackActions(options: UseStackActionsOptions) {
       editorState.setOriginalEnvContent('');
       editorState.setEnvEtag(null);
       editorState.setContainers([]);
+      editorState.setContainersLoadStatus('idle');
+      editorState.setContainersLoadError(null);
       editorState.setEffectiveServices([]);
       return { ok: false };
     } finally {
@@ -1587,9 +1735,8 @@ export function useStackActions(options: UseStackActionsOptions) {
       const label =
         action === 'restart' ? 'restarted' : action === 'stop' ? 'stopped' : 'started';
       toast.success(`Service "${serviceName}" ${label}`);
-      const cr = await apiFetch(`/stacks/${stackName}/containers`);
-      const conts = await cr.json();
-      editorState.setContainers(Array.isArray(conts) ? conts : []);
+      const selected = selectedFileRef.current;
+      if (selected) await refreshSelectedContainers(stackName, selected);
     } catch (e) {
       console.error(`Failed to ${action} service "${serviceName}":`, e);
       toast.error((e as Error).message || `Failed to ${action} service "${serviceName}"`);
@@ -1766,8 +1913,17 @@ export function useStackActions(options: UseStackActionsOptions) {
       }
       toast.success('Stack deleted successfully!');
       overlayState.closeDeleteDialog();
-      if (stackListState.selectedFile === stackToDelete) {
+      const selected = stackListState.selectedFile;
+      const stripExt = (name: string) => name.replace(/\.(yml|yaml)$/, '');
+      // Always clear a deleted selection, even when another top-level view is
+      // visible (Resources, Networking, etc.). Leaving that view is gated on
+      // the editor being the active surface below.
+      if (selected != null && stripExt(selected) === stripExt(deleteKey)) {
         resetEditorState();
+        if (navState.activeView === 'editor') {
+          navState.setActiveView('dashboard');
+          onDeletedOpenStack();
+        }
       }
       await stackListState.refreshStacks();
     } catch (error) {
@@ -2092,6 +2248,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     openStackApp,
     resetEditorState,
     refreshSelectedContainers,
+    retryContainersLoad,
     refreshGitSourcePending,
     loadFile,
     loadFileForRoute,

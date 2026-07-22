@@ -1104,7 +1104,13 @@ export class SchedulerService {
         );
         if (!lock.ran) return skipMessage(stackName, lock.existing.action);
         db.clearStackUpdateStatus(nodeId, stackName);
-        HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:scheduler');
+        const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:scheduler');
+        const orchResult = lock.result;
+        const recoveryId = orchResult && orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
+        if (recoveryId) {
+            const { StackUpdateRecoveryService } = await import('./StackUpdateRecoveryService');
+            StackUpdateRecoveryService.getInstance().linkGateOrRetain(recoveryId, healthGateId);
+        }
 
         this.safeDispatch(
             'info',

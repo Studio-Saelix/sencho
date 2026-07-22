@@ -235,7 +235,7 @@ describe('Notification suppression - CRUD', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         rule: {
-          id: 9001,
+          id: 910001,
           name: 'replica',
           applies_to: 'both',
           node_id: null,
@@ -255,7 +255,7 @@ describe('Notification suppression - CRUD', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({
         rule: {
-          id: 9001,
+          id: 910001,
           name: 'replica',
           applies_to: 'both',
           stack_patterns: ['****'],
@@ -270,14 +270,14 @@ describe('Notification suppression - CRUD', () => {
         },
       });
     expect(redos.status).toBe(400);
-    expect(DatabaseService.getInstance().getNotificationSuppressionRule(9001)).toBeUndefined();
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(910001)).toBeUndefined();
 
     const ok = await request(app)
       .post('/api/notification-suppression-rules/replica')
       .set('Authorization', `Bearer ${token}`)
       .send({
         rule: {
-          id: 9001,
+          id: 910001,
           name: 'replica',
           applies_to: 'both',
           stack_patterns: ['prod-*'],
@@ -292,7 +292,341 @@ describe('Notification suppression - CRUD', () => {
         },
       });
     expect(ok.status).toBe(200);
-    expect(DatabaseService.getInstance().getNotificationSuppressionRule(9001)?.stack_patterns).toEqual(['prod-*']);
-    DatabaseService.getInstance().deleteNotificationSuppressionRule(9001);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(910001)?.stack_patterns).toEqual(['prod-*']);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(910001)?.schedule).toBeNull();
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(910001);
+
+    const omitSched = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 910003,
+          name: 'replica-omit-sched',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(omitSched.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(910003)?.schedule).toBeNull();
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(910003);
+  });
+
+  it('schedule: create omit null; PUT preserve; null clear; canonicalize days; reject invalid', async () => {
+    const omitted = await request(app)
+      .post('/api/notification-suppression-rules')
+      .set('Cookie', authCookie)
+      .send({ name: 'sched omit', applies_to: 'both' });
+    expect(omitted.status).toBe(201);
+    expect(omitted.body.schedule).toBeNull();
+    const id = omitted.body.id as number;
+
+    const withSched = await request(app)
+      .put(`/api/notification-suppression-rules/${id}`)
+      .set('Cookie', authCookie)
+      .send({
+        schedule: { days: [3, 1], start_minute: 60, end_minute: 120, tz: 'UTC' },
+      });
+    expect(withSched.status).toBe(200);
+    expect(withSched.body.schedule).toEqual({
+      days: [1, 3],
+      start_minute: 60,
+      end_minute: 120,
+      tz: 'UTC',
+    });
+
+    const preserved = await request(app)
+      .put(`/api/notification-suppression-rules/${id}`)
+      .set('Cookie', authCookie)
+      .send({ enabled: false });
+    expect(preserved.status).toBe(200);
+    expect(preserved.body.schedule).toEqual({
+      days: [1, 3],
+      start_minute: 60,
+      end_minute: 120,
+      tz: 'UTC',
+    });
+
+    const cleared = await request(app)
+      .put(`/api/notification-suppression-rules/${id}`)
+      .set('Cookie', authCookie)
+      .send({ schedule: null });
+    expect(cleared.status).toBe(200);
+    expect(cleared.body.schedule).toBeNull();
+
+    const bad = await request(app)
+      .put(`/api/notification-suppression-rules/${id}`)
+      .set('Cookie', authCookie)
+      .send({ schedule: { days: [1], start_minute: 10, end_minute: 10, tz: 'UTC' } });
+    expect(bad.status).toBe(400);
+
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(id);
+  });
+
+  it('replica rejects invalid schedule and accepts valid schedule', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    const bad = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 920002,
+          name: 'replica-sched',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          schedule: { days: [1], start_minute: 0, end_minute: 0, tz: 'UTC' },
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(bad.status).toBe(400);
+
+    const ok = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 920002,
+          name: 'replica-sched',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          schedule: { days: [6], start_minute: 1320, end_minute: 120, tz: 'UTC' },
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(ok.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(920002)?.schedule).toEqual({
+      days: [6],
+      start_minute: 1320,
+      end_minute: 120,
+      tz: 'UTC',
+    });
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(920002);
+  });
+
+  it('replica forces node_id to null regardless of the payload value', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    const res = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 930004,
+          name: 'replica-scoped',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: 5,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(res.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(930004)?.node_id).toBeNull();
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(930004);
+  });
+
+  it('replica ignores a stale write with an older updated_at than the stored row', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const replicaRule = (overrides: Record<string, unknown>) => ({
+      id: 940005,
+      name: 'replica-race',
+      applies_to: 'both',
+      stack_patterns: [],
+      node_id: null,
+      label_ids: null,
+      categories: null,
+      levels: null,
+      enabled: true,
+      expires_at: null,
+      created_at: 1,
+      ...overrides,
+    });
+
+    const first = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ name: 'v2-newer', updated_at: 2000 }) });
+    expect(first.status).toBe(200);
+
+    const stale = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ name: 'v1-delayed-stale', updated_at: 1000 }) });
+    expect(stale.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(940005)?.name).toBe('v2-newer');
+
+    const tie = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ name: 'v2-tie-same-timestamp', updated_at: 2000 }) });
+    expect(tie.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(940005)?.name).toBe('v2-newer');
+
+    const newer = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ name: 'v3-newest', updated_at: 3000 }) });
+    expect(newer.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(940005)?.name).toBe('v3-newest');
+
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(940005);
+  });
+
+  it('replica does not resurrect a rule after it was deleted, even with a newer updated_at', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const replicaRule = (overrides: Record<string, unknown>) => ({
+      id: 950006,
+      name: 'replica-delete-race',
+      applies_to: 'both',
+      stack_patterns: [],
+      node_id: null,
+      label_ids: null,
+      categories: null,
+      levels: null,
+      enabled: true,
+      expires_at: null,
+      created_at: 1,
+      ...overrides,
+    });
+
+    const first = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ updated_at: 1000 }) });
+    expect(first.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(950006)).not.toBeUndefined();
+
+    const del = await request(app)
+      .delete('/api/notification-suppression-rules/replica/950006')
+      .set('Authorization', `Bearer ${token}`);
+    expect(del.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(950006)).toBeUndefined();
+
+    // A delayed POST arrives after the DELETE, reordered by the network. Even
+    // though its updated_at is newer than anything the sender ever sent before
+    // the delete, the delete is authoritative: this id must stay gone.
+    const delayed = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ updated_at: 2000 }) });
+    expect(delayed.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(950006)).toBeUndefined();
+  });
+
+  it('replica DELETE tombstones an id even when the remote never had that row', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    // This remote never received rule 960007 (e.g. it just enrolled, or the rule
+    // failed capability probing before its first push). A cleanup DELETE still
+    // arrives unconditionally from deleteRuleOnNode. A POST reordered behind it
+    // must not be allowed to create the rule for the first time.
+    const del = await request(app)
+      .delete('/api/notification-suppression-rules/replica/960007')
+      .set('Authorization', `Bearer ${token}`);
+    expect(del.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(960007)).toBeUndefined();
+
+    const delayed = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 960007,
+          name: 'replica-delete-before-first-post',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: 1,
+        },
+      });
+    expect(delayed.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(960007)).toBeUndefined();
+  });
+
+  it('replica does not resurrect a deleted rule with a schedule', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const replicaRule = (overrides: Record<string, unknown>) => ({
+      id: 970008,
+      name: 'replica-scheduled-delete-race',
+      applies_to: 'both',
+      stack_patterns: [],
+      node_id: null,
+      label_ids: null,
+      categories: null,
+      levels: null,
+      enabled: true,
+      expires_at: null,
+      schedule: { days: [1], start_minute: 120, end_minute: 360, tz: 'UTC' },
+      created_at: 1,
+      ...overrides,
+    });
+
+    const first = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ updated_at: 1000 }) });
+    expect(first.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(970008)?.schedule).not.toBeNull();
+
+    // This is the worst case the fix protects: a capability-cleanup DELETE
+    // retracts an all-day/scheduled mute from a node that stopped supporting
+    // it. A delayed re-push of the scheduled rule must not undo that cleanup.
+    const del = await request(app)
+      .delete('/api/notification-suppression-rules/replica/970008')
+      .set('Authorization', `Bearer ${token}`);
+    expect(del.status).toBe(200);
+
+    const delayed = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ updated_at: 2000 }) });
+    expect(delayed.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(970008)).toBeUndefined();
   });
 });

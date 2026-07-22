@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "predev": "node scripts/generate-version.js",
     "dev": "nodemon --watch src --ext ts,json --exec ts-node src/index.ts",
+    "test:docker-integration": "vitest run --config vitest.docker-integration.config.ts",
     "test": "vitest run",
     "lint": "eslint src",
     "reset-mfa": "node dist/cli/resetMfa.js",
@@ -65,7 +66,7 @@
   "dependencies": {
     "axios": "^1.15.0",
     "bcrypt": "^6.0.0",
-    "better-sqlite3": "^12.6.2",
+    "better-sqlite3": "^13.0.1",
     "composerize": "^1.7.5",
     "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",

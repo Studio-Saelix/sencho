@@ -96,11 +96,12 @@ describe('buildRollbackItems', () => {
     expect(known.detail).toContain('nginx:1.27.1');
   });
 
-  it('downgrades the previous image to not_covered for a moving tag', () => {
+  it('treats a moving tag as ready because full-stack updates retain the prior image ID', () => {
     const item = itemById(baseInputs({ rollbackTarget: { target: 'nginx:latest', moving: true } }), 'previous_images');
-    expect(item.state).toBe('not_covered');
+    expect(item.state).toBe('ready');
     expect(item.detail).toContain('moving image tag');
     expect(item.detail).toContain('nginx:latest');
+    expect(item.detail).toContain('recovery window');
   });
 
   it('does not mistake an image literally named error for a failed preview', () => {
@@ -139,9 +140,9 @@ describe('aggregateRollbackOverall', () => {
     expect(aggregateRollbackOverall(items)).toBe('partial');
   });
 
-  it('is partial when the rollback target is a moving tag', () => {
+  it('is ready when the rollback target is a moving tag (image ID capture covers it)', () => {
     const items = buildRollbackItems(baseInputs({ rollbackTarget: { target: 'nginx:latest', moving: true } }), NOW);
-    expect(aggregateRollbackOverall(items)).toBe('partial');
+    expect(aggregateRollbackOverall(items)).toBe('ready');
   });
 
   it('is partial when env coverage is missing', () => {

@@ -164,7 +164,7 @@ describe('self stack lifecycle refusal', () => {
   });
 
   it('allows update on a non-self stack', async () => {
-    mockUpdateStack.mockResolvedValue(undefined);
+    mockUpdateStack.mockResolvedValue({ recoveryId: null });
     const res = await request(app)
       .post('/api/stacks/web/update')
       .set('Cookie', authCookie);
@@ -177,7 +177,7 @@ describe('self stack lifecycle refusal', () => {
 describe('POST /api/stacks/bulk self stack skip', () => {
   beforeEach(() => {
     stubSelfProject('sencho');
-    mockUpdateStack.mockResolvedValue(undefined);
+    mockUpdateStack.mockResolvedValue({ recoveryId: null });
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1' }]);
   });
 

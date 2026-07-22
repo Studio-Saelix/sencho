@@ -96,11 +96,16 @@ export interface StackCpuSeries {
   latestValue: number;
 }
 
+export type StackStatusesLoadStatus = 'idle' | 'loading' | 'success' | 'error';
+
 export interface DashboardData {
   stats: Stats;
   systemStats: SystemStats | null;
   metrics: MetricPoint[];
   stackStatuses: Record<string, StackStatusEntry>;
+  stackStatusesLoadStatus: StackStatusesLoadStatus;
+  stackStatusesLoadError: string | null;
+  retryStackStatuses: () => void;
   lastSyncAt: number | null;
   nodeCount: number;
   stackCpuSeries: Record<string, StackCpuSeries>;

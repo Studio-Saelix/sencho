@@ -48,6 +48,9 @@ export default function HomeDashboard({ onNavigateToStack, onOpenSettingsSection
 
       <StackHealthTable
         stackStatuses={data.stackStatuses}
+        stackStatusesLoadStatus={data.stackStatusesLoadStatus}
+        stackStatusesLoadError={data.stackStatusesLoadError}
+        onRetryStackStatuses={data.retryStackStatuses}
         metrics={data.metrics}
         stackCpuSeries={data.stackCpuSeries}
         onNavigateToStack={onNavigateToStack ?? NOOP}

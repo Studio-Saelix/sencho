@@ -12,6 +12,7 @@ import {
     matchesNotificationFilters,
     ruleNeedsStackLabels,
 } from '../helpers/notificationMatchers';
+import { scheduleAllowsSuppression } from '../helpers/notificationSchedule';
 import {
     type NotificationChannelType,
     type ParsedAppriseConfig,
@@ -230,7 +231,8 @@ export class NotificationService {
                 });
             }
 
-            const suppressionRules = this.dbService.getEnabledNotificationSuppressionRules();
+            const atMs = Date.now();
+            const suppressionRules = this.dbService.getEnabledNotificationSuppressionRules(atMs);
             const routes = this.dbService.getEnabledNotificationRoutes();
             const needsStackLabels = stackName !== undefined && (
                 ruleNeedsStackLabels(suppressionRules)
@@ -246,7 +248,10 @@ export class NotificationService {
                 level,
                 stackLabelIds,
             };
-            const matchedSuppression = suppressionRules.filter((r) => matchesNotificationFilters(matchCtx, r));
+            const matchedSuppression = suppressionRules.filter((r) =>
+                matchesNotificationFilters(matchCtx, r)
+                && scheduleAllowsSuppression(r.schedule, r.scheduleInvalid, atMs)
+            );
             const suppressBell = matchedSuppression.some((r) => appliesToBell(r.applies_to));
             const suppressExternal = matchedSuppression.some((r) => appliesToExternal(r.applies_to));
 
