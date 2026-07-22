@@ -1027,7 +1027,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             )}
                         </div>
                         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-                        <ScrollArea className="max-h-[62vh]">
+                        <ScrollArea className="h-[62vh] max-md:h-auto">
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
@@ -1200,7 +1200,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                             />
                         </div>
                         <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-                        <ScrollArea className="max-h-[62vh]">
+                        <ScrollArea className="h-[62vh] max-md:h-auto">
                         <Table>
                             <TableHeader>
                                 <TableRow className="hover:bg-transparent">
