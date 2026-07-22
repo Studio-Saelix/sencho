@@ -248,7 +248,7 @@ export function ImagesTab({ summaries, loading, error, onInspect, canScan, scann
       </div>
 
       <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-        <ScrollArea className="max-h-[62vh]">
+        <ScrollArea className="h-[62vh]">
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
