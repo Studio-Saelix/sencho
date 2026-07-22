@@ -269,7 +269,9 @@ export function StackHealthTable({
         <span />
       </div>
       <ul className="divide-y divide-border/40">
-        {pagedRows.map((row) => (
+        {pagedRows.map((row) => {
+          const updateLabel = row.hasUpdate ? updateAvailableLabel(row.outdatedServices) : null;
+          return (
           <li
             key={row.file}
             role="button"
@@ -285,12 +287,12 @@ export function StackHealthTable({
           >
             <span className="flex items-center gap-1.5 min-w-0">
               <span className="min-w-0 truncate font-mono text-sm text-stat-value">{row.name}</span>
-              {row.hasUpdate && (
-                <span className="shrink-0" title={updateAvailableLabel(row.outdatedServices)}>
+              {updateLabel && (
+                <span className="shrink-0" title={updateLabel}>
                   <CircleArrowUp
                     className="h-3.5 w-3.5 text-brand"
                     strokeWidth={2}
-                    aria-label={updateAvailableLabel(row.outdatedServices)}
+                    aria-label={updateLabel}
                   />
                 </span>
               )}
@@ -328,7 +330,8 @@ export function StackHealthTable({
             </span>
             <ChevronRight className="h-3.5 w-3.5 text-stat-icon" strokeWidth={1.5} />
           </li>
-        ))}
+          );
+        })}
       </ul>
     </div>
   );
