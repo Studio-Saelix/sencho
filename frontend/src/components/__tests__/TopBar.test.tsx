@@ -142,7 +142,7 @@ describe('TopBar smart and compact modes', () => {
     expect(screen.getByRole('button', { name: 'More navigation' })).toHaveTextContent('More');
   });
 
-  it('opens the More menu with masthead chrome and keeps overflow labels', async () => {
+  it('opens the More menu without a redundant masthead title and keeps overflow labels', async () => {
     const onNavigate = vi.fn();
     renderTopBar({
       navMode: 'smart',
@@ -155,8 +155,8 @@ describe('TopBar smart and compact modes', () => {
     const more = screen.getByRole('button', { name: 'More navigation' });
     more.focus();
     fireEvent.keyDown(more, { key: 'Enter' });
-    expect(await screen.findByText('More', { selector: '.font-heading' })).toBeInTheDocument();
     expect(await screen.findByRole('menuitem', { name: /Logs/i })).toBeInTheDocument();
+    expect(screen.queryByText('More', { selector: '.font-heading' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('menuitem', { name: /Logs/i }));
     expect(onNavigate).toHaveBeenCalledWith('global-observability');
   });
