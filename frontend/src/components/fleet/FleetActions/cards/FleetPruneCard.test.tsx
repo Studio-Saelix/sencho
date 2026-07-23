@@ -13,12 +13,13 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 
 const toastError = vi.fn();
 const toastSuccess = vi.fn();
+const toastWarning = vi.fn();
 vi.mock('@/components/ui/toast-store', () => ({
   toast: {
     error: (...a: unknown[]) => toastError(...a),
     success: (...a: unknown[]) => toastSuccess(...a),
     info: vi.fn(),
-    warning: vi.fn(),
+    warning: (...a: unknown[]) => toastWarning(...a),
     loading: vi.fn(() => 'toast-id'),
     dismiss: vi.fn(),
   },
@@ -234,4 +235,43 @@ it('does not re-fetch the estimate when every target fails on a 2xx response', a
   await waitFor(() => expect(toastError).toHaveBeenCalled());
   await new Promise(r => setTimeout(r, 500));
   expect(estimateCallCount()).toBe(callsBefore);
+});
+
+it('warns instead of claiming total failure when a reachable node has mixed per-target outcomes', async () => {
+  const user = userEvent.setup();
+  mockedFetch.mockImplementation((url: string) => {
+    if (url === '/fleet/prune/estimate') {
+      return Promise.resolve(jsonResponse(200, {
+        totalBytes: 1024,
+        perNode: [{ nodeId: 1, nodeName: 'central', reclaimableBytes: 1024, reachable: true }],
+      }));
+    }
+    if (url === '/fleet/labels/fleet-prune') {
+      // Images succeed, volumes fail on the same reachable node. Pre-fix toast
+      // logic treated the node as fully failed (okNodes=0) and said every node
+      // failed even though Docker mutated for images.
+      return Promise.resolve(jsonResponse(200, {
+        results: [{
+          nodeId: 1,
+          nodeName: 'central',
+          reachable: true,
+          targets: [
+            { target: 'images', success: true, reclaimedBytes: 1024 },
+            { target: 'volumes', success: false, reclaimedBytes: 0, error: 'volume prune failed' },
+          ],
+        }],
+      }));
+    }
+    return Promise.resolve(jsonResponse(404, {}));
+  });
+
+  render(<FleetPruneCard nodes={nodes} />);
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Prune fleet' })).toBeEnabled());
+  await user.click(screen.getByRole('button', { name: 'Prune fleet' }));
+  const dialog = await screen.findByRole('alertdialog');
+  await user.click(within(dialog).getByRole('button', { name: 'Prune managed' }));
+
+  await waitFor(() => expect(toastWarning).toHaveBeenCalled());
+  expect(toastWarning.mock.calls[0][0]).toMatch(/1\/1 nodes reclaimed space/);
+  expect(toastError).not.toHaveBeenCalledWith('Prune failed on every node. See results below.');
 });

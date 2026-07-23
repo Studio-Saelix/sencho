@@ -143,19 +143,24 @@ export function FleetPruneCard({ nodes }: Props) {
       });
       setResults(rows);
       const totalNodes = apiResults.length;
-      const okNodes = apiResults.filter(n => n.reachable && n.targets.every(t => t.success)).length;
+      // Fully OK: every target on a reachable node succeeded. Partial: at
+      // least one target succeeded anywhere (mixed per-target on one node
+      // still counts). "Failed on every node" only when zero targets succeeded.
+      const fullyOkNodes = apiResults.filter(n => n.reachable && n.targets.every(t => t.success)).length;
+      const nodesWithAnySuccess = apiResults.filter(n => n.targets.some(t => t.success)).length;
+      const anyTargetSucceeded = nodesWithAnySuccess > 0;
       const totalReclaimed = apiResults.reduce(
         (sum, n) => sum + n.targets.reduce((s, t) => s + (t.reclaimedBytes ?? 0), 0),
         0,
       );
       if (opts.dryRun) {
         toast.success(`Dry run: ${formatBytes(totalReclaimed)} would be reclaimed across ${totalNodes} node${totalNodes === 1 ? '' : 's'}.`);
-      } else if (okNodes === totalNodes && totalNodes > 0) {
+      } else if (fullyOkNodes === totalNodes && totalNodes > 0) {
         toast.success(`Reclaimed ${formatBytes(totalReclaimed)} across ${totalNodes} node${totalNodes === 1 ? '' : 's'}.`);
-      } else if (okNodes === 0) {
+      } else if (!anyTargetSucceeded) {
         toast.error('Prune failed on every node. See results below.');
       } else {
-        toast.warning(`${okNodes}/${totalNodes} nodes succeeded · ${formatBytes(totalReclaimed)} reclaimed. See results below.`);
+        toast.warning(`${nodesWithAnySuccess}/${totalNodes} nodes reclaimed space · ${formatBytes(totalReclaimed)} reclaimed. See results below.`);
       }
     } catch (err) {
       toast.dismiss(toastId);
