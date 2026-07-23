@@ -18,6 +18,7 @@ import DockerController from './DockerController';
 import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
 import { MeshService } from './MeshService';
+import { NotificationService } from './NotificationService';
 import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -248,6 +249,7 @@ export class DeployedStackDeletionService {
       db.deleteStackExposure(nodeId, stackName);
       db.deleteStackProjectEnvFiles(nodeId, stackName);
       db.deleteStackScans(nodeId, stackName);
+      db.deleteNotificationsForStack(nodeId, stackName);
     } catch (dbErr) {
       console.error(
         '[DeployedStackDeletion] Secondary DB cleanup failed for %s; recovery rows already retired:',
@@ -272,6 +274,14 @@ export class DeployedStackDeletionService {
     }
 
     await this.sweepReadyIntent(intentId);
+    NotificationService.getInstance().broadcastEvent({
+      type: 'state-invalidate',
+      scope: 'notifications',
+      action: 'stack-deleted',
+      nodeId,
+      stackName,
+      ts: Date.now(),
+    });
     return { ok: true };
   }
 

@@ -4046,6 +4046,12 @@ export class DatabaseService {
         stmt.run(nodeId);
     }
 
+    /** Purge stack-scoped notification history when a stack is deleted. */
+    public deleteNotificationsForStack(nodeId: number, stackName: string): number {
+        const stmt = this.db.prepare('DELETE FROM notification_history WHERE node_id = ? AND stack_name = ?');
+        return stmt.run(nodeId, stackName).changes;
+    }
+
     public updateNotificationDispatchError(id: number, error: string): void {
         this.db.prepare('UPDATE notification_history SET dispatch_error = ? WHERE id = ?').run(error, id);
     }
