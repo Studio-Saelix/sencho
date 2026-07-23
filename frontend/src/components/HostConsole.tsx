@@ -8,6 +8,8 @@ import { useNodes } from '@/context/NodeContext';
 import { copyToClipboard } from '@/lib/clipboard';
 
 interface HostConsoleProps {
+    /** Resolved active node id; WebSocket must target this id, not localStorage. */
+    nodeId: number;
     stackName?: string | null;
     onClose: () => void;
 }
@@ -27,7 +29,7 @@ function formatUptime(ms: number): string {
 
 type ConnState = 'reconnecting' | 'connected' | 'disconnected';
 
-export default function HostConsole({ stackName, onClose }: HostConsoleProps) {
+export default function HostConsole({ nodeId, stackName, onClose }: HostConsoleProps) {
     const { activeNode } = useNodes();
     const terminalRef = useRef<HTMLDivElement>(null);
     const xtermRef = useRef<Terminal | null>(null);
@@ -93,12 +95,12 @@ export default function HostConsole({ stackName, onClose }: HostConsoleProps) {
             });
 
             const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const activeNodeId = localStorage.getItem('sencho-active-node') || '';
-            const nodeParam = activeNodeId ? `nodeId=${activeNodeId}` : '';
-            const stackParam = stackName ? `stack=${encodeURIComponent(stackName)}` : '';
-            const queryString = [nodeParam, stackParam].filter(Boolean).join('&');
-            const wsUrl = `${wsProtocol}//${window.location.host}/api/system/host-console${queryString ? `?${queryString}` : ''}`;
-            const ws = new WebSocket(wsUrl);
+            const qs = stackName
+                ? `nodeId=${nodeId}&stack=${encodeURIComponent(stackName)}`
+                : `nodeId=${nodeId}`;
+            const ws = new WebSocket(
+                `${wsProtocol}//${window.location.host}/api/system/host-console?${qs}`,
+            );
             wsRef.current = ws;
 
             ws.onopen = () => {
@@ -194,7 +196,7 @@ export default function HostConsole({ stackName, onClose }: HostConsoleProps) {
             fitAddonRef.current = null;
             serializeRef.current = null;
         };
-    }, [stackName, reconnectNonce]);
+    }, [nodeId, stackName, reconnectNonce]);
 
     const handleCopy = useCallback(() => {
         const term = xtermRef.current;
@@ -236,7 +238,10 @@ export default function HostConsole({ stackName, onClose }: HostConsoleProps) {
     const stateWord = connState === 'disconnected'
         ? 'Disconnected'
         : connState === 'reconnecting' ? 'Reconnecting' : 'Connected';
-    const nodeLabel = activeNode ? (activeNode.type === 'local' ? 'LOCAL' : activeNode.name.toUpperCase()) : 'LOCAL';
+    let nodeLabel = `NODE ${nodeId}`;
+    if (activeNode?.id === nodeId) {
+        nodeLabel = activeNode.type === 'local' ? 'LOCAL' : activeNode.name.toUpperCase();
+    }
     const kicker = `HOST CONSOLE · ${nodeLabel}`;
 
     const uptime = mountedAt != null ? formatUptime(tick - mountedAt) : '—';

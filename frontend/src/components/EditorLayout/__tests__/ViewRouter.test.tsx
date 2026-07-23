@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import * as AuthContext from '@/context/AuthContext';
@@ -11,7 +11,15 @@ vi.mock('@/context/LicenseContext');
 vi.mock('@/context/NodeContext');
 
 vi.mock('../../HostConsole', () => ({
-  default: () => <div data-testid="host-console">Host Console</div>,
+  default: ({ nodeId, stackName }: { nodeId: number; stackName?: string | null }) => (
+    <div
+      data-testid="host-console"
+      data-node-id={String(nodeId)}
+      data-stack={stackName ?? ''}
+    >
+      Host Console
+    </div>
+  ),
 }));
 
 vi.mock('../../LazyBoundary', () => ({
@@ -20,7 +28,7 @@ vi.mock('../../LazyBoundary', () => ({
 
 const baseProps = {
   activeView: 'host-console' as const,
-  selectedFile: null,
+  selectedFile: null as string | null,
   isLoading: false,
   settingsSection: 'appearance' as const,
   onSettingsSectionChange: vi.fn(),
@@ -42,13 +50,14 @@ const baseProps = {
   onSecurityTabChange: vi.fn(),
   renderEditor: () => null,
   stackUpdates: {},
-  urlHydratingStack: null,
+  urlHydratingStack: null as string | null,
   isFileLoading: false,
   quickLinkCandidates: [],
 };
 
 describe('ViewRouter host-console', () => {
   beforeEach(() => {
+    window.history.replaceState({}, '', '/nodes/local/host-console');
     vi.mocked(AuthContext.useAuth).mockReturnValue({
       can: (p: string) => p === 'system:console',
     } as unknown as ReturnType<typeof AuthContext.useAuth>);
@@ -62,9 +71,42 @@ describe('ViewRouter host-console', () => {
     } as unknown as ReturnType<typeof NodeContext.useNodes>);
   });
 
+  afterEach(() => {
+    window.history.replaceState({}, '', '/');
+  });
+
   it('renders Host Console for a Community admin on the local node', async () => {
     render(<ViewRouter {...baseProps} />);
-    expect(await screen.findByTestId('host-console')).toBeTruthy();
+    const el = await screen.findByTestId('host-console');
+    expect(el.getAttribute('data-node-id')).toBe('1');
+  });
+
+  it('does not mount HostConsole while the active node is unresolved', () => {
+    vi.mocked(NodeContext.useNodes).mockReturnValue({
+      activeNode: null,
+      activeNodeMeta: null,
+    } as unknown as ReturnType<typeof NodeContext.useNodes>);
+    render(<ViewRouter {...baseProps} />);
+    expect(screen.queryByTestId('host-console')).toBeNull();
+  });
+
+  it('does not mount HostConsole while a stack deep link is still hydrating', () => {
+    render(<ViewRouter {...baseProps} urlHydratingStack="radarr" selectedFile={null} />);
+    expect(screen.queryByTestId('host-console')).toBeNull();
+  });
+
+  it('does not mount a root shell while the URL targets a stack-scoped Console', () => {
+    window.history.replaceState({}, '', '/nodes/local/host-console/radarr');
+    render(<ViewRouter {...baseProps} selectedFile={null} urlHydratingStack={null} />);
+    expect(screen.queryByTestId('host-console')).toBeNull();
+  });
+
+  it('mounts stack-scoped Console only after selectedFile matches the route', async () => {
+    window.history.replaceState({}, '', '/nodes/local/host-console/radarr');
+    render(<ViewRouter {...baseProps} selectedFile="radarr" />);
+    const el = await screen.findByTestId('host-console');
+    expect(el.getAttribute('data-stack')).toBe('radarr');
+    expect(el.getAttribute('data-node-id')).toBe('1');
   });
 
   it('renders nothing without system:console', () => {
@@ -104,7 +146,8 @@ describe('ViewRouter host-console', () => {
       activeNodeMeta: { version: '0.95.0', capabilities: ['host-console'], fetchedAt: 1 },
     } as unknown as ReturnType<typeof NodeContext.useNodes>);
     render(<ViewRouter {...baseProps} />);
-    expect(await screen.findByTestId('host-console')).toBeTruthy();
+    const el = await screen.findByTestId('host-console');
+    expect(el.getAttribute('data-node-id')).toBe('2');
   });
 
   it('shows a skeleton for legacy-only remote while license is still loading', () => {

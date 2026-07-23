@@ -20,7 +20,7 @@ import type { MuteRuleDraft } from '@/lib/muteRules';
 import type { ActiveView } from './hooks/useViewNavigationState';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
 import type { SecurityTab, FleetTab } from '@/lib/events';
-import { isStackEditorDeepLink } from '@/lib/router/readUrlRouteState';
+import { isStackEditorDeepLink, isHostConsoleStackDeepLink } from '@/lib/router/readUrlRouteState';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 
 // Paid-tier views are loaded on demand. Their internal PaidGate /
@@ -188,20 +188,25 @@ export function ViewRouter({
         );
     }
     if (activeView === 'host-console') {
-        // RBAC + mixed-version capability. Do not mount HostConsole until
-        // remote meta resolves (optimistic hasCapability would open a doomed
-        // WebSocket when a Community hub targets a remote that only advertises
-        // legacy host-console).
+        // RBAC + mixed-version capability. Wait for a resolved active node and
+        // remote meta; null activeNode must not be treated as local (wrong-node
+        // or doomed WebSocket). Stack deep links hydrate selectedFile async:
+        // wait so we never open a compose-root shell, then reconnect into the stack.
         if (!can('system:console')) return null;
+        if (urlHydratingStack != null || (isHostConsoleStackDeepLink() && !selectedFile)) {
+            return <ViewSkeleton />;
+        }
+        if (activeNode == null) return <ViewSkeleton />;
         const capState = resolveHostConsoleCapability({
-            isRemote: activeNode?.type === 'remote',
+            nodeResolved: true,
+            isRemote: activeNode.type === 'remote',
             isPaid,
             licenseReady,
             activeNodeMeta,
         });
         if (capState === 'loading') return <ViewSkeleton />;
         if (capState === 'locked') {
-            const nodeName = activeNode?.name ?? 'this node';
+            const nodeName = activeNode.name;
             const version = activeNodeMeta?.version;
             let versionHint = `${nodeName} does not advertise this capability.`;
             if (version && version !== 'unknown' && version !== '0.0.0-dev') {
@@ -215,9 +220,15 @@ export function ViewRouter({
                 />
             );
         }
+        const nodeId = activeNode.id;
         return (
             <LazyView>
-                <HostConsole stackName={selectedFile} onClose={onHostConsoleClose} />
+                <HostConsole
+                    key={`${nodeId}:${selectedFile ?? ''}`}
+                    nodeId={nodeId}
+                    stackName={selectedFile}
+                    onClose={onHostConsoleClose}
+                />
             </LazyView>
         );
     }

@@ -145,6 +145,32 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
     expect(firstMessage).toContain('Invalid stack path');
     ws.close();
   });
+
+  it('closes without spawning a PTY when directory resolution throws (no default-node fallback)', async () => {
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const { HostTerminalService } = await import('../services/HostTerminalService');
+    const spawnSpy = vi.spyOn(HostTerminalService, 'spawnTerminal');
+    const getInstanceSpy = vi.spyOn(FileSystemService, 'getInstance').mockImplementation(() => {
+      throw new Error('compose dir unavailable');
+    });
+
+    try {
+      const ws = new WebSocket(wsUrl(), { headers: { Cookie: `sencho_token=${adminToken()}` } });
+      const firstMessage = await new Promise<string>((resolve) => {
+        ws.on('message', (data) => resolve(data.toString()));
+        ws.on('error', () => resolve(''));
+        ws.on('unexpected-response', () => resolve(''));
+      });
+      expect(firstMessage).toMatch(/Failed to resolve console directory/i);
+      expect(spawnSpy).not.toHaveBeenCalled();
+      // getInstance must not be retried against a fallback/default node id.
+      expect(getInstanceSpy).toHaveBeenCalledTimes(1);
+      ws.close();
+    } finally {
+      spawnSpy.mockRestore();
+      getInstanceSpy.mockRestore();
+    }
+  });
 });
 
 /** Poll a predicate up to ~1s; resolve true as soon as it passes. */

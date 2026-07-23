@@ -6,7 +6,9 @@ import {
 export type HostConsoleCapabilityState = 'loading' | 'allowed' | 'locked';
 
 export interface HostConsoleCapabilityInput {
-  /** True when the active node is a remote Distributed API Proxy or Pilot node. */
+  /** False until NodeContext resolves an active node (cold load). Never treat as local. */
+  nodeResolved: boolean;
+  /** True when the resolved active node is a remote Distributed API Proxy or Pilot node. */
   isRemote: boolean;
   /** Hub license: Admiral may accept legacy `host-console` on remotes. */
   isPaid: boolean;
@@ -26,14 +28,15 @@ export interface HostConsoleCapabilityInput {
 /**
  * Whether Host Console content may mount for the active node.
  *
- * Local nodes are always treated as compatible once RBAC passed (same build).
- * Remote nodes wait for metadata, then require `host-console-community`, or
- * (Admiral only) legacy `host-console`.
+ * Unresolved nodes stay in `loading`. Local nodes are treated as compatible
+ * once RBAC passed (same build). Remote nodes wait for metadata, then require
+ * `host-console-community`, or (Admiral only) legacy `host-console`.
  */
 export function resolveHostConsoleCapability(
   input: HostConsoleCapabilityInput,
 ): HostConsoleCapabilityState {
-  const { isRemote, isPaid, licenseReady, activeNodeMeta } = input;
+  const { nodeResolved, isRemote, isPaid, licenseReady, activeNodeMeta } = input;
+  if (!nodeResolved) return 'loading';
   if (!isRemote) return 'allowed';
   if (!activeNodeMeta) return 'loading';
 
