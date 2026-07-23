@@ -324,6 +324,7 @@ describe('DatabaseService - stack alerts CRUD', () => {
   it('adds and retrieves stack alerts', () => {
     db.addStackAlert({
       stack_name: 'alert-stack',
+      service_name: null,
       metric: 'cpu_percent',
       operator: '>',
       threshold: 80,
@@ -339,11 +340,27 @@ describe('DatabaseService - stack alerts CRUD', () => {
     expect(found.threshold).toBe(80);
     expect(found.duration_mins).toBe(5);
     expect(found.cooldown_mins).toBe(15);
+    expect(found.service_name).toBeNull();
+  });
+
+  it('persists a named service_name', () => {
+    const created = db.addStackAlert({
+      stack_name: 'scoped-stack',
+      service_name: 'api.web',
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 5,
+      cooldown_mins: 15,
+    });
+    expect(created.service_name).toBe('api.web');
+    expect(db.getStackAlerts('scoped-stack')[0].service_name).toBe('api.web');
   });
 
   it('filters alerts by stack name', () => {
     db.addStackAlert({
       stack_name: 'filter-stack-a',
+      service_name: null,
       metric: 'memory_mb',
       operator: '>=',
       threshold: 512,
@@ -352,6 +369,7 @@ describe('DatabaseService - stack alerts CRUD', () => {
     });
     db.addStackAlert({
       stack_name: 'filter-stack-b',
+      service_name: null,
       metric: 'cpu_percent',
       operator: '>',
       threshold: 90,
@@ -371,6 +389,7 @@ describe('DatabaseService - stack alerts CRUD', () => {
   it('updates last_fired_at timestamp', () => {
     db.addStackAlert({
       stack_name: 'fired-stack',
+      service_name: null,
       metric: 'net_rx',
       operator: '>',
       threshold: 100,
@@ -381,29 +400,55 @@ describe('DatabaseService - stack alerts CRUD', () => {
     const alerts = db.getStackAlerts('fired-stack');
     const alert = alerts[0];
     const fireTime = Date.now();
-    db.updateStackAlertLastFired(alert.id, fireTime);
+    db.updateStackAlertLastFired(alert.id!, fireTime);
 
     const updated = db.getStackAlerts('fired-stack');
     expect(updated[0].last_fired_at).toBe(fireTime);
   });
 
-  it('deletes an alert by id', () => {
-    db.addStackAlert({
+  it('upserts and reads distinct per-service cooldowns', () => {
+    const alert = db.addStackAlert({
+      stack_name: 'cooldown-stack',
+      service_name: null,
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 1,
+      cooldown_mins: 10,
+    });
+    const id = alert.id!;
+    expect(db.hasAnyStackAlertServiceCooldown(id)).toBe(false);
+
+    db.upsertStackAlertServiceCooldown(id, 'api', 1000);
+    db.upsertStackAlertServiceCooldown(id, 'database', 2000);
+
+    expect(db.getStackAlertServiceCooldown(id, 'api')).toBe(1000);
+    expect(db.getStackAlertServiceCooldown(id, 'database')).toBe(2000);
+    expect(db.hasAnyStackAlertServiceCooldown(id)).toBe(true);
+
+    db.upsertStackAlertServiceCooldown(id, 'api', 3000);
+    expect(db.getStackAlertServiceCooldown(id, 'api')).toBe(3000);
+  });
+
+  it('deletes an alert by id and removes child cooldown rows', () => {
+    const alert = db.addStackAlert({
       stack_name: 'delete-stack',
+      service_name: null,
       metric: 'memory_percent',
       operator: '>',
       threshold: 95,
       duration_mins: 1,
       cooldown_mins: 5,
     });
+    const id = alert.id!;
+    db.upsertStackAlertServiceCooldown(id, 'api', Date.now());
+    expect(db.hasAnyStackAlertServiceCooldown(id)).toBe(true);
 
-    const before = db.getStackAlerts('delete-stack');
-    expect(before.length).toBe(1);
+    db.deleteStackAlert(id);
 
-    db.deleteStackAlert(before[0].id);
-
-    const after = db.getStackAlerts('delete-stack');
-    expect(after.length).toBe(0);
+    expect(db.getStackAlerts('delete-stack').length).toBe(0);
+    expect(db.hasAnyStackAlertServiceCooldown(id)).toBe(false);
+    expect(db.getStackAlertServiceCooldown(id, 'api')).toBeNull();
   });
 });
 

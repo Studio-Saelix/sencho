@@ -58,6 +58,7 @@ export const CAPABILITIES = [
   'stack-down-remove-volumes',
   'guided-external-network-preflight',
   'service-scoped-update',
+  'service-scoped-stack-alert',
 ] as const;
 
 /**
@@ -80,6 +81,10 @@ export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' 
 
 /** Capability for the nested per-service update/restore routes and the `effective-services` model they read. */
 export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const satisfies Capability;
+
+/** Capability for nullable `service_name` on stack alert rules and per-service cooldown evaluation. */
+export const SERVICE_SCOPED_STACK_ALERT_CAPABILITY =
+  'service-scoped-stack-alert' as const satisfies Capability;
 
 /** Returns true when the string is a usable semver version. */
 export function isValidVersion(v: string | null | undefined): v is string {

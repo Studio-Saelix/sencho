@@ -57,8 +57,8 @@ describe('GET /api/alerts', () => {
   it('filters alerts by stackName query param', async () => {
     // Seed two alerts for different stacks
     const db = DatabaseService.getInstance();
-    db.addStackAlert({ stack_name: 'web', metric: 'cpu_percent', operator: '>', threshold: 80, duration_mins: 5, cooldown_mins: 60 });
-    db.addStackAlert({ stack_name: 'api', metric: 'memory_percent', operator: '>', threshold: 90, duration_mins: 5, cooldown_mins: 60 });
+    db.addStackAlert({ stack_name: 'web', service_name: null, metric: 'cpu_percent', operator: '>', threshold: 80, duration_mins: 5, cooldown_mins: 60 });
+    db.addStackAlert({ stack_name: 'api', service_name: null, metric: 'memory_percent', operator: '>', threshold: 90, duration_mins: 5, cooldown_mins: 60 });
 
     const res = await request(app)
       .get('/api/alerts?stackName=web')
@@ -105,8 +105,99 @@ describe('POST /api/alerts', () => {
     expect(res.status).toBe(201);
     expect(res.body.id).toBeDefined();
     expect(res.body.stack_name).toBe('new-stack');
+    expect(res.body.service_name).toBeNull();
     expect(res.body.metric).toBe('memory_percent');
     expect(res.body.threshold).toBe(85);
+  });
+
+  it('persists a valid dotted service_name', async () => {
+    const res = await request(app)
+      .post('/api/alerts')
+      .set('Cookie', authCookie)
+      .send({
+        stack_name: 'svc-stack',
+        service_name: 'api.web',
+        metric: 'cpu_percent',
+        operator: '>',
+        threshold: 80,
+        duration_mins: 5,
+        cooldown_mins: 60,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.service_name).toBe('api.web');
+  });
+
+  it('normalizes empty service_name to null', async () => {
+    const res = await request(app)
+      .post('/api/alerts')
+      .set('Cookie', authCookie)
+      .send({
+        stack_name: 'empty-svc',
+        service_name: '',
+        metric: 'cpu_percent',
+        operator: '>',
+        threshold: 80,
+        duration_mins: 5,
+        cooldown_mins: 60,
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.service_name).toBeNull();
+  });
+
+  it('rejects whitespace-only service_name', async () => {
+    const res = await request(app)
+      .post('/api/alerts')
+      .set('Cookie', authCookie)
+      .send({
+        stack_name: 'bad-svc',
+        service_name: '   ',
+        metric: 'cpu_percent',
+        operator: '>',
+        threshold: 80,
+        duration_mins: 5,
+        cooldown_mins: 60,
+      });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects reserved _unlabeled service_name', async () => {
+    const res = await request(app)
+      .post('/api/alerts')
+      .set('Cookie', authCookie)
+      .send({
+        stack_name: 'bad-svc',
+        service_name: '_unlabeled',
+        metric: 'cpu_percent',
+        operator: '>',
+        threshold: 80,
+        duration_mins: 5,
+        cooldown_mins: 60,
+      });
+    expect(res.status).toBe(400);
+  });
+
+  it('rejects service_name when the capability is disabled', async () => {
+    const { disableCapability, enableCapability, SERVICE_SCOPED_STACK_ALERT_CAPABILITY } =
+      await import('../services/CapabilityRegistry');
+    disableCapability(SERVICE_SCOPED_STACK_ALERT_CAPABILITY);
+    try {
+      const res = await request(app)
+        .post('/api/alerts')
+        .set('Cookie', authCookie)
+        .send({
+          stack_name: 'cap-stack',
+          service_name: 'api',
+          metric: 'cpu_percent',
+          operator: '>',
+          threshold: 80,
+          duration_mins: 5,
+          cooldown_mins: 60,
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('capability_unavailable');
+    } finally {
+      enableCapability(SERVICE_SCOPED_STACK_ALERT_CAPABILITY);
+    }
   });
 
   it('validates required fields and returns 400 for missing data', async () => {
@@ -202,6 +293,7 @@ describe('DELETE /api/alerts/:id', () => {
     // Create an alert to delete
     const created = DatabaseService.getInstance().addStackAlert({
       stack_name: 'delete-me',
+      service_name: null,
       metric: 'cpu_percent',
       operator: '>',
       threshold: 90,

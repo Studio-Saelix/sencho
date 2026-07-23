@@ -1,10 +1,10 @@
 ---
 title: Alerts & Notifications
 sidebarTitle: Alerts and notifications
-description: Threshold and event alerts for your fleet, dispatched to Discord, Slack, Apprise, or any webhook, with per-stack rules and channel routing.
+description: Threshold and event alerts for your fleet, dispatched to Discord, Slack, Apprise, or any webhook, with stack and service rules and channel routing.
 ---
 
-Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and an external channel you configure. This page covers everything from configuring channels to writing per-stack threshold rules, routing alerts to dedicated channels with routing rules, and tuning retention.
+Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and an external channel you configure. This page covers everything from configuring channels to writing stack and service threshold rules, routing alerts to dedicated channels with routing rules, and tuning retention.
 
 <Frame>
   <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel with NODE Local in the header, a Delivery retries row showing Extra attempts 0 and a Save retries button, Discord Slack Webhook and Apprise tabs with Apprise selected, Enabled off, an empty Apprise endpoint placeholder, and Test beside Save." />
@@ -37,7 +37,7 @@ Use the Generic Webhook tab when you have your own receiver: a Mattermost or Tea
 ```json
 {
   "level": "warning",
-  "message": "The **CPU usage** for **plex** has exceeded your threshold of **80%** (Currently: 91%).",
+  "message": "The **CPU usage** for **api** in **plex** (container **plex-api-1**) has exceeded your threshold of **80%** (Currently: 91%).",
   "timestamp": "2026-05-08T22:14:09.812Z",
   "source": "sencho"
 }
@@ -161,27 +161,30 @@ Every alert Sencho dispatches carries a category that you can filter on in the b
 
 The four `blueprint_*` categories are accepted by routing rules but render as raw category strings in the bell because the frontend label map omits them.
 
-## Per-stack alert rules
+## Stack alert rules
 
-Each stack carries its own set of threshold rules that fire when a metric stays above (or below) a value for a configurable window. Rules live on the node where the stack runs and are evaluated locally on a 30-second tick.
+Each stack carries its own set of threshold rules that fire when a metric stays above (or below) a value for a configurable window. A rule can target **All services** in the stack or one Compose service. Metrics are evaluated per running container (not as a stack aggregate): each container has its own duration timer, and cooldown is tracked per Compose service so replicas of the same service share one silence window while different services can alert independently.
+
+Rules live on the node where the stack runs and are evaluated locally on a 30-second tick.
 
 Open the rules editor by right-clicking a stack in the sidebar and choosing **Alerts**, or by pressing `A` while focused on a stack.
 
 <Frame>
-  <img src="/images/alerts-notifications/alert-panel.png" alt="The Stack › PLEX › MONITOR sheet with the Alerts tab active, a green notification-channel banner under the NOTIFICATION CHANNELS heading, an ACTIVE RULES section listing 'CPU Usage (%) > 80' with the secondary line 'Trigger after 5m • Cooldown 60m', and an ADD NEW RULE form with Metric, Operator, Threshold, Duration, Cooldown fields and an Add Rule submit button." />
+  <img src="/images/alerts-notifications/alert-panel.png" alt="The Stack › PLEX › MONITOR sheet with the Alerts tab active, a green notification-channel banner under the NOTIFICATION CHANNELS heading, an ACTIVE RULES section listing threshold rules with All services or a Compose service on the secondary line, and an ADD NEW RULE form with Metric, Operator, Threshold, Duration, Cooldown fields (plus Service when the node supports it) and an Add Rule submit button." />
 </Frame>
 
 ### Alert fields
 
 | Field | Purpose |
 |-------|---------|
+| **Service** | **All services** (default) or one Compose service from the stack. All services evaluates every matching container independently. |
 | **Metric** | The system resource or metric to monitor. |
 | **Operator** | Comparison: `Greater than`, `Greater or eq`, `Less than`, `Less or eq`, `Equals`. |
 | **Threshold** | A number ≥ 0. The unit follows the chosen metric. |
-| **Duration (mins)** | How long the breach must persist before firing. Default `5`, range 0 to 1440. |
-| **Cooldown (mins)** | Silence window between fires after a rule triggers. Default `60`, range 0 to 10080. |
+| **Duration (mins)** | How long a container's breach must persist before firing. Default `5`, range 0 to 1440. |
+| **Cooldown (mins)** | Silence window between fires for the same Compose service after a rule triggers. Default `60`, range 0 to 10080. |
 
-Sencho tracks the start of each breach in memory; the rule fires only after the breach has lasted for the full **Duration**, and only if the previous fire is older than **Cooldown**.
+Sencho tracks the start of each breach per container in memory; the rule fires only after that container's breach has lasted for the full **Duration**, and only if the previous fire for the same Compose service is older than **Cooldown**. The notification names the triggering service and container. Containers without a Compose service label are grouped under one shared cooldown key and appear as **unknown service** in the message; that label is not selectable as a rule target.
 
 ### Available metrics
 
@@ -441,7 +444,7 @@ Switching the active node tears down per-stack rule editors and reloads channel 
     Check three things in order. First, the channel toggle in **Settings · Notifications · Channels** must be on; the kicker on each tab reads `enabled` or `off`. Second, Discord, Slack, and webhook URLs must use HTTPS (the form rejects plain `http://` for those channels); Apprise endpoints may use HTTP or HTTPS. Third, a routing rule with unconstrained Node plus empty Stacks, Labels, Categories, and Severity matchers will intercept every alert and skip the global channels. Use the per-channel **Test** button to issue a one-shot dispatch and watch your endpoint for the literal message `🔌 Test Notification from Sencho!` Sencho records the failure reason in `notification_history.dispatch_error` when delivery throws, so a row that appears in the bell with no follow-up at the endpoint usually means a 4xx or timeout at the receiver.
   </Accordion>
   <Accordion title="An alert rule never fires even when the threshold is breached">
-    Three causes account for almost every case. First, the rule's **Duration** has not elapsed yet: the breach must persist for the full duration before the rule fires. Second, the rule is still in cooldown after a previous fire. Third, the panel's banner is not green: a remote-node banner means the rule was saved on a remote whose channels you may not have configured, and an amber `No notification channels configured` banner means the rule evaluates fine but Sencho has nowhere to send the alert. The evaluator runs on a 30-second tick, so expect up to 30 seconds of latency between the breach starting and the timer engaging.
+    Three causes account for almost every case. First, the rule's **Duration** has not elapsed yet: that container's breach must persist for the full duration before the rule fires (a healthy sibling service does not clear another container's timer). Second, the same Compose service is still in cooldown after a previous fire. Third, the panel's banner is not green: a remote-node banner means the rule was saved on a remote whose channels you may not have configured, and an amber `No notification channels configured` banner means the rule evaluates fine but Sencho has nowhere to send the alert. The evaluator runs on a 30-second tick, so expect up to 30 seconds of latency between the breach starting and the timer engaging.
   </Accordion>
   <Accordion title="I stopped a stack but got a crash alert anyway">
     The Docker event service defers `die` classification by 500 ms to absorb out-of-order `kill` events from the daemon, then asks the lifecycle classifier whether the exit was intentional, clean (exit 0), a crash, or an OOM kill. If your stop happened far enough outside that window, or the daemon emitted the events without the kill marker the classifier looks for, the exit can be classified as a crash. The classifier favors avoiding silent crashes over avoiding noisy false positives. Compare the alert timestamp against your `docker compose down` time; entries within a second of each other are usually the same event seen from two angles.

@@ -101,6 +101,7 @@ function stringifyServicesJson(services: StackServiceStatus[], generation: numbe
 export interface StackAlert {
     id?: number;
     stack_name: string;
+    service_name: string | null;
     metric: string;
     operator: string;
     threshold: number;
@@ -1060,6 +1061,7 @@ export class DatabaseService {
         this.migrateStackDossierHashes();
         this.migrateGitSourceMultiFile();
         this.migrateNodeUpdateSkips();
+        this.migrateStackAlertServiceScope();
 
         // Reset the cache once at end of constructor in case any migration
         // populated it via getGlobalSettings() and a subsequent migration
@@ -1096,12 +1098,21 @@ export class DatabaseService {
       CREATE TABLE IF NOT EXISTS stack_alerts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         stack_name TEXT NOT NULL,
+        service_name TEXT,
         metric TEXT NOT NULL,
         operator TEXT NOT NULL,
         threshold REAL NOT NULL,
         duration_mins INTEGER NOT NULL,
         cooldown_mins INTEGER NOT NULL,
         last_fired_at INTEGER DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS stack_alert_service_cooldowns (
+        alert_id INTEGER NOT NULL,
+        service_name TEXT NOT NULL,
+        last_fired_at INTEGER NOT NULL,
+        PRIMARY KEY (alert_id, service_name),
+        FOREIGN KEY (alert_id) REFERENCES stack_alerts(id) ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS notification_history (
@@ -2255,6 +2266,24 @@ export class DatabaseService {
         }
     }
 
+    private migrateStackAlertServiceScope(): void {
+        this.tryAddColumn('stack_alerts', 'service_name', 'TEXT');
+        try {
+            this.db.prepare(`
+                CREATE TABLE IF NOT EXISTS stack_alert_service_cooldowns (
+                    alert_id INTEGER NOT NULL,
+                    service_name TEXT NOT NULL,
+                    last_fired_at INTEGER NOT NULL,
+                    PRIMARY KEY (alert_id, service_name),
+                    FOREIGN KEY (alert_id) REFERENCES stack_alerts(id) ON DELETE CASCADE
+                )
+            `).run();
+        } catch (e) {
+            console.error('[DatabaseService] stack_alert_service_cooldowns migration failed:', (e as Error).message);
+            throw e;
+        }
+    }
+
     private migrateScanPolicyFleetColumns(): void {
         this.tryAddColumn('scan_policies', 'node_identity', "TEXT NOT NULL DEFAULT ''");
         this.tryAddColumn('scan_policies', 'replicated_from_control', 'INTEGER NOT NULL DEFAULT 0');
@@ -3050,22 +3079,19 @@ export class DatabaseService {
     // --- Stack Alerts ---
 
     public getStackAlerts(stackName?: string): StackAlert[] {
-        let stmt;
         if (stackName) {
-            stmt = this.db.prepare('SELECT * FROM stack_alerts WHERE stack_name = ?');
-            return stmt.all(stackName) as StackAlert[];
-        } else {
-            stmt = this.db.prepare('SELECT * FROM stack_alerts');
-            return stmt.all() as StackAlert[];
+            return this.db.prepare('SELECT * FROM stack_alerts WHERE stack_name = ?').all(stackName) as StackAlert[];
         }
+        return this.db.prepare('SELECT * FROM stack_alerts').all() as StackAlert[];
     }
 
     public addStackAlert(alert: StackAlert): StackAlert {
         const stmt = this.db.prepare(
-            'INSERT INTO stack_alerts (stack_name, metric, operator, threshold, duration_mins, cooldown_mins, last_fired_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO stack_alerts (stack_name, service_name, metric, operator, threshold, duration_mins, cooldown_mins, last_fired_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
         );
         const result = stmt.run(
             alert.stack_name,
+            alert.service_name ?? null,
             alert.metric,
             alert.operator,
             alert.threshold,
@@ -3077,13 +3103,41 @@ export class DatabaseService {
     }
 
     public deleteStackAlert(id: number): void {
-        const stmt = this.db.prepare('DELETE FROM stack_alerts WHERE id = ?');
-        stmt.run(id);
+        this.transaction(() => {
+            this.deleteStackAlertServiceCooldowns(id);
+            this.db.prepare('DELETE FROM stack_alerts WHERE id = ?').run(id);
+        });
     }
 
     public updateStackAlertLastFired(id: number, timestamp: number): void {
         const stmt = this.db.prepare('UPDATE stack_alerts SET last_fired_at = ? WHERE id = ?');
         stmt.run(timestamp, id);
+    }
+
+    public getStackAlertServiceCooldown(alertId: number, serviceName: string): number | null {
+        const row = this.db.prepare(
+            'SELECT last_fired_at FROM stack_alert_service_cooldowns WHERE alert_id = ? AND service_name = ?'
+        ).get(alertId, serviceName) as { last_fired_at: number } | undefined;
+        return row?.last_fired_at ?? null;
+    }
+
+    public hasAnyStackAlertServiceCooldown(alertId: number): boolean {
+        const row = this.db.prepare(
+            'SELECT 1 AS present FROM stack_alert_service_cooldowns WHERE alert_id = ? LIMIT 1'
+        ).get(alertId) as { present: number } | undefined;
+        return !!row;
+    }
+
+    public upsertStackAlertServiceCooldown(alertId: number, serviceName: string, timestamp: number): void {
+        this.db.prepare(`
+            INSERT INTO stack_alert_service_cooldowns (alert_id, service_name, last_fired_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(alert_id, service_name) DO UPDATE SET last_fired_at = excluded.last_fired_at
+        `).run(alertId, serviceName, timestamp);
+    }
+
+    public deleteStackAlertServiceCooldowns(alertId: number): void {
+        this.db.prepare('DELETE FROM stack_alert_service_cooldowns WHERE alert_id = ?').run(alertId);
     }
 
     // --- Auto-Heal Policies ---

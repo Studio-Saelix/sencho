@@ -20,18 +20,25 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { Trash2, HelpCircle, AlertTriangle, Info, CheckCircle2, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
+import { SERVICE_SCOPED_STACK_ALERT_CAPABILITY } from '@/lib/capabilities';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 
 interface StackAlert {
     id?: number;
     stack_name: string;
+    service_name: string | null;
     metric: string;
     operator: string;
     threshold: number;
     duration_mins: number;
     cooldown_mins: number;
 }
+
+type ServicesState =
+    | { status: 'idle' | 'loading' }
+    | { status: 'success'; options: string[] }
+    | { status: 'error' };
 
 interface AutoHealPolicy {
     id?: number;
@@ -161,8 +168,9 @@ export function StackAlertSheet({ open, onOpenChange, stackName, initialTab = 'a
 
 function AlertsTab({ stackName }: { stackName: string }) {
     const { isAdmin } = useAuth();
-    const { activeNode } = useNodes();
+    const { activeNode, activeNodeMeta } = useNodes();
     const isRemote = activeNode?.type === 'remote';
+    const canScopeService = activeNodeMeta?.capabilities.includes(SERVICE_SCOPED_STACK_ALERT_CAPABILITY) === true;
 
     const [alerts, setAlerts] = useState<StackAlert[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -172,7 +180,9 @@ function AlertsTab({ stackName }: { stackName: string }) {
         hasEnabled: false,
         enabledTypes: [],
     });
+    const [servicesState, setServicesState] = useState<ServicesState>({ status: 'idle' });
 
+    const [service, setService] = useState('');
     const [metric, setMetric] = useState('cpu_percent');
     const [operator, setOperator] = useState('>');
     const [threshold, setThreshold] = useState('');
@@ -183,7 +193,33 @@ function AlertsTab({ stackName }: { stackName: string }) {
         if (!stackName) return;
         fetchAlerts();
         fetchAgentStatus();
-    }, [stackName]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [stackName, activeNode?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    useEffect(() => {
+        if (!stackName || !canScopeService) {
+            setServicesState({ status: 'idle' });
+            setService('');
+            return;
+        }
+
+        let cancelled = false;
+        setServicesState({ status: 'loading' });
+        setService('');
+
+        void (async () => {
+            try {
+                const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`);
+                if (!res.ok) throw new Error(`services ${res.status}`);
+                const names = await res.json() as string[];
+                if (!cancelled) setServicesState({ status: 'success', options: names });
+            } catch (e) {
+                console.error('[StackAlertSheet] Failed to fetch stack services', e);
+                if (!cancelled) setServicesState({ status: 'error' });
+            }
+        })();
+
+        return () => { cancelled = true; };
+    }, [stackName, activeNode?.id, canScopeService]);
 
     const fetchAlerts = async () => {
         try {
@@ -224,8 +260,10 @@ function AlertsTab({ stackName }: { stackName: string }) {
             return;
         }
         setIsLoading(true);
+        const scopedServiceName = canScopeService && service !== '' ? service : null;
         const newAlert = {
             stack_name: stackName,
+            service_name: scopedServiceName,
             metric,
             operator,
             threshold: parseFloat(threshold),
@@ -240,6 +278,7 @@ function AlertsTab({ stackName }: { stackName: string }) {
             if (res.ok) {
                 toast.success('Alert rule added.');
                 setThreshold('');
+                setService('');
                 fetchAlerts();
             } else {
                 const err = await res.json().catch(() => ({}));
@@ -270,6 +309,29 @@ function AlertsTab({ stackName }: { stackName: string }) {
         } finally {
             setIsLoading(false);
         }
+    };
+
+    const serviceComboOptions = [
+        { value: '', label: 'All services' },
+        ...(servicesState.status === 'success'
+            ? servicesState.options.map(n => ({ value: n, label: n }))
+            : []),
+    ];
+
+    const renderTargetLabel = (alert: StackAlert) => {
+        if (!alert.service_name) {
+            return <span className="text-muted-foreground font-sans">All services</span>;
+        }
+        const missing = servicesState.status === 'success'
+            && !servicesState.options.includes(alert.service_name);
+        if (missing) {
+            return (
+                <span className="text-warning font-sans">
+                    {alert.service_name} <span className="font-medium">(Service missing)</span>
+                </span>
+            );
+        }
+        return <span className="font-sans">{alert.service_name}</span>;
     };
 
     const renderAgentStatusBanner = () => {
@@ -355,7 +417,8 @@ function AlertsTab({ stackName }: { stackName: string }) {
                                         {metricLabels[alert.metric] || alert.metric} {alert.operator} {alert.threshold}
                                     </span>
                                     <div className="text-muted-foreground text-xs mt-0.5">
-                                        Trigger after {alert.duration_mins}m &bull; Cooldown {alert.cooldown_mins}m
+                                        {renderTargetLabel(alert)}
+                                        {' '}&bull; Trigger after {alert.duration_mins}m &bull; Cooldown {alert.cooldown_mins}m
                                     </div>
                                 </div>
                                 {isAdmin && (
@@ -378,6 +441,31 @@ function AlertsTab({ stackName }: { stackName: string }) {
             {isAdmin && (
                 <SheetSection title="Add new rule">
                     <div className="space-y-3">
+                        {canScopeService && (
+                            <div className="space-y-2">
+                                <Label>Service</Label>
+                                <Combobox
+                                    options={serviceComboOptions}
+                                    value={service}
+                                    onValueChange={setService}
+                                    placeholder="All services"
+                                    searchPlaceholder="Search services..."
+                                    emptyText={servicesState.status === 'error' ? 'Could not load services.' : 'No services found.'}
+                                    disabled={servicesState.status === 'loading' || servicesState.status === 'error'}
+                                />
+                                {servicesState.status === 'error' && (
+                                    <p className="text-xs text-muted-foreground">
+                                        Could not load Compose services. The rule will target all services.
+                                    </p>
+                                )}
+                            </div>
+                        )}
+                        {!canScopeService && activeNodeMeta && (
+                            <p className="text-xs text-muted-foreground">
+                                This node does not support service-scoped alert rules yet. Update the node to target a specific service.
+                            </p>
+                        )}
+
                         <div className="space-y-2">
                             <div className="flex items-center gap-2">
                                 <Label>Metric</Label>

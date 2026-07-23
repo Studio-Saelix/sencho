@@ -5,7 +5,7 @@ import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER, PROXY_DEPLOY_SOURCE_HEADER, PROXY
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
-import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY } from '../services/CapabilityRegistry';
+import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY, SERVICE_SCOPED_STACK_ALERT_CAPABILITY } from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { DatabaseService } from '../services/DatabaseService';
 import { redactSensitiveText } from '../utils/safeLog';
@@ -246,6 +246,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
       }
 
+      if (isServiceScopedAlertCreate(req)) {
+        const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_STACK_ALERT_CAPABILITY);
+        if (!supported) {
+          res.status(400).json({
+            error: 'Service-scoped alert rules are not supported on this node',
+            code: 'capability_unavailable',
+          });
+          return;
+        }
+      }
+
       // Mixed-version RBAC gate (non-admin only).
       if (req.user?.role !== 'admin') {
         const rbacSupported = await remoteSupportsCrossNodeRbac(req.nodeId);
@@ -282,4 +293,13 @@ function isServiceScopedUpdateRoute(req: Request): boolean {
     return /^\/stacks\/[^/]+\/services\/[^/]+\/(?:update|restore)$/.test(req.path);
   }
   return false;
+}
+
+/** POST /alerts with a non-empty service_name (path is post-/api strip). */
+function isServiceScopedAlertCreate(req: Request): boolean {
+  if (req.method !== 'POST') return false;
+  if (req.path !== '/alerts' && req.path !== '/alerts/') return false;
+  const body = req.body as { service_name?: unknown } | undefined;
+  const serviceName = body?.service_name;
+  return typeof serviceName === 'string' && serviceName.trim() !== '';
 }
