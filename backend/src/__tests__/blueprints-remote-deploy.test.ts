@@ -204,7 +204,15 @@ describe('BlueprintService remote deploy', () => {
             applied_revision: bpObj.revision,
         });
 
-        vi.spyOn(axios, 'get').mockResolvedValue({ status: 404, data: {} }); // readMarker → null → proceed
+        const marker = {
+            blueprintId: bp.id,
+            revision: bpObj.revision,
+            lastApplied: Date.now(),
+        };
+        vi.spyOn(axios, 'get').mockResolvedValue({
+            status: 200,
+            data: { content: JSON.stringify(marker) },
+        });
         vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: {} }); // remote down (best-effort)
         const delSpy = vi.spyOn(axios, 'delete').mockResolvedValue({ status: 200, data: {} });
 
@@ -212,6 +220,56 @@ describe('BlueprintService remote deploy', () => {
 
         expect(result.status).toBe('withdrawn');
         expect(delSpy.mock.calls[0][0]).toMatch(/\/api\/stacks\//);
+        expect(DatabaseService.getInstance().getDeployment(bp.id, node.id)).toBeUndefined();
+    });
+
+    it('refuses remote withdraw when the marker is missing but the stack still exists', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            applied_revision: bpObj.revision,
+        });
+
+        // Marker GET 404, then stack list shows the same-name stack still present.
+        vi.spyOn(axios, 'get')
+            .mockResolvedValueOnce({ status: 404, data: {} })
+            .mockResolvedValueOnce({ status: 200, data: [{ name: bpObj.name }] });
+        const delSpy = vi.spyOn(axios, 'delete');
+
+        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('name_conflict');
+        expect(delSpy).not.toHaveBeenCalled();
+        expect(DatabaseService.getInstance().getDeployment(bp.id, node.id)?.status).toBe('name_conflict');
+    });
+
+    it('clears a remote deployment row when the stack is already absent (no marker)', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            applied_revision: bpObj.revision,
+        });
+
+        // Marker missing and stack list empty → already gone.
+        vi.spyOn(axios, 'get')
+            .mockResolvedValueOnce({ status: 404, data: {} })
+            .mockResolvedValueOnce({ status: 200, data: [] });
+        const delSpy = vi.spyOn(axios, 'delete');
+
+        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('withdrawn');
+        expect(delSpy).not.toHaveBeenCalled();
         expect(DatabaseService.getInstance().getDeployment(bp.id, node.id)).toBeUndefined();
     });
 
@@ -237,7 +295,15 @@ describe('BlueprintService remote deploy', () => {
             user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: bpObj.name,
         });
 
-        vi.spyOn(axios, 'get').mockResolvedValue({ status: 404, data: {} });
+        const marker = {
+            blueprintId: bp.id,
+            revision: bpObj.revision,
+            lastApplied: Date.now(),
+        };
+        vi.spyOn(axios, 'get').mockResolvedValue({
+            status: 200,
+            data: { content: JSON.stringify(marker) },
+        });
         vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: {} });
         const delSpy = vi.spyOn(axios, 'delete').mockResolvedValue({ status: 200, data: {} });
         const rbacSpy = vi.spyOn(db, 'deleteRoleAssignmentsByResource');

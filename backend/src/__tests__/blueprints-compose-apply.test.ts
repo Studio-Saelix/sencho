@@ -104,6 +104,10 @@ describe('Blueprint compose apply (real filesystem)', () => {
         await fsPromises.writeFile(path.join(stackDir, 'compose.yml'), 'services:\n  a:\n    image: a\n');
         await fsPromises.writeFile(path.join(stackDir, 'docker-compose.yaml'), 'services:\n  b:\n    image: b\n');
         await fsPromises.writeFile(path.join(stackDir, 'docker-compose.yml'), 'services:\n  c:\n    image: c\n');
+        await fsPromises.writeFile(
+            path.join(stackDir, '.blueprint.json'),
+            JSON.stringify({ blueprintId: 2, revision: 2, lastApplied: 1 }, null, 2),
+        );
 
         const composeContent = 'services:\n  app:\n    image: redis:7\n';
         const markerContent = JSON.stringify({ blueprintId: 2, revision: 3, lastApplied: Date.now() }, null, 2);
@@ -132,6 +136,32 @@ describe('Blueprint compose apply (real filesystem)', () => {
         await expectMissing(path.join(stackDir, 'docker-compose.yaml'));
         await expectMissing(path.join(stackDir, 'docker-compose.yml'));
         expect(deploySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses to overwrite an existing unmanaged stack directory inside the lock', async () => {
+        const { BlueprintNameConflictError } = await import('../services/BlueprintService');
+        const nodeId = seedLocalNode();
+        const stackName = `bp-hijack-${counter}`;
+        const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
+        await fsPromises.mkdir(stackDir, { recursive: true });
+        const original = 'services:\n  mine:\n    image: nginx:alpine\n';
+        await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), original);
+
+        const deploySpy = vi.spyOn(ComposeService.prototype, 'deployStack').mockResolvedValue(undefined);
+
+        await expect(
+            BlueprintService.getInstance().applyLocalUnderLock(
+                nodeId,
+                stackName,
+                'services:\n  bp:\n    image: redis:7\n',
+                JSON.stringify({ blueprintId: 99, revision: 1, lastApplied: Date.now() }, null, 2),
+                '/api/blueprints/test/apply',
+            ),
+        ).rejects.toBeInstanceOf(BlueprintNameConflictError);
+
+        expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe(original);
+        await expectMissing(path.join(stackDir, '.blueprint.json'));
+        expect(deploySpy).not.toHaveBeenCalled();
     });
 });
 

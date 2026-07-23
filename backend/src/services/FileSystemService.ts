@@ -56,6 +56,8 @@ const PROTECTED_STACK_FILES = new Set([
   'docker-compose.yaml',
   'docker-compose.yml',
   '.env',
+  // Blueprint ownership trust root — must not be deleted via the file explorer.
+  '.blueprint.json',
 ]);
 
 // Bookkeeping markers Sencho writes into the backup slot. They are never copied

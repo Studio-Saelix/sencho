@@ -456,6 +456,12 @@ describe('BlueprintService per-stack lock', () => {
         const nodeId = seedNode();
         const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
         const node = DatabaseService.getInstance().getNode(nodeId)!;
+        // Matching marker required before the delete lock is attempted.
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+            blueprintId: bp.id,
+            revision: bp.revision,
+            lastApplied: Date.now(),
+        });
         // A manual operation holds the lock; the withdraw must not race it.
         StackOpLockService.getInstance().tryAcquire(nodeId, bp.name, 'update', 'admin');
 
@@ -499,7 +505,11 @@ describe('BlueprintService local withdraw clears stack-scoped role assignments',
             user_id: userId, role: 'deployer', resource_type: 'node', resource_id: String(otherNodeId),
         });
 
-        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue(null);
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
+            blueprintId: bp.id,
+            revision: bp.revision,
+            lastApplied: Date.now(),
+        });
         const { ComposeService } = await import('../services/ComposeService');
         const { FileSystemService } = await import('../services/FileSystemService');
         vi.spyOn(ComposeService.prototype, 'downStack').mockResolvedValue(undefined);

@@ -52,6 +52,15 @@ export interface DeployOutcome {
     error?: string;
 }
 
+/** Thrown when apply refuses to overwrite a directory it does not own. */
+export class BlueprintNameConflictError extends Error {
+    readonly code = 'name_conflict' as const;
+    constructor(message: string) {
+        super(message);
+        this.name = 'BlueprintNameConflictError';
+    }
+}
+
 /**
  * BlueprintService is the orchestration layer between the reconciler and the
  * concrete deploy/withdraw primitives. It owns:
@@ -154,11 +163,11 @@ export class BlueprintService {
 
     /**
      * Returns true when a stack directory by this name exists on the target
-     * node but does not carry our marker file. The reconciler must not
-     * deploy in that case: there is a real user-authored stack with the
-     * same name and we must not overwrite it.
+     * node but does not carry a marker for this blueprint. The reconciler must
+     * not deploy in that case: there is a real user-authored stack (or another
+     * blueprint's stack) with the same name and we must not overwrite it.
      */
-    async hasNameConflict(blueprintName: string, node: Node): Promise<boolean> {
+    async hasNameConflict(blueprintName: string, node: Node, blueprintId: number): Promise<boolean> {
         try {
             if (node.type === 'local') {
                 const baseDir = NodeRegistry.getInstance().getComposeDir(node.id);
@@ -170,13 +179,8 @@ export class BlueprintService {
                 } catch {
                     return false; // directory doesn't exist → no conflict
                 }
-                const markerPath = path.join(stackDir, MARKER_FILENAME);
-                try {
-                    await fsPromises.stat(markerPath);
-                    return false; // marker present → ours
-                } catch {
-                    return true; // directory exists but no marker → conflict
-                }
+                const marker = await this.readLocalMarkerFromDisk(node.id, blueprintName);
+                return marker == null || marker.blueprintId !== blueprintId;
             }
             const target = NodeRegistry.getInstance().getProxyTarget(node.id);
             if (!target) return false;
@@ -192,9 +196,51 @@ export class BlueprintService {
             const exists = stacks.some(s => s?.name === blueprintName);
             if (!exists) return false;
             const marker = await this.readMarker(blueprintName, node);
-            return marker == null;
+            return marker == null || marker.blueprintId !== blueprintId;
         } catch {
             return false;
+        }
+    }
+
+    /** Read and parse a local on-disk marker without going through the remote HTTP path. */
+    private async readLocalMarkerFromDisk(nodeId: number, stackName: string): Promise<BlueprintMarker | null> {
+        try {
+            const baseDir = NodeRegistry.getInstance().getComposeDir(nodeId);
+            const markerPath = path.resolve(baseDir, stackName, MARKER_FILENAME);
+            if (!markerPath.startsWith(path.resolve(baseDir))) return null;
+            const content = await fsPromises.readFile(markerPath, 'utf-8');
+            return BlueprintService.parseMarker(content);
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Probe whether a stack directory/name still exists. Used by withdraw to
+     * distinguish "already gone" (safe to clear the deployment row) from
+     * "present without our marker" (must refuse).
+     */
+    private async probeStackExistence(
+        blueprintName: string,
+        node: Node,
+    ): Promise<'present' | 'absent' | 'unknown'> {
+        try {
+            if (node.type === 'local') {
+                return (await this.stackDirExists(node.id, blueprintName)) ? 'present' : 'absent';
+            }
+            const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+            if (!target) return 'unknown';
+            const baseUrl = target.apiUrl.replace(/\/$/, '');
+            const listRes = await axios.get(`${baseUrl}/api/stacks`, {
+                headers: this.remoteHeaders(target.apiToken),
+                timeout: REMOTE_HTTP_TIMEOUT_MS,
+                validateStatus: () => true,
+            });
+            if (listRes.status !== 200) return 'unknown';
+            const stacks = Array.isArray(listRes.data) ? listRes.data as Array<{ name?: string }> : [];
+            return stacks.some(s => s?.name === blueprintName) ? 'present' : 'absent';
+        } catch {
+            return 'unknown';
         }
     }
 
@@ -222,7 +268,7 @@ export class BlueprintService {
         });
         try {
             this.setStatus(blueprint.id, node.id, 'deploying');
-            if (await this.hasNameConflict(blueprint.name, node)) {
+            if (await this.hasNameConflict(blueprint.name, node, blueprint.id)) {
                 this.setStatus(blueprint.id, node.id, 'name_conflict', {
                     last_error: `A stack named "${blueprint.name}" already exists on this node and is not managed by Sencho.`,
                 });
@@ -249,6 +295,14 @@ export class BlueprintService {
                 sanitizeForLog(blueprint.name), node.id, Date.now() - started);
             return { status: 'active' };
         } catch (err) {
+            if (err instanceof BlueprintNameConflictError) {
+                this.setStatus(blueprint.id, node.id, 'name_conflict', {
+                    last_error: err.message,
+                });
+                console.warn('[BlueprintService] deploy name conflict blueprint=%s node=%s durationMs=%s',
+                    sanitizeForLog(blueprint.name), node.id, Date.now() - started);
+                return { status: 'name_conflict', error: 'name_conflict' };
+            }
             const message = BlueprintService.formatError(err);
             this.setStatus(blueprint.id, node.id, 'failed', { last_error: message });
             console.error('[BlueprintService] deploy failed blueprint=%s node=%s durationMs=%s error=%s',
@@ -280,11 +334,31 @@ export class BlueprintService {
         });
         try {
             this.setStatus(blueprint.id, node.id, 'withdrawing');
-            // Refuse to withdraw a directory we do not own
+            // Marker is the trust root: only withdraw when it matches this blueprint.
+            // Missing/unreadable marker on a still-present stack is refuse (not delete).
+            // Missing stack entirely is treated as already withdrawn.
             const marker = await this.readMarker(blueprint.name, node);
-            if (marker && marker.blueprintId !== blueprint.id) {
+            if (!marker || marker.blueprintId !== blueprint.id) {
+                if (marker && marker.blueprintId !== blueprint.id) {
+                    this.setStatus(blueprint.id, node.id, 'name_conflict', {
+                        last_error: `Marker on this node points to a different blueprint (id=${marker.blueprintId}); refusing to withdraw.`,
+                    });
+                    return { status: 'name_conflict' };
+                }
+                const existence = await this.probeStackExistence(blueprint.name, node);
+                if (existence === 'absent') {
+                    DatabaseService.getInstance().deleteDeployment(blueprint.id, node.id);
+                    console.info('[BlueprintService] withdraw noop (stack already absent) blueprint=%s node=%s durationMs=%s',
+                        sanitizeForLog(blueprint.name), node.id, Date.now() - started);
+                    return { status: 'withdrawn' };
+                }
+                if (existence === 'unknown') {
+                    const message = 'Could not verify blueprint marker before withdraw; refusing to delete.';
+                    this.setStatus(blueprint.id, node.id, 'failed', { last_error: message });
+                    return { status: 'failed', error: message };
+                }
                 this.setStatus(blueprint.id, node.id, 'name_conflict', {
-                    last_error: `Marker on this node points to a different blueprint (id=${marker.blueprintId}); refusing to withdraw.`,
+                    last_error: `Stack "${blueprint.name}" exists without a matching blueprint marker; refusing to withdraw.`,
                 });
                 return { status: 'name_conflict' };
             }
@@ -431,6 +505,10 @@ export class BlueprintService {
      * on a remote node receiving a blueprint apply from its hub (so the file
      * writes hold the remote's lock, not just the deploy). On lock conflict
      * nothing is written and { ran: false } is returned.
+     *
+     * Ownership is re-validated inside the lock: an existing directory is only
+     * overwritten when its marker matches the marker being applied. A missing or
+     * foreign marker throws BlueprintNameConflictError without writing.
      */
     async applyLocalUnderLock(
         nodeId: number,
@@ -439,11 +517,22 @@ export class BlueprintService {
         markerContent: string,
         auditPath: string,
     ): Promise<{ ran: true } | { ran: false; existingAction: StackOpAction }> {
+        const expected = BlueprintService.parseMarker(markerContent);
+        if (!expected) {
+            throw new Error('Invalid blueprint marker');
+        }
         const fs = FileSystemService.getInstance(nodeId);
         const lock = await StackOpLockService.getInstance().runExclusive(
             nodeId, stackName, 'deploy', 'system',
             async () => {
-                if (!(await this.stackDirExists(nodeId, stackName))) {
+                if (await this.stackDirExists(nodeId, stackName)) {
+                    const existing = await this.readLocalMarkerFromDisk(nodeId, stackName);
+                    if (!existing || existing.blueprintId !== expected.blueprintId) {
+                        throw new BlueprintNameConflictError(
+                            `A stack named "${stackName}" already exists on this node and is not managed by this blueprint.`,
+                        );
+                    }
+                } else {
                     await fs.createStack(stackName);
                 }
                 await fs.writeStackFile(stackName, COMPOSE_FILENAME, composeContent);
@@ -519,6 +608,16 @@ export class BlueprintService {
             return;
         }
         if (res.status === 409) {
+            const body = res.data;
+            const code = body && typeof body === 'object' && typeof (body as { code?: unknown }).code === 'string'
+                ? (body as { code: string }).code
+                : '';
+            if (code === 'name_conflict') {
+                throw new BlueprintNameConflictError(
+                    BlueprintService.extractApiError(res.data) ||
+                    `A stack named "${blueprint.name}" already exists on this node and is not managed by this blueprint.`,
+                );
+            }
             throw new Error(`blueprint apply skipped: ${BlueprintService.extractApiError(res.data) || 'another operation is already in progress'}`);
         }
         if (res.status >= 400) {

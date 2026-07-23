@@ -7,7 +7,7 @@ import {
     type BlueprintSelector,
     type DriftMode,
 } from '../services/DatabaseService';
-import { BlueprintService } from '../services/BlueprintService';
+import { BlueprintService, BlueprintNameConflictError } from '../services/BlueprintService';
 import {
     BlueprintReconciler,
     messageForConfirmedOutcomes,
@@ -320,8 +320,9 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
         // Best-effort cleanup before delete: withdraw exactly the rows a stateful delete would
         // block, i.e. stacks Sencho deployed and still owns (last_deployed_at set, and neither a
         // name_conflict nor an already-withdrawn row). Never run the withdraw primitive for a
-        // never-deployed or unmanaged row: withdrawFromNode proceeds on a missing marker and would
-        // down/delete a same-name stack Sencho does not own. The blueprint-delete cascade removes
+        // never-deployed or unmanaged row: withdrawFromNode requires a matching marker (or an
+        // already-absent stack) and refuses missing/foreign markers, so skipping those rows keeps
+        // delete from attempting a no-op conflict path. The blueprint-delete cascade removes
         // the rows the loop skips.
         const nodes = DatabaseService.getInstance().getNodes();
         const deployments = DatabaseService.getInstance().listDeployments(id);
@@ -384,6 +385,10 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         }
         res.json({ deployed: true });
     } catch (error) {
+        if (error instanceof BlueprintNameConflictError) {
+            res.status(409).json({ error: error.message, code: 'name_conflict' });
+            return;
+        }
         console.error('[Blueprints] apply-local error:', sanitizeForLog(getErrorMessage(error, 'apply failed')));
         res.status(500).json({ error: getErrorMessage(error, 'Blueprint apply failed') });
     }

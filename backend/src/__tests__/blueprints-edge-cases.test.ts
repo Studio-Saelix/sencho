@@ -111,9 +111,9 @@ describe('Blueprint route edge cases', () => {
 
 describe('Blueprint delete guard', () => {
     // Rows with no stack of ours on the node must not block delete, AND the route must not run the
-    // withdraw primitive for them: withdrawFromNode proceeds on a missing marker and would
-    // down/delete a same-name stack Sencho never owned. A name_conflict is exactly that unmanaged
-    // stack, so it is excluded even though it carries a last_deployed_at timestamp.
+    // withdraw primitive for them. withdrawFromNode now refuses a missing marker on a present
+    // stack, but skipping these rows still avoids a useless conflict path. A name_conflict is
+    // exactly that unmanaged stack, so it is excluded even though it may carry last_deployed_at.
     it.each([
         { label: 'never-deployed pending review', status: 'pending_state_review' as const, last_deployed_at: null },
         { label: 'first-deploy failure', status: 'failed' as const, last_deployed_at: null },
@@ -270,6 +270,41 @@ describe('BlueprintService marker edge cases', () => {
         const dep = DatabaseService.getInstance().getDeployment(bp.id, localNode.id);
         expect(dep).toBeDefined();
         expect(dep?.status).toBe('name_conflict');
+    });
+
+    it('refuses to withdraw when the marker is missing but the local stack directory still exists', async () => {
+        const fs = await import('fs');
+        const path = await import('path');
+        const composeDir = process.env.COMPOSE_DIR!;
+        const localNode = DatabaseService.getInstance().getNodes()[0];
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE nodes SET compose_dir = ? WHERE id = ?')
+            .run(composeDir, localNode.id);
+        const refreshed = DatabaseService.getInstance().getNode(localNode.id)!;
+        const bp = seedBlueprint([refreshed.id]);
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: refreshed.id,
+            status: 'active',
+            applied_revision: bpObj.revision,
+            last_deployed_at: Date.now(),
+        });
+
+        const stackDir = path.join(composeDir, bpObj.name);
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue(null);
+        const { DeployedStackDeletionService } = await import('../services/DeployedStackDeletionService');
+        const deleteSpy = vi.spyOn(DeployedStackDeletionService.getInstance(), 'deleteDeployedStack');
+
+        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, refreshed);
+
+        expect(result.status).toBe('name_conflict');
+        expect(deleteSpy).not.toHaveBeenCalled();
+        expect(DatabaseService.getInstance().getDeployment(bp.id, refreshed.id)?.status).toBe('name_conflict');
+        expect(fs.existsSync(path.join(stackDir, 'compose.yaml'))).toBe(true);
     });
 });
 

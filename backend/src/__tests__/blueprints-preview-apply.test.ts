@@ -326,6 +326,7 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
         const conflict = await BlueprintService.getInstance().hasNameConflict(
             created.body.name as string,
             DatabaseService.getInstance().getNode(node.id)!,
+            created.body.id as number,
         );
         expect(conflict).toBe(true);
 
