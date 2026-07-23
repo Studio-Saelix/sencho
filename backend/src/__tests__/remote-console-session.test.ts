@@ -42,12 +42,13 @@ describe('console_session token parity (HTTP route vs mint helper)', () => {
   });
 
   it('POST /api/system/console-token produces a token with the same shape as mintConsoleSession()', async () => {
-    const directToken = mintConsoleSession();
+    const directToken = mintConsoleSession({ path: 'host-console', actingAs: 'testadmin' });
     const directDecoded = jwt.verify(directToken, TEST_JWT_SECRET) as Record<string, unknown>;
 
     const res = await request(app)
       .post('/api/system/console-token')
-      .set('Cookie', adminCookie);
+      .set('Cookie', adminCookie)
+      .send({ path: 'host-console' });
     expect(res.status).toBe(200);
     expect(typeof res.body.token).toBe('string');
 
@@ -56,6 +57,12 @@ describe('console_session token parity (HTTP route vs mint helper)', () => {
     // Identical scope so the remote's upgrade handler treats both the same.
     expect(routeDecoded.scope).toBe('console_session');
     expect(directDecoded.scope).toBe('console_session');
+    expect(routeDecoded.path).toBe('host-console');
+    expect(directDecoded.path).toBe('host-console');
+    expect(typeof routeDecoded.jti).toBe('string');
+    expect(typeof directDecoded.jti).toBe('string');
+    expect(routeDecoded.acting_as).toBe('testadmin');
+    expect(directDecoded.acting_as).toBe('testadmin');
 
     // Same claim keys: if somebody adds or drops a claim on one path but not
     // the other, remote upgrade behavior will diverge.

@@ -7,10 +7,11 @@ import { ROLE_PERMISSIONS } from '../middleware/permissions';
 import type { UserRole } from '../services/DatabaseService';
 import { getErrorMessage } from '../utils/errors';
 import { rejectUpgrade as reject } from './reject';
+import { isConsoleSessionScope } from '../helpers/consoleSession';
 
 interface HostConsoleContext {
   nodeId: number;
-  decoded: { scope?: string; username?: string };
+  decoded: { scope?: string; username?: string; acting_as?: string };
   isProxyToken: boolean;
   wsResolvedUser: { username: string; role: UserRole; token_version: number } | undefined;
   stackParam: string | null;
@@ -26,6 +27,9 @@ interface HostConsoleContext {
  *  2. RBAC: user session tokens require the `system:console` permission.
  *     console_session tokens are pre-gated at issuance (see
  *     `routes/console.ts`) and skip this check.
+ *
+ * Path scoping and one-time jti consumption are enforced in upgradeHandler
+ * before this handler runs.
  */
 export function handleHostConsoleWs(
   req: IncomingMessage,
@@ -37,7 +41,7 @@ export function handleHostConsoleWs(
 
   if (isProxyToken) return reject(socket, 403, 'Forbidden');
 
-  const isConsoleSession = decoded.scope === 'console_session';
+  const isConsoleSession = isConsoleSessionScope(decoded.scope);
   if (!isConsoleSession) {
     const userRole = wsResolvedUser?.role;
     if (!userRole || !ROLE_PERMISSIONS[userRole]?.includes('system:console')) {
@@ -49,9 +53,18 @@ export function handleHostConsoleWs(
     }
   }
 
-  const consoleUsername = wsResolvedUser?.username || decoded.username || 'console_session';
+  // Option B: console_session principal stays "console_session"; hub operator
+  // is recorded separately as acting_as. Browser sessions use the real user.
+  const consoleUsername = isConsoleSession
+    ? 'console_session'
+    : (wsResolvedUser?.username || decoded.username || 'unknown');
+  const actingAs = isConsoleSession && typeof decoded.acting_as === 'string' && decoded.acting_as
+    ? decoded.acting_as
+    : null;
+
   console.log('[HostConsole] WebSocket upgrade accepted', {
     username: consoleUsername,
+    actingAs,
     nodeId,
     stack: stackParam || '(root)',
   });
@@ -79,6 +92,7 @@ export function handleHostConsoleWs(
     } catch (error) {
       console.error('[HostConsole] Failed to resolve console directory', {
         user: consoleUsername,
+        actingAs,
         nodeId,
         stack: stackParam || '(root)',
         error: getErrorMessage(error, 'unknown'),
@@ -89,11 +103,15 @@ export function handleHostConsoleWs(
       }
       return;
     }
-    const auditCtx = { username: consoleUsername, nodeId, ipAddress };
+    const auditCtx = { username: consoleUsername, actingAs, nodeId, ipAddress };
     try {
       HostTerminalService.spawnTerminal(ws, targetDirectory, auditCtx);
     } catch (error) {
-      console.error('[HostConsole] Unhandled spawn error:', { user: consoleUsername, error: getErrorMessage(error, 'unknown') });
+      console.error('[HostConsole] Unhandled spawn error:', {
+        user: consoleUsername,
+        actingAs,
+        error: getErrorMessage(error, 'unknown'),
+      });
       if (ws.readyState === WebSocket.OPEN) {
         ws.send('Error: Failed to start terminal session.\r\n');
         ws.close();

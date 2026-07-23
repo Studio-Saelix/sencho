@@ -23,6 +23,12 @@ import { isLicenseTier, normalizeTier } from '../services/license-normalize';
 import { HOST_CONSOLE_COMMUNITY_CAPABILITY } from '../services/CapabilityRegistry';
 import { remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
 
+import {
+  consoleSessionPathForPathname,
+  consumeConsoleSessionJti,
+  isConsoleSessionScope,
+} from '../helpers/consoleSession';
+
 function parseCookies(req: IncomingMessage): Record<string, string> {
   const header = req.headers.cookie || '';
   return Object.fromEntries(
@@ -31,6 +37,17 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
       .map((c) => c.trim().split('='))
       .filter(([k, v]) => k && v),
   );
+}
+
+/**
+ * Parse ?nodeId= as a strict positive integer. Returns null when the param is
+ * absent (caller should use the default node). Returns undefined when the
+ * param is present but malformed (caller should 404).
+ */
+function parseStrictNodeIdParam(raw: string | null): number | null | undefined {
+  if (raw == null || raw === '') return null;
+  if (!/^[1-9][0-9]*$/.test(raw)) return undefined;
+  return Number(raw);
 }
 
 // The two WebSocket paths open to any authenticated user (read-only/deploy-only
@@ -145,7 +162,16 @@ export function attachUpgrade(
     try {
       // Opaque sen_sk_ API tokens: handled before jwt.verify. Prefix +
       // length + checksum reject malformed keys without touching SQLite.
-      let decoded: { username?: string; scope?: string; role?: string; tv?: number };
+      let decoded: {
+        username?: string;
+        scope?: string;
+        role?: string;
+        tv?: number;
+        path?: string;
+        acting_as?: string;
+        jti?: string;
+        exp?: number;
+      };
       let wsApiTokenScope: string | null = null;
       if (looksLikeApiToken(token)) {
         const validation = validateApiToken(token);
@@ -160,7 +186,7 @@ export function attachUpgrade(
         const settings = DatabaseService.getInstance().getGlobalSettings();
         const jwtSecret = settings.auth_jwt_secret;
         if (!jwtSecret) throw new Error('No JWT secret');
-        decoded = jwt.verify(token, jwtSecret) as { username?: string; scope?: string; role?: string; tv?: number };
+        decoded = jwt.verify(token, jwtSecret) as typeof decoded;
       }
 
       // Node proxy tokens are machine-to-machine credentials and must never be
@@ -188,6 +214,21 @@ export function attachUpgrade(
 
       const parsedUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
       const pathname = parsedUrl.pathname;
+
+      // Path-scoped, one-time console_session tokens for interactive surfaces.
+      // Consume runs at upgrade acceptance (before PTY spawn); missing exp/jti fail closed.
+      if (isConsoleSessionScope(decoded.scope)) {
+        const requiredPath = consoleSessionPathForPathname(pathname);
+        if (!requiredPath || decoded.path !== requiredPath) {
+          return reject(socket, 403, 'Forbidden');
+        }
+        if (typeof decoded.exp !== 'number' || typeof decoded.jti !== 'string' || !decoded.jti) {
+          return reject(socket, 401, 'Unauthorized');
+        }
+        if (!consumeConsoleSessionJti(decoded.jti, decoded.exp * 1000)) {
+          return reject(socket, 401, 'Unauthorized');
+        }
+      }
 
       // Gate WebSocket paths by API token scope
       if (wsApiTokenScope) {
@@ -228,8 +269,11 @@ export function attachUpgrade(
         return;
       }
 
-      const nodeIdParam = parsedUrl.searchParams.get('nodeId');
-      const nodeId = nodeIdParam ? parseInt(nodeIdParam, 10) : NodeRegistry.getInstance().getDefaultNodeId();
+      const parsedNodeId = parseStrictNodeIdParam(parsedUrl.searchParams.get('nodeId'));
+      if (parsedNodeId === undefined) {
+        return reject(socket, 404, 'Not Found');
+      }
+      const nodeId = parsedNodeId ?? NodeRegistry.getInstance().getDefaultNodeId();
       const node = NodeRegistry.getInstance().getNode(nodeId);
 
       // Notification push channel: local only when no remote nodeId is
@@ -279,7 +323,11 @@ export function attachUpgrade(
           // serve gateway-local data for a request that named a remote node.
           return reject(socket, 503, 'Service Unavailable');
         }
-        await handleRemoteForwarder(req, socket, head, { pathname, target });
+        await handleRemoteForwarder(req, socket, head, {
+          pathname,
+          target,
+          actingAs: wsResolvedUser?.username || decoded.username,
+        });
         return;
       }
 
@@ -294,6 +342,11 @@ export function attachUpgrade(
         // remote forward gate). Do not rely on missing wsResolvedUser alone.
         if (wsApiTokenScope) {
           return reject(socket, 403, 'Forbidden');
+        }
+        // Unknown / deleted nodeIds must not fall through to the hub compose
+        // root via getComposeDir's env default.
+        if (!node) {
+          return reject(socket, 404, 'Not Found');
         }
         handleHostConsoleWs(req, socket, head, {
           nodeId,

@@ -84,7 +84,7 @@ The Host Console is one of the most powerful features in Sencho and is treated a
 
 - **Admin role required.** Only users with the **admin** role can open a console session.
 - **Browser sessions only.** Console sessions are only available from a signed-in browser session, not from API tokens.
-- **Audited.** Every console session is recorded in the audit log. Opening and closing a session each write an entry capturing the user, node, client IP, and timestamp, so shell access is fully accountable.
+- **Audited.** Every console session is recorded in the audit log. Opening and closing a session each write an entry with the session principal, node, client IP, and timestamp. When the session is opened through a remote hub bridge, the principal is `console_session` and the hub operator is recorded in `acting_as`, so remote shell access stays accountable to the signed-in admin.
 
 <Warning>
   The Host Console provides unrestricted shell access to the machine running Sencho. Do not expose Sencho on a public network without HTTPS and strong authentication.

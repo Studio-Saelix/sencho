@@ -613,6 +613,8 @@ export interface AuditLogEntry {
     node_id: number | null;
     ip_address: string;
     summary: string;
+    /** Hub operator for remote console_session bridges; null/absent for direct sessions. */
+    acting_as?: string | null;
 }
 
 export interface SecretRow {
@@ -1240,11 +1242,19 @@ export class DatabaseService {
         status_code INTEGER NOT NULL DEFAULT 0,
         node_id INTEGER,
         ip_address TEXT NOT NULL DEFAULT '',
-        summary TEXT NOT NULL DEFAULT ''
+        summary TEXT NOT NULL DEFAULT '',
+        acting_as TEXT
       );
 
       CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
       CREATE INDEX IF NOT EXISTS idx_audit_log_username ON audit_log(username);
+
+      CREATE TABLE IF NOT EXISTS console_session_jtis (
+        jti TEXT PRIMARY KEY,
+        used_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_console_session_jtis_expires ON console_session_jtis(expires_at);
 
       CREATE TABLE IF NOT EXISTS api_tokens (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1787,6 +1797,21 @@ export class DatabaseService {
         const maybeAddCol = (table: string, col: string, def: string) => {
             try { this.db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`).run(); } catch (e) { /* ignore */ }
         };
+
+        // Remote Host Console bridges record the hub operator separately from
+        // the console_session principal (username stays console_session).
+        maybeAddCol('audit_log', 'acting_as', 'TEXT');
+        // Cached INSERT may predate the column; rebuild on next flush.
+        this.auditLogInsertStmt = null;
+
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS console_session_jtis (
+            jti TEXT PRIMARY KEY,
+            used_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_console_session_jtis_expires ON console_session_jtis(expires_at);
+        `);
 
         maybeAddCol('stack_update_recovery_generations', 'artifacts_retired', 'INTEGER NOT NULL DEFAULT 0');
 
@@ -4456,6 +4481,21 @@ export class DatabaseService {
         this.db.prepare('DELETE FROM pilot_enrollments WHERE node_id = ?').run(nodeId);
     }
 
+    /**
+     * One-time consume for a console_session JWT id. Inserts the jti on first
+     * use; returns false when the jti was already recorded (replay).
+     */
+    public consumeConsoleSessionJti(jti: string, expiresAtMs: number): boolean {
+        const now = Date.now();
+        return this.db.transaction(() => {
+            this.db.prepare('DELETE FROM console_session_jtis WHERE expires_at < ?').run(now);
+            const result = this.db.prepare(
+                'INSERT OR IGNORE INTO console_session_jtis (jti, used_at, expires_at) VALUES (?, ?, ?)',
+            ).run(jti, now, expiresAtMs);
+            return result.changes > 0;
+        })();
+    }
+
     // --- Stack Update Status ---
 
     /**
@@ -5159,7 +5199,7 @@ export class DatabaseService {
         this.auditLogBuffer = [];
         if (!this.auditLogInsertStmt) {
             this.auditLogInsertStmt = this.db.prepare(
-                'INSERT INTO audit_log (timestamp, username, method, path, status_code, node_id, ip_address, summary) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                'INSERT INTO audit_log (timestamp, username, method, path, status_code, node_id, ip_address, summary, acting_as) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
             );
         }
         const stmt = this.auditLogInsertStmt;
@@ -5174,6 +5214,7 @@ export class DatabaseService {
                     entry.node_id,
                     entry.ip_address,
                     entry.summary,
+                    entry.acting_as ?? null,
                 );
             }
         });
