@@ -145,8 +145,19 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
         // Body forwarding: conditionalJsonParser skips parsing for remote
         // requests (see middleware/jsonParser.ts), so req's raw stream is
-        // intact and http-proxy's req.pipe(proxyReq) forwards the body
-        // automatically.
+        // usually intact and http-proxy's req.pipe(proxyReq) forwards it.
+        // When a gate must inspect JSON (POST /alerts), we buffer into
+        // req.rawBody first; rewrite that buffer here because the stream is
+        // already consumed.
+        if (req.rawBody) {
+          proxyReq.removeHeader('Transfer-Encoding');
+          proxyReq.removeHeader('Content-Length');
+          if (!proxyReq.getHeader('Content-Type')) {
+            proxyReq.setHeader('Content-Type', 'application/json');
+          }
+          proxyReq.setHeader('Content-Length', req.rawBody.length);
+          proxyReq.write(req.rawBody);
+        }
       },
       proxyRes: (proxyRes, req) => {
         // Mark every response forwarded from a remote node with a sentinel
@@ -246,14 +257,20 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
       }
 
-      if (isServiceScopedAlertCreate(req)) {
-        const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_STACK_ALERT_CAPABILITY);
-        if (!supported) {
-          res.status(400).json({
-            error: 'Service-scoped alert rules are not supported on this node',
-            code: 'capability_unavailable',
-          });
-          return;
+      // POST /alerts bodies are not on req.body for remote hops (JSON parsing
+      // is skipped so the stream can be piped). Buffer once, gate on the
+      // parsed service_name, then rewrite rawBody in on.proxyReq.
+      if (isAlertCreateRoute(req)) {
+        req.rawBody = await bufferRequestBody(req);
+        if (alertCreateHasScopedService(req.rawBody)) {
+          const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_STACK_ALERT_CAPABILITY);
+          if (!supported) {
+            res.status(400).json({
+              error: 'Service-scoped alert rules are not supported on this node',
+              code: 'capability_unavailable',
+            });
+            return;
+          }
         }
       }
 
@@ -295,11 +312,59 @@ function isServiceScopedUpdateRoute(req: Request): boolean {
   return false;
 }
 
-/** POST /alerts with a non-empty service_name (path is post-/api strip). */
-function isServiceScopedAlertCreate(req: Request): boolean {
-  if (req.method !== 'POST') return false;
-  if (req.path !== '/alerts' && req.path !== '/alerts/') return false;
-  const body = req.body as { service_name?: unknown } | undefined;
-  const serviceName = body?.service_name;
-  return typeof serviceName === 'string' && serviceName.trim() !== '';
+/** POST /alerts (path is post-/api strip). */
+function isAlertCreateRoute(req: Request): boolean {
+  return req.method === 'POST' && /^\/alerts\/?$/.test(req.path);
+}
+
+/** True when the buffered JSON alert body targets a specific Compose service. */
+function alertCreateHasScopedService(rawBody: Buffer): boolean {
+  if (rawBody.length === 0) return false;
+  try {
+    const parsed = JSON.parse(rawBody.toString('utf-8')) as { service_name?: unknown };
+    return typeof parsed.service_name === 'string' && parsed.service_name.trim() !== '';
+  } catch {
+    // Invalid JSON is forwarded as-is; the remote rejects it. Do not treat
+    // parse failure as scoped (would block unscoped typos behind a capability).
+    return false;
+  }
+}
+
+/**
+ * Drain the incoming request into a Buffer so a capability gate can inspect
+ * JSON without leaving http-proxy with an already-ended empty stream.
+ */
+async function bufferRequestBody(req: Request): Promise<Buffer> {
+  if (req.rawBody) return req.rawBody;
+  if (req.readableEnded) return Buffer.alloc(0);
+
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let settled = false;
+
+    const finish = (buf: Buffer) => {
+      if (settled) return;
+      settled = true;
+      resolve(buf);
+    };
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+
+    req.on('data', (chunk: Buffer) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    req.on('end', () => finish(Buffer.concat(chunks)));
+    req.on('error', fail);
+    req.on('aborted', () => {
+      fail(Object.assign(new Error('Client aborted request body'), { status: 400, expose: true }));
+    });
+    req.on('close', () => {
+      if (!settled && !req.readableEnded) {
+        fail(Object.assign(new Error('Client closed request before body finished'), { status: 400, expose: true }));
+      }
+    });
+  });
 }
