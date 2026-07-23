@@ -78,7 +78,7 @@ beforeAll(async () => {
   authCookie = await loginAsTestAdmin(app);
 
   const { NotificationService } = await import('../services/NotificationService');
-  vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+  vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
 });
 
 afterAll(() => {

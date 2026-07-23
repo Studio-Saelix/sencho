@@ -40,7 +40,7 @@ const {
   mockGetSystemState: vi.fn().mockReturnValue(null),
   mockSetSystemState: vi.fn(),
   mockTransaction: vi.fn().mockImplementation((fn: () => unknown) => fn()),
-  mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
+  mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
   mockAxiosPost: vi.fn().mockResolvedValue({ data: { success: true } }),
 }));
 

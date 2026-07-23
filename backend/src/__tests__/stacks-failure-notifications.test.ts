@@ -132,7 +132,7 @@ beforeAll(async () => {
   const { NotificationService } = await import('../services/NotificationService');
   dispatchAlertSpy = vi
     .spyOn(NotificationService.getInstance(), 'dispatchAlert')
-    .mockResolvedValue(undefined);
+    .mockResolvedValue({ persisted: true });
 });
 
 afterAll(() => {

@@ -326,8 +326,11 @@ function AlertsTab({ stackName }: { stackName: string }) {
             && !servicesState.options.includes(alert.service_name);
         if (missing) {
             return (
-                <span className="text-warning font-sans">
-                    {alert.service_name} <span className="font-medium">(Service missing)</span>
+                <span
+                    className="text-warning font-sans"
+                    title="This name is not in the compose file. The rule still evaluates running containers with this Compose service label."
+                >
+                    {alert.service_name} <span className="font-medium">(Not in compose)</span>
                 </span>
             );
         }

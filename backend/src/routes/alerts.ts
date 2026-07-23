@@ -73,8 +73,10 @@ alertsRouter.post('/', authMiddleware, async (req: Request, res: Response) => {
 
 alertsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
   if (!requireAdmin(req, res)) return;
-  const id = parseInt(req.params.id as string, 10);
-  if (!Number.isFinite(id)) {
+  // Reject leading-junk / fractional ids (parseInt("1abc") === 1, parseInt("2.5") === 2).
+  const rawId = String(req.params.id ?? '');
+  const id = /^\d+$/.test(rawId) ? Number.parseInt(rawId, 10) : NaN;
+  if (!Number.isInteger(id) || id <= 0) {
     res.status(400).json({ error: 'Invalid alert id' });
     return;
   }

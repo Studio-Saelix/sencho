@@ -135,7 +135,7 @@ describe('StackAlertSheet Alerts tab', () => {
     });
   });
 
-  it('shows Service missing only after a successful services list', async () => {
+  it('shows Not in compose only after a successful services list', async () => {
     mockHappyPath(['database'], [{
       id: 1,
       stack_name: 'my-stack',
@@ -150,11 +150,11 @@ describe('StackAlertSheet Alerts tab', () => {
     render(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Service missing/i)).toBeInTheDocument();
+      expect(screen.getByText(/Not in compose/i)).toBeInTheDocument();
     });
   });
 
-  it('does not show Service missing when services fetch fails', async () => {
+  it('does not show Not in compose when services fetch fails', async () => {
     mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/agents')) return jsonRes([{ type: 'discord', enabled: true }]);
@@ -177,7 +177,7 @@ describe('StackAlertSheet Alerts tab', () => {
     render(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" />);
 
     await waitFor(() => expect(screen.getByText('api')).toBeInTheDocument());
-    expect(screen.queryByText(/Service missing/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Not in compose/i)).not.toBeInTheDocument();
   });
 
   it('hides service selector when capability is missing and posts null', async () => {
@@ -232,7 +232,7 @@ describe('StackAlertSheet Alerts tab', () => {
     );
 
     await waitFor(() => expect(servicesCalls).toBe(1));
-    await waitFor(() => expect(screen.queryByText(/Service missing/i)).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText(/Not in compose/i)).not.toBeInTheDocument());
 
     nodeState.activeNode = { id: 2, type: 'remote', name: 'Remote' };
     nodeState.activeNodeMeta = {
@@ -243,6 +243,6 @@ describe('StackAlertSheet Alerts tab', () => {
 
     await waitFor(() => expect(servicesCalls).toBe(2));
     // New node's list has only worker, so the api-targeted rule is missing.
-    await waitFor(() => expect(screen.getByText(/Service missing/i)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/Not in compose/i)).toBeInTheDocument());
   });
 });

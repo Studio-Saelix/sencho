@@ -25,7 +25,7 @@ const {
   mockGetSystemState: vi.fn().mockReturnValue('1'), // default: backfilled
   mockSetSystemState: vi.fn(),
   mockAddNotificationHistory: vi.fn(),
-  mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
+  mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
   mockGetStacks: vi.fn().mockResolvedValue([]),
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockRejectedValue(new Error('no env')),

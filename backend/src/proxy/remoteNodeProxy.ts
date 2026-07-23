@@ -430,7 +430,9 @@ async function bufferRequestBody(req: Request, limit: number): Promise<Buffer> {
 
   const declared = Number.parseInt(String(req.headers['content-length'] ?? ''), 10);
   if (Number.isFinite(declared) && declared > limit) {
-    await drainRequestBody(req);
+    // Reject immediately so the client gets a structured 413; drain leftover
+    // bytes in the background so the socket can close without holding the gate.
+    void drainRequestBody(req);
     throw alertBodyError('Alert payload too large', 413);
   }
 
@@ -452,11 +454,10 @@ async function bufferRequestBody(req: Request, limit: number): Promise<Buffer> {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       total += buf.length;
       if (total > limit) {
-        cleanup();
         chunks.length = 0;
-        void drainRequestBody(req).finally(() => {
-          fail(alertBodyError('Alert payload too large', 413));
-        });
+        // fail() removes listeners; drain leftover bytes so the socket can close.
+        fail(alertBodyError('Alert payload too large', 413));
+        void drainRequestBody(req);
         return;
       }
       chunks.push(buf);

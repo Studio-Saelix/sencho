@@ -308,6 +308,58 @@ describe('DELETE /api/alerts/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
   });
+
+  it('rejects leading-junk ids like 1abc without deleting alert 1', async () => {
+    const created = DatabaseService.getInstance().addStackAlert({
+      stack_name: 'strict-id-junk',
+      service_name: null,
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 90,
+      duration_mins: 0,
+      cooldown_mins: 0,
+    });
+    expect(created.id).toBeDefined();
+
+    const res = await request(app)
+      .delete(`/api/alerts/${created.id}abc`)
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid alert id');
+    expect(DatabaseService.getInstance().getStackAlerts('strict-id-junk').some((a) => a.id === created.id)).toBe(true);
+  });
+
+  it('rejects fractional ids like 2.5 without deleting alert 2', async () => {
+    const first = DatabaseService.getInstance().addStackAlert({
+      stack_name: 'strict-id-fraction',
+      service_name: null,
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 0,
+      cooldown_mins: 0,
+    });
+    const second = DatabaseService.getInstance().addStackAlert({
+      stack_name: 'strict-id-fraction',
+      service_name: null,
+      metric: 'memory_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 0,
+      cooldown_mins: 0,
+    });
+    expect(second.id).toBeDefined();
+
+    const res = await request(app)
+      .delete(`/api/alerts/${second.id}.5`)
+      .set('Cookie', authCookie);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Invalid alert id');
+    const remaining = DatabaseService.getInstance().getStackAlerts('strict-id-fraction').map((a) => a.id);
+    expect(remaining).toEqual(expect.arrayContaining([first.id, second.id]));
+  });
 });
 
 // --- POST /api/notifications/test ---

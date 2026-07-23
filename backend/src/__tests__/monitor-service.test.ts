@@ -48,7 +48,7 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   }),
   mockGetImages: vi.fn().mockResolvedValue([]),
   mockGetStacks: vi.fn().mockResolvedValue([]),
-  mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
+  mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
   mockCurrentLoad: vi.fn().mockResolvedValue({ currentLoad: 10 }),
   mockMem: vi.fn().mockResolvedValue({ total: 16e9, used: 4e9, active: 4e9, available: 12e9, free: 12e9, buffcache: 0 }),
   mockFsSize: vi.fn().mockResolvedValue([{ mount: '/', use: 30 }]),
@@ -917,7 +917,7 @@ describe('MonitorService - breach state machine', () => {
       { stackName: 'my-stack', containerName: 'my-stack-api-1', actor: 'system:monitor' },
     );
     expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(1, 'api', expect.any(Number));
-    expect(mockUpdateStackAlertLastFired).not.toHaveBeenCalled();
+    expect(mockUpdateStackAlertLastFired).toHaveBeenCalledWith(1, expect.any(Number));
   });
 
   it('does not fire when condition not met', async () => {
@@ -982,6 +982,26 @@ describe('MonitorService - breach state machine', () => {
 
     expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
     expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(1, 'api', expect.any(Number));
+    expect(mockUpdateStackAlertLastFired).toHaveBeenCalledWith(1, expect.any(Number));
+  });
+
+  it('does not advance cooldown when notification history is not persisted', async () => {
+    setupAlertScenario(90);
+    mockDispatchAlert.mockResolvedValueOnce({ persisted: false });
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    expect(mockUpsertStackAlertServiceCooldown).not.toHaveBeenCalled();
+    expect(mockUpdateStackAlertLastFired).not.toHaveBeenCalled();
+
+    mockDispatchAlert.mockResolvedValueOnce({ persisted: true });
+    await (svc as any).evaluate();
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(1, 'api', expect.any(Number));
+    expect(mockUpdateStackAlertLastFired).toHaveBeenCalledWith(1, expect.any(Number));
   });
 
   it('drops in-memory breach timers when a rule is deleted', async () => {

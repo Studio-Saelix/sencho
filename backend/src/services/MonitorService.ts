@@ -825,15 +825,27 @@ export class MonitorService {
                             // Node-neutral body: the hub bell badge attributes remotes.
                             const message = `The **${metricName}** for **${serviceLabel}** in **${rule.stack_name}** (container **${containerName}**) ${operatorPhrase} **${safeThreshold}${unit}** (Currently: ${safeCurrent}${unit}).`;
 
-                            console.log(`[MonitorService] Alert fired: rule ${ruleId} on stack "${rule.stack_name}" service "${serviceName}": ${metricName} ${operatorPhrase} ${safeThreshold}${unit}`);
                             try {
-                                await NotificationService.getInstance().dispatchAlert(
+                                const { persisted } = await NotificationService.getInstance().dispatchAlert(
                                     'warning',
                                     'monitor_alert',
                                     message,
                                     { stackName: rule.stack_name, containerName, actor: 'system:monitor' },
                                 );
-                                db.upsertStackAlertServiceCooldown(ruleId, serviceName, Date.now());
+                                if (!persisted) {
+                                    // History was not written; do not advance cooldown or we silence retries.
+                                    this.firedThisCycle.delete(cooldownKey);
+                                    console.error(
+                                        `[MonitorService] Alert history not persisted for rule ${ruleId} service "${serviceName}"; cooldown not advanced`,
+                                    );
+                                    continue;
+                                }
+                                const firedAt = Date.now();
+                                // Dual-write: per-service row for current code, parent last_fired_at
+                                // so a downgrade that only reads the parent column still has a floor.
+                                db.upsertStackAlertServiceCooldown(ruleId, serviceName, firedAt);
+                                db.updateStackAlertLastFired(ruleId, firedAt);
+                                console.log(`[MonitorService] Alert fired: rule ${ruleId} on stack "${rule.stack_name}" service "${serviceName}": ${metricName} ${operatorPhrase} ${safeThreshold}${unit}`);
                             } catch (fireErr) {
                                 this.firedThisCycle.delete(cooldownKey);
                                 console.error(

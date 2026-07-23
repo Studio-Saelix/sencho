@@ -1107,6 +1107,9 @@ export class DatabaseService {
         last_fired_at INTEGER DEFAULT 0
       );
 
+      -- FK cascade is declarative only: PRAGMA foreign_keys is never enabled
+      -- on this connection, so parent deletes must remove children explicitly
+      -- (see deleteStackAlert).
       CREATE TABLE IF NOT EXISTS stack_alert_service_cooldowns (
         alert_id INTEGER NOT NULL,
         service_name TEXT NOT NULL,
@@ -2269,6 +2272,7 @@ export class DatabaseService {
     private migrateStackAlertServiceScope(): void {
         this.tryAddColumn('stack_alerts', 'service_name', 'TEXT');
         try {
+            // FK is not enforced (foreign_keys pragma off); deleteStackAlert removes children.
             this.db.prepare(`
                 CREATE TABLE IF NOT EXISTS stack_alert_service_cooldowns (
                     alert_id INTEGER NOT NULL,
@@ -3102,6 +3106,11 @@ export class DatabaseService {
         return this.db.prepare('SELECT * FROM stack_alerts WHERE id = ?').get(result.lastInsertRowid) as StackAlert;
     }
 
+    /**
+     * Delete an alert and its per-service cooldown rows.
+     * SQLite foreign_keys is not enabled here, so child rows are removed
+     * explicitly rather than relying on ON DELETE CASCADE.
+     */
     public deleteStackAlert(id: number): void {
         this.transaction(() => {
             this.deleteStackAlertServiceCooldowns(id);

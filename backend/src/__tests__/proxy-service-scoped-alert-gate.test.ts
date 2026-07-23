@@ -176,15 +176,18 @@ describe('remote proxy service-scoped alert gate', () => {
       stack_name: 'x'.repeat(120 * 1024),
     };
 
+    const started = Date.now();
     const res = await request(app)
       .post('/api/alerts')
       .set('Authorization', `Bearer ${adminBearer}`)
       .set('x-node-id', String(noCapNodeId))
       .set('Content-Type', 'application/json')
       .send(huge);
+    const elapsedMs = Date.now() - started;
 
     expect(res.status).toBe(413);
     expect(res.body.code).toBe('entity_too_large');
+    expect(elapsedMs).toBeLessThan(2000);
     expect(noCapPaths.some((p) => p.includes('/api/alerts'))).toBe(false);
     expect(lastNoCapBody).toBeNull();
   });
