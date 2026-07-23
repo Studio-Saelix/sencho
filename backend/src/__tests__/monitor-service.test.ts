@@ -9,7 +9,9 @@ import { installArcstatsFsMock, arcstatsBody, DEFAULT_ARC_PATH, type ArcstatsFsM
 
 const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContainerMetric,
   mockCleanupOldMetrics, mockCleanupOldNotifications, mockCleanupOldAuditLogs,
-  mockUpdateStackAlertLastFired, mockGetSystemState, mockSetSystemState,
+  mockUpdateStackAlertLastFired, mockGetStackAlertServiceCooldown,
+  mockHasAnyStackAlertServiceCooldown, mockUpsertStackAlertServiceCooldown,
+  mockGetSystemState, mockSetSystemState,
   mockPruneScanHistoryPerImage, mockDeleteScansByImageRef,
   mockGetRunningContainers, mockGetAllContainers, mockGetContainerStatsStream,
   mockGetContainerRestartCount, mockGetDiskUsage, mockGetImages, mockGetStacks,
@@ -29,6 +31,9 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   mockCleanupOldNotifications: vi.fn(),
   mockCleanupOldAuditLogs: vi.fn(),
   mockUpdateStackAlertLastFired: vi.fn(),
+  mockGetStackAlertServiceCooldown: vi.fn().mockReturnValue(null),
+  mockHasAnyStackAlertServiceCooldown: vi.fn().mockReturnValue(false),
+  mockUpsertStackAlertServiceCooldown: vi.fn(),
   mockGetSystemState: vi.fn().mockReturnValue(null),
   mockSetSystemState: vi.fn(),
   mockPruneScanHistoryPerImage: vi.fn().mockReturnValue(0),
@@ -43,7 +48,7 @@ const { mockGetGlobalSettings, mockGetNodes, mockGetStackAlerts, mockAddContaine
   }),
   mockGetImages: vi.fn().mockResolvedValue([]),
   mockGetStacks: vi.fn().mockResolvedValue([]),
-  mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
+  mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
   mockCurrentLoad: vi.fn().mockResolvedValue({ currentLoad: 10 }),
   mockMem: vi.fn().mockResolvedValue({ total: 16e9, used: 4e9, active: 4e9, available: 12e9, free: 12e9, buffcache: 0 }),
   mockFsSize: vi.fn().mockResolvedValue([{ mount: '/', use: 30 }]),
@@ -65,6 +70,9 @@ vi.mock('../services/DatabaseService', () => ({
       cleanupOldNotifications: mockCleanupOldNotifications,
       cleanupOldAuditLogs: mockCleanupOldAuditLogs,
       updateStackAlertLastFired: mockUpdateStackAlertLastFired,
+      getStackAlertServiceCooldown: mockGetStackAlertServiceCooldown,
+      hasAnyStackAlertServiceCooldown: mockHasAnyStackAlertServiceCooldown,
+      upsertStackAlertServiceCooldown: mockUpsertStackAlertServiceCooldown,
       getSystemState: mockGetSystemState,
       setSystemState: mockSetSystemState,
       pruneScanHistoryPerImage: mockPruneScanHistoryPerImage,
@@ -868,8 +876,12 @@ describe('MonitorService - breach state machine', () => {
   function setupAlertScenario(cpuPercent: number) {
     mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
     mockGetRunningContainers.mockResolvedValue([{
-      Id: 'c1',
-      Labels: { 'com.docker.compose.project': 'my-stack' },
+      Id: 'c1abcdefghijk',
+      Names: ['/my-stack-api-1'],
+      Labels: {
+        'com.docker.compose.project': 'my-stack',
+        'com.docker.compose.service': 'api',
+      },
     }]);
     mockGetContainerStatsStream.mockResolvedValue(JSON.stringify({
       cpu_stats: { cpu_usage: { total_usage: 1000 + cpuPercent * 50 }, system_cpu_usage: 10000, online_cpus: 1 },
@@ -879,6 +891,7 @@ describe('MonitorService - breach state machine', () => {
     mockGetStackAlerts.mockReturnValue([{
       id: 1,
       stack_name: 'my-stack',
+      service_name: null,
       metric: 'cpu_percent',
       operator: '>',
       threshold: 80,
@@ -887,6 +900,8 @@ describe('MonitorService - breach state machine', () => {
       last_fired_at: 0,
     }]);
     mockGetGlobalSettings.mockReturnValue({});
+    mockGetStackAlertServiceCooldown.mockReturnValue(null);
+    mockHasAnyStackAlertServiceCooldown.mockReturnValue(false);
   }
 
   it('fires alert when condition met and duration is 0', async () => {
@@ -898,9 +913,10 @@ describe('MonitorService - breach state machine', () => {
     expect(mockDispatchAlert).toHaveBeenCalledWith(
       'warning',
       'monitor_alert',
-      'The **CPU usage** for **my-stack** has exceeded your threshold of **80%** (Currently: 90%).',
-      { stackName: 'my-stack', actor: 'system:monitor' },
+      'The **CPU usage** for **api** in **my-stack** (container **my-stack-api-1**) has exceeded your threshold of **80%** (Currently: 90%).',
+      { stackName: 'my-stack', containerName: 'my-stack-api-1', actor: 'system:monitor' },
     );
+    expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(1, 'api', expect.any(Number));
     expect(mockUpdateStackAlertLastFired).toHaveBeenCalledWith(1, expect.any(Number));
   });
 
@@ -913,12 +929,22 @@ describe('MonitorService - breach state machine', () => {
     expect(mockDispatchAlert).not.toHaveBeenCalledWith('warning', expect.stringContaining('CPU'));
   });
 
-  it('respects cooldown after firing', async () => {
+  it('respects cooldown after firing via persisted service cooldown', async () => {
     setupAlertScenario(90);
-    // Simulate that alert was fired 30 minutes ago (within 60-min cooldown)
+    mockGetStackAlertServiceCooldown.mockReturnValue(Date.now() - 30 * 60 * 1000);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    expect(mockUpsertStackAlertServiceCooldown).not.toHaveBeenCalled();
+  });
+
+  it('respects legacy last_fired_at floor when no child cooldown rows exist', async () => {
+    setupAlertScenario(90);
     mockGetStackAlerts.mockReturnValue([{
       id: 1,
       stack_name: 'my-stack',
+      service_name: null,
       metric: 'cpu_percent',
       operator: '>',
       threshold: 80,
@@ -926,14 +952,94 @@ describe('MonitorService - breach state machine', () => {
       cooldown_mins: 60,
       last_fired_at: Date.now() - 30 * 60 * 1000,
     }]);
+    mockGetStackAlertServiceCooldown.mockReturnValue(null);
+    mockHasAnyStackAlertServiceCooldown.mockReturnValue(false);
 
     const svc = MonitorService.getInstance();
     await (svc as any).evaluate();
 
-    expect(mockUpdateStackAlertLastFired).not.toHaveBeenCalled();
+    expect(mockUpsertStackAlertServiceCooldown).not.toHaveBeenCalled();
   });
 
-  it('resets breach state when condition clears', async () => {
+  it('fires after legacy last_fired_at cooldown expires and writes a child cooldown row', async () => {
+    setupAlertScenario(90);
+    mockGetStackAlerts.mockReturnValue([{
+      id: 1,
+      stack_name: 'my-stack',
+      service_name: null,
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 0,
+      cooldown_mins: 60,
+      last_fired_at: Date.now() - 90 * 60 * 1000,
+    }]);
+    mockGetStackAlertServiceCooldown.mockReturnValue(null);
+    mockHasAnyStackAlertServiceCooldown.mockReturnValue(false);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(1, 'api', expect.any(Number));
+    expect(mockUpdateStackAlertLastFired).toHaveBeenCalledWith(1, expect.any(Number));
+  });
+
+  it('does not advance cooldown when notification history is not persisted', async () => {
+    setupAlertScenario(90);
+    mockDispatchAlert.mockResolvedValueOnce({ persisted: false });
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    expect(mockUpsertStackAlertServiceCooldown).not.toHaveBeenCalled();
+    expect(mockUpdateStackAlertLastFired).not.toHaveBeenCalled();
+
+    mockDispatchAlert.mockResolvedValueOnce({ persisted: true });
+    await (svc as any).evaluate();
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(1, 'api', expect.any(Number));
+    expect(mockUpdateStackAlertLastFired).toHaveBeenCalledWith(1, expect.any(Number));
+  });
+
+  it('drops in-memory breach timers when a rule is deleted', async () => {
+    const svc = MonitorService.getInstance();
+    (svc as any).activeBreaches.set('55:gone-container', { breachStartedAt: Date.now() });
+    mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
+    mockGetRunningContainers.mockResolvedValue([]);
+    mockGetStackAlerts.mockReturnValue([]);
+    mockGetGlobalSettings.mockReturnValue({});
+
+    await (svc as any).evaluate();
+
+    expect((svc as any).activeBreaches.has('55:gone-container')).toBe(false);
+  });
+
+  it('names unlabeled containers as unknown service in the alert body', async () => {
+    setupAlertScenario(90);
+    mockGetRunningContainers.mockResolvedValue([{
+      Id: 'orphan123456789',
+      Names: ['/orphan'],
+      Labels: {
+        'com.docker.compose.project': 'my-stack',
+      },
+    }]);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    expect(mockDispatchAlert).toHaveBeenCalledWith(
+      'warning',
+      'monitor_alert',
+      expect.stringContaining('**unknown service**'),
+      expect.objectContaining({ stackName: 'my-stack', containerName: 'orphan' }),
+    );
+    expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(1, '_unlabeled', expect.any(Number));
+  });
+
+  it('resets breach state when condition clears for that container only', async () => {
     const svc = MonitorService.getInstance();
 
     // First: breach starts
@@ -941,6 +1047,7 @@ describe('MonitorService - breach state machine', () => {
     mockGetStackAlerts.mockReturnValue([{
       id: 42,
       stack_name: 'my-stack',
+      service_name: null,
       metric: 'cpu_percent',
       operator: '>',
       threshold: 80,
@@ -949,13 +1056,14 @@ describe('MonitorService - breach state machine', () => {
       last_fired_at: 0,
     }]);
     await (svc as any).evaluate();
-    expect((svc as any).activeBreaches.has(42)).toBe(true);
+    expect((svc as any).activeBreaches.has('42:c1abcdefghijk')).toBe(true);
 
     // Second: condition clears
     setupAlertScenario(10);
     mockGetStackAlerts.mockReturnValue([{
       id: 42,
       stack_name: 'my-stack',
+      service_name: null,
       metric: 'cpu_percent',
       operator: '>',
       threshold: 80,
@@ -964,7 +1072,28 @@ describe('MonitorService - breach state machine', () => {
       last_fired_at: 0,
     }]);
     await (svc as any).evaluate();
-    expect((svc as any).activeBreaches.has(42)).toBe(false);
+    expect((svc as any).activeBreaches.has('42:c1abcdefghijk')).toBe(false);
+  });
+
+  it('falls back to short container id when Names is absent', async () => {
+    setupAlertScenario(90);
+    mockGetRunningContainers.mockResolvedValue([{
+      Id: 'abcdef1234567890',
+      Labels: {
+        'com.docker.compose.project': 'my-stack',
+        'com.docker.compose.service': 'api',
+      },
+    }]);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    expect(mockDispatchAlert).toHaveBeenCalledWith(
+      'warning',
+      'monitor_alert',
+      'The **CPU usage** for **api** in **my-stack** (container **abcdef123456**) has exceeded your threshold of **80%** (Currently: 90%).',
+      { stackName: 'my-stack', containerName: 'abcdef123456', actor: 'system:monitor' },
+    );
   });
 });
 
@@ -1074,7 +1203,12 @@ describe('MonitorService - restart_count metric', () => {
 
     expect(mockGetContainerRestartCount).toHaveBeenCalledWith('c1');
     // restart_count=5 > threshold=3, should fire
-    expect(mockDispatchAlert).toHaveBeenCalledWith('warning', 'monitor_alert', expect.stringContaining('Restart count'), { stackName: 'my-stack', actor: 'system:monitor' });
+    expect(mockDispatchAlert).toHaveBeenCalledWith(
+      'warning',
+      'monitor_alert',
+      expect.stringContaining('Restart count'),
+      { stackName: 'my-stack', containerName: 'c1', actor: 'system:monitor' },
+    );
   });
 
   it('skips Docker inspect when no restart_count rules exist', async () => {
@@ -1261,6 +1395,8 @@ describe('MonitorService - parallel container processing', () => {
     mockGetGlobalSettings.mockReturnValue({});
     mockGetStackAlerts.mockReturnValue([]);
     mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
+    mockGetStackAlertServiceCooldown.mockReturnValue(null);
+    mockHasAnyStackAlertServiceCooldown.mockReturnValue(false);
   });
 
   it('fans out per-container stats fetches in parallel (wall time ~ max not sum)', async () => {
@@ -1311,12 +1447,15 @@ describe('MonitorService - parallel container processing', () => {
   });
 
   it('dispatches a stack alert exactly once per cycle even when multiple containers in the stack breach', async () => {
-    // 5 containers in the same stack, all breaching the same rule. Without
-    // the per-cycle dedup, parallel workers race past the cooldown check
-    // and each fire dispatchAlert before any DB write lands.
+    // 5 replicas of the same Compose service, all breaching. Dedup is per
+    // rule+service, so only one fire should land this cycle.
     const containers = Array.from({ length: 5 }, (_, i) => ({
       Id: `container-${i}`,
-      Labels: { 'com.docker.compose.project': 'shared-stack' },
+      Names: [`/shared-stack-web-${i}`],
+      Labels: {
+        'com.docker.compose.project': 'shared-stack',
+        'com.docker.compose.service': 'web',
+      },
     }));
     mockGetRunningContainers.mockResolvedValue(containers);
     mockGetContainerStatsStream.mockResolvedValue(JSON.stringify({
@@ -1328,6 +1467,7 @@ describe('MonitorService - parallel container processing', () => {
     mockGetStackAlerts.mockReturnValue([{
       id: 7,
       stack_name: 'shared-stack',
+      service_name: null,
       metric: 'cpu_percent',
       operator: '>',
       threshold: 80,
@@ -1335,6 +1475,8 @@ describe('MonitorService - parallel container processing', () => {
       cooldown_mins: 60,
       last_fired_at: 0,
     }]);
+    mockGetStackAlertServiceCooldown.mockReturnValue(null);
+    mockHasAnyStackAlertServiceCooldown.mockReturnValue(false);
 
     const svc = MonitorService.getInstance();
     await (svc as any).evaluate();
@@ -1343,7 +1485,290 @@ describe('MonitorService - parallel container processing', () => {
       (args: unknown[]) => args[1] === 'monitor_alert' && typeof args[2] === 'string' && args[2].includes('CPU'),
     );
     expect(cpuDispatches).toHaveLength(1);
-    expect(mockUpdateStackAlertLastFired).toHaveBeenCalledTimes(1);
+    expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows different services on an All-services rule to fire in the same cycle', async () => {
+    mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
+    mockGetRunningContainers.mockResolvedValue([
+      {
+        Id: 'api-1',
+        Names: ['/stack-api-1'],
+        Labels: { 'com.docker.compose.project': 'shared-stack', 'com.docker.compose.service': 'api' },
+      },
+      {
+        Id: 'db-1',
+        Names: ['/stack-db-1'],
+        Labels: { 'com.docker.compose.project': 'shared-stack', 'com.docker.compose.service': 'database' },
+      },
+    ]);
+    mockGetContainerStatsStream.mockResolvedValue(JSON.stringify({
+      cpu_stats: { cpu_usage: { total_usage: 5500 }, system_cpu_usage: 10000, online_cpus: 1 },
+      precpu_stats: { cpu_usage: { total_usage: 1000 }, system_cpu_usage: 5000 },
+      memory_stats: { usage: 100e6, limit: 1e9 },
+    }));
+    mockGetStackAlerts.mockReturnValue([{
+      id: 8,
+      stack_name: 'shared-stack',
+      service_name: null,
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 0,
+      cooldown_mins: 60,
+      last_fired_at: 0,
+    }]);
+    mockGetStackAlertServiceCooldown.mockReturnValue(null);
+    mockHasAnyStackAlertServiceCooldown.mockReturnValue(false);
+    mockGetGlobalSettings.mockReturnValue({});
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    const cpuDispatches = mockDispatchAlert.mock.calls.filter(
+      (args: unknown[]) => args[1] === 'monitor_alert' && typeof args[2] === 'string' && args[2].includes('CPU'),
+    );
+    expect(cpuDispatches).toHaveLength(2);
+    expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(8, 'api', expect.any(Number));
+    expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(8, 'database', expect.any(Number));
+  });
+
+  it('does not let a healthy sibling clear another container breach timer', async () => {
+    const svc = MonitorService.getInstance();
+    mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetStackAlerts.mockReturnValue([{
+      id: 9,
+      stack_name: 'shared-stack',
+      service_name: null,
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 999,
+      cooldown_mins: 0,
+      last_fired_at: 0,
+    }]);
+
+    const highCpu = JSON.stringify({
+      cpu_stats: { cpu_usage: { total_usage: 5500 }, system_cpu_usage: 10000, online_cpus: 1 },
+      precpu_stats: { cpu_usage: { total_usage: 1000 }, system_cpu_usage: 5000 },
+      memory_stats: { usage: 100e6, limit: 1e9 },
+    });
+    const lowCpu = JSON.stringify({
+      cpu_stats: { cpu_usage: { total_usage: 1100 }, system_cpu_usage: 10000, online_cpus: 1 },
+      precpu_stats: { cpu_usage: { total_usage: 1000 }, system_cpu_usage: 5000 },
+      memory_stats: { usage: 100e6, limit: 1e9 },
+    });
+
+    mockGetRunningContainers.mockResolvedValue([
+      {
+        Id: 'api-hot',
+        Labels: { 'com.docker.compose.project': 'shared-stack', 'com.docker.compose.service': 'api' },
+      },
+      {
+        Id: 'db-cool',
+        Labels: { 'com.docker.compose.project': 'shared-stack', 'com.docker.compose.service': 'database' },
+      },
+    ]);
+    mockGetContainerStatsStream.mockImplementation(async (id: string) => (id === 'api-hot' ? highCpu : lowCpu));
+
+    await (svc as any).evaluate();
+
+    expect((svc as any).activeBreaches.has('9:api-hot')).toBe(true);
+    expect((svc as any).activeBreaches.has('9:db-cool')).toBe(false);
+  });
+
+  it('ignores sibling services for a service-scoped rule', async () => {
+    mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetRunningContainers.mockResolvedValue([
+      {
+        Id: 'api-1',
+        Names: ['/stack-api-1'],
+        Labels: { 'com.docker.compose.project': 'shared-stack', 'com.docker.compose.service': 'api' },
+      },
+      {
+        Id: 'db-1',
+        Names: ['/stack-db-1'],
+        Labels: { 'com.docker.compose.project': 'shared-stack', 'com.docker.compose.service': 'database' },
+      },
+    ]);
+    mockGetContainerStatsStream.mockResolvedValue(JSON.stringify({
+      cpu_stats: { cpu_usage: { total_usage: 5500 }, system_cpu_usage: 10000, online_cpus: 1 },
+      precpu_stats: { cpu_usage: { total_usage: 1000 }, system_cpu_usage: 5000 },
+      memory_stats: { usage: 100e6, limit: 1e9 },
+    }));
+    mockGetStackAlerts.mockReturnValue([{
+      id: 10,
+      stack_name: 'shared-stack',
+      service_name: 'api',
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 0,
+      cooldown_mins: 0,
+      last_fired_at: 0,
+    }]);
+    mockGetStackAlertServiceCooldown.mockReturnValue(null);
+    mockHasAnyStackAlertServiceCooldown.mockReturnValue(false);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    expect(mockDispatchAlert.mock.calls[0][2]).toContain('**api**');
+    expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(10, 'api', expect.any(Number));
+  });
+
+  it('does not block service B after service A fires under new-schema cooldown', async () => {
+    mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetRunningContainers.mockResolvedValue([
+      {
+        Id: 'db-1',
+        Names: ['/stack-db-1'],
+        Labels: { 'com.docker.compose.project': 'shared-stack', 'com.docker.compose.service': 'database' },
+      },
+    ]);
+    mockGetContainerStatsStream.mockResolvedValue(JSON.stringify({
+      cpu_stats: { cpu_usage: { total_usage: 5500 }, system_cpu_usage: 10000, online_cpus: 1 },
+      precpu_stats: { cpu_usage: { total_usage: 1000 }, system_cpu_usage: 5000 },
+      memory_stats: { usage: 100e6, limit: 1e9 },
+    }));
+    mockGetStackAlerts.mockReturnValue([{
+      id: 11,
+      stack_name: 'shared-stack',
+      service_name: null,
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 0,
+      cooldown_mins: 60,
+      last_fired_at: Date.now() - 5 * 60 * 1000, // would block under old rule-wide semantics
+    }]);
+    // api already has a cooldown row; database does not, so database may still fire.
+    mockGetStackAlertServiceCooldown.mockImplementation((_id: number, service: string) =>
+      service === 'api' ? Date.now() - 5 * 60 * 1000 : null,
+    );
+    mockHasAnyStackAlertServiceCooldown.mockReturnValue(true);
+
+    const svc = MonitorService.getInstance();
+    await (svc as any).evaluate();
+
+    expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(11, 'database', expect.any(Number));
+  });
+
+  it('honors persisted per-service cooldown after a fresh MonitorService instance', async () => {
+    mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetRunningContainers.mockResolvedValue([
+      {
+        Id: 'api-1',
+        Names: ['/stack-api-1'],
+        Labels: { 'com.docker.compose.project': 'shared-stack', 'com.docker.compose.service': 'api' },
+      },
+      {
+        Id: 'api-2',
+        Names: ['/stack-api-2'],
+        Labels: { 'com.docker.compose.project': 'shared-stack', 'com.docker.compose.service': 'api' },
+      },
+      {
+        Id: 'db-1',
+        Names: ['/stack-db-1'],
+        Labels: { 'com.docker.compose.project': 'shared-stack', 'com.docker.compose.service': 'database' },
+      },
+    ]);
+    mockGetContainerStatsStream.mockResolvedValue(JSON.stringify({
+      cpu_stats: { cpu_usage: { total_usage: 5500 }, system_cpu_usage: 10000, online_cpus: 1 },
+      precpu_stats: { cpu_usage: { total_usage: 1000 }, system_cpu_usage: 5000 },
+      memory_stats: { usage: 100e6, limit: 1e9 },
+    }));
+    mockGetStackAlerts.mockReturnValue([{
+      id: 13,
+      stack_name: 'shared-stack',
+      service_name: null,
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 0,
+      cooldown_mins: 60,
+      last_fired_at: 0,
+    }]);
+    mockGetStackAlertServiceCooldown.mockImplementation((_id: number, service: string) =>
+      service === 'api' ? Date.now() - 5 * 60 * 1000 : null,
+    );
+    mockHasAnyStackAlertServiceCooldown.mockReturnValue(true);
+
+    // beforeEach already cleared the singleton; this instance has empty maps.
+    const svc = MonitorService.getInstance();
+    expect((svc as any).activeBreaches.size).toBe(0);
+    expect((svc as any).firedThisCycle.size).toBe(0);
+
+    await (svc as any).evaluate();
+
+    const cpuDispatches = mockDispatchAlert.mock.calls.filter(
+      (args: unknown[]) => args[1] === 'monitor_alert' && typeof args[2] === 'string' && args[2].includes('CPU'),
+    );
+    expect(cpuDispatches).toHaveLength(1);
+    expect(cpuDispatches[0][2]).toContain('**database**');
+    expect(mockUpsertStackAlertServiceCooldown).toHaveBeenCalledWith(13, 'database', expect.any(Number));
+    expect(mockUpsertStackAlertServiceCooldown).not.toHaveBeenCalledWith(13, 'api', expect.any(Number));
+  });
+
+  it('preserves breach timers when container enumeration fails', async () => {
+    const svc = MonitorService.getInstance();
+    (svc as any).activeBreaches.set('12:still-running', { breachStartedAt: Date.now() });
+    mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
+    mockGetStackAlerts.mockReturnValue([{
+      id: 12,
+      stack_name: 'shared-stack',
+      service_name: null,
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 999,
+      cooldown_mins: 0,
+      last_fired_at: 0,
+    }]);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetRunningContainers.mockRejectedValue(new Error('docker down'));
+
+    await (svc as any).evaluate();
+
+    expect((svc as any).activeBreaches.has('12:still-running')).toBe(true);
+  });
+
+  it('removes breach timers for stopped containers after successful enumeration', async () => {
+    const svc = MonitorService.getInstance();
+    (svc as any).activeBreaches.set('13:gone', { breachStartedAt: Date.now() });
+    mockGetNodes.mockReturnValue([{ id: 1, name: 'local', type: 'local' }]);
+    mockGetStackAlerts.mockReturnValue([{
+      id: 13,
+      stack_name: 'shared-stack',
+      service_name: null,
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 999,
+      cooldown_mins: 0,
+      last_fired_at: 0,
+    }]);
+    mockGetGlobalSettings.mockReturnValue({});
+    mockGetRunningContainers.mockResolvedValue([
+      {
+        Id: 'still-here',
+        Labels: { 'com.docker.compose.project': 'shared-stack', 'com.docker.compose.service': 'api' },
+      },
+    ]);
+    mockGetContainerStatsStream.mockResolvedValue(JSON.stringify({
+      cpu_stats: { cpu_usage: { total_usage: 1100 }, system_cpu_usage: 10000, online_cpus: 1 },
+      precpu_stats: { cpu_usage: { total_usage: 1000 }, system_cpu_usage: 5000 },
+      memory_stats: { usage: 100e6, limit: 1e9 },
+    }));
+
+    await (svc as any).evaluate();
+
+    expect((svc as any).activeBreaches.has('13:gone')).toBe(false);
   });
 
   it('caps simultaneous Docker calls at MAX_CONTAINER_CONCURRENCY', async () => {

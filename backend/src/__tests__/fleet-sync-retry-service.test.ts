@@ -18,7 +18,7 @@ const {
   mockGetFleetSyncStatuses: vi.fn().mockReturnValue([]),
   mockGetSystemState: vi.fn().mockReturnValue(null),
   mockPushResourceToNode: vi.fn().mockResolvedValue(undefined),
-  mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
+  mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
 }));
 
 vi.mock('../services/DatabaseService', () => ({

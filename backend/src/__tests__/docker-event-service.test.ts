@@ -27,7 +27,7 @@ const {
     mockGetDocker,
     mockIsOwnContainer,
 } = vi.hoisted(() => ({
-    mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
+    mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
     mockBroadcastEvent: vi.fn(),
     mockGetGlobalSettings: vi.fn().mockReturnValue({ global_crash: '1' }),
     mockGetEvents: vi.fn(),

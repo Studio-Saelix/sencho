@@ -600,7 +600,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
 
     it('suggest-mode local drift uses on this node', async () => {
         const { NotificationService } = await import('../services/NotificationService');
-        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
         const nodeId = seedNode();
         const bp = seedBlueprint({ name: 'drift-local', drift_mode: 'suggest', nodeIds: [nodeId] });
         const node = DatabaseService.getInstance().getNode(nodeId)!;
@@ -618,7 +618,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
 
     it('suggest-mode remote drift keeps the authoritative node name', async () => {
         const { NotificationService } = await import('../services/NotificationService');
-        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
         const nodeId = seedRemoteNode('sencho-test-02');
         const bp = seedBlueprint({ name: 'drift-remote', drift_mode: 'suggest', nodeIds: [nodeId] });
         const node = DatabaseService.getInstance().getNode(nodeId)!;
@@ -636,7 +636,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
 
     it('stateful marker-loss on local uses on this node', async () => {
         const { NotificationService } = await import('../services/NotificationService');
-        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
         vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue(null);
         const nodeId = seedNode();
         const bp = seedBlueprint({
@@ -660,7 +660,7 @@ describe('BlueprintReconciler drift alert node wording', () => {
 
     it('enforce correction-failure on local uses on this node', async () => {
         const { NotificationService } = await import('../services/NotificationService');
-        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+        const dispatchSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
         vi.spyOn(BlueprintService.getInstance(), 'deployToNode').mockResolvedValue({
             status: 'failed',
             error: 'compose up failed',

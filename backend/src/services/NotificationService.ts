@@ -181,7 +181,7 @@ export class NotificationService {
         category: NotificationCategory,
         message: string,
         options?: { stackName?: string; containerName?: string; actor?: string },
-    ) {
+    ): Promise<{ persisted: boolean }> {
         const t0 = Date.now();
         const { stackName, containerName, actor } = options ?? {};
 
@@ -191,6 +191,8 @@ export class NotificationService {
         // WebSocket broadcast can all throw on an unhealthy DB, which would
         // otherwise surface as an unhandledRejection and take the process down.
         // The whole body is wrapped so the worst case is a dropped notification.
+        // Callers that gate cooldowns on history use `persisted` (true only after the row write).
+        let wroteHistory = false;
         try {
             // Internal writes use the middleware default so they share a row key
             // with user-initiated requests; otherwise the UI and monitors split
@@ -216,11 +218,12 @@ export class NotificationService {
                     container_name: containerName,
                     actor_username: actor ?? null,
                 });
+                wroteHistory = true;
                 StackActivityMetricsService.getInstance().record(localNodeId, 'write', Date.now() - t0, true);
             } catch (err) {
                 StackActivityMetricsService.getInstance().record(localNodeId, 'write', Date.now() - t0, false);
                 console.error('[Notify] Failed to persist notification:', err);
-                return;
+                return { persisted: false };
             }
             // Separate [StackActivity:diag] namespace from the [Notify:diag] lines
             // below so a single grep can pull every per-stack timeline write across
@@ -273,7 +276,7 @@ export class NotificationService {
             }
 
             if (suppressExternal) {
-                return;
+                return { persisted: wroteHistory };
             }
 
             // Resolve retry extras once for this dispatch (shared by all destinations).
@@ -298,14 +301,14 @@ export class NotificationService {
                     )
                 );
                 this.recordDispatchErrors(notification.id!, errors);
-                return;
+                return { persisted: wroteHistory };
             }
 
             // 4. Fall back to this instance's agents (keyed by this instance's default node id).
             const agents = this.dbService.getEnabledAgents(localNodeId);
             if (agents.length === 0) {
                 if (isDebugEnabled()) console.log('[Notify:diag] No routes or agents matched; skipping external dispatch');
-                return;
+                return { persisted: wroteHistory };
             }
 
             if (isDebugEnabled()) console.log(`[Notify:diag] Falling back to ${agents.length} global agent(s)`);
@@ -322,8 +325,11 @@ export class NotificationService {
                 )
             );
             this.recordDispatchErrors(notification.id!, errors);
+            return { persisted: wroteHistory };
         } catch (err) {
             console.error('[Notify] dispatchAlert failed:', err);
+            // History may already be written; callers must not treat that as a miss.
+            return { persisted: wroteHistory };
         }
     }
 

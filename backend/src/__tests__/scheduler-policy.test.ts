@@ -34,7 +34,7 @@ const {
   mockMarkStaleRunsAsFailed: vi.fn().mockReturnValue(0),
   mockDeleteOldScans: vi.fn().mockReturnValue(0),
   mockGetTier: vi.fn().mockReturnValue('paid'),
-  mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
+  mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
   mockGetProxyTarget: vi.fn().mockReturnValue(null),
   mockIsTrivyAvailable: vi.fn().mockReturnValue(true),
   mockScanAllNodeImages: vi.fn(),

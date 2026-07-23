@@ -168,7 +168,7 @@ describe('Rollback notifications (M-2)', () => {
     mockTier('paid');
     mockDeployStack.mockResolvedValue(undefined);
     const { NotificationService } = await import('../services/NotificationService');
-    const spy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+    const spy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
 
     const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
     expect(res.status).toBe(200);
@@ -186,7 +186,7 @@ describe('Rollback notifications (M-2)', () => {
     mockTier('paid');
     mockDeployStack.mockRejectedValueOnce(new Error('restore failed'));
     const { NotificationService } = await import('../services/NotificationService');
-    const spy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+    const spy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
 
     const res = await request(app).post('/api/stacks/web/rollback').set('Cookie', authCookie);
     expect(res.status).toBe(500);

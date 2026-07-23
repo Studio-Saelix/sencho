@@ -37,6 +37,7 @@ export const CAPABILITIES = [
   'stack-down-remove-volumes',
   'guided-external-network-preflight',
   'service-scoped-update',
+  'service-scoped-stack-alert',
 ] as const;
 
 export type Capability = (typeof CAPABILITIES)[number];
@@ -50,3 +51,4 @@ export const HOST_CONSOLE_COMMUNITY_CAPABILITY = 'host-console-community' as con
 export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' as const satisfies Capability;
 export const GUIDED_EXTERNAL_NETWORK_PREFLIGHT_CAPABILITY = 'guided-external-network-preflight' as const satisfies Capability;
 export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const satisfies Capability;
+export const SERVICE_SCOPED_STACK_ALERT_CAPABILITY = 'service-scoped-stack-alert' as const satisfies Capability;
