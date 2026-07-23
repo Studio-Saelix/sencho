@@ -70,15 +70,18 @@ describe('fetchRemoteMeta Authorization header', () => {
 describe('applyPilotModeCapabilityFilter', () => {
   afterEach(() => {
     enableCapability('host-console');
+    enableCapability('host-console-community');
   });
 
-  it('removes host-console from active capabilities', () => {
+  it('removes host-console and host-console-community from active capabilities', () => {
     expect(CAPABILITIES).toContain('host-console');
+    expect(CAPABILITIES).toContain('host-console-community');
 
     applyPilotModeCapabilityFilter();
     const active = getActiveCapabilities();
 
     expect(active).not.toContain('host-console');
+    expect(active).not.toContain('host-console-community');
     expect(active).toContain('stacks');
   });
 
@@ -97,6 +100,7 @@ describe('applyPilotModeCapabilityFilter', () => {
     const active = getActiveCapabilities();
 
     expect(active).not.toContain('host-console');
-    expect(active.length).toBe(CAPABILITIES.length - 1);
+    expect(active).not.toContain('host-console-community');
+    expect(active.length).toBe(CAPABILITIES.length - 2);
   });
 });

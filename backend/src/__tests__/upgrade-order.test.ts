@@ -8,7 +8,7 @@
  * product paths. This test pins each position by observing behavior that
  * could only originate from the expected handler.
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import WebSocket from 'ws';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
@@ -419,6 +419,100 @@ describe('WebSocket upgrade dispatch order', () => {
       const outcome = await waitForOutcome(ws);
       expect(outcome.kind).toBe('unexpected');
       if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
+
+    it('rejects a full-admin API token remote Host Console with 403 (container exec stays allowed)', async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const adminId = DatabaseService.getInstance().getUserByUsername(TEST_USERNAME)!.id;
+      const rawToken = createTestApiToken({
+        db: DatabaseService,
+        scope: 'full-admin',
+        userId: adminId,
+        name: `host-console-api-deny-${Date.now()}`,
+      });
+      const consoleWs = connect(`/api/system/host-console?nodeId=${remoteNodeId}`, { bearer: rawToken });
+      const consoleOutcome = await waitForOutcome(consoleWs);
+      expect(consoleOutcome.kind).toBe('unexpected');
+      if (consoleOutcome.kind === 'unexpected') expect(consoleOutcome.status).toBe(403);
+
+      const execWs = connect(`/ws?nodeId=${remoteNodeId}`, { bearer: rawToken });
+      const execOutcome = await waitForOutcome(execWs);
+      if (execOutcome.kind === 'unexpected') expect(execOutcome.status).not.toBe(403);
+      try { execWs.terminate(); } catch { /* ignore */ }
+    });
+  });
+
+  describe('remote Host Console Community capability probe', () => {
+    // Community hubs must probe host-console-community before forwarding Host
+    // Console; Admiral hubs skip the probe so legacy remotes still work.
+    // Fail closed when the probe errors or the capability is missing.
+
+    const meta = (capabilities: string[]): import('../services/CapabilityRegistry').RemoteMeta => ({
+      version: '0.95.0',
+      capabilities,
+      startedAt: 1,
+      updateError: null,
+      online: true,
+      imagePinKind: null,
+      updateBlocked: false,
+      imageChannel: null,
+    });
+
+    async function setLicense(status: string): Promise<void> {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      DatabaseService.getInstance().setSystemState('license_status', status);
+    }
+
+    afterEach(async () => {
+      vi.restoreAllMocks();
+      await setLicense('active');
+    });
+
+    it('rejects Community hub remote Host Console when the remote lacks host-console-community', async () => {
+      await setLicense('community');
+      const { NodeRegistry } = await import('../services/NodeRegistry');
+      vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockResolvedValue(meta(['host-console']));
+
+      const ws = connect(`/api/system/host-console?nodeId=${remoteNodeId}`, { cookie: sessionCookie });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
+
+    it('rejects Community hub remote Host Console when the capability probe fails', async () => {
+      await setLicense('community');
+      const { NodeRegistry } = await import('../services/NodeRegistry');
+      vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockRejectedValue(new Error('offline'));
+
+      const ws = connect(`/api/system/host-console?nodeId=${remoteNodeId}`, { cookie: sessionCookie });
+      const outcome = await waitForOutcome(ws);
+      expect(outcome.kind).toBe('unexpected');
+      if (outcome.kind === 'unexpected') expect(outcome.status).toBe(403);
+    });
+
+    it('forwards Community hub remote Host Console when the remote advertises host-console-community', async () => {
+      await setLicense('community');
+      const { NodeRegistry } = await import('../services/NodeRegistry');
+      vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockResolvedValue(
+        meta(['host-console-community']),
+      );
+
+      const ws = connect(`/api/system/host-console?nodeId=${remoteNodeId}`, { cookie: sessionCookie });
+      const outcome = await waitForOutcome(ws);
+      if (outcome.kind === 'unexpected') expect(outcome.status).not.toBe(403);
+      try { ws.terminate(); } catch { /* ignore */ }
+    });
+
+    it('skips the capability probe on an Admiral hub even when the remote lacks host-console-community', async () => {
+      await setLicense('active');
+      const { NodeRegistry } = await import('../services/NodeRegistry');
+      const spy = vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockResolvedValue(meta([]));
+
+      const ws = connect(`/api/system/host-console?nodeId=${remoteNodeId}`, { cookie: sessionCookie });
+      const outcome = await waitForOutcome(ws);
+      if (outcome.kind === 'unexpected') expect(outcome.status).not.toBe(403);
+      expect(spy).not.toHaveBeenCalled();
+      try { ws.terminate(); } catch { /* ignore */ }
     });
   });
 

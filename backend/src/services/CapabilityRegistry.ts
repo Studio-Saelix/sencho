@@ -38,6 +38,7 @@ export const CAPABILITIES = [
   'notification-suppression',
   'notification-suppression-schedule',
   'host-console',
+  'host-console-community',
   'container-exec',
   'audit-log',
   'scheduled-ops',
@@ -70,6 +71,12 @@ export const CAPABILITIES = [
 export const CROSS_NODE_RBAC_CAPABILITY = 'cross-node-rbac';
 
 export type Capability = (typeof CAPABILITIES)[number];
+
+/** Legacy Host Console advertisement (Admiral hubs still accept this on remotes). */
+export const HOST_CONSOLE_CAPABILITY = 'host-console' as const satisfies Capability;
+
+/** Host Console works without a paid license on this node. */
+export const HOST_CONSOLE_COMMUNITY_CAPABILITY = 'host-console-community' as const satisfies Capability;
 
 /** Remotes that evaluate weekly maintenance windows on mute/suppression replicas. */
 export const NOTIFICATION_SUPPRESSION_SCHEDULE_CAPABILITY =
@@ -165,6 +172,7 @@ export function getActiveCapabilities(): readonly string[] {
  */
 const PILOT_DISABLED_CAPABILITIES: readonly Capability[] = [
   'host-console',
+  'host-console-community',
 ];
 
 /** Disable capabilities that require a central->pilot path that is not yet wired. */

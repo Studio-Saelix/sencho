@@ -171,7 +171,7 @@ Authorises every read and every write the API exposes, **except** the universal 
 | `/api/stacks/:stack/logs` (stack log stream) | yes | yes | yes |
 | `/ws/notifications` (notification stream) | yes | yes | yes |
 | `/ws` (generic exec / stats) | no | no | yes |
-| `/api/system/host-console` (host shell) | no | no | yes |
+| `/api/system/host-console` (host shell) | no | no | no |
 
 A Read Only or Deploy Only token attempting an out-of-scope WebSocket upgrade is rejected with `403 Forbidden` before any frames flow.
 
@@ -268,7 +268,7 @@ API tokens are issued and revoked on the hub that authenticates the call. When y
 - **One owner per token.** Tokens are not shareable across users at the data model; only the creating user can revoke a token through the UI.
 - **Owner deletion breaks the token.** If the user who created a token is deleted, subsequent calls with that token return `401` because the auth path requires the creator to still exist. Rotate before deleting accounts.
 - **No token introspection endpoint.** There is no `GET /api/me` for an API token; client code must know its own scope.
-- **WebSocket scope restrictions.** Read Only and Deploy Only tokens cannot reach the generic `/ws` exec/stats endpoint or the host console. Full Admin can.
+- **WebSocket scope restrictions.** Read Only and Deploy Only tokens cannot reach the generic `/ws` exec/stats endpoint or the host console. Full Admin can reach `/ws` (container exec / stats) but not Host Console; Host Console always requires a signed-in browser session.
 
 ## Common workflows
 

@@ -103,7 +103,7 @@ auditLogRouter.get('/export', async (req: Request, res: Response): Promise<void>
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename="audit-log-${timestamp}.csv"`);
 
-      const headers = ['id', 'timestamp', 'username', 'method', 'path', 'status_code', 'node_id', 'ip_address', 'summary'];
+      const headers = ['id', 'timestamp', 'username', 'acting_as', 'method', 'path', 'status_code', 'node_id', 'ip_address', 'summary'];
       const rows = result.entries.map(e =>
         headers.map(h => escapeCsvField(e[h as keyof typeof e])).join(','),
       );

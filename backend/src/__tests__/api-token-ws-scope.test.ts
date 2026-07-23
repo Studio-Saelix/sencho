@@ -76,4 +76,8 @@ describe('WebSocket API-token scope enforcement', () => {
   it('does not scope-block a full-admin token from a generic socket', async () => {
     expect(await upgradeStatus(createToken('full-admin'), '/ws')).not.toBe(403);
   });
+
+  it('blocks a full-admin token from the host console (403)', async () => {
+    expect(await upgradeStatus(createToken('full-admin'), '/api/system/host-console')).toBe(403);
+  });
 });

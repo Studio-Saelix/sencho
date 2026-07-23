@@ -43,11 +43,7 @@ export function isViewHidden(view: ActiveView, ctx: ReachabilityContext): boolea
   if (!ctx.isAdmin && (view === 'auto-updates' || view === 'scheduled-ops')) return true;
   if (!ctx.can('node:read') && view === 'fleet') return true;
   if (view === 'host-console') {
-    // Defer experimental hide until ready so enabled deep links survive cold load.
-    if (experimentalDiscoveryReady(ctx) && !ctx.experimental) return true;
-    if (!ctx.isPaid) return true;
-    if (!ctx.isAdmin) return true;
-    return false;
+    return !ctx.can('system:console');
   }
   if (!ctx.isPaid) {
     if (view === 'audit-log') return true;
@@ -67,7 +63,7 @@ export function isViewCapabilityLocked(view: ActiveView, ctx: ReachabilityContex
 export function isFleetTabHidden(tab: FleetTab, ctx: ReachabilityContext): boolean {
   if (!authzReady(ctx)) return false;
   if (tab === 'container-labels' && !ctx.containerLabelsEnabled) return true;
-  // Defer experimental hide until ready (same cold-load contract as host-console).
+  // Defer experimental hide until ready so deep links survive cold load.
   if ((tab === 'routing' || tab === 'secrets') && experimentalDiscoveryReady(ctx) && !ctx.experimental) {
     return true;
   }
