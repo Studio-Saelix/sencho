@@ -8,6 +8,7 @@ import { parseEffectiveModel } from './preflight/effectiveModel';
 import { compareStackNetworks, fromDeclaredCompose } from './network/normalize';
 import { sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
+import { isCleanOneShotCompletion } from '../utils/oneShotCompletion';
 
 const MAX_RENDER_ERROR = 600;
 
@@ -178,16 +179,16 @@ function networkDriftFindings(
 }
 
 /**
- * Pure diff step (no Docker / FS access) so it is directly unit-testable. Only
- * running containers are compared, since a stopped container publishes no ports
- * and is not "deployed": a declared service with no running container is
- * service-missing, a running container with no matching service is
- * service-undeclared, and image / port differences are checked only for services
- * present on both sides so a missing/undeclared service is not double-reported.
+ * Pure diff step (no Docker / FS access) so it is directly unit-testable.
+ * Running/restarting containers drive image/port comparison. Clean one-shot
+ * completions (exit 0 + declared restart no/absent) satisfy service presence
+ * without counting as hasContainers. Network comparison still uses only
+ * running/restarting attachments.
  */
 export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftReport {
   const { stack, declared, containers, parseError } = input;
   const networks = input.networks ?? [];
+  // Public contract: at least one running/restarting container (not "satisfied").
   const hasContainers = containers.some((c) => RUNNING_STATES.has(c.state));
 
   // A parse failure means the declared model is untrustworthy: report drift
@@ -196,30 +197,44 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
     return { stack, status: 'drifted', hasComposeFile: false, hasContainers, findings: [], parseError };
   }
 
-  const runtimeByService = new Map<string, RuntimeService>();
-  for (const c of containers) {
-    if (!RUNNING_STATES.has(c.state)) continue;
-    const name = c.service ?? c.name;
-    const agg = runtimeByService.get(name) ?? { images: new Set<string>(), ports: new Set<string>() };
-    if (c.image) agg.images.add(normalizeImageRef(c.image));
-    for (const p of c.ports) agg.ports.add(portKey(p.publishedPort, p.protocol));
-    runtimeByService.set(name, agg);
-  }
-
-  // Nothing running: the stack is defined on disk but not deployed. One status
-  // conveys this; per-service findings would just be noise.
-  if (!hasContainers) {
-    return { stack, status: 'missing-runtime', hasComposeFile: true, hasContainers: false, findings: [] };
-  }
-
   const declaredByName = new Map<string, DeclaredService>();
   for (const svc of declared.services) declaredByName.set(svc.name, svc);
 
+  const runtimeByService = new Map<string, RuntimeService>();
+  const oneShotSatisfied = new Set<string>();
+  for (const c of containers) {
+    const name = c.service ?? c.name;
+    if (RUNNING_STATES.has(c.state)) {
+      const agg = runtimeByService.get(name) ?? { images: new Set<string>(), ports: new Set<string>() };
+      if (c.image) agg.images.add(normalizeImageRef(c.image));
+      for (const p of c.ports) agg.ports.add(portKey(p.publishedPort, p.protocol));
+      runtimeByService.set(name, agg);
+      continue;
+    }
+    const declaredRestart = declaredByName.get(name)?.restart;
+    if (isCleanOneShotCompletion({
+      state: c.state,
+      exitCode: c.exitCode,
+      restartPolicy: declaredRestart,
+    })) {
+      oneShotSatisfied.add(name);
+    }
+  }
+
+  const servicePresent = (serviceName: string): boolean =>
+    runtimeByService.has(serviceName) || oneShotSatisfied.has(serviceName);
+
+  // Nothing running and no declared service satisfied by a clean one-shot: the
+  // stack is defined on disk but not deployed. One status conveys this.
+  if (!hasContainers && !declared.services.some((svc) => servicePresent(svc.name))) {
+    return { stack, status: 'missing-runtime', hasComposeFile: true, hasContainers: false, findings: [] };
+  }
+
   const findings: StackDriftFinding[] = [];
 
-  // Declared service with no running container.
+  // Declared service with no running container and no clean one-shot completion.
   for (const svc of declared.services) {
-    if (!runtimeByService.has(svc.name)) {
+    if (!servicePresent(svc.name)) {
       findings.push({
         kind: 'service-missing',
         service: svc.name,
@@ -239,7 +254,7 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
     }
   }
 
-  // Image / port divergence for services present on both sides.
+  // Image / port divergence for services present on both sides (running only).
   for (const [name, svc] of declaredByName) {
     const runtime = runtimeByService.get(name);
     if (!runtime) continue;

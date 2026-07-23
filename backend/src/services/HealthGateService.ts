@@ -5,6 +5,7 @@ import { AutoHealService } from './AutoHealService';
 import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { withTimeout } from '../utils/withTimeout';
+import { isCleanOneShotCompletion } from '../utils/oneShotCompletion';
 import type { HealthGateContainer, HealthGateReport } from './updateGuard/types';
 import { getComposeCommandTimeoutMs } from './ComposeService';
 
@@ -47,6 +48,10 @@ interface ObservedContainer {
   service: string | null;
   /** Image id the container is running (service gates check convergence on it). */
   imageId: string;
+  /** Inspect State.ExitCode; null when unavailable. */
+  exitCode: number | null;
+  /** HostConfig.RestartPolicy.Name, or null when unset. */
+  restartPolicy: string | null;
 }
 
 interface ActiveGate {
@@ -101,6 +106,8 @@ interface PreparedBaseline {
   restartCount: number;
   startedAt: string | null;
   imageId: string;
+  exitCode: number | null;
+  restartPolicy: string | null;
 }
 
 function isRegressionEligibleSibling(baseline: PreparedBaseline): boolean {
@@ -118,7 +125,16 @@ function observedFromPreparedBaseline(baseline: PreparedBaseline): ObservedConta
     health: baseline.health,
     service: baseline.service,
     imageId: baseline.imageId,
+    exitCode: baseline.exitCode,
+    restartPolicy: baseline.restartPolicy,
   };
+}
+
+/** Running, or a clean one-shot exit (exit 0 + restart no/absent). */
+function isObservedContainerSatisfied(current: ObservedContainer | undefined): boolean {
+  if (!current) return false;
+  if (current.state === 'running') return true;
+  return isCleanOneShotCompletion(current);
 }
 
 /** An in-memory prepare snapshot awaiting attachExpectedImage + beginPrepared. */
@@ -630,9 +646,12 @@ export class HealthGateService {
       gate.missingLastPoll.delete(name);
 
       if (current.state === 'exited' && baseline.restarts === current.restarts) {
-        // An exit with no restart attempt is terminal for the window.
-        this.finalize(gate, 'failed', `container ${name} exited during observation`, summary);
-        return;
+        if (!isCleanOneShotCompletion(current)) {
+          // An exit with no restart attempt is terminal for the window, unless
+          // this is an expected one-shot (exit 0 + restart no/absent).
+          this.finalize(gate, 'failed', `container ${name} exited during observation`, summary);
+          return;
+        }
       }
       if (current.health === 'unhealthy') {
         this.finalize(gate, 'failed', `container ${name} reported unhealthy`, summary);
@@ -657,14 +676,15 @@ export class HealthGateService {
 
     if (elapsedMs < gate.windowSeconds * 1000) return;
 
-    // Window complete: pass requires everything running and healthy wherever a
-    // healthcheck exists. A health state still 'starting' is not a pass.
+    // Window complete: pass requires everything running (or a clean one-shot
+    // completion) and healthy wherever a healthcheck exists. A health state
+    // still 'starting' is not a pass.
     const stillStarting = observed.filter(c => c.health === 'starting');
     if (stillStarting.length > 0) {
       this.finalize(gate, 'unknown', 'a healthcheck was still starting when the observation window ended', summary);
       return;
     }
-    const notRunning = [...gate.expected.keys()].filter(name => byName.get(name)?.state !== 'running');
+    const notRunning = [...gate.expected.keys()].filter(name => !isObservedContainerSatisfied(byName.get(name)));
     if (notRunning.length > 0) {
       this.finalize(gate, 'failed', `not running at the end of the window: ${notRunning.join(', ')}`, summary);
       return;
@@ -782,8 +802,10 @@ export class HealthGateService {
       gate.missingLastPoll.delete(name);
 
       if (current.state === 'exited' && baseline.restarts === current.restarts) {
-        this.finalize(gate, 'failed', `${noun} ${name} exited during observation`, summary, role);
-        return;
+        if (!isCleanOneShotCompletion(current)) {
+          this.finalize(gate, 'failed', `${noun} ${name} exited during observation`, summary, role);
+          return;
+        }
       }
       if (current.health === 'unhealthy') {
         this.finalize(gate, 'failed', `${noun} ${name} reported unhealthy`, summary, role);
@@ -814,18 +836,20 @@ export class HealthGateService {
       this.finalize(gate, 'unknown', 'a healthcheck was still starting when the observation window ended', summary);
       return;
     }
-    const runningPrimary = observed.filter(c => c.service === serviceName && c.state === 'running');
-    if (runningPrimary.length !== gate.expectedReplicas) {
+    const satisfiedPrimary = observed.filter(
+      c => c.service === serviceName && isObservedContainerSatisfied(c),
+    );
+    if (satisfiedPrimary.length !== gate.expectedReplicas) {
       this.finalize(
         gate, 'failed',
-        `service ${serviceName} has ${runningPrimary.length} running replica(s), expected ${gate.expectedReplicas}`,
+        `service ${serviceName} has ${satisfiedPrimary.length} satisfied replica(s), expected ${gate.expectedReplicas}`,
         summary, 'primary',
       );
       return;
     }
     const collateralNotRunning = [...gate.expected.keys()]
       .filter(name => gate.roleByName.get(name) === 'collateral')
-      .filter(name => byName.get(name)?.state !== 'running');
+      .filter(name => !isObservedContainerSatisfied(byName.get(name)));
     if (collateralNotRunning.length > 0) {
       this.finalize(gate, 'failed', `sibling(s) not running at the end of the window: ${collateralNotRunning.join(', ')}`, summary, 'collateral');
       return;
@@ -877,6 +901,8 @@ export class HealthGateService {
             health: inspect.State?.Health?.Status ?? null,
             service: labels['com.docker.compose.service'] ?? null,
             imageId: inspect.Image ?? '',
+            exitCode: typeof inspect.State?.ExitCode === 'number' ? inspect.State.ExitCode : null,
+            restartPolicy: inspect.HostConfig?.RestartPolicy?.Name || null,
           };
         } catch (e: unknown) {
           // Removed between list and inspect; the missing-container logic will
@@ -903,6 +929,8 @@ export class HealthGateService {
       restartCount: c.restartCount,
       startedAt: c.startedAt,
       imageId: c.imageId,
+      exitCode: c.exitCode,
+      restartPolicy: c.restartPolicy,
     }));
   }
 

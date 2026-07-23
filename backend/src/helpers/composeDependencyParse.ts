@@ -26,6 +26,8 @@ export interface DeclaredService {
   image?: string;
   /** Service `network_mode:` as declared (e.g. `host`), or undefined. */
   networkMode?: string;
+  /** Compose `restart:` policy; null when unset (effective model and raw parser normalize absent to null). */
+  restart?: string | null;
 }
 
 /** A top-level networks:/volumes: entry. */
@@ -200,6 +202,7 @@ export function parseComposeDependencies(content: string): DeclaredCompose {
       ports,
       image: asString(svc.image),
       networkMode: asString(svc.network_mode),
+      restart: asString(svc.restart) ?? null,
     });
   }
 

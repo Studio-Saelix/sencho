@@ -41,6 +41,7 @@ export function declaredFromEffectiveModel(model: EffectiveModel): DeclaredCompo
     ),
     image: s.image,
     networkMode: s.networkMode,
+    restart: s.restart ?? null,
   }));
 
   return {

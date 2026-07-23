@@ -49,9 +49,11 @@ The 3-second crash probe from [atomic deployments](/features/atomic-deployments)
 
 During the window, the gate checks every container that came up with the stack:
 
-- all expected containers stay **running**,
+- all expected containers stay **running** (or finish cleanly as a one-shot; see below),
 - Docker healthchecks report **healthy** wherever a service defines one,
-- no container **exits**, **disappears**, or enters a **restart loop**.
+- no container **crashes** (non-zero exit), **disappears**, or enters a **restart loop**.
+
+A one-shot or init service that finishes with exit code `0` and has restart policy `no` (or no restart policy) counts as a successful completion, not a gate failure. A clean exit under `unless-stopped`, `always`, or `on-failure` still fails the gate. An exit whose code cannot be read also fails the gate.
 
 A clear failure ends the observation immediately. Passing requires the full window, and a healthcheck still in its start period when the window ends records the verdict as unknown rather than claiming success.
 
@@ -110,7 +112,7 @@ When a deploy or update fails, Sencho classifies the failure from the compose ou
     Unknown means one of the verdict-affecting signals could not be verified, most often because Docker or the node did not answer in time. The update path is never blocked by an unknown verdict; check the node's connection if it persists, and proceed when you are confident in the stack's state.
   </Accordion>
   <Accordion title="The health gate failed but my app seems fine">
-    The gate fails on the first clear problem it observes: a container exit, an unhealthy healthcheck, a restart loop, or a container disappearing mid-window. Check the named container's logs from the stack page. If the container legitimately restarts during startup (a migration step, for example), raise the observation window under **Settings > Infrastructure > Stacks > Deploy Guardrails** so the gate watches past the settle period.
+    The gate fails on the first clear problem it observes: a non-zero exit, an unexpected clean exit of a service with a restarting policy, an unhealthy healthcheck, a restart loop, or a container disappearing mid-window. A one-shot that exits `0` with `restart: "no"` does not fail the gate. Check the named container's logs from the stack page. If the container legitimately restarts during startup (a migration step that should stay up, for example), raise the observation window under **Settings > Infrastructure > Stacks > Deploy Guardrails** so the gate watches past the settle period.
   </Accordion>
   <Accordion title="The health gate result is unknown">
     Unknown means the observation could not finish: Sencho restarted mid-window, a newer update superseded the observation, Docker became unreachable, a healthcheck was still starting when the window ended, or no containers appeared to observe. The stack timeline records the reason. Check the containers directly; an unknown verdict makes no claim either way.

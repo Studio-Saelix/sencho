@@ -85,6 +85,8 @@ type Fixture = {
   restartCount?: number;
   startedAt?: string;
   imageId?: string;
+  exitCode?: number | null;
+  restartPolicy?: string | null;
 };
 
 function setContainers(fixtures: Fixture[]): void {
@@ -100,11 +102,13 @@ function setContainers(fixtures: Fixture[]): void {
     return Promise.resolve({
       State: {
         Status: f.state ?? 'running',
+        ExitCode: f.exitCode === undefined ? (f.state === 'exited' ? 1 : 0) : f.exitCode,
         Health: f.health !== undefined && f.health !== null ? { Status: f.health } : undefined,
         StartedAt: f.startedAt ?? '2026-06-10T00:00:00Z',
       },
       RestartCount: f.restartCount ?? 0,
       Image: f.imageId ?? 'sha256:app',
+      HostConfig: { RestartPolicy: { Name: f.restartPolicy ?? 'unless-stopped' } },
       Config: { Labels: { 'com.docker.compose.service': f.service } },
     });
   });
@@ -216,12 +220,97 @@ describe('primary vs collateral attribution', () => {
     await ticks(1);
     setContainers([
       { id: 'p1', name: 'web-app-1', service: 'app' },
-      { id: 's1', name: 'web-db-1', service: 'db', state: 'exited' },
+      { id: 's1', name: 'web-db-1', service: 'db', state: 'exited', exitCode: 1, restartPolicy: 'unless-stopped' },
     ]);
     await ticks(1);
     const report = svc().getReport(0, 'web', runId!);
     expect(report.status).toBe('failed');
     expect(report.failureSource).toBe('collateral');
+  });
+
+  it('passes when a collateral one-shot exits 0 with restart no', async () => {
+    const token = await prepareService([
+      { id: 'p1', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped' },
+      { id: 's1', name: 'web-migrate-1', service: 'migrate', restartPolicy: 'no' },
+    ]);
+    svc().attachExpectedImage(token, 'sha256:app');
+    const { runId } = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
+    await ticks(1);
+    setContainers([
+      { id: 'p1', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped' },
+      { id: 's1', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0, restartPolicy: 'no' },
+    ]);
+    await ticks(1);
+    expect(svc().getReport(0, 'web', runId!).status).toBe('observing');
+    await ticks(6);
+    expect(svc().getReport(0, 'web', runId!).status).toBe('passed');
+  });
+
+  it('passes when the primary service is a completed one-shot', async () => {
+    const token = await prepareService([
+      { id: 'p1', name: 'web-job-1', service: 'job', restartPolicy: 'no' },
+    ], { serviceName: 'job', expectedReplicas: 1 });
+    svc().attachExpectedImage(token, 'sha256:app');
+    const { runId } = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
+    await ticks(1);
+    setContainers([
+      { id: 'p1', name: 'web-job-1', service: 'job', state: 'exited', exitCode: 0, restartPolicy: 'no', imageId: 'sha256:app' },
+    ]);
+    await ticks(1);
+    expect(svc().getReport(0, 'web', runId!).status).toBe('observing');
+    await ticks(6);
+    expect(svc().getReport(0, 'web', runId!).status).toBe('passed');
+  });
+
+  it('fails when a primary one-shot exits with null exit code', async () => {
+    const token = await prepareService([
+      { id: 'p1', name: 'web-job-1', service: 'job', restartPolicy: 'no' },
+    ], { serviceName: 'job', expectedReplicas: 1 });
+    svc().attachExpectedImage(token, 'sha256:app');
+    const { runId } = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
+    await ticks(1);
+    setContainers([
+      { id: 'p1', name: 'web-job-1', service: 'job', state: 'exited', exitCode: null, restartPolicy: 'no', imageId: 'sha256:app' },
+    ]);
+    await ticks(1);
+    const report = svc().getReport(0, 'web', runId!);
+    expect(report.status).toBe('failed');
+    expect(report.reason).toContain('exited during observation');
+    expect(report.failureSource).toBe('primary');
+  });
+
+  it('fails when a primary one-shot exits 0 under unless-stopped', async () => {
+    const token = await prepareService([
+      { id: 'p1', name: 'web-job-1', service: 'job', restartPolicy: 'unless-stopped' },
+    ], { serviceName: 'job', expectedReplicas: 1 });
+    svc().attachExpectedImage(token, 'sha256:app');
+    const { runId } = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
+    await ticks(1);
+    setContainers([
+      { id: 'p1', name: 'web-job-1', service: 'job', state: 'exited', exitCode: 0, restartPolicy: 'unless-stopped', imageId: 'sha256:app' },
+    ]);
+    await ticks(1);
+    const report = svc().getReport(0, 'web', runId!);
+    expect(report.status).toBe('failed');
+    expect(report.reason).toContain('exited during observation');
+    expect(report.failureSource).toBe('primary');
+  });
+
+  it('fails when a primary one-shot exits non-zero', async () => {
+    const token = await prepareService([
+      { id: 'p1', name: 'web-job-1', service: 'job', restartPolicy: 'no' },
+    ], { serviceName: 'job', expectedReplicas: 1 });
+    svc().attachExpectedImage(token, 'sha256:app');
+    const { runId } = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
+    await ticks(1);
+    setContainers([
+      { id: 'p1', name: 'web-job-1', service: 'job', state: 'exited', exitCode: 1, restartPolicy: 'no', imageId: 'sha256:app' },
+    ]);
+    await ticks(1);
+    const report = svc().getReport(0, 'web', runId!);
+    expect(report.status).toBe('failed');
+    expect(report.reason).toContain('exited during observation');
+    expect(report.failureSource).toBe('primary');
   });
 
   it('fails with failureSource collateral when a healthy sibling vanishes before the first poll', async () => {

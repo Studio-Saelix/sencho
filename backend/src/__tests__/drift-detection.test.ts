@@ -36,7 +36,7 @@ function declared(services: DeclaredService[], parseError?: string): DeclaredCom
 function container(p: Partial<DependencyContainer> & { id: string }): DependencyContainer {
   return {
     name: p.id, service: null, composeProject: null, stack: 'app',
-    state: 'running', image: 'img:latest', networks: [], volumes: [], ports: [], ...p,
+    state: 'running', exitCode: null, image: 'img:latest', networks: [], volumes: [], ports: [], ...p,
   };
 }
 
@@ -105,6 +105,110 @@ describe('assembleStackDrift - status', () => {
       containers: [container({ id: 'c1', service: 'web', state: 'exited' })],
     });
     expect(report.status).toBe('missing-runtime');
+    expect(report.findings).toEqual([]);
+  });
+
+  it('does not emit service-missing for a clean one-shot beside a running service', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([
+        service({ name: 'app', image: 'app:1', restart: 'unless-stopped' }),
+        service({ name: 'migrate', image: 'migrate:1', restart: 'no' }),
+      ]),
+      containers: [
+        container({ id: 'c1', service: 'app', image: 'app:1', state: 'running' }),
+        container({ id: 'c2', service: 'migrate', image: 'migrate:1', state: 'exited', exitCode: 0 }),
+      ],
+    });
+    expect(findingKinds(report)).not.toContain('service-missing');
+    expect(report.status).toBe('in-sync');
+    expect(report.hasContainers).toBe(true);
+  });
+
+  it('still emits service-missing when a one-shot exits non-zero', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([
+        service({ name: 'app', image: 'app:1', restart: 'unless-stopped' }),
+        service({ name: 'migrate', image: 'migrate:1', restart: 'no' }),
+      ]),
+      containers: [
+        container({ id: 'c1', service: 'app', image: 'app:1', state: 'running' }),
+        container({ id: 'c2', service: 'migrate', image: 'migrate:1', state: 'exited', exitCode: 1 }),
+      ],
+    });
+    expect(findingKinds(report)).toContain('service-missing');
+    expect(report.findings.find(f => f.kind === 'service-missing')?.service).toBe('migrate');
+  });
+
+  it('still treats exited unless-stopped as missing even with exit 0', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'web', restart: 'unless-stopped' })]),
+      containers: [container({ id: 'c1', service: 'web', state: 'exited', exitCode: 0 })],
+    });
+    expect(report.status).toBe('missing-runtime');
+    expect(report.hasContainers).toBe(false);
+  });
+
+  it('fails closed when exitCode is null even with restart no', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([
+        service({ name: 'app', image: 'app:1', restart: 'unless-stopped' }),
+        service({ name: 'migrate', image: 'migrate:1', restart: 'no' }),
+      ]),
+      containers: [
+        container({ id: 'c1', service: 'app', image: 'app:1', state: 'running' }),
+        container({ id: 'c2', service: 'migrate', image: 'migrate:1', state: 'exited', exitCode: null }),
+      ],
+    });
+    expect(findingKinds(report)).toContain('service-missing');
+    expect(report.findings.find(f => f.kind === 'service-missing')?.service).toBe('migrate');
+  });
+
+  it('treats absent declared restart like no for a clean one-shot', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'migrate' })]),
+      containers: [container({ id: 'c1', service: 'migrate', state: 'exited', exitCode: 0 })],
+    });
+    expect(report.status).toBe('in-sync');
+    expect(report.hasContainers).toBe(false);
+  });
+
+  it('all-one-shot stack with dedicated network is not missing-runtime but keeps network-missing and hasContainers false', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: {
+        services: [service({ name: 'migrate', restart: 'no', networks: ['jobs'] })],
+        networks: { jobs: { external: false } },
+        volumes: {},
+        projectName: 'app',
+      },
+      containers: [
+        container({
+          id: 'c1', service: 'migrate', state: 'exited', exitCode: 0,
+          networks: [{ name: 'app_jobs', id: 'j', ip: '' }],
+        }),
+      ],
+      networks: [depNet('app_jobs')],
+    });
+    expect(report.status).not.toBe('missing-runtime');
+    expect(findingKinds(report)).not.toContain('service-missing');
+    expect(report.hasContainers).toBe(false);
+    expect(findingKinds(report)).toContain('network-missing');
+    expect(report.status).toBe('drifted');
+  });
+
+  it('all-one-shot stack without network findings is in-sync with hasContainers false', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'migrate', restart: 'no' })]),
+      containers: [container({ id: 'c1', service: 'migrate', state: 'exited', exitCode: 0 })],
+    });
+    expect(report.status).toBe('in-sync');
+    expect(report.hasContainers).toBe(false);
     expect(report.findings).toEqual([]);
   });
 
@@ -454,6 +558,32 @@ describe('declaredFromEffectiveModel', () => {
     expect(converted.projectName).toBe('app');
     expect(converted.services[0].image).toBe('ghcr.io/karakeep-app/karakeep:release');
     expect(converted.services[0].ports).toEqual([{ hostIp: '127.0.0.1', publishedPort: 8080, protocol: 'tcp' }]);
+  });
+
+  it('preserves restart policy including no, unless-stopped, and absent', () => {
+    const withNo = declaredFromEffectiveModel({
+      projectName: 'app',
+      services: [effSvc({ name: 'migrate', restart: 'no' })],
+      networks: {},
+      volumes: {},
+    });
+    expect(withNo.services[0].restart).toBe('no');
+
+    const withUnless = declaredFromEffectiveModel({
+      projectName: 'app',
+      services: [effSvc({ name: 'web', restart: 'unless-stopped' })],
+      networks: {},
+      volumes: {},
+    });
+    expect(withUnless.services[0].restart).toBe('unless-stopped');
+
+    const absent = declaredFromEffectiveModel({
+      projectName: 'app',
+      services: [effSvc({ name: 'job', restart: undefined })],
+      networks: {},
+      volumes: {},
+    });
+    expect(absent.services[0].restart).toBeNull();
   });
 
   it('normalizes networks so drift matches the rendered model', () => {
