@@ -1,16 +1,22 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { useState, type ReactNode } from 'react';
 import { MobileStackDetail } from './MobileStackDetail';
 import type { EditorViewProps } from './EditorView';
+import type { ContainerInfo } from './EditorView';
+import type { EffectiveServiceSpec } from '@/types/effectiveServices';
 
 // The detail's heavy children stream logs, parse compose, and render container
 // stats; stub them with markers so this test focuses on segment behavior and the
-// mobile editing flow.
+// mobile editing flow. Capture showServiceChips for wiring assertions.
+let lastShowServiceChips: boolean | undefined;
 vi.mock('./editor-view-blocks', () => ({
     StackIdentityHeader: () => <div>identity-header</div>,
     ContainersHealth: () => <div>health-pane</div>,
-    StackLogsSection: () => <div>logs-pane</div>,
+    StackLogsSection: ({ showServiceChips }: { showServiceChips: boolean }) => {
+        lastShowServiceChips = showServiceChips;
+        return <div>logs-pane</div>;
+    },
 }));
 // Prop-aware so the edit affordance (canEdit + onEditCompose) is exercised, not
 // just the read-only marker.
@@ -296,5 +302,67 @@ describe('MobileStackDetail mobile editing', () => {
         fireEvent.change(editor, { target: { value: 'late-edit' } });
         expect(setEnvContent).not.toHaveBeenCalled();
         expect(setContent).not.toHaveBeenCalled();
+    });
+});
+
+function containerStub(id: string, name: string): ContainerInfo {
+    return {
+        Id: id,
+        Names: [name],
+        State: 'running',
+        Status: 'Up 1 minute',
+    };
+}
+
+function serviceStub(name: string): EffectiveServiceSpec {
+    return {
+        name,
+        declaredImage: `${name}:latest`,
+        hasBuild: false,
+        expectedReplicas: 1,
+        dependsOn: [],
+        hasHealthcheck: false,
+    };
+}
+
+describe('MobileStackDetail showServiceChips wiring', () => {
+    afterEach(() => {
+        lastShowServiceChips = undefined;
+    });
+
+    it('passes false for one container and one declared service', () => {
+        render(
+            <MobileStackDetail
+                {...makeProps({
+                    containers: [containerStub('c1', '/web')],
+                    effectiveServices: [serviceStub('web')],
+                })}
+            />,
+        );
+        expect(lastShowServiceChips).toBe(false);
+    });
+
+    it('passes true for two containers', () => {
+        render(
+            <MobileStackDetail
+                {...makeProps({
+                    containers: [containerStub('c1', '/web'), containerStub('c2', '/db')],
+                    effectiveServices: [serviceStub('web')],
+                })}
+            />,
+        );
+        expect(lastShowServiceChips).toBe(true);
+    });
+
+    it('passes true for one container and two declared services', () => {
+        render(
+            <MobileStackDetail
+                {...makeProps({
+                    containers: [containerStub('c1', '/web')],
+                    effectiveServices: [serviceStub('web'), serviceStub('db')],
+                })}
+            />,
+        );
+        expect(lastShowServiceChips).toBe(true);
     });
 });

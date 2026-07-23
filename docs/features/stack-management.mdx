@@ -235,10 +235,10 @@ Single-service stacks keep the existing flat container layout; service headers d
 The logs area at the bottom of the stack view has two modes. Toggle between them with the segmented control in the top-right of the panel; your choice is remembered for next time.
 
 <Frame>
-  <img src="/images/stack-view/logs-viewer.png" alt="Logs panel in Structured mode for the plex stack with toolbar, level filter pills, and timestamped INFO log rows" />
+  <img src="/images/stack-view/logs-viewer.png" alt="Logs panel in Structured mode with toolbar, level filter pills, and timestamped INFO log rows without service chips on a single-service stack" />
 </Frame>
 
-**Structured** (default) parses every line into a DOM row with three columns: local time, level badge, and message. Level detection is automatic:
+**Structured** (default) parses every line into a DOM row with three columns: local time, level badge, and message. On multi-service or multi-container stacks, each row also shows a service chip so you can tell which service wrote the line; single-service, single-container stacks omit the chip. Level detection is automatic:
 
 - `err` rows get a red left rail and a subtle rose tint.
 - `warn` rows get a warm tint.

@@ -346,8 +346,8 @@ export function ContainersHealth({
     containersLoadError = null,
     onRetryContainersLoad,
 }: ContainersHealthProps) {
-    // Multi-service only (§12): a single-service stack keeps the existing flat
-    // layout untouched, including its per-container Start/Stop/Restart kebab.
+    // Multi-service only: a single-service stack keeps the existing flat layout
+    // untouched, including its per-container Start/Stop/Restart kebab.
     const isMultiService = effectiveServices.length > 1;
     const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
     const copiedUrlTimerRef = useRef<number | null>(null);
@@ -445,9 +445,9 @@ export function ContainersHealth({
     ) : null;
 
     // One container card. `hideServiceMenu` drops the per-container
-    // Start/Stop/Restart kebab on multi-service stacks, where the declared-
-    // service header above owns that action instead (§12 point 4: child cards
-    // keep only logs, shell, ports, metrics).
+    // Start/Stop/Restart kebab on multi-service stacks; the declared-service
+    // header above owns lifecycle actions. Child cards keep logs, shell, ports,
+    // and metrics only.
     const renderContainerCard = (container: ContainerInfo, hideServiceMenu: boolean) => {
                         let mainPort: number | undefined;
                         let mainPortPrivate: number | undefined;
@@ -807,6 +807,8 @@ export interface StackLogsSectionProps {
     stackName: string;
     logsMode: 'structured' | 'raw';
     setLogsMode: (mode: 'structured' | 'raw') => void;
+    /** True when the stack has more than one service or container; gates log chips. */
+    showServiceChips: boolean;
     /** When set, the structured viewer shows an expand control that collapses
      *  the Command Center to give the logs more vertical room. */
     logsExpanded?: boolean;
@@ -814,7 +816,7 @@ export interface StackLogsSectionProps {
 }
 
 // Logs pane: structured / raw-terminal toggle + the live viewer.
-export function StackLogsSection({ stackName, logsMode, setLogsMode, logsExpanded, onToggleLogsExpand }: StackLogsSectionProps) {
+export function StackLogsSection({ stackName, logsMode, setLogsMode, showServiceChips, logsExpanded, onToggleLogsExpand }: StackLogsSectionProps) {
     return (
         <div className="flex-1 min-h-0 flex flex-col gap-2 overflow-hidden">
             <div className="flex items-center justify-between">
@@ -844,7 +846,7 @@ export function StackLogsSection({ stackName, logsMode, setLogsMode, logsExpande
             </div>
             {logsMode === 'structured' ? (
                 <ErrorBoundary>
-                    <StructuredLogViewer stackName={stackName} expanded={logsExpanded} onToggleExpand={onToggleLogsExpand} />
+                    <StructuredLogViewer stackName={stackName} showServiceChips={showServiceChips} expanded={logsExpanded} onToggleExpand={onToggleLogsExpand} />
                 </ErrorBoundary>
             ) : (
                 <div className="flex-1 rounded-xl overflow-hidden border border-muted bg-black p-3 shadow-[inset_0_2px_4px_0_oklch(0_0_0/0.4)]">
