@@ -217,7 +217,7 @@ describe('NotificationService - routing logic', () => {
     mockFetch.mockRejectedValueOnce(new Error('Network timeout'));
 
     // Should not throw
-    await expect(svc.dispatchAlert('error', 'monitor_alert', 'Crash', { stackName: 'my-app' })).resolves.toBeUndefined();
+    await expect(svc.dispatchAlert('error', 'monitor_alert', 'Crash', { stackName: 'my-app' })).resolves.toEqual({ persisted: true });
   });
 
   it('does not dispatch to global agents when routes array is empty and no stackName', async () => {
@@ -553,7 +553,7 @@ describe('NotificationService - crash safety (dispatchAlert never rejects)', () 
 
     await expect(
       svc.dispatchAlert('error', 'monitor_alert', 'Container crashed', { stackName: 'my-app' }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ persisted: false });
 
     // No external dispatch and no routing read when there is no persisted row.
     expect(mockFetch).not.toHaveBeenCalled();
@@ -580,7 +580,7 @@ describe('NotificationService - crash safety (dispatchAlert never rejects)', () 
 
     await expect(
       svc.dispatchAlert('error', 'monitor_alert', 'Container crashed', { stackName: 'my-app' }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ persisted: true });
 
     // The history row was still written; only routing failed, and it was logged.
     expect(mockAddNotificationHistory).toHaveBeenCalledTimes(1);
@@ -598,7 +598,7 @@ describe('NotificationService - crash safety (dispatchAlert never rejects)', () 
 
     await expect(
       svc.dispatchAlert('info', 'system', 'Host rebooted'),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ persisted: true });
 
     expect(mockAddNotificationHistory).toHaveBeenCalledTimes(1);
     expect(consoleErrorSpy).toHaveBeenCalledWith('[Notify] dispatchAlert failed:', expect.any(Error));
