@@ -13,6 +13,7 @@
  * lifecycle in the plan.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import type { Blueprint, Node } from '../services/DatabaseService';
 import type { ReconcileDecision } from '../services/BlueprintReconciler';
@@ -40,6 +41,7 @@ afterAll(() => cleanupTestDb(tmpDir));
 
 beforeEach(() => {
     const db = DatabaseService.getInstance().getDb();
+    db.prepare('DELETE FROM role_assignments').run();
     db.prepare('DELETE FROM blueprint_deployments').run();
     db.prepare('DELETE FROM blueprints').run();
     db.prepare('DELETE FROM node_labels').run();
@@ -463,6 +465,108 @@ describe('BlueprintService per-stack lock', () => {
         expect(outcome.error).toContain('already in progress');
         // The lock is still held by the manual op (the withdraw never acquired it).
         expect(StackOpLockService.getInstance().get(nodeId, bp.name)?.action).toBe('update');
+    });
+});
+
+describe('BlueprintService local withdraw clears stack-scoped role assignments', () => {
+    function hasAssignment(userId: number, resourceType: string, resourceId: string): boolean {
+        return DatabaseService.getInstance().getAllRoleAssignments(userId)
+            .some((a) => a.resource_type === resourceType && a.resource_id === resourceId);
+    }
+
+    async function arrangeLocalWithdraw() {
+        const db = DatabaseService.getInstance();
+        const nodeId = seedNode();
+        const bp = seedBlueprint({ name: `rbac-wd-${counter}`, classification: 'stateless', nodeIds: [nodeId] });
+        const node = db.getNode(nodeId)!;
+        db.upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: nodeId,
+            status: 'active',
+            applied_revision: bp.revision,
+        });
+
+        const hash = await bcrypt.hash('password123', 1);
+        const userId = db.addUser({ username: `bp-rbac-${counter}`, password_hash: hash, role: 'viewer' });
+        const otherNodeId = seedNode();
+        db.addRoleAssignment({
+            user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: bp.name,
+        });
+        db.addRoleAssignment({
+            user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'other-stack',
+        });
+        db.addRoleAssignment({
+            user_id: userId, role: 'deployer', resource_type: 'node', resource_id: String(otherNodeId),
+        });
+
+        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue(null);
+        const { ComposeService } = await import('../services/ComposeService');
+        const { FileSystemService } = await import('../services/FileSystemService');
+        vi.spyOn(ComposeService.prototype, 'downStack').mockResolvedValue(undefined);
+        const deleteStackSpy = vi.spyOn(FileSystemService.prototype, 'deleteStack').mockResolvedValue(undefined);
+
+        return { bp, node, nodeId, userId, deleteStackSpy, db };
+    }
+
+    it('clears the target assignment after successful filesystem deletion and preserves unrelated grants', async () => {
+        const { bp, node, userId, deleteStackSpy, db } = await arrangeLocalWithdraw();
+
+        const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
+
+        expect(outcome.status).toBe('withdrawn');
+        expect(deleteStackSpy).toHaveBeenCalledWith(bp.name);
+        expect(db.getDeployment(bp.id, node.id)).toBeUndefined();
+        expect(hasAssignment(userId, 'stack', bp.name)).toBe(false);
+        expect(hasAssignment(userId, 'stack', 'other-stack')).toBe(true);
+        expect(db.getAllRoleAssignments(userId).some((a) => a.resource_type === 'node')).toBe(true);
+        db.deleteUser(userId);
+    });
+
+    it('clears the target assignment when deleteStack treats the directory as already absent (ENOENT)', async () => {
+        // Shared deletion always calls deleteStack; FileSystemService maps ENOENT to success.
+        const { bp, node, userId, deleteStackSpy, db } = await arrangeLocalWithdraw();
+        deleteStackSpy.mockResolvedValue(undefined);
+
+        const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
+
+        expect(outcome.status).toBe('withdrawn');
+        expect(deleteStackSpy).toHaveBeenCalledWith(bp.name);
+        expect(hasAssignment(userId, 'stack', bp.name)).toBe(false);
+        expect(db.getAllRoleAssignments(userId)).toHaveLength(2);
+        db.deleteUser(userId);
+    });
+
+    it('preserves the grant when filesystem deletion fails with a non-ENOENT error', async () => {
+        const { bp, node, nodeId, userId, deleteStackSpy, db } = await arrangeLocalWithdraw();
+        const fsErr = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+        deleteStackSpy.mockRejectedValue(fsErr);
+        const rbacSpy = vi.spyOn(db, 'deleteRoleAssignmentsByResource');
+
+        const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
+
+        expect(outcome.status).toBe('failed');
+        expect(rbacSpy).not.toHaveBeenCalled();
+        expect(db.getDeployment(bp.id, nodeId)?.status).toBe('failed');
+        expect(hasAssignment(userId, 'stack', bp.name)).toBe(true);
+        db.deleteUser(userId);
+    });
+
+    it('fails withdraw and keeps the deployment when role-assignment cleanup throws', async () => {
+        const { bp, node, nodeId, userId, db } = await arrangeLocalWithdraw();
+        vi.spyOn(db, 'deleteRoleAssignmentsByResource')
+            .mockImplementation(() => { throw new Error('simulated rbac cleanup failure'); });
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+        const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
+
+        expect(outcome.status).toBe('failed');
+        expect(db.getDeployment(bp.id, nodeId)).toBeDefined();
+        expect(db.getDeployment(bp.id, nodeId)?.status).toBe('failed');
+        expect(errorSpy.mock.calls.some((args) =>
+            typeof args[0] === 'string' && args[0].includes('Secondary DB cleanup failed'),
+        )).toBe(true);
+        expect(hasAssignment(userId, 'stack', bp.name)).toBe(true);
+        db.deleteUser(userId);
     });
 });
 
