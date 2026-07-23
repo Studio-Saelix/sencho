@@ -257,11 +257,49 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
       }
 
+      // Mixed-version RBAC gate (non-admin only). Runs before alert body
+      // buffering so an unauthorized client cannot force unbounded memory use.
+      if (req.user?.role !== 'admin') {
+        const rbacSupported = await remoteSupportsCrossNodeRbac(req.nodeId);
+        if (!rbacSupported) {
+          res.status(403).json({
+            error: `Remote node "${node.name}" is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`,
+          });
+          return;
+        }
+      }
+
       // POST /alerts bodies are not on req.body for remote hops (JSON parsing
-      // is skipped so the stream can be piped). Buffer once, gate on the
-      // parsed service_name, then rewrite rawBody in on.proxyReq.
+      // is skipped so the stream can be piped). Buffer once under the same
+      // 100 KB cap as express.json(), gate on service_name, then rewrite
+      // rawBody in on.proxyReq. Compressed bodies are rejected: the hub cannot
+      // inspect them, and treating parse failure as unscoped would bypass the
+      // mixed-version gate.
       if (isAlertCreateRoute(req)) {
-        req.rawBody = await bufferRequestBody(req);
+        if (hasNonIdentityContentEncoding(req)) {
+          await drainRequestBody(req);
+          res.status(415).json({
+            error: 'Compressed request bodies are not supported for remote alert creates',
+            code: 'encoding_unsupported',
+          });
+          return;
+        }
+        try {
+          req.rawBody = await bufferRequestBody(req, ALERT_PROXY_BODY_LIMIT);
+        } catch (err) {
+          const status = Number((err as { status?: number }).status);
+          if (status === 413) {
+            console.error('[remoteNodeProxy] alert body rejected as too large:', err);
+            res.status(413).json({ error: 'Alert payload too large', code: 'entity_too_large' });
+            return;
+          }
+          if (status === 400) {
+            console.error('[remoteNodeProxy] alert body incomplete:', err);
+            res.status(400).json({ error: 'Incomplete request body' });
+            return;
+          }
+          throw err;
+        }
         if (alertCreateHasScopedService(req.rawBody)) {
           const supported = await remoteAdvertisesCapability(req.nodeId, SERVICE_SCOPED_STACK_ALERT_CAPABILITY);
           if (!supported) {
@@ -271,17 +309,6 @@ export function createRemoteProxyMiddleware(): RequestHandler {
             });
             return;
           }
-        }
-      }
-
-      // Mixed-version RBAC gate (non-admin only).
-      if (req.user?.role !== 'admin') {
-        const rbacSupported = await remoteSupportsCrossNodeRbac(req.nodeId);
-        if (!rbacSupported) {
-          res.status(403).json({
-            error: `Remote node "${node.name}" is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`,
-          });
-          return;
         }
       }
 
@@ -317,6 +344,28 @@ function isAlertCreateRoute(req: Request): boolean {
   return req.method === 'POST' && /^\/alerts\/?$/.test(req.path);
 }
 
+/** Same default as express.json(); remote alert creates must not exceed it. */
+const ALERT_PROXY_BODY_LIMIT = 100 * 1024;
+
+/** Max time to wait for leftover body bytes after a size/encoding reject. */
+const DRAIN_TIMEOUT_MS = 5_000;
+
+/** Error with HTTP status for the alert-body gate catch mapper. */
+function alertBodyError(message: string, status: number): Error {
+  return Object.assign(new Error(message), { status, expose: true });
+}
+
+/** True when Content-Encoding is present and not identity (gzip/deflate/br/…). */
+function hasNonIdentityContentEncoding(req: Request): boolean {
+  const raw = req.headers['content-encoding'];
+  if (raw == null) return false;
+  const value = Array.isArray(raw) ? raw.join(',') : raw;
+  return value.split(',').some((part) => {
+    const encoding = part.trim().toLowerCase();
+    return encoding.length > 0 && encoding !== 'identity';
+  });
+}
+
 /** True when the buffered JSON alert body targets a specific Compose service. */
 function alertCreateHasScopedService(rawBody: Buffer): boolean {
   if (rawBody.length === 0) return false;
@@ -324,47 +373,115 @@ function alertCreateHasScopedService(rawBody: Buffer): boolean {
     const parsed = JSON.parse(rawBody.toString('utf-8')) as { service_name?: unknown };
     return typeof parsed.service_name === 'string' && parsed.service_name.trim() !== '';
   } catch {
-    // Invalid JSON is forwarded as-is; the remote rejects it. Do not treat
-    // parse failure as scoped (would block unscoped typos behind a capability).
+    // Identity-encoded non-JSON is forwarded as-is; the remote rejects it.
+    // Encoded bodies never reach here (rejected earlier).
     return false;
   }
 }
 
 /**
- * Drain the incoming request into a Buffer so a capability gate can inspect
- * JSON without leaving http-proxy with an already-ended empty stream.
+ * Consume remaining request bytes (or wait for abort/close) so the response
+ * can flush without leaving the socket half-open. Does not buffer into memory.
+ * Caps wait time so a stalled or endless chunked stream cannot hang the gate.
  */
-async function bufferRequestBody(req: Request): Promise<Buffer> {
-  if (req.rawBody) return req.rawBody;
+function drainRequestBody(req: Request): Promise<void> {
+  return new Promise((resolve) => {
+    if (req.readableEnded || req.destroyed) {
+      resolve();
+      return;
+    }
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      req.off('end', done);
+      req.off('error', done);
+      req.off('aborted', done);
+      req.off('close', done);
+      resolve();
+    };
+    // Bound hang time: destroy after timeout so mid-stream rejects still settle.
+    const timer = setTimeout(() => {
+      if (!req.destroyed) req.destroy();
+      done();
+    }, DRAIN_TIMEOUT_MS);
+    req.resume();
+    req.once('end', done);
+    req.once('error', done);
+    req.once('aborted', done);
+    req.once('close', done);
+  });
+}
+
+/**
+ * Buffer the request so a capability gate can inspect JSON without leaving
+ * http-proxy with an already-ended empty stream. Enforces `limit` on both
+ * declared Content-Length and streamed accumulation.
+ */
+async function bufferRequestBody(req: Request, limit: number): Promise<Buffer> {
+  if (req.rawBody) {
+    if (req.rawBody.length > limit) {
+      throw alertBodyError('Alert payload too large', 413);
+    }
+    return req.rawBody;
+  }
   if (req.readableEnded) return Buffer.alloc(0);
+
+  const declared = Number.parseInt(String(req.headers['content-length'] ?? ''), 10);
+  if (Number.isFinite(declared) && declared > limit) {
+    await drainRequestBody(req);
+    throw alertBodyError('Alert payload too large', 413);
+  }
 
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
+    let total = 0;
     let settled = false;
 
-    const finish = (buf: Buffer) => {
+    const settle = (fn: () => void) => {
       if (settled) return;
       settled = true;
-      resolve(buf);
+      cleanup();
+      fn();
     };
-    const fail = (err: Error) => {
-      if (settled) return;
-      settled = true;
-      reject(err);
+    const finish = (buf: Buffer) => settle(() => resolve(buf));
+    const fail = (err: Error) => settle(() => reject(err));
+
+    const onData = (chunk: Buffer) => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buf.length;
+      if (total > limit) {
+        cleanup();
+        chunks.length = 0;
+        void drainRequestBody(req).finally(() => {
+          fail(alertBodyError('Alert payload too large', 413));
+        });
+        return;
+      }
+      chunks.push(buf);
+    };
+    const onEnd = () => finish(Buffer.concat(chunks));
+    const onError = (err: Error) => fail(err);
+    const onAborted = () => fail(alertBodyError('Client aborted request body', 400));
+    const onClose = () => {
+      if (!settled && !req.readableEnded) {
+        fail(alertBodyError('Client closed request before body finished', 400));
+      }
     };
 
-    req.on('data', (chunk: Buffer) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    });
-    req.on('end', () => finish(Buffer.concat(chunks)));
-    req.on('error', fail);
-    req.on('aborted', () => {
-      fail(Object.assign(new Error('Client aborted request body'), { status: 400, expose: true }));
-    });
-    req.on('close', () => {
-      if (!settled && !req.readableEnded) {
-        fail(Object.assign(new Error('Client closed request before body finished'), { status: 400, expose: true }));
-      }
-    });
+    function cleanup(): void {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('error', onError);
+      req.off('aborted', onAborted);
+      req.off('close', onClose);
+    }
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+    req.on('aborted', onAborted);
+    req.on('close', onClose);
   });
 }
