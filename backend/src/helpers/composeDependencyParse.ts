@@ -26,6 +26,8 @@ export interface DeclaredService {
   image?: string;
   /** Service `network_mode:` as declared (e.g. `host`), or undefined. */
   networkMode?: string;
+  /** Service `restart` from raw YAML parse. The effective-model path may set this via normalizeComposeRestartIntent (including deploy.restart_policy). Null when unset. */
+  restart?: string | null;
 }
 
 /** A top-level networks:/volumes: entry. */
@@ -200,6 +202,7 @@ export function parseComposeDependencies(content: string): DeclaredCompose {
       ports,
       image: asString(svc.image),
       networkMode: asString(svc.network_mode),
+      restart: asString(svc.restart) ?? null,
     });
   }
 

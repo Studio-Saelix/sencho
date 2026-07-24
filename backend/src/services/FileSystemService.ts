@@ -58,6 +58,13 @@ const PROTECTED_STACK_FILES = new Set([
   '.env',
 ]);
 
+// Explorer-only protection: includes the blueprint ownership marker without
+// putting it in PROTECTED_STACK_FILES (backup/rollback orphan removal).
+const EXPLORER_PROTECTED_STACK_FILES = new Set([
+  ...PROTECTED_STACK_FILES,
+  '.blueprint.json',
+]);
+
 // Bookkeeping markers Sencho writes into the backup slot. They are never copied
 // back into the stack directory on restore: `.timestamp` records when the backup
 // was taken; `.checksums` is the integrity manifest verified before a restore.
@@ -169,7 +176,7 @@ function isProtectedRelPath(relPath: string): boolean {
   if (normalized.includes('/')) return false;
   // Fold case so e.g. a request for COMPOSE.YAML cannot dodge the gate on a
   // case-insensitive filesystem where it resolves to the real compose.yaml.
-  return PROTECTED_STACK_FILES.has(fsCaseKey(normalized));
+  return EXPLORER_PROTECTED_STACK_FILES.has(fsCaseKey(normalized));
 }
 
 function protectedFileError(relPath: string): Error & { code: string } {
@@ -1643,7 +1650,7 @@ export class FileSystemService {
           type,
           size,
           mtime,
-          isProtected: protectedEnabled && PROTECTED_STACK_FILES.has(dirent.name),
+          isProtected: protectedEnabled && EXPLORER_PROTECTED_STACK_FILES.has(dirent.name),
         };
       })
     );
@@ -2096,7 +2103,7 @@ export class FileSystemService {
       type,
       size: stat.isDirectory() ? 0 : stat.size,
       mtime: stat.mtimeMs,
-      isProtected: (scope?.protectedEnabled ?? true) && PROTECTED_STACK_FILES.has(name),
+      isProtected: (scope?.protectedEnabled ?? true) && EXPLORER_PROTECTED_STACK_FILES.has(name),
     };
   }
 }

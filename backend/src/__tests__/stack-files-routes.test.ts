@@ -1116,6 +1116,37 @@ describe('PUT /api/stacks/:stackName/files/content', () => {
     expect(content).toBe('community-write');
   });
 
+  it('blocks root trust file writes while a stack op lock is held', async () => {
+    const { StackOpLockService } = await import('../services/StackOpLockService');
+    StackOpLockService.getInstance().tryAcquire(1, STACK, 'deploy', 'admin');
+    try {
+      const composeRes = await request(app)
+        .put(`/api/stacks/${STACK}/files/content`)
+        .query({ path: 'compose.yaml' })
+        .set('Cookie', adminCookie)
+        .send({ content: 'services:\n  app:\n    image: nginx\n' });
+      expect(composeRes.status).toBe(409);
+      expect(composeRes.body.code).toBe('stack_op_in_progress');
+
+      const markerRes = await request(app)
+        .put(`/api/stacks/${STACK}/files/content`)
+        .query({ path: '.blueprint.json' })
+        .set('Cookie', adminCookie)
+        .send({ content: '{"blueprintId":1,"revision":1,"lastApplied":0}' });
+      expect(markerRes.status).toBe(409);
+      expect(markerRes.body.code).toBe('stack_op_in_progress');
+
+      const nestedRes = await request(app)
+        .put(`/api/stacks/${STACK}/files/content`)
+        .query({ path: 'config/app.conf' })
+        .set('Cookie', adminCookie)
+        .send({ content: 'ok' });
+      expect(nestedRes.status).toBe(204);
+    } finally {
+      StackOpLockService.getInstance().release(1, STACK);
+    }
+  });
+
   it('returns 400 when content is not a string', async () => {
     const res = await request(app)
       .put(`/api/stacks/${STACK}/files/content`)
@@ -1926,6 +1957,16 @@ describe('protected stack files', () => {
     const res = await request(app)
       .delete(`/api/stacks/${STACK}/files`)
       .query({ path: '.env' })
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PROTECTED_FILE');
+  });
+
+  it('DELETE /files refuses .blueprint.json with 409 PROTECTED_FILE', async () => {
+    await fs.writeFile(path.join(stacksDir, STACK, '.blueprint.json'), '{"blueprintId":1,"revision":1}\n');
+    const res = await request(app)
+      .delete(`/api/stacks/${STACK}/files`)
+      .query({ path: '.blueprint.json' })
       .set('Cookie', adminCookie);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('PROTECTED_FILE');

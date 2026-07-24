@@ -56,7 +56,7 @@ export interface EffService {
   networkMode?: string;
   restart?: string;
   hasHealthcheck: boolean;
-  /** Raw deploy block (read for key presence only, never values; undefined = none). */
+  /** Raw deploy block (preflight uses key presence; Drift also reads restart_policy.condition). Undefined = none. */
   deploy?: Record<string, unknown>;
   containerName?: string;
   user?: string;

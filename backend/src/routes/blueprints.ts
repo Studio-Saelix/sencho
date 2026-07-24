@@ -7,7 +7,9 @@ import {
     type BlueprintSelector,
     type DriftMode,
 } from '../services/DatabaseService';
-import { BlueprintService } from '../services/BlueprintService';
+import { BlueprintService, BlueprintNameConflictError, BlueprintOwnershipProbeError } from '../services/BlueprintService';
+import { DeployedStackDeletionService } from '../services/DeployedStackDeletionService';
+import { refuseIfSelfStack } from '../helpers/selfStackGuard';
 import {
     BlueprintReconciler,
     messageForConfirmedOutcomes,
@@ -317,12 +319,9 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
                 return;
             }
         }
-        // Best-effort cleanup before delete: withdraw exactly the rows a stateful delete would
-        // block, i.e. stacks Sencho deployed and still owns (last_deployed_at set, and neither a
-        // name_conflict nor an already-withdrawn row). Never run the withdraw primitive for a
-        // never-deployed or unmanaged row: withdrawFromNode proceeds on a missing marker and would
-        // down/delete a same-name stack Sencho does not own. The blueprint-delete cascade removes
-        // the rows the loop skips.
+        // Withdraw owned deployments before delete. Fail closed: if any withdraw does not
+        // complete as withdrawn, keep the blueprint (and its deployment rows) so the operator
+        // can retry. Never orphan a live stack by deleting the only control-plane record.
         const nodes = DatabaseService.getInstance().getNodes();
         const deployments = DatabaseService.getInstance().listDeployments(id);
         for (const dep of deployments) {
@@ -330,9 +329,24 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
             const node = nodes.find(n => n.id === dep.node_id);
             if (!node) continue;
             try {
-                await BlueprintService.getInstance().withdrawFromNode(blueprint, node);
+                const outcome = await BlueprintService.getInstance().withdrawFromNode(blueprint, node);
+                if (outcome.status !== 'withdrawn') {
+                    res.status(409).json({
+                        error: `Cannot delete blueprint: withdraw on node "${node.name}" ended as ${outcome.status}. Resolve that deployment, then retry.`,
+                        code: 'withdraw_failed_blocking_delete',
+                        nodeId: node.id,
+                        withdrawStatus: outcome.status,
+                    });
+                    return;
+                }
             } catch (err) {
                 console.warn(`[Blueprints] Pre-delete withdraw failed for blueprint ${id} on node ${node.id}:`, err);
+                res.status(409).json({
+                    error: `Cannot delete blueprint: withdraw on node "${node.name}" failed. Resolve that deployment, then retry.`,
+                    code: 'withdraw_failed_blocking_delete',
+                    nodeId: node.id,
+                });
+                return;
             }
         }
         DatabaseService.getInstance().deleteBlueprint(id);
@@ -384,8 +398,65 @@ blueprintsRouter.post('/apply-local', async (req: Request, res: Response): Promi
         }
         res.json({ deployed: true });
     } catch (error) {
+        if (error instanceof BlueprintNameConflictError) {
+            res.status(409).json({ error: error.message, code: 'name_conflict' });
+            return;
+        }
+        if (error instanceof BlueprintOwnershipProbeError) {
+            console.error('[Blueprints] apply-local ownership probe failed:', sanitizeForLog(error.message));
+            res.status(500).json({ error: error.message });
+            return;
+        }
         console.error('[Blueprints] apply-local error:', sanitizeForLog(getErrorMessage(error, 'apply failed')));
         res.status(500).json({ error: getErrorMessage(error, 'Blueprint apply failed') });
+    }
+});
+
+// Node-to-node atomic blueprint withdraw. Ownership is validated under the
+// delete lock on this node. Requires stack:delete and refuses Sencho's own stack.
+blueprintsRouter.post('/withdraw-local', async (req: Request, res: Response): Promise<void> => {
+    const body = (req.body ?? {}) as { stackName?: unknown; blueprintId?: unknown };
+    if (typeof body.stackName !== 'string' || !isValidStackName(body.stackName)) {
+        res.status(400).json({ error: 'Invalid stack name' });
+        return;
+    }
+    if (typeof body.blueprintId !== 'number' || !Number.isInteger(body.blueprintId) || body.blueprintId <= 0) {
+        res.status(400).json({ error: 'blueprintId must be a positive integer' });
+        return;
+    }
+    if (!requirePermission(req, res, 'stack:delete', 'stack', body.stackName)) return;
+    if (await refuseIfSelfStack(req, res, body.stackName)) return;
+
+    try {
+        const result = await DeployedStackDeletionService.getInstance().deleteDeployedStack({
+            nodeId: req.nodeId,
+            stackName: body.stackName,
+            pruneVolumes: false,
+            actor: req.user?.username ?? 'system:blueprint',
+            requireBlueprintId: body.blueprintId,
+        });
+        if (result.ok) {
+            res.json({
+                status: result.status === 'already_absent' ? 'already_absent' : 'withdrawn',
+            });
+            return;
+        }
+        if (result.code === 'name_conflict') {
+            res.status(409).json({ error: result.error, code: 'name_conflict' });
+            return;
+        }
+        if (result.code === 'lock_conflict') {
+            res.status(409).json({
+                error: result.error,
+                code: 'stack_op_in_progress',
+                inProgress: { action: result.existingAction },
+            });
+            return;
+        }
+        res.status(500).json({ error: result.error });
+    } catch (error) {
+        console.error('[Blueprints] withdraw-local error:', sanitizeForLog(getErrorMessage(error, 'withdraw failed')));
+        res.status(500).json({ error: getErrorMessage(error, 'Blueprint withdraw failed') });
     }
 });
 

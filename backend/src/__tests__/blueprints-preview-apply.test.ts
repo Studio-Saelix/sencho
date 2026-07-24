@@ -326,6 +326,7 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
         const conflict = await BlueprintService.getInstance().hasNameConflict(
             created.body.name as string,
             DatabaseService.getInstance().getNode(node.id)!,
+            created.body.id as number,
         );
         expect(conflict).toBe(true);
 
@@ -340,6 +341,41 @@ describe('POST /api/blueprints/:id/apply confirm binding', () => {
         // Name-conflict detection must not mutate unmanaged alternate compose files.
         expect(fs.readFileSync(path.join(stackDir, 'docker-compose.yml'), 'utf-8'))
             .toBe('services:\n  app:\n    image: nginx\n');
+    });
+
+    it('hasNameConflict is false for a matching marker and true for a foreign marker', async () => {
+        const node = seedNode();
+        counter += 1;
+        const created = await request(app)
+            .post('/api/blueprints')
+            .set('Cookie', adminCookie)
+            .send(validBlueprintBody(node.id));
+        expect(created.status).toBe(201);
+
+        const composeDir = process.env.COMPOSE_DIR!;
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE nodes SET compose_dir = ? WHERE id = ?')
+            .run(composeDir, node.id);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const stackName = created.body.name as string;
+        const blueprintId = created.body.id as number;
+        const stackDir = path.join(composeDir, stackName);
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+        fs.writeFileSync(
+            path.join(stackDir, '.blueprint.json'),
+            JSON.stringify({ blueprintId, revision: 1, lastApplied: 1 }),
+        );
+
+        const { BlueprintService } = await import('../services/BlueprintService');
+        const svc = BlueprintService.getInstance();
+        expect(await svc.hasNameConflict(stackName, nodeObj, blueprintId)).toBe(false);
+
+        fs.writeFileSync(
+            path.join(stackDir, '.blueprint.json'),
+            JSON.stringify({ blueprintId: blueprintId + 99, revision: 1, lastApplied: 1 }),
+        );
+        expect(await svc.hasNameConflict(stackName, nodeObj, blueprintId)).toBe(true);
     });
 
     it('blocks rename while a non-withdrawn deployment exists', async () => {
