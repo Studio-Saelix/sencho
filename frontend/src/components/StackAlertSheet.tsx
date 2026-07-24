@@ -78,6 +78,8 @@ interface StackAlertSheetProps {
     onOpenChange: (open: boolean) => void;
     stackName: string;
     initialTab?: MonitorTab;
+    /** Prefill Add-form service comboboxes when opening from a service card. */
+    initialService?: string;
 }
 
 interface AgentStatus {
@@ -124,6 +126,10 @@ function actionColorClass(action: AutoHealHistoryEntry['action']): string {
     return 'text-muted-foreground';
 }
 
+function preselectListedService(initialService: string | undefined, names: string[]): string {
+    return initialService && names.includes(initialService) ? initialService : '';
+}
+
 function actionLabel(action: AutoHealHistoryEntry['action']): string {
     switch (action) {
         case 'restarted': return 'Restarted';
@@ -136,7 +142,13 @@ function actionLabel(action: AutoHealHistoryEntry['action']): string {
     }
 }
 
-export function StackAlertSheet({ open, onOpenChange, stackName, initialTab = 'alerts' }: StackAlertSheetProps) {
+export function StackAlertSheet({
+    open,
+    onOpenChange,
+    stackName,
+    initialTab = 'alerts',
+    initialService,
+}: StackAlertSheetProps) {
     const [activeTab, setActiveTab] = useState<MonitorTab>(initialTab);
 
     useEffect(() => {
@@ -147,6 +159,7 @@ export function StackAlertSheet({ open, onOpenChange, stackName, initialTab = 'a
         { id: 'alerts', label: 'Alerts' },
         { id: 'auto-heal', label: 'Auto-heal' },
     ];
+    const prefillService = open ? initialService : undefined;
 
     return (
         <SystemSheet
@@ -160,13 +173,17 @@ export function StackAlertSheet({ open, onOpenChange, stackName, initialTab = 'a
             onTabChange={(id) => setActiveTab(id as MonitorTab)}
             size="md"
         >
-            {activeTab === 'alerts' && <AlertsTab stackName={stackName} />}
-            {activeTab === 'auto-heal' && <AutoHealTab stackName={stackName} open={open} />}
+            {activeTab === 'alerts' && (
+                <AlertsTab stackName={stackName} initialService={prefillService} />
+            )}
+            {activeTab === 'auto-heal' && (
+                <AutoHealTab stackName={stackName} open={open} initialService={prefillService} />
+            )}
         </SystemSheet>
     );
 }
 
-function AlertsTab({ stackName }: { stackName: string }) {
+function AlertsTab({ stackName, initialService }: { stackName: string; initialService?: string }) {
     const { isAdmin } = useAuth();
     const { activeNode, activeNodeMeta } = useNodes();
     const isRemote = activeNode?.type === 'remote';
@@ -211,7 +228,9 @@ function AlertsTab({ stackName }: { stackName: string }) {
                 const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`);
                 if (!res.ok) throw new Error(`services ${res.status}`);
                 const names = await res.json() as string[];
-                if (!cancelled) setServicesState({ status: 'success', options: names });
+                if (cancelled) return;
+                setServicesState({ status: 'success', options: names });
+                setService(preselectListedService(initialService, names));
             } catch (e) {
                 console.error('[StackAlertSheet] Failed to fetch stack services', e);
                 if (!cancelled) setServicesState({ status: 'error' });
@@ -219,7 +238,7 @@ function AlertsTab({ stackName }: { stackName: string }) {
         })();
 
         return () => { cancelled = true; };
-    }, [stackName, activeNode?.id, canScopeService]);
+    }, [stackName, activeNode?.id, canScopeService, initialService]);
 
     const fetchAlerts = async () => {
         try {
@@ -567,7 +586,15 @@ function AlertsTab({ stackName }: { stackName: string }) {
     );
 }
 
-function AutoHealTab({ stackName, open }: { stackName: string; open: boolean }) {
+function AutoHealTab({
+    stackName,
+    open,
+    initialService,
+}: {
+    stackName: string;
+    open: boolean;
+    initialService?: string;
+}) {
     const { isAdmin } = useAuth();
     const [policies, setPolicies] = useState<AutoHealPolicy[]>([]);
     const [loading, setLoading] = useState(false);
@@ -584,17 +611,25 @@ function AutoHealTab({ stackName, open }: { stackName: string; open: boolean }) 
     useEffect(() => {
         if (!open || !stackName) return;
         setLoading(true);
+        setService('');
         apiFetch(`/auto-heal/policies?stackName=${encodeURIComponent(stackName)}`)
             .then(res => res.json() as Promise<AutoHealPolicy[]>)
             .then(data => setPolicies(data))
             .catch(() => toast.error('Failed to load auto-heal policies.'))
             .finally(() => setLoading(false));
 
-        apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`)
-            .then(res => res.json() as Promise<string[]>)
-            .then(names => setServiceOptions(names.map(n => ({ value: n, label: n }))))
-            .catch(() => { /* services list is optional, silently skip */ });
-    }, [open, stackName]);
+        void (async () => {
+            try {
+                const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`);
+                if (!res.ok) throw new Error(`services ${res.status}`);
+                const names = await res.json() as string[];
+                setServiceOptions(names.map(n => ({ value: n, label: n })));
+                setService(preselectListedService(initialService, names));
+            } catch (e) {
+                console.error('[StackAlertSheet] Failed to fetch stack services', e);
+            }
+        })();
+    }, [open, stackName, initialService]);
 
     const handleToggle = async (id: number, enabled: boolean) => {
         setSaving(true);
