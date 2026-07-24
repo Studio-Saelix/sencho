@@ -245,4 +245,64 @@ describe('StackAlertSheet Alerts tab', () => {
     // New node's list has only worker, so the api-targeted rule is missing.
     await waitFor(() => expect(screen.getByText(/Not in compose/i)).toBeInTheDocument());
   });
+
+  it('prefills the Service combobox from initialService when listed', async () => {
+    mockHappyPath(['api', 'database']);
+    render(
+      <StackAlertSheet
+        open
+        onOpenChange={() => {}}
+        stackName="my-stack"
+        initialService="api"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Add Rule')).toBeInTheDocument();
+      expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('api');
+    });
+  });
+
+  it('ignores Alerts initialService when service-scoped capability is absent', async () => {
+    nodeState.activeNodeMeta = { version: '0.90.0', capabilities: [] };
+    mockHappyPath(['api', 'database']);
+    render(
+      <StackAlertSheet
+        open
+        onOpenChange={() => {}}
+        stackName="my-stack"
+        initialService="api"
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByText('Add Rule')).toBeInTheDocument());
+    expect(screen.queryByText('All services')).toBeNull();
+    expect(
+      mockedFetch.mock.calls.some(([url]) => String(url).includes('/services')),
+    ).toBe(false);
+  });
+
+  it('prefills Auto-heal Service from initialService when listed', async () => {
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/auto-heal/policies')) return jsonRes([]);
+      if (url.includes('/services')) return jsonRes(['api', 'database']);
+      return jsonRes(null, false);
+    });
+
+    render(
+      <StackAlertSheet
+        open
+        onOpenChange={() => {}}
+        stackName="my-stack"
+        initialTab="auto-heal"
+        initialService="api"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('Add Policy')).toBeInTheDocument();
+      expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('api');
+    });
+  });
 });

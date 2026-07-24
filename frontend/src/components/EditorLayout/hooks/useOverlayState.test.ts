@@ -74,6 +74,19 @@ describe('useOverlayState', () => {
     expect(result.current.stackMonitor).toEqual({ stackName: 'web-stack', tab: 'alerts' });
   });
 
+  it.each([
+    ['openAlertSheet', 'alerts' as const],
+    ['openAutoHeal', 'auto-heal' as const],
+  ])('%s can carry a serviceName for form preselect', (openFn, tab) => {
+    const { result } = renderHook(() => useOverlayState());
+    act(() => result.current[openFn as 'openAlertSheet' | 'openAutoHeal']('web-stack', { serviceName: 'api' }));
+    expect(result.current.stackMonitor).toEqual({
+      stackName: 'web-stack',
+      tab,
+      serviceName: 'api',
+    });
+  });
+
   it('openAutoHeal opens stack monitor on the auto-heal tab', () => {
     const { result } = renderHook(() => useOverlayState());
     act(() => result.current.openAutoHeal('web-stack'));
