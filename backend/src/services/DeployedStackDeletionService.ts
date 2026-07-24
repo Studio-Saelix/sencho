@@ -123,9 +123,14 @@ function parseJsonStringArray(raw: string): string[] {
 
 
 async function probeStackDirectory(nodeId: number, stackName: string): Promise<DirProbe> {
-  const stackDir = path.join(FileSystemService.getInstance(nodeId).getBaseDir(), stackName);
+  // Canonical js/path-injection barrier inline with the stat sink.
+  const baseResolved = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
+  const safePath = path.resolve(baseResolved, stackName);
+  if (!safePath.startsWith(baseResolved + path.sep)) {
+    return { kind: 'error', error: 'Invalid stack path' };
+  }
   try {
-    const stat = await fs.stat(stackDir);
+    const stat = await fs.stat(safePath);
     return stat.isDirectory() ? { kind: 'present' } : { kind: 'absent' };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -139,13 +144,14 @@ async function probeBlueprintMarkerOwnership(
   stackName: string,
   requireBlueprintId: number,
 ): Promise<MarkerProbe> {
-  const baseDir = NodeRegistry.getInstance().getComposeDir(nodeId);
-  const markerPath = path.resolve(baseDir, stackName, BLUEPRINT_MARKER_FILENAME);
-  if (!isPathWithinBase(markerPath, path.resolve(baseDir))) {
+  // Canonical js/path-injection barrier inline with the read sink.
+  const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
+  const safePath = path.resolve(baseResolved, stackName, BLUEPRINT_MARKER_FILENAME);
+  if (!safePath.startsWith(baseResolved + path.sep)) {
     return { kind: 'failed', error: 'Invalid stack path for blueprint marker' };
   }
   try {
-    const content = await fs.readFile(markerPath, 'utf-8');
+    const content = await fs.readFile(safePath, 'utf-8');
     const marker = parseBlueprintMarker(content);
     if (!marker || marker.blueprintId !== requireBlueprintId) {
       return { kind: 'name_conflict', error: blueprintMarkerMismatchError(stackName) };

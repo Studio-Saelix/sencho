@@ -240,12 +240,13 @@ export class BlueprintService {
     /** Read and parse a local on-disk marker without going through the remote HTTP path. */
     private async readLocalMarkerFromDisk(nodeId: number, stackName: string): Promise<LocalMarkerRead> {
         try {
-            const baseDir = NodeRegistry.getInstance().getComposeDir(nodeId);
-            const markerPath = path.resolve(baseDir, stackName, BLUEPRINT_MARKER_FILENAME);
-            if (!isPathWithinBase(markerPath, baseDir)) {
+            // Canonical js/path-injection barrier inline with the read sink.
+            const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
+            const safePath = path.resolve(baseResolved, stackName, BLUEPRINT_MARKER_FILENAME);
+            if (!safePath.startsWith(baseResolved + path.sep)) {
                 return { kind: 'failed', error: 'Invalid stack path for blueprint marker' };
             }
-            const content = await fsPromises.readFile(markerPath, 'utf-8');
+            const content = await fsPromises.readFile(safePath, 'utf-8');
             const marker = parseBlueprintMarker(content);
             if (!marker) return { kind: 'missing' };
             return { kind: 'present', marker };
