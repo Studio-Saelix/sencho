@@ -129,3 +129,71 @@ describe('POST /api/blueprints/apply-local (node-to-node atomic apply)', () => {
         expect(StackOpLockService.getInstance().get(1, 'apply-local-busy')?.action).toBe('update');
     });
 });
+
+describe('POST /api/blueprints/withdraw-local', () => {
+    let viewerCookie: string;
+
+    beforeAll(async () => {
+        const bcrypt = (await import('bcrypt')).default;
+        const passwordHash = await bcrypt.hash('bp-wd-viewer-pass', 1);
+        DatabaseService.getInstance().addUser({
+            username: 'bp-wd-viewer',
+            password_hash: passwordHash,
+            role: 'viewer',
+        });
+        const res = await request(app)
+            .post('/api/auth/login')
+            .send({ username: 'bp-wd-viewer', password: 'bp-wd-viewer-pass' });
+        const cookies = res.headers['set-cookie'] as string | string[];
+        viewerCookie = Array.isArray(cookies) ? cookies[0] : cookies;
+    });
+
+    it('rejects an invalid stack name', async () => {
+        const res = await request(app)
+            .post('/api/blueprints/withdraw-local')
+            .set('Cookie', adminCookie)
+            .send({ stackName: '../escape', blueprintId: 1 });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toContain('Invalid stack name');
+    });
+
+    it('rejects a non-positive blueprintId', async () => {
+        const res = await request(app)
+            .post('/api/blueprints/withdraw-local')
+            .set('Cookie', adminCookie)
+            .send({ stackName: 'wd-local-stack', blueprintId: 0 });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/blueprintId/i);
+    });
+
+    it('returns 403 for a viewer without stack:delete', async () => {
+        const res = await request(app)
+            .post('/api/blueprints/withdraw-local')
+            .set('Cookie', viewerCookie)
+            .send({ stackName: 'wd-local-stack', blueprintId: 1 });
+        expect(res.status).toBe(403);
+    });
+
+    it('returns 409 self_stack_protected for Sencho own stack', async () => {
+        const selfStackGuard = await import('../helpers/selfStackGuard');
+        vi.spyOn(selfStackGuard, 'refuseIfSelfStack').mockImplementation(async (_req, res) => {
+            res.status(409).json({ error: 'self', code: 'self_stack_protected' });
+            return true;
+        });
+        const res = await request(app)
+            .post('/api/blueprints/withdraw-local')
+            .set('Cookie', adminCookie)
+            .send({ stackName: 'sencho-self', blueprintId: 1 });
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('self_stack_protected');
+    });
+
+    it('returns already_absent when the stack directory is missing', async () => {
+        const res = await request(app)
+            .post('/api/blueprints/withdraw-local')
+            .set('Cookie', adminCookie)
+            .send({ stackName: `wd-absent-${Date.now()}`, blueprintId: 42 });
+        expect(res.status).toBe(200);
+        expect(res.body.status).toBe('already_absent');
+    });
+});

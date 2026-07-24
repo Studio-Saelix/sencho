@@ -21,7 +21,7 @@ Three moving parts cooperate per blueprint.
 
 1. **The declared spec.** A blueprint is a row in Sencho's database. It carries the compose YAML, the selector (labels or explicit node IDs), the drift policy, and a monotonic revision number. The revision auto-increments every time the compose changes.
 2. **The reconciler.** A background loop on the controlling Sencho ticks every 60 seconds (with a 5-second initial delay after startup) and on demand after **Confirm Apply**. Each tick only mutates the fleet when the blueprint's current operational intent is approved. The tick resolves the selector, compares every desired-vs-live node, and runs only the place or remove outcomes the operator already confirmed.
-3. **The executor.** Per-node deploy and withdraw run against the local Docker socket on local nodes, and through the standard authenticated proxy to `/api/stacks` on remote nodes. Every blueprint deployment writes a `.blueprint.json` marker into the stack directory; the marker carries the blueprint ID, the revision, and the last-applied timestamp.
+3. **The executor.** Per-node deploy and withdraw run against the local Docker socket on local nodes, and through the authenticated proxy to `/api/blueprints/apply-local` and `/api/blueprints/withdraw-local` on remote nodes (older remotes fail closed until upgraded). Every blueprint deployment writes a `.blueprint.json` marker into the stack directory; the marker carries the blueprint ID, the revision, and the last-applied timestamp.
 
 The marker is the trust root. If a directory by the blueprint's name already exists on a node and does not carry a matching marker, the reconciler refuses to touch it and surfaces a **Name conflict** on the deployment row. A Blueprint named `nginx` will never overwrite an existing user-authored `nginx` stack on any node.
 
@@ -155,7 +155,7 @@ Possible status values:
 | **Withdrawing** | A withdraw is in flight. |
 | **Withdrawn** | The deployment was successfully removed; the row is about to be cleared. |
 | **Evict blocked** | A node left the selector while a stateful deployment was active. The reconciler refuses to evict until you choose an explicit mode. |
-| **Name conflict** | A directory by the blueprint's name already exists on the node and does not carry our marker file. The reconciler will not touch it. |
+| **Name conflict** | A directory by the blueprint's name already exists on the node and does not carry a matching `.blueprint.json` (missing, malformed, or another blueprint ID). The reconciler will not touch it. |
 
 <Frame caption="A deployment row in Awaiting confirmation. The Confirm deploy action sits at the right; the notes column explains why the reconciler is waiting on the operator.">
   <img src="/images/blueprint-model/detail-state-review.png" alt="Blueprint detail sheet with a deployment row in Awaiting confirmation state" />
@@ -309,7 +309,7 @@ A future Volume Migration feature will automate this with app-aware backup tooli
 
 <AccordionGroup>
   <Accordion title="A deployment row shows 'Name conflict' and refuses to deploy">
-    A directory by the blueprint's name already exists on that node and does not carry the `.blueprint.json` marker. The most likely cause is a manually created stack with the same name. Resolution: rename either the existing stack or the blueprint, then click **Apply now** on the detail sheet to retry.
+    A directory by the blueprint's name already exists on that node without a matching `.blueprint.json` marker (missing, malformed, or owned by another blueprint). The most likely cause is a manually created stack with the same name. Resolution: rename either the existing stack or the blueprint, then click **Apply now** on the detail sheet to retry.
   </Accordion>
   <Accordion title="A stateful deployment is stuck in 'Awaiting confirmation'">
     The reconciler will not auto-deploy a stateful blueprint to a node it has never run on. Click **Confirm deploy** on the row, then choose **Deploy fresh** in the dialog. Sencho will create empty named volumes and start the stack.
@@ -322,6 +322,9 @@ A future Volume Migration feature will automate this with app-aware backup tooli
   </Accordion>
   <Accordion title="A remote node is offline or disconnected during apply">
     The row moves to **Failed** with the remote error. Reconnect the node (see [Pilot Agent](/features/pilot-agent) and [Multi-node management](/features/multi-node)), verify whether the stack directory contains `compose.yaml` and `.blueprint.json`, then click **Apply now**. If the directory exists without a matching marker, Sencho treats it as a name conflict until you rename or remove the remote stack manually.
+  </Accordion>
+  <Accordion title="Remote apply or withdraw fails asking for an upgrade">
+    Blueprint apply and withdraw on a remote node require that node's Sencho build to expose the atomic node-local endpoints (`/api/blueprints/apply-local` and `/api/blueprints/withdraw-local`). Older remotes refuse the mutation with a failed deployment row rather than writing files without ownership checks. Upgrade the remote instance to a matching Sencho release, then retry **Apply now** or withdraw.
   </Accordion>
   <Accordion title="A Docker daemon or registry failure surfaced during apply">
     The deployment row moves to **Failed** and records the Docker or registry error. Resolve the daemon, socket, registry credentials, rate limit, disk, or volume-permission issue on the affected node, then click **Apply now**. Watch that node's stack activity and security scan status after retry.
