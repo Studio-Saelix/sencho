@@ -212,7 +212,11 @@ describe('hygiene rules', () => {
   });
   it('flags a missing restart policy and healthcheck', () => {
     const bare = model([svc({ restart: undefined, hasHealthcheck: false })]);
-    expect(ids(runRules(ctx({ model: bare })), 'no-restart-policy')).toHaveLength(1);
+    const restartFindings = ids(runRules(ctx({ model: bare })), 'no-restart-policy');
+    expect(restartFindings).toHaveLength(1);
+    expect(restartFindings[0].remediation).toMatch(/one-shot|init jobs/i);
+    expect(restartFindings[0].remediation).toMatch(/restart: "no"/);
+    expect(restartFindings[0].remediation).toMatch(/unless-stopped/);
     expect(ids(runRules(ctx({ model: bare })), 'no-healthcheck')).toHaveLength(1);
     const withDeployRestart = model([svc({ restart: undefined, deploy: { restart_policy: { condition: 'any' } }})]);
     expect(ids(runRules(ctx({ model: withDeployRestart })), 'no-restart-policy')).toHaveLength(0);

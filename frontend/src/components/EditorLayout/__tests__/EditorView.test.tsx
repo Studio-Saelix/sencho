@@ -17,11 +17,15 @@ vi.mock('@/lib/monacoLoader', () => ({
   },
 }));
 
-// Stub heavy children; this test only asserts the Monaco language prop.
+// Capture StackLogsSection props for showServiceChips wiring tests.
+let lastShowServiceChips: boolean | undefined;
 vi.mock('../editor-view-blocks', () => ({
   StackIdentityHeader: () => <div>identity-header</div>,
   ContainersHealth: () => <div>health-pane</div>,
-  StackLogsSection: () => <div>logs-pane</div>,
+  StackLogsSection: ({ showServiceChips }: { showServiceChips: boolean }) => {
+    lastShowServiceChips = showServiceChips;
+    return <div>logs-pane</div>;
+  },
 }));
 vi.mock('../../StackAnatomyPanel', () => ({
   default: () => <div>anatomy-pane</div>,
@@ -98,6 +102,7 @@ describe('EditorView Monaco language prop', () => {
     lastLanguage = undefined;
     lastValue = undefined;
     lastReadOnly = undefined;
+    lastShowServiceChips = undefined;
   });
 
   it('passes language="ini" when the env tab is active', () => {
@@ -149,6 +154,7 @@ describe('EditorView single edit gate', () => {
     lastLanguage = undefined;
     lastValue = undefined;
     lastReadOnly = undefined;
+    lastShowServiceChips = undefined;
   });
 
   it('shows Save & Deploy immediately without an Edit button when compose editor is open', () => {
@@ -189,5 +195,67 @@ describe('EditorView single edit gate', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: 'Close editor' }));
     expect(closeComposeEditor).toHaveBeenCalledTimes(1);
+  });
+});
+
+function containerStub(id: string, name: string): EditorViewProps['containers'][number] {
+  return {
+    Id: id,
+    Names: [name],
+    State: 'running',
+    Status: 'Up 1 minute',
+  };
+}
+
+function serviceStub(name: string) {
+  return {
+    name,
+    declaredImage: `${name}:latest`,
+    hasBuild: false,
+    expectedReplicas: 1,
+    dependsOn: [] as string[],
+    hasHealthcheck: false,
+  };
+}
+
+describe('EditorView showServiceChips wiring', () => {
+  afterEach(() => {
+    lastShowServiceChips = undefined;
+  });
+
+  it('passes false for one container and one declared service', () => {
+    render(
+      <EditorView
+        {...makeProps({
+          containers: [containerStub('c1', '/web')],
+          effectiveServices: [serviceStub('web')],
+        })}
+      />,
+    );
+    expect(lastShowServiceChips).toBe(false);
+  });
+
+  it('passes true for two containers', () => {
+    render(
+      <EditorView
+        {...makeProps({
+          containers: [containerStub('c1', '/web'), containerStub('c2', '/db')],
+          effectiveServices: [serviceStub('web')],
+        })}
+      />,
+    );
+    expect(lastShowServiceChips).toBe(true);
+  });
+
+  it('passes true for one container and two declared services', () => {
+    render(
+      <EditorView
+        {...makeProps({
+          containers: [containerStub('c1', '/web')],
+          effectiveServices: [serviceStub('web'), serviceStub('db')],
+        })}
+      />,
+    );
+    expect(lastShowServiceChips).toBe(true);
   });
 });

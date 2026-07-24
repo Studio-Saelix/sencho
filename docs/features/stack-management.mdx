@@ -235,10 +235,10 @@ Single-service stacks keep the existing flat container layout; service headers d
 The logs area at the bottom of the stack view has two modes. Toggle between them with the segmented control in the top-right of the panel; your choice is remembered for next time.
 
 <Frame>
-  <img src="/images/stack-view/logs-viewer.png" alt="Logs panel in Structured mode for the plex stack with toolbar, level filter pills, and timestamped INFO log rows" />
+  <img src="/images/stack-view/logs-viewer.png" alt="Logs panel in Structured mode with toolbar, level filter pills, and timestamped INFO log rows without service chips on a single-service stack" />
 </Frame>
 
-**Structured** (default) parses every line into a DOM row with three columns: local time, level badge, and message. Level detection is automatic:
+**Structured** (default) parses every line into a DOM row with three columns: local time, level badge, and message. On multi-service or multi-container stacks, each row also shows a service chip so you can tell which service wrote the line; single-service, single-container stacks omit the chip. Level detection is automatic:
 
 - `err` rows get a red left rail and a subtle rose tint.
 - `warn` rows get a warm tint.
@@ -368,6 +368,7 @@ The stack header groups actions by frequency of use. The most common action is t
 | Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. |
 | Overflow | **Rollback** | Restores backup | Reverts compose and env files to the pre-deploy snapshot and redeploys. Only shown when a backup exists. |
 | Overflow | **Scan config** | Trivy config scan | Scans the compose file for misconfigurations (admin role). |
+| Overflow | **Monitor** | Opens Monitor sheet | Opens the stack **Monitor** sheet on the Alerts tab (alert rules and Auto-heal). Same sheet as sidebar **Alerts** / **Auto-Heal**. |
 | Overflow | **Mute** | Creates a mute rule | Quick presets to mute notifications, deploy-success noise, or monitor alerts for this stack, plus a link to manage its mute rules in full. See [Alerts and Notifications](/features/alerts-notifications). |
 | Overflow | **Delete** | `down --volumes` + removes files | Stops and removes containers and volumes, then deletes the stack directory. |
 
@@ -377,6 +378,7 @@ The stack header groups actions by frequency of use. The most common action is t
 |-----------|--------|---------|--------------|
 | Primary | **Start** | `docker compose up -d` | Starts the stack. |
 | Secondary | **Update** | `docker compose pull` + `up -d` (or build-aware rebuild when services declare `build:`) | Pulls registry images and recreates containers. When one or more services use `build:`, Update rebuilds those images from source (`compose build --pull`), pulls any remaining registry images, then recreates containers. |
+| Overflow | **Monitor** | Opens Monitor sheet | Opens the stack **Monitor** sheet on the Alerts tab. |
 | Overflow | **Delete** | Removes files | Deletes the stack directory. |
 
 Use the sidebar context menu or `⌘↓` / `Ctrl+↓` for **Take down** on a stopped stack.
@@ -414,8 +416,9 @@ Press `B` again or toggle the bulk mode button to leave bulk mode.
 
 ## Controlling a single service
 
-Inside the stack detail view, each container card has a **Service actions** kebab on the right side. Use it to act on that service without touching the rest of the stack.
+Inside the stack detail view, each container card has quick actions (View logs, Monitor, Open bash when available) and a **Service actions** kebab on the right side. Use them to act on that service without touching the rest of the stack.
 
+- **Monitor**: opens the stack **Monitor** sheet with that Compose service preferred in the add forms. Shown only when the container reports a Compose service name.
 - **Restart service**: stops and starts all containers for that service.
 - **Stop service**: stops all containers for that service. Only shown when the service is running.
 - **Start service**: starts all containers for that service. Only shown when the service is stopped or exited.

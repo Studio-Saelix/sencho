@@ -1316,6 +1316,7 @@ describe('DockerController - getDependencySnapshot', () => {
     expect(c.networks).toEqual([{ name: 'web_frontend', id: 'net1', ip: '172.18.0.2' }]);
     expect(c.volumes).toEqual(['web_data']); // bind mount dropped
     expect(c.ports).toEqual([{ ip: '0.0.0.0', publishedPort: 8080, privatePort: 80, protocol: 'tcp' }]); // unpublished 9090 dropped
+    expect(c.exitCode).toBeNull();
 
     expect(snap.networks.find((n) => n.name === 'bridge')?.isSystem).toBe(true);
     const frontend = snap.networks.find((n) => n.name === 'web_frontend');
@@ -1337,6 +1338,23 @@ describe('DockerController - getDependencySnapshot', () => {
     expect(snap.containers[0].service).toBeNull();
     expect(snap.containers[0].stack).toBeNull();
     expect(snap.containers[0].composeProject).toBeNull();
+  });
+
+  it('parses exitCode from list Status for exited containers', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      { Id: 'a', Names: ['/job-0'], Image: 'busybox', State: 'exited', Status: 'Exited (0) 5 minutes ago', Labels: {}, NetworkSettings: { Networks: {} }, Mounts: [], Ports: [] },
+      { Id: 'b', Names: ['/crash-0'], Image: 'busybox', State: 'exited', Status: 'Exited (137) 1 minute ago', Labels: {}, NetworkSettings: { Networks: {} }, Mounts: [], Ports: [] },
+      { Id: 'c', Names: ['/up-0'], Image: 'busybox', State: 'running', Status: 'Up 3 hours', Labels: {}, NetworkSettings: { Networks: {} }, Mounts: [], Ports: [] },
+      { Id: 'd', Names: ['/odd-0'], Image: 'busybox', State: 'exited', Status: 'Exited', Labels: {}, NetworkSettings: { Networks: {} }, Mounts: [], Ports: [] },
+    ]);
+    mockDocker.listNetworks.mockResolvedValue([]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+
+    const snap = await DockerController.getInstance(1).getDependencySnapshot([]);
+    expect(snap.containers.find(c => c.id === 'a')?.exitCode).toBe(0);
+    expect(snap.containers.find(c => c.id === 'b')?.exitCode).toBe(137);
+    expect(snap.containers.find(c => c.id === 'c')?.exitCode).toBeNull();
+    expect(snap.containers.find(c => c.id === 'd')?.exitCode).toBeNull();
   });
 });
 

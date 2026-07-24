@@ -363,7 +363,7 @@ const noRestartPolicy: PreflightRule = {
         message: `Service "${s.name}" has no restart policy, so it will not come back after a crash or host reboot.`,
         sourcePath: s.name,
         service: s.name,
-        remediation: 'Add restart: unless-stopped.',
+        remediation: 'For long-running services, add restart: unless-stopped. For one-shot or init jobs that should finish and stay stopped, restart: "no" is appropriate.',
       }));
   },
 };

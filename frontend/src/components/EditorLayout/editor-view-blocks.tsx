@@ -22,7 +22,8 @@ import {
     Maximize2,
     Minimize2,
     AlertCircle,
-    RefreshCw
+    RefreshCw,
+    HeartPulse,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/button';
@@ -144,6 +145,8 @@ export interface StackIdentityHeaderProps {
     /** True when this stack is the running Sencho instance on the active node. */
     isSelfStack?: boolean;
     stackMuteActions?: ReturnType<typeof useStackMuteActions>;
+    /** Opens the stack Monitor sheet on the Alerts tab. */
+    onOpenMonitor?: () => void;
 }
 
 // Breadcrumb + serif title + state pill + action bar. The action buttons grow
@@ -170,6 +173,7 @@ export function StackIdentityHeader({
     showTakeDown,
     isSelfStack = false,
     stackMuteActions,
+    onOpenMonitor,
 }: StackIdentityHeaderProps) {
     const selfProtected = isSelfStack;
     return (
@@ -206,7 +210,7 @@ export function StackIdentityHeader({
                 const canScan = trivy.available && isAdmin;
                 const canMute = stackMuteActions?.canMute ?? false;
                 const hasOverflowExtras = canRollback || canScan;
-                const hasOverflow = hasOverflowExtras || canDelete || canMute;
+                const hasOverflow = hasOverflowExtras || canDelete || canMute || onOpenMonitor;
                 if (!canDeploy && !hasOverflow) return null;
                 return (
                     <div className="flex items-center gap-2 flex-wrap">
@@ -278,8 +282,14 @@ export function StackIdentityHeader({
                                             {stackMisconfigScanning ? 'Scanning...' : 'Scan config'}
                                         </DropdownMenuItem>
                                     )}
+                                    {onOpenMonitor && (
+                                        <DropdownMenuItem onClick={onOpenMonitor}>
+                                            <HeartPulse className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                            Monitor
+                                        </DropdownMenuItem>
+                                    )}
                                     {stackMuteActions && <StackMuteSubmenu actions={stackMuteActions} />}
-                                    {(canRollback || canScan || stackMuteActions?.canMute) && canDelete && <DropdownMenuSeparator />}
+                                    {(canRollback || canScan || onOpenMonitor || stackMuteActions?.canMute) && canDelete && <DropdownMenuSeparator />}
                                     {canDelete && (
                                         <DropdownMenuItem
                                             className="text-destructive focus:text-destructive focus:bg-destructive/10"
@@ -308,6 +318,8 @@ export interface ContainersHealthProps {
     activeNode: Node | null;
     openLogViewer: (containerId: string, containerName: string) => void;
     openBashModal: (containerId: string, containerName: string) => void;
+    /** Opens Monitor (Alerts tab); preselects the Compose service in add forms when listed. */
+    onOpenServiceMonitor?: (serviceName: string) => void;
     serviceAction: (action: 'start' | 'stop' | 'restart', serviceName: string) => Promise<void>;
     // Declared Compose services from the effective model. Multi-service
     // headers (owning Update/Rebuild + badge + Start/Stop/Restart) render only
@@ -335,6 +347,7 @@ export function ContainersHealth({
     activeNode,
     openLogViewer,
     openBashModal,
+    onOpenServiceMonitor,
     serviceAction,
     effectiveServices = [],
     serviceUpdateStatuses = [],
@@ -346,8 +359,8 @@ export function ContainersHealth({
     containersLoadError = null,
     onRetryContainersLoad,
 }: ContainersHealthProps) {
-    // Multi-service only (§12): a single-service stack keeps the existing flat
-    // layout untouched, including its per-container Start/Stop/Restart kebab.
+    // Multi-service only: a single-service stack keeps the existing flat layout
+    // untouched, including its per-container Start/Stop/Restart kebab.
     const isMultiService = effectiveServices.length > 1;
     const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null);
     const copiedUrlTimerRef = useRef<number | null>(null);
@@ -445,9 +458,9 @@ export function ContainersHealth({
     ) : null;
 
     // One container card. `hideServiceMenu` drops the per-container
-    // Start/Stop/Restart kebab on multi-service stacks, where the declared-
-    // service header above owns that action instead (§12 point 4: child cards
-    // keep only logs, shell, ports, metrics).
+    // Start/Stop/Restart kebab on multi-service stacks; the declared-service
+    // header above owns lifecycle actions. Child cards keep logs, shell, ports,
+    // and metrics only.
     const renderContainerCard = (container: ContainerInfo, hideServiceMenu: boolean) => {
                         let mainPort: number | undefined;
                         let mainPortPrivate: number | undefined;
@@ -474,6 +487,7 @@ export function ContainersHealth({
                             : '';
 
                         const containerName = container?.Names?.[0]?.replace(/^\//, '') || container?.Id?.slice(0, 12) || 'container';
+                        const composeService = container.Service;
                         const isActive = container.State === 'running' || container.State === 'paused';
                         const health = container.healthStatus;
                         const uptime = isActive ? extractUptime(container.Status) : null;
@@ -565,6 +579,24 @@ export function ContainersHealth({
                                             <TooltipContent>View logs</TooltipContent>
                                           </Tooltip>
                                         </TooltipProvider>
+                                        {onOpenServiceMonitor && composeService && (
+                                          <TooltipProvider>
+                                            <Tooltip>
+                                              <TooltipTrigger asChild>
+                                                <Button
+                                                  size="icon"
+                                                  variant="ghost"
+                                                  className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
+                                                  onClick={() => onOpenServiceMonitor(composeService)}
+                                                  aria-label={`Monitor ${composeService}`}
+                                                >
+                                                  <HeartPulse className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                                </Button>
+                                              </TooltipTrigger>
+                                              <TooltipContent>Monitor {composeService}</TooltipContent>
+                                            </Tooltip>
+                                          </TooltipProvider>
+                                        )}
                                         {isAdmin && (
                                           <TooltipProvider>
                                             <Tooltip>
@@ -807,6 +839,8 @@ export interface StackLogsSectionProps {
     stackName: string;
     logsMode: 'structured' | 'raw';
     setLogsMode: (mode: 'structured' | 'raw') => void;
+    /** True when the stack has more than one service or container; gates log chips. */
+    showServiceChips: boolean;
     /** When set, the structured viewer shows an expand control that collapses
      *  the Command Center to give the logs more vertical room. */
     logsExpanded?: boolean;
@@ -814,7 +848,7 @@ export interface StackLogsSectionProps {
 }
 
 // Logs pane: structured / raw-terminal toggle + the live viewer.
-export function StackLogsSection({ stackName, logsMode, setLogsMode, logsExpanded, onToggleLogsExpand }: StackLogsSectionProps) {
+export function StackLogsSection({ stackName, logsMode, setLogsMode, showServiceChips, logsExpanded, onToggleLogsExpand }: StackLogsSectionProps) {
     return (
         <div className="flex-1 min-h-0 flex flex-col gap-2 overflow-hidden">
             <div className="flex items-center justify-between">
@@ -844,7 +878,7 @@ export function StackLogsSection({ stackName, logsMode, setLogsMode, logsExpande
             </div>
             {logsMode === 'structured' ? (
                 <ErrorBoundary>
-                    <StructuredLogViewer stackName={stackName} expanded={logsExpanded} onToggleExpand={onToggleLogsExpand} />
+                    <StructuredLogViewer stackName={stackName} showServiceChips={showServiceChips} expanded={logsExpanded} onToggleExpand={onToggleLogsExpand} />
                 </ErrorBoundary>
             ) : (
                 <div className="flex-1 rounded-xl overflow-hidden border border-muted bg-black p-3 shadow-[inset_0_2px_4px_0_oklch(0_0_0/0.4)]">

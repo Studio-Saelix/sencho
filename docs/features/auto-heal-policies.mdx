@@ -28,10 +28,12 @@ Policies live next to your stack-level alert rules in the stack's **Monitor** sh
 
 ## Workflow
 
-1. In the sidebar, right-click the stack you want to protect (or focus the stack and press **H**).
-2. Click **Auto-Heal** in the **inspect** group. The stack's **Monitor** sheet opens directly on the **Auto-heal** tab.
-3. In **Add new policy**, pick a **Service** (or leave the combobox on **All services** to cover every container in the stack) and tune the four thresholds.
-4. Click **Add Policy**. The new policy appears in **Active policies** above the form, with its enable toggle already on.
+1. Open the stack's **Monitor** sheet any of these ways:
+   - Stack header **More actions** → **Monitor**, then switch to the **Auto-heal** tab
+   - Container card **Monitor** (prefers that Compose service in **Add new policy**), then switch to **Auto-heal**
+   - Sidebar: right-click the stack (or focus it and press **H**) → **Auto-Heal** in the **inspect** group (opens directly on the **Auto-heal** tab)
+2. In **Add new policy**, pick a **Service** (or leave the combobox on **All services** to cover every container in the stack) and tune the four thresholds.
+3. Click **Add Policy**. The new policy appears in **Active policies** above the form, with its enable toggle already on.
 
 <Frame>
   <img src="/images/auto-heal-policies/sheet.png" alt="The Stack › plex › Monitor sheet on the Auto-heal tab, showing one policy scoped to the plex service in the Active policies section with its ON toggle, and the Add new policy form below with Service, Unhealthy for, Cooldown, Max restarts / hr, and Auto-disable after fields, plus the Add Policy button" />
