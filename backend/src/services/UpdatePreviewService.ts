@@ -10,7 +10,7 @@ import {
 } from './ImageUpdateService';
 import {
     parseImageRef,
-    selectLocalRepoDigest,
+    selectLocalRepoDigests,
     compareLocalToRemoteTag,
     listRegistryTags,
     type ParsedRef,
@@ -165,7 +165,8 @@ async function loadStackImages(
 }
 
 export interface LocalDigestInfo {
-    digest: string | null;
+    /** All usable RepoDigests for the image ref; compared as a set against the remote tag. */
+    digests: string[];
     platform: { os: string; architecture: string };
 }
 
@@ -200,8 +201,8 @@ export async function computeImagePreview(
     // digest-based update, it only skips it.
     const localInfo = await deps.getLocalDigest(imageRef, parsed);
     const [comparison, tags] = await Promise.all([
-        localInfo.digest
-            ? deps.compareDigest(localInfo.digest, parsed.registry, parsed.repo, parsed.tag, localInfo.platform, credentials)
+        localInfo.digests.length > 0
+            ? deps.compareDigest(localInfo.digests, parsed.registry, parsed.repo, parsed.tag, localInfo.platform, credentials)
             : Promise.resolve<DigestComparisonResult>({ kind: 'error', reason: 'No local registry digest available' }),
         deps.listRegistryTags(parsed.registry, parsed.repo, credentials),
     ]);
@@ -322,10 +323,10 @@ export class UpdatePreviewService {
                 try {
                     const inspect = await docker.getDocker().getImage(imageRef).inspect();
                     const repoDigests: string[] = inspect.RepoDigests ?? [];
-                    const digest = selectLocalRepoDigest(repoDigests, parsed);
-                    return { digest, platform: { os: inspect.Os, architecture: inspect.Architecture } };
+                    const digests = selectLocalRepoDigests(repoDigests, parsed);
+                    return { digests, platform: { os: inspect.Os, architecture: inspect.Architecture } };
                 } catch {
-                    return { digest: null, platform: { os: '', architecture: '' } };
+                    return { digests: [], platform: { os: '', architecture: '' } };
                 }
             },
         };

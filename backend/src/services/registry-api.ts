@@ -242,14 +242,15 @@ export function repoDigestMatchesRef(repoDigest: string, parsed: ParsedRef): boo
 const SHA256_DIGEST_RE = /^sha256:[0-9a-f]{64}$/i;
 
 /**
- * Deterministic local RepoDigest selection shared by the scanner and the
- * update preview: the first entry whose repository matches the parsed
- * image ref, else the sole remaining valid entry, else null. A truncated
- * or malformed digest (not a complete "sha256:" + 64 hex chars) is never
- * selected, so a corrupted RepoDigests entry surfaces as "could not
- * resolve" rather than a false match or update.
+ * All usable local RepoDigests for a parsed image ref, shared by the scanner
+ * and update preview. Returns every valid digest whose repository matches the
+ * ref (deduped, first-seen order), else the sole remaining valid entry when
+ * nothing matches, else []. A truncated or malformed digest is never selected,
+ * so a corrupted RepoDigests entry surfaces as "could not resolve" rather than
+ * a false match or update. Callers must compare every candidate: Docker can
+ * list a stale index digest ahead of the current one on the same image.
  */
-export function selectLocalRepoDigest(repoDigests: string[], parsed: ParsedRef): string | null {
+export function selectLocalRepoDigests(repoDigests: readonly string[], parsed: ParsedRef): string[] {
     const valid = repoDigests
         .map((entry) => {
             const at = entry.indexOf('@');
@@ -257,9 +258,25 @@ export function selectLocalRepoDigest(repoDigests: string[], parsed: ParsedRef):
         })
         .filter((e): e is { entry: string; digest: string } => e !== null && SHA256_DIGEST_RE.test(e.digest));
 
-    const matched = valid.find((e) => repoDigestMatchesRef(e.entry, parsed));
-    if (matched) return matched.digest;
-    return valid.length === 1 ? valid[0].digest : null;
+    const matched: string[] = [];
+    const seen = new Set<string>();
+    for (const e of valid) {
+        if (!repoDigestMatchesRef(e.entry, parsed)) continue;
+        const key = e.digest.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        matched.push(e.digest);
+    }
+    if (matched.length > 0) return matched;
+    return valid.length === 1 ? [valid[0].digest] : [];
+}
+
+/**
+ * Scalar view of {@link selectLocalRepoDigests}: the first candidate, or null.
+ * Prefer the plural form when comparing against a remote tag.
+ */
+export function selectLocalRepoDigest(repoDigests: readonly string[], parsed: ParsedRef): string | null {
+    return selectLocalRepoDigests(repoDigests, parsed)[0] ?? null;
 }
 
 /** Outcome of a remote-digest lookup: the digest, or a human-readable reason it failed. */
@@ -754,24 +771,33 @@ async function classifyManifest(
 }
 
 /**
- * Compare a local image digest to the registry's current manifest for a tag.
- * `platform` is the local image's Os/Architecture (from `docker image inspect`),
- * required to safely match against an index's platform descriptors; without it,
- * an index mismatch is an error rather than a speculative match. Never retries
- * against the mutable tag once a primary digest is established: classification
- * always targets that digest.
+ * Compare local image digests to the registry's current manifest for a tag.
+ * Any candidate that equals the remote primary or is a member of that primary's
+ * index counts as current (Docker often lists a stale index digest ahead of the
+ * current one). `platform` is the local image's Os/Architecture (from
+ * `docker image inspect`), required to safely match against an index's platform
+ * descriptors; without it, an index mismatch is an error rather than a
+ * speculative match. Never retries against the mutable tag once a primary
+ * digest is established: classification always targets that digest.
+ *
+ * `update` is returned only after a successful, complete remote classification
+ * with no candidate matching the primary, an exact member, or a same-platform
+ * runnable descriptor. Empty/all-malformed candidates, unknown platform when
+ * platform matching is required, and classification failures return `error`.
  */
 export async function compareLocalToRemoteTag(
-    localDigest: string,
+    localDigests: readonly string[],
     registry: string,
     repo: string,
     tag: string,
     platform: { os: string; architecture: string },
     credentials?: RegistryCredentials | null,
 ): Promise<DigestComparisonResult> {
-    if (!SHA256_DIGEST_RE.test(localDigest)) {
+    const candidates = localDigests.filter((d) => SHA256_DIGEST_RE.test(d));
+    if (candidates.length === 0) {
         return { kind: 'error', reason: 'Local digest is malformed or truncated' };
     }
+    const candidateSet = new Set(candidates.map((d) => d.toLowerCase()));
 
     const ref = `${registry}/${repo}:${tag}`;
     const probe = await probeManifestForRef(registry, repo, tag, credentials, ref);
@@ -781,7 +807,7 @@ export async function compareLocalToRemoteTag(
     if (!SHA256_DIGEST_RE.test(primaryDigest)) {
         return { kind: 'error', reason: `Registry returned a malformed digest for ${ref}` };
     }
-    if (localDigest === primaryDigest) return { kind: 'match' };
+    if (candidateSet.has(primaryDigest.toLowerCase())) return { kind: 'match' };
 
     let classification: ManifestClassification;
     try {
@@ -792,14 +818,16 @@ export async function compareLocalToRemoteTag(
 
     if (classification.kind === 'single') return { kind: 'update' };
 
-    if (classification.exactDigests.includes(localDigest)) return { kind: 'match' };
+    if (classification.exactDigests.some((d) => candidateSet.has(d.toLowerCase()))) return { kind: 'match' };
 
     if (!platform.os || !platform.architecture) {
         return { kind: 'error', reason: `Local image platform is unknown; cannot verify multi-arch membership for ${ref}` };
     }
 
     const isMember = classification.descriptors.some(
-        (d) => d.os === platform.os && d.architecture === platform.architecture && d.digest === localDigest,
+        (d) => d.os === platform.os
+            && d.architecture === platform.architecture
+            && candidateSet.has(d.digest.toLowerCase()),
     );
     return isMember ? { kind: 'match' } : { kind: 'update' };
 }

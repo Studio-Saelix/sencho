@@ -13,8 +13,9 @@ import type { DigestComparisonResult } from '../services/registry-api';
 
 const PLATFORM = { os: 'linux', architecture: 'amd64' };
 
-function localDigest(digest: string | null): LocalDigestInfo {
-    return { digest, platform: PLATFORM };
+function localDigest(digest: string | null | string[]): LocalDigestInfo {
+    if (Array.isArray(digest)) return { digests: digest, platform: PLATFORM };
+    return { digests: digest ? [digest] : [], platform: PLATFORM };
 }
 
 describe('parseSemverTag', () => {
@@ -195,7 +196,32 @@ describe('computeImagePreview', () => {
             listRegistryTags: vi.fn().mockResolvedValue([]),
         });
         await computeImagePreview('web', 'ghcr.io/linuxserver/radarr:latest', deps);
-        expect(compareDigest).toHaveBeenCalledWith('sha256:aaa', 'ghcr.io', 'linuxserver/radarr', 'latest', PLATFORM, null);
+        expect(compareDigest).toHaveBeenCalledWith(['sha256:aaa'], 'ghcr.io', 'linuxserver/radarr', 'latest', PLATFORM, null);
+    });
+
+    it('forwards every local digest candidate and reports no same-tag rebuild on match', async () => {
+        const STALE = `sha256:${'f'.repeat(64)}`;
+        const CURRENT = `sha256:${'e'.repeat(64)}`;
+        const compareDigest = vi.fn().mockResolvedValue({ kind: 'match' });
+        const deps = makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest([STALE, CURRENT])),
+            compareDigest,
+            listRegistryTags: vi.fn().mockResolvedValue([]),
+        });
+        const result = await computeImagePreview('broker', 'redis:8.8.0', deps);
+        expect(compareDigest).toHaveBeenCalledWith(
+            [STALE, CURRENT],
+            'registry-1.docker.io',
+            'library/redis',
+            '8.8.0',
+            PLATFORM,
+            null,
+        );
+        expect(result).toMatchObject({
+            has_update: false,
+            next_tag: null,
+            semver_bump: 'none',
+        });
     });
 });
 

@@ -110,7 +110,7 @@ vi.mock('../services/NodeRegistry', () => ({
 }));
 
 // compareLocalToRemoteTag is module-scoped inside checkImage; mock it to drive the
-// comparison outcome while keeping the real parseImageRef / selectLocalRepoDigest.
+// comparison outcome while keeping the real parseImageRef / selectLocalRepoDigests.
 const { mockCompareLocalToRemoteTag } = vi.hoisted(() => ({ mockCompareLocalToRemoteTag: vi.fn() }));
 vi.mock('../services/registry-api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/registry-api')>();
@@ -256,10 +256,40 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
     await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
     expect(mockCompareLocalToRemoteTag).toHaveBeenCalledWith(
-      LOCAL_DIGEST,
+      [LOCAL_DIGEST],
       'ghcr.io',
       'linuxserver/radarr',
       'latest',
+      { os: 'linux', architecture: 'amd64' },
+      null,
+    );
+  });
+
+  it('forwards every matching RepoDigest (stale index ahead of current) to the comparison resolver', async () => {
+    const STALE = `sha256:${'f'.repeat(64)}`;
+    const CURRENT = `sha256:${'e'.repeat(64)}`;
+    const docker = {
+      getDocker: () => ({
+        getImage: () => ({
+          inspect: vi.fn().mockResolvedValue({
+            RepoDigests: [
+              `redis@${STALE}`,
+              `redis@${CURRENT}`,
+            ],
+            Os: 'linux',
+            Architecture: 'amd64',
+          }),
+        }),
+      }),
+    } as any;
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
+    const result = await service.checkImage(docker, 'redis:8.8.0');
+    expect(result).toEqual({ hasUpdate: false });
+    expect(mockCompareLocalToRemoteTag).toHaveBeenCalledWith(
+      [STALE, CURRENT],
+      'registry-1.docker.io',
+      'library/redis',
+      '8.8.0',
       { os: 'linux', architecture: 'amd64' },
       null,
     );
