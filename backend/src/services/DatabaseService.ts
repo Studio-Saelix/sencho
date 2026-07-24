@@ -251,6 +251,8 @@ export interface StackUpdateCleanupPendingRow {
     rollback_tags_json: string;
     override_paths_json: string;
     prune_volumes_requested: number;
+    /** Blueprint ID that authorized this deletion; null for manual deletes. */
+    required_blueprint_id: number | null;
     created_at: number;
     updated_at: number;
 }
@@ -1828,6 +1830,7 @@ export class DatabaseService {
         `);
 
         maybeAddCol('stack_update_recovery_generations', 'artifacts_retired', 'INTEGER NOT NULL DEFAULT 0');
+        maybeAddCol('stack_update_cleanup_pending', 'required_blueprint_id', 'INTEGER');
 
         // Distributed API model columns
         maybeAddCol('nodes', 'api_url', "TEXT DEFAULT ''");
@@ -3933,12 +3936,12 @@ export class DatabaseService {
         this.db.prepare(
             `INSERT INTO stack_update_cleanup_pending (
                 id, node_id, stack_name, status, target_kind, rollback_tags_json,
-                override_paths_json, prune_volumes_requested, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                override_paths_json, prune_volumes_requested, required_blueprint_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         ).run(
             row.id, row.node_id, row.stack_name, row.status, row.target_kind,
             row.rollback_tags_json, row.override_paths_json, row.prune_volumes_requested,
-            row.created_at, row.updated_at,
+            row.required_blueprint_id, row.created_at, row.updated_at,
         );
     }
 
@@ -4409,6 +4412,7 @@ export class DatabaseService {
                     rollback_tags_json: JSON.stringify(localCleanup.tags),
                     override_paths_json: JSON.stringify(localCleanup.overridePaths),
                     prune_volumes_requested: 0,
+                    required_blueprint_id: null,
                     created_at: now,
                     updated_at: now,
                 });

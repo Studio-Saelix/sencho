@@ -111,9 +111,9 @@ describe('Blueprint route edge cases', () => {
 
 describe('Blueprint delete guard', () => {
     // Rows with no stack of ours on the node must not block delete, AND the route must not run the
-    // withdraw primitive for them: withdrawFromNode proceeds on a missing marker and would
-    // down/delete a same-name stack Sencho never owned. A name_conflict is exactly that unmanaged
-    // stack, so it is excluded even though it carries a last_deployed_at timestamp.
+    // withdraw primitive for them: there is nothing Sencho owns to remove. A name_conflict is an
+    // unmanaged same-name stack, so it is excluded even though it may carry a last_deployed_at
+    // timestamp. When withdraw does run, ownership is enforced under the delete lock.
     it.each([
         { label: 'never-deployed pending review', status: 'pending_state_review' as const, last_deployed_at: null },
         { label: 'first-deploy failure', status: 'failed' as const, last_deployed_at: null },
@@ -182,6 +182,34 @@ describe('Blueprint delete guard', () => {
         // A deployed, owned stack must still be withdrawn from the node before the blueprint goes.
         expect(withdrawSpy).toHaveBeenCalledTimes(1);
         expect(DatabaseService.getInstance().getBlueprint(bp.id)).toBeUndefined();
+    });
+
+    it('refuses to delete a stateless blueprint when pre-delete withdraw fails', async () => {
+        const node = seedNode();
+        const bp = seedBlueprint([node.id]);
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'failed',
+            applied_revision: bp.revision,
+            last_deployed_at: Date.now(),
+            last_error: 'Remote node lacks withdraw-local',
+        });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({
+            status: 'failed',
+            error: 'Remote node does not support atomic blueprint withdraw',
+        });
+
+        const res = await request(app)
+            .delete(`/api/blueprints/${bp.id}`)
+            .set('Cookie', adminCookie);
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('withdraw_failed_blocking_delete');
+        expect(res.body.nodeId).toBe(node.id);
+        expect(withdrawSpy).toHaveBeenCalledTimes(1);
+        expect(DatabaseService.getInstance().getBlueprint(bp.id)).toBeDefined();
+        expect(DatabaseService.getInstance().listDeployments(bp.id)).toHaveLength(1);
     });
 
     it('refuses to delete when a pending review still has a deployed stack (revision drift)', async () => {
@@ -253,38 +281,54 @@ describe('BlueprintService marker edge cases', () => {
     });
 
     it('refuses to withdraw when the marker belongs to a different blueprint', async () => {
+        const fs = await import('fs');
+        const path = await import('path');
+        const composeDir = process.env.COMPOSE_DIR!;
         const localNode = DatabaseService.getInstance().getNodes()[0];
-        const bp = seedBlueprint([localNode.id]);
+        DatabaseService.getInstance().getDb()
+            .prepare('UPDATE nodes SET compose_dir = ? WHERE id = ?')
+            .run(composeDir, localNode.id);
+        const refreshed = DatabaseService.getInstance().getNode(localNode.id)!;
+        const bp = seedBlueprint([refreshed.id]);
         const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
-
-        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
-            blueprintId: bp.id + 999,
-            revision: 1,
-            lastApplied: 0,
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: refreshed.id,
+            status: 'active',
+            applied_revision: bpObj.revision,
+            last_deployed_at: Date.now(),
         });
 
-        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, localNode);
+        const stackDir = path.join(composeDir, bpObj.name);
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+        fs.writeFileSync(
+            path.join(stackDir, '.blueprint.json'),
+            JSON.stringify({ blueprintId: bp.id + 999, revision: 1, lastApplied: 0 }),
+        );
+
+        const { DeployedStackDeletionService } = await import('../services/DeployedStackDeletionService');
+        const deleteSpy = vi.spyOn(DeployedStackDeletionService.getInstance(), 'deleteDeployedStack');
+
+        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, refreshed);
 
         expect(result.status).toBe('name_conflict');
-        // The deployment row must record the conflict, not silently disappear.
-        const dep = DatabaseService.getInstance().getDeployment(bp.id, localNode.id);
+        // deleteDeployedStack is invoked but returns name_conflict without mutating.
+        expect(deleteSpy).toHaveBeenCalled();
+        const dep = DatabaseService.getInstance().getDeployment(bp.id, refreshed.id);
         expect(dep).toBeDefined();
         expect(dep?.status).toBe('name_conflict');
+        expect(fs.existsSync(path.join(stackDir, 'compose.yaml'))).toBe(true);
     });
 });
 
 describe('BlueprintService developer-mode diagnostics', () => {
-    // withdrawFromNode emits its "withdraw inputs" diagnostic line before reading the
-    // marker, so a cross-blueprint marker stub lets us assert the gate without Docker.
+    // withdrawFromNode emits its "withdraw inputs" diagnostic before the deletion
+    // service runs. An absent stack directory is enough to exercise logging without Docker.
     function arrangeWithdraw() {
         const localNode = DatabaseService.getInstance().getNodes()[0];
         const bp = seedBlueprint([localNode.id]);
         const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
-        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue({
-            blueprintId: bp.id + 999,
-            revision: 1,
-            lastApplied: 0,
-        });
         return { bpObj, localNode };
     }
 
