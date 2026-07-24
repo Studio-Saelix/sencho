@@ -165,4 +165,21 @@ describe('senchoRoute', () => {
     expect(parsed.view).toBe('networking');
     expect(parsed.nodeSlug).toBe('local');
   });
+
+  it('round-trips Host Console without a stack', () => {
+    const path = buildPath({ ...base, activeView: 'host-console', stackName: null });
+    expect(path).toBe('/nodes/local/host-console');
+    const parsed = parsePath(path, '');
+    expect(parsed.view).toBe('host-console');
+    expect(parsed.nodeSlug).toBe('local');
+    expect(parsed.stackName).toBeNull();
+  });
+
+  it('round-trips Host Console rooted in a stack directory', () => {
+    const path = buildPath({ ...base, activeView: 'host-console', stackName: 'radarr' });
+    expect(path).toBe('/nodes/local/host-console/radarr');
+    const parsed = parsePath(path, '');
+    expect(parsed.view).toBe('host-console');
+    expect(parsed.stackName).toBe('radarr');
+  });
 });

@@ -103,4 +103,15 @@ describe('StackIdentityHeader', () => {
 
     expect(screen.queryByRole('menuitem', { name: /Take down/i })).toBeNull();
   });
+
+  it('shows Monitor in More actions and calls onOpenMonitor', async () => {
+    const user = userEvent.setup();
+    const onOpenMonitor = vi.fn();
+    renderHeader({ onOpenMonitor, backupInfo: { exists: false, timestamp: null } });
+
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Monitor' }));
+
+    expect(onOpenMonitor).toHaveBeenCalledTimes(1);
+  });
 });

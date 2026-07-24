@@ -375,9 +375,42 @@ describe('POST /api/system/console-token', () => {
     const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
     const res = await request(app)
       .post('/api/system/console-token')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .send({ path: 'host-console' });
     expect(res.status).toBe(200);
     expect(typeof res.body.token).toBe('string');
+    const decoded = jwt.verify(res.body.token, TEST_JWT_SECRET) as { scope?: string; path?: string; jti?: string };
+    expect(decoded.scope).toBe('console_session');
+    expect(decoded.path).toBe('host-console');
+    expect(typeof decoded.jti).toBe('string');
+  });
+
+  it('returns 400 when path is missing', async () => {
+    const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const res = await request(app)
+      .post('/api/system/console-token')
+      .set('Authorization', `Bearer ${token}`)
+      .send({});
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 200 for an admin on Community (no paid gate)', async () => {
+    const { LicenseService } = await import('../services/LicenseService');
+    const spy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
+    try {
+      const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
+      const res = await request(app)
+        .post('/api/system/console-token')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ path: 'container-exec' });
+      expect(res.status).toBe(200);
+      expect(typeof res.body.token).toBe('string');
+      const decoded = jwt.verify(res.body.token, TEST_JWT_SECRET) as { scope?: string; path?: string };
+      expect(decoded.scope).toBe('console_session');
+      expect(decoded.path).toBe('container-exec');
+    } finally {
+      spy.mockReturnValue('paid');
+    }
   });
 
   it('returns 403 for non-admin user (viewer role)', async () => {

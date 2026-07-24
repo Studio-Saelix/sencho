@@ -77,19 +77,31 @@ describe('buildNavigationModel', () => {
     expect(values).not.toContain('audit-log');
   });
 
-  it('omits Console until experimental discovery is ready and enabled via reachCtx only', () => {
+  it('includes Console for system:console regardless of experimental discovery', () => {
     expect(
-      buildNavigationModel(makeCtx({ experimentalReady: false, experimental: false }))
-        .allPageItems.map((i) => i.value),
-    ).not.toContain('host-console');
-    expect(
-      buildNavigationModel(makeCtx({ experimentalReady: true, experimental: false }))
-        .allPageItems.map((i) => i.value),
-    ).not.toContain('host-console');
-    expect(
-      buildNavigationModel(makeCtx({ experimentalReady: true, experimental: true }))
+      buildNavigationModel(makeCtx({
+        experimentalReady: true,
+        experimental: false,
+        isPaid: false,
+        can: (a) => a === 'system:console' || a === 'node:read',
+      }))
         .allPageItems.map((i) => i.value),
     ).toContain('host-console');
+    expect(
+      buildNavigationModel(makeCtx({
+        experimentalReady: false,
+        experimental: false,
+        can: (a) => a === 'system:console' || a === 'node:read',
+      }))
+        .allPageItems.map((i) => i.value),
+    ).toContain('host-console');
+  });
+
+  it('omits Console without system:console', () => {
+    expect(
+      buildNavigationModel(makeCtx({ can: () => false, isAdmin: false }))
+        .allPageItems.map((i) => i.value),
+    ).not.toContain('host-console');
   });
 
   it('excludes hidden views from quick-link candidates', () => {

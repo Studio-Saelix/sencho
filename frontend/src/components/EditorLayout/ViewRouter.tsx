@@ -1,8 +1,11 @@
 import { Suspense, lazy, type ReactNode } from 'react';
+import { Unplug } from 'lucide-react';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAuth } from '@/context/AuthContext';
-import { useExperimental } from '@/hooks/useExperimental';
-import { PaidGate } from '../PaidGate';
+import { useLicense } from '@/context/LicenseContext';
+import { useNodes } from '@/context/NodeContext';
+import { resolveHostConsoleCapability } from '@/lib/routing/hostConsoleCapability';
+import { LockCard } from '../ui/LockCard';
 import { CapabilityGate } from '../CapabilityGate';
 import { HubOnlyGate } from '../HubOnlyGate';
 import LazyBoundary from '../LazyBoundary';
@@ -17,7 +20,7 @@ import type { MuteRuleDraft } from '@/lib/muteRules';
 import type { ActiveView } from './hooks/useViewNavigationState';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
 import type { SecurityTab, FleetTab } from '@/lib/events';
-import { isStackEditorDeepLink } from '@/lib/router/readUrlRouteState';
+import { isStackEditorDeepLink, isHostConsoleStackDeepLink } from '@/lib/router/readUrlRouteState';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 
 // Paid-tier views are loaded on demand. Their internal PaidGate /
@@ -147,7 +150,8 @@ export function ViewRouter({
     quickLinkCandidates,
 }: ViewRouterProps): ReactNode {
     const { can } = useAuth();
-    const { experimental, experimentalReady } = useExperimental();
+    const { isPaid, licenseReady } = useLicense();
+    const { activeNode, activeNodeMeta } = useNodes();
     if (activeView === 'settings') {
         return (
             <SettingsPage
@@ -184,20 +188,48 @@ export function ViewRouter({
         );
     }
     if (activeView === 'host-console') {
-        // Discovery + paid/RBAC: hide until experimental discovery is on,
-        // then mirror backend gates (system:console admin-only + PaidGate +
-        // capability). Nav is already gated the same way; this stops a
-        // deep link from mounting a console the operator cannot use.
-        if (!experimentalReady || !experimental) return null;
+        // RBAC + mixed-version capability. Wait for a resolved active node and
+        // remote meta; null activeNode must not be treated as local (wrong-node
+        // or doomed WebSocket). Stack deep links hydrate selectedFile async:
+        // wait so we never open a compose-root shell, then reconnect into the stack.
         if (!can('system:console')) return null;
+        if (urlHydratingStack != null || (isHostConsoleStackDeepLink() && !selectedFile)) {
+            return <ViewSkeleton />;
+        }
+        if (activeNode == null) return <ViewSkeleton />;
+        const capState = resolveHostConsoleCapability({
+            nodeResolved: true,
+            isRemote: activeNode.type === 'remote',
+            isPaid,
+            licenseReady,
+            activeNodeMeta,
+        });
+        if (capState === 'loading') return <ViewSkeleton />;
+        if (capState === 'locked') {
+            const nodeName = activeNode.name;
+            const version = activeNodeMeta?.version;
+            let versionHint = `${nodeName} does not advertise this capability.`;
+            if (version && version !== 'unknown' && version !== '0.0.0-dev') {
+                versionHint = `${nodeName} is running v${version}.`;
+            }
+            return (
+                <LockCard
+                    icon={Unplug}
+                    title="Host Console is not available on this node"
+                    body={`${versionHint} Upgrade the node to use this feature.`}
+                />
+            );
+        }
+        const nodeId = activeNode.id;
         return (
-            <PaidGate>
-                <CapabilityGate capability="host-console" featureName="Host Console">
-                    <LazyView>
-                        <HostConsole stackName={selectedFile} onClose={onHostConsoleClose} />
-                    </LazyView>
-                </CapabilityGate>
-            </PaidGate>
+            <LazyView>
+                <HostConsole
+                    key={`${nodeId}:${selectedFile ?? ''}`}
+                    nodeId={nodeId}
+                    stackName={selectedFile}
+                    onClose={onHostConsoleClose}
+                />
+            </LazyView>
         );
     }
     // Stack workspace: keep a loading shell while the stack URL hydrates.

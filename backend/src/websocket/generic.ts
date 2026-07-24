@@ -54,9 +54,10 @@ export function handleGenericWs(
   if (isProxyToken) return reject(socket, 403, 'Forbidden');
 
   // Admin enforcement: container exec requires admin role.
-  // console_session tokens are already admin-gated at creation time.
-  // API tokens reaching this point have full-admin scope (read-only /
-  // deploy-only are blocked by the upgrade handler's scope gate).
+  // console_session tokens are already admin-gated at creation time and
+  // path/jti-gated in upgradeHandler. API tokens reaching this point have
+  // full-admin scope (read-only / deploy-only are blocked by the upgrade
+  // handler's scope gate).
   if (!decoded.scope) {
     const execUser = decoded.username ? DatabaseService.getInstance().getUserByUsername(decoded.username) : undefined;
     if (!execUser) {

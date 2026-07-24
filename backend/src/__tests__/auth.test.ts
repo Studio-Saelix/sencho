@@ -115,7 +115,8 @@ describe('POST /api/system/console-token', () => {
     const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
     const res = await request(app)
       .post('/api/system/console-token')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .send({ path: 'host-console' });
     expect(res.status).toBe(200);
     expect(typeof res.body.token).toBe('string');
   });

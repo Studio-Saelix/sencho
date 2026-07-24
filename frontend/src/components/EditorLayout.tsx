@@ -256,6 +256,7 @@ export default function EditorLayout() {
     markAllRead,
     deleteNotification,
     clearAllNotifications,
+    removeNotificationsForStack,
   } = useNotifications({
     nodes,
     onStateInvalidate: scheduleStateInvalidateRefresh,
@@ -289,6 +290,7 @@ export default function EditorLayout() {
     },
     canOfferVolumeRemoval,
     onDeletedOpenStack: () => onDeletedOpenStackRef.current(),
+    removeNotificationsForStack,
   });
 
   // Wire the ref now that stackActions is available
@@ -658,6 +660,10 @@ export default function EditorLayout() {
       changeEnvFile={stackActions.changeEnvFile}
       openLogViewer={stackActions.openLogViewer}
       openBashModal={stackActions.openBashModal}
+      onOpenMonitor={stackName ? () => overlayState.openAlertSheet(stackName) : undefined}
+      onOpenServiceMonitor={stackName
+        ? (serviceName) => overlayState.openAlertSheet(stackName, { serviceName })
+        : undefined}
       serviceAction={stackActions.serviceAction}
       effectiveServices={effectiveServices}
       serviceUpdateStatuses={serviceUpdateStatuses}

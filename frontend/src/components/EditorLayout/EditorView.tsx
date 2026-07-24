@@ -177,12 +177,14 @@ export interface EditorViewProps {
     // Container / service actions
     openLogViewer: (containerId: string, containerName: string) => void;
     openBashModal: (containerId: string, containerName: string) => void;
+    onOpenMonitor?: () => void;
+    onOpenServiceMonitor?: (serviceName: string) => void;
     serviceAction: (
         action: 'start' | 'stop' | 'restart',
         serviceName: string,
     ) => Promise<void>;
-    // Declared-service facts for the multi-service header split (§12). Empty
-    // on single-service stacks and older remotes (capability-gated fetch), so
+    // Declared-service facts for the multi-service header layout. Empty on
+    // single-service stacks and older remotes (capability-gated fetch), so
     // ContainersHealth falls back to the flat single-service layout. Optional
     // so callers/tests that never deal in services can omit them.
     effectiveServices?: EffectiveServiceSpec[];
@@ -278,6 +280,8 @@ export function EditorView(props: EditorViewProps) {
         changeEnvFile,
         openLogViewer,
         openBashModal,
+        onOpenMonitor,
+        onOpenServiceMonitor,
         serviceAction,
         effectiveServices = [],
         serviceUpdateStatuses = [],
@@ -388,9 +392,8 @@ export function EditorView(props: EditorViewProps) {
         });
     };
 
-    // Declared-service headers (§12) need the same expandable, scroll-wrapped
-    // layout as a multi-container stack even when only one container of a
-    // multi-service stack is currently running.
+    // Multi-service stacks need the same expandable, scroll-wrapped layout as a
+    // multi-container stack even when only one container is currently running.
     const isMultiContainerLayout = safeContainers.length > 1 || effectiveServices.length > 1;
 
     // Below md, render the segmented full-screen mobile detail instead of the
@@ -400,6 +403,17 @@ export function EditorView(props: EditorViewProps) {
     if (isMobile) {
         return <MobileStackDetail {...props} />;
     }
+
+    const stackLogsSection = (
+        <StackLogsSection
+            stackName={stackName}
+            logsMode={logsMode}
+            setLogsMode={setLogsMode}
+            showServiceChips={isMultiContainerLayout}
+            logsExpanded={logsExpanded}
+            onToggleLogsExpand={toggleLogsExpand}
+        />
+    );
 
     return (
         <ErrorBoundary>
@@ -437,6 +451,7 @@ export function EditorView(props: EditorViewProps) {
                                         showTakeDown={showTakeDown}
                                         isSelfStack={isSelfStack}
                                         stackMuteActions={stackMuteActions}
+                                        onOpenMonitor={onOpenMonitor}
                                     />
                                 </div>
                                 {recoveryResult && loadingAction == null && (
@@ -474,6 +489,7 @@ export function EditorView(props: EditorViewProps) {
                                     activeNode={activeNode}
                                     openLogViewer={openLogViewer}
                                     openBashModal={openBashModal}
+                                    onOpenServiceMonitor={onOpenServiceMonitor}
                                     serviceAction={serviceAction}
                                     effectiveServices={effectiveServices}
                                     serviceUpdateStatuses={serviceUpdateStatuses}
@@ -498,6 +514,7 @@ export function EditorView(props: EditorViewProps) {
                                 activeNode={activeNode}
                                 openLogViewer={openLogViewer}
                                 openBashModal={openBashModal}
+                                onOpenServiceMonitor={onOpenServiceMonitor}
                                 serviceAction={serviceAction}
                                 effectiveServices={effectiveServices}
                                 serviceUpdateStatuses={serviceUpdateStatuses}
@@ -518,23 +535,9 @@ export function EditorView(props: EditorViewProps) {
                         Hidden when containers are expanded to fill the column. */}
                     {!containersExpanded && (isMultiContainerLayout ? (
                     <div className="flex-1 min-h-[180px] flex flex-col">
-                    <StackLogsSection
-                        stackName={stackName}
-                        logsMode={logsMode}
-                        setLogsMode={setLogsMode}
-                        logsExpanded={logsExpanded}
-                        onToggleLogsExpand={toggleLogsExpand}
-                    />
+                        {stackLogsSection}
                     </div>
-                    ) : (
-                    <StackLogsSection
-                        stackName={stackName}
-                        logsMode={logsMode}
-                        setLogsMode={setLogsMode}
-                        logsExpanded={logsExpanded}
-                        onToggleLogsExpand={toggleLogsExpand}
-                    />
-                    ))}
+                    ) : stackLogsSection)}
                 </div>
                 )}
 

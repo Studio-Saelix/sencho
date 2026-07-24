@@ -38,6 +38,7 @@ export const CAPABILITIES = [
   'notification-suppression',
   'notification-suppression-schedule',
   'host-console',
+  'host-console-community',
   'container-exec',
   'audit-log',
   'scheduled-ops',
@@ -58,6 +59,7 @@ export const CAPABILITIES = [
   'stack-down-remove-volumes',
   'guided-external-network-preflight',
   'service-scoped-update',
+  'service-scoped-stack-alert',
 ] as const;
 
 /**
@@ -71,6 +73,12 @@ export const CROSS_NODE_RBAC_CAPABILITY = 'cross-node-rbac';
 
 export type Capability = (typeof CAPABILITIES)[number];
 
+/** Legacy Host Console advertisement (Admiral hubs still accept this on remotes). */
+export const HOST_CONSOLE_CAPABILITY = 'host-console' as const satisfies Capability;
+
+/** Host Console works without a paid license on this node. */
+export const HOST_CONSOLE_COMMUNITY_CAPABILITY = 'host-console-community' as const satisfies Capability;
+
 /** Remotes that evaluate weekly maintenance windows on mute/suppression replicas. */
 export const NOTIFICATION_SUPPRESSION_SCHEDULE_CAPABILITY =
   'notification-suppression-schedule' as const satisfies Capability;
@@ -80,6 +88,10 @@ export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' 
 
 /** Capability for the nested per-service update/restore routes and the `effective-services` model they read. */
 export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const satisfies Capability;
+
+/** Capability for nullable `service_name` on stack alert rules and per-service cooldown evaluation. */
+export const SERVICE_SCOPED_STACK_ALERT_CAPABILITY =
+  'service-scoped-stack-alert' as const satisfies Capability;
 
 /** Returns true when the string is a usable semver version. */
 export function isValidVersion(v: string | null | undefined): v is string {
@@ -165,6 +177,7 @@ export function getActiveCapabilities(): readonly string[] {
  */
 const PILOT_DISABLED_CAPABILITIES: readonly Capability[] = [
   'host-console',
+  'host-console-community',
 ];
 
 /** Disable capabilities that require a central->pilot path that is not yet wired. */

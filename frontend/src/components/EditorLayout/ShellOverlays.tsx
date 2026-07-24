@@ -117,6 +117,7 @@ export function ShellOverlays({
         onOpenChange={(open) => { if (!open) closeStackMonitor(); }}
         stackName={stackMonitor?.stackName ?? ''}
         initialTab={stackMonitor?.tab ?? 'alerts'}
+        initialService={stackMonitor?.serviceName}
       />
 
       {/* Pre-update readiness check */}

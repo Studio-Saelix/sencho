@@ -447,7 +447,7 @@ export function AppearanceSection({
 
                 <SettingsField
                     label="Log chip color"
-                    helper="Unified uses the accent color for all service chips. Per-service assigns each service a stable label color for faster visual scanning."
+                    helper="Applies to service chips on multi-service or multi-container stacks. Unified uses the accent color for all chips. Per-service assigns each service a stable label color for faster visual scanning."
                 >
                     <SegmentedControl
                         value={chipColorMode}

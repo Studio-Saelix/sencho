@@ -3,11 +3,17 @@ import { Button } from './ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
 import { Download, RefreshCw, Maximize2, Minimize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { useLogChipColorMode } from '@/hooks/use-log-chip-color-mode';
+import { useLogChipColorMode, type LogChipColorMode } from '@/hooks/use-log-chip-color-mode';
 import { hashLabel } from '@/lib/label-colors';
 
 interface StructuredLogViewerProps {
   stackName: string;
+  /**
+   * When true, render a service chip on prefixed log rows.
+   * Pass true only for multi-service or multi-container stacks; defaults to
+   * false so single-service streams stay uncluttered.
+   */
+  showServiceChips?: boolean;
   /** When set, renders an expand/collapse control next to the download button. */
   expanded?: boolean;
   onToggleExpand?: () => void;
@@ -20,7 +26,7 @@ interface LogRow {
   ts: string | null;
   level: LogLevel;
   message: string;
-  /** Normalized service name extracted from the log prefix, or null for synthetic / old-format rows. */
+  /** Display name from the log prefix (normalized Compose service name), or null for synthetic / old-format rows. */
   containerName: string | null;
   /** True when this row was synthesized by the client (e.g. reconnect sentinel). */
   synthetic?: boolean;
@@ -69,7 +75,36 @@ function formatTs(iso: string | null): string {
   return `${hh}:${mm}:${ss}`;
 }
 
-export default function StructuredLogViewer({ stackName, expanded, onToggleExpand }: StructuredLogViewerProps) {
+function stackDisplayName(stackName: string): string {
+  return stackName.replace(/\.(yml|yaml)$/, '');
+}
+
+function LogServiceChip({ name, colorMode }: { name: string; colorMode: LogChipColorMode }) {
+  const perService = colorMode === 'per-service';
+  const labelKey = hashLabel(name);
+  return (
+    <span
+      className={cn(
+        'font-mono text-[10px] tracking-wide rounded px-1.5 py-px mr-1.5 select-none',
+        perService ? 'border' : 'text-brand/80 bg-brand/10',
+      )}
+      title={name}
+      style={
+        perService
+          ? {
+              backgroundColor: `var(--label-${labelKey}-bg)`,
+              color: `var(--label-${labelKey})`,
+              borderColor: `color-mix(in oklch, var(--label-${labelKey}) 30%, transparent)`,
+            }
+          : undefined
+      }
+    >
+      {name}
+    </span>
+  );
+}
+
+export default function StructuredLogViewer({ stackName, showServiceChips = false, expanded, onToggleExpand }: StructuredLogViewerProps) {
   const [rows, setRows] = useState<LogRow[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
   const [following, setFollowing] = useState(true);
@@ -91,7 +126,7 @@ export default function StructuredLogViewer({ stackName, expanded, onToggleExpan
     setFollowing(true);
     followingRef.current = true;
 
-    const cleanStackName = stackName.replace(/\.(yml|yaml)$/, '');
+    const cleanStackName = stackDisplayName(stackName);
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const activeNodeId = localStorage.getItem('sencho-active-node') || '';
     const wsUrl = `${wsProtocol}//${window.location.host}/api/stacks/${cleanStackName}/logs${activeNodeId ? `?nodeId=${activeNodeId}` : ''}`;
@@ -238,12 +273,12 @@ export default function StructuredLogViewer({ stackName, expanded, onToggleExpan
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${stackName.replace(/\.(yml|yaml)$/, '')}-logs.txt`;
+    a.download = `${stackDisplayName(stackName)}-logs.txt`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  const label = `logs · ${stackName.replace(/\.(yml|yaml)$/, '')}`;
+  const label = `logs · ${stackDisplayName(stackName)}`;
 
   return (
     <div className="flex h-full min-h-0 flex-col rounded-xl border border-muted bg-card/40">
@@ -346,25 +381,8 @@ export default function StructuredLogViewer({ stackName, expanded, onToggleExpan
                 {row.level}
               </span>
               <span className="whitespace-pre-wrap break-all text-foreground/90">
-                {row.containerName && (
-                  <span
-                    className={cn(
-                      'font-mono text-[10px] tracking-wide rounded px-1.5 py-px mr-1.5 select-none',
-                      chipColorMode === 'per-service' ? 'border' : 'text-brand/80 bg-brand/10',
-                    )}
-                    title={row.containerName}
-                    style={
-                      chipColorMode === 'per-service'
-                        ? {
-                            backgroundColor: `var(--label-${hashLabel(row.containerName)}-bg)`,
-                            color: `var(--label-${hashLabel(row.containerName)})`,
-                            borderColor: `color-mix(in oklch, var(--label-${hashLabel(row.containerName)}) 30%, transparent)`,
-                          }
-                        : undefined
-                    }
-                  >
-                    {row.containerName}
-                  </span>
+                {showServiceChips && row.containerName && (
+                  <LogServiceChip name={row.containerName} colorMode={chipColorMode} />
                 )}
                 {row.message}
               </span>

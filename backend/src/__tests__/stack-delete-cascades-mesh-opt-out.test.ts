@@ -131,3 +131,32 @@ describe('DELETE /api/stacks/:stackName mesh opt-out cascade (F-1 / F-14)', () =
         expect(sawCascadeWarning).toBe(true);
     });
 });
+
+describe('DELETE /api/stacks/:stackName clears stack-scoped role assignments', () => {
+    it('removes only the deleted stack assignment and preserves unrelated grants', async () => {
+        const db = DatabaseService.getInstance();
+        const bcrypt = await import('bcrypt');
+        const hash = await bcrypt.hash('password123', 1);
+        const userId = db.addUser({ username: 'stack-del-rbac', password_hash: hash, role: 'viewer' });
+        const otherNodeId = db.addNode({
+            name: 'stack-del-rbac-node', type: 'remote', api_url: 'http://test:1852',
+            api_token: '', compose_dir: '/tmp', is_default: false,
+        });
+        db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'api' });
+        db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'other-stack' });
+        db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'node', resource_id: String(otherNodeId) });
+
+        const res = await request(app)
+            .delete('/api/stacks/api')
+            .set('Cookie', adminCookie);
+
+        expect(res.status).toBe(200);
+        const remaining = db.getAllRoleAssignments(userId);
+        expect(remaining.some((a) => a.resource_type === 'stack' && a.resource_id === 'api')).toBe(false);
+        expect(remaining.some((a) => a.resource_type === 'stack' && a.resource_id === 'other-stack')).toBe(true);
+        expect(remaining.some((a) => a.resource_type === 'node' && a.resource_id === String(otherNodeId))).toBe(true);
+
+        db.deleteUser(userId);
+        db.deleteNode(otherNodeId);
+    });
+});

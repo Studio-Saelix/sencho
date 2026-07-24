@@ -176,6 +176,12 @@ interface UseStackActionsOptions {
    * owns that state, and an optional callback would silently skip it.
    */
   onDeletedOpenStack: () => void;
+  /**
+   * Drop in-memory notifications for a deleted stack on the active node.
+   * Caller must pass the node id and canonical stack basename (no .yml/.yaml).
+   * Optional so unit tests that do not exercise delete can omit it.
+   */
+  removeNotificationsForStack?: (nodeId: number, stackName: string) => void;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -399,6 +405,7 @@ export function useStackActions(options: UseStackActionsOptions) {
     canEditStack,
     canOfferVolumeRemoval = false,
     onDeletedOpenStack,
+    removeNotificationsForStack,
   } = options;
 
   const pendingStackLoadRef = useRef<string | null>(null);
@@ -1895,6 +1902,7 @@ export function useStackActions(options: UseStackActionsOptions) {
       stackListState.files.find(
         f => f === stackToDelete || f.replace(/\.(yml|yaml)$/, '') === stackToDelete,
       ) ?? stackToDelete;
+    const canonicalName = deleteKey.replace(/\.(yml|yaml)$/, '');
     if (stackListState.isStackBusy(deleteKey)) return;
     stackListState.setStackAction(deleteKey, 'delete');
     try {
@@ -1914,11 +1922,14 @@ export function useStackActions(options: UseStackActionsOptions) {
       toast.success('Stack deleted successfully!');
       overlayState.closeDeleteDialog();
       const selected = stackListState.selectedFile;
-      const stripExt = (name: string) => name.replace(/\.(yml|yaml)$/, '');
+      const nodeId = activeNode?.id;
+      if (nodeId != null && removeNotificationsForStack) {
+        removeNotificationsForStack(nodeId, canonicalName);
+      }
       // Always clear a deleted selection, even when another top-level view is
       // visible (Resources, Networking, etc.). Leaving that view is gated on
       // the editor being the active surface below.
-      if (selected != null && stripExt(selected) === stripExt(deleteKey)) {
+      if (selected != null && selected.replace(/\.(yml|yaml)$/, '') === canonicalName) {
         resetEditorState();
         if (navState.activeView === 'editor') {
           navState.setActiveView('dashboard');

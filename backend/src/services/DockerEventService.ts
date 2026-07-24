@@ -45,12 +45,20 @@ export interface ContainerHealthSnapshot {
 /** Grace window after a `die` before classifying, to absorb out-of-order kill events. */
 const DIE_GRACE_WINDOW_MS = 500;
 
-/** Max crash alerts emitted per node within RATE_WINDOW_MS. Overflow is batched. */
+/** Max crash/health alerts emitted per node within RATE_WINDOW_MS. Overflow is batched. */
 const RATE_LIMIT_MAX = 20;
 const RATE_WINDOW_MS = 60_000;
 
 /** Dedup window for repeat crash alerts of the same container. */
 const CRASH_DEDUP_MS = 60 * 60_000;
+
+/**
+ * Dedup window for repeat health alerts of the same container. Same duration as
+ * crash dedup, but stored outside containerState so the 10-minute prune cannot
+ * shrink the advertised 60-minute window. Unlike crash dedup, recovery (start /
+ * healthy) does not clear this stamp.
+ */
+const HEALTH_DEDUP_MS = CRASH_DEDUP_MS;
 
 /** Interval for pruning stale container state from memory. */
 const PRUNE_INTERVAL_MS = 60_000;
@@ -109,6 +117,11 @@ interface DockerEventPayload {
 
 type LifecycleStatus = 'disconnected' | 'connecting' | 'connected' | 'stopped';
 
+/** Rate-limit token bound to the fixed window that issued it. */
+interface RateToken {
+    readonly windowStart: number;
+}
+
 export class DockerEventService {
     private readonly nodeId: number;
     private readonly nodeName: string;
@@ -127,11 +140,34 @@ export class DockerEventService {
     /** Pending die timers keyed by container ID (for the 500ms grace window). */
     private pendingDieTimers: Map<string, NodeJS.Timeout> = new Map();
 
-    /** Rate-limiter bookkeeping. */
-    private rateWindowStart = 0;
-    private rateCount = 0;
-    private suppressedCount = 0;
+    /**
+     * Shared fixed-window rate limiter for crash and health alerts (per local
+     * node / this service instance). Dedup and transition checks run before
+     * consuming a token so suppressed duplicates do not count toward the cap.
+     * Tokens carry the issuing window start so a late refund cannot inflate a
+     * newer window's budget.
+     */
+    private containerAlertRateWindowStart = 0;
+    private containerAlertRateCount = 0;
+    private suppressedCrashAlertCount = 0;
+    private suppressedHealthAlertCount = 0;
     private summaryTimer: NodeJS.Timeout | null = null;
+
+    /**
+     * Process-local health-alert dedup keyed by container id. Kept outside
+     * containerState so pruneStaleState cannot drop an active 60m window.
+     * Entries expire after HEALTH_DEDUP_MS via pruneStaleState; the map clears
+     * on process restart. Not cleared on healthy/start recovery.
+     */
+    private healthAlertDedupAt = new Map<string, number>();
+    /** In-flight health dispatches; prevents concurrent duplicate flaps. */
+    private healthAlertInFlight = new Set<string>();
+    /**
+     * Container ids that entered unhealthy again while a health dispatch was
+     * in flight. Retried once after the in-flight call finishes if history
+     * did not persist (so a failed write cannot permanently silence the alert).
+     */
+    private healthAlertPendingRetry = new Set<string>();
 
     /** Parse-error tracking for flooded bad payloads. */
     private parseErrorWindowStart = 0;
@@ -166,6 +202,8 @@ export class DockerEventService {
 
     /** Close the stream, cancel timers, and clear state. */
     public shutdown(): void {
+        // Flush overflow roll-up while still live so pending summaries are not dropped.
+        this.flushRateLimitSummaryNow();
         this.status = 'stopped';
         this.clearReconnectTimer();
         if (this.pruneTimer) {
@@ -180,6 +218,17 @@ export class DockerEventService {
         this.pendingDieTimers.clear();
         this.detachStream();
         this.containerState.clear();
+        this.healthAlertDedupAt.clear();
+        this.healthAlertInFlight.clear();
+        this.healthAlertPendingRetry.clear();
+        this.suppressedCrashAlertCount = 0;
+        this.suppressedHealthAlertCount = 0;
+        this.containerAlertRateCount = 0;
+    }
+
+    /** Status helper so await-crossing stopped checks are not narrowed away. */
+    private isStopped(): boolean {
+        return this.status === 'stopped';
     }
 
     // ========================================================================
@@ -460,27 +509,104 @@ export class DockerEventService {
         state.lastActivityAt = Date.now();
 
         if (action.includes('unhealthy')) {
-            if (state.healthStatus !== 'unhealthy') {
+            const enteringUnhealthy = state.healthStatus !== 'unhealthy';
+            if (enteringUnhealthy) {
                 state.unhealthySince = Date.now();
             }
+            // Auto-Heal reads healthStatus / unhealthySince; update before any alert gate.
             state.healthStatus = 'unhealthy';
+            if (!enteringUnhealthy) return;
             if (!this.isCrashAlertsEnabled()) return;
+            void this.dispatchHealthAlert(id, state);
+        } else {
+            // Recovery clears Auto-Heal timing but must not erase health-alert dedup,
+            // or a healthy↔unhealthy flap would re-alert immediately.
+            state.unhealthySince = undefined;
+            state.healthStatus = action.includes('starting') ? 'starting' : 'healthy';
+            // Drop deferred-retry markers so a later unrelated persist failure cannot
+            // spuriously retry from a flap that already recovered.
+            this.healthAlertPendingRetry.delete(id);
+        }
+    }
+
+    /**
+     * Dispatch a healthcheck failure alert with transition already confirmed.
+     * Dedup and rate checks run before the token is consumed. Advance dedup
+     * only when dispatchAlert returns `{ persisted: true }` (history row written).
+     */
+    private async dispatchHealthAlert(id: string, state: InternalContainerState): Promise<void> {
+        if (this.isStopped()) return;
+
+        const now = Date.now();
+        if (this.isWithinAlertDedupWindow(this.healthAlertDedupAt.get(id), now, HEALTH_DEDUP_MS)) {
+            return;
+        }
+        if (this.healthAlertInFlight.has(id)) {
+            this.healthAlertPendingRetry.add(id);
+            return;
+        }
+        const token = this.consumeRateToken();
+        if (!token) {
+            this.suppressedHealthAlertCount += 1;
+            this.scheduleSummary();
+            return;
+        }
+
+        this.healthAlertInFlight.add(id);
+        let persisted = false;
+        try {
+            if (this.isStopped()) {
+                this.refundRateToken(token);
+                this.healthAlertPendingRetry.delete(id);
+                return;
+            }
             const name = state.name ?? id.slice(0, 12);
-            void this.emitError(
+            const result = await this.emitError(
                 'monitor_alert',
                 `Healthcheck failed: ${name} is unhealthy.`,
                 state.stackName,
                 state.name,
                 state.isSelf === true,
             );
-        } else {
-            state.unhealthySince = undefined;
-            if (action.includes('starting')) {
-                state.healthStatus = 'starting';
+            persisted = result.persisted;
+            if (persisted) {
+                this.healthAlertDedupAt.set(id, Date.now());
+                this.healthAlertPendingRetry.delete(id);
             } else {
-                state.healthStatus = 'healthy';
+                // Refund only into the window that issued the token so a late
+                // persist failure cannot inflate a newer window's budget.
+                this.refundRateToken(token);
+                console.error(
+                    `[DockerEvents:${this.nodeName}] Health alert history not persisted for ${id}; dedup not advanced`,
+                );
             }
+        } finally {
+            this.healthAlertInFlight.delete(id);
         }
+
+        if (this.isStopped()) {
+            this.healthAlertPendingRetry.delete(id);
+            return;
+        }
+
+        // A concurrent healthy→unhealthy flap was deferred while we were in
+        // flight. If the first write failed, retry so the alert is not lost
+        // while the container stays unhealthy with no further transitions.
+        if (this.shouldRetryHealthAlert(id, state, persisted)) {
+            this.healthAlertPendingRetry.delete(id);
+            await this.dispatchHealthAlert(id, state);
+        }
+    }
+
+    private shouldRetryHealthAlert(
+        id: string,
+        state: InternalContainerState,
+        persisted: boolean,
+    ): boolean {
+        return !this.isStopped()
+            && !persisted
+            && this.healthAlertPendingRetry.has(id)
+            && state.healthStatus === 'unhealthy';
     }
 
     private onStart(id: string): void {
@@ -495,6 +621,7 @@ export class DockerEventService {
         state.healthStatus = 'starting';
         state.lastStartAt = Date.now();
         state.lastActivityAt = Date.now();
+        this.healthAlertPendingRetry.delete(id);
     }
 
     private onDestroy(id: string): void {
@@ -504,6 +631,9 @@ export class DockerEventService {
             clearTimeout(pending);
             this.pendingDieTimers.delete(id);
         }
+        this.healthAlertPendingRetry.delete(id);
+        this.healthAlertInFlight.delete(id);
+        this.healthAlertDedupAt.delete(id);
     }
 
     private async classifyDie(id: string, event: DockerEventPayload, dieAt: number): Promise<void> {
@@ -545,7 +675,7 @@ export class DockerEventService {
         // Dedup early: crashloops repeatedly reach this point with exit 137,
         // and the OOM fallback below issues a Docker inspect. Skipping the
         // inspect on deduped crashes avoids hammering the daemon.
-        if (state.lastCrashAlertAt && now - state.lastCrashAlertAt < CRASH_DEDUP_MS) {
+        if (this.isWithinAlertDedupWindow(state.lastCrashAlertAt, now, CRASH_DEDUP_MS)) {
             return;
         }
 
@@ -584,6 +714,7 @@ export class DockerEventService {
         state: InternalContainerState | null,
         info: { name: string; exitCode: number; stackName?: string; isSelf?: boolean },
     ): Promise<void> {
+        if (this.isStopped()) return;
         // Respect the existing global crash-alerts toggle so users who have
         // disabled these notifications in Settings remain opted out.
         if (!this.isCrashAlertsEnabled()) return;
@@ -592,8 +723,9 @@ export class DockerEventService {
             ? `Container OOM Kill: ${info.name} was killed by the OOM killer (out of memory).`
             : `Container Crash Detected: ${info.name} exited unexpectedly (Code: ${info.exitCode}).`;
 
-        if (!this.consumeRateToken()) {
-            this.suppressedCount += 1;
+        const token = this.consumeRateToken();
+        if (!token) {
+            this.suppressedCrashAlertCount += 1;
             this.scheduleSummary();
             return;
         }
@@ -625,32 +757,70 @@ export class DockerEventService {
         return value;
     }
 
-    /** Return true if an alert can be emitted now. Side effect: increments counters. */
-    private consumeRateToken(): boolean {
+    /**
+     * Consume one shared crash/health rate token for the current fixed window.
+     * Returns null when the window is exhausted. Rolling into a new window first
+     * flushes any pending overflow summary so counters cannot span windows.
+     */
+    private consumeRateToken(): RateToken | null {
         const now = Date.now();
-        if (now - this.rateWindowStart >= RATE_WINDOW_MS) {
-            this.rateWindowStart = now;
-            this.rateCount = 0;
+        if (now - this.containerAlertRateWindowStart >= RATE_WINDOW_MS) {
+            this.flushRateLimitSummaryNow();
+            this.containerAlertRateWindowStart = now;
+            this.containerAlertRateCount = 0;
         }
-        if (this.rateCount >= RATE_LIMIT_MAX) return false;
-        this.rateCount += 1;
-        return true;
+        if (this.containerAlertRateCount >= RATE_LIMIT_MAX) return null;
+        this.containerAlertRateCount += 1;
+        return { windowStart: this.containerAlertRateWindowStart };
+    }
+
+    /** Refund a token only when the issuing window is still active. */
+    private refundRateToken(token: RateToken): void {
+        if (token.windowStart !== this.containerAlertRateWindowStart) return;
+        if (this.containerAlertRateCount > 0) this.containerAlertRateCount -= 1;
+    }
+
+    private isWithinAlertDedupWindow(
+        lastAlertAt: number | undefined,
+        now: number,
+        windowMs: number,
+    ): boolean {
+        return lastAlertAt !== undefined && now - lastAlertAt < windowMs;
+    }
+
+    private buildRateLimitSummaryMessage(crash: number, health: number): string {
+        const total = crash + health;
+        if (crash > 0 && health > 0) {
+            return `${total} additional container alerts were rate-limited in the last minute (${crash} crash, ${health} health).`;
+        }
+        if (health > 0) {
+            return `${health} additional container health alerts were rate-limited in the last minute.`;
+        }
+        return `${crash} additional container crash alerts were rate-limited in the last minute.`;
+    }
+
+    /** Emit and clear any pending overflow roll-up immediately (e.g. on window roll). */
+    private flushRateLimitSummaryNow(): void {
+        if (this.summaryTimer) {
+            clearTimeout(this.summaryTimer);
+            this.summaryTimer = null;
+        }
+        const crash = this.suppressedCrashAlertCount;
+        const health = this.suppressedHealthAlertCount;
+        this.suppressedCrashAlertCount = 0;
+        this.suppressedHealthAlertCount = 0;
+        if (crash + health <= 0) return;
+        if (this.status === 'stopped') return;
+        void this.emitWarning('monitor_alert', this.buildRateLimitSummaryMessage(crash, health));
     }
 
     private scheduleSummary(): void {
         if (this.summaryTimer) return;
-        const remaining = RATE_WINDOW_MS - (Date.now() - this.rateWindowStart);
+        const remaining = RATE_WINDOW_MS - (Date.now() - this.containerAlertRateWindowStart);
         const delay = Math.max(1_000, remaining);
         this.summaryTimer = setTimeout(() => {
-            const count = this.suppressedCount;
             this.summaryTimer = null;
-            this.suppressedCount = 0;
-            if (count > 0) {
-                void this.emitWarning(
-                    'monitor_alert',
-                    `${count} additional containers crashed in the last minute.`,
-                );
-            }
+            this.flushRateLimitSummaryNow();
         }, delay);
     }
 
@@ -707,15 +877,24 @@ export class DockerEventService {
     }
 
     private pruneStaleState(): void {
-        if (this.containerState.size === 0) return;
-        const cutoff = Date.now() - STATE_STALE_AFTER_MS;
-        for (const [id, state] of this.containerState) {
-            // Keep state for a container with an unresolved crash so Auto-Heal can
-            // still act on it past the default stale window (policy thresholds run
-            // up to 24h). It is cleared on `start` and removed on `destroy`.
-            if (state.crashedAt !== undefined) continue;
-            if (state.lastActivityAt < cutoff) {
-                this.containerState.delete(id);
+        if (this.containerState.size > 0) {
+            const cutoff = Date.now() - STATE_STALE_AFTER_MS;
+            for (const [id, state] of this.containerState) {
+                // Keep state for a container with an unresolved crash so Auto-Heal can
+                // still act on it past the default stale window (policy thresholds run
+                // up to 24h). It is cleared on `start` and removed on `destroy`.
+                if (state.crashedAt !== undefined) continue;
+                if (state.lastActivityAt < cutoff) {
+                    this.containerState.delete(id);
+                }
+            }
+        }
+        // Health dedup lives outside containerState so the 60m window survives
+        // ordinary 10m prune. Drop only entries whose window has fully expired.
+        if (this.healthAlertDedupAt.size > 0) {
+            const dedupCutoff = Date.now() - HEALTH_DEDUP_MS;
+            for (const [id, at] of this.healthAlertDedupAt) {
+                if (at < dedupCutoff) this.healthAlertDedupAt.delete(id);
             }
         }
     }
@@ -734,15 +913,15 @@ export class DockerEventService {
             : { stackName, containerName, actor: 'system:docker-events' };
     }
 
-    private async emitError(category: NotificationCategory, message: string, stackName?: string, containerName?: string, systemOnly = false): Promise<void> {
+    private async emitError(category: NotificationCategory, message: string, stackName?: string, containerName?: string, systemOnly = false): Promise<{ persisted: boolean }> {
         return this.notifier.dispatchAlert('error', category, message, this.buildAlertOptions(stackName, containerName, systemOnly));
     }
 
-    private async emitWarning(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
+    private async emitWarning(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<{ persisted: boolean }> {
         return this.notifier.dispatchAlert('warning', category, message, this.buildAlertOptions(stackName, containerName));
     }
 
-    private async emitInfo(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<void> {
+    private async emitInfo(category: NotificationCategory, message: string, stackName?: string, containerName?: string): Promise<{ persisted: boolean }> {
         return this.notifier.dispatchAlert('info', category, message, this.buildAlertOptions(stackName, containerName));
     }
 

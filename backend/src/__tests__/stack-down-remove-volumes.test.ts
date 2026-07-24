@@ -68,7 +68,7 @@ beforeAll(async () => {
   writeStack('web');
 
   const { NotificationService } = await import('../services/NotificationService');
-  dispatchAlertSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue(undefined);
+  dispatchAlertSpy = vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
 });
 
 afterAll(() => {

@@ -19,11 +19,21 @@ const DEFAULT: UrlRouteState = {
   filterNodeId: null,
 };
 
-/** True when the current URL is a stack workspace deep link (detail or editor). */
-export function isStackEditorDeepLink(): boolean {
+/** True when the URL is a stack-scoped deep link for the given view. */
+function isStackScopedDeepLink(view: ActiveView): boolean {
   if (typeof window === 'undefined') return false;
   const parsed = parsePath(window.location.pathname, window.location.search);
-  return parsed.view === 'editor' && parsed.stackName != null;
+  return parsed.view === view && parsed.stackName != null;
+}
+
+/** True when the current URL is a stack workspace deep link (detail or editor). */
+export function isStackEditorDeepLink(): boolean {
+  return isStackScopedDeepLink('editor');
+}
+
+/** True when the URL targets Host Console rooted in a stack directory. */
+export function isHostConsoleStackDeepLink(): boolean {
+  return isStackScopedDeepLink('host-console');
 }
 
 /** Read shell navigation fields from the current browser URL (cold-load bootstrap). */

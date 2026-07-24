@@ -715,7 +715,7 @@ describe('GET /api/audit-log/export', () => {
 
     const csvText = res.text;
     const lines = csvText.split('\n');
-    expect(lines[0]).toBe('id,timestamp,username,method,path,status_code,node_id,ip_address,summary');
+    expect(lines[0]).toBe('id,timestamp,username,acting_as,method,path,status_code,node_id,ip_address,summary');
     expect(lines.length).toBeGreaterThan(1);
   });
 
