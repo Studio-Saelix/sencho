@@ -6,8 +6,10 @@ import { sanitizeForLog } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { withTimeout } from '../utils/withTimeout';
 import { isCleanOneShotCompletion } from '../utils/oneShotCompletion';
+import { declaredFromEffectiveModel } from '../helpers/effectiveToDeclaredCompose';
+import { parseEffectiveModel } from './preflight/effectiveModel';
 import type { HealthGateContainer, HealthGateReport } from './updateGuard/types';
-import { getComposeCommandTimeoutMs } from './ComposeService';
+import { ComposeService, getComposeCommandTimeoutMs } from './ComposeService';
 
 const POLL_INTERVAL_MS = 5_000;
 // A prepared-but-never-begun token (prepare called, mutation then failed before
@@ -50,7 +52,7 @@ interface ObservedContainer {
   imageId: string;
   /** Inspect State.ExitCode; null when unavailable. */
   exitCode: number | null;
-  /** HostConfig.RestartPolicy.Name, or null when unset. */
+  /** HostConfig.RestartPolicy.Name (report/debug only; not used for one-shot intent). */
   restartPolicy: string | null;
 }
 
@@ -94,6 +96,13 @@ interface ActiveGate {
   collateralBaselineByName: Map<string, ObservedContainer>;
   /** Role of each expected container (service gates), for failure attribution. */
   roleByName: Map<string, GateRole>;
+  /**
+   * Declared Compose restart intent by service name (normalized). Loaded once
+   * per gate; null until the first load attempt completes. Used for one-shot
+   * recognition instead of Docker inspect (which cannot distinguish omit vs
+   * explicit `restart: "no"`).
+   */
+  declaredRestartByService: Map<string, string | null> | null;
 }
 
 /** A pre-mutation baseline container captured at prepare time. */
@@ -130,11 +139,28 @@ function observedFromPreparedBaseline(baseline: PreparedBaseline): ObservedConta
   };
 }
 
-/** Running, or a clean one-shot exit (exit 0 + restart no/absent). */
-function isObservedContainerSatisfied(current: ObservedContainer | undefined): boolean {
+/** Running, or a clean one-shot exit (exit 0 + explicit declared restart "no"). */
+function isObservedContainerSatisfied(
+  gate: ActiveGate,
+  current: ObservedContainer | undefined,
+): boolean {
   if (!current) return false;
   if (current.state === 'running') return true;
-  return isCleanOneShotCompletion(current);
+  return isDeclaredCleanOneShot(gate, current);
+}
+
+/**
+ * One-shot recognition from declared Compose intent only. Unlabeled containers
+ * and services missing from the effective model fail closed.
+ */
+function isDeclaredCleanOneShot(gate: ActiveGate, current: ObservedContainer): boolean {
+  const map = gate.declaredRestartByService;
+  if (!map || !current.service || !map.has(current.service)) return false;
+  return isCleanOneShotCompletion({
+    state: current.state,
+    exitCode: current.exitCode,
+    restartPolicy: map.get(current.service),
+  });
 }
 
 /** An in-memory prepare snapshot awaiting attachExpectedImage + beginPrepared. */
@@ -345,6 +371,7 @@ export class HealthGateService {
         collateralEligibleNames: new Set(),
         collateralBaselineByName: new Map(),
         roleByName: new Map(),
+        declaredRestartByService: null,
       };
       this.active.set(key, gate);
       this.scheduleNextPoll(gate);
@@ -504,6 +531,7 @@ export class HealthGateService {
           prep.collateralBaseline.filter(b => prep.collateralEligibleNames.has(b.name)),
         ),
         roleByName: new Map(),
+        declaredRestartByService: null,
       };
       this.active.set(key, gate);
       this.scheduleNextPoll(gate);
@@ -603,6 +631,9 @@ export class HealthGateService {
     if (gate.finalized || this.active.get(key) !== gate) return;
     gate.consecutivePollErrors = 0;
 
+    await this.ensureDeclaredRestartMap(gate);
+    if (gate.finalized || this.active.get(key) !== gate) return;
+
     const elapsedMs = Date.now() - gate.startedAt;
 
     if (gate.expected === null) {
@@ -645,9 +676,9 @@ export class HealthGateService {
       }
       gate.missingLastPoll.delete(name);
 
-      const cleanOneShot = isCleanOneShotCompletion(current);
+      const cleanOneShot = isDeclaredCleanOneShot(gate, current);
       // An exit with no restart attempt is terminal for the window, unless
-      // this is an expected one-shot (exit 0 + restart no/absent).
+      // this is an expected one-shot (exit 0 + explicit declared restart "no").
       if (current.state === 'exited' && baseline.restarts === current.restarts && !cleanOneShot) {
         this.finalize(gate, 'failed', `container ${name} exited during observation`, summary);
         return;
@@ -681,13 +712,15 @@ export class HealthGateService {
     // completion) and healthy wherever a healthcheck exists. A health state
     // still 'starting' is not a pass (except residual health on a clean one-shot).
     const stillStarting = observed.filter(
-      c => c.health === 'starting' && !isCleanOneShotCompletion(c),
+      c => c.health === 'starting' && !isDeclaredCleanOneShot(gate, c),
     );
     if (stillStarting.length > 0) {
       this.finalize(gate, 'unknown', 'a healthcheck was still starting when the observation window ended', summary);
       return;
     }
-    const notRunning = [...gate.expected.keys()].filter(name => !isObservedContainerSatisfied(byName.get(name)));
+    const notRunning = [...gate.expected.keys()].filter(
+      name => !isObservedContainerSatisfied(gate, byName.get(name)),
+    );
     if (notRunning.length > 0) {
       this.finalize(gate, 'failed', `not running at the end of the window: ${notRunning.join(', ')}`, summary);
       return;
@@ -722,6 +755,9 @@ export class HealthGateService {
     }
     if (gate.finalized || this.active.get(key) !== gate) return;
     gate.consecutivePollErrors = 0;
+
+    await this.ensureDeclaredRestartMap(gate);
+    if (gate.finalized || this.active.get(key) !== gate) return;
 
     const elapsedMs = Date.now() - gate.startedAt;
     const serviceName = gate.serviceName ?? '';
@@ -804,7 +840,7 @@ export class HealthGateService {
       }
       gate.missingLastPoll.delete(name);
 
-      const cleanOneShot = isCleanOneShotCompletion(current);
+      const cleanOneShot = isDeclaredCleanOneShot(gate, current);
       if (current.state === 'exited' && baseline.restarts === current.restarts && !cleanOneShot) {
         this.finalize(gate, 'failed', `${noun} ${name} exited during observation`, summary, role);
         return;
@@ -833,7 +869,7 @@ export class HealthGateService {
 
     const stillStarting = observed.filter(
       c => c.health === 'starting'
-        && !isCleanOneShotCompletion(c)
+        && !isDeclaredCleanOneShot(gate, c)
         && (c.service === serviceName || gate.collateralEligibleNames.has(c.name)),
     );
     if (stillStarting.length > 0) {
@@ -841,7 +877,7 @@ export class HealthGateService {
       return;
     }
     const satisfiedPrimary = observed.filter(
-      c => c.service === serviceName && isObservedContainerSatisfied(c),
+      c => c.service === serviceName && isObservedContainerSatisfied(gate, c),
     );
     if (satisfiedPrimary.length !== gate.expectedReplicas) {
       this.finalize(
@@ -853,7 +889,7 @@ export class HealthGateService {
     }
     const collateralNotRunning = [...gate.expected.keys()]
       .filter(name => gate.roleByName.get(name) === 'collateral')
-      .filter(name => !isObservedContainerSatisfied(byName.get(name)));
+      .filter(name => !isObservedContainerSatisfied(gate, byName.get(name)));
     if (collateralNotRunning.length > 0) {
       this.finalize(gate, 'failed', `sibling(s) not running at the end of the window: ${collateralNotRunning.join(', ')}`, summary, 'collateral');
       return;
@@ -881,6 +917,35 @@ export class HealthGateService {
 
   private async observeContainers(gate: ActiveGate): Promise<ObservedContainer[]> {
     return this.listStackContainers(gate.nodeId, gate.stackName);
+  }
+
+  /**
+   * Load declared Compose restart intent once per gate. Fail closed to an empty
+   * map on render/parse errors so inspect "no" cannot false-qualify one-shots.
+   */
+  private async ensureDeclaredRestartMap(gate: ActiveGate): Promise<void> {
+    if (gate.declaredRestartByService !== null) return;
+    gate.declaredRestartByService = new Map();
+    try {
+      const result = await ComposeService.getInstance(gate.nodeId).renderConfig(gate.stackName);
+      if (result.rendered === null) {
+        console.warn(
+          '[HealthGate] declared restart map unavailable for %s (compose render failed)',
+          sanitizeForLog(gate.stackName),
+        );
+        return;
+      }
+      const model = parseEffectiveModel(JSON.parse(result.rendered), gate.stackName);
+      const declared = declaredFromEffectiveModel(model);
+      gate.declaredRestartByService = new Map(
+        declared.services.map((s) => [s.name, s.restart ?? null]),
+      );
+    } catch (error) {
+      console.warn(
+        '[HealthGate] declared restart map load failed for %s:',
+        sanitizeForLog(gate.stackName), getErrorMessage(error, 'unknown'),
+      );
+    }
   }
 
   /** List and inspect a stack's containers into the gate's observation shape. */

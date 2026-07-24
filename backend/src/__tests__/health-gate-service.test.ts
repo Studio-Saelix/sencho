@@ -29,6 +29,7 @@ const { state } = vi.hoisted(() => ({
     settings: {} as Record<string, string>,
     listContainers: vi.fn(),
     inspect: vi.fn(),
+    renderConfig: vi.fn(),
   },
 }));
 
@@ -80,6 +81,15 @@ vi.mock('../services/DockerController', () => ({
   },
 }));
 
+vi.mock('../services/ComposeService', () => ({
+  getComposeCommandTimeoutMs: () => 30_000,
+  ComposeService: {
+    getInstance: () => ({
+      renderConfig: state.renderConfig,
+    }),
+  },
+}));
+
 import { HealthGateService } from '../services/HealthGateService';
 
 type ContainerFixture = {
@@ -121,6 +131,25 @@ function setContainers(fixtures: ContainerFixture[]): void {
   });
 }
 
+/** Declared Compose restart map used for one-shot recognition (not inspect). */
+function setDeclaredRestarts(services: Record<string, string | undefined>): void {
+  const rendered = {
+    name: 'web',
+    services: Object.fromEntries(
+      Object.entries(services).map(([name, restart]) => [
+        name,
+        restart === undefined ? { image: `${name}:1` } : { image: `${name}:1`, restart },
+      ]),
+    ),
+  };
+  state.renderConfig.mockResolvedValue({
+    rendered: JSON.stringify(rendered),
+    stderr: '',
+    code: 0,
+    timedOut: false,
+  });
+}
+
 const svc = () => HealthGateService.getInstance();
 
 const latest = (stack = 'web') => svc().getReport(0, stack);
@@ -138,7 +167,9 @@ beforeEach(() => {
   state.settings = { health_gate_enabled: '1', health_gate_window_seconds: '30' };
   state.listContainers.mockReset();
   state.inspect.mockReset();
-  setContainers([{ id: 'aaa', name: 'web-app-1' }]);
+  state.renderConfig.mockReset();
+  setDeclaredRestarts({ app: 'unless-stopped' });
+  setContainers([{ id: 'aaa', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped' }]);
   svc().start();
 });
 
@@ -170,16 +201,17 @@ describe('HealthGateService verdicts', () => {
     expect(state.activity.some(a => a.category === 'health_gate_failed')).toBe(true);
   });
 
-  it('passes when a clean one-shot exits 0 with restart no', async () => {
+  it('passes when a clean one-shot exits 0 with explicit declared restart no', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
     setContainers([
-      { id: 'app', name: 'web-app-1', state: 'running', restartPolicy: 'unless-stopped' },
-      { id: 'job', name: 'web-migrate-1', state: 'running', restartPolicy: 'no' },
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
     ]);
     svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1);
     setContainers([
-      { id: 'app', name: 'web-app-1', state: 'running', restartPolicy: 'unless-stopped' },
-      { id: 'job', name: 'web-migrate-1', state: 'exited', exitCode: 0, restartPolicy: 'no' },
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0, restartPolicy: 'no' },
     ]);
     await ticks(1);
     expect(latest().status).toBe('observing');
@@ -187,17 +219,41 @@ describe('HealthGateService verdicts', () => {
     expect(latest().status).toBe('passed');
   });
 
-  it('passes a clean one-shot even when residual health is unhealthy', async () => {
+  it('fails when a daemon with omitted Compose restart exits 0 (inspect also reports no)', async () => {
+    // QA P0: Docker HostConfig.RestartPolicy.Name is "no" for both omit and
+    // explicit restart:"no". Declared intent must decide, not inspect.
+    setDeclaredRestarts({ 'daemon-default': undefined });
     setContainers([
-      { id: 'app', name: 'web-app-1', state: 'running', restartPolicy: 'unless-stopped' },
-      { id: 'job', name: 'web-migrate-1', state: 'running', restartPolicy: 'no' },
+      {
+        id: 'daemon', name: 'web-daemon-default-1', service: 'daemon-default',
+        state: 'running', restartPolicy: 'no',
+      },
     ]);
     svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1);
     setContainers([
-      { id: 'app', name: 'web-app-1', state: 'running', restartPolicy: 'unless-stopped' },
       {
-        id: 'job', name: 'web-migrate-1', state: 'exited', exitCode: 0,
+        id: 'daemon', name: 'web-daemon-default-1', service: 'daemon-default',
+        state: 'exited', exitCode: 0, restartPolicy: 'no',
+      },
+    ]);
+    await ticks(1);
+    expect(latest().status).toBe('failed');
+    expect(latest().reason).toContain('exited during observation');
+  });
+
+  it('passes a clean one-shot even when residual health is unhealthy', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
+    setContainers([
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
+    ]);
+    svc().beginStack(0, 'web', 'update', 'tester');
+    await ticks(1);
+    setContainers([
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      {
+        id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0,
         restartPolicy: 'no', health: 'unhealthy',
       },
     ]);
@@ -208,16 +264,17 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('passes a clean one-shot even when residual health is still starting', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
     setContainers([
-      { id: 'app', name: 'web-app-1', state: 'running', restartPolicy: 'unless-stopped' },
-      { id: 'job', name: 'web-migrate-1', state: 'running', restartPolicy: 'no' },
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
     ]);
     svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1);
     setContainers([
-      { id: 'app', name: 'web-app-1', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
       {
-        id: 'job', name: 'web-migrate-1', state: 'exited', exitCode: 0,
+        id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0,
         restartPolicy: 'no', health: 'starting',
       },
     ]);
@@ -228,15 +285,19 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('still fails unhealthy on a long-running container', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
     setContainers([
-      { id: 'app', name: 'web-app-1', state: 'running', restartPolicy: 'unless-stopped' },
-      { id: 'job', name: 'web-migrate-1', state: 'running', restartPolicy: 'no' },
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
     ]);
     svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1);
     setContainers([
-      { id: 'app', name: 'web-app-1', state: 'running', restartPolicy: 'unless-stopped', health: 'unhealthy' },
-      { id: 'job', name: 'web-migrate-1', state: 'exited', exitCode: 0, restartPolicy: 'no' },
+      {
+        id: 'app', name: 'web-app-1', service: 'app', state: 'running',
+        restartPolicy: 'unless-stopped', health: 'unhealthy',
+      },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0, restartPolicy: 'no' },
     ]);
     await ticks(1);
     expect(latest().status).toBe('failed');
@@ -244,15 +305,19 @@ describe('HealthGateService verdicts', () => {
   });
 
   it('still ends unknown when a long-running healthcheck is starting at window end', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
     setContainers([
-      { id: 'app', name: 'web-app-1', state: 'running', restartPolicy: 'unless-stopped' },
-      { id: 'job', name: 'web-migrate-1', state: 'running', restartPolicy: 'no' },
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
     ]);
     svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1);
     setContainers([
-      { id: 'app', name: 'web-app-1', state: 'running', restartPolicy: 'unless-stopped', health: 'starting' },
-      { id: 'job', name: 'web-migrate-1', state: 'exited', exitCode: 0, restartPolicy: 'no' },
+      {
+        id: 'app', name: 'web-app-1', service: 'app', state: 'running',
+        restartPolicy: 'unless-stopped', health: 'starting',
+      },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0, restartPolicy: 'no' },
     ]);
     await ticks(1);
     expect(latest().status).toBe('observing');

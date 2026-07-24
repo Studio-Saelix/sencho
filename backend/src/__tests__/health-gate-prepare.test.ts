@@ -29,6 +29,7 @@ const { state } = vi.hoisted(() => ({
     settings: {} as Record<string, string>,
     listContainers: vi.fn(),
     inspect: vi.fn(),
+    renderConfig: vi.fn(),
   },
 }));
 
@@ -64,6 +65,15 @@ vi.mock('../services/DockerController', () => ({
         listContainers: state.listContainers,
         getContainer: (id: string) => ({ inspect: () => state.inspect(id) }),
       }),
+    }),
+  },
+}));
+
+vi.mock('../services/ComposeService', () => ({
+  getComposeCommandTimeoutMs: () => 30_000,
+  ComposeService: {
+    getInstance: () => ({
+      renderConfig: state.renderConfig,
     }),
   },
 }));
@@ -114,6 +124,24 @@ function setContainers(fixtures: Fixture[]): void {
   });
 }
 
+function setDeclaredRestarts(services: Record<string, string | undefined>): void {
+  const rendered = {
+    name: 'web',
+    services: Object.fromEntries(
+      Object.entries(services).map(([name, restart]) => [
+        name,
+        restart === undefined ? { image: `${name}:1` } : { image: `${name}:1`, restart },
+      ]),
+    ),
+  };
+  state.renderConfig.mockResolvedValue({
+    rendered: JSON.stringify(rendered),
+    stderr: '',
+    code: 0,
+    timedOut: false,
+  });
+}
+
 const svc = () => HealthGateService.getInstance();
 
 async function ticks(n: number): Promise<void> {
@@ -141,6 +169,8 @@ beforeEach(() => {
   state.settings = { health_gate_enabled: '1', health_gate_window_seconds: '30' };
   state.listContainers.mockReset();
   state.inspect.mockReset();
+  state.renderConfig.mockReset();
+  setDeclaredRestarts({ app: 'unless-stopped', db: 'unless-stopped' });
   svc().start();
 });
 
@@ -229,6 +259,7 @@ describe('primary vs collateral attribution', () => {
   });
 
   it('passes when a collateral one-shot exits 0 with restart no', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
     const token = await prepareService([
       { id: 'p1', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped' },
       { id: 's1', name: 'web-migrate-1', service: 'migrate', restartPolicy: 'no' },
@@ -247,6 +278,7 @@ describe('primary vs collateral attribution', () => {
   });
 
   it('passes a collateral one-shot with residual unhealthy health', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
     const token = await prepareService([
       { id: 'p1', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped' },
       { id: 's1', name: 'web-migrate-1', service: 'migrate', restartPolicy: 'no' },
@@ -267,7 +299,31 @@ describe('primary vs collateral attribution', () => {
     expect(svc().getReport(0, 'web', runId!).status).toBe('passed');
   });
 
+  it('fails when a collateral daemon with omitted restart exits 0', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', 'daemon-default': undefined });
+    const token = await prepareService([
+      { id: 'p1', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped' },
+      { id: 's1', name: 'web-daemon-1', service: 'daemon-default', restartPolicy: 'no' },
+    ]);
+    svc().attachExpectedImage(token, 'sha256:app');
+    const { runId } = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
+    await ticks(1);
+    setContainers([
+      { id: 'p1', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped' },
+      {
+        id: 's1', name: 'web-daemon-1', service: 'daemon-default',
+        state: 'exited', exitCode: 0, restartPolicy: 'no',
+      },
+    ]);
+    await ticks(1);
+    const report = svc().getReport(0, 'web', runId!);
+    expect(report.status).toBe('failed');
+    expect(report.failureSource).toBe('collateral');
+    expect(report.reason).toContain('exited during observation');
+  });
+
   it('passes when the primary service is a completed one-shot', async () => {
+    setDeclaredRestarts({ job: 'no' });
     const token = await prepareService([
       { id: 'p1', name: 'web-job-1', service: 'job', restartPolicy: 'no' },
     ], { serviceName: 'job', expectedReplicas: 1 });
@@ -284,6 +340,7 @@ describe('primary vs collateral attribution', () => {
   });
 
   it('passes a primary one-shot with residual unhealthy health', async () => {
+    setDeclaredRestarts({ job: 'no' });
     const token = await prepareService([
       { id: 'p1', name: 'web-job-1', service: 'job', restartPolicy: 'no' },
     ], { serviceName: 'job', expectedReplicas: 1 });
@@ -303,6 +360,7 @@ describe('primary vs collateral attribution', () => {
   });
 
   it('passes a primary one-shot with residual starting health', async () => {
+    setDeclaredRestarts({ job: 'no' });
     const token = await prepareService([
       { id: 'p1', name: 'web-job-1', service: 'job', restartPolicy: 'no' },
     ], { serviceName: 'job', expectedReplicas: 1 });

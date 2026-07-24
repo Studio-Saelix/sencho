@@ -6,14 +6,14 @@ import {
 } from '../utils/oneShotCompletion';
 
 describe('isNoRestartPolicy', () => {
-  it('treats undefined, null, empty string, and no as absent', () => {
-    expect(isNoRestartPolicy(undefined)).toBe(true);
-    expect(isNoRestartPolicy(null)).toBe(true);
-    expect(isNoRestartPolicy('')).toBe(true);
+  it('accepts only explicit no', () => {
     expect(isNoRestartPolicy('no')).toBe(true);
   });
 
-  it('rejects restarting policies', () => {
+  it('rejects absent, empty, and restarting policies', () => {
+    expect(isNoRestartPolicy(undefined)).toBe(false);
+    expect(isNoRestartPolicy(null)).toBe(false);
+    expect(isNoRestartPolicy('')).toBe(false);
     expect(isNoRestartPolicy('unless-stopped')).toBe(false);
     expect(isNoRestartPolicy('always')).toBe(false);
     expect(isNoRestartPolicy('on-failure')).toBe(false);
@@ -27,11 +27,14 @@ describe('isCleanOneShotCompletion', () => {
     restartPolicy: 'no' as string | null | undefined,
   };
 
-  it('returns true only for exited + exit 0 + no/absent restart', () => {
+  it('returns true only for exited + exit 0 + explicit restart no', () => {
     expect(isCleanOneShotCompletion(clean)).toBe(true);
-    expect(isCleanOneShotCompletion({ ...clean, restartPolicy: undefined })).toBe(true);
-    expect(isCleanOneShotCompletion({ ...clean, restartPolicy: null })).toBe(true);
-    expect(isCleanOneShotCompletion({ ...clean, restartPolicy: '' })).toBe(true);
+  });
+
+  it('returns false for absent or empty declared restart', () => {
+    expect(isCleanOneShotCompletion({ ...clean, restartPolicy: undefined })).toBe(false);
+    expect(isCleanOneShotCompletion({ ...clean, restartPolicy: null })).toBe(false);
+    expect(isCleanOneShotCompletion({ ...clean, restartPolicy: '' })).toBe(false);
   });
 
   it('returns false for non-exited states', () => {

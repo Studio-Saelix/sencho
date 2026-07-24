@@ -4,8 +4,14 @@
  * status, Auto-Heal, or atomic-deploy helpers.
  */
 
+/**
+ * True only for an explicit Compose `restart: "no"` (after normalization).
+ * Absent / null / empty do not qualify: Docker reports HostConfig restart
+ * "no" for both intentional one-shots and bare long-running services that
+ * omit `restart:`, so consumers must pass declared Compose intent, not inspect.
+ */
 export function isNoRestartPolicy(policy: string | null | undefined): boolean {
-  return policy == null || policy === '' || policy === 'no';
+  return policy === 'no';
 }
 
 /**
@@ -16,6 +22,7 @@ export function isNoRestartPolicy(policy: string | null | undefined): boolean {
  * Docker-like policy names so {@link isNoRestartPolicy} stays the single gate:
  * `none` → `no`, `any` → `always`, `on-failure` → `on-failure`. Missing
  * condition defaults to `any` (Compose default). Unknown shapes fail closed.
+ * Absent service restart (no deploy policy) stays null and is not one-shot eligible.
  */
 export function normalizeComposeRestartIntent(
   serviceRestart: string | null | undefined,
@@ -50,13 +57,18 @@ export interface OneShotCompletionInput {
   state: string;
   /** Exact Docker exit code; null means unknown (fail closed). */
   exitCode: number | null;
-  /** Restart policy name (inspect HostConfig or effective Compose restart). */
+  /**
+   * Declared Compose restart intent after normalization (`"no"` for explicit
+   * one-shots / `deploy.restart_policy.condition: none`). Do not pass Docker
+   * inspect HostConfig values here.
+   */
   restartPolicy: string | null | undefined;
 }
 
 /**
- * True only for an exited container with exit code exactly 0 and restart policy
- * no/absent. Null exit codes and restarting policies never qualify.
+ * True only for an exited container with exit code exactly 0 and explicit
+ * declared restart `"no"`. Null/absent restart, null exit codes, and restarting
+ * policies never qualify.
  */
 export function isCleanOneShotCompletion(input: OneShotCompletionInput): boolean {
   return input.state === 'exited'

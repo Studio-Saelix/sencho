@@ -167,14 +167,20 @@ describe('assembleStackDrift - status', () => {
     expect(report.findings.find(f => f.kind === 'service-missing')?.service).toBe('migrate');
   });
 
-  it('treats absent declared restart like no for a clean one-shot', () => {
+  it('does not treat absent declared restart as a clean one-shot', () => {
     const report = assembleStackDrift({
       stack: 'app',
-      declared: declared([service({ name: 'migrate' })]),
-      containers: [container({ id: 'c1', service: 'migrate', state: 'exited', exitCode: 0 })],
+      declared: declared([
+        service({ name: 'app', image: 'app:1', restart: 'unless-stopped' }),
+        service({ name: 'daemon-default', image: 'daemon:1' }),
+      ]),
+      containers: [
+        container({ id: 'c1', service: 'app', image: 'app:1' }),
+        container({ id: 'c2', service: 'daemon-default', image: 'daemon:1', state: 'exited', exitCode: 0 }),
+      ],
     });
-    expect(report.status).toBe('in-sync');
-    expect(report.hasContainers).toBe(false);
+    expect(findingKinds(report)).toContain('service-missing');
+    expect(report.findings.find((f) => f.kind === 'service-missing')?.service).toBe('daemon-default');
   });
 
   it('all-one-shot stack with dedicated network is not missing-runtime but keeps network-missing and hasContainers false', () => {
