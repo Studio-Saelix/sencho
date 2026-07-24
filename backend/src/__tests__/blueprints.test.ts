@@ -399,7 +399,7 @@ describe('BlueprintReconciler developer-mode diagnostics', () => {
 });
 
 describe('BlueprintService per-stack lock', () => {
-    it('deploy under a free lock writes compose then marker, then deploys', async () => {
+    it('deploy under a free lock writes compose, cleans siblings, deploys, then writes the marker', async () => {
         const nodeId = seedNode();
         const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
         const node = DatabaseService.getInstance().getNode(nodeId)!;
@@ -419,7 +419,7 @@ describe('BlueprintService per-stack lock', () => {
             source: 'blueprint',
             actor: 'system:blueprint',
         });
-        // Compose is written first, then the marker, both before sibling cleanup and deploy.
+        // Compose is written first; the marker is deferred until after sibling cleanup and deploy.
         expect(writeSpy).toHaveBeenCalledTimes(2);
         expect(writeSpy.mock.calls[0][1]).toBe('compose.yaml');
         expect(writeSpy.mock.calls[0][2]).toBe(bp.compose_content);
@@ -429,9 +429,9 @@ describe('BlueprintService per-stack lock', () => {
         const [composeOrder, markerOrder] = writeSpy.mock.invocationCallOrder;
         const [cleanupOrder] = cleanupSpy.mock.invocationCallOrder;
         const [deployOrder] = deploySpy.mock.invocationCallOrder;
-        expect(composeOrder).toBeLessThan(markerOrder);
-        expect(markerOrder).toBeLessThan(cleanupOrder);
+        expect(composeOrder).toBeLessThan(cleanupOrder);
         expect(cleanupOrder).toBeLessThan(deployOrder);
+        expect(deployOrder).toBeLessThan(markerOrder);
     });
 
     it('deploy skips, writes no stack files, and records failed when the stack lock is held', async () => {
