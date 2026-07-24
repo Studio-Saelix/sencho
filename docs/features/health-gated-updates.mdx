@@ -50,12 +50,12 @@ The 3-second crash probe from [atomic deployments](/features/atomic-deployments)
 During the window, the gate checks every container that came up with the stack:
 
 - all expected containers stay **running** (or finish cleanly as a one-shot; see below),
-- Docker healthchecks report **healthy** wherever a service defines one,
+- Docker healthchecks report **healthy** on long-running containers wherever a service defines one (residual health on a completed one-shot is ignored),
 - no container **crashes** (non-zero exit), **disappears**, or enters a **restart loop**.
 
-A one-shot or init service that finishes with exit code `0` and has restart policy `no` (or no restart policy) counts as a successful completion, not a gate failure. A clean exit under `unless-stopped`, `always`, or `on-failure` still fails the gate. An exit whose code cannot be read also fails the gate.
+A one-shot or init service that finishes with exit code `0` and has restart policy `no` (or no restart policy) counts as a successful completion, not a gate failure. Residual Docker health state on that completed container (`starting` or `unhealthy` from an inherited healthcheck) does not fail or leave the gate unknown. A clean exit under `unless-stopped`, `always`, or `on-failure` still fails the gate. An exit whose code cannot be read also fails the gate.
 
-A clear failure ends the observation immediately. Passing requires the full window, and a healthcheck still in its start period when the window ends records the verdict as unknown rather than claiming success.
+A clear failure ends the observation immediately. Passing requires the full window, and a healthcheck still in its start period on a long-running container when the window ends records the verdict as unknown rather than claiming success.
 
 After a **service-scoped** update or restore, the gate still watches the whole project, but it attributes failures: a problem on the updated service is a primary failure; a previously healthy sibling that regresses during the window is a collateral failure. Siblings that were already unhealthy before the update do not fail the gate on their own.
 
@@ -80,7 +80,7 @@ The gate also runs for updates you did not click: scheduled image updates, webho
 Open **Settings > Infrastructure > Stacks > Deploy Guardrails** on the node you want to configure:
 
 - **Observe health after updates** turns the gate on or off for that node. On by default; turning it off only stops the observation and its timeline events, never the update itself.
-- **Observation window** sets how long containers are watched, from 15 to 600 seconds. The default is 90 seconds; raise it for stacks that take a while to settle, since a healthcheck still starting at the end of the window records an unknown verdict instead of a pass.
+- **Observation window** sets how long containers are watched, from 15 to 600 seconds. The default is 90 seconds; raise it for stacks that take a while to settle, since a long-running healthcheck still starting at the end of the window records an unknown verdict instead of a pass.
 
 <Frame>
   <img src="/images/health-gated-updates/settings.png" alt="Stacks settings page showing the Deploy Guardrails subsection, with the Observe health after updates toggle set to On and the Observation window field set to 90 seconds" />
@@ -112,10 +112,10 @@ When a deploy or update fails, Sencho classifies the failure from the compose ou
     Unknown means one of the verdict-affecting signals could not be verified, most often because Docker or the node did not answer in time. The update path is never blocked by an unknown verdict; check the node's connection if it persists, and proceed when you are confident in the stack's state.
   </Accordion>
   <Accordion title="The health gate failed but my app seems fine">
-    The gate fails on the first clear problem it observes: a non-zero exit, an unexpected clean exit of a service with a restarting policy, an unhealthy healthcheck, a restart loop, or a container disappearing mid-window. A one-shot that exits `0` with `restart: "no"` does not fail the gate. Check the named container's logs from the stack page. If the container legitimately restarts during startup (a migration step that should stay up, for example), raise the observation window under **Settings > Infrastructure > Stacks > Deploy Guardrails** so the gate watches past the settle period.
+    The gate fails on the first clear problem it observes: a non-zero exit, an unexpected clean exit of a service with a restarting policy, an unhealthy healthcheck on a long-running container, a restart loop, or a container disappearing mid-window. A one-shot that exits `0` with `restart: "no"` (or no restart policy) does not fail the gate, including when residual Docker health on that completed container is still starting or unhealthy. Check the named container's logs from the stack page. If the container legitimately restarts during startup (a migration step that should stay up, for example), raise the observation window under **Settings > Infrastructure > Stacks > Deploy Guardrails** so the gate watches past the settle period.
   </Accordion>
   <Accordion title="The health gate result is unknown">
-    Unknown means the observation could not finish: Sencho restarted mid-window, a newer update superseded the observation, Docker became unreachable, a healthcheck was still starting when the window ended, or no containers appeared to observe. The stack timeline records the reason. Check the containers directly; an unknown verdict makes no claim either way.
+    Unknown means the observation could not finish: Sencho restarted mid-window, a newer update superseded the observation, Docker became unreachable, a long-running healthcheck was still starting when the window ended, or no containers appeared to observe. Residual starting health on a completed one-shot does not produce unknown. The stack timeline records the reason. Check the containers directly; an unknown verdict makes no claim either way.
   </Accordion>
   <Accordion title="The modal stays open saying the gate is observing">
     The modal holds its auto-close while the gate observes so the verdict is not lost. You can close it at any time; the observation continues server-side and the verdict lands on the stack timeline. If the gate result repeatedly cannot be retrieved, the modal gives up with an unknown verdict instead of waiting forever.

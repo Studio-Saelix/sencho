@@ -26,7 +26,7 @@ export interface DeclaredService {
   image?: string;
   /** Service `network_mode:` as declared (e.g. `host`), or undefined. */
   networkMode?: string;
-  /** Compose `restart:` policy; null when unset (effective model and raw parser normalize absent to null). */
+  /** Service `restart` from raw YAML parse. The effective-model path may set this via normalizeComposeRestartIntent (including deploy.restart_policy). Null when unset. */
   restart?: string | null;
 }
 

@@ -181,8 +181,9 @@ function networkDriftFindings(
 /**
  * Pure diff step (no Docker / FS access) so it is directly unit-testable.
  * Running/restarting containers drive image/port comparison. Clean one-shot
- * completions (exit 0 + declared restart no/absent) satisfy service presence
- * without counting as hasContainers. Network comparison still uses only
+ * completions (exit 0 + declared no-restart intent, including
+ * `deploy.restart_policy.condition: none`) satisfy service presence without
+ * counting as hasContainers. Network comparison still uses only
  * running/restarting attachments.
  */
 export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftReport {

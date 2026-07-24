@@ -28,7 +28,7 @@ The status badge at the top of the tab summarizes the comparison between the eff
 
 | Status | Meaning |
 |--------|---------|
-| **In sync** | Declared services match runtime: same running services, images, and published ports, or a declared one-shot finished cleanly (`Exited (0)` with `restart: "no"` / no restart policy). |
+| **In sync** | Declared services match runtime: same running services, images, and published ports, or a declared one-shot finished cleanly (`Exited (0)` with no-restart intent: service `restart: "no"` / absent, or `deploy.restart_policy.condition: none`). |
 | **Not running** | The stack has no running containers, and no declared service is satisfied by a finished one-shot. The file is present but nothing is up. |
 | **Drifted** | Something differs from the model. Specific findings are listed below the badge. |
 | **Unreachable** | Docker could not be reached on the active node, so drift cannot be assessed. |
@@ -157,7 +157,7 @@ Viewing the tab requires read access to the stack; any role that can see a stack
 
 <AccordionGroup>
   <Accordion title="A stack I deliberately stopped shows as 'Not running'">
-    That is expected for long-running services. Drift compares the file on disk against what is actually running, so a stack with no running containers and no finished one-shot jobs reports **Not running** even when you stopped it intentionally. Deploy it to return it to **In sync**. A stack made only of one-shot jobs that already exited `0` with `restart: "no"` can show **In sync** (or **Drifted** for other findings such as unused networks) with no containers currently running.
+    That is expected for long-running services. Drift compares the file on disk against what is actually running, so a stack with no running containers and no finished one-shot jobs reports **Not running** even when you stopped it intentionally. Deploy it to return it to **In sync**. A stack made only of one-shot jobs that already exited `0` with no-restart intent (`restart: "no"` or `deploy.restart_policy.condition: none`) can show **In sync** (or **Drifted** for other findings such as unused networks) with no containers currently running.
   </Accordion>
   <Accordion title="The image finding flags a stack I just updated">
     Click **re-check** after the deploy finishes. During a rolling update, replicas can briefly run different images, and the report captures that moment. Once every container is on the declared image, the finding clears.

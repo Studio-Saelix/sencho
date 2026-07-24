@@ -246,6 +246,27 @@ describe('primary vs collateral attribution', () => {
     expect(svc().getReport(0, 'web', runId!).status).toBe('passed');
   });
 
+  it('passes a collateral one-shot with residual unhealthy health', async () => {
+    const token = await prepareService([
+      { id: 'p1', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped' },
+      { id: 's1', name: 'web-migrate-1', service: 'migrate', restartPolicy: 'no' },
+    ]);
+    svc().attachExpectedImage(token, 'sha256:app');
+    const { runId } = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
+    await ticks(1);
+    setContainers([
+      { id: 'p1', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped' },
+      {
+        id: 's1', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0,
+        restartPolicy: 'no', health: 'unhealthy',
+      },
+    ]);
+    await ticks(1);
+    expect(svc().getReport(0, 'web', runId!).status).toBe('observing');
+    await ticks(6);
+    expect(svc().getReport(0, 'web', runId!).status).toBe('passed');
+  });
+
   it('passes when the primary service is a completed one-shot', async () => {
     const token = await prepareService([
       { id: 'p1', name: 'web-job-1', service: 'job', restartPolicy: 'no' },
@@ -255,6 +276,44 @@ describe('primary vs collateral attribution', () => {
     await ticks(1);
     setContainers([
       { id: 'p1', name: 'web-job-1', service: 'job', state: 'exited', exitCode: 0, restartPolicy: 'no', imageId: 'sha256:app' },
+    ]);
+    await ticks(1);
+    expect(svc().getReport(0, 'web', runId!).status).toBe('observing');
+    await ticks(6);
+    expect(svc().getReport(0, 'web', runId!).status).toBe('passed');
+  });
+
+  it('passes a primary one-shot with residual unhealthy health', async () => {
+    const token = await prepareService([
+      { id: 'p1', name: 'web-job-1', service: 'job', restartPolicy: 'no' },
+    ], { serviceName: 'job', expectedReplicas: 1 });
+    svc().attachExpectedImage(token, 'sha256:app');
+    const { runId } = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
+    await ticks(1);
+    setContainers([
+      {
+        id: 'p1', name: 'web-job-1', service: 'job', state: 'exited', exitCode: 0,
+        restartPolicy: 'no', health: 'unhealthy', imageId: 'sha256:app',
+      },
+    ]);
+    await ticks(1);
+    expect(svc().getReport(0, 'web', runId!).status).toBe('observing');
+    await ticks(6);
+    expect(svc().getReport(0, 'web', runId!).status).toBe('passed');
+  });
+
+  it('passes a primary one-shot with residual starting health', async () => {
+    const token = await prepareService([
+      { id: 'p1', name: 'web-job-1', service: 'job', restartPolicy: 'no' },
+    ], { serviceName: 'job', expectedReplicas: 1 });
+    svc().attachExpectedImage(token, 'sha256:app');
+    const { runId } = svc().beginPrepared({ prepareToken: token, actor: 'tester' });
+    await ticks(1);
+    setContainers([
+      {
+        id: 'p1', name: 'web-job-1', service: 'job', state: 'exited', exitCode: 0,
+        restartPolicy: 'no', health: 'starting', imageId: 'sha256:app',
+      },
     ]);
     await ticks(1);
     expect(svc().getReport(0, 'web', runId!).status).toBe('observing');

@@ -212,6 +212,37 @@ describe('assembleStackDrift - status', () => {
     expect(report.findings).toEqual([]);
   });
 
+  it('emits service-missing when normalized restart is always (deploy any)', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([
+        service({ name: 'app', image: 'app:1', restart: 'unless-stopped' }),
+        service({ name: 'worker', image: 'worker:1', restart: 'always' }),
+      ]),
+      containers: [
+        container({ id: 'c1', service: 'app', image: 'app:1' }),
+        container({ id: 'c2', service: 'worker', image: 'worker:1', state: 'exited', exitCode: 0 }),
+      ],
+    });
+    expect(findingKinds(report)).toContain('service-missing');
+    expect(report.findings.find((f) => f.kind === 'service-missing')?.service).toBe('worker');
+  });
+
+  it('emits service-missing when normalized restart is on-failure', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([
+        service({ name: 'app', image: 'app:1', restart: 'unless-stopped' }),
+        service({ name: 'worker', image: 'worker:1', restart: 'on-failure' }),
+      ]),
+      containers: [
+        container({ id: 'c1', service: 'app', image: 'app:1' }),
+        container({ id: 'c2', service: 'worker', image: 'worker:1', state: 'exited', exitCode: 0 }),
+      ],
+    });
+    expect(findingKinds(report)).toContain('service-missing');
+  });
+
   it('counts a restarting container as deployed', () => {
     const report = assembleStackDrift({
       stack: 'app',
@@ -584,6 +615,56 @@ describe('declaredFromEffectiveModel', () => {
       volumes: {},
     });
     expect(absent.services[0].restart).toBeNull();
+  });
+
+  it('normalizes deploy.restart_policy conditions with Compose precedence', () => {
+    const none = declaredFromEffectiveModel({
+      projectName: 'app',
+      services: [effSvc({
+        name: 'migrate',
+        restart: 'unless-stopped',
+        deploy: { restart_policy: { condition: 'none' } },
+      })],
+      networks: {},
+      volumes: {},
+    });
+    expect(none.services[0].restart).toBe('no');
+
+    const any = declaredFromEffectiveModel({
+      projectName: 'app',
+      services: [effSvc({
+        name: 'worker',
+        restart: 'no',
+        deploy: { restart_policy: { condition: 'any' } },
+      })],
+      networks: {},
+      volumes: {},
+    });
+    expect(any.services[0].restart).toBe('always');
+
+    const onFailure = declaredFromEffectiveModel({
+      projectName: 'app',
+      services: [effSvc({
+        name: 'worker',
+        restart: undefined,
+        deploy: { restart_policy: { condition: 'on-failure' } },
+      })],
+      networks: {},
+      volumes: {},
+    });
+    expect(onFailure.services[0].restart).toBe('on-failure');
+
+    const defaultAny = declaredFromEffectiveModel({
+      projectName: 'app',
+      services: [effSvc({
+        name: 'worker',
+        restart: 'no',
+        deploy: { restart_policy: {} },
+      })],
+      networks: {},
+      volumes: {},
+    });
+    expect(defaultAny.services[0].restart).toBe('always');
   });
 
   it('normalizes networks so drift matches the rendered model', () => {

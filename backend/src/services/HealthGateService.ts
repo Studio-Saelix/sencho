@@ -645,15 +645,16 @@ export class HealthGateService {
       }
       gate.missingLastPoll.delete(name);
 
-      if (current.state === 'exited' && baseline.restarts === current.restarts) {
-        if (!isCleanOneShotCompletion(current)) {
-          // An exit with no restart attempt is terminal for the window, unless
-          // this is an expected one-shot (exit 0 + restart no/absent).
-          this.finalize(gate, 'failed', `container ${name} exited during observation`, summary);
-          return;
-        }
+      const cleanOneShot = isCleanOneShotCompletion(current);
+      // An exit with no restart attempt is terminal for the window, unless
+      // this is an expected one-shot (exit 0 + restart no/absent).
+      if (current.state === 'exited' && baseline.restarts === current.restarts && !cleanOneShot) {
+        this.finalize(gate, 'failed', `container ${name} exited during observation`, summary);
+        return;
       }
-      if (current.health === 'unhealthy') {
+      // Residual Docker health on a completed one-shot is not a gate failure;
+      // long-running containers still fail on unhealthy.
+      if (!cleanOneShot && current.health === 'unhealthy') {
         this.finalize(gate, 'failed', `container ${name} reported unhealthy`, summary);
         return;
       }
@@ -678,8 +679,10 @@ export class HealthGateService {
 
     // Window complete: pass requires everything running (or a clean one-shot
     // completion) and healthy wherever a healthcheck exists. A health state
-    // still 'starting' is not a pass.
-    const stillStarting = observed.filter(c => c.health === 'starting');
+    // still 'starting' is not a pass (except residual health on a clean one-shot).
+    const stillStarting = observed.filter(
+      c => c.health === 'starting' && !isCleanOneShotCompletion(c),
+    );
     if (stillStarting.length > 0) {
       this.finalize(gate, 'unknown', 'a healthcheck was still starting when the observation window ended', summary);
       return;
@@ -801,13 +804,12 @@ export class HealthGateService {
       }
       gate.missingLastPoll.delete(name);
 
-      if (current.state === 'exited' && baseline.restarts === current.restarts) {
-        if (!isCleanOneShotCompletion(current)) {
-          this.finalize(gate, 'failed', `${noun} ${name} exited during observation`, summary, role);
-          return;
-        }
+      const cleanOneShot = isCleanOneShotCompletion(current);
+      if (current.state === 'exited' && baseline.restarts === current.restarts && !cleanOneShot) {
+        this.finalize(gate, 'failed', `${noun} ${name} exited during observation`, summary, role);
+        return;
       }
-      if (current.health === 'unhealthy') {
+      if (!cleanOneShot && current.health === 'unhealthy') {
         this.finalize(gate, 'failed', `${noun} ${name} reported unhealthy`, summary, role);
         return;
       }
@@ -830,7 +832,9 @@ export class HealthGateService {
     if (elapsedMs < gate.windowSeconds * 1000) return;
 
     const stillStarting = observed.filter(
-      c => c.health === 'starting' && (c.service === serviceName || gate.collateralEligibleNames.has(c.name)),
+      c => c.health === 'starting'
+        && !isCleanOneShotCompletion(c)
+        && (c.service === serviceName || gate.collateralEligibleNames.has(c.name)),
     );
     if (stillStarting.length > 0) {
       this.finalize(gate, 'unknown', 'a healthcheck was still starting when the observation window ended', summary);

@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { isCleanOneShotCompletion, isNoRestartPolicy } from '../utils/oneShotCompletion';
+import {
+  isCleanOneShotCompletion,
+  isNoRestartPolicy,
+  normalizeComposeRestartIntent,
+} from '../utils/oneShotCompletion';
 
 describe('isNoRestartPolicy', () => {
   it('treats undefined, null, empty string, and no as absent', () => {
@@ -47,5 +51,39 @@ describe('isCleanOneShotCompletion', () => {
     expect(isCleanOneShotCompletion({ ...clean, restartPolicy: 'unless-stopped' })).toBe(false);
     expect(isCleanOneShotCompletion({ ...clean, restartPolicy: 'always' })).toBe(false);
     expect(isCleanOneShotCompletion({ ...clean, restartPolicy: 'on-failure' })).toBe(false);
+  });
+});
+
+describe('normalizeComposeRestartIntent', () => {
+  it('falls back to service restart when deploy.restart_policy is unset', () => {
+    expect(normalizeComposeRestartIntent('no')).toBe('no');
+    expect(normalizeComposeRestartIntent('unless-stopped')).toBe('unless-stopped');
+    expect(normalizeComposeRestartIntent(undefined)).toBeNull();
+    expect(normalizeComposeRestartIntent(null, {})).toBeNull();
+    expect(normalizeComposeRestartIntent('always', { replicas: 2 })).toBe('always');
+  });
+
+  it('maps deploy.restart_policy.condition with Compose defaults and precedence', () => {
+    expect(normalizeComposeRestartIntent('unless-stopped', {
+      restart_policy: { condition: 'none' },
+    })).toBe('no');
+    expect(normalizeComposeRestartIntent(null, {
+      restart_policy: { condition: 'any' },
+    })).toBe('always');
+    expect(normalizeComposeRestartIntent('no', {
+      restart_policy: { condition: 'on-failure' },
+    })).toBe('on-failure');
+    expect(normalizeComposeRestartIntent('no', {
+      restart_policy: {},
+    })).toBe('always');
+  });
+
+  it('fails closed on malformed restart_policy shapes', () => {
+    expect(normalizeComposeRestartIntent('no', { restart_policy: null })).toBe('always');
+    expect(normalizeComposeRestartIntent('no', { restart_policy: 'none' })).toBe('always');
+    expect(normalizeComposeRestartIntent('no', { restart_policy: [] })).toBe('always');
+    expect(normalizeComposeRestartIntent('no', {
+      restart_policy: { condition: 'weird' },
+    })).toBe('always');
   });
 });
