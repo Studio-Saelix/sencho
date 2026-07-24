@@ -15,6 +15,7 @@ import { HealthGateService } from '../services/HealthGateService';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
+import { FLEET_UPDATE_CACHE_KEY, invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import { summarizeBlockReasons } from '../utils/policy-risk';
 import { isValidStackName } from '../utils/validation';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -22,7 +23,6 @@ import { logDebugTiming } from '../utils/requestTiming';
 import { getErrorMessage } from '../utils/errors';
 
 // Fleet aggregation cache: 2-minute TTL, shared across dashboard tabs.
-const FLEET_UPDATE_CACHE_KEY = 'fleet-updates';
 const FLEET_CACHE_TTL = 120_000;
 const REMOTE_NODE_FETCH_TIMEOUT_MS = 5000;
 
@@ -304,7 +304,7 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
     }
   }
 
-  CacheService.getInstance().invalidate(FLEET_UPDATE_CACHE_KEY);
+  invalidateFleetUpdateCache();
   res.json({ triggered, rateLimited, failed });
 });
 
@@ -458,7 +458,7 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
       }
     }
 
-    CacheService.getInstance().invalidate(FLEET_UPDATE_CACHE_KEY);
+    invalidateFleetUpdateCache();
     res.json({ result: results.join('\n') });
   } catch (error) {
     const msg = getErrorMessage(error, 'Auto-update execution failed');

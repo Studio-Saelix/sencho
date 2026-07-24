@@ -72,6 +72,9 @@ export interface StackCard {
   // Name of the service currently applying a per-service update on this card,
   // or null when none is in flight. Distinct from `applying` (full-stack).
   applyingService: string | null;
+  // Post-Apply verification note when Compose succeeded but clearance could
+  // not be confirmed (distinct from a failed preview fetch).
+  verificationNote: string | null;
 }
 
 interface NodeGroup {
@@ -212,9 +215,10 @@ function StackReadinessCard({
   onApply: (stack: string, nodeId: number) => void;
   onApplyService?: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled } = card;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote } = card;
   const loading = !previewLoaded;
-  const failed = previewLoaded && preview === null;
+  const uncertain = previewLoaded && !!verificationNote;
+  const failed = previewLoaded && preview === null && !verificationNote;
   const blocked = preview?.summary.blocked ?? false;
   const bump = preview?.summary.semver_bump ?? 'none';
   const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
@@ -248,6 +252,10 @@ function StackReadinessCard({
 
       {loading ? (
         <div className="font-mono text-xs text-stat-subtitle/80">Checking registry...</div>
+      ) : uncertain ? (
+        <div className="font-mono text-xs text-warning">
+          {verificationNote}
+        </div>
       ) : failed ? (
         <div className="font-mono text-xs text-destructive/80">
           Preview failed. Registry may be unreachable.
@@ -477,8 +485,9 @@ export function MobileReadinessCard({
   onApply: (stack: string, nodeId: number) => void;
   onApplyService?: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled } = card;
-  const failed = previewLoaded && preview === null;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote } = card;
+  const uncertain = previewLoaded && !!verificationNote;
+  const failed = previewLoaded && preview === null && !verificationNote;
   const blocked = preview?.summary.blocked ?? false;
   const bump = preview?.summary.semver_bump ?? 'none';
   const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
@@ -508,6 +517,8 @@ export function MobileReadinessCard({
 
       {!previewLoaded ? (
         <div className="font-mono text-xs text-stat-subtitle/80">Checking registry...</div>
+      ) : uncertain ? (
+        <div className="font-mono text-xs text-warning">{verificationNote}</div>
       ) : failed ? (
         <div className="font-mono text-xs text-destructive/80">Preview failed. Registry may be unreachable.</div>
       ) : (
@@ -753,6 +764,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             applying: false,
             applyingService: null,
             autoUpdateEnabled: scheduledTask !== null,
+            verificationNote: null,
           };
         });
         initialGroups.push({
@@ -948,8 +960,26 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         ...g,
         cards: g.cards.map(c => predicate(c) ? { ...c, ...patch } : c),
       })));
+    const matchCard = (c: StackCard) => c.stack === stack && c.nodeId === nodeId;
+    const removeCard = () => setGroups(prev => prev
+      .map(g => g.nodeId === nodeId
+        ? { ...g, cards: g.cards.filter(c => c.stack !== stack) }
+        : g)
+      .filter(g => g.cards.length > 0));
+    const retainPreviewFailed = () => setCardField(matchCard, {
+      applying: false,
+      preview: null,
+      previewLoaded: true,
+      verificationNote: null,
+    });
+    const retainUncertain = (note: string) => setCardField(matchCard, {
+      applying: false,
+      preview: null,
+      previewLoaded: true,
+      verificationNote: note,
+    });
 
-    setCardField(c => c.stack === stack && c.nodeId === nodeId, { applying: true });
+    setCardField(matchCard, { applying: true, verificationNote: null });
     const loadingId = toast.loading(`Applying update to ${stack}...`);
     try {
       const res = await fetchForNode(
@@ -961,15 +991,53 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         const data = await res.json().catch(() => ({ error: 'Update failed' }));
         throw new Error(data.error ?? 'Update failed');
       }
-      toast.success(`${stack} updated successfully`);
-      setGroups(prev => prev
-        .map(g => g.nodeId === nodeId
-          ? { ...g, cards: g.cards.filter(c => c.stack !== stack) }
-          : g)
-        .filter(g => g.cards.length > 0));
+      const body = await res.json().catch(() => ({})) as { recheckWarning?: unknown };
+      const recheckWarning = typeof body.recheckWarning === 'string' ? body.recheckWarning : undefined;
+      if (recheckWarning) toast.info(recheckWarning);
+      else toast.success(`${stack} updated successfully`);
+
+      // Authoritative live preview decides card removal. When it disagrees with
+      // a backend recheckWarning (preview cleared, persisted check uncertain),
+      // keep an uncertain card so Fleet does not diverge from the sidebar.
+      try {
+        const previewRes = await fetchForNode(
+          `/stacks/${encodeURIComponent(stack)}/update-preview`,
+          nodeId,
+        );
+        if (!previewRes.ok) {
+          retainPreviewFailed();
+          return;
+        }
+        const next = await previewRes.json() as UpdatePreview;
+        if (typeof next?.summary?.has_update !== 'boolean') {
+          retainPreviewFailed();
+          return;
+        }
+        if (next.summary.has_update) {
+          if (!recheckWarning) {
+            toast.info(
+              'The update command completed, but Sencho still detects an available image update.',
+            );
+          }
+          setCardField(matchCard, {
+            applying: false,
+            preview: next,
+            previewLoaded: true,
+            verificationNote: null,
+          });
+          return;
+        }
+        if (recheckWarning) {
+          retainUncertain(recheckWarning);
+          return;
+        }
+        removeCard();
+      } catch {
+        retainPreviewFailed();
+      }
     } catch (err) {
       toast.error((err as Error)?.message || 'Update failed');
-      setCardField(c => c.stack === stack && c.nodeId === nodeId, { applying: false });
+      setCardField(matchCard, { applying: false });
     } finally {
       toast.dismiss(loadingId);
     }

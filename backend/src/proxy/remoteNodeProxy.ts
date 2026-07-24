@@ -11,6 +11,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { redactSensitiveText } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
 import { logDebugTiming, templatizeHydrationPath } from '../utils/requestTiming';
+import { invalidateFleetUpdateCache, isFullStackUpdatePath } from '../helpers/fleetUpdateCache';
 
 /**
  * Per-request hop timing for the critical hydration GETs, kept off the Request
@@ -174,6 +175,18 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         if (timing) {
           timing.upstreamStatus = proxyRes.statusCode;
           timing.ttfbMs = Date.now() - timing.startedAt;
+        }
+        // Hub fleet aggregation is local-only. A successful remote full-stack
+        // update must drop the hub cache so Fleet Readiness cannot resurrect
+        // a verified-cleared card from a stale 120s entry.
+        const status = proxyRes.statusCode ?? 0;
+        if (
+          req.method === 'POST'
+          && status >= 200
+          && status < 300
+          && isFullStackUpdatePath(req.path)
+        ) {
+          invalidateFleetUpdateCache();
         }
       },
       error: (err, req, proxyRes) => {

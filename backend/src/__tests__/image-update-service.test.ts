@@ -1616,7 +1616,7 @@ services:
   });
 
   describe('recheckStack', () => {
-    it('persists a fresh per-service reduction and returns no warning on success', async () => {
+    it('returns still_present when a checkable service still has an update', async () => {
       mockBuildEffectiveServiceModel.mockResolvedValueOnce({
         renderable: true,
         services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
@@ -1629,7 +1629,10 @@ services:
 
       const result = await service.recheckStack(1, 'stackA');
 
-      expect(result).toEqual({ warning: null });
+      expect(result).toEqual({
+        outcome: 'still_present',
+        warning: 'The update command completed, but Sencho still detects an available image update.',
+      });
       expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
         1, 'stackA', true, expect.any(Number), 'ok', null,
         [
@@ -1640,13 +1643,62 @@ services:
       );
     });
 
-    it('returns a warning and leaves the prior row untouched when the model cannot render', async () => {
+    it('returns cleared when every checkable service is up to date', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({ hasUpdate: false });
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({ outcome: 'cleared', warning: null });
+      expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
+        1, 'stackA', false, expect.any(Number), 'ok', null,
+        expect.any(Array),
+        expect.any(Number),
+      );
+    });
+
+    it('returns verification_failed and leaves the prior row untouched when the model cannot render', async () => {
       mockBuildEffectiveServiceModel.mockResolvedValueOnce({ renderable: false, code: 'effective_model_render_failed', error: 'no model in test' });
       const service = ImageUpdateService.getInstance();
 
       const result = await service.recheckStack(1, 'stackA');
 
-      expect(result).toEqual({ warning: 'no model in test' });
+      expect(result).toEqual({ outcome: 'verification_failed', warning: 'no model in test' });
+      expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+      expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+    });
+
+    it('returns verification_incomplete and preserves prior hasUpdate on a fully failed check', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      mockGetStackServicesJson.mockReturnValueOnce([
+        { service: 'web', image: 'web:latest', hasUpdate: true, checkStatus: 'ok', lastError: null },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({
+        hasUpdate: false,
+        error: 'registry timeout',
+      });
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({
+        outcome: 'verification_incomplete',
+        warning: 'The update command completed, but Sencho could not fully verify whether an image update remains.',
+      });
+      expect(mockRecordStackCheckFailure).toHaveBeenCalled();
       expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
     });
   });
