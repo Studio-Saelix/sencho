@@ -319,12 +319,9 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
                 return;
             }
         }
-        // Best-effort cleanup before delete: withdraw exactly the rows a stateful delete would
-        // block, i.e. stacks Sencho deployed and still owns (last_deployed_at set, and neither a
-        // name_conflict nor an already-withdrawn row). Skip never-deployed / name_conflict /
-        // withdrawn rows: there is nothing Sencho owns to remove. When withdraw does run,
-        // ownership is enforced under the delete lock via a matching `.blueprint.json`.
-        // The blueprint-delete cascade removes the rows the loop skips.
+        // Withdraw owned deployments before delete. Fail closed: if any withdraw does not
+        // complete as withdrawn, keep the blueprint (and its deployment rows) so the operator
+        // can retry. Never orphan a live stack by deleting the only control-plane record.
         const nodes = DatabaseService.getInstance().getNodes();
         const deployments = DatabaseService.getInstance().listDeployments(id);
         for (const dep of deployments) {
@@ -332,9 +329,24 @@ blueprintsRouter.delete('/:id', async (req: Request, res: Response): Promise<voi
             const node = nodes.find(n => n.id === dep.node_id);
             if (!node) continue;
             try {
-                await BlueprintService.getInstance().withdrawFromNode(blueprint, node);
+                const outcome = await BlueprintService.getInstance().withdrawFromNode(blueprint, node);
+                if (outcome.status !== 'withdrawn') {
+                    res.status(409).json({
+                        error: `Cannot delete blueprint: withdraw on node "${node.name}" ended as ${outcome.status}. Resolve that deployment, then retry.`,
+                        code: 'withdraw_failed_blocking_delete',
+                        nodeId: node.id,
+                        withdrawStatus: outcome.status,
+                    });
+                    return;
+                }
             } catch (err) {
                 console.warn(`[Blueprints] Pre-delete withdraw failed for blueprint ${id} on node ${node.id}:`, err);
+                res.status(409).json({
+                    error: `Cannot delete blueprint: withdraw on node "${node.name}" failed. Resolve that deployment, then retry.`,
+                    code: 'withdraw_failed_blocking_delete',
+                    nodeId: node.id,
+                });
+                return;
             }
         }
         DatabaseService.getInstance().deleteBlueprint(id);

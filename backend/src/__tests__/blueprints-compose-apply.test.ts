@@ -89,6 +89,7 @@ describe('Blueprint compose apply (real filesystem)', () => {
         const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
         expect(await fsPromises.readFile(path.join(stackDir, 'compose.yaml'), 'utf-8')).toBe(composeContent);
         await expectMissing(path.join(stackDir, 'docker-compose.yml'));
+        expect(await fsPromises.readFile(path.join(stackDir, '.blueprint.json'), 'utf-8')).toBe(markerContent);
 
         const resolved = await FileSystemService.getInstance(nodeId).getComposeFilename(stackName);
         expect(resolved).toBe('compose.yaml');
@@ -135,7 +136,56 @@ describe('Blueprint compose apply (real filesystem)', () => {
         await expectMissing(path.join(stackDir, 'compose.yml'));
         await expectMissing(path.join(stackDir, 'docker-compose.yaml'));
         await expectMissing(path.join(stackDir, 'docker-compose.yml'));
+        expect(await fsPromises.readFile(path.join(stackDir, '.blueprint.json'), 'utf-8')).toBe(markerContent);
         expect(deploySpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not write a new marker when deploy fails; rolls back a newly created stack', async () => {
+        const nodeId = seedLocalNode();
+        const stackName = `bp-partial-${counter}`;
+        const composeContent = 'services:\n  web:\n    image: traefik:v3\n';
+        const markerContent = JSON.stringify({ blueprintId: 7, revision: 1, lastApplied: Date.now() }, null, 2);
+        const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
+
+        vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(new Error('docker unavailable'));
+
+        await expect(
+            BlueprintService.getInstance().applyLocalUnderLock(
+                nodeId,
+                stackName,
+                composeContent,
+                markerContent,
+                '/api/blueprints/test/apply',
+            ),
+        ).rejects.toThrow(/docker unavailable/);
+
+        await expectMissing(path.join(stackDir, '.blueprint.json'));
+        await expectMissing(stackDir);
+    });
+
+    it('keeps the prior marker when a re-apply deploy fails', async () => {
+        const nodeId = seedLocalNode();
+        const stackName = `bp-reapply-fail-${counter}`;
+        const stackDir = path.join(process.env.COMPOSE_DIR!, stackName);
+        const priorMarker = JSON.stringify({ blueprintId: 8, revision: 2, lastApplied: 1 }, null, 2);
+        await fsPromises.mkdir(stackDir, { recursive: true });
+        await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services:\n  old:\n    image: nginx\n');
+        await fsPromises.writeFile(path.join(stackDir, '.blueprint.json'), priorMarker);
+
+        vi.spyOn(ComposeService.prototype, 'deployStack').mockRejectedValue(new Error('deploy blew up'));
+
+        await expect(
+            BlueprintService.getInstance().applyLocalUnderLock(
+                nodeId,
+                stackName,
+                'services:\n  new:\n    image: redis:7\n',
+                JSON.stringify({ blueprintId: 8, revision: 3, lastApplied: Date.now() }, null, 2),
+                '/api/blueprints/test/apply',
+            ),
+        ).rejects.toThrow(/deploy blew up/);
+
+        expect(await fsPromises.readFile(path.join(stackDir, '.blueprint.json'), 'utf-8')).toBe(priorMarker);
+        expect(await fsPromises.access(stackDir).then(() => true, () => false)).toBe(true);
     });
 
     it('refuses to overwrite an existing unmanaged stack directory inside the lock', async () => {

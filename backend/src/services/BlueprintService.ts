@@ -490,14 +490,14 @@ export class BlueprintService {
     }
 
     /**
-     * Create the stack if needed, write the compose and marker files, run the
-     * deploy policy gate, and deploy, all under the per-stack operation lock so
-     * none of it can race a manual deploy/update/rollback/backup on the same
-     * stack and node. Runs on the node that owns the stack: deployLocal calls it
-     * for the hub's own node, and the /api/blueprints/apply-local route calls it
-     * on a remote node receiving a blueprint apply from its hub (so the file
-     * writes hold the remote's lock, not just the deploy). On lock conflict
-     * nothing is written and { ran: false } is returned.
+     * Create the stack if needed, write the compose file, run the deploy policy
+     * gate and deploy, then write the marker, all under the per-stack operation
+     * lock. The marker is written only after a successful deploy so a failed
+     * apply cannot claim an applied revision that never ran. Runs on the node
+     * that owns the stack: deployLocal calls it for the hub's own node, and the
+     * /api/blueprints/apply-local route calls it on a remote node receiving a
+     * blueprint apply from its hub. On lock conflict nothing is written and
+     * { ran: false } is returned.
      */
     async applyLocalUnderLock(
         nodeId: number,
@@ -514,6 +514,7 @@ export class BlueprintService {
         const lock = await StackOpLockService.getInstance().runExclusive(
             nodeId, stackName, 'deploy', 'system',
             async () => {
+                let createdStack = false;
                 if (await this.stackDirExists(nodeId, stackName)) {
                     const existing = await this.readLocalMarkerFromDisk(nodeId, stackName);
                     if (existing.kind === 'failed') {
@@ -528,22 +529,38 @@ export class BlueprintService {
                     }
                 } else {
                     await fs.createStack(stackName);
+                    createdStack = true;
                 }
                 await fs.writeStackFile(stackName, COMPOSE_FILENAME, composeContent);
-                await fs.writeStackFile(stackName, BLUEPRINT_MARKER_FILENAME, markerContent);
                 // Clear lower-priority compose siblings so discovery cannot shadow compose.yaml.
                 await fs.removeAlternateRootComposeFiles(stackName);
-                await assertPolicyGateAllows(
-                    stackName,
-                    nodeId,
-                    buildSystemPolicyGateOptions('blueprint', { auditPath }),
-                );
-                await ComposeService.getInstance(nodeId).deployStack(
-                    stackName,
-                    undefined,
-                    false,
-                    { source: 'blueprint', actor: 'system:blueprint' },
-                );
+                try {
+                    await assertPolicyGateAllows(
+                        stackName,
+                        nodeId,
+                        buildSystemPolicyGateOptions('blueprint', { auditPath }),
+                    );
+                    await ComposeService.getInstance(nodeId).deployStack(
+                        stackName,
+                        undefined,
+                        false,
+                        { source: 'blueprint', actor: 'system:blueprint' },
+                    );
+                    await fs.writeStackFile(stackName, BLUEPRINT_MARKER_FILENAME, markerContent);
+                } catch (err) {
+                    if (createdStack) {
+                        try {
+                            await fs.deleteStack(stackName);
+                        } catch (cleanupErr) {
+                            console.warn(
+                                '[BlueprintService] Failed to roll back newly created stack "%s" after apply error: %s',
+                                sanitizeForLog(stackName),
+                                sanitizeForLog(BlueprintService.formatError(cleanupErr)),
+                            );
+                        }
+                    }
+                    throw err;
+                }
             },
         );
         return lock.ran ? { ran: true } : { ran: false, existingAction: lock.existing.action };

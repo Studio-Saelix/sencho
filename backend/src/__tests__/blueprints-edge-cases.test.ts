@@ -184,6 +184,34 @@ describe('Blueprint delete guard', () => {
         expect(DatabaseService.getInstance().getBlueprint(bp.id)).toBeUndefined();
     });
 
+    it('refuses to delete a stateless blueprint when pre-delete withdraw fails', async () => {
+        const node = seedNode();
+        const bp = seedBlueprint([node.id]);
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'failed',
+            applied_revision: bp.revision,
+            last_deployed_at: Date.now(),
+            last_error: 'Remote node lacks withdraw-local',
+        });
+        const withdrawSpy = vi.spyOn(BlueprintService.getInstance(), 'withdrawFromNode').mockResolvedValue({
+            status: 'failed',
+            error: 'Remote node does not support atomic blueprint withdraw',
+        });
+
+        const res = await request(app)
+            .delete(`/api/blueprints/${bp.id}`)
+            .set('Cookie', adminCookie);
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('withdraw_failed_blocking_delete');
+        expect(res.body.nodeId).toBe(node.id);
+        expect(withdrawSpy).toHaveBeenCalledTimes(1);
+        expect(DatabaseService.getInstance().getBlueprint(bp.id)).toBeDefined();
+        expect(DatabaseService.getInstance().listDeployments(bp.id)).toHaveLength(1);
+    });
+
     it('refuses to delete when a pending review still has a deployed stack (revision drift)', async () => {
         const node = seedNode();
         const bp = seedBlueprint([node.id], 'stateful');
