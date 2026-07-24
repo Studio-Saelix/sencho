@@ -109,12 +109,19 @@ vi.mock('../services/NodeRegistry', () => ({
   },
 }));
 
-// compareLocalToRemoteTag is module-scoped inside checkImage; mock it to drive the
-// comparison outcome while keeping the real parseImageRef / selectLocalRepoDigest.
-const { mockCompareLocalToRemoteTag } = vi.hoisted(() => ({ mockCompareLocalToRemoteTag: vi.fn() }));
+// checkImage uses detectImageUpdateAvailability, which calls registry-api helpers;
+// mock compare/listTags to drive outcomes while keeping real parseImageRef / selectLocalRepoDigest.
+const { mockCompareLocalToRemoteTag, mockListRegistryTags } = vi.hoisted(() => ({
+  mockCompareLocalToRemoteTag: vi.fn(),
+  mockListRegistryTags: vi.fn().mockResolvedValue([]),
+}));
 vi.mock('../services/registry-api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/registry-api')>();
-  return { ...actual, compareLocalToRemoteTag: mockCompareLocalToRemoteTag };
+  return {
+    ...actual,
+    compareLocalToRemoteTag: mockCompareLocalToRemoteTag,
+    listRegistryTags: mockListRegistryTags,
+  };
 });
 
 // ── Re-export internal helpers via the module ─────────────────────────
@@ -218,6 +225,7 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockListRegistryTags.mockResolvedValue([]);
     (ImageUpdateService as any).instance = undefined;
     service = ImageUpdateService.getInstance();
   });
@@ -228,6 +236,16 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
     getDocker: () => ({
       getImage: () => ({ inspect: vi.fn().mockResolvedValue({
         RepoDigests: [`ghcr.io/linuxserver/radarr@${digest}`],
+        Os: 'linux',
+        Architecture: 'amd64',
+      }) }),
+    }),
+  } as any);
+
+  const dockerWithNginxSemver = () => ({
+    getDocker: () => ({
+      getImage: () => ({ inspect: vi.fn().mockResolvedValue({
+        RepoDigests: [`registry-1.docker.io/library/nginx@${LOCAL_DIGEST}`],
         Os: 'linux',
         Architecture: 'amd64',
       }) }),
@@ -264,6 +282,20 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
       null,
     );
   });
+
+  it('reports an update when the declared tag digest matches but a higher semver tag exists', async () => {
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
+    mockListRegistryTags.mockResolvedValue(['1.2.3', '1.2.4']);
+    const result = await service.checkImage(dockerWithNginxSemver(), 'nginx:1.2.3');
+    expect(result).toEqual({ hasUpdate: true });
+  });
+
+  it('reports an update when digest comparison errors but a higher semver tag exists', async () => {
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' });
+    mockListRegistryTags.mockResolvedValue(['1.2.3', '1.2.4']);
+    const result = await service.checkImage(dockerWithNginxSemver(), 'nginx:1.2.3');
+    expect(result).toEqual({ hasUpdate: true });
+  });
 });
 
 // ── Multi-arch digest comparison persistence (end-to-end via checkNode) ─
@@ -288,6 +320,7 @@ services:
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockListRegistryTags.mockResolvedValue([]);
     (ImageUpdateService as any).instance = undefined;
     mockGetSystemState.mockReturnValue('1');
     mockGetStacks.mockResolvedValue(['stackA']);

@@ -8,7 +8,8 @@ import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
-import { parseImageRef, selectLocalRepoDigest, compareLocalToRemoteTag } from './registry-api';
+import { parseImageRef, selectLocalRepoDigest } from './registry-api';
+import { detectImageUpdateAvailability } from './imageUpdateDetect';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -1135,14 +1136,25 @@ export class ImageUpdateService {
             return { hasUpdate: false, error: `Could not resolve a local registry digest for "${imageRef}"` };
         }
 
-        const comparison = await compareLocalToRemoteTag(localDigest, parsed.registry, parsed.repo, parsed.tag, platform, credentials);
-        if (comparison.kind === 'error') {
-            return { hasUpdate: false, error: comparison.reason };
+        // Same digest + semver-tag detection as Fleet/Anatomy preview so
+        // persisted sidebar status cannot disagree after Apply.
+        const detection = await detectImageUpdateAvailability({
+            localDigest,
+            platform,
+            registry: parsed.registry,
+            repo: parsed.repo,
+            tag: parsed.tag,
+            credentials,
+        });
+        if (!detection.hasUpdate && detection.digestError) {
+            return { hasUpdate: false, error: detection.digestError };
         }
 
-        const hasUpdate = comparison.kind === 'update';
-        console.log(`[ImageUpdateService] ${imageRef}: local=${localDigest.slice(0, 27)}... update=${hasUpdate}`);
-        return { hasUpdate };
+        const nextSuffix = detection.nextTag ? ` next=${detection.nextTag}` : '';
+        console.log(
+            `[ImageUpdateService] ${imageRef}: local=${localDigest.slice(0, 27)}... update=${detection.hasUpdate}${nextSuffix}`,
+        );
+        return { hasUpdate: detection.hasUpdate };
     }
 }
 

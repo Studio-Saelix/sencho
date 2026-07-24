@@ -15,10 +15,21 @@ import {
     listRegistryTags,
     type ParsedRef,
     type RegistryCredentials,
-    type DigestComparisonResult,
 } from './registry-api';
+import {
+    computeSemverBump,
+    detectImageUpdateAvailability,
+    type SemverBump,
+} from './imageUpdateDetect';
 
-export type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
+// Re-export shared helpers so existing callers keep importing from this module.
+export {
+    parseSemverTag,
+    findNextTag,
+    computeSemverBump,
+    isMovingTag,
+    type SemverBump,
+} from './imageUpdateDetect';
 
 export interface UpdatePreviewImage {
     service: string;
@@ -59,74 +70,6 @@ export interface UpdatePreview {
     summary: UpdatePreviewSummary;
     rollback_target: string | null;
     changelog: string | null;
-}
-
-interface SemverParts {
-    prefix: string;
-    major: number;
-    minor: number;
-    patch: number;
-    suffix: string;
-    raw: string;
-}
-
-const SEMVER_RE = /^(v)?(\d+)\.(\d+)\.(\d+)(?:-([A-Za-z][A-Za-z0-9.-]*))?$/;
-
-export function parseSemverTag(tag: string): SemverParts | null {
-    const m = tag.match(SEMVER_RE);
-    if (!m) return null;
-    return {
-        prefix: m[1] ?? '',
-        major: Number(m[2]),
-        minor: Number(m[3]),
-        patch: Number(m[4]),
-        suffix: m[5] ?? '',
-        raw: tag,
-    };
-}
-
-/**
- * A tag is "moving" when restoring the compose file would not revert the image
- * behind it: `latest`, a branch name, or an unpinned major/minor like `1.25`.
- * Only a fully-pinned semver tag (X.Y.Z, optionally `v`-prefixed and/or with a
- * `-prerelease` suffix) is treated as immutable, matching how a file rollback
- * restores the exact tag.
- */
-export function isMovingTag(tag: string): boolean {
-    return parseSemverTag(tag) === null;
-}
-
-function compareSemver(a: SemverParts, b: SemverParts): number {
-    if (a.major !== b.major) return a.major - b.major;
-    if (a.minor !== b.minor) return a.minor - b.minor;
-    return a.patch - b.patch;
-}
-
-export function findNextTag(currentTag: string, availableTags: string[]): string | null {
-    const current = parseSemverTag(currentTag);
-    if (!current) return null;
-    let best: SemverParts | null = null;
-    for (const tag of availableTags) {
-        const parsed = parseSemverTag(tag);
-        if (!parsed) continue;
-        if (parsed.prefix !== current.prefix) continue;
-        if (parsed.suffix !== current.suffix) continue;
-        if (compareSemver(parsed, current) <= 0) continue;
-        if (!best || compareSemver(parsed, best) > 0) best = parsed;
-    }
-    return best ? best.raw : null;
-}
-
-export function computeSemverBump(currentTag: string, nextTag: string | null): SemverBump {
-    if (!nextTag) return 'none';
-    if (nextTag === currentTag) return 'patch';
-    const current = parseSemverTag(currentTag);
-    const next = parseSemverTag(nextTag);
-    if (!current || !next) return 'unknown';
-    if (next.major > current.major) return 'major';
-    if (next.minor > current.minor) return 'minor';
-    if (next.patch > current.patch) return 'patch';
-    return 'none';
 }
 
 function maxBump(a: SemverBump, b: SemverBump): SemverBump {
@@ -194,29 +137,26 @@ export async function computeImagePreview(
     }
 
     const credentials = await deps.getCredentials(parsed.registry);
-
-    // Digest-based: is a new build of the SAME tag available? A comparison error
-    // (network failure, malformed manifest) fails soft: it never claims a
-    // digest-based update, it only skips it.
     const localInfo = await deps.getLocalDigest(imageRef, parsed);
-    const [comparison, tags] = await Promise.all([
-        localInfo.digest
-            ? deps.compareDigest(localInfo.digest, parsed.registry, parsed.repo, parsed.tag, localInfo.platform, credentials)
-            : Promise.resolve<DigestComparisonResult>({ kind: 'error', reason: 'No local registry digest available' }),
-        deps.listRegistryTags(parsed.registry, parsed.repo, credentials),
-    ]);
-    const digestUpdate = comparison.kind === 'update';
+    const detection = await detectImageUpdateAvailability({
+        localDigest: localInfo.digest,
+        platform: localInfo.platform,
+        registry: parsed.registry,
+        repo: parsed.repo,
+        tag: parsed.tag,
+        credentials,
+        deps: {
+            compareDigest: deps.compareDigest,
+            listTags: deps.listRegistryTags,
+        },
+    });
 
-    // Tag-based: is a higher semver tag available?
-    const nextTag = findNextTag(parsed.tag, tags);
-
-    const hasUpdate = digestUpdate || nextTag !== null;
     let semverBump: SemverBump = 'none';
     let resolvedNext: string | null = null;
-    if (nextTag) {
-        resolvedNext = nextTag;
-        semverBump = computeSemverBump(parsed.tag, nextTag);
-    } else if (digestUpdate) {
+    if (detection.nextTag) {
+        resolvedNext = detection.nextTag;
+        semverBump = computeSemverBump(parsed.tag, detection.nextTag);
+    } else if (detection.digestUpdate) {
         resolvedNext = parsed.tag;
         semverBump = 'patch';
     }
@@ -226,7 +166,7 @@ export async function computeImagePreview(
         image: imageRef,
         current_tag: parsed.tag,
         next_tag: resolvedNext,
-        has_update: hasUpdate,
+        has_update: detection.hasUpdate,
         semver_bump: semverBump,
     };
 }
