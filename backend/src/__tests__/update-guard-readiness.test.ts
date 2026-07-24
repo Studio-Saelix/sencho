@@ -37,6 +37,8 @@ const summary = (over: Partial<UpdatePreviewSummary> = {}): UpdatePreviewSummary
   blocked_reason: null,
   has_build_services: false,
   rebuild_available: false,
+  verification_failed: false,
+  verification_error: null,
   ...over,
 });
 
@@ -225,3 +227,17 @@ describe('aggregateVerdict', () => {
     expect(aggregateVerdict([driftSignal(0), preflightSignal({ activeStatus: 'pass' }), healthchecksSignal([probe()])])).toBe('ready');
   });
 });
+
+describe('updatePreviewSignal verification failure', () => {
+  it('does not claim no pending update when digest verification failed', () => {
+    const signal = updatePreviewSignal(summary({
+      verification_failed: true,
+      verification_error: 'Registry unreachable',
+    }));
+    expect(signal.status).toBe('unknown');
+    expect(signal.detail).toMatch(/Digest verification failed/);
+    expect(signal.detail).toMatch(/Registry unreachable/);
+    expect(signal.detail).not.toMatch(/No pending image update detected/);
+  });
+});
+

@@ -319,6 +319,67 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
     // An ok stack with no update must not appear in the advisory.
     expect(screen.queryByText('web')).toBeNull();
   });
+
+  it('keeps sticky has_update+failed stacks in the advisory, not the update card grid', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            '1': { grafana: true, web: true },
+          }),
+        });
+      }
+      if (url.startsWith('/scheduled-tasks')) return Promise.resolve({ ok: true, json: async () => [] });
+      if (url === '/image-updates/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            grafana: { hasUpdate: true, checkStatus: 'failed', lastError: 'Registry unreachable', checkedAt: 1 },
+            web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockImplementation((_nodeId: number, url: string) => {
+      if (String(url).includes('/update-preview')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            stack_name: 'web',
+            images: [{ service: 'web', image: 'nginx:1', current_tag: '1', next_tag: '2', has_update: true, semver_bump: 'patch', check_error: null }],
+            summary: {
+              has_update: true,
+              primary_image: 'nginx:1',
+              current_tag: '1',
+              next_tag: '2',
+              semver_bump: 'patch',
+              update_kind: 'tag',
+              blocked: false,
+              blocked_reason: null,
+              verification_failed: false,
+              verification_error: null,
+            },
+            rollback_target: null,
+            changelog: null,
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => null });
+    });
+
+    render(<AutoUpdateReadinessView />);
+
+    expect(await screen.findByText(/could not be checked/i)).toBeInTheDocument();
+    expect(screen.getByText('grafana')).toBeInTheDocument();
+    expect(screen.getByText(/Registry unreachable/)).toBeInTheDocument();
+    // web remains a confirmed update card; grafana must not also render as a stack card heading.
+    await waitFor(() => {
+      const headings = screen.getAllByText('web');
+      expect(headings.length).toBeGreaterThan(0);
+    });
+  });
 });
 
 /**

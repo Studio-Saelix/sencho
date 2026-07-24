@@ -431,20 +431,26 @@ export function useStackListState() {
     [files, searchQuery],
   );
 
+  // Sticky has_update during a failed check is not a verified update for the chip.
+  const hasConfirmedUpdate = useCallback((file: string) => {
+    const info = sidebarStackUpdates[file];
+    return Boolean(info?.hasUpdate && info.checkStatus !== 'failed');
+  }, [sidebarStackUpdates]);
+
   const filterCounts = useMemo(() => ({
     all: filteredFiles.length,
     up: filteredFiles.filter(f => stackStatuses[f] === 'running').length,
     down: filteredFiles.filter(f => isDownStatus(stackStatuses[f])).length,
-    updates: filteredFiles.filter(f => sidebarStackUpdates[f]?.hasUpdate).length,
-  }), [filteredFiles, stackStatuses, sidebarStackUpdates]);
+    updates: filteredFiles.filter(hasConfirmedUpdate).length,
+  }), [filteredFiles, stackStatuses, hasConfirmedUpdate]);
 
   const chipFilteredFiles = useMemo(() => {
     if (filterChip === 'all') return filteredFiles;
     if (filterChip === 'up') return filteredFiles.filter(f => stackStatuses[f] === 'running');
     if (filterChip === 'down') return filteredFiles.filter(f => isDownStatus(stackStatuses[f]));
-    if (filterChip === 'updates') return filteredFiles.filter(f => sidebarStackUpdates[f]?.hasUpdate);
+    if (filterChip === 'updates') return filteredFiles.filter(hasConfirmedUpdate);
     return filteredFiles;
-  }, [filteredFiles, filterChip, stackStatuses, sidebarStackUpdates]);
+  }, [filteredFiles, filterChip, stackStatuses, hasConfirmedUpdate]);
 
   const toggleBulkMode = useCallback(() => {
     setBulkMode(prev => {

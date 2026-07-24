@@ -13,9 +13,17 @@ import type { DigestComparisonResult } from '../services/registry-api';
 
 const PLATFORM = { os: 'linux', architecture: 'amd64' };
 
-function localDigest(digest: string | null | string[]): LocalDigestInfo {
-    if (Array.isArray(digest)) return { digests: digest, platform: PLATFORM };
-    return { digests: digest ? [digest] : [], platform: PLATFORM };
+function localDigest(
+    digest: string | null | string[],
+    emptyReason: LocalDigestInfo['emptyReason'] = null,
+): LocalDigestInfo {
+    if (Array.isArray(digest)) return { digests: digest, platform: PLATFORM, emptyReason };
+    if (digest) return { digests: [digest], platform: PLATFORM, emptyReason: null };
+    return {
+        digests: [],
+        platform: PLATFORM,
+        emptyReason: emptyReason ?? 'not_checkable',
+    };
 }
 
 describe('parseSemverTag', () => {
@@ -162,9 +170,10 @@ describe('computeImagePreview', () => {
         expect(result.has_update).toBe(true);
         expect(result.next_tag).toBe('1.2.4');
         expect(result.semver_bump).toBe('patch');
+        expect(result.check_error).toBe('Registry unreachable');
     });
 
-    it('fails soft to no-update when the comparison resolver errors and no higher tag exists', async () => {
+    it('surfaces verification failure when the comparison resolver errors and no higher tag exists', async () => {
         const deps = makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
             compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' }),
@@ -174,18 +183,44 @@ describe('computeImagePreview', () => {
         expect(result.has_update).toBe(false);
         expect(result.next_tag).toBeNull();
         expect(result.semver_bump).toBe('none');
+        expect(result.check_error).toBe('Registry unreachable');
     });
 
-    it('never calls the comparison resolver when no local digest is resolvable', async () => {
+    it('treats empty RepoDigests as not_checkable (no verification failure)', async () => {
         const compareDigest = vi.fn().mockResolvedValue({ kind: 'update' });
         const deps = makeDeps({
-            getLocalDigest: vi.fn().mockResolvedValue(localDigest(null)),
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest(null, 'not_checkable')),
             compareDigest,
             listRegistryTags: vi.fn().mockResolvedValue([]),
         });
         const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
         expect(compareDigest).not.toHaveBeenCalled();
         expect(result.has_update).toBe(false);
+        expect(result.check_error).toBeNull();
+    });
+
+    it('surfaces unresolved RepoDigests as verification failure without claiming an update', async () => {
+        const compareDigest = vi.fn().mockResolvedValue({ kind: 'update' });
+        const deps = makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest(null, 'unresolved')),
+            compareDigest,
+            listRegistryTags: vi.fn().mockResolvedValue([]),
+        });
+        const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
+        expect(compareDigest).not.toHaveBeenCalled();
+        expect(result.has_update).toBe(false);
+        expect(result.check_error).toBe('Could not resolve a local registry digest');
+    });
+
+    it('surfaces inspect failure as verification failure', async () => {
+        const deps = makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest(null, 'inspect_failed')),
+            compareDigest: vi.fn(),
+            listRegistryTags: vi.fn().mockResolvedValue([]),
+        });
+        const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
+        expect(result.has_update).toBe(false);
+        expect(result.check_error).toBe('Failed to inspect local image');
     });
 
     it('passes the local digest, tag, and platform through to the comparison resolver', async () => {
@@ -226,13 +261,14 @@ describe('computeImagePreview', () => {
 });
 
 describe('buildSummary', () => {
-    const baseImage = (partial: Partial<Parameters<typeof buildSummary>[1][number]>) => ({
+    const baseImage = (partial: Partial<Parameters<typeof buildSummary>[1][number]> = {}) => ({
         service: 'svc',
         image: 'nginx:1.0.0',
         current_tag: '1.0.0',
         next_tag: null,
         has_update: false,
         semver_bump: 'none' as const,
+        check_error: null as string | null,
         ...partial,
     });
 
@@ -245,6 +281,41 @@ describe('buildSummary', () => {
         expect(preview.summary.blocked).toBe(true);
         expect(preview.summary.blocked_reason).toMatch(/major/i);
         expect(preview.summary.semver_bump).toBe('major');
+        expect(preview.summary.verification_failed).toBe(false);
+        expect(preview.summary.verification_error).toBeNull();
+    });
+
+    it('aggregates digest verification failure without claiming a digest rebuild', () => {
+        const images = [
+            baseImage({
+                service: 'broker',
+                image: 'redis:8.8.0',
+                current_tag: '8.8.0',
+                check_error: 'Local image platform is unknown; cannot verify multi-arch membership',
+            }),
+        ];
+        const preview = buildSummary('app', images);
+        expect(preview.summary.has_update).toBe(false);
+        expect(preview.summary.update_kind).toBe('none');
+        expect(preview.summary.verification_failed).toBe(true);
+        expect(preview.summary.verification_error).toContain('cannot verify multi-arch membership');
+    });
+
+    it('keeps a tag update when digest verification failed on the same image', () => {
+        const images = [
+            baseImage({
+                service: 'web',
+                has_update: true,
+                semver_bump: 'patch',
+                next_tag: '1.0.1',
+                check_error: 'Registry unreachable',
+            }),
+        ];
+        const preview = buildSummary('app', images);
+        expect(preview.summary.has_update).toBe(true);
+        expect(preview.summary.update_kind).toBe('tag');
+        expect(preview.summary.verification_failed).toBe(true);
+        expect(preview.summary.verification_error).toBe('Registry unreachable');
     });
 
     it('picks first updated image as primary', () => {

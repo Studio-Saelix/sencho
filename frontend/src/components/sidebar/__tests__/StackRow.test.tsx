@@ -111,9 +111,10 @@ describe('StackRow', () => {
     expect(container.querySelector('.bg-update')).toBeNull();
   });
 
-  it('prefers the update dot over the check-failed indicator', () => {
-    const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: true, checkStatus: 'failed' })} />);
-    expect(container.querySelector('.bg-update')).not.toBeNull();
+  it('prefers the check-failed indicator over a sticky update claim', () => {
+    const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: true, checkStatus: 'failed', lastError: 'Registry unreachable' })} />);
+    expect(container.querySelector('[data-testid="stack-trailing-check-failed"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="stack-trailing-update"]')).toBeNull();
   });
 
   it('names outdated services in the update tooltip', async () => {

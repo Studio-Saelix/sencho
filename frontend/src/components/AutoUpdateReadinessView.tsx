@@ -25,6 +25,7 @@ interface UpdatePreviewImage {
   next_tag: string | null;
   has_update: boolean;
   semver_bump: SemverBump;
+  check_error?: string | null;
 }
 
 type UpdateKind = 'tag' | 'digest' | 'none';
@@ -43,6 +44,8 @@ interface UpdatePreview {
     blocked_reason: string | null;
     has_build_services?: boolean;
     rebuild_available?: boolean;
+    verification_failed?: boolean;
+    verification_error?: string | null;
   };
   build_services?: string[];
   rollback_target: string | null;
@@ -55,6 +58,11 @@ function declaredServiceCount(preview: UpdatePreview | null | undefined): number
   for (const img of preview.images) names.add(img.service);
   for (const name of preview.build_services ?? []) names.add(name);
   return names.size;
+}
+
+/** Append `: reason` when present, otherwise end the lead-in with a period. */
+function withErrorDetail(lead: string, error: string | null | undefined): string {
+  return error ? `${lead}: ${error}` : `${lead}.`;
 }
 
 export interface StackCard {
@@ -256,20 +264,41 @@ function StackReadinessCard({
         (() => {
           const p = preview!;
           const blockedReason = p.summary.blocked_reason;
+          const verificationFailed = Boolean(p.summary.verification_failed);
+          const verificationError = p.summary.verification_error;
+
+          let headline: ReactNode;
+          if (verificationFailed && !p.summary.has_update) {
+            headline = (
+              <div className="font-mono text-xs text-warning" data-testid="readiness-verification-failed">
+                {withErrorDetail('Digest verification failed', verificationError)}
+              </div>
+            );
+          } else if (p.summary.update_kind === 'digest') {
+            headline = (
+              <div className="flex items-baseline gap-2 font-mono text-sm">
+                <span className="text-stat-subtitle">{p.summary.current_tag}</span>
+                <span className="text-brand text-[10px] leading-3 uppercase tracking-[0.18em]">
+                  Rebuild available
+                </span>
+              </div>
+            );
+          } else {
+            headline = (
+              <VersionDiff
+                current={p.summary.current_tag}
+                next={p.summary.next_tag}
+              />
+            );
+          }
+
           return (
             <>
-              {p.summary.update_kind === 'digest' ? (
-                <div className="flex items-baseline gap-2 font-mono text-sm">
-                  <span className="text-stat-subtitle">{p.summary.current_tag}</span>
-                  <span className="text-brand text-[10px] leading-3 uppercase tracking-[0.18em]">
-                    Rebuild available
-                  </span>
+              {headline}
+              {verificationFailed && p.summary.has_update && (
+                <div className="font-mono text-[11px] text-warning" data-testid="readiness-verification-warning">
+                  {withErrorDetail('Digest check could not be verified', verificationError)}
                 </div>
-              ) : (
-                <VersionDiff
-                  current={p.summary.current_tag}
-                  next={p.summary.next_tag}
-                />
               )}
 
               <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle/80">
@@ -510,55 +539,77 @@ export function MobileReadinessCard({
         <div className="font-mono text-xs text-stat-subtitle/80">Checking registry...</div>
       ) : failed ? (
         <div className="font-mono text-xs text-destructive/80">Preview failed. Registry may be unreachable.</div>
-      ) : (
-        <>
-          {preview!.summary.update_kind === 'digest' ? (
+      ) : (() => {
+        const p = preview!;
+        const verificationFailed = Boolean(p.summary.verification_failed);
+        const verificationError = p.summary.verification_error;
+
+        let headline: ReactNode;
+        if (verificationFailed && !p.summary.has_update) {
+          headline = (
+            <div className="font-mono text-xs text-warning" data-testid="readiness-verification-failed">
+              {withErrorDetail('Digest verification failed', verificationError)}
+            </div>
+          );
+        } else if (p.summary.update_kind === 'digest') {
+          headline = (
             <div className="flex items-baseline gap-2 font-mono text-[13px]">
-              <span className="text-stat-subtitle">{preview!.summary.current_tag}</span>
+              <span className="text-stat-subtitle">{p.summary.current_tag}</span>
               <span className="text-[10px] uppercase tracking-[0.12em] text-brand">Rebuild available</span>
             </div>
-          ) : (
-            <VersionDiff current={preview!.summary.current_tag} next={preview!.summary.next_tag} />
-          )}
-          <div className="truncate font-mono text-[11px] text-stat-subtitle">{preview!.summary.primary_image ?? '-'}</div>
-          <div className="border-t border-dashed border-card-border pt-[9px] text-[12.5px] leading-[18px] text-stat-subtitle">
-            {lead && <b className="text-stat-title">{lead}</b>}{rest}
-          </div>
-          {showServiceApply && (
-            <div className="flex flex-col gap-1.5 rounded-md border border-card-border bg-muted/20 p-2">
-              {updatingImages.map(img => (
-                <div key={img.service} className="flex items-center justify-between gap-2">
-                  <span className="truncate font-mono text-[11px] text-stat-subtitle">{img.service}</span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 gap-1 rounded-md px-2 text-[11px]"
-                    onClick={() => onApplyService?.(stack, nodeId, img.service)}
-                    disabled={blocked || applying || applyingService !== null}
-                  >
-                    {applyingService === img.service ? 'Applying...' : 'Apply'}
-                  </Button>
-                </div>
-              ))}
+          );
+        } else {
+          headline = <VersionDiff current={p.summary.current_tag} next={p.summary.next_tag} />;
+        }
+
+        return (
+          <>
+            {headline}
+            {verificationFailed && p.summary.has_update && (
+              <div className="font-mono text-[11px] text-warning" data-testid="readiness-verification-warning">
+                {withErrorDetail('Digest check could not be verified', verificationError)}
+              </div>
+            )}
+            <div className="truncate font-mono text-[11px] text-stat-subtitle">{p.summary.primary_image ?? '-'}</div>
+            <div className="border-t border-dashed border-card-border pt-[9px] text-[12.5px] leading-[18px] text-stat-subtitle">
+              {lead && <b className="text-stat-title">{lead}</b>}{rest}
             </div>
-          )}
-          <div className="flex items-center justify-between gap-[10px] pt-0.5">
-            <span className={`font-mono text-[11px] ${blocked ? 'text-destructive' : 'text-stat-subtitle'}`}>
-              {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked ? 'Held for review' : 'No schedule')}
-            </span>
-            <Button
-              size="sm"
-              variant={blocked ? 'outline' : 'default'}
-              onClick={() => onApply(stack, nodeId)}
-              disabled={blocked || applying || applyingService !== null}
-              className="gap-1.5"
-            >
-              <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-              {applying ? 'Applying...' : 'Apply now'}
-            </Button>
-          </div>
-        </>
-      )}
+            {showServiceApply && (
+              <div className="flex flex-col gap-1.5 rounded-md border border-card-border bg-muted/20 p-2">
+                {updatingImages.map(img => (
+                  <div key={img.service} className="flex items-center justify-between gap-2">
+                    <span className="truncate font-mono text-[11px] text-stat-subtitle">{img.service}</span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 gap-1 rounded-md px-2 text-[11px]"
+                      onClick={() => onApplyService?.(stack, nodeId, img.service)}
+                      disabled={blocked || applying || applyingService !== null}
+                    >
+                      {applyingService === img.service ? 'Applying...' : 'Apply'}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center justify-between gap-[10px] pt-0.5">
+              <span className={`font-mono text-[11px] ${blocked ? 'text-destructive' : 'text-stat-subtitle'}`}>
+                {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked ? 'Held for review' : 'No schedule')}
+              </span>
+              <Button
+                size="sm"
+                variant={blocked ? 'outline' : 'default'}
+                onClick={() => onApply(stack, nodeId)}
+                disabled={blocked || applying || applyingService !== null}
+                className="gap-1.5"
+              >
+                <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                {applying ? 'Applying...' : 'Apply now'}
+              </Button>
+            </div>
+          </>
+        );
+      })()}
     </div>
   );
 }
@@ -679,14 +730,17 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
 
       // Local-node check failures: surfaced separately because the fleet map is
       // boolean and the card grid only lists stacks with a confirmed update.
+      // Sticky has_update during a failed check is not a verified rebuild, so those
+      // stacks stay in the advisory only.
+      let failedLocalStacks = new Set<string>();
       if (detailRes.ok) {
         const detail = await detailRes.json() as Record<string, StackUpdateInfo>;
-        setCheckFailures(
-          Object.entries(detail)
-            .filter(([, info]) => info.checkStatus === 'failed')
-            .map(([stack, info]) => ({ stack, reason: info.lastError }))
-            .sort((a, b) => a.stack.localeCompare(b.stack)),
-        );
+        const failures = Object.entries(detail)
+          .filter(([, info]) => info.checkStatus === 'failed')
+          .map(([stack, info]) => ({ stack, reason: info.lastError }))
+          .sort((a, b) => a.stack.localeCompare(b.stack));
+        failedLocalStacks = new Set(failures.map(f => f.stack));
+        setCheckFailures(failures);
       } else {
         // Clear stale failures rather than persist them across a load, but log:
         // an empty advisory must not silently stand in for "detail unavailable".
@@ -730,7 +784,9 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         const node = currentNodes.find(n => n.id === nodeId);
         if (!node) continue;
         const stacks = Object.entries(stackMap)
-          .filter(([, hasUpdate]) => hasUpdate)
+          .filter(([stack, hasUpdate]) =>
+            hasUpdate && !(node.type === 'local' && failedLocalStacks.has(stack)),
+          )
           .map(([stack]) => stack)
           .sort();
         if (stacks.length === 0) continue;

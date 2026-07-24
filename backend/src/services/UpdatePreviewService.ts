@@ -27,6 +27,12 @@ export interface UpdatePreviewImage {
     next_tag: string | null;
     has_update: boolean;
     semver_bump: SemverBump;
+    /**
+     * Digest-comparison failure reason when the registry check could not be
+     * verified. Never paired with a digest-based has_update claim: callers must
+     * treat this as verification-failed / unknown, not as "up to date" or rebuild.
+     */
+    check_error: string | null;
 }
 
 export type UpdateKind = 'tag' | 'digest' | 'none';
@@ -50,6 +56,10 @@ export interface UpdatePreviewSummary {
     has_build_services: boolean;
     /** True when a manual update can rebuild local build services (always when has_build_services). */
     rebuild_available: boolean;
+    /** True when any image's digest comparison failed to verify. */
+    verification_failed: boolean;
+    /** First image check_error when verification_failed; otherwise null. */
+    verification_error: string | null;
 }
 
 export interface UpdatePreview {
@@ -164,10 +174,18 @@ async function loadStackImages(
     return extractServiceImagesFromCompose(composeContent, merged);
 }
 
+export type LocalDigestEmptyReason = 'not_checkable' | 'inspect_failed' | 'unresolved';
+
 export interface LocalDigestInfo {
     /** All usable RepoDigests for the image ref; compared as a set against the remote tag. */
     digests: string[];
     platform: { os: string; architecture: string };
+    /**
+     * Why digests is empty. `not_checkable` mirrors the scanner (no RepoDigests /
+     * locally built) and must not surface as verification-failed. Inspect failure
+     * and unresolved selection do.
+     */
+    emptyReason: LocalDigestEmptyReason | null;
 }
 
 export interface ComputePreviewDeps {
@@ -191,22 +209,34 @@ export async function computeImagePreview(
             next_tag: null,
             has_update: false,
             semver_bump: 'none',
+            check_error: null,
         };
     }
 
     const credentials = await deps.getCredentials(parsed.registry);
 
-    // Digest-based: is a new build of the SAME tag available? A comparison error
-    // (network failure, malformed manifest) fails soft: it never claims a
-    // digest-based update, it only skips it.
+    // Digest-based: is a new build of the SAME tag available? Comparison errors
+    // never claim a digest update; they set check_error so operators see
+    // verification-failed. Empty RepoDigests stay not_checkable (no check_error),
+    // matching ImageUpdateService.
     const localInfo = await deps.getLocalDigest(imageRef, parsed);
+    const digestPromise: Promise<DigestComparisonResult | null> = localInfo.digests.length > 0
+        ? deps.compareDigest(localInfo.digests, parsed.registry, parsed.repo, parsed.tag, localInfo.platform, credentials)
+        : Promise.resolve(null);
     const [comparison, tags] = await Promise.all([
-        localInfo.digests.length > 0
-            ? deps.compareDigest(localInfo.digests, parsed.registry, parsed.repo, parsed.tag, localInfo.platform, credentials)
-            : Promise.resolve<DigestComparisonResult>({ kind: 'error', reason: 'No local registry digest available' }),
+        digestPromise,
         deps.listRegistryTags(parsed.registry, parsed.repo, credentials),
     ]);
-    const digestUpdate = comparison.kind === 'update';
+    let digestUpdate = false;
+    let checkError: string | null = null;
+    if (comparison) {
+        digestUpdate = comparison.kind === 'update';
+        checkError = comparison.kind === 'error' ? comparison.reason : null;
+    } else if (localInfo.emptyReason === 'inspect_failed') {
+        checkError = 'Failed to inspect local image';
+    } else if (localInfo.emptyReason === 'unresolved') {
+        checkError = 'Could not resolve a local registry digest';
+    }
 
     // Tag-based: is a higher semver tag available?
     const nextTag = findNextTag(parsed.tag, tags);
@@ -229,6 +259,7 @@ export async function computeImagePreview(
         next_tag: resolvedNext,
         has_update: hasUpdate,
         semver_bump: semverBump,
+        check_error: checkError,
     };
 }
 
@@ -267,6 +298,7 @@ export function buildSummary(
         : updated.some(i => i.next_tag !== null && i.next_tag !== i.current_tag)
             ? 'tag'
             : 'digest';
+    const verificationError = images.find(i => i.check_error)?.check_error ?? null;
     return {
         stack_name: stackName,
         images,
@@ -282,6 +314,8 @@ export function buildSummary(
             blocked_reason: blocked ? 'Major version jumps require human review before applying.' : null,
             has_build_services: hasBuildServices,
             rebuild_available: hasBuildServices,
+            verification_failed: verificationError !== null,
+            verification_error: verificationError,
         },
         rollback_target: primary ? buildRollbackTarget(primary.image, primary.current_tag) : null,
         changelog: null,
@@ -323,10 +357,21 @@ export class UpdatePreviewService {
                 try {
                     const inspect = await docker.getDocker().getImage(imageRef).inspect();
                     const repoDigests: string[] = inspect.RepoDigests ?? [];
+                    if (repoDigests.length === 0) {
+                        return {
+                            digests: [],
+                            platform: { os: inspect.Os, architecture: inspect.Architecture },
+                            emptyReason: 'not_checkable',
+                        };
+                    }
                     const digests = selectLocalRepoDigests(repoDigests, parsed);
-                    return { digests, platform: { os: inspect.Os, architecture: inspect.Architecture } };
+                    return {
+                        digests,
+                        platform: { os: inspect.Os, architecture: inspect.Architecture },
+                        emptyReason: digests.length === 0 ? 'unresolved' : null,
+                    };
                 } catch {
-                    return { digests: [], platform: { os: '', architecture: '' } };
+                    return { digests: [], platform: { os: '', architecture: '' }, emptyReason: 'inspect_failed' };
                 }
             },
         };

@@ -134,7 +134,20 @@ export function updatePreviewSignal(input: UpdatePreviewSummary | Errored): Read
     const buildNote = input.has_build_services
       ? ' Local build services will also be rebuilt from source.'
       : '';
-    return { ...base, status: 'ok', affectsVerdict: true, detail: `Pending: ${kind}.${buildNote}` };
+    const verifyNote = input.verification_failed
+      ? ` Digest verification also failed${input.verification_error ? `: ${input.verification_error}` : '.'}`
+      : '';
+    return { ...base, status: 'ok', affectsVerdict: true, detail: `Pending: ${kind}.${buildNote}${verifyNote}` };
+  }
+  if (input.verification_failed && !input.has_update) {
+    return {
+      ...base,
+      status: 'unknown',
+      affectsVerdict: true,
+      detail: input.verification_error
+        ? `Digest verification failed: ${input.verification_error}`
+        : 'Digest verification failed; Sencho is not claiming a rebuild.',
+    };
   }
   if (input.rebuild_available) {
     const n = input.has_build_services ? 'Local build service(s)' : 'Build';

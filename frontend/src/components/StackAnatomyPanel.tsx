@@ -47,6 +47,7 @@ interface UpdatePreviewImage {
   next_tag: string | null;
   has_update: boolean;
   semver_bump: SemverBump;
+  check_error?: string | null;
 }
 
 interface UpdatePreviewSummary {
@@ -60,6 +61,8 @@ interface UpdatePreviewSummary {
   blocked_reason: string | null;
   has_build_services: boolean;
   rebuild_available: boolean;
+  verification_failed?: boolean;
+  verification_error?: string | null;
 }
 
 interface UpdatePreview {
@@ -363,6 +366,10 @@ export default function StackAnatomyPanel({
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
   const hasBuildServices = Boolean(updatePreview?.summary.has_build_services);
   const rebuildAvailable = Boolean(updatePreview?.summary.rebuild_available);
+  const verificationFailed = Boolean(updatePreview?.summary.verification_failed);
+  const verificationError = updatePreview?.summary.verification_error ?? null;
+  // Failed digest verification is never a verified rebuild claim, but a confirmed
+  // tag update or intentional local rebuild affordance still shows.
   const showUpdateBanner = hasUpdate || rebuildAvailable;
   const updateKind = updatePreview?.summary.update_kind ?? 'none';
   const blocked = Boolean(updatePreview?.summary.blocked);
@@ -383,7 +390,7 @@ export default function StackAnatomyPanel({
   const bumpLabel = bump === 'none' || bump === 'unknown' ? '' : `${bump}`;
   const bannerLeadIn = blocked
     ? 'review required'
-    : hasUpdate && updateKind === 'digest'
+    : hasUpdate && updateKind === 'digest' && !verificationFailed
       ? 'same-tag digest rebuild'
       : hasUpdate && hasBuildServices
         ? 'registry update + local rebuild'
@@ -575,6 +582,19 @@ export default function StackAnatomyPanel({
               </button>
             </Row>
           </>
+        )}
+        {verificationFailed && updatePreview && (
+          <div
+            data-testid="verification-failed-banner"
+            className="mt-3 mb-3 rounded-lg border border-warning/40 bg-warning/[0.06] p-3 text-warning"
+            role="status"
+          >
+            <div className="font-mono text-xs uppercase tracking-wide">Digest verification failed</div>
+            <div className="mt-1 font-mono text-xs text-foreground/80 leading-relaxed">
+              {verificationError
+                ?? 'The registry digest could not be verified. Sencho is not claiming a rebuild.'}
+            </div>
+          </div>
         )}
         {showUpdateBanner && updatePreview && (
           <div data-testid="update-available-banner" className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>

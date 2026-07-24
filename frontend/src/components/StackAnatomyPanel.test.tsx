@@ -23,8 +23,13 @@ import StackAnatomyPanel from './StackAnatomyPanel';
 
 const COMPOSE = 'services:\n  web:\n    image: nginx:1.25\n';
 
-function previewBody(hasUpdate: boolean, buildServices: string[] = []) {
+function previewBody(
+  hasUpdate: boolean,
+  buildServices: string[] = [],
+  over: { verification_failed?: boolean; verification_error?: string | null; check_error?: string | null } = {},
+) {
   const hasBuild = buildServices.length > 0;
+  const verificationFailed = over.verification_failed ?? false;
   return {
     build_services: buildServices,
     images: [
@@ -35,6 +40,7 @@ function previewBody(hasUpdate: boolean, buildServices: string[] = []) {
         next_tag: hasUpdate ? '1.26' : null,
         has_update: hasUpdate,
         semver_bump: hasUpdate ? 'minor' : 'none',
+        check_error: over.check_error ?? null,
       },
     ],
     summary: {
@@ -42,12 +48,14 @@ function previewBody(hasUpdate: boolean, buildServices: string[] = []) {
       primary_image: 'nginx',
       current_tag: '1.25',
       next_tag: '1.26',
-      semver_bump: 'minor',
+      semver_bump: hasUpdate ? 'minor' : 'none',
       update_kind: hasUpdate ? 'tag' : 'none',
       blocked: false,
       blocked_reason: null,
       has_build_services: hasBuild,
       rebuild_available: hasBuild,
+      verification_failed: verificationFailed,
+      verification_error: over.verification_error ?? null,
     },
     changelog: null,
   };
@@ -519,5 +527,26 @@ describe('StackAnatomyPanel capability gating (capability off)', () => {
     expect(screen.queryByTestId('networking-tab')).not.toBeInTheDocument();
     expect(screen.queryByTestId('doctor-tab')).not.toBeInTheDocument();
     expect(screen.queryByTestId('storage-tab')).not.toBeInTheDocument();
+  });
+});
+
+describe('StackAnatomyPanel digest verification failure', () => {
+  it('shows a verification-failed banner instead of an update claim when digest check errors', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes(previewBody(false, [], {
+          verification_failed: true,
+          verification_error: 'Registry unreachable',
+          check_error: 'Registry unreachable',
+        }));
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    expect(await screen.findByTestId('verification-failed-banner')).toBeInTheDocument();
+    expect(screen.queryByTestId('update-available-banner')).toBeNull();
+    expect(screen.getByText(/Registry unreachable/)).toBeInTheDocument();
   });
 });
