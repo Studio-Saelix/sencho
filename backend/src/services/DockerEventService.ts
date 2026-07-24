@@ -117,6 +117,11 @@ interface DockerEventPayload {
 
 type LifecycleStatus = 'disconnected' | 'connecting' | 'connected' | 'stopped';
 
+/** Rate-limit token bound to the fixed window that issued it. */
+interface RateToken {
+    readonly windowStart: number;
+}
+
 export class DockerEventService {
     private readonly nodeId: number;
     private readonly nodeName: string;
@@ -139,6 +144,8 @@ export class DockerEventService {
      * Shared fixed-window rate limiter for crash and health alerts (per local
      * node / this service instance). Dedup and transition checks run before
      * consuming a token so suppressed duplicates do not count toward the cap.
+     * Tokens carry the issuing window start so a late refund cannot inflate a
+     * newer window's budget.
      */
     private containerAlertRateWindowStart = 0;
     private containerAlertRateCount = 0;
@@ -195,6 +202,8 @@ export class DockerEventService {
 
     /** Close the stream, cancel timers, and clear state. */
     public shutdown(): void {
+        // Flush overflow roll-up while still live so pending summaries are not dropped.
+        this.flushRateLimitSummaryNow();
         this.status = 'stopped';
         this.clearReconnectTimer();
         if (this.pruneTimer) {
@@ -209,6 +218,17 @@ export class DockerEventService {
         this.pendingDieTimers.clear();
         this.detachStream();
         this.containerState.clear();
+        this.healthAlertDedupAt.clear();
+        this.healthAlertInFlight.clear();
+        this.healthAlertPendingRetry.clear();
+        this.suppressedCrashAlertCount = 0;
+        this.suppressedHealthAlertCount = 0;
+        this.containerAlertRateCount = 0;
+    }
+
+    /** Status helper so await-crossing stopped checks are not narrowed away. */
+    private isStopped(): boolean {
+        return this.status === 'stopped';
     }
 
     // ========================================================================
@@ -503,6 +523,9 @@ export class DockerEventService {
             // or a healthy↔unhealthy flap would re-alert immediately.
             state.unhealthySince = undefined;
             state.healthStatus = action.includes('starting') ? 'starting' : 'healthy';
+            // Drop deferred-retry markers so a later unrelated persist failure cannot
+            // spuriously retry from a flap that already recovered.
+            this.healthAlertPendingRetry.delete(id);
         }
     }
 
@@ -512,6 +535,8 @@ export class DockerEventService {
      * only when dispatchAlert returns `{ persisted: true }` (history row written).
      */
     private async dispatchHealthAlert(id: string, state: InternalContainerState): Promise<void> {
+        if (this.isStopped()) return;
+
         const now = Date.now();
         if (this.isWithinAlertDedupWindow(this.healthAlertDedupAt.get(id), now, HEALTH_DEDUP_MS)) {
             return;
@@ -520,7 +545,8 @@ export class DockerEventService {
             this.healthAlertPendingRetry.add(id);
             return;
         }
-        if (!this.consumeRateToken()) {
+        const token = this.consumeRateToken();
+        if (!token) {
             this.suppressedHealthAlertCount += 1;
             this.scheduleSummary();
             return;
@@ -529,6 +555,11 @@ export class DockerEventService {
         this.healthAlertInFlight.add(id);
         let persisted = false;
         try {
+            if (this.isStopped()) {
+                this.refundRateToken(token);
+                this.healthAlertPendingRetry.delete(id);
+                return;
+            }
             const name = state.name ?? id.slice(0, 12);
             const result = await this.emitError(
                 'monitor_alert',
@@ -542,15 +573,20 @@ export class DockerEventService {
                 this.healthAlertDedupAt.set(id, Date.now());
                 this.healthAlertPendingRetry.delete(id);
             } else {
-                // Refund the token so a failed history write does not burn the
-                // shared crash/health rate budget.
-                this.refundRateToken();
+                // Refund only into the window that issued the token so a late
+                // persist failure cannot inflate a newer window's budget.
+                this.refundRateToken(token);
                 console.error(
                     `[DockerEvents:${this.nodeName}] Health alert history not persisted for ${id}; dedup not advanced`,
                 );
             }
         } finally {
             this.healthAlertInFlight.delete(id);
+        }
+
+        if (this.isStopped()) {
+            this.healthAlertPendingRetry.delete(id);
+            return;
         }
 
         // A concurrent healthy→unhealthy flap was deferred while we were in
@@ -567,7 +603,8 @@ export class DockerEventService {
         state: InternalContainerState,
         persisted: boolean,
     ): boolean {
-        return !persisted
+        return !this.isStopped()
+            && !persisted
             && this.healthAlertPendingRetry.has(id)
             && state.healthStatus === 'unhealthy';
     }
@@ -584,6 +621,7 @@ export class DockerEventService {
         state.healthStatus = 'starting';
         state.lastStartAt = Date.now();
         state.lastActivityAt = Date.now();
+        this.healthAlertPendingRetry.delete(id);
     }
 
     private onDestroy(id: string): void {
@@ -593,6 +631,9 @@ export class DockerEventService {
             clearTimeout(pending);
             this.pendingDieTimers.delete(id);
         }
+        this.healthAlertPendingRetry.delete(id);
+        this.healthAlertInFlight.delete(id);
+        this.healthAlertDedupAt.delete(id);
     }
 
     private async classifyDie(id: string, event: DockerEventPayload, dieAt: number): Promise<void> {
@@ -673,6 +714,7 @@ export class DockerEventService {
         state: InternalContainerState | null,
         info: { name: string; exitCode: number; stackName?: string; isSelf?: boolean },
     ): Promise<void> {
+        if (this.isStopped()) return;
         // Respect the existing global crash-alerts toggle so users who have
         // disabled these notifications in Settings remain opted out.
         if (!this.isCrashAlertsEnabled()) return;
@@ -681,7 +723,8 @@ export class DockerEventService {
             ? `Container OOM Kill: ${info.name} was killed by the OOM killer (out of memory).`
             : `Container Crash Detected: ${info.name} exited unexpectedly (Code: ${info.exitCode}).`;
 
-        if (!this.consumeRateToken()) {
+        const token = this.consumeRateToken();
+        if (!token) {
             this.suppressedCrashAlertCount += 1;
             this.scheduleSummary();
             return;
@@ -714,19 +757,26 @@ export class DockerEventService {
         return value;
     }
 
-    /** Return true if an alert can be emitted now. Side effect: increments counters. */
-    private consumeRateToken(): boolean {
+    /**
+     * Consume one shared crash/health rate token for the current fixed window.
+     * Returns null when the window is exhausted. Rolling into a new window first
+     * flushes any pending overflow summary so counters cannot span windows.
+     */
+    private consumeRateToken(): RateToken | null {
         const now = Date.now();
         if (now - this.containerAlertRateWindowStart >= RATE_WINDOW_MS) {
+            this.flushRateLimitSummaryNow();
             this.containerAlertRateWindowStart = now;
             this.containerAlertRateCount = 0;
         }
-        if (this.containerAlertRateCount >= RATE_LIMIT_MAX) return false;
+        if (this.containerAlertRateCount >= RATE_LIMIT_MAX) return null;
         this.containerAlertRateCount += 1;
-        return true;
+        return { windowStart: this.containerAlertRateWindowStart };
     }
 
-    private refundRateToken(): void {
+    /** Refund a token only when the issuing window is still active. */
+    private refundRateToken(token: RateToken): void {
+        if (token.windowStart !== this.containerAlertRateWindowStart) return;
         if (this.containerAlertRateCount > 0) this.containerAlertRateCount -= 1;
     }
 
@@ -749,18 +799,28 @@ export class DockerEventService {
         return `${crash} additional container crash alerts were rate-limited in the last minute.`;
     }
 
+    /** Emit and clear any pending overflow roll-up immediately (e.g. on window roll). */
+    private flushRateLimitSummaryNow(): void {
+        if (this.summaryTimer) {
+            clearTimeout(this.summaryTimer);
+            this.summaryTimer = null;
+        }
+        const crash = this.suppressedCrashAlertCount;
+        const health = this.suppressedHealthAlertCount;
+        this.suppressedCrashAlertCount = 0;
+        this.suppressedHealthAlertCount = 0;
+        if (crash + health <= 0) return;
+        if (this.status === 'stopped') return;
+        void this.emitWarning('monitor_alert', this.buildRateLimitSummaryMessage(crash, health));
+    }
+
     private scheduleSummary(): void {
         if (this.summaryTimer) return;
         const remaining = RATE_WINDOW_MS - (Date.now() - this.containerAlertRateWindowStart);
         const delay = Math.max(1_000, remaining);
         this.summaryTimer = setTimeout(() => {
-            const crash = this.suppressedCrashAlertCount;
-            const health = this.suppressedHealthAlertCount;
             this.summaryTimer = null;
-            this.suppressedCrashAlertCount = 0;
-            this.suppressedHealthAlertCount = 0;
-            if (crash + health <= 0) return;
-            void this.emitWarning('monitor_alert', this.buildRateLimitSummaryMessage(crash, health));
+            this.flushRateLimitSummaryNow();
         }, delay);
     }
 

@@ -97,6 +97,8 @@ let service: DockerEventService;
 beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    mockDispatchAlert.mockReset();
+    mockDispatchAlert.mockResolvedValue({ persisted: true });
     mockGetGlobalSettings.mockReturnValue({ global_crash: '1' });
     mockIsOwnContainer.mockReset();
     mockIsOwnContainer.mockReturnValue(false);
@@ -797,6 +799,237 @@ describe('DockerEventService - health alert gates', () => {
             healthStatus: 'unhealthy',
         });
         expect(service.getContainerState('h7')?.unhealthySince).toBeTypeOf('number');
+    });
+
+    it('does not refund a rate token into the next fixed window', async () => {
+        let resolvePersist!: (value: { persisted: boolean }) => void;
+        mockDispatchAlert.mockImplementation(
+            () =>
+                new Promise<{ persisted: boolean }>((resolve) => {
+                    resolvePersist = resolve;
+                }),
+        );
+
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: unhealthy',
+            Actor: { ID: 'cross-window', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        // Cross the fixed window, then consume a token in the new window so
+        // refund would inflate W2's count if it ignored the issuing window.
+        await vi.advanceTimersByTimeAsync(60_000);
+        mockDispatchAlert.mockResolvedValue({ persisted: true });
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: {
+                ID: 'cw-roll',
+                Attributes: { exitCode: '1', name: 'roll' },
+            },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        expect(
+            mockDispatchAlert.mock.calls.filter(
+                (c) => typeof c[2] === 'string' && c[2].includes('Crash Detected'),
+            ),
+        ).toHaveLength(1);
+
+        // Fail the original health persist: old code refunds into W2 (count 1→0).
+        resolvePersist({ persisted: false });
+        await flushMicrotasks();
+
+        // Fill the rest of W2 to the 20-alert cap (19 more crashes).
+        for (let i = 0; i < 19; i++) {
+            stream.push({
+                Type: 'container',
+                Action: 'die',
+                Actor: {
+                    ID: `cw-${i}`,
+                    Attributes: { exitCode: '1', name: `svc-${i}` },
+                },
+            });
+        }
+        await vi.advanceTimersByTimeAsync(600);
+
+        // Cap must still hold: a cross-window refund would have allowed a 21st.
+        stream.push({
+            Type: 'container',
+            Action: 'die',
+            Actor: {
+                ID: 'cw-overflow',
+                Attributes: { exitCode: '1', name: 'overflow' },
+            },
+        });
+        await vi.advanceTimersByTimeAsync(600);
+
+        const crashCalls = mockDispatchAlert.mock.calls.filter(
+            (c) => typeof c[2] === 'string' && c[2].includes('Crash Detected'),
+        );
+        expect(crashCalls).toHaveLength(20);
+    });
+
+    it('clears pending health retry when the container recovers before persist fails', async () => {
+        let resolvePersist!: (value: { persisted: boolean }) => void;
+        mockDispatchAlert.mockImplementation(
+            () =>
+                new Promise<{ persisted: boolean }>((resolve) => {
+                    resolvePersist = resolve;
+                }),
+        );
+
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        // First unhealthy starts an in-flight dispatch.
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: unhealthy',
+            Actor: { ID: 'recover-pending', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        // Flap while in flight: recover then re-fail so a pending-retry marker is set.
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: healthy',
+            Actor: { ID: 'recover-pending', Attributes: { name: 'api' } },
+        });
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: unhealthy',
+            Actor: { ID: 'recover-pending', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        // Recover again before the first persist settles; marker must be dropped.
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: healthy',
+            Actor: { ID: 'recover-pending', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+
+        resolvePersist({ persisted: false });
+        await flushMicrotasks();
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        // Later unrelated persist failure must not spuriously retry from a stale marker.
+        mockDispatchAlert.mockResolvedValueOnce({ persisted: false });
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: unhealthy',
+            Actor: { ID: 'recover-pending', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not dispatch deferred health retry after shutdown', async () => {
+        let resolvePersist!: (value: { persisted: boolean }) => void;
+        mockDispatchAlert.mockImplementation(
+            () =>
+                new Promise<{ persisted: boolean }>((resolve) => {
+                    resolvePersist = resolve;
+                }),
+        );
+
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: unhealthy',
+            Actor: { ID: 'shutdown-pending', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        service.shutdown();
+        resolvePersist({ persisted: false });
+        await flushMicrotasks();
+
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears health alert bookkeeping on destroy', async () => {
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: unhealthy',
+            Actor: { ID: 'destroy-dedup', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        stream.push({
+            Type: 'container',
+            Action: 'destroy',
+            Actor: { ID: 'destroy-dedup', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: unhealthy',
+            Actor: { ID: 'destroy-dedup', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retry a deferred health alert after destroy', async () => {
+        let resolvePersist!: (value: { persisted: boolean }) => void;
+        mockDispatchAlert.mockImplementation(
+            () =>
+                new Promise<{ persisted: boolean }>((resolve) => {
+                    resolvePersist = resolve;
+                }),
+        );
+
+        service = new DockerEventService(1, 'local');
+        await service.start();
+
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: unhealthy',
+            Actor: { ID: 'destroy-pending', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
+
+        // Set a pending-retry marker while the first dispatch is in flight.
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: healthy',
+            Actor: { ID: 'destroy-pending', Attributes: { name: 'api' } },
+        });
+        stream.push({
+            Type: 'container',
+            Action: 'health_status: unhealthy',
+            Actor: { ID: 'destroy-pending', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+
+        stream.push({
+            Type: 'container',
+            Action: 'destroy',
+            Actor: { ID: 'destroy-pending', Attributes: { name: 'api' } },
+        });
+        await flushMicrotasks();
+
+        resolvePersist({ persisted: false });
+        await flushMicrotasks();
+        expect(mockDispatchAlert).toHaveBeenCalledTimes(1);
     });
 });
 
