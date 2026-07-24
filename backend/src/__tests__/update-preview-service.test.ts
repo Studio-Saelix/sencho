@@ -6,15 +6,22 @@ import {
     computeImagePreview,
     buildSummary,
     isMovingTag,
+    listAllRegistryTagsBounded,
+    isAuthoritativeNegativePreview,
+    PREVIEW_TAG_LIST_MAX_PAGES,
     type ComputePreviewDeps,
     type LocalDigestInfo,
 } from '../services/UpdatePreviewService';
-import type { DigestComparisonResult } from '../services/registry-api';
+import type { DigestComparisonResult, TagListResult } from '../services/registry-api';
 
 const PLATFORM = { os: 'linux', architecture: 'amd64' };
 
 function localDigest(digest: string | null): LocalDigestInfo {
     return { digest, platform: PLATFORM };
+}
+
+function tagsOk(tags: string[], nextCursor?: string): TagListResult {
+    return nextCursor ? { ok: true, tags, nextCursor } : { ok: true, tags };
 }
 
 describe('parseSemverTag', () => {
@@ -97,7 +104,7 @@ function makeDeps(overrides: Partial<ComputePreviewDeps> = {}): ComputePreviewDe
         getCredentials: vi.fn().mockResolvedValue(null),
         getLocalDigest: vi.fn().mockResolvedValue(localDigest(null)),
         compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'not configured' } satisfies DigestComparisonResult),
-        listRegistryTags: vi.fn().mockResolvedValue([]),
+        listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk([])),
         ...overrides,
     };
 }
@@ -107,7 +114,7 @@ describe('computeImagePreview', () => {
         const deps = makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
             compareDigest: vi.fn().mockResolvedValue({ kind: 'match' }),
-            listRegistryTags: vi.fn().mockResolvedValue(['1.2.3']),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk(['1.2.3'])),
         });
         const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
         expect(result.has_update).toBe(false);
@@ -119,7 +126,7 @@ describe('computeImagePreview', () => {
         const deps = makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
             compareDigest: vi.fn().mockResolvedValue({ kind: 'update' }),
-            listRegistryTags: vi.fn().mockResolvedValue([]),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk([])),
         });
         const result = await computeImagePreview('web', 'nginx:latest', deps);
         expect(result.has_update).toBe(true);
@@ -132,7 +139,7 @@ describe('computeImagePreview', () => {
         const deps = makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
             compareDigest: vi.fn().mockResolvedValue({ kind: 'match' }),
-            listRegistryTags: vi.fn().mockResolvedValue(['27.1.4', '27.1.5', '27.2.0']),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk(['27.1.4', '27.1.5', '27.2.0'])),
         });
         const result = await computeImagePreview('engine', 'docker.io/library/docker:27.1.4', deps);
         expect(result.has_update).toBe(true);
@@ -144,7 +151,7 @@ describe('computeImagePreview', () => {
         const deps = makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
             compareDigest: vi.fn().mockResolvedValue({ kind: 'match' }),
-            listRegistryTags: vi.fn().mockResolvedValue(['1.2.3', '2.0.0']),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk(['1.2.3', '2.0.0'])),
         });
         const result = await computeImagePreview('db', 'postgres:1.2.3', deps);
         expect(result.next_tag).toBe('2.0.0');
@@ -155,7 +162,7 @@ describe('computeImagePreview', () => {
         const deps = makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
             compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' }),
-            listRegistryTags: vi.fn().mockResolvedValue(['1.2.3', '1.2.4']),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk(['1.2.3', '1.2.4'])),
         });
         const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
         expect(result.has_update).toBe(true);
@@ -167,12 +174,24 @@ describe('computeImagePreview', () => {
         const deps = makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
             compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' }),
-            listRegistryTags: vi.fn().mockResolvedValue([]),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk([])),
         });
         const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
         expect(result.has_update).toBe(false);
         expect(result.next_tag).toBeNull();
         expect(result.semver_bump).toBe('none');
+        expect(result.check_status).toBe('partial');
+    });
+
+    it('treats digest error + higher tag as a confirmed update (ok)', async () => {
+        const result = await computeImagePreview('web', 'nginx:1.2.3', makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' }),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk(['1.2.3', '1.2.4'])),
+        }));
+        expect(result.has_update).toBe(true);
+        expect(result.next_tag).toBe('1.2.4');
+        expect(result.check_status).toBe('ok');
     });
 
     it('never calls the comparison resolver when no local digest is resolvable', async () => {
@@ -180,7 +199,7 @@ describe('computeImagePreview', () => {
         const deps = makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest(null)),
             compareDigest,
-            listRegistryTags: vi.fn().mockResolvedValue([]),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk([])),
         });
         const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
         expect(compareDigest).not.toHaveBeenCalled();
@@ -192,7 +211,7 @@ describe('computeImagePreview', () => {
         const deps = makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
             compareDigest,
-            listRegistryTags: vi.fn().mockResolvedValue([]),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk([])),
         });
         await computeImagePreview('web', 'ghcr.io/linuxserver/radarr:latest', deps);
         expect(compareDigest).toHaveBeenCalledWith('sha256:aaa', 'ghcr.io', 'linuxserver/radarr', 'latest', PLATFORM, null);
@@ -207,6 +226,7 @@ describe('buildSummary', () => {
         next_tag: null,
         has_update: false,
         semver_bump: 'none' as const,
+        check_status: 'ok' as const,
         ...partial,
     });
 
@@ -333,5 +353,142 @@ describe('buildSummary', () => {
     it('reports update_kind="none" when nothing has an update', () => {
         const images = [baseImage({ service: 'clean', has_update: false })];
         expect(buildSummary('stacky', images).summary.update_kind).toBe('none');
+    });
+
+    it('sets check_status=ok for empty and all-ok images', () => {
+        expect(buildSummary('empty', []).summary.check_status).toBe('ok');
+        expect(buildSummary('ok', [baseImage({ check_status: 'ok' })]).summary.check_status).toBe('ok');
+    });
+
+    it('rolls up mixed and failed check_status', () => {
+        expect(buildSummary('mixed', [
+            baseImage({ service: 'a', check_status: 'ok' }),
+            baseImage({ service: 'b', check_status: 'partial' }),
+        ]).summary.check_status).toBe('partial');
+        expect(buildSummary('fail', [
+            baseImage({ service: 'a', check_status: 'failed' }),
+            baseImage({ service: 'b', check_status: 'failed' }),
+        ]).summary.check_status).toBe('failed');
+    });
+});
+
+describe('preview authority', () => {
+    it('marks digest match + exhausted empty tags as authoritative ok with no update', async () => {
+        const result = await computeImagePreview('web', 'nginx:1.2.3', makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'match' }),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk(['1.2.3'])),
+        }));
+        expect(result.has_update).toBe(false);
+        expect(result.check_status).toBe('ok');
+        expect(isAuthoritativeNegativePreview(buildSummary('s', [result]))).toBe(true);
+    });
+
+    it('marks digest error + successful tag list with no next as partial (not authoritative-negative)', async () => {
+        const result = await computeImagePreview('web', 'nginx:1.2.3', makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'boom' }),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk(['1.2.3'])),
+        }));
+        expect(result.has_update).toBe(false);
+        expect(result.check_status).toBe('partial');
+        expect(isAuthoritativeNegativePreview(buildSummary('s', [result]))).toBe(false);
+    });
+
+    it('does not treat empty or not_checkable-only previews as authoritative-negative', () => {
+        expect(isAuthoritativeNegativePreview(buildSummary('empty', []))).toBe(false);
+        expect(isAuthoritativeNegativePreview(buildSummary('build', [
+            {
+                service: 'app',
+                image: 'sha256:dead',
+                current_tag: 'unknown',
+                next_tag: null,
+                has_update: false,
+                semver_bump: 'none',
+                check_status: 'not_checkable',
+            },
+        ]))).toBe(false);
+    });
+
+    it('marks digest match + tag list failure as partial for semver tags', async () => {
+        const result = await computeImagePreview('web', 'nginx:1.2.3', makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'match' }),
+            listRegistryTagsResult: vi.fn().mockResolvedValue({
+                ok: false,
+                code: 'REGISTRY_UPSTREAM',
+                message: 'Registry unreachable',
+            }),
+        }));
+        expect(result.has_update).toBe(false);
+        expect(result.check_status).toBe('partial');
+    });
+
+    it('allows moving/non-semver tags to be authoritative-negative on digest match without tag enum', async () => {
+        const listFn = vi.fn();
+        const result = await computeImagePreview('web', 'nginx:latest', makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'match' }),
+            listRegistryTagsResult: listFn,
+        }));
+        expect(listFn).not.toHaveBeenCalled();
+        expect(result.has_update).toBe(false);
+        expect(result.check_status).toBe('ok');
+        expect(isAuthoritativeNegativePreview(buildSummary('s', [result]))).toBe(true);
+    });
+
+    it('detects a newer tag found on a later page', async () => {
+        const listFn = vi.fn()
+            .mockResolvedValueOnce(tagsOk(['1.0.0', '1.0.1'], 'cursor-1'))
+            .mockResolvedValueOnce(tagsOk(['1.1.0']));
+        const result = await computeImagePreview('web', 'nginx:1.0.0', makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'match' }),
+            listRegistryTagsResult: listFn,
+        }));
+        expect(listFn).toHaveBeenCalledTimes(2);
+        expect(result.has_update).toBe(true);
+        expect(result.next_tag).toBe('1.1.0');
+        expect(result.check_status).toBe('ok');
+    });
+
+    it('treats page-cap with remaining cursor as non-authoritative for semver negatives', async () => {
+        let page = 0;
+        const listFn = vi.fn().mockImplementation(async () => {
+            page += 1;
+            return tagsOk([`1.0.${page}`], `cursor-${page}`);
+        });
+        const result = await computeImagePreview('web', 'nginx:2.0.0', makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
+            compareDigest: vi.fn().mockResolvedValue({ kind: 'match' }),
+            listRegistryTagsResult: listFn,
+        }));
+        expect(listFn).toHaveBeenCalledTimes(PREVIEW_TAG_LIST_MAX_PAGES);
+        expect(result.has_update).toBe(false);
+        expect(result.check_status).toBe('partial');
+        expect(isAuthoritativeNegativePreview(buildSummary('s', [result]))).toBe(false);
+    });
+
+    it('marks invalid refs as not_checkable', async () => {
+        const result = await computeImagePreview('web', 'sha256:deadbeef', makeDeps());
+        expect(result.check_status).toBe('not_checkable');
+        expect(result.has_update).toBe(false);
+    });
+});
+
+describe('listAllRegistryTagsBounded', () => {
+    it('returns incomplete when nextCursor remains after the page cap', async () => {
+        const listFn = vi.fn().mockResolvedValue(tagsOk(['a'], 'more'));
+        const outcome = await listAllRegistryTagsBounded(listFn, 'ghcr.io', 'acme/app', null, { maxPages: 2 });
+        expect(outcome.kind).toBe('incomplete');
+        expect(listFn).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns complete when pagination exhausts', async () => {
+        const listFn = vi.fn()
+            .mockResolvedValueOnce(tagsOk(['a'], 'c1'))
+            .mockResolvedValueOnce(tagsOk(['b']));
+        const outcome = await listAllRegistryTagsBounded(listFn, 'ghcr.io', 'acme/app', null);
+        expect(outcome).toEqual({ kind: 'complete', tags: ['a', 'b'] });
     });
 });

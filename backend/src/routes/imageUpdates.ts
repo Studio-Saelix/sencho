@@ -30,7 +30,9 @@ export const imageUpdatesRouter = Router();
 
 imageUpdatesRouter.get('/', authMiddleware, (req: Request, res: Response): void => {
   try {
-    const updates = DatabaseService.getInstance().getStackUpdateStatus(req.nodeId);
+    // Confirmed-only: partial/failed retained has_update rows stay out of the
+    // boolean map so Fleet and node cards do not treat uncertainty as pending.
+    const updates = DatabaseService.getInstance().getConfirmedStackUpdateStatus(req.nodeId);
     res.json(updates);
   } catch (error) {
     console.error('Failed to fetch image update status:', error);
@@ -184,10 +186,10 @@ imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Respo
         const nr = NodeRegistry.getInstance();
         const data: Record<number, Record<string, boolean>> = {};
 
-        // Local nodes: synchronous DB reads.
+        // Local nodes: synchronous DB reads (confirmed-only projection).
         for (const node of nodes) {
           if (node.type === 'local') {
-            data[node.id] = db.getStackUpdateStatus(node.id);
+            data[node.id] = db.getConfirmedStackUpdateStatus(node.id);
           }
         }
 

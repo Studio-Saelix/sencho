@@ -17,7 +17,8 @@ import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '
 import DockerController, { type BulkStackInfo } from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { CacheService, type CacheFetchOutcome } from '../services/CacheService';
-import { UpdatePreviewService } from '../services/UpdatePreviewService';
+import { UpdatePreviewService, isAuthoritativeNegativePreview } from '../services/UpdatePreviewService';
+import { ImageUpdateService } from '../services/ImageUpdateService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
@@ -2209,7 +2210,23 @@ stacksRouter.post('/:stackName/services/:serviceName/restore', async (req: Reque
 stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   try {
+    // Read-only preview first: do not reserve a scanner write generation here.
+    // Only an authoritative-negative result may mutate persisted update state.
     const preview = await UpdatePreviewService.getInstance().getPreview(req.nodeId, stackName);
+    if (isAuthoritativeNegativePreview(preview)) {
+      const clearResult = await ImageUpdateService.getInstance().commitPreviewClear(req.nodeId, stackName);
+      if (clearResult === 'cleared') {
+        CacheService.getInstance().invalidate('fleet-updates');
+        NotificationService.getInstance().broadcastEvent({
+          type: 'state-invalidate',
+          scope: 'image-updates',
+          nodeId: req.nodeId,
+          stackName,
+          action: 'update-status-reconciled',
+          ts: Date.now(),
+        });
+      }
+    }
     res.json(preview);
   } catch (error) {
     console.error('[Stacks] Update preview failed: %s', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));

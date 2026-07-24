@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { StackStatusEntry, MetricPoint, StackCpuSeries, StackStatusesLoadStatus } from './types';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
+import { isConfirmedImageUpdate, isConfirmedServiceUpdate } from '@/types/imageUpdates';
 import { aggregateCurrentUsage } from './aggregateCurrentUsage';
 import { classifyRow, type RowState } from './classifyRow';
 import { updateAvailableBadge, updateAvailableLabel } from '@/lib/updateAvailableLabel';
@@ -119,6 +120,7 @@ export function StackHealthTable({
       const series = stackCpuSeries[name];
       const peakCpu = series?.peakValue ?? agg?.cpu ?? 0;
       const state = classifyRow(entry.status, peakCpu);
+      const updateInfo = stackUpdates[file];
       return {
         file,
         name,
@@ -132,9 +134,9 @@ export function StackHealthTable({
         runningSince: entry.runningSince ?? null,
         source: entry.source ?? 'local',
         mainPort: entry.mainPort ?? null,
-        hasUpdate: stackUpdates[file]?.hasUpdate ?? false,
-        outdatedServices: (stackUpdates[file]?.services ?? [])
-          .filter((s) => s.hasUpdate)
+        hasUpdate: updateInfo != null && isConfirmedImageUpdate(updateInfo),
+        outdatedServices: (updateInfo?.services ?? [])
+          .filter((s) => isConfirmedServiceUpdate(s))
           .map((s) => s.service),
       };
     });

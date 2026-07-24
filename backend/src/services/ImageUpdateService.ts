@@ -963,6 +963,35 @@ export class ImageUpdateService {
         return committed;
     }
 
+    /**
+     * Clear sticky scanner state after an authoritative-negative update preview.
+     * Reserves a generation only for this mutation (read-only previews must not
+     * call this). Only deletes rows that are still incomplete/failed (sticky);
+     * a confirmed ok scanner write that landed after the preview observation is
+     * left intact. Returns:
+     *   - cleared: sticky row deleted under this generation
+     *   - stale: a newer writer reserved after us; no delete committed
+     *   - absent: committed but nothing to clear (no row, or confirmed ok row)
+     */
+    public async commitPreviewClear(
+        nodeId: number,
+        stackName: string,
+    ): Promise<'cleared' | 'stale' | 'absent'> {
+        const generation = this.reserveStackWriteGeneration(nodeId, stackName);
+        let deleted = 0;
+        const committed = await this.withStackWriteLock(nodeId, stackName, generation, () => {
+            const db = DatabaseService.getInstance();
+            const detail = db.getStackUpdateDetail(nodeId)[stackName];
+            if (!detail) return;
+            // Do not wipe a confirmed scanner result that may have landed after
+            // the preview was computed (or a clean ok/no-update row).
+            if (detail.checkStatus === 'ok') return;
+            deleted = db.clearStackUpdateStatus(nodeId, stackName);
+        });
+        if (!committed) return 'stale';
+        return deleted > 0 ? 'cleared' : 'absent';
+    }
+
     private runtimeImagesByService(
         stackName: string,
         containers: Array<{ Image?: string; Labels?: Record<string, string> }>,

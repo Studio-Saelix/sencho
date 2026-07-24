@@ -43,10 +43,22 @@ interface UpdatePreview {
     blocked_reason: string | null;
     has_build_services?: boolean;
     rebuild_available?: boolean;
+    /** Absent on older remotes; treat missing as non-authoritative. */
+    check_status?: 'ok' | 'partial' | 'failed';
   };
   build_services?: string[];
   rollback_target: string | null;
   changelog: string | null;
+}
+
+function isAuthoritativeNegativePreview(preview: UpdatePreview | null | undefined): boolean {
+  if (!preview) return false;
+  const hasCheckable = preview.images.some((img) => img.service); // images present ⇒ checkable declared refs
+  // Older remotes omit check_status; treat missing as non-authoritative.
+  // Empty image lists (build-only) must not drop cards that came from scanner state.
+  return hasCheckable
+    && preview.summary.check_status === 'ok'
+    && preview.summary.has_update === false;
 }
 
 function declaredServiceCount(preview: UpdatePreview | null | undefined): number {
@@ -796,12 +808,16 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
 
       setGroups(initialGroups.map(g => ({
         ...g,
-        cards: g.cards.map(c => ({
-          ...c,
-          preview: previewByKey.get(`${c.nodeId}::${c.stack}`) ?? null,
-          previewLoaded: true,
-        })),
-      })));
+        cards: g.cards
+          .map(c => ({
+            ...c,
+            preview: previewByKey.get(`${c.nodeId}::${c.stack}`) ?? null,
+            previewLoaded: true,
+          }))
+          // Drop cards whose live preview authoritatively reports no update.
+          // Missing check_status (older remotes) or non-ok status keeps the card.
+          .filter(c => !isAuthoritativeNegativePreview(c.preview)),
+      })).filter(g => g.cards.length > 0));
     } catch (err) {
       if (token !== loadTokenRef.current) return;
       toast.error((err as Error)?.message || 'Failed to load readiness');

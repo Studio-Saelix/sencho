@@ -852,13 +852,15 @@ function parseNextCursor(linkHeader: string | string[] | undefined): string | un
 }
 
 /**
- * Typed tag list for the Resources registry browser. Never collapses auth
- * failures into an empty array (that would hide credential problems).
+ * Typed tag list for the Resources registry browser and update-preview authority.
+ * Never collapses auth failures into an empty array (that would hide credential
+ * problems and falsely look like a successful empty listing).
+ * Pass null/undefined credentials to attempt anonymous pull.
  */
 export async function listRegistryTagsResult(
     registry: string,
     repo: string,
-    credentials: RegistryCredentials,
+    credentials?: RegistryCredentials | null,
     opts: { limit?: number; cursor?: string } = {},
 ): Promise<TagListResult> {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
@@ -896,13 +898,12 @@ export async function listRegistryTagsResult(
     }
 }
 
-/** Compatibility wrapper for update-preview: empty list on any failure. */
+/** Compatibility wrapper for callers that only need tags: empty list on any failure. */
 export async function listRegistryTags(
     registry: string,
     repo: string,
     credentials?: RegistryCredentials | null,
 ): Promise<string[]> {
-    if (!credentials) return [];
     const result = await listRegistryTagsResult(registry, repo, credentials);
     return result.ok ? result.tags : [];
 }

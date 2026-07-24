@@ -142,6 +142,40 @@ describe('useNotifications', () => {
     expect(onStateInvalidate).toHaveBeenCalledTimes(1);
   });
 
+  it('fires onImageUpdatesChange on update-status-reconciled', () => {
+    const onImageUpdatesChange = vi.fn();
+    renderHook(() =>
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange }),
+    );
+    act(() => { MockWS.instances[0]?.onopen?.(); });
+    act(() => {
+      MockWS.instances[0]?.onmessage?.({
+        data: JSON.stringify({
+          type: 'state-invalidate', scope: 'image-updates', nodeId: 1,
+          stackName: 'foo', action: 'update-status-reconciled', ts: 1000,
+        }),
+      });
+    });
+    expect(onImageUpdatesChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores unrelated image-updates actions for the refresh callback', () => {
+    const onImageUpdatesChange = vi.fn();
+    renderHook(() =>
+      useNotifications({ nodes: [localNode], onStateInvalidate: vi.fn(), onImageUpdatesChange }),
+    );
+    act(() => { MockWS.instances[0]?.onopen?.(); });
+    act(() => {
+      MockWS.instances[0]?.onmessage?.({
+        data: JSON.stringify({
+          type: 'state-invalidate', scope: 'image-updates', nodeId: 1,
+          stackName: 'foo', action: 'other', ts: 1000,
+        }),
+      });
+    });
+    expect(onImageUpdatesChange).not.toHaveBeenCalled();
+  });
+
   it('does not fire onImageUpdatesChange on a generic state-invalidate', () => {
     const onStateInvalidate = vi.fn();
     const onImageUpdatesChange = vi.fn();

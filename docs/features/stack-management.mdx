@@ -144,8 +144,9 @@ Each row leads with a two-character status indicator that summarizes the stack's
 
 Additional indicators appear to the right of the stack name:
 
-- A pulsing fuchsia dot flags that an image update is available.
-- A muted alert icon replaces the dot when the update check ran but failed to reach the registry or errored.
+- A pulsing fuchsia dot flags that an image update is available and the latest check completed successfully.
+- A muted warning icon appears when the last check was incomplete and an update was detected or previously recorded, but the full stack could not be verified. Incomplete results are not counted under **Updates**.
+- A muted alert icon appears when the update check failed (and, when an earlier update was recorded, notes that the previous status was retained).
 - A branch icon signals that the Git source's upstream branch has moved ahead of the working copy.
 
 ### Search and filter chips
@@ -159,7 +160,7 @@ The search box above the list filters stacks by name. The chip row below it filt
 - **All**: every stack discovered in `COMPOSE_DIR`.
 - **Up**: stacks where every container is running.
 - **Down**: stacks with at least one stopped or exited container.
-- **Updates**: stacks with a pending image update.
+- **Updates**: stacks with a confirmed pending image update (latest check completed successfully). Incomplete or failed checks are excluded from this chip.
 
 Each chip carries a live count. Click **Hide filters** in the top-right of the row to collapse the chips when you want a denser list. Search and chips combine: filtering by **Updates** and typing a few characters returns the intersection.
 

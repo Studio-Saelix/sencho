@@ -12,13 +12,20 @@ import {
     parseImageRef,
     selectLocalRepoDigest,
     compareLocalToRemoteTag,
-    listRegistryTags,
+    listRegistryTagsResult,
     type ParsedRef,
     type RegistryCredentials,
     type DigestComparisonResult,
+    type TagListResult,
 } from './registry-api';
 
 export type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
+
+/** Per-image check confidence for preview authority rollup. */
+export type PreviewImageCheckStatus = 'ok' | 'partial' | 'failed' | 'not_checkable';
+
+/** Stack-level preview authority; absent on older remotes. */
+export type PreviewCheckStatus = 'ok' | 'partial' | 'failed';
 
 export interface UpdatePreviewImage {
     service: string;
@@ -27,6 +34,8 @@ export interface UpdatePreviewImage {
     next_tag: string | null;
     has_update: boolean;
     semver_bump: SemverBump;
+    /** Authority of this image's checks; not_checkable for invalid refs. */
+    check_status: PreviewImageCheckStatus;
 }
 
 export type UpdateKind = 'tag' | 'digest' | 'none';
@@ -50,6 +59,12 @@ export interface UpdatePreviewSummary {
     has_build_services: boolean;
     /** True when a manual update can rebuild local build services (always when has_build_services). */
     rebuild_available: boolean;
+    /**
+     * Whether every checkable image was verified authoritatively.
+     * Authoritative-negative reconcile requires check_status === 'ok' and !has_update.
+     * Older remotes omit this field; treat absence as non-authoritative.
+     */
+    check_status: PreviewCheckStatus;
 }
 
 export interface UpdatePreview {
@@ -71,6 +86,13 @@ interface SemverParts {
 }
 
 const SEMVER_RE = /^(v)?(\d+)\.(\d+)\.(\d+)(?:-([A-Za-z][A-Za-z0-9.-]*))?$/;
+
+/** Max pages when enumerating tags for a pinned-semver authoritative-negative. */
+export const PREVIEW_TAG_LIST_MAX_PAGES = 20;
+/** Max tags accumulated across pages for the same purpose. */
+export const PREVIEW_TAG_LIST_MAX_TAGS = 2000;
+/** Per-page size passed to listRegistryTagsResult. */
+export const PREVIEW_TAG_LIST_PAGE_SIZE = 100;
 
 export function parseSemverTag(tag: string): SemverParts | null {
     const m = tag.match(SEMVER_RE);
@@ -169,11 +191,86 @@ export interface LocalDigestInfo {
     platform: { os: string; architecture: string };
 }
 
+export type ListRegistryTagsResultFn = (
+    registry: string,
+    repo: string,
+    credentials?: RegistryCredentials | null,
+    opts?: { limit?: number; cursor?: string },
+) => Promise<TagListResult>;
+
 export interface ComputePreviewDeps {
     getLocalDigest: (imageRef: string, parsed: ParsedRef) => Promise<LocalDigestInfo>;
     compareDigest: typeof compareLocalToRemoteTag;
-    listRegistryTags: typeof listRegistryTags;
+    listRegistryTagsResult: ListRegistryTagsResultFn;
     getCredentials: (registry: string) => Promise<RegistryCredentials | null>;
+}
+
+export type TagEnumOutcome =
+    | { kind: 'complete'; tags: string[] }
+    | { kind: 'incomplete'; tags: string[]; reason: string }
+    | { kind: 'error'; reason: string }
+    | { kind: 'skipped' };
+
+/**
+ * Enumerate tags with bounded pagination. Hitting the page/tag cap while a
+ * nextCursor remains is incomplete (non-authoritative), not a successful empty
+ * or "no newer tag" result.
+ */
+export async function listAllRegistryTagsBounded(
+    listFn: ListRegistryTagsResultFn,
+    registry: string,
+    repo: string,
+    credentials: RegistryCredentials | null,
+    opts: { maxPages?: number; maxTags?: number; pageSize?: number } = {},
+): Promise<TagEnumOutcome> {
+    const maxPages = opts.maxPages ?? PREVIEW_TAG_LIST_MAX_PAGES;
+    const maxTags = opts.maxTags ?? PREVIEW_TAG_LIST_MAX_TAGS;
+    const pageSize = opts.pageSize ?? PREVIEW_TAG_LIST_PAGE_SIZE;
+    const tags: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < maxPages; page++) {
+        const result = await listFn(registry, repo, credentials, { limit: pageSize, cursor });
+        if (!result.ok) {
+            return { kind: 'error', reason: result.message };
+        }
+        tags.push(...result.tags);
+        if (tags.length > maxTags) {
+            return {
+                kind: 'incomplete',
+                tags: tags.slice(0, maxTags),
+                reason: `Tag list exceeded ${maxTags} tags before pagination completed`,
+            };
+        }
+        if (!result.nextCursor) {
+            return { kind: 'complete', tags };
+        }
+        cursor = result.nextCursor;
+    }
+    return {
+        kind: 'incomplete',
+        tags,
+        reason: `Tag list exceeded ${maxPages} pages before pagination completed`,
+    };
+}
+
+function imageFromParts(
+    service: string,
+    imageRef: string,
+    currentTag: string,
+    nextTag: string | null,
+    hasUpdate: boolean,
+    semverBump: SemverBump,
+    checkStatus: PreviewImageCheckStatus,
+): UpdatePreviewImage {
+    return {
+        service,
+        image: imageRef,
+        current_tag: currentTag,
+        next_tag: nextTag,
+        has_update: hasUpdate,
+        semver_bump: semverBump,
+        check_status: checkStatus,
+    };
 }
 
 export async function computeImagePreview(
@@ -183,33 +280,32 @@ export async function computeImagePreview(
 ): Promise<UpdatePreviewImage> {
     const parsed = parseImageRef(imageRef);
     if (!parsed) {
-        return {
-            service,
-            image: imageRef,
-            current_tag: 'unknown',
-            next_tag: null,
-            has_update: false,
-            semver_bump: 'none',
-        };
+        return imageFromParts(service, imageRef, 'unknown', null, false, 'none', 'not_checkable');
     }
 
     const credentials = await deps.getCredentials(parsed.registry);
+    const tagApplicable = !isMovingTag(parsed.tag);
 
     // Digest-based: is a new build of the SAME tag available? A comparison error
-    // (network failure, malformed manifest) fails soft: it never claims a
-    // digest-based update, it only skips it.
+    // fails soft for has_update (never claims digest update) but affects authority.
     const localInfo = await deps.getLocalDigest(imageRef, parsed);
-    const [comparison, tags] = await Promise.all([
-        localInfo.digest
-            ? deps.compareDigest(localInfo.digest, parsed.registry, parsed.repo, parsed.tag, localInfo.platform, credentials)
-            : Promise.resolve<DigestComparisonResult>({ kind: 'error', reason: 'No local registry digest available' }),
-        deps.listRegistryTags(parsed.registry, parsed.repo, credentials),
-    ]);
+    const comparisonPromise: Promise<DigestComparisonResult> = localInfo.digest
+        ? deps.compareDigest(localInfo.digest, parsed.registry, parsed.repo, parsed.tag, localInfo.platform, credentials)
+        : Promise.resolve({ kind: 'error', reason: 'No local registry digest available' });
+
+    // Tag enumeration only when findNextTag can apply (pinned semver).
+    const tagPromise: Promise<TagEnumOutcome> = tagApplicable
+        ? listAllRegistryTagsBounded(deps.listRegistryTagsResult, parsed.registry, parsed.repo, credentials)
+        : Promise.resolve({ kind: 'skipped' });
+
+    const [comparison, tagOutcome] = await Promise.all([comparisonPromise, tagPromise]);
+
+    let nextTag: string | null = null;
+    if (tagOutcome.kind === 'complete' || tagOutcome.kind === 'incomplete') {
+        nextTag = findNextTag(parsed.tag, tagOutcome.tags);
+    }
+
     const digestUpdate = comparison.kind === 'update';
-
-    // Tag-based: is a higher semver tag available?
-    const nextTag = findNextTag(parsed.tag, tags);
-
     const hasUpdate = digestUpdate || nextTag !== null;
     let semverBump: SemverBump = 'none';
     let resolvedNext: string | null = null;
@@ -221,14 +317,51 @@ export async function computeImagePreview(
         semverBump = 'patch';
     }
 
-    return {
-        service,
-        image: imageRef,
-        current_tag: parsed.tag,
-        next_tag: resolvedNext,
-        has_update: hasUpdate,
-        semver_bump: semverBump,
-    };
+    const checkStatus = resolveImageCheckStatus({
+        digest: comparison.kind,
+        tagApplicable,
+        tagOutcome,
+        hasUpdate,
+    });
+
+    return imageFromParts(service, imageRef, parsed.tag, resolvedNext, hasUpdate, semverBump, checkStatus);
+}
+
+function resolveImageCheckStatus(args: {
+    digest: DigestComparisonResult['kind'];
+    tagApplicable: boolean;
+    tagOutcome: TagEnumOutcome;
+    hasUpdate: boolean;
+}): PreviewImageCheckStatus {
+    const { digest, tagApplicable, tagOutcome, hasUpdate } = args;
+
+    // Digest alone proves an update → authoritative ok regardless of tags.
+    if (digest === 'update') return 'ok';
+
+    if (!tagApplicable) {
+        // Moving/non-semver: negative authority rests on digest match only.
+        return digest === 'match' ? 'ok' : 'failed';
+    }
+
+    // Pinned semver: need complete tag enumeration for authoritative-negative.
+    // A found next tag is a definitive positive even when digest compare failed.
+    if (tagOutcome.kind === 'complete') {
+        if (hasUpdate) return 'ok';
+        if (digest === 'match') return 'ok';
+        // digest error and no next tag: cannot exclude same-tag rebuild
+        return 'partial';
+    }
+
+    if (tagOutcome.kind === 'incomplete') {
+        // Newer tag on pages we fetched is a confirmed positive; otherwise partial.
+        if (hasUpdate) return 'ok';
+        return 'partial';
+    }
+
+    // tagOutcome.kind === 'error' or unexpected skipped for semver
+    if (hasUpdate) return 'partial'; // tag prove failed; digest may still be soft
+    if (digest === 'match') return 'partial';
+    return 'failed';
 }
 
 function buildRollbackTarget(image: string, currentTag: string): string | null {
@@ -242,6 +375,16 @@ function buildRollbackTarget(image: string, currentTag: string): string | null {
         : parsed.repo;
     const base = isDockerHub ? repo : `${parsed.registry}/${repo}`;
     return `${base}:${currentTag}`;
+}
+
+export function rollupPreviewCheckStatus(images: UpdatePreviewImage[]): PreviewCheckStatus {
+    const checkable = images.filter((i) => i.check_status !== 'not_checkable');
+    if (checkable.length === 0) return 'ok';
+    const allFailed = checkable.every((i) => i.check_status === 'failed');
+    if (allFailed) return 'failed';
+    const allOk = checkable.every((i) => i.check_status === 'ok');
+    if (allOk) return 'ok';
+    return 'partial';
 }
 
 export function buildSummary(
@@ -281,10 +424,20 @@ export function buildSummary(
             blocked_reason: blocked ? 'Major version jumps require human review before applying.' : null,
             has_build_services: hasBuildServices,
             rebuild_available: hasBuildServices,
+            check_status: rollupPreviewCheckStatus(images),
         },
         rollback_target: primary ? buildRollbackTarget(primary.image, primary.current_tag) : null,
         changelog: null,
     };
+}
+
+/** True when a preview is safe to clear sticky scanner state. */
+export function isAuthoritativeNegativePreview(preview: UpdatePreview): boolean {
+    const hasCheckable = preview.images.some((i) => i.check_status !== 'not_checkable');
+    // Empty / build-only previews must not clear scanner rows that track runtime images.
+    return hasCheckable
+        && preview.summary.check_status === 'ok'
+        && preview.summary.has_update === false;
 }
 
 /** Filter a full-stack preview down to one service's images and recompute the summary from that subset. */
@@ -317,7 +470,7 @@ export class UpdatePreviewService {
         const deps: ComputePreviewDeps = {
             getCredentials: (registry) => RegistryService.getInstance().getAuthForRegistry(registry),
             compareDigest: compareLocalToRemoteTag,
-            listRegistryTags,
+            listRegistryTagsResult,
             getLocalDigest: async (imageRef: string, parsed: ParsedRef): Promise<LocalDigestInfo> => {
                 try {
                     const inspect = await docker.getDocker().getImage(imageRef).inspect();

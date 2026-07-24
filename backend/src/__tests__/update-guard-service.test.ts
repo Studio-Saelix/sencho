@@ -159,7 +159,7 @@ describe('UpdateGuardService.computeUpdateReadiness wiring', () => {
       summary: {
         has_update: true, primary_image: 'nginx', current_tag: '1.27.0', next_tag: '1.27.1',
         semver_bump: 'patch', update_kind: 'tag', blocked: false, blocked_reason: null,
-        has_build_services: false, rebuild_available: false,
+        has_build_services: false, rebuild_available: false, check_status: 'ok',
       },
       rollback_target: 'nginx:1.27.0',
       changelog: null,
@@ -190,7 +190,7 @@ describe('UpdateGuardService.computeUpdateReadiness with a serviceName', () => {
     summary: {
       has_update: true, primary_image: 'nginx', current_tag: '1.27.0', next_tag: '1.27.1',
       semver_bump: 'patch', update_kind: 'tag', blocked: false, blocked_reason: null,
-      has_build_services: false, rebuild_available: false,
+      has_build_services: false, rebuild_available: false, check_status: 'ok',
     },
     rollback_target: 'nginx:1.27.0',
     changelog: null,
@@ -284,7 +284,7 @@ describe('UpdateGuardService.computeRollbackReadiness moving-tag wiring', () => 
     summary: {
       has_update: false, primary_image: 'app', current_tag: images[0]?.current_tag ?? null,
       next_tag: null, semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
-      has_build_services: false, rebuild_available: false,
+      has_build_services: false, rebuild_available: false, check_status: 'ok',
     },
     rollback_target: 'app:1.2.3',
     changelog: null,
