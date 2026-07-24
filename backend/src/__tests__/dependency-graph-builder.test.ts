@@ -32,7 +32,7 @@ function snap(partial: Partial<DependencySnapshot>): DependencySnapshot {
 function container(p: Partial<DependencyContainer> & { id: string }): DependencyContainer {
   return {
     name: p.id, service: null, composeProject: null, stack: null,
-    state: 'running', image: 'img:latest', networks: [], volumes: [], ports: [], ...p,
+    state: 'running', exitCode: null, image: 'img:latest', networks: [], volumes: [], ports: [], ...p,
   };
 }
 
