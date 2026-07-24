@@ -1949,7 +1949,7 @@ export class DatabaseService {
         stmt.run('cve_intel_enabled', '1');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
-        stmt.run('reclaim_hero', '1');
+        stmt.run('reclaim_hero', '0');
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
         stmt.run('image_update_check_interval_minutes', '120');

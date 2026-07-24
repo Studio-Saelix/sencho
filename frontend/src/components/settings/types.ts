@@ -42,7 +42,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     scan_history_per_image_limit: '50',
     prune_orphaned_scans: '1',
     prune_on_update: '1',
-    reclaim_hero: '1',
+    reclaim_hero: '0',
     snapshot_documentation: '0',
     health_gate_enabled: '1',
     health_gate_window_seconds: '90',

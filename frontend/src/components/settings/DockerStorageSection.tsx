@@ -132,7 +132,7 @@ export function DockerStorageSection({ onDirtyChange }: DockerStorageSectionProp
                 </SettingsField>
                 <SettingsField
                     label="Show reclaimable-space banner"
-                    helper="Show the reclaimable-space banner at the top of the Resource Hub when this node has unused images, stopped containers, or dangling volumes to clear. On by default."
+                    helper="Show the reclaimable-space banner at the top of the Resource Hub when this node has unused images, stopped containers, or dangling volumes to clear. Off by default."
                 >
                     <TogglePill
                         checked={settings.reclaim_hero === '1'}

@@ -421,9 +421,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
     const [planError, setPlanError] = useState<string | null>(null);
     const planFetchGenRef = useRef(0);
 
-    // Reclaim banner visibility: the per-node opt-out setting (loaded in
+    // Reclaim banner visibility: the per-node opt-in setting (loaded in
     // fetchAllData) and the per-browser dismiss snapshot for the active node.
-    const [reclaimHeroEnabled, setReclaimHeroEnabled] = useState(true);
+    const [reclaimHeroEnabled, setReclaimHeroEnabled] = useState(false);
     const [heroDismissedBytes, setHeroDismissedBytes] = useState<number | null>(null);
 
     // Classified image selection is node-bound so a node switch cannot leave
@@ -471,11 +471,10 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
 
             if (fetchGenerationRef.current !== generation) return;
 
-            // Set unconditionally: a failed /settings (settingsData null) must
-            // reset to the default-on state for this node, not inherit the
-            // previously active node's value. undefined !== '0' is true, so a
-            // missing key or failed fetch fails open toward showing the banner.
-            setReclaimHeroEnabled(settingsData?.reclaim_hero !== '0');
+            // Set unconditionally: a failed /settings (settingsData null) or a
+            // missing key falls back to the default-off state for this node
+            // rather than inheriting the previously active node's value.
+            setReclaimHeroEnabled(settingsData?.reclaim_hero === '1');
             if (usageData) setUsage(usageData);
             if (resourcesData) {
                 setImages(resourcesData.images ?? []);
@@ -777,7 +776,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
         + (usage?.reclaimableContainers ?? 0)
         + (usage?.reclaimableVolumes ?? 0);
 
-    // Banner shows while the opt-out is on and the operator has not dismissed
+    // Banner shows while the opt-in is on and the operator has not dismissed
     // this (or a larger) reclaimable total. A stable residue stays hidden; a
     // fresh pile pushes the total past the snapshot and the banner returns.
     const heroVisible = isAdmin && reclaimHeroEnabled

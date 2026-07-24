@@ -11,13 +11,13 @@ The **Resources** tab shows everything Docker is storing on your host, broken do
 
 ## Reclaim hero
 
-When there is reclaimable disk space (unused images, stopped containers, or dangling volumes), an amber banner leads the view with the total amount you can free and a `·`-separated breakdown of what contributes to it (for example, `2 unused images · 10 dangling volumes`). Click **Review & prune** to open a confirmation dialog that lists the exact items that will be removed (capped in the preview with an "and N more" note when the list is long). Confirm only after the plan is ready; Sencho rechecks the list at execute time and skips anything that is no longer eligible.
+Once enabled for a node, an amber banner leads the view whenever there is reclaimable disk space (unused images, stopped containers, or dangling volumes), showing the total amount you can free and a `·`-separated breakdown of what contributes to it (for example, `2 unused images · 10 dangling volumes`). Click **Review & prune** to open a confirmation dialog that lists the exact items that will be removed (capped in the preview with an "and N more" note when the list is long). Confirm only after the plan is ready; Sencho rechecks the list at execute time and skips anything that is no longer eligible.
 
 The hero stays hidden when there is nothing to reclaim, keeping the view focused on the rest of your inventory.
 
 To set the banner aside without pruning, use the **×** in its top-right corner. It stays hidden on that browser until the reclaimable total grows past the amount it held when you dismissed it, so a small, stubborn remainder will not keep reappearing while a genuine new build-up still surfaces.
 
-To keep the banner off for a node entirely, open **Settings → Monitoring → Docker & Storage** and switch off **Show reclaimable-space banner**. It is on by default and applies per node.
+The banner is off by default and applies per node. To turn it on, open **Settings → Monitoring → Docker & Storage** and switch on **Show reclaimable-space banner**.
 
 <Note>
   The banner and the **Review & prune** action are admin-only. Read-only roles still see the rest of the page but cannot trigger destructive operations.
