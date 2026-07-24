@@ -540,7 +540,8 @@ describe('Notification suppression - CRUD', () => {
 
     // A delayed POST arrives after the DELETE, reordered by the network. Even
     // though its updated_at is newer than anything the sender ever sent before
-    // the delete, the delete is authoritative: this id must stay gone.
+    // the delete, it is still older than deleted_at (wall-clock at DELETE time),
+    // so the tombstone must keep this id gone.
     const delayed = await request(app)
       .post('/api/notification-suppression-rules/replica')
       .set('Authorization', `Bearer ${token}`)
@@ -628,5 +629,116 @@ describe('Notification suppression - CRUD', () => {
       .send({ rule: replicaRule({ updated_at: 2000 }) });
     expect(delayed.status).toBe(200);
     expect(DatabaseService.getInstance().getNotificationSuppressionRule(970008)).toBeUndefined();
+  });
+
+  it('replica recreates after soft-cleanup when hub re-save is newer than tombstone', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const replicaRule = (overrides: Record<string, unknown>) => ({
+      id: 980009,
+      name: 'replica-soft-cleanup-resave',
+      applies_to: 'both',
+      stack_patterns: [],
+      node_id: null,
+      label_ids: null,
+      categories: null,
+      levels: null,
+      enabled: true,
+      expires_at: null,
+      schedule: { days: [2], start_minute: 60, end_minute: 120, tz: 'UTC' },
+      created_at: 1,
+      ...overrides,
+    });
+
+    const first = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ updated_at: Date.now() - 60_000 }) });
+    expect(first.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(980009)).not.toBeUndefined();
+
+    // Soft cleanup DELETE (capability unsupported-or-unreachable / corrupt schedule)
+    // tombstones the id. A later hub re-save must recreate once updated_at is newer.
+    const del = await request(app)
+      .delete('/api/notification-suppression-rules/replica/980009')
+      .set('Authorization', `Bearer ${token}`);
+    expect(del.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(980009)).toBeUndefined();
+
+    const resaveAt = Date.now() + 1_000;
+    const resave = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ name: 'replica-soft-cleanup-resave-v2', updated_at: resaveAt }) });
+    expect(resave.status).toBe(200);
+    const restored = DatabaseService.getInstance().getNotificationSuppressionRule(980009);
+    expect(restored).not.toBeUndefined();
+    expect(restored?.name).toBe('replica-soft-cleanup-resave-v2');
+    expect(restored?.updated_at).toBe(resaveAt);
+    expect(restored?.schedule).not.toBeNull();
+  });
+
+  it('replica refuses a post-delete write whose updated_at ties the tombstone', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    const deletedAt = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(deletedAt);
+    try {
+      const del = await request(app)
+        .delete('/api/notification-suppression-rules/replica/990010')
+        .set('Authorization', `Bearer ${token}`);
+      expect(del.status).toBe(200);
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    const tie = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 990010,
+          name: 'replica-tombstone-tie',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: deletedAt,
+        },
+      });
+    expect(tie.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(990010)).toBeUndefined();
+
+    const newer = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 990010,
+          name: 'replica-tombstone-newer',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: deletedAt + 1,
+        },
+      });
+    expect(newer.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(990010)?.name).toBe(
+      'replica-tombstone-newer',
+    );
   });
 });

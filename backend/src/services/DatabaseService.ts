@@ -2961,11 +2961,22 @@ export class DatabaseService {
             'SELECT deleted_at FROM notification_suppression_rule_tombstones WHERE id = ?',
         ).get(rule.id) as { deleted_at: number } | undefined;
         if (tombstone) {
-            console.warn(
-                `[DatabaseService] Ignoring suppression replica write for rule id=${sanitizeForLog(rule.id)}: ` +
-                    `this id was deleted at ${sanitizeForLog(tombstone.deleted_at)} and must not be recreated`,
-            );
-            return;
+            // Soft cleanup DELETEs (capability probe false / corrupt schedule) share this
+            // tombstone path with authoritative deletes. A delayed POST whose updated_at is
+            // not strictly newer than the tombstone must stay blocked. A later hub re-save
+            // bumps updated_at past deleted_at and must be allowed to recreate the replica
+            // (e.g. remote came back reachable or gained schedule support).
+            if (rule.updated_at <= tombstone.deleted_at) {
+                console.warn(
+                    `[DatabaseService] Ignoring suppression replica write for rule id=${sanitizeForLog(rule.id)}: ` +
+                        `this id was deleted at ${sanitizeForLog(tombstone.deleted_at)} and incoming ` +
+                        `updated_at=${sanitizeForLog(rule.updated_at)} is not newer`,
+                );
+                return;
+            }
+            this.db.prepare(
+                'DELETE FROM notification_suppression_rule_tombstones WHERE id = ?',
+            ).run(rule.id);
         }
         this.db.prepare(
             `INSERT INTO notification_suppression_rules
@@ -3018,11 +3029,13 @@ export class DatabaseService {
     public deleteNotificationSuppressionRule(id: number): number {
         const changes = this.db.prepare('DELETE FROM notification_suppression_rules WHERE id = ?').run(id).changes;
         // Fleet sync has no delivery ordering guarantee: a replica POST for this id can
-        // still be in flight. Record the delete permanently (ids are AUTOINCREMENT and
-        // never reused) so upsertNotificationSuppressionRuleReplica refuses to resurrect it.
+        // still be in flight. Record a tombstone so upsertNotificationSuppressionRuleReplica
+        // refuses writes whose updated_at is not newer than this delete.
         // Tombstone unconditionally, even when changes is 0: deleteRuleOnNode issues this
         // same DELETE for capability/invalid-schedule cleanup against remotes that may never
         // have received the rule yet, and a reordered POST behind that DELETE must not create it.
+        // Soft-cleanup tombstones are not permanent for the id: a later hub re-save with a
+        // fresher updated_at clears the tombstone and recreates the replica (see upsert).
         this.db.prepare(
             `INSERT INTO notification_suppression_rule_tombstones (id, deleted_at) VALUES (?, ?)
              ON CONFLICT(id) DO UPDATE SET deleted_at = excluded.deleted_at`,
