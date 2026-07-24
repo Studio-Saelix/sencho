@@ -24,7 +24,7 @@ function effSvc(over: Partial<EffService> = {}): EffService {
 function container(over: Partial<DependencyContainer> = {}): DependencyContainer {
   return {
     id: 'c1', name: 'web1', service: 'web', composeProject: 'myapp', stack: 'myapp',
-    state: 'running', image: 'nginx:1.27', networks: [], volumes: [], ports: [], ...over,
+    state: 'running', exitCode: null, image: 'nginx:1.27', networks: [], volumes: [], ports: [], ...over,
   };
 }
 

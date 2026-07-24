@@ -323,7 +323,7 @@ describe('DriftLedgerService.reconcileStack', () => {
   // A running container on a different image than compose declares => image-mismatch.
   const driftedContainer = (stack: string) => ({
     id: `${stack}-c1`, name: `${stack}-web-1`, service: 'web', composeProject: stack, stack,
-    state: 'running', image: 'nginx:1.26', networks: [], volumes: [], ports: [],
+    state: 'running', exitCode: null, image: 'nginx:1.26', networks: [], volumes: [], ports: [],
   });
 
   beforeEach(() => {
@@ -377,7 +377,7 @@ describe('drift route (GET read-only, POST recheck persists)', () => {
     getDependencySnapshot: vi.fn().mockResolvedValue({
       containers: [{
         id: 'c1', name: `${STACK}-web-1`, service: 'web', composeProject: STACK, stack: STACK,
-        state: 'running', image: 'nginx:1.26', networks: [], volumes: [], ports: [],
+        state: 'running', exitCode: null, image: 'nginx:1.26', networks: [], volumes: [], ports: [],
       }],
       networks: [], volumes: [],
     }),
