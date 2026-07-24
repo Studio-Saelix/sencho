@@ -185,8 +185,8 @@ The header answers two questions at a glance:
 
 - **What is this?** A breadcrumb (`LOCAL · STACKS · NAME`) and the stack name as the title.
 - **Is it healthy?** A state pill to the right of the title reports the live state:
-  - `running · healthy` (green) when at least one container reports a passing healthcheck.
-  - `running · unhealthy` (red) when any container reports a failing healthcheck.
+  - `running · healthy` (green) when at least one container reports Docker health status `healthy`.
+  - `running · unhealthy` (red) when any container reports Docker health status `unhealthy`.
   - `running · starting` (amber) during the Docker healthcheck start period.
   - `running` (green) when no healthcheck is defined.
   - `exited` (red) when no containers are up.
@@ -215,9 +215,9 @@ Below the header, each container in the stack gets a single row that answers "is
 
 Each row includes:
 
-- **Health badge.** A colored glyph reports the Docker healthcheck state: `✓` green for passing, `✗` red for failing, `…` amber while the healthcheck start period is in flight. Containers without a `healthcheck:` block show a neutral `✓`.
+- **Health badge.** A colored glyph reports the Docker healthcheck state: `✓` green for `healthy`, `✗` red for `unhealthy`, `…` amber while the healthcheck start period is in flight. Containers without a `healthcheck:` block show a neutral `✓`.
 - **Container name** in mono.
-- **Meta line.** Uptime (`up 12 hours`) and the primary port mapping (`8989 → 8989/tcp`).
+- **Meta line.** Uptime (`up 12 hours`), the Docker health status when defined (`healthy`, `unhealthy`, or `starting`), and the primary port mapping (`8989 → 8989/tcp`).
 - **Open link.** When the container publishes a port, the mapping itself is a link (`8989 → 8989/tcp ↗`) that opens the service in a new tab, with a **Copy URL** button beside it. The address uses the active node's host and switches to `https` for port 443. Recognised multi-port apps open their web path automatically (for example, Plex opens `/web`).
 - **Live stat tiles.** Three tiles show CPU, memory, and network I/O with a rolling sparkline. The sparkline uses the cyan data color and refreshes roughly every 1.5 seconds.
 - **Action icons.** The image source links button (see above), plus shortcuts to **View logs**, open a bash shell, and (on single-service stacks) the per-container Start / Stop / Restart kebab.
