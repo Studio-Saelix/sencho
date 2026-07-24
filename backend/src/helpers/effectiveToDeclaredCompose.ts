@@ -1,5 +1,6 @@
 import type { EffectiveModel, EffResource } from '../services/preflight/effectiveModel';
 import type { DeclaredCompose, DeclaredPort, DeclaredResource, DeclaredService } from './composeDependencyParse';
+import { normalizeComposeRestartIntent } from '../utils/oneShotCompletion';
 
 /** Map one rendered network/volume entry to the declared shape drift expects. */
 function toDeclaredResource(key: string, res: EffResource, projectName: string): DeclaredResource {
@@ -41,6 +42,7 @@ export function declaredFromEffectiveModel(model: EffectiveModel): DeclaredCompo
     ),
     image: s.image,
     networkMode: s.networkMode,
+    restart: normalizeComposeRestartIntent(s.restart, s.deploy),
   }));
 
   return {

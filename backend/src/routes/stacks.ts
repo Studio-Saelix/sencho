@@ -140,6 +140,40 @@ function releaseStackOpLock(req: Request, stackName: string): void {
   StackOpLockService.getInstance().release(req.nodeId, stackName);
 }
 
+/** Root compose + blueprint marker on the stack-source root must not change while a lifecycle op holds the stack lock. */
+const STACK_OP_LOCKED_ROOT_TRUST_FILES = new Set([
+  'compose.yaml',
+  'compose.yml',
+  'docker-compose.yaml',
+  'docker-compose.yml',
+  '.blueprint.json',
+]);
+
+function rejectIfStackOpBlocksRootTrustFileWrite(
+  req: Request,
+  res: Response,
+  stackName: string,
+  relPath: string,
+  root: StackFileRoot,
+): boolean {
+  if (root.kind !== 'stack-source') return false;
+  if (relPath.includes('/')) return false;
+  const base = relPath.toLowerCase();
+  if (!STACK_OP_LOCKED_ROOT_TRUST_FILES.has(base)) return false;
+  const existing = StackOpLockService.getInstance().get(req.nodeId, stackName);
+  if (!existing) return false;
+  res.status(409).json({
+    error: `${stackName} is busy: another operation (${existing.action}) is already in progress`,
+    code: 'stack_op_in_progress',
+    inProgress: {
+      action: existing.action,
+      startedAt: existing.startedAt,
+      user: existing.user,
+    },
+  });
+  return true;
+}
+
 function stackFileEtag(mtimeMs: number): string {
   return `W/"${Math.floor(mtimeMs)}"`;
 }
@@ -2909,6 +2943,10 @@ stacksRouter.post(
       return res.status(400).json({ error: 'Invalid filename' });
     }
     const targetRelPath = relPath ? `${relPath}/${originalName}` : originalName;
+    if (rejectIfStackOpBlocksRootTrustFileWrite(req, res, stackName, targetRelPath, root)) {
+      await cleanupUploadTemp(req);
+      return;
+    }
     const overwrite = String(req.query.overwrite) === '1';
     // The multer wrapper stashed the route-entry timestamp on the request so
     // the success path and the rejection paths share one window. Fall back to
@@ -3012,6 +3050,7 @@ stacksRouter.put('/:stackName/files/content', async (req: Request, res: Response
   const expectedVersion = req.header('if-match') || undefined;
   const root = await resolveRootForOp(req, res, stackName, 'write');
   if (!root) return;
+  if (rejectIfStackOpBlocksRootTrustFileWrite(req, res, stackName, relPath, root)) return;
   const startedAt = Date.now();
   logFileDiag('write start', { stackName, relPath, nodeId: req.nodeId, bytes: Buffer.byteLength(content, 'utf-8'), hasIfMatch: expectedVersion !== undefined, rootKind: root.kind });
   try {

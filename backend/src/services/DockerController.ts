@@ -210,6 +210,12 @@ export interface DependencyContainer {
   /** Resolved Sencho stack, or null when the container is not Sencho-managed. */
   stack: string | null;
   state: string;
+  /**
+   * Exit code from list Status when a parenthesized code is present
+   * (e.g. "Exited (0) …", "Restarting (1) …"); null when none (e.g. "Up …", bare "Exited").
+   * Required so Drift can fail closed on unknown codes.
+   */
+  exitCode: number | null;
   image: string;
   networks: { name: string; id: string; ip: string }[];
   /** Named-volume sources mounted by the container (bind mounts excluded). */
@@ -1833,6 +1839,7 @@ class DockerController {
         composeProject: c.Labels?.['com.docker.compose.project'] ?? null,
         stack: DockerController.resolveContainerStack(c.Labels, projectToStack, knownSet, absDirToStack, resolvedBase),
         state: c.State ?? 'unknown',
+        exitCode: parseExitCode(typeof c.Status === 'string' ? c.Status : undefined),
         image: c.Image ?? '',
         networks,
         volumes,

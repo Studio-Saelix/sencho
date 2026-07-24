@@ -101,7 +101,7 @@ describe('BlueprintService remote deploy', () => {
         expect(dep?.applied_revision).toBe(bpObj.revision);
     });
 
-    it('falls back to the legacy create/write/deploy flow when the remote lacks apply-local (404)', async () => {
+    it('fails closed when the remote lacks apply-local (404); no legacy mutations', async () => {
         const node = seedRemoteNode();
         const bp = seedBlueprint([node.id]);
         const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
@@ -110,25 +110,17 @@ describe('BlueprintService remote deploy', () => {
         vi.spyOn(axios, 'get').mockResolvedValue({ status: 200, data: [] });
         const putSpy = vi.spyOn(axios, 'put').mockResolvedValue({ status: 200, data: {} });
         const postSpy = vi.spyOn(axios, 'post')
-            .mockResolvedValueOnce({ status: 404, data: {} })   // apply-local missing on older node
-            .mockResolvedValueOnce({ status: 201, data: {} })   // legacy create stack
-            .mockResolvedValueOnce({ status: 200, data: {} });  // legacy deploy
+            .mockResolvedValueOnce({ status: 404, data: {} });
 
         const result = await BlueprintService.getInstance().deployToNode(bpObj, nodeObj);
 
-        expect(result.status).toBe('active');
+        expect(result.status).toBe('failed');
+        expect(result.error).toMatch(/apply-local|Upgrade/i);
+        expect(postSpy).toHaveBeenCalledTimes(1);
         expect(postSpy.mock.calls[0][0]).toMatch(/\/api\/blueprints\/apply-local$/);
-        expect(postSpy.mock.calls[1][0]).toMatch(/\/api\/stacks$/);
-        expect(putSpy).toHaveBeenCalledTimes(2); // compose + marker
-        const composePutUrl = String(putSpy.mock.calls[0][0]);
-        const markerPutUrl = String(putSpy.mock.calls[1][0]);
-        expect(composePutUrl).toMatch(/[?&]path=compose\.yaml(?:&|$)/);
-        expect(markerPutUrl).toMatch(/[?&]path=\.blueprint\.json(?:&|$)/);
-        expect(postSpy.mock.calls[2][0]).toMatch(/\/deploy$/);
-        const [composePutOrder, markerPutOrder] = putSpy.mock.invocationCallOrder;
-        const deployOrder = postSpy.mock.invocationCallOrder[2];
-        expect(composePutOrder).toBeLessThan(markerPutOrder);
-        expect(markerPutOrder).toBeLessThan(deployOrder);
+        expect(putSpy).not.toHaveBeenCalled();
+        const dep = DatabaseService.getInstance().getDeployment(bp.id, node.id);
+        expect(dep?.status).toBe('failed');
     });
 
     it('maps a remote apply lock-conflict (409) to status=failed', async () => {
@@ -192,7 +184,7 @@ describe('BlueprintService remote deploy', () => {
         expect(dep?.status).toBe('name_conflict');
     });
 
-    it('withdraws a remote deployment by deleting the stack and removing the row', async () => {
+    it('withdraws a remote deployment via withdraw-local and removes the row', async () => {
         const node = seedRemoteNode();
         const bp = seedBlueprint([node.id]);
         const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
@@ -204,15 +196,71 @@ describe('BlueprintService remote deploy', () => {
             applied_revision: bpObj.revision,
         });
 
-        vi.spyOn(axios, 'get').mockResolvedValue({ status: 404, data: {} }); // readMarker → null → proceed
-        vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: {} }); // remote down (best-effort)
-        const delSpy = vi.spyOn(axios, 'delete').mockResolvedValue({ status: 200, data: {} });
+        const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({
+            status: 200,
+            data: { status: 'withdrawn' },
+        });
+        const delSpy = vi.spyOn(axios, 'delete');
 
         const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, nodeObj);
 
         expect(result.status).toBe('withdrawn');
-        expect(delSpy.mock.calls[0][0]).toMatch(/\/api\/stacks\//);
+        expect(postSpy.mock.calls[0][0]).toMatch(/\/api\/blueprints\/withdraw-local$/);
+        expect(delSpy).not.toHaveBeenCalled();
         expect(DatabaseService.getInstance().getDeployment(bp.id, node.id)).toBeUndefined();
+    });
+
+    it('maps remote withdraw-local lock conflict to failed without fallback delete', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            applied_revision: bpObj.revision,
+        });
+
+        vi.spyOn(axios, 'post').mockResolvedValue({
+            status: 409,
+            data: {
+                error: `${bpObj.name} is busy: another operation (update) is already in progress`,
+                code: 'stack_op_in_progress',
+            },
+        });
+        const delSpy = vi.spyOn(axios, 'delete');
+
+        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('failed');
+        expect(result.error).toMatch(/already in progress/);
+        expect(delSpy).not.toHaveBeenCalled();
+        expect(DatabaseService.getInstance().getDeployment(bp.id, node.id)?.status).toBe('failed');
+    });
+
+    it('fails closed when the remote lacks withdraw-local (404); no legacy delete', async () => {
+        const node = seedRemoteNode();
+        const bp = seedBlueprint([node.id]);
+        const nodeObj = DatabaseService.getInstance().getNode(node.id)!;
+        const bpObj = DatabaseService.getInstance().getBlueprint(bp.id)!;
+        DatabaseService.getInstance().upsertDeployment({
+            blueprint_id: bp.id,
+            node_id: node.id,
+            status: 'active',
+            applied_revision: bpObj.revision,
+        });
+
+        const postSpy = vi.spyOn(axios, 'post').mockResolvedValue({ status: 404, data: { error: 'Not Found' } });
+        const delSpy = vi.spyOn(axios, 'delete');
+
+        const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, nodeObj);
+
+        expect(result.status).toBe('failed');
+        expect(result.error).toMatch(/withdraw-local|Upgrade/i);
+        expect(postSpy.mock.calls[0][0]).toMatch(/\/api\/blueprints\/withdraw-local$/);
+        expect(delSpy).not.toHaveBeenCalled();
+        expect(DatabaseService.getInstance().getDeployment(bp.id, node.id)?.status).toBe('failed');
     });
 
     it('does not clear hub role assignments when withdrawing a remote deployment', async () => {
@@ -237,15 +285,14 @@ describe('BlueprintService remote deploy', () => {
             user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: bpObj.name,
         });
 
-        vi.spyOn(axios, 'get').mockResolvedValue({ status: 404, data: {} });
-        vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: {} });
-        const delSpy = vi.spyOn(axios, 'delete').mockResolvedValue({ status: 200, data: {} });
+        vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: { status: 'withdrawn' } });
+        const delSpy = vi.spyOn(axios, 'delete');
         const rbacSpy = vi.spyOn(db, 'deleteRoleAssignmentsByResource');
 
         const result = await BlueprintService.getInstance().withdrawFromNode(bpObj, nodeObj);
 
         expect(result.status).toBe('withdrawn');
-        expect(delSpy.mock.calls[0][0]).toMatch(/\/api\/stacks\//);
+        expect(delSpy).not.toHaveBeenCalled();
         expect(rbacSpy).not.toHaveBeenCalled();
         expect(db.getAllRoleAssignments(userId)
             .some((a) => a.resource_type === 'stack' && a.resource_id === bpObj.name)).toBe(true);
