@@ -48,6 +48,9 @@ export function FleetPruneCard({ nodes }: Props) {
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<ResultRow[]>([]);
   const [estimate, setEstimate] = useState<EstimateState>({ kind: 'idle' });
+  // Bumped after a real prune mutates at least one target so the estimate
+  // effect re-runs without changing targets/scope.
+  const [estimateEpoch, setEstimateEpoch] = useState(0);
 
   const toggleTarget = (target: PruneTarget) => {
     setTargets(prev => {
@@ -92,7 +95,7 @@ export function FleetPruneCard({ nodes }: Props) {
       cancelled = true;
       if (estimateDebounceRef.current) clearTimeout(estimateDebounceRef.current);
     };
-  }, [targets, scope]);
+  }, [targets, scope, estimateEpoch]);
 
   async function run(opts: { dryRun: boolean }) {
     if (targets.size === 0) return;
@@ -113,6 +116,13 @@ export function FleetPruneCard({ nodes }: Props) {
         return;
       }
       const apiResults = (body.results as FleetPruneNodeResult[]) ?? [];
+      // HTTP 200 still arrives when every target fails; only a successful
+      // target means Docker state changed and the live estimate is stale.
+      // Scan targets independently of node.reachable (an early remote target
+      // can succeed before a later transport error marks the node unreachable).
+      if (!opts.dryRun && apiResults.some(node => node.targets.some(target => target.success))) {
+        setEstimateEpoch(e => e + 1);
+      }
       const rows: ResultRow[] = apiResults.map((node) => {
         const totalBytes = node.targets.reduce((sum, t) => sum + (t.reclaimedBytes ?? 0), 0);
         const allOk = node.reachable && node.targets.every(t => t.success);
@@ -133,19 +143,24 @@ export function FleetPruneCard({ nodes }: Props) {
       });
       setResults(rows);
       const totalNodes = apiResults.length;
-      const okNodes = apiResults.filter(n => n.reachable && n.targets.every(t => t.success)).length;
+      // Fully OK: every target on a reachable node succeeded. Partial: at
+      // least one target succeeded anywhere (mixed per-target on one node
+      // still counts). "Failed on every node" only when zero targets succeeded.
+      const fullyOkNodes = apiResults.filter(n => n.reachable && n.targets.every(t => t.success)).length;
+      const nodesWithAnySuccess = apiResults.filter(n => n.targets.some(t => t.success)).length;
+      const anyTargetSucceeded = nodesWithAnySuccess > 0;
       const totalReclaimed = apiResults.reduce(
         (sum, n) => sum + n.targets.reduce((s, t) => s + (t.reclaimedBytes ?? 0), 0),
         0,
       );
       if (opts.dryRun) {
         toast.success(`Dry run: ${formatBytes(totalReclaimed)} would be reclaimed across ${totalNodes} node${totalNodes === 1 ? '' : 's'}.`);
-      } else if (okNodes === totalNodes && totalNodes > 0) {
+      } else if (fullyOkNodes === totalNodes && totalNodes > 0) {
         toast.success(`Reclaimed ${formatBytes(totalReclaimed)} across ${totalNodes} node${totalNodes === 1 ? '' : 's'}.`);
-      } else if (okNodes === 0) {
+      } else if (!anyTargetSucceeded) {
         toast.error('Prune failed on every node. See results below.');
       } else {
-        toast.warning(`${okNodes}/${totalNodes} nodes succeeded · ${formatBytes(totalReclaimed)} reclaimed. See results below.`);
+        toast.warning(`${nodesWithAnySuccess}/${totalNodes} nodes reclaimed space · ${formatBytes(totalReclaimed)} reclaimed. See results below.`);
       }
     } catch (err) {
       toast.dismiss(toastId);

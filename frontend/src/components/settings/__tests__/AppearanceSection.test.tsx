@@ -84,6 +84,13 @@ describe('AppearanceSection', () => {
         expect(screen.getByText('Constrained graphics')).toBeTruthy();
     });
 
+    it('states that log chip color applies on multi-service or multi-container stacks', () => {
+        render(<AppearanceSection />);
+        expect(
+            screen.getByText(/Applies to service chips on multi-service or multi-container stacks/i),
+        ).toBeTruthy();
+    });
+
     it('readability locks the header + chart controls and disables the glow slider', () => {
         const { container } = render(<AppearanceSection />);
         // Baseline: nothing reduced, so no slider is disabled.

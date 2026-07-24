@@ -58,6 +58,13 @@ describe('remoteWsForwardAllowed', () => {
     expect(remoteWsForwardAllowed(EXEC, { ...base, wsApiTokenScope: 'deploy-only', decoded: { scope: 'api_token' } })).toBe(false);
   });
 
+  it('denies every API-token scope for Host Console while preserving full-admin for container exec', () => {
+    expect(remoteWsForwardAllowed(CONSOLE, { ...base, wsApiTokenScope: 'full-admin', decoded: { scope: 'api_token' } })).toBe(false);
+    expect(remoteWsForwardAllowed(CONSOLE, { ...base, wsApiTokenScope: 'deploy-only', decoded: { scope: 'api_token' } })).toBe(false);
+    expect(remoteWsForwardAllowed(CONSOLE, { ...base, wsApiTokenScope: 'read-only', decoded: { scope: 'api_token' } })).toBe(false);
+    expect(remoteWsForwardAllowed(EXEC, { ...base, wsApiTokenScope: 'full-admin', decoded: { scope: 'api_token' } })).toBe(true);
+  });
+
   it('allows an interactive path for a pre-gated console_session token', () => {
     expect(remoteWsForwardAllowed(CONSOLE, { ...base, decoded: { scope: 'console_session' } })).toBe(true);
   });

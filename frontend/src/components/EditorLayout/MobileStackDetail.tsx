@@ -61,8 +61,10 @@ export function MobileStackDetail(props: EditorViewProps) {
         changeEnvFile,
         openLogViewer,
         openBashModal,
+        onOpenMonitor,
+        onOpenServiceMonitor,
         serviceAction,
-        effectiveServices,
+        effectiveServices = [],
         serviceUpdateStatuses,
         serviceUpdateInProgress,
         onRequestServiceUpdate,
@@ -88,6 +90,7 @@ export function MobileStackDetail(props: EditorViewProps) {
     const [segment, setSegment] = useState<Segment>('logs');
 
     const safeContainers = containers || [];
+    const isMultiContainerLayout = safeContainers.length > 1 || effectiveServices.length > 1;
     const isRunning = safeContainers.some(c => c.State === 'running');
     const canEditStack = can('stack:edit', 'stack', stackName);
 
@@ -158,6 +161,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                         showTakeDown={showTakeDown}
                         isSelfStack={isSelfStack}
                         stackMuteActions={stackMuteActions}
+                        onOpenMonitor={onOpenMonitor}
                     />
                 </div>
 
@@ -228,6 +232,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 activeNode={activeNode}
                                 openLogViewer={openLogViewer}
                                 openBashModal={openBashModal}
+                                onOpenServiceMonitor={onOpenServiceMonitor}
                                 serviceAction={serviceAction}
                                 effectiveServices={effectiveServices}
                                 serviceUpdateStatuses={serviceUpdateStatuses}
@@ -241,7 +246,12 @@ export function MobileStackDetail(props: EditorViewProps) {
                         </div>
                     )}
                     {segment === 'logs' && (
-                        <StackLogsSection stackName={stackName} logsMode={logsMode} setLogsMode={setLogsMode} />
+                        <StackLogsSection
+                            stackName={stackName}
+                            logsMode={logsMode}
+                            setLogsMode={setLogsMode}
+                            showServiceChips={isMultiContainerLayout}
+                        />
                     )}
                     {segment === 'compose' && (
                         <div className="min-h-0 flex-1">

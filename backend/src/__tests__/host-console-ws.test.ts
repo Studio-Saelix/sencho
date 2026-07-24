@@ -21,8 +21,8 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
   beforeAll(async () => {
     vi.restoreAllMocks();
     tmpDir = await setupTestDb();
-    // Host console requires the paid tier; mock the license so the tier gate
-    // passes for the admin/accepted cases. Individual tests override as needed.
+    // Host console is available on every tier for admins; mock paid so other
+    // suites that share LicenseService state stay stable.
     const { LicenseService } = await import('../services/LicenseService');
     getTierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
     const mod = await import('../index');
@@ -78,10 +78,28 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
     expect(await expectRejected(ws)).toBe(403);
   });
 
-  it('rejects an admin on the Community tier (403)', async () => {
+  it('accepts a Community-tier admin', async () => {
     getTierSpy.mockReturnValueOnce('community');
     const ws = new WebSocket(wsUrl(), { headers: { Cookie: `sencho_token=${adminToken()}` } });
-    expect(await expectRejected(ws)).toBe(403);
+    const opened = await new Promise<boolean>((resolve) => {
+      ws.on('open', () => { ws.close(); resolve(true); });
+      ws.on('error', () => resolve(false));
+      ws.on('unexpected-response', () => resolve(false));
+    });
+    expect(opened).toBe(true);
+  });
+
+  it('accepts a console_session Bearer on Community (remote bridge mint path)', async () => {
+    getTierSpy.mockReturnValueOnce('community');
+    const { mintConsoleSession } = await import('../helpers/consoleSession');
+    const token = mintConsoleSession({ path: 'host-console', actingAs: TEST_USERNAME });
+    const ws = new WebSocket(wsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const opened = await new Promise<boolean>((resolve) => {
+      ws.on('open', () => { ws.close(); resolve(true); });
+      ws.on('error', () => resolve(false));
+      ws.on('unexpected-response', () => resolve(false));
+    });
+    expect(opened).toBe(true);
   });
 
   it('accepts an admin on Admiral and records an open audit row', async () => {
@@ -126,6 +144,116 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
     });
     expect(firstMessage).toContain('Invalid stack path');
     ws.close();
+  });
+
+
+  it('rejects an unknown nodeId without spawning a PTY (404)', async () => {
+    const { HostTerminalService } = await import('../services/HostTerminalService');
+    const spawnSpy = vi.spyOn(HostTerminalService, 'spawnTerminal');
+    try {
+      const ws = new WebSocket(wsUrl('?nodeId=99999999'), {
+        headers: { Cookie: `sencho_token=${adminToken()}` },
+      });
+      expect(await expectRejected(ws)).toBe(404);
+      expect(spawnSpy).not.toHaveBeenCalled();
+    } finally {
+      spawnSpy.mockRestore();
+    }
+  });
+
+  it('rejects a malformed nodeId that parseInt would coerce (404)', async () => {
+    const ws = new WebSocket(wsUrl('?nodeId=1abc'), {
+      headers: { Cookie: `sencho_token=${adminToken()}` },
+    });
+    expect(await expectRejected(ws)).toBe(404);
+  });
+
+  it('rejects zero and negative nodeId values (404)', async () => {
+    for (const id of ['0', '-1']) {
+      const ws = new WebSocket(wsUrl(`?nodeId=${id}`), {
+        headers: { Cookie: `sencho_token=${adminToken()}` },
+      });
+      expect(await expectRejected(ws)).toBe(404);
+    }
+  });
+
+  it('rejects a replayed console_session token on second Host Console upgrade', async () => {
+    const { mintConsoleSession } = await import('../helpers/consoleSession');
+    const token = mintConsoleSession({ path: 'host-console', actingAs: 'qaadmin' });
+    const first = new WebSocket(wsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const firstOpened = await new Promise<boolean>((resolve) => {
+      first.on('open', () => { first.close(); resolve(true); });
+      first.on('error', () => resolve(false));
+      first.on('unexpected-response', () => resolve(false));
+    });
+    expect(firstOpened).toBe(true);
+    const second = new WebSocket(wsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    expect(await expectRejected(second)).toBe(401);
+  });
+
+  it('rejects a host-console console_session on the container-exec /ws path', async () => {
+    const { mintConsoleSession } = await import('../helpers/consoleSession');
+    const token = mintConsoleSession({ path: 'host-console' });
+    const addr = server.address();
+    if (!addr || typeof addr === 'string') throw new Error('Server not listening');
+    const ws = new WebSocket(`ws://127.0.0.1:${addr.port}/ws`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(await expectRejected(ws)).toBe(403);
+  });
+
+  it('records acting_as on console_session open audit rows', async () => {
+    const { mintConsoleSession } = await import('../helpers/consoleSession');
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const insertSpy = vi.spyOn(db, 'insertAuditLog');
+    const token = mintConsoleSession({ path: 'host-console', actingAs: 'qaadmin' });
+    try {
+      const ws = new WebSocket(wsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+      const opened = await new Promise<boolean>((resolve) => {
+        ws.on('open', () => { ws.close(); resolve(true); });
+        ws.on('error', () => resolve(false));
+        ws.on('unexpected-response', () => resolve(false));
+      });
+      expect(opened).toBe(true);
+      await waitFor(() => insertSpy.mock.calls.some((c) => {
+        const e = c[0] as { summary?: string };
+        return typeof e.summary === 'string' && e.summary.includes('Opened host console');
+      }));
+      const openEntry = insertSpy.mock.calls
+        .map((c) => c[0] as { username: string; acting_as?: string | null; summary: string })
+        .find((e) => e.summary.includes('Opened host console'));
+      expect(openEntry?.username).toBe('console_session');
+      expect(openEntry?.acting_as).toBe('qaadmin');
+    } finally {
+      insertSpy.mockRestore();
+    }
+  });
+
+  it('closes without spawning a PTY when directory resolution throws (no default-node fallback)', async () => {
+    const { FileSystemService } = await import('../services/FileSystemService');
+    const { HostTerminalService } = await import('../services/HostTerminalService');
+    const spawnSpy = vi.spyOn(HostTerminalService, 'spawnTerminal');
+    const getInstanceSpy = vi.spyOn(FileSystemService, 'getInstance').mockImplementation(() => {
+      throw new Error('compose dir unavailable');
+    });
+
+    try {
+      const ws = new WebSocket(wsUrl(), { headers: { Cookie: `sencho_token=${adminToken()}` } });
+      const firstMessage = await new Promise<string>((resolve) => {
+        ws.on('message', (data) => resolve(data.toString()));
+        ws.on('error', () => resolve(''));
+        ws.on('unexpected-response', () => resolve(''));
+      });
+      expect(firstMessage).toMatch(/Failed to resolve console directory/i);
+      expect(spawnSpy).not.toHaveBeenCalled();
+      // getInstance must not be retried against a fallback/default node id.
+      expect(getInstanceSpy).toHaveBeenCalledTimes(1);
+      ws.close();
+    } finally {
+      spawnSpy.mockRestore();
+      getInstanceSpy.mockRestore();
+    }
   });
 });
 

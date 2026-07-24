@@ -20,18 +20,25 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { Trash2, HelpCircle, AlertTriangle, Info, CheckCircle2, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
+import { SERVICE_SCOPED_STACK_ALERT_CAPABILITY } from '@/lib/capabilities';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
 
 interface StackAlert {
     id?: number;
     stack_name: string;
+    service_name: string | null;
     metric: string;
     operator: string;
     threshold: number;
     duration_mins: number;
     cooldown_mins: number;
 }
+
+type ServicesState =
+    | { status: 'idle' | 'loading' }
+    | { status: 'success'; options: string[] }
+    | { status: 'error' };
 
 interface AutoHealPolicy {
     id?: number;
@@ -71,6 +78,8 @@ interface StackAlertSheetProps {
     onOpenChange: (open: boolean) => void;
     stackName: string;
     initialTab?: MonitorTab;
+    /** Prefill Add-form service comboboxes when opening from a service card. */
+    initialService?: string;
 }
 
 interface AgentStatus {
@@ -117,6 +126,10 @@ function actionColorClass(action: AutoHealHistoryEntry['action']): string {
     return 'text-muted-foreground';
 }
 
+function preselectListedService(initialService: string | undefined, names: string[]): string {
+    return initialService && names.includes(initialService) ? initialService : '';
+}
+
 function actionLabel(action: AutoHealHistoryEntry['action']): string {
     switch (action) {
         case 'restarted': return 'Restarted';
@@ -129,7 +142,13 @@ function actionLabel(action: AutoHealHistoryEntry['action']): string {
     }
 }
 
-export function StackAlertSheet({ open, onOpenChange, stackName, initialTab = 'alerts' }: StackAlertSheetProps) {
+export function StackAlertSheet({
+    open,
+    onOpenChange,
+    stackName,
+    initialTab = 'alerts',
+    initialService,
+}: StackAlertSheetProps) {
     const [activeTab, setActiveTab] = useState<MonitorTab>(initialTab);
 
     useEffect(() => {
@@ -140,6 +159,7 @@ export function StackAlertSheet({ open, onOpenChange, stackName, initialTab = 'a
         { id: 'alerts', label: 'Alerts' },
         { id: 'auto-heal', label: 'Auto-heal' },
     ];
+    const prefillService = open ? initialService : undefined;
 
     return (
         <SystemSheet
@@ -153,16 +173,21 @@ export function StackAlertSheet({ open, onOpenChange, stackName, initialTab = 'a
             onTabChange={(id) => setActiveTab(id as MonitorTab)}
             size="md"
         >
-            {activeTab === 'alerts' && <AlertsTab stackName={stackName} />}
-            {activeTab === 'auto-heal' && <AutoHealTab stackName={stackName} open={open} />}
+            {activeTab === 'alerts' && (
+                <AlertsTab stackName={stackName} initialService={prefillService} />
+            )}
+            {activeTab === 'auto-heal' && (
+                <AutoHealTab stackName={stackName} open={open} initialService={prefillService} />
+            )}
         </SystemSheet>
     );
 }
 
-function AlertsTab({ stackName }: { stackName: string }) {
+function AlertsTab({ stackName, initialService }: { stackName: string; initialService?: string }) {
     const { isAdmin } = useAuth();
-    const { activeNode } = useNodes();
+    const { activeNode, activeNodeMeta } = useNodes();
     const isRemote = activeNode?.type === 'remote';
+    const canScopeService = activeNodeMeta?.capabilities.includes(SERVICE_SCOPED_STACK_ALERT_CAPABILITY) === true;
 
     const [alerts, setAlerts] = useState<StackAlert[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -172,7 +197,9 @@ function AlertsTab({ stackName }: { stackName: string }) {
         hasEnabled: false,
         enabledTypes: [],
     });
+    const [servicesState, setServicesState] = useState<ServicesState>({ status: 'idle' });
 
+    const [service, setService] = useState('');
     const [metric, setMetric] = useState('cpu_percent');
     const [operator, setOperator] = useState('>');
     const [threshold, setThreshold] = useState('');
@@ -183,7 +210,35 @@ function AlertsTab({ stackName }: { stackName: string }) {
         if (!stackName) return;
         fetchAlerts();
         fetchAgentStatus();
-    }, [stackName]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [stackName, activeNode?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+    useEffect(() => {
+        if (!stackName || !canScopeService) {
+            setServicesState({ status: 'idle' });
+            setService('');
+            return;
+        }
+
+        let cancelled = false;
+        setServicesState({ status: 'loading' });
+        setService('');
+
+        void (async () => {
+            try {
+                const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`);
+                if (!res.ok) throw new Error(`services ${res.status}`);
+                const names = await res.json() as string[];
+                if (cancelled) return;
+                setServicesState({ status: 'success', options: names });
+                setService(preselectListedService(initialService, names));
+            } catch (e) {
+                console.error('[StackAlertSheet] Failed to fetch stack services', e);
+                if (!cancelled) setServicesState({ status: 'error' });
+            }
+        })();
+
+        return () => { cancelled = true; };
+    }, [stackName, activeNode?.id, canScopeService, initialService]);
 
     const fetchAlerts = async () => {
         try {
@@ -224,8 +279,10 @@ function AlertsTab({ stackName }: { stackName: string }) {
             return;
         }
         setIsLoading(true);
+        const scopedServiceName = canScopeService && service !== '' ? service : null;
         const newAlert = {
             stack_name: stackName,
+            service_name: scopedServiceName,
             metric,
             operator,
             threshold: parseFloat(threshold),
@@ -240,6 +297,7 @@ function AlertsTab({ stackName }: { stackName: string }) {
             if (res.ok) {
                 toast.success('Alert rule added.');
                 setThreshold('');
+                setService('');
                 fetchAlerts();
             } else {
                 const err = await res.json().catch(() => ({}));
@@ -270,6 +328,32 @@ function AlertsTab({ stackName }: { stackName: string }) {
         } finally {
             setIsLoading(false);
         }
+    };
+
+    const serviceComboOptions = [
+        { value: '', label: 'All services' },
+        ...(servicesState.status === 'success'
+            ? servicesState.options.map(n => ({ value: n, label: n }))
+            : []),
+    ];
+
+    const renderTargetLabel = (alert: StackAlert) => {
+        if (!alert.service_name) {
+            return <span className="text-muted-foreground font-sans">All services</span>;
+        }
+        const missing = servicesState.status === 'success'
+            && !servicesState.options.includes(alert.service_name);
+        if (missing) {
+            return (
+                <span
+                    className="text-warning font-sans"
+                    title="This name is not in the compose file. The rule still evaluates running containers with this Compose service label."
+                >
+                    {alert.service_name} <span className="font-medium">(Not in compose)</span>
+                </span>
+            );
+        }
+        return <span className="font-sans">{alert.service_name}</span>;
     };
 
     const renderAgentStatusBanner = () => {
@@ -355,7 +439,8 @@ function AlertsTab({ stackName }: { stackName: string }) {
                                         {metricLabels[alert.metric] || alert.metric} {alert.operator} {alert.threshold}
                                     </span>
                                     <div className="text-muted-foreground text-xs mt-0.5">
-                                        Trigger after {alert.duration_mins}m &bull; Cooldown {alert.cooldown_mins}m
+                                        {renderTargetLabel(alert)}
+                                        {' '}&bull; Trigger after {alert.duration_mins}m &bull; Cooldown {alert.cooldown_mins}m
                                     </div>
                                 </div>
                                 {isAdmin && (
@@ -378,6 +463,31 @@ function AlertsTab({ stackName }: { stackName: string }) {
             {isAdmin && (
                 <SheetSection title="Add new rule">
                     <div className="space-y-3">
+                        {canScopeService && (
+                            <div className="space-y-2">
+                                <Label>Service</Label>
+                                <Combobox
+                                    options={serviceComboOptions}
+                                    value={service}
+                                    onValueChange={setService}
+                                    placeholder="All services"
+                                    searchPlaceholder="Search services..."
+                                    emptyText={servicesState.status === 'error' ? 'Could not load services.' : 'No services found.'}
+                                    disabled={servicesState.status === 'loading' || servicesState.status === 'error'}
+                                />
+                                {servicesState.status === 'error' && (
+                                    <p className="text-xs text-muted-foreground">
+                                        Could not load Compose services. The rule will target all services.
+                                    </p>
+                                )}
+                            </div>
+                        )}
+                        {!canScopeService && activeNodeMeta && (
+                            <p className="text-xs text-muted-foreground">
+                                This node does not support service-scoped alert rules yet. Update the node to target a specific service.
+                            </p>
+                        )}
+
                         <div className="space-y-2">
                             <div className="flex items-center gap-2">
                                 <Label>Metric</Label>
@@ -476,7 +586,15 @@ function AlertsTab({ stackName }: { stackName: string }) {
     );
 }
 
-function AutoHealTab({ stackName, open }: { stackName: string; open: boolean }) {
+function AutoHealTab({
+    stackName,
+    open,
+    initialService,
+}: {
+    stackName: string;
+    open: boolean;
+    initialService?: string;
+}) {
     const { isAdmin } = useAuth();
     const [policies, setPolicies] = useState<AutoHealPolicy[]>([]);
     const [loading, setLoading] = useState(false);
@@ -493,17 +611,25 @@ function AutoHealTab({ stackName, open }: { stackName: string; open: boolean }) 
     useEffect(() => {
         if (!open || !stackName) return;
         setLoading(true);
+        setService('');
         apiFetch(`/auto-heal/policies?stackName=${encodeURIComponent(stackName)}`)
             .then(res => res.json() as Promise<AutoHealPolicy[]>)
             .then(data => setPolicies(data))
             .catch(() => toast.error('Failed to load auto-heal policies.'))
             .finally(() => setLoading(false));
 
-        apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`)
-            .then(res => res.json() as Promise<string[]>)
-            .then(names => setServiceOptions(names.map(n => ({ value: n, label: n }))))
-            .catch(() => { /* services list is optional, silently skip */ });
-    }, [open, stackName]);
+        void (async () => {
+            try {
+                const res = await apiFetch(`/stacks/${encodeURIComponent(stackName)}/services`);
+                if (!res.ok) throw new Error(`services ${res.status}`);
+                const names = await res.json() as string[];
+                setServiceOptions(names.map(n => ({ value: n, label: n })));
+                setService(preselectListedService(initialService, names));
+            } catch (e) {
+                console.error('[StackAlertSheet] Failed to fetch stack services', e);
+            }
+        })();
+    }, [open, stackName, initialService]);
 
     const handleToggle = async (id: number, enabled: boolean) => {
         setSaving(true);

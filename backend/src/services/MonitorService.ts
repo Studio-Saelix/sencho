@@ -32,6 +32,39 @@ const getOperatorPhrase = (operator: string): string => {
     return `triggered the operator ${operator}`;
 };
 
+/** Sentinel for containers without a Compose service label. Not a valid API target. */
+const UNLABELED_SERVICE_KEY = '_unlabeled';
+
+function displayServiceName(serviceName: string): string {
+    return serviceName === UNLABELED_SERVICE_KEY ? 'unknown service' : serviceName;
+}
+
+function parseAlertBreachKey(key: string): { ruleId: number; containerId: string } | null {
+    const sep = key.indexOf(':');
+    if (sep < 0) return null;
+    const ruleId = Number(key.slice(0, sep));
+    if (!Number.isFinite(ruleId)) return null;
+    return { ruleId, containerId: key.slice(sep + 1) };
+}
+
+/** Per-service cooldown timestamp, with pre-migration fallback to rule.last_fired_at. */
+function resolveStackAlertLastFired(rule: StackAlert, serviceName: string, db: DatabaseService): number {
+    const ruleId = rule.id!;
+    let lastFired = db.getStackAlertServiceCooldown(ruleId, serviceName);
+    if (lastFired == null && !db.hasAnyStackAlertServiceCooldown(ruleId) && (rule.last_fired_at || 0) > 0) {
+        lastFired = rule.last_fired_at || 0;
+    }
+    return lastFired || 0;
+}
+
+function normalizeContainerName(container: { Id: string; Names?: string[] }): string {
+    const raw = container.Names?.[0];
+    if (raw && raw.length > 0) {
+        return raw.startsWith('/') ? raw.slice(1) : raw;
+    }
+    return container.Id.slice(0, 12);
+}
+
 /** Shape of the JSON returned by Docker container stats (stream: false). */
 interface DockerContainerStats {
     cpu_stats?: {
@@ -153,21 +186,18 @@ export class MonitorService {
     private janitorConsecutiveTimeouts = 0;
     private janitorBreakerUntil = 0;
 
-    // Track the duration a specific stack alert rule has been in breach state
-    // key: rule_id, value: AlertState
-    private activeBreaches = new Map<number, AlertState>();
+    // Track the duration a specific stack alert rule+container has been in breach
+    // key: `${ruleId}:${containerId}`, value: AlertState
+    private activeBreaches = new Map<string, AlertState>();
 
     // Track previous network counters per container for rate calculation.
     // key: container_id, value: { rx bytes, tx bytes, sample timestamp }
     private previousNetworkStats = new Map<string, { rx: number; tx: number; ts: number }>();
 
-    // Per-cycle dispatch dedup. Stack rules are shared across every container
-    // in the stack, so parallel processContainer calls can race past the
-    // cooldown check (DB write happens after the awaited dispatch) and fire
-    // the same alert N times on first breach. The synchronous check-and-add
-    // below is atomic in JS between awaits, so only the first worker wins.
+    // Per-cycle dispatch dedup keyed by rule+service so replicas of the same
+    // Compose service do not fire N times, while different services can.
     // Reset at the start of each evaluateStackAlerts call.
-    private firedThisCycle = new Set<number>();
+    private firedThisCycle = new Set<string>();
 
     // Crash and healthcheck detection live in DockerEventService (event-driven,
     // causal classification). MonitorService no longer polls for container
@@ -604,6 +634,10 @@ export class MonitorService {
             else alertsByStack.set(a.stack_name, [a]);
         }
 
+        const activeRuleIds = new Set(alerts.map(a => a.id!));
+        const allCurrentIds = new Set<string>();
+        let enumerationFailed = false;
+
         for (const node of nodes) {
             if (!node.id) continue;
             // Remote nodes are self-monitoring - skip direct Docker access
@@ -623,22 +657,39 @@ export class MonitorService {
                     (container) => this.processContainer(node, container, alertsByStack, docker, db),
                 );
 
+                for (const c of containers) allCurrentIds.add(c.Id);
+
                 // Clean up stale network stats for containers on this node that no longer run
                 if (this.previousNetworkStats.size > containers.length * 2) {
-                    const currentIds = new Set(containers.map((c: { Id: string }) => c.Id));
+                    const nodeIds = new Set(containers.map((c: { Id: string }) => c.Id));
                     for (const key of this.previousNetworkStats.keys()) {
-                        if (!currentIds.has(key)) this.previousNetworkStats.delete(key);
+                        if (!nodeIds.has(key)) this.previousNetworkStats.delete(key);
                     }
                 }
             } catch (err) {
+                // Enumeration failed: preserve existing breach timers.
+                enumerationFailed = true;
                 console.error(`Error fetching containers for node ${node.name}`, err);
             }
         }
 
-        // Clean up stale breach trackers for rules that have been deleted
-        const activeRuleIds = new Set(alerts.map(a => a.id!));
-        for (const key of this.activeBreaches.keys()) {
-            if (!activeRuleIds.has(key)) {
+        // After successful enumeration(s), drop breach timers for containers
+        // that are no longer running. Skip when any local enumeration failed
+        // so a transient Docker error cannot reset duration timers.
+        if (!enumerationFailed) {
+            for (const key of [...this.activeBreaches.keys()]) {
+                const parsed = parseAlertBreachKey(key);
+                if (parsed && activeRuleIds.has(parsed.ruleId) && !allCurrentIds.has(parsed.containerId)) {
+                    this.activeBreaches.delete(key);
+                }
+            }
+        }
+
+        // Clean up in-memory breach trackers for rules that have been deleted.
+        // Persisted cooldowns are removed only via transactional deleteStackAlert.
+        for (const key of [...this.activeBreaches.keys()]) {
+            const parsed = parseAlertBreachKey(key);
+            if (parsed && !activeRuleIds.has(parsed.ruleId)) {
                 this.activeBreaches.delete(key);
             }
         }
@@ -666,12 +717,14 @@ export class MonitorService {
      */
     private async processContainer(
         node: Node,
-        container: { Id: string; Labels?: Record<string, string> },
+        container: { Id: string; Names?: string[]; Labels?: Record<string, string> },
         alertsByStack: Map<string, StackAlert[]>,
         docker: DockerController,
         db: DatabaseService,
     ): Promise<void> {
         const stackName = container.Labels?.['com.docker.compose.project'] || 'system';
+        const serviceName = container.Labels?.['com.docker.compose.service'] || UNLABELED_SERVICE_KEY;
+        const containerName = normalizeContainerName(container);
 
         try {
             const rawStats = await withTimeout(
@@ -727,7 +780,11 @@ export class MonitorService {
             });
 
             for (const rule of stackAlerts) {
+                if (rule.service_name && rule.service_name !== serviceName) continue;
+
                 const ruleId = rule.id!;
+                const breachKey = `${ruleId}:${container.Id}`;
+                const cooldownKey = `${ruleId}:${serviceName}`;
                 const currentValue = metrics[rule.metric as keyof typeof metrics];
 
                 if (currentValue === undefined) continue;
@@ -735,57 +792,75 @@ export class MonitorService {
                 const isBreaching = this.evaluateCondition(currentValue, rule.operator, rule.threshold);
 
                 if (isBreaching) {
-                    if (!this.activeBreaches.has(ruleId)) {
-                        this.activeBreaches.set(ruleId, { breachStartedAt: Date.now() });
-                        if (isDebugEnabled()) console.log(`[Monitor:diag] Breach entered: rule ${ruleId} (${rule.metric} ${rule.operator} ${rule.threshold}) on stack "${rule.stack_name}"`);
+                    if (!this.activeBreaches.has(breachKey)) {
+                        this.activeBreaches.set(breachKey, { breachStartedAt: Date.now() });
+                        if (isDebugEnabled()) console.log(`[Monitor:diag] Breach entered: rule ${ruleId} (${rule.metric} ${rule.operator} ${rule.threshold}) on stack "${rule.stack_name}" service "${serviceName}" container "${containerName}"`);
                     }
 
-                    const breachState = this.activeBreaches.get(ruleId)!;
+                    const breachState = this.activeBreaches.get(breachKey)!;
                     const durationMs = Date.now() - breachState.breachStartedAt;
                     const requiredDurationMs = rule.duration_mins * 60 * 1000;
 
                     if (durationMs >= requiredDurationMs) {
-                        const timeSinceLastFired = Date.now() - (rule.last_fired_at || 0);
+                        const timeSinceLastFired = Date.now() - resolveStackAlertLastFired(rule, serviceName, db);
                         const requiredCooldownMs = rule.cooldown_mins * 60 * 1000;
 
                         if (timeSinceLastFired >= requiredCooldownMs) {
-                            // Claim this rule for the cycle before awaiting
-                            // dispatch. The check-and-add is synchronous, so
-                            // sibling workers evaluating the same shared rule
-                            // see the claim and skip — preventing N-fire when
-                            // multiple containers in one stack all breach.
-                            if (this.firedThisCycle.has(ruleId)) {
-                                if (isDebugEnabled()) console.log(`[Monitor:diag] Skipping duplicate dispatch for rule ${ruleId} (already fired this cycle by sibling container)`);
-                            } else {
-                                this.firedThisCycle.add(ruleId);
+                            // Claim this rule+service for the cycle before awaiting
+                            // dispatch so replicas of the same service skip.
+                            if (this.firedThisCycle.has(cooldownKey)) {
+                                if (isDebugEnabled()) console.log(`[Monitor:diag] Skipping duplicate dispatch for rule ${ruleId} service "${serviceName}" (already fired this cycle by sibling replica)`);
+                                continue;
+                            }
 
-                                const { name: metricName, unit } = getMetricDetails(rule.metric);
-                                const operatorPhrase = getOperatorPhrase(rule.operator);
+                            this.firedThisCycle.add(cooldownKey);
 
-                                const safeCurrent = typeof currentValue === 'number' ? Number(currentValue.toFixed(2)) : currentValue;
-                                const safeThreshold = typeof rule.threshold === 'number' ? Number(rule.threshold.toFixed(2)) : rule.threshold;
+                            const { name: metricName, unit } = getMetricDetails(rule.metric);
+                            const operatorPhrase = getOperatorPhrase(rule.operator);
 
-                                // Node-neutral body: the hub bell badge attributes remotes.
-                                const message = `The **${metricName}** for **${rule.stack_name}** ${operatorPhrase} **${safeThreshold}${unit}** (Currently: ${safeCurrent}${unit}).`;
+                            const safeCurrent = typeof currentValue === 'number' ? Number(currentValue.toFixed(2)) : currentValue;
+                            const safeThreshold = typeof rule.threshold === 'number' ? Number(rule.threshold.toFixed(2)) : rule.threshold;
+                            const serviceLabel = displayServiceName(serviceName);
 
-                                console.log(`[MonitorService] Alert fired: rule ${ruleId} on stack "${rule.stack_name}": ${metricName} ${operatorPhrase} ${safeThreshold}${unit}`);
-                                await NotificationService.getInstance().dispatchAlert(
+                            // Node-neutral body: the hub bell badge attributes remotes.
+                            const message = `The **${metricName}** for **${serviceLabel}** in **${rule.stack_name}** (container **${containerName}**) ${operatorPhrase} **${safeThreshold}${unit}** (Currently: ${safeCurrent}${unit}).`;
+
+                            try {
+                                const { persisted } = await NotificationService.getInstance().dispatchAlert(
                                     'warning',
                                     'monitor_alert',
                                     message,
-                                    { stackName: rule.stack_name, actor: 'system:monitor' },
+                                    { stackName: rule.stack_name, containerName, actor: 'system:monitor' },
                                 );
-
-                                db.updateStackAlertLastFired(ruleId, Date.now());
+                                if (!persisted) {
+                                    // History was not written; do not advance cooldown or we silence retries.
+                                    this.firedThisCycle.delete(cooldownKey);
+                                    console.error(
+                                        `[MonitorService] Alert history not persisted for rule ${ruleId} service "${serviceName}"; cooldown not advanced`,
+                                    );
+                                    continue;
+                                }
+                                const firedAt = Date.now();
+                                // Dual-write: per-service row for current code, parent last_fired_at
+                                // so a downgrade that only reads the parent column still has a floor.
+                                db.upsertStackAlertServiceCooldown(ruleId, serviceName, firedAt);
+                                db.updateStackAlertLastFired(ruleId, firedAt);
+                                console.log(`[MonitorService] Alert fired: rule ${ruleId} on stack "${rule.stack_name}" service "${serviceName}": ${metricName} ${operatorPhrase} ${safeThreshold}${unit}`);
+                            } catch (fireErr) {
+                                this.firedThisCycle.delete(cooldownKey);
+                                console.error(
+                                    `[MonitorService] Failed to fire alert rule ${ruleId} service "${serviceName}" container "${containerName}":`,
+                                    fireErr,
+                                );
                             }
                         } else if (isDebugEnabled()) {
-                            console.log(`[Monitor:diag] Cooldown active for rule ${ruleId}: ${Math.round((requiredCooldownMs - timeSinceLastFired) / 1000)}s remaining`);
+                            console.log(`[Monitor:diag] Cooldown active for rule ${ruleId} service "${serviceName}": ${Math.round((requiredCooldownMs - timeSinceLastFired) / 1000)}s remaining`);
                         }
                     }
                 } else {
-                    if (this.activeBreaches.has(ruleId)) {
-                        if (isDebugEnabled()) console.log(`[Monitor:diag] Breach cleared: rule ${ruleId} on stack "${rule.stack_name}"`);
-                        this.activeBreaches.delete(ruleId);
+                    if (this.activeBreaches.has(breachKey)) {
+                        if (isDebugEnabled()) console.log(`[Monitor:diag] Breach cleared: rule ${ruleId} on stack "${rule.stack_name}" container "${containerName}"`);
+                        this.activeBreaches.delete(breachKey);
                     }
                 }
             }

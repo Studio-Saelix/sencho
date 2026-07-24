@@ -55,7 +55,7 @@ beforeEach(() => {
     const db = DatabaseService.getInstance();
     db.getDb().prepare('DELETE FROM auto_heal_history').run();
     db.getDb().prepare('DELETE FROM auto_heal_policies').run();
-    vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue();
+    vi.spyOn(NotificationService.getInstance(), 'dispatchAlert').mockResolvedValue({ persisted: true });
 });
 
 afterAll(() => {

@@ -59,7 +59,7 @@ const {
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockResolvedValue(''),
   mockCheckImage: vi.fn().mockResolvedValue({ hasUpdate: false }),
-  mockDispatchAlert: vi.fn().mockResolvedValue(undefined),
+  mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
   mockGetProxyTarget: vi.fn().mockReturnValue(null),
   mockIsTrivyAvailable: vi.fn().mockReturnValue(true),
   mockScanAllNodeImages: vi.fn().mockResolvedValue({

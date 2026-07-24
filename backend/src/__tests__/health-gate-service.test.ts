@@ -29,6 +29,7 @@ const { state } = vi.hoisted(() => ({
     settings: {} as Record<string, string>,
     listContainers: vi.fn(),
     inspect: vi.fn(),
+    renderConfig: vi.fn(),
   },
 }));
 
@@ -80,6 +81,15 @@ vi.mock('../services/DockerController', () => ({
   },
 }));
 
+vi.mock('../services/ComposeService', () => ({
+  getComposeCommandTimeoutMs: () => 30_000,
+  ComposeService: {
+    getInstance: () => ({
+      renderConfig: state.renderConfig,
+    }),
+  },
+}));
+
 import { HealthGateService } from '../services/HealthGateService';
 
 type ContainerFixture = {
@@ -89,22 +99,54 @@ type ContainerFixture = {
   health?: string | null;
   restartCount?: number;
   startedAt?: string;
+  exitCode?: number | null;
+  restartPolicy?: string | null;
+  service?: string;
+  imageId?: string;
 };
 
 /** Configure the docker mocks from a simple fixture list. */
 function setContainers(fixtures: ContainerFixture[]): void {
-  state.listContainers.mockResolvedValue(fixtures.map(f => ({ Id: f.id, Names: [`/${f.name}`], State: f.state ?? 'running' })));
+  state.listContainers.mockResolvedValue(fixtures.map(f => ({
+    Id: f.id,
+    Names: [`/${f.name}`],
+    State: f.state ?? 'running',
+    Labels: f.service ? { 'com.docker.compose.service': f.service } : {},
+  })));
   state.inspect.mockImplementation((id: string) => {
     const f = fixtures.find(c => c.id === id);
     if (!f) return Promise.reject(Object.assign(new Error('no such container'), { statusCode: 404 }));
     return Promise.resolve({
       State: {
         Status: f.state ?? 'running',
+        ExitCode: f.exitCode === undefined ? (f.state === 'exited' ? 1 : 0) : f.exitCode,
         Health: f.health !== undefined && f.health !== null ? { Status: f.health } : undefined,
         StartedAt: f.startedAt ?? '2026-06-10T00:00:00Z',
       },
       RestartCount: f.restartCount ?? 0,
+      Image: f.imageId ?? 'sha256:img',
+      HostConfig: { RestartPolicy: { Name: f.restartPolicy ?? '' } },
+      Config: { Labels: f.service ? { 'com.docker.compose.service': f.service } : {} },
     });
+  });
+}
+
+/** Declared Compose restart map used for one-shot recognition (not inspect). */
+function setDeclaredRestarts(services: Record<string, string | undefined>): void {
+  const rendered = {
+    name: 'web',
+    services: Object.fromEntries(
+      Object.entries(services).map(([name, restart]) => [
+        name,
+        restart === undefined ? { image: `${name}:1` } : { image: `${name}:1`, restart },
+      ]),
+    ),
+  };
+  state.renderConfig.mockResolvedValue({
+    rendered: JSON.stringify(rendered),
+    stderr: '',
+    code: 0,
+    timedOut: false,
   });
 }
 
@@ -125,7 +167,9 @@ beforeEach(() => {
   state.settings = { health_gate_enabled: '1', health_gate_window_seconds: '30' };
   state.listContainers.mockReset();
   state.inspect.mockReset();
-  setContainers([{ id: 'aaa', name: 'web-app-1' }]);
+  state.renderConfig.mockReset();
+  setDeclaredRestarts({ app: 'unless-stopped' });
+  setContainers([{ id: 'aaa', name: 'web-app-1', service: 'app', restartPolicy: 'unless-stopped' }]);
   svc().start();
 });
 
@@ -149,12 +193,173 @@ describe('HealthGateService verdicts', () => {
   it('fails fast when a container exits', async () => {
     svc().beginStack(0, 'web', 'update', 'tester');
     await ticks(1); // baseline
-    setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited' }]);
+    setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: 1, restartPolicy: 'unless-stopped' }]);
     await ticks(1);
     const report = latest();
     expect(report.status).toBe('failed');
     expect(report.reason).toContain('exited');
     expect(state.activity.some(a => a.category === 'health_gate_failed')).toBe(true);
+  });
+
+  it('passes when a clean one-shot exits 0 with explicit declared restart no', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
+    setContainers([
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
+    ]);
+    svc().beginStack(0, 'web', 'update', 'tester');
+    await ticks(1);
+    setContainers([
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0, restartPolicy: 'no' },
+    ]);
+    await ticks(1);
+    expect(latest().status).toBe('observing');
+    await ticks(6);
+    expect(latest().status).toBe('passed');
+  });
+
+  it('fails when a daemon with omitted Compose restart exits 0 (inspect also reports no)', async () => {
+    // QA P0: Docker HostConfig.RestartPolicy.Name is "no" for both omit and
+    // explicit restart:"no". Declared intent must decide, not inspect.
+    setDeclaredRestarts({ 'daemon-default': undefined });
+    setContainers([
+      {
+        id: 'daemon', name: 'web-daemon-default-1', service: 'daemon-default',
+        state: 'running', restartPolicy: 'no',
+      },
+    ]);
+    svc().beginStack(0, 'web', 'update', 'tester');
+    await ticks(1);
+    setContainers([
+      {
+        id: 'daemon', name: 'web-daemon-default-1', service: 'daemon-default',
+        state: 'exited', exitCode: 0, restartPolicy: 'no',
+      },
+    ]);
+    await ticks(1);
+    expect(latest().status).toBe('failed');
+    expect(latest().reason).toContain('exited during observation');
+  });
+
+  it('passes a clean one-shot even when residual health is unhealthy', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
+    setContainers([
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
+    ]);
+    svc().beginStack(0, 'web', 'update', 'tester');
+    await ticks(1);
+    setContainers([
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      {
+        id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0,
+        restartPolicy: 'no', health: 'unhealthy',
+      },
+    ]);
+    await ticks(1);
+    expect(latest().status).toBe('observing');
+    await ticks(6);
+    expect(latest().status).toBe('passed');
+  });
+
+  it('passes a clean one-shot even when residual health is still starting', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
+    setContainers([
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
+    ]);
+    svc().beginStack(0, 'web', 'update', 'tester');
+    await ticks(1);
+    setContainers([
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      {
+        id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0,
+        restartPolicy: 'no', health: 'starting',
+      },
+    ]);
+    await ticks(1);
+    expect(latest().status).toBe('observing');
+    await ticks(6);
+    expect(latest().status).toBe('passed');
+  });
+
+  it('still fails unhealthy on a long-running container', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
+    setContainers([
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
+    ]);
+    svc().beginStack(0, 'web', 'update', 'tester');
+    await ticks(1);
+    setContainers([
+      {
+        id: 'app', name: 'web-app-1', service: 'app', state: 'running',
+        restartPolicy: 'unless-stopped', health: 'unhealthy',
+      },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0, restartPolicy: 'no' },
+    ]);
+    await ticks(1);
+    expect(latest().status).toBe('failed');
+    expect(latest().reason).toContain('unhealthy');
+  });
+
+  it('still ends unknown when a long-running healthcheck is starting at window end', async () => {
+    setDeclaredRestarts({ app: 'unless-stopped', migrate: 'no' });
+    setContainers([
+      { id: 'app', name: 'web-app-1', service: 'app', state: 'running', restartPolicy: 'unless-stopped' },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'running', restartPolicy: 'no' },
+    ]);
+    svc().beginStack(0, 'web', 'update', 'tester');
+    await ticks(1);
+    setContainers([
+      {
+        id: 'app', name: 'web-app-1', service: 'app', state: 'running',
+        restartPolicy: 'unless-stopped', health: 'starting',
+      },
+      { id: 'job', name: 'web-migrate-1', service: 'migrate', state: 'exited', exitCode: 0, restartPolicy: 'no' },
+    ]);
+    await ticks(1);
+    expect(latest().status).toBe('observing');
+    await ticks(6);
+    expect(latest().status).toBe('unknown');
+    expect(latest().reason).toContain('still starting');
+  });
+
+  it('fails when exit 0 has unless-stopped restart policy', async () => {
+    svc().beginStack(0, 'web', 'update', 'tester');
+    await ticks(1);
+    setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: 0, restartPolicy: 'unless-stopped' }]);
+    await ticks(1);
+    expect(latest().status).toBe('failed');
+    expect(latest().reason).toContain('exited during observation');
+  });
+
+  it('fails when exit 0 has always restart policy', async () => {
+    svc().beginStack(0, 'web', 'update', 'tester');
+    await ticks(1);
+    setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: 0, restartPolicy: 'always' }]);
+    await ticks(1);
+    expect(latest().status).toBe('failed');
+    expect(latest().reason).toContain('exited during observation');
+  });
+
+  it('fails closed when exit code is null on an exited container', async () => {
+    svc().beginStack(0, 'web', 'update', 'tester');
+    await ticks(1);
+    setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: null, restartPolicy: 'no' }]);
+    await ticks(1);
+    expect(latest().status).toBe('failed');
+    expect(latest().reason).toContain('exited during observation');
+  });
+
+  it('fails when a one-shot exits non-zero', async () => {
+    svc().beginStack(0, 'web', 'update', 'tester');
+    await ticks(1);
+    setContainers([{ id: 'aaa', name: 'web-app-1', state: 'exited', exitCode: 1, restartPolicy: 'no' }]);
+    await ticks(1);
+    expect(latest().status).toBe('failed');
+    expect(latest().reason).toContain('exited during observation');
   });
 
   it('fails fast when a healthcheck reports unhealthy', async () => {

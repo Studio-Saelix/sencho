@@ -18,10 +18,15 @@ import DockerController from './DockerController';
 import { FileSystemService } from './FileSystemService';
 import { NodeRegistry } from './NodeRegistry';
 import { MeshService } from './MeshService';
+import { NotificationService } from './NotificationService';
 import { StackOpLockService, stackOpSkipMessage } from './StackOpLockService';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isPathWithinBase, isValidStackName } from '../utils/validation';
+import {
+  BLUEPRINT_MARKER_FILENAME,
+  parseBlueprintMarker,
+} from '../helpers/blueprintMarker';
 
 /**
  * Directory that may contain recovery override files for a tombstone sweep.
@@ -45,13 +50,30 @@ export interface DeleteDeployedStackInput {
   stackName: string;
   pruneVolumes: boolean;
   actor: string;
+  /** When set, deletion requires an on-disk .blueprint.json matching this blueprint ID. */
+  requireBlueprintId?: number;
   /** When true, skip acquiring a new lock (caller already holds delete via continuation). */
   continuationIntentId?: string;
 }
 
 export type DeleteDeployedStackResult =
-  | { ok: true }
-  | { ok: false; code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed'; error: string; existingAction?: string };
+  | { ok: true; status: 'deleted' | 'already_absent' }
+  | {
+      ok: false;
+      code: 'lock_conflict' | 'fs_failed' | 'tombstone_failed' | 'db_failed' | 'name_conflict' | 'failed';
+      error: string;
+      existingAction?: string;
+    };
+
+type DirProbe = { kind: 'absent' } | { kind: 'present' } | { kind: 'error'; error: string };
+type MarkerProbe =
+  | { kind: 'match' }
+  | { kind: 'name_conflict'; error: string }
+  | { kind: 'failed'; error: string };
+
+function blueprintMarkerMismatchError(stackName: string): string {
+  return `Stack "${stackName}" exists without a matching blueprint marker; refusing to withdraw.`;
+}
 
 function collectArtifactsFromGenerations(
   generations: Array<{ override_path: string | null; services_json: string }>,
@@ -96,6 +118,51 @@ function parseJsonStringArray(raw: string): string[] {
     return parsed.filter((item): item is string => typeof item === 'string');
   } catch {
     return [];
+  }
+}
+
+
+async function probeStackDirectory(nodeId: number, stackName: string): Promise<DirProbe> {
+  // Canonical js/path-injection barrier inline with the stat sink.
+  const baseResolved = path.resolve(FileSystemService.getInstance(nodeId).getBaseDir());
+  const safePath = path.resolve(baseResolved, stackName);
+  if (!safePath.startsWith(baseResolved + path.sep)) {
+    return { kind: 'error', error: 'Invalid stack path' };
+  }
+  try {
+    const stat = await fs.stat(safePath);
+    return stat.isDirectory() ? { kind: 'present' } : { kind: 'absent' };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return { kind: 'absent' };
+    return { kind: 'error', error: getErrorMessage(error, 'Failed to access stack directory') };
+  }
+}
+
+async function probeBlueprintMarkerOwnership(
+  nodeId: number,
+  stackName: string,
+  requireBlueprintId: number,
+): Promise<MarkerProbe> {
+  // Canonical js/path-injection barrier inline with the read sink.
+  const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(nodeId));
+  const safePath = path.resolve(baseResolved, stackName, BLUEPRINT_MARKER_FILENAME);
+  if (!safePath.startsWith(baseResolved + path.sep)) {
+    return { kind: 'failed', error: 'Invalid stack path for blueprint marker' };
+  }
+  try {
+    const content = await fs.readFile(safePath, 'utf-8');
+    const marker = parseBlueprintMarker(content);
+    if (!marker || marker.blueprintId !== requireBlueprintId) {
+      return { kind: 'name_conflict', error: blueprintMarkerMismatchError(stackName) };
+    }
+    return { kind: 'match' };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      return { kind: 'name_conflict', error: blueprintMarkerMismatchError(stackName) };
+    }
+    return { kind: 'failed', error: getErrorMessage(error, 'Failed to read blueprint marker') };
   }
 }
 
@@ -163,6 +230,42 @@ export class DeployedStackDeletionService {
     const { nodeId, stackName, pruneVolumes } = input;
     const db = DatabaseService.getInstance();
 
+    // Continuation loads ownership from the persisted intent; first call uses input.
+    let requiredBlueprintId: number | null =
+      typeof input.requireBlueprintId === 'number' ? input.requireBlueprintId : null;
+
+    if (existingIntentId) {
+      const existing = db.getDeletionIntentById(existingIntentId);
+      if (!existing || existing.status !== 'prepared') {
+        return { ok: false, code: 'tombstone_failed', error: 'Deletion intent is not prepared' };
+      }
+      if (existing.required_blueprint_id != null) {
+        requiredBlueprintId = existing.required_blueprint_id;
+      }
+    }
+
+    let skipPhysical = false;
+    if (requiredBlueprintId != null) {
+      const dirProbe = await probeStackDirectory(nodeId, stackName);
+      if (dirProbe.kind === 'error') {
+        return { ok: false, code: 'failed', error: dirProbe.error };
+      }
+      if (dirProbe.kind === 'absent') {
+        skipPhysical = true;
+      } else {
+        const ownership = await probeBlueprintMarkerOwnership(nodeId, stackName, requiredBlueprintId);
+        if (ownership.kind === 'failed') {
+          return { ok: false, code: 'failed', error: ownership.error };
+        }
+        if (ownership.kind === 'name_conflict') {
+          if (existingIntentId) {
+            db.updateCleanupPendingStatus(existingIntentId, 'cancelled');
+          }
+          return { ok: false, code: 'name_conflict', error: ownership.error };
+        }
+      }
+    }
+
     let intentId = existingIntentId;
     if (!intentId) {
       const { tags, overridePaths } = collectArtifacts(nodeId, stackName);
@@ -176,6 +279,7 @@ export class DeployedStackDeletionService {
         rollback_tags_json: JSON.stringify(tags),
         override_paths_json: JSON.stringify(overridePaths),
         prune_volumes_requested: pruneVolumes ? 1 : 0,
+        required_blueprint_id: requiredBlueprintId,
         created_at: now,
         updated_at: now,
       };
@@ -196,38 +300,53 @@ export class DeployedStackDeletionService {
       return { ok: false, code: 'tombstone_failed', error: 'Deletion intent is not prepared' };
     }
 
-    try {
-      await ComposeService.getInstance(nodeId).downStack(stackName);
-    } catch (downErr) {
-      console.warn(
-        '[DeployedStackDeletion] Compose down failed or no-op for %s:',
-        sanitizeForLog(stackName),
-        downErr,
-      );
-    }
-
-    if (intent.prune_volumes_requested === 1) {
+    if (!skipPhysical) {
       try {
-        await DockerController.getInstance(nodeId).pruneManagedOnly('volumes', [stackName]);
-      } catch (pruneErr) {
+        await ComposeService.getInstance(nodeId).downStack(stackName);
+      } catch (downErr) {
         console.warn(
-          '[DeployedStackDeletion] Volume prune failed for %s, continuing delete:',
+          '[DeployedStackDeletion] Compose down failed or no-op for %s:',
           sanitizeForLog(stackName),
-          pruneErr,
+          downErr,
         );
+      }
+
+      if (intent.prune_volumes_requested === 1) {
+        try {
+          await DockerController.getInstance(nodeId).pruneManagedOnly('volumes', [stackName]);
+        } catch (pruneErr) {
+          console.warn(
+            '[DeployedStackDeletion] Volume prune failed for %s, continuing delete:',
+            sanitizeForLog(stackName),
+            pruneErr,
+          );
+        }
+      }
+
+      try {
+        await FileSystemService.getInstance(nodeId).deleteStack(stackName);
+      } catch (fsErr) {
+        db.updateCleanupPendingStatus(intentId, 'cancelled');
+        return {
+          ok: false,
+          code: 'fs_failed',
+          error: getErrorMessage(fsErr, 'Failed to remove stack files'),
+        };
       }
     }
 
-    try {
-      await FileSystemService.getInstance(nodeId).deleteStack(stackName);
-    } catch (fsErr) {
-      db.updateCleanupPendingStatus(intentId, 'cancelled');
-      return {
-        ok: false,
-        code: 'fs_failed',
-        error: getErrorMessage(fsErr, 'Failed to remove stack files'),
-      };
-    }
+    const finalized = await this.finalizeLogicalDeletion(input, intentId);
+    if (!finalized.ok) return finalized;
+    return { ok: true, status: skipPhysical ? 'already_absent' : 'deleted' };
+  }
+
+  /** Ready transaction, secondary DB/RBAC cleanup, mesh opt-out, sweep, invalidate. */
+  private async finalizeLogicalDeletion(
+    input: DeleteDeployedStackInput,
+    intentId: string,
+  ): Promise<DeleteDeployedStackResult> {
+    const { nodeId, stackName } = input;
+    const db = DatabaseService.getInstance();
 
     if (!db.commitStackDeletionReadyTransaction(intentId, nodeId, stackName)) {
       return {
@@ -248,6 +367,7 @@ export class DeployedStackDeletionService {
       db.deleteStackExposure(nodeId, stackName);
       db.deleteStackProjectEnvFiles(nodeId, stackName);
       db.deleteStackScans(nodeId, stackName);
+      db.deleteNotificationsForStack(nodeId, stackName);
     } catch (dbErr) {
       console.error(
         '[DeployedStackDeletion] Secondary DB cleanup failed for %s; recovery rows already retired:',
@@ -272,7 +392,15 @@ export class DeployedStackDeletionService {
     }
 
     await this.sweepReadyIntent(intentId);
-    return { ok: true };
+    NotificationService.getInstance().broadcastEvent({
+      type: 'state-invalidate',
+      scope: 'notifications',
+      action: 'stack-deleted',
+      nodeId,
+      stackName,
+      ts: Date.now(),
+    });
+    return { ok: true, status: 'deleted' };
   }
 
   /**
@@ -485,6 +613,31 @@ export class DeployedStackDeletionService {
         }
         await this.sweepReadyIntent(intent.id);
         continue;
+      }
+
+      if (intent.required_blueprint_id != null) {
+        const ownership = await probeBlueprintMarkerOwnership(
+          nodeId,
+          stackName,
+          intent.required_blueprint_id,
+        );
+        if (ownership.kind === 'name_conflict') {
+          db.updateCleanupPendingStatus(intent.id, 'cancelled');
+          console.warn(
+            '[DeployedStackDeletion] Startup cancelled blueprint deletion for %s: %s',
+            sanitizeForLog(stackName),
+            sanitizeForLog(ownership.error),
+          );
+          continue;
+        }
+        if (ownership.kind === 'failed') {
+          console.warn(
+            '[DeployedStackDeletion] Startup ownership probe failed for %s (leaving prepared): %s',
+            sanitizeForLog(stackName),
+            sanitizeForLog(ownership.error),
+          );
+          continue;
+        }
       }
 
       const result = await this.deleteDeployedStack({

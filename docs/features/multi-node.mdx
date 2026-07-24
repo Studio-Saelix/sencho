@@ -236,7 +236,7 @@ Bearer tokens grant full control over the remote Sencho instance. Treat them lik
 
 - **Rotate immediately** if a token is compromised: open the remote instance's **Settings → Infrastructure → Nodes** and click **Generate Token** to mint a new one. The previous token is invalidated instantly.
 - Tokens are **encrypted at rest** in the local SQLite database.
-- Tokens cannot be used to open interactive terminals (Host Console or container exec). Interactive shell access always requires a real browser session on that specific instance.
+- Tokens cannot be used to open interactive terminals (Host Console or container exec). Interactive shell access requires a signed-in browser session. From the control plane you can open Host Console on a compatible Distributed API Proxy remote; Pilot Agent remotes do not offer Host Console.
 
 ### Transport encryption
 

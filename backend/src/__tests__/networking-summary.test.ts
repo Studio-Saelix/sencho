@@ -60,7 +60,7 @@ describe('networking summary', () => {
   it('flags a stack with an undeclared runtime network as network drift', async () => {
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
       getDependencySnapshot: vi.fn().mockResolvedValue({
-        containers: [{ id: 'c1', name: 'web1', service: 'web', composeProject: STACK, stack: STACK, state: 'running', image: 'nginx', networks: [{ name: `${STACK}_default`, id: 'd', ip: '' }, { name: `${STACK}_rogue`, id: 'r', ip: '' }], volumes: [], ports: [] }],
+        containers: [{ id: 'c1', name: 'web1', service: 'web', composeProject: STACK, stack: STACK, state: 'running', exitCode: null, image: 'nginx', networks: [{ name: `${STACK}_default`, id: 'd', ip: '' }, { name: `${STACK}_rogue`, id: 'r', ip: '' }], volumes: [], ports: [] }],
         networks: [
           { id: 'd', name: `${STACK}_default`, driver: 'bridge', scope: 'local', isSystem: false, composeProject: STACK, stack: STACK },
           { id: 'r', name: `${STACK}_rogue`, driver: 'bridge', scope: 'local', isSystem: false, composeProject: STACK, stack: STACK },

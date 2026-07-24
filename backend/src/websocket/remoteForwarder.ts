@@ -5,6 +5,7 @@ import { LicenseService } from '../services/LicenseService';
 import { wsProxyServer } from '../proxy/websocketProxy';
 import { getErrorMessage } from '../utils/errors';
 import { rejectUpgrade as reject } from './reject';
+import { consoleSessionPathForPathname } from '../helpers/consoleSession';
 
 /**
  * Forward a WebSocket upgrade to a remote Sencho instance. Handles the
@@ -23,9 +24,14 @@ export async function handleRemoteForwarder(
   req: IncomingMessage,
   socket: Duplex,
   head: Buffer,
-  opts: { pathname: string; target: { apiUrl: string; apiToken: string } },
+  opts: {
+    pathname: string;
+    target: { apiUrl: string; apiToken: string };
+    /** Hub browser operator; recorded as acting_as on the remote audit trail. */
+    actingAs?: string;
+  },
 ): Promise<void> {
-  const { pathname, target } = opts;
+  const { pathname, target, actingAs } = opts;
   if (!target.apiUrl) return reject(socket, 503, 'Service Unavailable');
 
   const wsTarget = target.apiUrl.replace(/\/$/, '').replace(/^https?/, (m) => m === 'https' ? 'wss' : 'ws');
@@ -38,24 +44,33 @@ export async function handleRemoteForwarder(
   // direct api_token access. Pilot loopback targets skip this: there is no
   // long-lived api_token to exchange, and host-console is disabled on pilot
   // mode at the capability registry anyway.
-  const isInteractiveConsolePath = pathname === '/api/system/host-console' || pathname === '/ws';
+  const sessionPath = consoleSessionPathForPathname(pathname);
   let bearerTokenForProxy = target.apiToken;
-  if (isInteractiveConsolePath && !isPilotLoopback) {
+  if (sessionPath && !isPilotLoopback) {
     try {
       const consoleHeaders = LicenseService.getInstance().getProxyHeaders();
       const tokenRes = await fetch(`${target.apiUrl.replace(/\/$/, '')}/api/system/console-token`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${target.apiToken}`,
+          'Content-Type': 'application/json',
           [PROXY_TIER_HEADER]: consoleHeaders.tier,
         },
+        body: JSON.stringify({
+          path: sessionPath,
+          ...(actingAs ? { acting_as: actingAs } : {}),
+        }),
       });
       if (!tokenRes.ok) {
         console.error(`[WS Proxy] Remote console-token request failed: ${tokenRes.status}`);
         return reject(socket, 502, 'Bad Gateway');
       }
       const data = await tokenRes.json() as { token?: string };
-      if (typeof data.token === 'string') bearerTokenForProxy = data.token;
+      if (typeof data.token !== 'string' || !data.token) {
+        console.error('[WS Proxy] Remote console-token response missing token');
+        return reject(socket, 502, 'Bad Gateway');
+      }
+      bearerTokenForProxy = data.token;
     } catch (e) {
       console.error('[WS Proxy] Failed to fetch remote console token:', getErrorMessage(e, 'unknown'));
       return reject(socket, 502, 'Bad Gateway');

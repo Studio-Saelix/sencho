@@ -130,6 +130,7 @@ function setup(over: {
   activeNode?: Parameters<typeof useStackActions>[0]['activeNode'];
   setActiveNode?: Parameters<typeof useStackActions>[0]['setActiveNode'];
   onDeletedOpenStack?: () => void;
+  removeNotificationsForStack?: (nodeId: number, stackName: string) => void;
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
@@ -141,6 +142,7 @@ function setup(over: {
   const overlayState = makeOverlay(over.overlay);
   const setActiveNode = over.setActiveNode ?? vi.fn();
   const onDeletedOpenStack = over.onDeletedOpenStack ?? vi.fn();
+  const removeNotificationsForStack = over.removeNotificationsForStack ?? vi.fn();
 
   const { result } = renderHook(() =>
     useStackActions({
@@ -157,9 +159,10 @@ function setup(over: {
       hasUpdateGuard: over.hasUpdateGuard ?? false,
       canEditStack: over.canEditStack ?? (() => true),
       onDeletedOpenStack,
+      removeNotificationsForStack,
     }),
   );
-  return { result, editorState, stackListState, overlayState, navState, setActiveNode, onDeletedOpenStack };
+  return { result, editorState, stackListState, overlayState, navState, setActiveNode, onDeletedOpenStack, removeNotificationsForStack };
 }
 
 describe('useStackActions.saveFile', () => {
@@ -1616,5 +1619,41 @@ describe('useStackActions.deleteStack', () => {
     expect(navState.setActiveView).not.toHaveBeenCalled();
     expect(onDeletedOpenStack).not.toHaveBeenCalled();
     expect(stackListState.refreshStacks).not.toHaveBeenCalled();
+  });
+
+  it('calls removeNotificationsForStack with node id and canonical name on success', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response(null, { status: 200 }));
+    const removeNotificationsForStack = vi.fn();
+    const { result } = setup({
+      overlay: { stackToDelete: 'web.yml' },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+      navState: { activeView: 'editor' },
+      activeNode: { id: 7, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'],
+      removeNotificationsForStack,
+    });
+
+    await act(async () => {
+      await result.current.deleteStack(false);
+    });
+
+    expect(removeNotificationsForStack).toHaveBeenCalledTimes(1);
+    expect(removeNotificationsForStack).toHaveBeenCalledWith(7, 'web');
+  });
+
+  it('does not call removeNotificationsForStack on a non-OK delete', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(new Response('boom', { status: 500 }));
+    const removeNotificationsForStack = vi.fn();
+    const { result } = setup({
+      overlay: { stackToDelete: 'web.yml' },
+      stackList: { selectedFile: 'web.yml', files: ['web.yml'] },
+      navState: { activeView: 'editor' },
+      removeNotificationsForStack,
+    });
+
+    await act(async () => {
+      await result.current.deleteStack(false);
+    });
+
+    expect(removeNotificationsForStack).not.toHaveBeenCalled();
   });
 });

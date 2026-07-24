@@ -51,7 +51,7 @@ function mockDeployer() {
 function mockPaidAdmin() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     isAdmin: true,
-    can: (p: string) => p === 'system:audit' || p === 'node:read',
+    can: (p: string) => p === 'system:audit' || p === 'system:console' || p === 'node:read',
     permissionsStatus: 'ready',
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
@@ -63,7 +63,7 @@ function mockPaidAdmin() {
 function mockCommunityAdmin() {
   vi.mocked(AuthContext.useAuth).mockReturnValue({
     isAdmin: true,
-    can: (p: string) => p === 'node:read',
+    can: (p: string) => p === 'system:console' || p === 'node:read',
     permissionsStatus: 'ready',
   } as unknown as ReturnType<typeof AuthContext.useAuth>);
   vi.mocked(LicenseContext.useLicense).mockReturnValue({
@@ -269,13 +269,13 @@ describe('useViewNavigationState', () => {
     expect(result.current.navItems.map(i => i.value)).toContain('global-observability');
   });
 
-  it('shows Update and Schedules for a community admin (now free) but hides paid Console and Audit', () => {
+  it('shows Update, Schedules, and Console for a community admin; Audit stays paid', () => {
     mockCommunityAdmin();
     const { result } = renderHook(() => useViewNavigationState());
     const values = result.current.navItems.map(i => i.value);
     expect(values).toContain('auto-updates');
     expect(values).toContain('scheduled-ops');
-    expect(values).not.toContain('host-console');
+    expect(values).toContain('host-console');
     expect(values).not.toContain('audit-log');
     // The auto-updates nav item surfaces under the short label "Update".
     expect(result.current.navItems.find(i => i.value === 'auto-updates')?.label).toBe('Update');
@@ -429,53 +429,29 @@ describe('useViewNavigationState', () => {
     expect(result.current.securityTab).toBe('overview');
   });
 
-  // ── experimental discovery ─────────────────────────────────────────────────
+  // ── host-console discovery (no longer experimental) ────────────────────────
 
-  it('hides Console from nav for a paid admin when experimental discovery is off', () => {
+  it('keeps Console in nav for a paid admin when experimental discovery is off', () => {
     mockPaidAdmin();
     useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
     const { result } = renderHook(() => useViewNavigationState());
-    expect(result.current.navItems.map(i => i.value)).not.toContain('host-console');
+    expect(result.current.navItems.map(i => i.value)).toContain('host-console');
   });
 
-  it('hides Console from nav while experimental metadata is still loading', () => {
+  it('keeps Console in nav while experimental metadata is still loading', () => {
     mockPaidAdmin();
     useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: false });
     const { result } = renderHook(() => useViewNavigationState());
-    expect(result.current.navItems.map(i => i.value)).not.toContain('host-console');
+    expect(result.current.navItems.map(i => i.value)).toContain('host-console');
   });
 
-  it('does not normalize a host-console deep link before experimental readiness', () => {
+  it('keeps a host-console deep link selected when experimental is off', () => {
     mockPaidAdmin();
-    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: false });
+    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
     const onNavigateToDashboard = vi.fn();
     const { result } = renderHook(() => useViewNavigationState({ onNavigateToDashboard }));
     act(() => result.current.setActiveView('host-console'));
     expect(result.current.activeView).toBe('host-console');
     expect(onNavigateToDashboard).not.toHaveBeenCalled();
-  });
-
-  it('keeps host-console selected when delayed experimental resolves enabled', () => {
-    mockPaidAdmin();
-    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: false });
-    const onNavigateToDashboard = vi.fn();
-    const { result, rerender } = renderHook(() => useViewNavigationState({ onNavigateToDashboard }));
-    act(() => result.current.setActiveView('host-console'));
-    useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
-    rerender();
-    expect(result.current.activeView).toBe('host-console');
-    expect(onNavigateToDashboard).not.toHaveBeenCalled();
-  });
-
-  it('normalizes host-console once when experimental resolves disabled', () => {
-    mockPaidAdmin();
-    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: false });
-    const onNavigateToDashboard = vi.fn();
-    const { result, rerender } = renderHook(() => useViewNavigationState({ onNavigateToDashboard }));
-    act(() => result.current.setActiveView('host-console'));
-    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
-    rerender();
-    expect(result.current.activeView).toBe('dashboard');
-    expect(onNavigateToDashboard).toHaveBeenCalled();
   });
 });

@@ -714,6 +714,29 @@ describe('Orphaned role assignment cleanup', () => {
     // Cleanup
     db.deleteUser(userId);
   });
+
+  it('deleteRoleAssignmentsByResource removes only the matching resource tuple', async () => {
+    const db = DatabaseService.getInstance();
+    const hash = await bcrypt.hash('password123', 1);
+    const userId = db.addUser({ username: 'tupleorphan', password_hash: hash, role: 'viewer' });
+    const nodeId = db.addNode({
+      name: 'tuple-cleanup-node', type: 'remote', api_url: 'http://test:1852',
+      api_token: '', compose_dir: '/tmp', is_default: false,
+    });
+    db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'target-stack' });
+    db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'keep-stack' });
+    db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'node', resource_id: String(nodeId) });
+
+    db.deleteRoleAssignmentsByResource('stack', 'target-stack');
+
+    const after = db.getAllRoleAssignments(userId);
+    expect(after.some((a) => a.resource_type === 'stack' && a.resource_id === 'target-stack')).toBe(false);
+    expect(after.some((a) => a.resource_type === 'stack' && a.resource_id === 'keep-stack')).toBe(true);
+    expect(after.some((a) => a.resource_type === 'node' && a.resource_id === String(nodeId))).toBe(true);
+
+    db.deleteUser(userId);
+    db.deleteNode(nodeId);
+  });
 });
 
 // ---- Role-Based Permission Checks (via API) ----

@@ -6,7 +6,7 @@ description: An interactive terminal on your host OS, directly in the browser - 
 The **Console** tab opens a full interactive terminal session on the machine running Sencho. It behaves exactly like an SSH session, but without needing an SSH server, client, or key management.
 
 <Note>
-  The Host Console is a limited-availability operator surface. When it is present on an instance, it requires the **admin** role. [Learn more about licensing](/features/licensing).
+  Host Console requires the **admin** role. [Learn more about roles](/features/rbac).
 </Note>
 
 <Frame>
@@ -26,6 +26,14 @@ The Host Console gives you a real terminal session on the Sencho host, streamed 
 ## Opening the console
 
 Click **Console** in the top navigation bar. The session starts immediately in the `COMPOSE_DIR` root. If a stack is selected in the sidebar, the terminal opens directly inside that stack's directory instead, and a small back button appears in the masthead so you can return to the stack editor.
+
+You can also open Console from a bookmark or shared link. Every Console view has a stable URL under [Deep links and URLs](/features/deep-links):
+
+- `/nodes/local/host-console` opens Host Console on the local node at the compose root
+- `/nodes/local/host-console/radarr` opens the same terminal rooted in the Radarr stack directory
+- Remote nodes use their node slug the same way (for example `/nodes/nas-box-42/host-console`)
+
+Console requires the **admin** role. The URL stays in the address bar on a phone, but Host Console is meant for a desktop browser.
 
 ## Cockpit layout
 
@@ -74,9 +82,9 @@ Environment variables whose names suggest secrets (passwords, tokens, keys, cred
 
 The Host Console is one of the most powerful features in Sencho and is treated as such:
 
-- **Admin role required when present.** The Host Console is a limited-availability surface; only users with the **admin** role can open a console session.
+- **Admin role required.** Only users with the **admin** role can open a console session.
 - **Browser sessions only.** Console sessions are only available from a signed-in browser session, not from API tokens.
-- **Audited.** Every console session is recorded in the audit log. Opening and closing a session each write an entry capturing the user, node, client IP, and timestamp, so shell access is fully accountable.
+- **Audited.** Every console session is recorded in the audit log. Opening and closing a session each write an entry with the session principal, node, client IP, and timestamp. When the session is opened through a remote hub bridge, the principal is `console_session` and the hub operator is recorded in `acting_as`, so remote shell access stays accountable to the signed-in admin.
 
 <Warning>
   The Host Console provides unrestricted shell access to the machine running Sencho. Do not expose Sencho on a public network without HTTPS and strong authentication.
@@ -97,7 +105,7 @@ The Host Console is one of the most powerful features in Sencho and is treated a
   </Accordion>
 
   <Accordion title="Session ends immediately after connecting">
-    This typically means the shell could not be found on the host. In a Docker deployment, ensure `bash` or `sh` is available inside the container. You can check by running `docker exec <container> which bash` from the host. Also verify that your user has the **admin** role and that Console is available on this instance.
+    This typically means the shell could not be found on the host. In a Docker deployment, ensure `bash` or `sh` is available inside the container. You can check by running `docker exec <container> which bash` from the host. Also verify that your user has the **admin** role.
   </Accordion>
 
   <Accordion title="Connection drops after a short time">
@@ -105,6 +113,6 @@ The Host Console is one of the most powerful features in Sencho and is treated a
   </Accordion>
 
   <Accordion title="Console tab is not visible">
-    Console appears only when the surface is present on the instance, and only for users with the **admin** role. Verify those conditions are met, then refresh the page.
+    Console appears for users with the **admin** role. If you are an admin and still do not see it, refresh the page. On a remote node, the Console tab may show a lock card when that node does not support Host Console (for example a Pilot Agent node, or a Distributed API Proxy node that does not advertise Host Console).
   </Accordion>
 </AccordionGroup>

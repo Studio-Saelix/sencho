@@ -78,10 +78,10 @@ body:
       label: Subsystems involved
       description: Tick any that apply.
       options:
-        - label: Trivy / vulnerability scanning
-        - label: Pilot Agent (NAT tunnel)
-        - label: Sencho Mesh (cross-node networking)
-        - label: Fleet Actions / Secrets / Snapshots
-        - label: Cloud Backup
-        - label: SSO / LDAP
+        - label: Stacks, Compose & Deploy
+        - label: Multi-node, Pilot & Mesh
+        - label: Fleet (actions, sync, secrets, backups, blueprints)
+        - label: Alerts, Notifications & Observability
+        - label: Security, Scanning & Auth (Trivy, SSO, MFA, RBAC)
+        - label: Updates, Schedules & Automation
         - label: None of the above

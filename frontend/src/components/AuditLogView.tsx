@@ -27,6 +27,7 @@ interface AuditEntry {
     node_id: number | null;
     ip_address: string;
     summary: string;
+    acting_as?: string | null;
     flags?: AnomalyFlag[];
 }
 
@@ -464,6 +465,11 @@ export function AuditLogView({ headerActions }: AuditLogViewProps = {}) {
                                                         </TableCell>
                                                         <TableCell className="font-medium text-sm">
                                                             {entry.username}
+                                                            {entry.acting_as ? (
+                                                                <span className="block text-xs text-muted-foreground font-normal">
+                                                                    acting as {entry.acting_as}
+                                                                </span>
+                                                            ) : null}
                                                         </TableCell>
                                                         <TableCell>
                                                             <Badge variant={methodBadgeVariant(entry.method)} className="text-xs font-mono">
@@ -491,6 +497,10 @@ export function AuditLogView({ headerActions }: AuditLogViewProps = {}) {
                                                                     <div>
                                                                         <span className="text-muted-foreground text-xs block">IP Address</span>
                                                                         <span className="font-mono text-xs tabular-nums">{entry.ip_address || '-'}</span>
+                                                                    </div>
+                                                                    <div>
+                                                                        <span className="text-muted-foreground text-xs block">Acting as</span>
+                                                                        <span className="font-mono text-xs">{entry.acting_as || '-'}</span>
                                                                     </div>
                                                                     <div>
                                                                         <span className="text-muted-foreground text-xs block">Node ID</span>
@@ -673,6 +683,9 @@ function StreamRow({ entry, now }: StreamRowProps) {
             <div className="min-w-0">
                 <div className="text-sm leading-snug">
                     <span className="font-semibold">{entry.username || 'system'}</span>
+                    {entry.acting_as ? (
+                        <span className="text-muted-foreground"> (acting as {entry.acting_as})</span>
+                    ) : null}
                     <span className="text-muted-foreground"> {verb.toLowerCase()} </span>
                     <span className="font-semibold">{target || entry.path}</span>
                 </div>

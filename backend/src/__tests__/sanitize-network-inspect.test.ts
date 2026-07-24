@@ -13,7 +13,7 @@ describe('sanitizeNetworkInspect connected containers', () => {
       networks: [{ id: 'net1', name: 'app_net', driver: 'bridge', scope: 'local', isSystem: false, composeProject: 'app', stack: 'app' }],
       volumes: [],
       containers: [{
-        id: 'c1', name: 'app-web-1', service: 'web', composeProject: 'app', stack: 'app', state: 'running', image: 'nginx',
+        id: 'c1', name: 'app-web-1', service: 'web', composeProject: 'app', stack: 'app', state: 'running', exitCode: null, image: 'nginx',
         networks: [{ name: 'app_net', id: 'net1', ip: '172.20.0.5/16' }], volumes: [], ports: [],
       }],
     };

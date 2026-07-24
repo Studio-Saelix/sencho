@@ -3,9 +3,21 @@ import { z } from 'zod';
 import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
+import { isValidServiceName } from '../utils/validation';
+import {
+  getActiveCapabilities,
+  SERVICE_SCOPED_STACK_ALERT_CAPABILITY,
+} from '../services/CapabilityRegistry';
 
 const AlertCreateSchema = z.object({
   stack_name: z.string().min(1).max(255),
+  service_name: z.preprocess(
+    (val) => (val === '' ? null : val),
+    z.string().max(255).nullable().optional().refine(
+      (val) => val == null || isValidServiceName(val),
+      { message: 'Invalid service name' },
+    ),
+  ),
   metric: z.enum(['cpu_percent', 'memory_percent', 'memory_mb', 'net_rx', 'net_tx', 'restart_count']),
   operator: z.enum(['>', '>=', '<', '<=', '==']),
   threshold: z.number().min(0),
@@ -22,7 +34,8 @@ alertsRouter.get('/', authMiddleware, async (req: Request, res: Response) => {
 
     const alerts = DatabaseService.getInstance().getStackAlerts(stackName);
     res.json(alerts);
-  } catch {
+  } catch (error) {
+    console.error('Failed to fetch alerts:', error);
     res.status(500).json({ error: 'Failed to fetch alerts' });
   }
 });
@@ -34,8 +47,23 @@ alertsRouter.post('/', authMiddleware, async (req: Request, res: Response) => {
     res.status(400).json({ error: 'Invalid alert data', details: parsed.error.flatten().fieldErrors });
     return;
   }
+  const { service_name, ...alertFields } = parsed.data;
+  const serviceName = service_name ?? null;
+  if (
+    serviceName != null
+    && !getActiveCapabilities().includes(SERVICE_SCOPED_STACK_ALERT_CAPABILITY)
+  ) {
+    res.status(400).json({
+      error: 'This node does not support service-scoped alert rules',
+      code: 'capability_unavailable',
+    });
+    return;
+  }
   try {
-    const created = DatabaseService.getInstance().addStackAlert(parsed.data);
+    const created = DatabaseService.getInstance().addStackAlert({
+      ...alertFields,
+      service_name: serviceName,
+    });
     res.status(201).json(created);
   } catch (error) {
     console.error('Failed to add alert:', error);
@@ -45,11 +73,18 @@ alertsRouter.post('/', authMiddleware, async (req: Request, res: Response) => {
 
 alertsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
   if (!requireAdmin(req, res)) return;
+  // Reject leading-junk / fractional ids (parseInt("1abc") === 1, parseInt("2.5") === 2).
+  const rawId = String(req.params.id ?? '');
+  const id = /^\d+$/.test(rawId) ? Number.parseInt(rawId, 10) : NaN;
+  if (!Number.isInteger(id) || id <= 0) {
+    res.status(400).json({ error: 'Invalid alert id' });
+    return;
+  }
   try {
-    const id = parseInt(req.params.id as string, 10);
     DatabaseService.getInstance().deleteStackAlert(id);
     res.json({ success: true });
-  } catch {
+  } catch (error) {
+    console.error('Failed to delete alert:', error);
     res.status(500).json({ error: 'Failed to delete alert' });
   }
 });

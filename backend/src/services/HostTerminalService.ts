@@ -18,6 +18,8 @@ export interface ConsoleAuditContext {
     // path always supplies a concrete id.
     readonly nodeId: number | null;
     readonly ipAddress: string;
+    /** Hub operator for remote console_session bridges; null for direct sessions. */
+    readonly actingAs?: string | null;
 }
 
 const CONSOLE_AUDIT_PATH = '/api/system/host-console';
@@ -97,6 +99,7 @@ export class HostTerminalService {
                 node_id: audit.nodeId,
                 ip_address: audit.ipAddress,
                 summary,
+                acting_as: audit.actingAs ?? null,
             });
         } catch (err) {
             console.error('[HostConsole] Failed to write session audit log:', err);
