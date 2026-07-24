@@ -95,9 +95,10 @@ describe('FileSystemService stack methods', () => {
       expect(fileNames).toEqual(['.env', 'compose.yaml']);
     });
 
-    it('marks compose.yaml and .env as protected', async () => {
+    it('marks compose.yaml, .env, and .blueprint.json as protected', async () => {
       await fs.writeFile(path.join(stackDir, 'compose.yaml'), '');
       await fs.writeFile(path.join(stackDir, '.env'), '');
+      await fs.writeFile(path.join(stackDir, '.blueprint.json'), '{}');
       await fs.writeFile(path.join(stackDir, 'custom.conf'), '');
 
       const service = FileSystemService.getInstance();
@@ -106,6 +107,7 @@ describe('FileSystemService stack methods', () => {
       const byName = Object.fromEntries(entries.map(e => [e.name, e]));
       expect(byName['compose.yaml'].isProtected).toBe(true);
       expect(byName['.env'].isProtected).toBe(true);
+      expect(byName['.blueprint.json'].isProtected).toBe(true);
       expect(byName['custom.conf'].isProtected).toBe(false);
     });
 

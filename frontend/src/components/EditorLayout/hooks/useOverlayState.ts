@@ -25,6 +25,12 @@ type PolicyBlock = {
 };
 type Container = { id: string; name: string };
 
+type StackMonitorState = {
+  stackName: string;
+  tab: 'alerts' | 'auto-heal';
+  serviceName?: string;
+};
+
 // Kept here (not in useStackActions) so overlay state can hold load options
 // without a circular type import between the two hooks.
 export type LoadFileOptions = {
@@ -109,12 +115,12 @@ export function useOverlayState() {
     return () => window.removeEventListener(SENCHO_OPEN_LOGS_EVENT, handler);
   }, [openLogViewer]); // openLogViewer is stable (useCallback with empty deps)
 
-  const [stackMonitor, setStackMonitor] = useState<{ stackName: string; tab: 'alerts' | 'auto-heal' } | null>(null);
-  const openAlertSheet = useCallback((stackName: string) => {
-    setStackMonitor({ stackName, tab: 'alerts' });
+  const [stackMonitor, setStackMonitor] = useState<StackMonitorState | null>(null);
+  const openAlertSheet = useCallback((stackName: string, opts?: { serviceName?: string }) => {
+    setStackMonitor({ stackName, tab: 'alerts', serviceName: opts?.serviceName });
   }, []);
-  const openAutoHeal = useCallback((stackName: string) => {
-    setStackMonitor({ stackName, tab: 'auto-heal' });
+  const openAutoHeal = useCallback((stackName: string, opts?: { serviceName?: string }) => {
+    setStackMonitor({ stackName, tab: 'auto-heal', serviceName: opts?.serviceName });
   }, []);
   const closeStackMonitor = useCallback(() => setStackMonitor(null), []);
 

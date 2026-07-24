@@ -61,6 +61,8 @@ export function MobileStackDetail(props: EditorViewProps) {
         changeEnvFile,
         openLogViewer,
         openBashModal,
+        onOpenMonitor,
+        onOpenServiceMonitor,
         serviceAction,
         effectiveServices = [],
         serviceUpdateStatuses,
@@ -159,6 +161,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                         showTakeDown={showTakeDown}
                         isSelfStack={isSelfStack}
                         stackMuteActions={stackMuteActions}
+                        onOpenMonitor={onOpenMonitor}
                     />
                 </div>
 
@@ -229,6 +232,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 activeNode={activeNode}
                                 openLogViewer={openLogViewer}
                                 openBashModal={openBashModal}
+                                onOpenServiceMonitor={onOpenServiceMonitor}
                                 serviceAction={serviceAction}
                                 effectiveServices={effectiveServices}
                                 serviceUpdateStatuses={serviceUpdateStatuses}

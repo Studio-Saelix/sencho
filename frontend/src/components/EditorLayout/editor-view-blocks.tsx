@@ -22,7 +22,8 @@ import {
     Maximize2,
     Minimize2,
     AlertCircle,
-    RefreshCw
+    RefreshCw,
+    HeartPulse,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../ui/button';
@@ -144,6 +145,8 @@ export interface StackIdentityHeaderProps {
     /** True when this stack is the running Sencho instance on the active node. */
     isSelfStack?: boolean;
     stackMuteActions?: ReturnType<typeof useStackMuteActions>;
+    /** Opens the stack Monitor sheet on the Alerts tab. */
+    onOpenMonitor?: () => void;
 }
 
 // Breadcrumb + serif title + state pill + action bar. The action buttons grow
@@ -170,6 +173,7 @@ export function StackIdentityHeader({
     showTakeDown,
     isSelfStack = false,
     stackMuteActions,
+    onOpenMonitor,
 }: StackIdentityHeaderProps) {
     const selfProtected = isSelfStack;
     return (
@@ -206,7 +210,7 @@ export function StackIdentityHeader({
                 const canScan = trivy.available && isAdmin;
                 const canMute = stackMuteActions?.canMute ?? false;
                 const hasOverflowExtras = canRollback || canScan;
-                const hasOverflow = hasOverflowExtras || canDelete || canMute;
+                const hasOverflow = hasOverflowExtras || canDelete || canMute || onOpenMonitor;
                 if (!canDeploy && !hasOverflow) return null;
                 return (
                     <div className="flex items-center gap-2 flex-wrap">
@@ -278,8 +282,14 @@ export function StackIdentityHeader({
                                             {stackMisconfigScanning ? 'Scanning...' : 'Scan config'}
                                         </DropdownMenuItem>
                                     )}
+                                    {onOpenMonitor && (
+                                        <DropdownMenuItem onClick={onOpenMonitor}>
+                                            <HeartPulse className="w-4 h-4 mr-2" strokeWidth={1.5} />
+                                            Monitor
+                                        </DropdownMenuItem>
+                                    )}
                                     {stackMuteActions && <StackMuteSubmenu actions={stackMuteActions} />}
-                                    {(canRollback || canScan || stackMuteActions?.canMute) && canDelete && <DropdownMenuSeparator />}
+                                    {(canRollback || canScan || onOpenMonitor || stackMuteActions?.canMute) && canDelete && <DropdownMenuSeparator />}
                                     {canDelete && (
                                         <DropdownMenuItem
                                             className="text-destructive focus:text-destructive focus:bg-destructive/10"
@@ -308,6 +318,8 @@ export interface ContainersHealthProps {
     activeNode: Node | null;
     openLogViewer: (containerId: string, containerName: string) => void;
     openBashModal: (containerId: string, containerName: string) => void;
+    /** Opens Monitor (Alerts tab); preselects the Compose service in add forms when listed. */
+    onOpenServiceMonitor?: (serviceName: string) => void;
     serviceAction: (action: 'start' | 'stop' | 'restart', serviceName: string) => Promise<void>;
     // Declared Compose services from the effective model. Multi-service
     // headers (owning Update/Rebuild + badge + Start/Stop/Restart) render only
@@ -335,6 +347,7 @@ export function ContainersHealth({
     activeNode,
     openLogViewer,
     openBashModal,
+    onOpenServiceMonitor,
     serviceAction,
     effectiveServices = [],
     serviceUpdateStatuses = [],
@@ -474,6 +487,7 @@ export function ContainersHealth({
                             : '';
 
                         const containerName = container?.Names?.[0]?.replace(/^\//, '') || container?.Id?.slice(0, 12) || 'container';
+                        const composeService = container.Service;
                         const isActive = container.State === 'running' || container.State === 'paused';
                         const health = container.healthStatus;
                         const uptime = isActive ? extractUptime(container.Status) : null;
@@ -565,6 +579,24 @@ export function ContainersHealth({
                                             <TooltipContent>View logs</TooltipContent>
                                           </Tooltip>
                                         </TooltipProvider>
+                                        {onOpenServiceMonitor && composeService && (
+                                          <TooltipProvider>
+                                            <Tooltip>
+                                              <TooltipTrigger asChild>
+                                                <Button
+                                                  size="icon"
+                                                  variant="ghost"
+                                                  className="h-7 w-7 rounded-md max-md:h-11 max-md:w-11"
+                                                  onClick={() => onOpenServiceMonitor(composeService)}
+                                                  aria-label={`Monitor ${composeService}`}
+                                                >
+                                                  <HeartPulse className="h-3.5 w-3.5" strokeWidth={1.5} />
+                                                </Button>
+                                              </TooltipTrigger>
+                                              <TooltipContent>Monitor {composeService}</TooltipContent>
+                                            </Tooltip>
+                                          </TooltipProvider>
+                                        )}
                                         {isAdmin && (
                                           <TooltipProvider>
                                             <Tooltip>

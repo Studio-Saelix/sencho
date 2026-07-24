@@ -660,6 +660,10 @@ export default function EditorLayout() {
       changeEnvFile={stackActions.changeEnvFile}
       openLogViewer={stackActions.openLogViewer}
       openBashModal={stackActions.openBashModal}
+      onOpenMonitor={stackName ? () => overlayState.openAlertSheet(stackName) : undefined}
+      onOpenServiceMonitor={stackName
+        ? (serviceName) => overlayState.openAlertSheet(stackName, { serviceName })
+        : undefined}
       serviceAction={stackActions.serviceAction}
       effectiveServices={effectiveServices}
       serviceUpdateStatuses={serviceUpdateStatuses}

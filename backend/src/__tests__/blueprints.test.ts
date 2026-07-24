@@ -399,7 +399,7 @@ describe('BlueprintReconciler developer-mode diagnostics', () => {
 });
 
 describe('BlueprintService per-stack lock', () => {
-    it('deploy under a free lock writes compose then marker, then deploys', async () => {
+    it('deploy under a free lock writes compose, cleans siblings, deploys, then writes the marker', async () => {
         const nodeId = seedNode();
         const bp = seedBlueprint({ classification: 'stateless', nodeIds: [nodeId] });
         const node = DatabaseService.getInstance().getNode(nodeId)!;
@@ -419,7 +419,7 @@ describe('BlueprintService per-stack lock', () => {
             source: 'blueprint',
             actor: 'system:blueprint',
         });
-        // Compose is written first, then the marker, both before sibling cleanup and deploy.
+        // Compose is written first; the marker is deferred until after sibling cleanup and deploy.
         expect(writeSpy).toHaveBeenCalledTimes(2);
         expect(writeSpy.mock.calls[0][1]).toBe('compose.yaml');
         expect(writeSpy.mock.calls[0][2]).toBe(bp.compose_content);
@@ -429,9 +429,9 @@ describe('BlueprintService per-stack lock', () => {
         const [composeOrder, markerOrder] = writeSpy.mock.invocationCallOrder;
         const [cleanupOrder] = cleanupSpy.mock.invocationCallOrder;
         const [deployOrder] = deploySpy.mock.invocationCallOrder;
-        expect(composeOrder).toBeLessThan(markerOrder);
-        expect(markerOrder).toBeLessThan(cleanupOrder);
+        expect(composeOrder).toBeLessThan(cleanupOrder);
         expect(cleanupOrder).toBeLessThan(deployOrder);
+        expect(deployOrder).toBeLessThan(markerOrder);
     });
 
     it('deploy skips, writes no stack files, and records failed when the stack lock is held', async () => {
@@ -476,7 +476,10 @@ describe('BlueprintService local withdraw clears stack-scoped role assignments',
 
     async function arrangeLocalWithdraw() {
         const db = DatabaseService.getInstance();
+        const composeDir = process.env.COMPOSE_DIR!;
         const nodeId = seedNode();
+        db.getDb().prepare('UPDATE nodes SET compose_dir = ? WHERE id = ?').run(composeDir, nodeId);
+
         const bp = seedBlueprint({ name: `rbac-wd-${counter}`, classification: 'stateless', nodeIds: [nodeId] });
         const node = db.getNode(nodeId)!;
         db.upsertDeployment({
@@ -499,7 +502,15 @@ describe('BlueprintService local withdraw clears stack-scoped role assignments',
             user_id: userId, role: 'deployer', resource_type: 'node', resource_id: String(otherNodeId),
         });
 
-        vi.spyOn(BlueprintService.getInstance(), 'readMarker').mockResolvedValue(null);
+        // Matching on-disk marker so ownership passes; FS/down are stubbed.
+        const fs = await import('fs');
+        const path = await import('path');
+        const stackDir = path.join(composeDir, bp.name);
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(
+            path.join(stackDir, '.blueprint.json'),
+            JSON.stringify({ blueprintId: bp.id, revision: bp.revision, lastApplied: Date.now() }),
+        );
         const { ComposeService } = await import('../services/ComposeService');
         const { FileSystemService } = await import('../services/FileSystemService');
         vi.spyOn(ComposeService.prototype, 'downStack').mockResolvedValue(undefined);
@@ -522,15 +533,16 @@ describe('BlueprintService local withdraw clears stack-scoped role assignments',
         db.deleteUser(userId);
     });
 
-    it('clears the target assignment when deleteStack treats the directory as already absent (ENOENT)', async () => {
-        // Shared deletion always calls deleteStack; FileSystemService maps ENOENT to success.
+    it('clears the target assignment when the stack directory is already absent', async () => {
         const { bp, node, userId, deleteStackSpy, db } = await arrangeLocalWithdraw();
-        deleteStackSpy.mockResolvedValue(undefined);
+        const fs = await import('fs');
+        const path = await import('path');
+        fs.rmSync(path.join(process.env.COMPOSE_DIR!, bp.name), { recursive: true, force: true });
 
         const outcome = await BlueprintService.getInstance().withdrawFromNode(bp, node);
 
         expect(outcome.status).toBe('withdrawn');
-        expect(deleteStackSpy).toHaveBeenCalledWith(bp.name);
+        expect(deleteStackSpy).not.toHaveBeenCalled();
         expect(hasAssignment(userId, 'stack', bp.name)).toBe(false);
         expect(db.getAllRoleAssignments(userId)).toHaveLength(2);
         db.deleteUser(userId);

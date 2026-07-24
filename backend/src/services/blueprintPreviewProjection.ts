@@ -457,15 +457,30 @@ function asApprovedBlueprint(blueprint: Blueprint): Blueprint & BlueprintApprova
 }
 
 /** Upgrade create rows to blockers when an unmanaged same-name stack already exists. */
-async function applyCreateNameConflictBlockers(blueprintName: string, raw: RawAction[]): Promise<void> {
+function blockCreateForOwnership(row: RawAction, detail: string): void {
+    row.action = 'blocked_name_conflict';
+    row.severity = 'blocker';
+    row.detail = detail;
+}
+
+async function applyCreateNameConflictBlockers(
+    blueprintName: string,
+    blueprintId: number,
+    raw: RawAction[],
+): Promise<void> {
     const { BlueprintService } = await import('./BlueprintService');
     const svc = BlueprintService.getInstance();
     for (const row of raw) {
         if (row.action !== 'create') continue;
-        if (!(await svc.hasNameConflict(blueprintName, row.node))) continue;
-        row.action = 'blocked_name_conflict';
-        row.severity = 'blocker';
-        row.detail = 'Unmanaged stack with this name already exists on this node';
+        try {
+            if (!(await svc.hasNameConflict(blueprintName, row.node, blueprintId))) continue;
+            blockCreateForOwnership(row, 'Unmanaged stack with this name already exists on this node');
+        } catch (err) {
+            blockCreateForOwnership(
+                row,
+                err instanceof Error ? err.message : 'Cannot verify stack ownership on this node',
+            );
+        }
     }
 }
 
@@ -477,7 +492,7 @@ export async function buildBlueprintPreview(blueprintId: number): Promise<Bluepr
     const deployments = db.listDeployments(blueprintId);
     const decision = BlueprintReconciler.getInstance().computeDecisionForPreview(blueprint, allNodes);
     const raw = projectActions(blueprint, allNodes, deployments, decision);
-    await applyCreateNameConflictBlockers(blueprint.name, raw);
+    await applyCreateNameConflictBlockers(blueprint.name, blueprint.id, raw);
 
     const changes: PreviewChangeRow[] = [];
     for (const row of raw) {

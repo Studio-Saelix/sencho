@@ -509,4 +509,43 @@ describe('containers load states', () => {
     await user.click(screen.getByRole('button', { name: /retry/i }));
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
+
+  it('shows Monitor when Service is set and calls onOpenServiceMonitor', async () => {
+    const onOpenServiceMonitor = vi.fn();
+    const user = userEvent.setup();
+    const c = { ...container([{ PrivatePort: 80, PublicPort: 8080 }]), Service: 'web' } as ContainerInfo;
+    render(
+      <ContainersHealth
+        safeContainers={[c]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        onOpenServiceMonitor={onOpenServiceMonitor}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Monitor web' }));
+    expect(onOpenServiceMonitor).toHaveBeenCalledWith('web');
+  });
+
+  it('hides Monitor when the container has no Service label', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[container([{ PrivatePort: 80, PublicPort: 8080 }])]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        onOpenServiceMonitor={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /Monitor / })).toBeNull();
+  });
 });

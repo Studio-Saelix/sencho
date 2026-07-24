@@ -142,7 +142,7 @@ describe('networking operator routes', () => {
   it('blocks admin delete when network is attached', async () => {
     vi.spyOn(DockerController, 'getInstance').mockReturnValue({
       getDependencySnapshot: vi.fn().mockResolvedValue({
-        containers: [{ id: 'c1', name: 'web', service: 'web', composeProject: STACK, stack: STACK, state: 'running', image: 'nginx', networks: [{ name: 'orphan_net', id: NET_ID, ip: '' }], volumes: [], ports: [] }],
+        containers: [{ id: 'c1', name: 'web', service: 'web', composeProject: STACK, stack: STACK, state: 'running', exitCode: null, image: 'nginx', networks: [{ name: 'orphan_net', id: NET_ID, ip: '' }], volumes: [], ports: [] }],
         networks: [{ id: NET_ID, name: 'orphan_net', driver: 'bridge', scope: 'local', isSystem: false, composeProject: null, stack: null }],
         volumes: [],
       }),
@@ -220,7 +220,7 @@ describe('evaluateNetworkDeleteGuard', () => {
   it('blocks a network that still has an attached container', () => {
     const snapshot = {
       volumes: [],
-      containers: [{ id: 'c1', name: 'web', service: 'web', composeProject: STACK, stack: STACK, state: 'running', image: 'img', networks: [{ name: 'app_net', id: 'n1', ip: '' }], volumes: [], ports: [] }],
+      containers: [{ id: 'c1', name: 'web', service: 'web', composeProject: STACK, stack: STACK, state: 'running', exitCode: null, image: 'img', networks: [{ name: 'app_net', id: 'n1', ip: '' }], volumes: [], ports: [] }],
       networks: [{ id: 'n1', name: 'app_net', driver: 'bridge', scope: 'local', isSystem: false, composeProject: STACK, stack: STACK }],
     };
     expect(evaluateNetworkDeleteGuard('n1', snapshot, []).code).toBe('attached');
