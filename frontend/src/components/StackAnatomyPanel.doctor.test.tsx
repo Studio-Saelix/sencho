@@ -71,6 +71,21 @@ describe('StackAnatomyPanel Doctor tab (capability on)', () => {
     expect(screen.queryByTestId('doctor-tab-dot')).not.toBeInTheDocument();
   });
 
+  it('places Doctor between Activity and Drift when the capability is present', async () => {
+    badgeSeverity = 'warning';
+    render(panel());
+    await screen.findByTestId('doctor-tab');
+    const labels = screen.getAllByRole('tab').map((t) => t.textContent?.replace(/\s+/g, ' ').trim());
+    const activity = labels.indexOf('Activity');
+    const doctor = labels.findIndex((l) => l?.startsWith('Doctor'));
+    const drift = labels.indexOf('Drift');
+    const dossier = labels.indexOf('Dossier');
+    expect(activity).toBeGreaterThanOrEqual(0);
+    expect(doctor).toBe(activity + 1);
+    expect(drift).toBe(doctor + 1);
+    expect(dossier).toBe(drift + 1);
+  });
+
   it('renders the Networking tab when the capability is present', async () => {
     badgeSeverity = 'warning';
     render(panel());

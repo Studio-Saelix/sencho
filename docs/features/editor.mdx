@@ -79,21 +79,21 @@ Stacks with more than one container gain a summary strip above the container lis
 The right column shows the **Anatomy panel** by default: a read-only summary of the compose file alongside a scrollable tab row for other stack views.
 
 <Frame>
-  <img src="/images/editor/anatomy-tabs.png" alt="Anatomy panel header strip showing the Anatomy, Activity, Dossier, Drift, Environment, Networking, Doctor, and Storage tab row with Files and Edit compose shortcuts on the right" />
+  <img src="/images/editor/anatomy-tabs.png" alt="Anatomy panel header strip showing the Anatomy, Activity, Doctor, Drift, Dossier, Environment, Networking, and Storage tab row with Files and Edit compose shortcuts on the right" />
 </Frame>
 
-The tab row always shows four tabs: **Anatomy**, **Activity**, **Dossier**, and **Drift**. Four more tabs appear when the active node advertises the matching capability.
+The tab row always shows four tabs: **Anatomy**, **Activity**, **Drift**, and **Dossier**. When Compose Doctor is available on the node, **Doctor** sits between Activity and Drift. Four more capability-gated tabs appear when the active node advertises them.
 
 | Tab | Always present? | What it shows |
 |-----|----------------|--------------|
 | **Anatomy** | Yes | Read-only compose file summary. |
 | **Activity** | Yes | Operational event timeline for this stack. See [Stack Activity](/features/stack-activity). |
-| **Dossier** | Yes | Exportable Markdown of the anatomy combined with operator notes. See [Stack Dossier](/features/stack-dossier). |
+| **Doctor** | When `compose-doctor` capability is present | Preflight check results grouped by severity. The tab gains a red dot for blocker findings and an amber dot for high-risk findings. See [Compose Doctor](/features/compose-doctor). |
 | **Drift** | Yes | Live comparison of the declared compose against the running containers. See [Stack Drift](/features/stack-drift). |
+| **Dossier** | Yes | Exportable Markdown of the anatomy combined with operator notes. See [Stack Dossier](/features/stack-dossier). |
 | **Environment** | When `env-inventory` capability is present | Variable inventory across all env files, with status for each variable. See [Environment Guardrails](/features/environment-guardrails). |
 | **Compose Labels** | When `container-label-inventory` capability is present | Declared Compose labels vs runtime container labels per service. See [Docker Label Audit](/features/docker-label-audit). |
 | **Networking** | When `compose-networking` capability is present | Port exposure summary per service with intent classification. See [Compose Networking](/features/compose-networking). |
-| **Doctor** | When `compose-doctor` capability is present | Preflight check results grouped by severity. The tab gains a red dot for blocker findings and an amber dot for high-risk findings. See [Compose Doctor](/features/compose-doctor). |
 | **Storage** | When `compose-storage` capability is present | Mount inventory with portability assessment and snapshot coverage. See [Compose Storage](/features/compose-storage). |
 
 The **Files** shortcut and the **Edit compose** button sit at the right end of the strip and stay available regardless of which tab is active.
