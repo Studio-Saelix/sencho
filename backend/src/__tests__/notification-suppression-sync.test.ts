@@ -272,4 +272,57 @@ describe('notificationSuppressionSync', () => {
     const posts = mockFetch.mock.calls.filter((c) => (c[1] as { method: string }).method === 'POST');
     expect(posts.some((c) => String(c[0]).includes('node-10'))).toBe(true);
   });
+
+  it('capability cleanup DELETE sends recoverable retraction body', async () => {
+    mockRemoteAdvertises.mockResolvedValue(false);
+    mockFetch.mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+    syncSuppressionRuleToFleet(makeRule({
+      node_id: 10,
+      updated_at: 555,
+      schedule: { days: [1], start_minute: 0, end_minute: 60, tz: 'UTC' },
+    }));
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalled());
+    const [, init] = mockFetch.mock.calls[0] as [string, { method: string; body: string }];
+    expect(init.method).toBe('DELETE');
+    expect(JSON.parse(init.body)).toEqual({ kind: 'recoverable', source_updated_at: 555 });
+  });
+
+  it('scheduleInvalid DELETE sends recoverable retraction body', async () => {
+    mockFetch.mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+    syncSuppressionRuleToFleet(makeRule({
+      node_id: 10,
+      updated_at: 777,
+      schedule: null,
+      scheduleInvalid: true,
+    }));
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalled());
+    const [, init] = mockFetch.mock.calls[0] as [string, { method: string; body: string }];
+    expect(init.method).toBe('DELETE');
+    expect(JSON.parse(init.body)).toEqual({ kind: 'recoverable', source_updated_at: 777 });
+  });
+
+  it('stale-target DELETE sends recoverable watermark from updated rule', async () => {
+    const previous = makeRule({ id: 42, node_id: null, schedule: null, updated_at: 10 });
+    const updated = makeRule({ id: 42, node_id: 10, schedule: null, updated_at: 99 });
+    syncSuppressionRuleUpdateToFleet(previous, updated);
+    await vi.waitFor(() => expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(2));
+    const deletes = mockFetch.mock.calls.filter((c) => (c[1] as { method: string }).method === 'DELETE');
+    const stale = deletes.find((c) => String(c[0]).includes('node-11'));
+    expect(stale).toBeTruthy();
+    expect(JSON.parse((stale![1] as { body: string }).body)).toEqual({
+      kind: 'recoverable',
+      source_updated_at: 99,
+    });
+  });
+
+  it('authoritative fleet delete sends permanent retraction body', async () => {
+    const { deleteSuppressionRuleFromFleet } = await import('../helpers/notificationSuppressionSync');
+    mockFetch.mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+    deleteSuppressionRuleFromFleet(makeRule({ node_id: 10, updated_at: 321 }));
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalled());
+    const [, init] = mockFetch.mock.calls[0] as [string, { method: string; body: string }];
+    expect(init.method).toBe('DELETE');
+    expect(JSON.parse(init.body)).toEqual({ kind: 'permanent', source_updated_at: 321 });
+  });
+
 });

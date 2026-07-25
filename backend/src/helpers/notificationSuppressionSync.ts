@@ -1,4 +1,4 @@
-import { DatabaseService, type NotificationSuppressionRule, type Node } from '../services/DatabaseService';
+import { DatabaseService, type NotificationSuppressionRule, type NotificationSuppressionRetraction, type NotificationSuppressionRetractionKind, type Node } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { LicenseService } from '../services/LicenseService';
 import { PROXY_TIER_HEADER } from '../services/license-headers';
@@ -18,6 +18,13 @@ function buildRemoteHeaders(apiToken: string): Record<string, string> {
   };
   if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
   return headers;
+}
+
+function retractionFor(
+  kind: NotificationSuppressionRetractionKind,
+  rule: NotificationSuppressionRule,
+): NotificationSuppressionRetraction {
+  return { kind, source_updated_at: rule.updated_at };
 }
 
 /** Hub node ids that should receive a replica for this rule (before wire identity normalize). */
@@ -58,7 +65,11 @@ async function pushRuleToNode(node: Node, rule: NotificationSuppressionRule): Pr
   }
 }
 
-async function deleteRuleOnNode(node: Node, ruleId: number): Promise<void> {
+async function deleteRuleOnNode(
+  node: Node,
+  ruleId: number,
+  retraction: NotificationSuppressionRetraction,
+): Promise<void> {
   const target = NodeRegistry.getInstance().getProxyTarget(node.id);
   if (!target?.apiUrl) {
     throw new Error(`no proxy target for node "${node.name}" (id=${node.id})`);
@@ -67,6 +78,7 @@ async function deleteRuleOnNode(node: Node, ruleId: number): Promise<void> {
   const res = await fetch(`${baseUrl}/api/notification-suppression-rules/replica/${ruleId}`, {
     method: 'DELETE',
     headers: buildRemoteHeaders(target.apiToken),
+    body: JSON.stringify(retraction),
     signal: AbortSignal.timeout(SYNC_TIMEOUT_MS),
   });
   if (!res.ok && res.status !== 404) {
@@ -88,7 +100,7 @@ async function pushOrCleanupScheduled(node: Node, rule: NotificationSuppressionR
   // through the legacy contract (older remotes would mute all day). Attempt DELETE;
   // only claim cleanup when DELETE succeeds.
   try {
-    await deleteRuleOnNode(node, rule.id);
+    await deleteRuleOnNode(node, rule.id, retractionFor('recoverable', rule));
     console.warn(
       `[SuppressionSync] Scheduled rule ${rule.id} not applied on node "${node.name}" (id=${node.id}): ` +
         `capability unsupported-or-unreachable; DELETE succeeded and replica was removed`,
@@ -106,7 +118,7 @@ async function cleanupInvalidScheduleReplica(node: Node, rule: NotificationSuppr
   // Never POST an invalid schedule (would mute all day on remotes that ignore the field).
   // Attempt DELETE so a prior valid/unscheduled replica cannot keep muting.
   try {
-    await deleteRuleOnNode(node, rule.id);
+    await deleteRuleOnNode(node, rule.id, retractionFor('recoverable', rule));
     console.warn(
       `[SuppressionSync] Corrupt schedule on rule ${rule.id}: replica removed on node "${node.name}" (id=${node.id}); not posting`,
     );
@@ -160,13 +172,14 @@ export function syncSuppressionRuleUpdateToFleet(
   const newIds = new Set(replicationTargetIds(updated));
   const db = DatabaseService.getInstance();
   const staleIds = [...oldIds].filter((id) => !newIds.has(id));
+  const staleRetraction = retractionFor('recoverable', updated);
 
   void Promise.allSettled([
     ...staleIds.map(async (id) => {
       const node = db.getNode(id);
       if (!node || node.type !== 'remote') return;
       try {
-        await deleteRuleOnNode(node, previous.id);
+        await deleteRuleOnNode(node, previous.id, staleRetraction);
       } catch (err) {
         console.error(
           `[SuppressionSync] Failed to delete stale rule ${previous.id} on node "${node.name}":`,
@@ -191,10 +204,11 @@ export function syncSuppressionRuleUpdateToFleet(
 export function deleteSuppressionRuleFromFleet(rule: NotificationSuppressionRule): void {
   const targets = replicationTargets(rule);
   if (targets.length === 0) return;
+  const retraction = retractionFor('permanent', rule);
   void Promise.allSettled(
     targets.map(async (node) => {
       try {
-        await deleteRuleOnNode(node, rule.id);
+        await deleteRuleOnNode(node, rule.id, retraction);
       } catch (err) {
         console.error(
           `[SuppressionSync] Failed to delete rule ${rule.id} on node "${node.name}":`,
