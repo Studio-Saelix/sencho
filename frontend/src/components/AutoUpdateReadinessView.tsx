@@ -65,6 +65,20 @@ function withErrorDetail(lead: string, error: string | null | undefined): string
   return error ? `${lead}: ${error}` : `${lead}.`;
 }
 
+/** Digest verification failed with no confirmed update or rebuild. */
+export function isVerificationOnlyPreview(preview: UpdatePreview | null | undefined): boolean {
+  if (!preview) return false;
+  const s = preview.summary;
+  return Boolean(s.verification_failed) && !s.has_update && !s.rebuild_available;
+}
+
+/** Confirmed update or intentional rebuild that may be applied from Fleet. */
+export function isActionableUpdatePreview(preview: UpdatePreview | null | undefined): boolean {
+  if (!preview) return false;
+  return !preview.summary.blocked
+    && Boolean(preview.summary.has_update || preview.summary.rebuild_available);
+}
+
 export interface StackCard {
   stack: string;
   nodeId: number;
@@ -231,6 +245,8 @@ function StackReadinessCard({
   // build-only), not preview.images.length (shared tags collapse that list).
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImageCount > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
+  const verificationOnly = isVerificationOnlyPreview(preview);
+  const applyDisabled = blocked || verificationOnly || applying || applyingService !== null;
 
   return (
     <Card className="flex flex-col gap-4 p-5">
@@ -266,6 +282,9 @@ function StackReadinessCard({
           const blockedReason = p.summary.blocked_reason;
           const verificationFailed = Boolean(p.summary.verification_failed);
           const verificationError = p.summary.verification_error;
+          let applyTitle: string | undefined;
+          if (blocked) applyTitle = blockedReason ?? undefined;
+          else if (verificationOnly) applyTitle = 'Digest verification failed';
 
           let headline: ReactNode;
           if (verificationFailed && !p.summary.has_update) {
@@ -331,7 +350,7 @@ function StackReadinessCard({
                         variant="outline"
                         className="h-6 gap-1 rounded-md px-2 text-[11px]"
                         onClick={() => onApplyService?.(stack, nodeId, img.service)}
-                        disabled={blocked || applying || applyingService !== null}
+                        disabled={applyDisabled}
                       >
                         {applyingService === img.service ? 'Applying...' : 'Apply'}
                       </Button>
@@ -358,8 +377,8 @@ function StackReadinessCard({
                 <Button
                   size="sm"
                   onClick={() => onApply(stack, nodeId)}
-                  disabled={blocked || applying || applyingService !== null}
-                  title={blocked ? (blockedReason ?? undefined) : undefined}
+                  disabled={applyDisabled}
+                  title={applyTitle}
                   className="gap-1.5"
                 >
                   <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
@@ -513,6 +532,8 @@ export function MobileReadinessCard({
   const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImages.length > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
+  const verificationOnly = isVerificationOnlyPreview(preview);
+  const applyDisabled = blocked || verificationOnly || applying || applyingService !== null;
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
   const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
@@ -584,7 +605,7 @@ export function MobileReadinessCard({
                       variant="outline"
                       className="h-7 gap-1 rounded-md px-2 text-[11px]"
                       onClick={() => onApplyService?.(stack, nodeId, img.service)}
-                      disabled={blocked || applying || applyingService !== null}
+                      disabled={applyDisabled}
                     >
                       {applyingService === img.service ? 'Applying...' : 'Apply'}
                     </Button>
@@ -598,9 +619,9 @@ export function MobileReadinessCard({
               </span>
               <Button
                 size="sm"
-                variant={blocked ? 'outline' : 'default'}
+                variant={blocked || verificationOnly ? 'outline' : 'default'}
                 onClick={() => onApply(stack, nodeId)}
-                disabled={blocked || applying || applyingService !== null}
+                disabled={applyDisabled}
                 className="gap-1.5"
               >
                 <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
@@ -850,14 +871,36 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         previewByKey.set(`${pair.nodeId}::${pair.stack}`, previews[idx]);
       });
 
-      setGroups(initialGroups.map(g => ({
-        ...g,
-        cards: g.cards.map(c => ({
-          ...c,
-          preview: previewByKey.get(`${c.nodeId}::${c.stack}`) ?? null,
-          previewLoaded: true,
-        })),
-      })));
+      const previewAdvisory: { stack: string; reason: string | null }[] = [];
+      const groupsWithPreview = initialGroups
+        .map(g => {
+          const cards: StackCard[] = [];
+          for (const c of g.cards) {
+            const preview = previewByKey.get(`${c.nodeId}::${c.stack}`) ?? null;
+            if (isVerificationOnlyPreview(preview)) {
+              previewAdvisory.push({
+                stack: g.nodeType === 'remote' ? `${c.stack} (${g.nodeName})` : c.stack,
+                reason: preview?.summary.verification_error ?? 'Digest verification failed',
+              });
+              continue;
+            }
+            cards.push({ ...c, preview, previewLoaded: true });
+          }
+          return { ...g, cards };
+        })
+        .filter(g => g.cards.length > 0);
+
+      if (previewAdvisory.length > 0) {
+        setCheckFailures(prev => {
+          const byStack = new Map(prev.map(f => [f.stack, f]));
+          for (const entry of previewAdvisory) {
+            if (!byStack.has(entry.stack)) byStack.set(entry.stack, entry);
+          }
+          return [...byStack.values()].sort((a, b) => a.stack.localeCompare(b.stack));
+        });
+      }
+
+      setGroups(groupsWithPreview);
     } catch (err) {
       if (token !== loadTokenRef.current) return;
       toast.error((err as Error)?.message || 'Failed to load readiness');
@@ -1034,14 +1077,11 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   const flatCards = useMemo(() => groups.flatMap(g => g.cards), [groups]);
   const { total, ready } = useMemo(() => {
     const t = flatCards.length;
-    // "Ready" means a schedule covers the stack, the preview loaded without
-    // error, and no major-bump blocked it. Without a covering schedule the
-    // stack cannot apply automatically regardless of preview state.
+    // Schedule-covered and actionable (confirmed update/rebuild, not blocked).
     const r = flatCards.filter(c =>
       c.autoUpdateEnabled
       && c.previewLoaded
-      && c.preview !== null
-      && !c.preview.summary.blocked,
+      && isActionableUpdatePreview(c.preview),
     ).length;
     return { total: t, ready: r };
   }, [flatCards]);

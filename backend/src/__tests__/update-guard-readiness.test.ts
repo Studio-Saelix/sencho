@@ -240,4 +240,3 @@ describe('updatePreviewSignal verification failure', () => {
     expect(signal.detail).not.toMatch(/No pending image update detected/);
   });
 });
-

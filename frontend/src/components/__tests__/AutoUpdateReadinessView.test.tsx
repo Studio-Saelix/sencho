@@ -1,6 +1,7 @@
 /**
  * MobileReadinessCard is the one-up phone card for the Updates readiness board.
- * Its Apply button is disabled only when the update is blocked (major bump) or
+ * Its Apply button is disabled when the update is blocked (major bump),
+ * digest verification failed without a confirmed update, or an apply is
  * already in flight; manual apply works regardless of schedule. The Auto: Off
  * pill still reflects the absence of a covering auto-update schedule.
  */
@@ -26,9 +27,12 @@ vi.mock('@/context/DeployFeedbackContext', () => ({
 // loadReadiness useCallback identity and re-triggers its effect forever.
 const mockNodeMeta = new Map();
 const mockRefreshNodeMeta = vi.fn();
+const mockNodes: { id: number; name: string; type: 'local' | 'remote'; status: string }[] = [
+  { id: 1, name: 'Local', type: 'local', status: 'online' },
+];
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({
-    nodes: [{ id: 1, name: 'Local', type: 'local', status: 'online' }],
+    nodes: mockNodes,
     nodeMeta: mockNodeMeta,
     refreshNodeMeta: mockRefreshNodeMeta,
   }),
@@ -36,7 +40,13 @@ vi.mock('@/context/NodeContext', () => ({
 
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
-import AutoUpdateReadinessView, { MobileReadinessCard, CadenceStrip, type StackCard } from '../AutoUpdateReadinessView';
+import AutoUpdateReadinessView, {
+  MobileReadinessCard,
+  CadenceStrip,
+  isVerificationOnlyPreview,
+  isActionableUpdatePreview,
+  type StackCard,
+} from '../AutoUpdateReadinessView';
 
 function card(over: Partial<StackCard> = {}): StackCard {
   return {
@@ -69,6 +79,78 @@ function card(over: Partial<StackCard> = {}): StackCard {
 
 const apply = () => screen.getByRole('button', { name: /Apply now/i });
 
+function previewSummary(over: Record<string, unknown> = {}) {
+  return {
+    stack_name: 'redis',
+    images: [],
+    rollback_target: null,
+    changelog: null,
+    summary: {
+      has_update: false,
+      primary_image: 'redis',
+      current_tag: '8.8.0',
+      next_tag: '8.8.0',
+      semver_bump: 'none' as const,
+      update_kind: 'none' as const,
+      blocked: false,
+      blocked_reason: null,
+      rebuild_available: false,
+      verification_failed: false,
+      verification_error: null,
+      ...over,
+    },
+  };
+}
+
+describe('verification preview helpers', () => {
+  it('treats verification failure without update/rebuild as verification-only', () => {
+    const preview = previewSummary({ verification_failed: true });
+    expect(isVerificationOnlyPreview(preview)).toBe(true);
+    expect(isActionableUpdatePreview(preview)).toBe(false);
+  });
+
+  it('keeps a verified update actionable even when verification_failed is set', () => {
+    const preview = previewSummary({
+      verification_failed: true,
+      has_update: true,
+      update_kind: 'tag',
+      semver_bump: 'patch',
+      next_tag: '8.8.1',
+    });
+    expect(isVerificationOnlyPreview(preview)).toBe(false);
+    expect(isActionableUpdatePreview(preview)).toBe(true);
+  });
+
+  it('keeps a rebuild actionable even when verification_failed is set', () => {
+    const preview = previewSummary({
+      verification_failed: true,
+      rebuild_available: true,
+      update_kind: 'digest',
+    });
+    expect(isVerificationOnlyPreview(preview)).toBe(false);
+    expect(isActionableUpdatePreview(preview)).toBe(true);
+  });
+
+  it('rejects blocked updates as actionable', () => {
+    const preview = previewSummary({
+      has_update: true,
+      blocked: true,
+      blocked_reason: 'Major version bump',
+      semver_bump: 'major',
+      update_kind: 'tag',
+    });
+    expect(isVerificationOnlyPreview(preview)).toBe(false);
+    expect(isActionableUpdatePreview(preview)).toBe(false);
+  });
+
+  it('returns false for null/undefined previews', () => {
+    expect(isVerificationOnlyPreview(null)).toBe(false);
+    expect(isVerificationOnlyPreview(undefined)).toBe(false);
+    expect(isActionableUpdatePreview(null)).toBe(false);
+    expect(isActionableUpdatePreview(undefined)).toBe(false);
+  });
+});
+
 it('enables Apply for a safe, non-blocked update', () => {
   render(<MobileReadinessCard card={card()} onApply={vi.fn()} />);
   expect(apply()).toBeEnabled();
@@ -90,6 +172,34 @@ it('disables Apply when the update is blocked (major bump)', () => {
     />,
   );
   expect(apply()).toBeDisabled();
+});
+
+it('disables Apply for verification-only preview (no confirmed update)', () => {
+  render(
+    <MobileReadinessCard
+      card={card({
+        preview: {
+          stack_name: 'redis', images: [], rollback_target: null, changelog: null,
+          summary: {
+            has_update: false,
+            primary_image: 'redis',
+            current_tag: '8.8.0',
+            next_tag: '8.8.0',
+            semver_bump: 'none',
+            update_kind: 'none',
+            blocked: false,
+            blocked_reason: null,
+            rebuild_available: false,
+            verification_failed: true,
+            verification_error: 'Could not verify digest',
+          },
+        },
+      })}
+      onApply={vi.fn()}
+    />,
+  );
+  expect(apply()).toBeDisabled();
+  expect(screen.getByTestId('readiness-verification-failed')).toBeInTheDocument();
 });
 
 it('disables Apply while an update is in flight', () => {
@@ -292,6 +402,7 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
   afterEach(() => {
     mockedFetch.mockReset();
     mockedFetchForNode.mockReset();
+    mockNodes.splice(0, mockNodes.length, { id: 1, name: 'Local', type: 'local', status: 'online' });
   });
 
   it('lists local stacks whose check failed, with the reason', async () => {
@@ -342,7 +453,7 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       }
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
-    mockedFetchForNode.mockImplementation((_nodeId: number, url: string) => {
+    mockedFetchForNode.mockImplementation((url: string, _nodeId: number) => {
       if (String(url).includes('/update-preview')) {
         return Promise.resolve({
           ok: true,
@@ -379,6 +490,269 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       const headings = screen.getAllByText('web');
       expect(headings.length).toBeGreaterThan(0);
     });
+  });
+
+  it('drops verification-only sticky stacks from the card grid into the advisory', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            '1': { redis: true },
+          }),
+        });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ([{
+            id: 1,
+            enabled: true,
+            action: 'update',
+            target_type: 'stack',
+            target_id: 'redis',
+            node_id: 1,
+            next_run_at: Date.now() + 60_000,
+          }]),
+        });
+      }
+      if (url === '/image-updates/detail') {
+        // Sticky hasUpdate with a successful check still enters the fleet grid;
+        // only the fresh preview can prove verification-only.
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockImplementation((url: string) => {
+      if (String(url).includes('/update-preview')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            stack_name: 'redis',
+            images: [{
+              service: 'redis',
+              image: 'redis:8.8.0',
+              current_tag: '8.8.0',
+              next_tag: '8.8.0',
+              has_update: false,
+              semver_bump: 'none',
+              check_error: 'Could not verify digest',
+            }],
+            summary: {
+              has_update: false,
+              primary_image: 'redis:8.8.0',
+              current_tag: '8.8.0',
+              next_tag: '8.8.0',
+              semver_bump: 'none',
+              update_kind: 'none',
+              blocked: false,
+              blocked_reason: null,
+              rebuild_available: false,
+              verification_failed: true,
+              verification_error: 'Could not verify digest',
+            },
+            rollback_target: null,
+            changelog: null,
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => null });
+    });
+
+    render(<AutoUpdateReadinessView />);
+
+    expect(await screen.findByText(/could not be checked/i)).toBeInTheDocument();
+    expect(screen.getByText('redis')).toBeInTheDocument();
+    expect(screen.getByText(/Could not verify digest/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
+    expect(screen.getByText(/Everything is up to date/)).toBeInTheDocument();
+    expect(screen.queryByText(/ready to apply automatically/)).toBeNull();
+  });
+
+  it('keeps actionable cards while dropping verification-only stacks to the advisory', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ '1': { web: true, redis: true } }),
+        });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ([
+            {
+              id: 1, enabled: true, action: 'update', target_type: 'stack',
+              target_id: 'web', node_id: 1, next_run_at: Date.now() + 60_000,
+            },
+            {
+              id: 2, enabled: true, action: 'update', target_type: 'stack',
+              target_id: 'redis', node_id: 1, next_run_at: Date.now() + 60_000,
+            },
+          ]),
+        });
+      }
+      if (url === '/image-updates/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            web: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockImplementation((url: string) => {
+      if (String(url).includes('/stacks/web/update-preview')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            stack_name: 'web',
+            images: [{ service: 'web', image: 'nginx:1', current_tag: '1', next_tag: '2', has_update: true, semver_bump: 'patch', check_error: null }],
+            summary: {
+              has_update: true, primary_image: 'nginx:1', current_tag: '1', next_tag: '2',
+              semver_bump: 'patch', update_kind: 'tag', blocked: false, blocked_reason: null,
+              verification_failed: false, verification_error: null,
+            },
+            rollback_target: null, changelog: null,
+          }),
+        });
+      }
+      if (String(url).includes('/stacks/redis/update-preview')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            stack_name: 'redis',
+            images: [{ service: 'redis', image: 'redis:8.8.0', current_tag: '8.8.0', next_tag: '8.8.0', has_update: false, semver_bump: 'none', check_error: 'verify failed' }],
+            summary: {
+              has_update: false, primary_image: 'redis:8.8.0', current_tag: '8.8.0', next_tag: '8.8.0',
+              semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
+              rebuild_available: false, verification_failed: true, verification_error: 'verify failed',
+            },
+            rollback_target: null, changelog: null,
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => null });
+    });
+
+    render(<AutoUpdateReadinessView />);
+
+    expect(await screen.findByRole('button', { name: /Apply now/i })).toBeEnabled();
+    expect(screen.getByText(/1 of 1 ready to apply automatically/)).toBeInTheDocument();
+    expect(screen.getByText(/could not be checked/i)).toBeInTheDocument();
+    expect(screen.getByText(/verify failed/)).toBeInTheDocument();
+  });
+
+  it('counts a sticky cleared preview as not ready while keeping the card', async () => {
+    // Sticky fleet still lists the stack, but fresh preview has no update and
+    // no verification failure. Card stays; ready filter must not count it.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { redis: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ([{
+            id: 1, enabled: true, action: 'update', target_type: 'stack',
+            target_id: 'redis', node_id: 1, next_run_at: Date.now() + 60_000,
+          }]),
+        });
+      }
+      if (url === '/image-updates/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockImplementation((url: string) => {
+      if (String(url).includes('/update-preview')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            stack_name: 'redis',
+            images: [{
+              service: 'redis', image: 'redis:8.8.0', current_tag: '8.8.0', next_tag: '8.8.0',
+              has_update: false, semver_bump: 'none', check_error: null,
+            }],
+            summary: {
+              has_update: false, primary_image: 'redis:8.8.0', current_tag: '8.8.0', next_tag: '8.8.0',
+              semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
+              rebuild_available: false, verification_failed: false, verification_error: null,
+            },
+            rollback_target: null, changelog: null,
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => null });
+    });
+
+    render(<AutoUpdateReadinessView />);
+
+    expect(await screen.findByRole('button', { name: /Apply now/i })).toBeEnabled();
+    expect(screen.getByText(/0 of 1 ready to apply automatically/)).toBeInTheDocument();
+    expect(screen.queryByText(/could not be checked/i)).toBeNull();
+  });
+
+  it('labels remote verification-only stacks with the node name in the advisory', async () => {
+    mockNodes.splice(0, mockNodes.length,
+      { id: 1, name: 'Local', type: 'local', status: 'online' },
+      { id: 2, name: 'Edge', type: 'remote', status: 'online' },
+    );
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ '2': { redis: true } }),
+        });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      // Local-only detail cannot see remote sticky failures; preview must move them.
+      if (url === '/image-updates/detail') {
+        return Promise.resolve({ ok: true, json: async () => ({}) });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockImplementation((url: string, nodeId: number) => {
+      if (nodeId === 2 && String(url).includes('/update-preview')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            stack_name: 'redis',
+            images: [{
+              service: 'redis', image: 'redis:8.8.0', current_tag: '8.8.0', next_tag: '8.8.0',
+              has_update: false, semver_bump: 'none', check_error: 'Could not verify digest',
+            }],
+            summary: {
+              has_update: false, primary_image: 'redis:8.8.0', current_tag: '8.8.0', next_tag: '8.8.0',
+              semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
+              rebuild_available: false, verification_failed: true, verification_error: 'Could not verify digest',
+            },
+            rollback_target: null, changelog: null,
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => null });
+    });
+
+    render(<AutoUpdateReadinessView />);
+
+    expect(await screen.findByText(/could not be checked/i)).toBeInTheDocument();
+    expect(screen.getByText('redis (Edge)')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
   });
 });
 
