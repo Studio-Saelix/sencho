@@ -11,7 +11,7 @@ import {
   buildServicesSignal,
 } from '../services/updateGuard/readiness';
 import type { ContainerProbe, ReadinessSignal } from '../services/updateGuard/types';
-import type { UpdatePreviewSummary } from '../services/UpdatePreviewService';
+import type { UpdatePreviewImage, UpdatePreviewSummary } from '../services/UpdatePreviewService';
 
 const NOW = 1_750_000_000_000;
 
@@ -262,5 +262,38 @@ describe('updatePreviewSignal verification failure', () => {
     expect(signal.status).toBe('attention');
     expect(signal.detail).toMatch(/rebuild/);
     expect(signal.detail).toMatch(/Registry unreachable/);
+  });
+
+  const image = (over: Partial<UpdatePreviewImage> = {}): UpdatePreviewImage => ({
+    service: 'web',
+    image: 'nginx:1',
+    current_tag: '1',
+    next_tag: null,
+    has_update: false,
+    semver_bump: 'none',
+    check_error: null,
+    ...over,
+  });
+
+  it('keeps a single image with its own confirmed update ok even though that same image also failed its own digest check', () => {
+    // has_update and check_error are independent per image; there is no
+    // "other image" here, so per-image detail must clear the review hold
+    // that the aggregate-only fallback would otherwise apply.
+    const signal = updatePreviewSignal(
+      summary({ has_update: true, semver_bump: 'patch', update_kind: 'tag', verification_failed: true, verification_error: 'Registry unreachable' }),
+      [image({ has_update: true, check_error: 'Registry unreachable' })],
+    );
+    expect(signal.status).toBe('ok');
+  });
+
+  it('holds a confirmed update for review when per-image detail proves a genuinely different image failed verification', () => {
+    const signal = updatePreviewSignal(
+      summary({ has_update: true, semver_bump: 'patch', update_kind: 'tag', verification_failed: true, verification_error: 'Registry unreachable' }),
+      [
+        image({ service: 'confirmed', has_update: true, check_error: null }),
+        image({ service: 'failing', has_update: false, check_error: 'Registry unreachable' }),
+      ],
+    );
+    expect(signal.status).toBe('attention');
   });
 });

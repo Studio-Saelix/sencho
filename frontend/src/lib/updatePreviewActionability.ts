@@ -7,8 +7,23 @@ export interface UpdatePreviewActionSummary {
   blocked?: boolean;
 }
 
+export interface UpdatePreviewActionImage {
+  has_update?: boolean;
+  check_error?: string | null;
+}
+
 export interface UpdatePreviewActionInput {
   summary: UpdatePreviewActionSummary;
+  /**
+   * Per-image detail backing the summary. `has_update` and `check_error` are
+   * independent per image (a tag-based update can be confirmed via the
+   * registry's tag list even when that same image's own digest comparison
+   * errored), so the stack-level `verification_failed` alone cannot say
+   * whether the failure belongs to the confirmed image itself or to a
+   * different one. Optional for callers that only have the aggregate summary
+   * (falls back to the older, more conservative aggregate-only judgment).
+   */
+  images?: UpdatePreviewActionImage[];
 }
 
 /** Digest verification failed with no confirmed update or rebuild. */
@@ -18,6 +33,29 @@ export function isVerificationOnlyPreview(
   if (!preview) return false;
   const s = preview.summary;
   return Boolean(s.verification_failed) && !s.has_update && !s.rebuild_available;
+}
+
+/**
+ * True when a full-stack apply would pull/recreate an image whose digest
+ * verification failed as collateral of applying a DIFFERENT image's confirmed
+ * update or a local rebuild. Excludes the case where the only verification
+ * failure belongs to the very image whose update is confirmed (that image's
+ * own stale-digest check does not block moving it to a newer tag).
+ */
+function hasUnverifiedOtherImage(preview: UpdatePreviewActionInput): boolean {
+  const s = preview.summary;
+  const images = preview.images;
+  if (!images || images.length === 0) {
+    // No per-image detail: fall back to the aggregate flags.
+    return Boolean(s.verification_failed) && Boolean(s.has_update || s.rebuild_available);
+  }
+  // An image with its own check_error and no has_update cannot be the same
+  // image as one that confirmed an update (has_update requires no error to
+  // land in this bucket), so finding one proves a genuinely different image
+  // is unverified.
+  const hasPureFailureImage = images.some((i) => Boolean(i.check_error) && !i.has_update);
+  if (!hasPureFailureImage) return false;
+  return images.some((i) => Boolean(i.has_update)) || Boolean(s.rebuild_available);
 }
 
 /**
@@ -31,8 +69,7 @@ export function isReviewRequiredUpdatePreview(
   preview: UpdatePreviewActionInput | null | undefined,
 ): boolean {
   if (!preview) return false;
-  const s = preview.summary;
-  return Boolean(s.verification_failed) && Boolean(s.has_update || s.rebuild_available);
+  return hasUnverifiedOtherImage(preview);
 }
 
 /** Confirmed update or intentional rebuild that may be applied from Fleet. */
@@ -41,7 +78,9 @@ export function isActionableUpdatePreview(
 ): boolean {
   if (!preview) return false;
   const s = preview.summary;
-  return !s.blocked && !s.verification_failed && Boolean(s.has_update || s.rebuild_available);
+  return !s.blocked
+    && Boolean(s.has_update || s.rebuild_available)
+    && !hasUnverifiedOtherImage(preview);
 }
 
 /**

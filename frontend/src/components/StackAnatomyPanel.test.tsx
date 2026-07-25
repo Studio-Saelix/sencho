@@ -67,6 +67,38 @@ function previewBody(
   };
 }
 
+/** Two-service preview: `web` confirms a tag update, `db` fails digest verification. */
+function mixedPreviewBody(over: { blocked?: boolean; blocked_reason?: string | null } = {}) {
+  return {
+    build_services: [],
+    images: [
+      {
+        service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.26',
+        has_update: true, semver_bump: 'minor', check_error: null,
+      },
+      {
+        service: 'db', image: 'private.example/db:latest', current_tag: 'latest', next_tag: null,
+        has_update: false, semver_bump: 'none', check_error: 'Registry unreachable',
+      },
+    ],
+    summary: {
+      has_update: true,
+      primary_image: 'nginx',
+      current_tag: '1.25',
+      next_tag: '1.26',
+      semver_bump: 'minor',
+      update_kind: 'tag',
+      blocked: over.blocked ?? false,
+      blocked_reason: over.blocked_reason ?? null,
+      has_build_services: false,
+      rebuild_available: false,
+      verification_failed: true,
+      verification_error: 'Registry unreachable',
+    },
+    changelog: null,
+  };
+}
+
 function jsonRes(body: unknown, ok = true) {
   return { ok, status: ok ? 200 : 404, json: async () => body, text: async () => '' } as unknown as Response;
 }
@@ -556,15 +588,10 @@ describe('StackAnatomyPanel digest verification failure', () => {
     expect(screen.getByText(/Registry unreachable/)).toBeInTheDocument();
   });
 
-  it('does not claim "safe to apply" and withholds the full-stack Apply button when a confirmed update sits alongside a verification failure', async () => {
+  it('does not claim "safe to apply" and withholds the full-stack Apply button when a confirmed update sits alongside a DIFFERENT image failing verification', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.includes('/update-preview')) {
-        return jsonRes(previewBody(true, [], {
-          verification_failed: true,
-          verification_error: 'Registry unreachable',
-        }));
-      }
+      if (url.includes('/update-preview')) return jsonRes(mixedPreviewBody());
       if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
       return jsonRes(null, false);
     });
@@ -576,16 +603,38 @@ describe('StackAnatomyPanel digest verification failure', () => {
     expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
   });
 
-  it('keeps the blocked (major-bump policy) banner precedence over the verification-failure review-required banner', async () => {
+  it('keeps a single image with its own confirmed tag update fully actionable even though that same image also failed its own digest check', async () => {
+    // has_update and check_error are independent per image: a tag-based update
+    // can be confirmed via the registry's tag list even when that same
+    // image's digest comparison against the OLD tag errored. There is no
+    // other image here, so this must NOT be held for review.
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/update-preview')) {
         return jsonRes(previewBody(true, [], {
           verification_failed: true,
           verification_error: 'Registry unreachable',
-          blocked: true,
-          blocked_reason: 'Major version bump',
+          check_error: 'Registry unreachable',
         }));
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
+    // previewBody's single image bumps 'minor', so the un-held lead-in reads
+    // "review recommended" (a semver-bump advisory), not "review required"
+    // (the blocked/mixed-state hold this test is proving does NOT apply here).
+    expect(screen.getByText(/review recommended/i)).toBeInTheDocument();
+    expect(screen.queryByText(/review required/i)).toBeNull();
+    expect(screen.getByRole('button', { name: /^apply$/i })).toBeEnabled();
+  });
+
+  it('keeps the blocked (major-bump policy) banner precedence over the verification-failure review-required banner', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes(mixedPreviewBody({ blocked: true, blocked_reason: 'Major version bump' }));
       }
       if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
       return jsonRes(null, false);

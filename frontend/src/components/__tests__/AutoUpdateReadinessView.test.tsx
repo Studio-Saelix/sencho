@@ -148,6 +148,31 @@ describe('verification preview helpers', () => {
     expect(isClearedUpdatePreview(preview)).toBe(false);
   });
 
+  it('keeps a single image with its own confirmed tag update fully actionable even though that same image also failed its own digest check', () => {
+    // has_update and check_error are independent per image: a tag-based
+    // update can be confirmed via the registry's tag list even when that
+    // same image's digest comparison against the OLD tag errored. There is
+    // no "other image" here, so this must not be held for review.
+    const preview = {
+      ...previewSummary({ verification_failed: true, has_update: true, update_kind: 'tag', semver_bump: 'patch', next_tag: '8.8.1' }),
+      images: [{ has_update: true, check_error: 'Registry unreachable' }],
+    };
+    expect(isReviewRequiredUpdatePreview(preview)).toBe(false);
+    expect(isActionableUpdatePreview(preview)).toBe(true);
+  });
+
+  it('holds a confirmed update for review when a genuinely different image failed verification', () => {
+    const preview = {
+      ...previewSummary({ verification_failed: true, has_update: true, update_kind: 'tag', semver_bump: 'patch', next_tag: '8.8.1' }),
+      images: [
+        { has_update: true, check_error: null },
+        { has_update: false, check_error: 'Registry unreachable' },
+      ],
+    };
+    expect(isReviewRequiredUpdatePreview(preview)).toBe(true);
+    expect(isActionableUpdatePreview(preview)).toBe(false);
+  });
+
   it('rejects blocked updates as actionable', () => {
     const preview = previewSummary({
       has_update: true,

@@ -629,14 +629,15 @@ export function MobileReadinessCard({
               </div>
             )}
             <div className="flex items-center justify-between gap-[10px] pt-0.5">
-              <span className={`font-mono text-[11px] ${blocked ? 'text-destructive' : 'text-stat-subtitle'}`}>
-                {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked ? 'Held for review' : 'No schedule')}
+              <span className={`font-mono text-[11px] ${blocked || reviewRequired ? 'text-destructive' : 'text-stat-subtitle'}`}>
+                {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked || reviewRequired ? 'Held for review' : 'No schedule')}
               </span>
               <Button
                 size="sm"
                 variant={blocked || verificationOnly || reviewRequired ? 'outline' : 'default'}
                 onClick={() => onApply(stack, nodeId)}
                 disabled={applyDisabled}
+                title={reviewRequired ? 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.' : undefined}
                 className="gap-1.5"
               >
                 <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />

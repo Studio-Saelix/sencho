@@ -20,6 +20,7 @@ import ComposeLabelsPanel from './stack/ComposeLabelsPanel';
 import StackNetworkingPanel from './stack/StackNetworkingPanel';
 import { useNodes } from '@/context/NodeContext';
 import type { NotificationItem } from '@/components/dashboard/types';
+import { isReviewRequiredUpdatePreview } from '@/lib/updatePreviewActionability';
 
 interface StackAnatomyPanelProps {
   stackName: string;
@@ -376,8 +377,10 @@ export default function StackAnatomyPanel({
   // Another image in the stack failed digest verification: applying the
   // full-stack update would pull/recreate that image as collateral, so the
   // banner must not claim "safe to apply" and the Apply button is withheld
-  // (per-service update actions elsewhere are unaffected).
-  const reviewRequired = verificationFailed && showUpdateBanner;
+  // (per-service update actions elsewhere are unaffected). Uses the same
+  // per-image logic as Fleet so the two surfaces never disagree; a stack
+  // whose only unverified image is the one being updated is unaffected.
+  const reviewRequired = isReviewRequiredUpdatePreview(updatePreview);
   const updatedImages = (updatePreview?.images ?? []).filter((img) => img.has_update);
   const bannerSeverity: 'danger' | 'warn' | 'ok' = bump === 'major' || blocked
     ? 'danger'
