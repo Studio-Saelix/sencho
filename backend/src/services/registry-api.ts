@@ -219,7 +219,11 @@ const MANIFEST_ACCEPT = [
     'application/vnd.oci.image.manifest.v1+json',
 ].join(', ');
 
-/** docker.io has three hostnames that all address the same registry. */
+/**
+ * docker.io has three hostnames that all address the same registry. Defensive
+ * normalizer for arbitrary host strings (e.g. from a raw RepoDigest entry); not the
+ * canonical form parseImageRef assigns (which normalizes to 'registry-1.docker.io').
+ */
 function canonicalRegistry(host: string): string {
     if (host === 'docker.io' || host === 'index.docker.io' || host === 'registry-1.docker.io') {
         return 'docker.io';

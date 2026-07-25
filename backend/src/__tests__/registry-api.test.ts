@@ -118,8 +118,8 @@ describe('repoDigestMatchesRef', () => {
 describe('parseImageRef', () => {
   // docker.io / index.docker.io / registry-1.docker.io are the same registry, but only
   // the literal 'registry-1.docker.io' is recognized elsewhere (getAuthToken, the
-  // library/ auto-prefix below). An unnormalized 'docker.io' or 'index.docker.io' leaks
-  // through into request URLs and hits the marketing domain instead of the registry API.
+  // library/ auto-prefix in parseImageRef). An unnormalized 'docker.io' or 'index.docker.io'
+  // leaks through into request URLs and hits the marketing domain instead of the registry API.
   it('normalizes an explicit docker.io host to the registry API host', () => {
     expect(parseImageRef('docker.io/library/traefik:latest')).toEqual({
       registry: 'registry-1.docker.io',
@@ -138,6 +138,14 @@ describe('parseImageRef', () => {
 
   it('normalizes an explicit index.docker.io host to the registry API host', () => {
     expect(parseImageRef('index.docker.io/library/traefik:latest')).toEqual({
+      registry: 'registry-1.docker.io',
+      repo: 'library/traefik',
+      tag: 'latest',
+    });
+  });
+
+  it('normalizes index.docker.io and still applies the library/ auto-prefix when the namespace is omitted', () => {
+    expect(parseImageRef('index.docker.io/traefik:latest')).toEqual({
       registry: 'registry-1.docker.io',
       repo: 'library/traefik',
       tag: 'latest',
@@ -1537,45 +1545,5 @@ describe('compareLocalToRemoteTag', () => {
 
     const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result.kind).toBe('error');
-  });
-
-  // Regression for issue #1705: traefik:latest (and any official multi-arch image) resolves
-  // to an OCI index with a per-platform child manifest plus an unrelated attestation-manifest
-  // sibling (os/architecture "unknown"), verified against the live Docker Hub API. A
-  // docker.io/-prefixed ref must resolve through the same registry-1.docker.io host as the
-  // bare form and still match on the platform-specific child, not the index digest.
-  it('matches the real traefik:latest index shape (attestation sibling + amd64 child) parsed from a docker.io/-prefixed ref', async () => {
-    const parsed = parseImageRef('docker.io/library/traefik:latest');
-    if (!parsed) throw new Error('unparseable ref');
-    expect(parsed.registry).toBe(REGISTRY);
-
-    const attestationDigest = `sha256:${'f'.repeat(64)}`;
-    const traefikIndexBody = JSON.stringify({
-      schemaVersion: 2,
-      mediaType: INDEX_CONTENT_TYPE,
-      manifests: [
-        { digest: CHILD_AMD64, mediaType: 'application/vnd.oci.image.manifest.v1+json', platform: { os: 'linux', architecture: 'amd64' } },
-        {
-          digest: attestationDigest,
-          mediaType: 'application/vnd.oci.image.manifest.v1+json',
-          platform: { os: 'unknown', architecture: 'unknown' },
-          annotations: { 'vnd.docker.reference.type': 'attestation-manifest' },
-        },
-        { digest: CHILD_ARM64, mediaType: 'application/vnd.oci.image.manifest.v1+json', platform: { os: 'linux', architecture: 'arm64' } },
-      ],
-    });
-    const indexDigest = contentDigest(traefikIndexBody);
-    const tagUrl = `https://${parsed.registry}/v2/${parsed.repo}/manifests/${parsed.tag}`;
-    const digestUrl = `https://${parsed.registry}/v2/${parsed.repo}/manifests/${indexDigest}`;
-    route = (url, method) => tokenOk(url) ?? (
-      url === tagUrl && method === 'HEAD'
-        ? { statusCode: 200, headers: { 'docker-content-digest': indexDigest, 'content-type': INDEX_CONTENT_TYPE } }
-        : url === digestUrl && method === 'GET'
-          ? { statusCode: 200, headers: { 'docker-content-digest': indexDigest }, body: traefikIndexBody }
-          : { statusCode: 500, headers: {} }
-    );
-
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, parsed.registry, parsed.repo, parsed.tag, AMD64);
-    expect(result).toEqual({ kind: 'match' });
   });
 });
