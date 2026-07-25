@@ -15,6 +15,7 @@ import type { ScheduledTask } from '@/types/scheduling';
 import { SERVICE_SCOPED_UPDATE_CAPABILITY } from '@/lib/capabilities';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
+import { isActionableUpdatePreview, isVerificationOnlyPreview } from '@/lib/updatePreviewActionability';
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
 
@@ -63,20 +64,6 @@ function declaredServiceCount(preview: UpdatePreview | null | undefined): number
 /** Append `: reason` when present, otherwise end the lead-in with a period. */
 function withErrorDetail(lead: string, error: string | null | undefined): string {
   return error ? `${lead}: ${error}` : `${lead}.`;
-}
-
-/** Digest verification failed with no confirmed update or rebuild. */
-export function isVerificationOnlyPreview(preview: UpdatePreview | null | undefined): boolean {
-  if (!preview) return false;
-  const s = preview.summary;
-  return Boolean(s.verification_failed) && !s.has_update && !s.rebuild_available;
-}
-
-/** Confirmed update or intentional rebuild that may be applied from Fleet. */
-export function isActionableUpdatePreview(preview: UpdatePreview | null | undefined): boolean {
-  if (!preview) return false;
-  return !preview.summary.blocked
-    && Boolean(preview.summary.has_update || preview.summary.rebuild_available);
 }
 
 export interface StackCard {

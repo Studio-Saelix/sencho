@@ -43,10 +43,12 @@ import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import AutoUpdateReadinessView, {
   MobileReadinessCard,
   CadenceStrip,
-  isVerificationOnlyPreview,
-  isActionableUpdatePreview,
   type StackCard,
 } from '../AutoUpdateReadinessView';
+import {
+  isActionableUpdatePreview,
+  isVerificationOnlyPreview,
+} from '@/lib/updatePreviewActionability';
 
 function card(over: Partial<StackCard> = {}): StackCard {
   return {
@@ -453,7 +455,7 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
       }
       return Promise.resolve({ ok: true, json: async () => ({}) });
     });
-    mockedFetchForNode.mockImplementation((url: string, _nodeId: number) => {
+    mockedFetchForNode.mockImplementation((url: string) => {
       if (String(url).includes('/update-preview')) {
         return Promise.resolve({
           ok: true,
