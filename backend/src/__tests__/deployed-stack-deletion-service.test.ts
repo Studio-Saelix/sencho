@@ -89,6 +89,7 @@ describe('DeployedStackDeletionService ready transaction', () => {
       rollback_tags_json: '[]',
       override_paths_json: '[]',
       prune_volumes_requested: 0,
+      required_blueprint_id: null,
       created_at: now,
       updated_at: now,
     };
@@ -111,6 +112,7 @@ describe('DeployedStackDeletionService ready transaction', () => {
       rollback_tags_json: '[]',
       override_paths_json: '[]',
       prune_volumes_requested: 0,
+      required_blueprint_id: null,
       created_at: now,
       updated_at: now,
     });
@@ -129,6 +131,7 @@ describe('DeployedStackDeletionService ready transaction', () => {
       rollback_tags_json: '[]',
       override_paths_json: '[]',
       prune_volumes_requested: 0,
+      required_blueprint_id: null,
       created_at: now,
       updated_at: now,
     });
@@ -151,6 +154,42 @@ describe('overrideDeletionContainmentBase', () => {
   it('rejects invalid stack names that could traverse', () => {
     expect(overrideDeletionContainmentBase('/app/compose', '../other')).toBeNull();
     expect(overrideDeletionContainmentBase('/app/compose', 'bad/name')).toBeNull();
+  });
+});
+
+describe('DeployedStackDeletionService blueprint ownership probe', () => {
+  it('returns failed (not name_conflict) when marker read fails with non-ENOENT I/O', async () => {
+    const { promises: fsPromises } = await import('fs');
+    const { vi } = await import('vitest');
+    const composeDir = process.env.COMPOSE_DIR!;
+    const stackName = `del-probe-${Date.now()}`;
+    const stackDir = path.join(composeDir, stackName);
+    await fsPromises.mkdir(stackDir, { recursive: true });
+    await fsPromises.writeFile(path.join(stackDir, 'compose.yaml'), 'services: {}\n');
+    await fsPromises.writeFile(
+      path.join(stackDir, '.blueprint.json'),
+      JSON.stringify({ blueprintId: 7, revision: 1, lastApplied: 0 }),
+    );
+
+    const accessErr = Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    const readSpy = vi.spyOn(fsPromises, 'readFile').mockRejectedValueOnce(accessErr);
+
+    const result = await DeployedStackDeletionService.getInstance().deleteDeployedStack({
+      nodeId: NODE,
+      stackName,
+      pruneVolumes: false,
+      actor: 'test',
+      requireBlueprintId: 7,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe('failed');
+      expect(result.error).toMatch(/EACCES|Failed to read|permission/i);
+    }
+    expect(readSpy).toHaveBeenCalled();
+    readSpy.mockRestore();
+    await fsPromises.rm(stackDir, { recursive: true, force: true });
   });
 });
 
