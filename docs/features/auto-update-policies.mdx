@@ -39,7 +39,7 @@ Sencho polls your registries on a configurable schedule to detect available imag
 Detection is separate from applying updates:
 
 - **Registry detection** is this interval. It only looks for newer images and raises an "update available" notification the first time a stack goes from up to date to having an update.
-- **Scheduled auto-update tasks** apply updates on their own cron schedule, independent of the detection interval. See [Scheduling auto-updates](#scheduling-auto-updates).
+- **Scheduled auto-update tasks** pull and recreate on their own cron schedule when the Compose-pinned tag has same-tag digest drift. A higher semver tag that is not yet written into Compose stays advisory on the readiness board and sidebar. See [Scheduling auto-updates](#scheduling-auto-updates).
 - **Apply now** updates a single stack on demand, regardless of either schedule.
 
 The interval is node-scoped: each node runs its own scanner on its own cadence, and across a fleet Sencho staggers the runs slightly so the nodes do not all poll at the same instant. Setting the interval requires an admin account.
@@ -95,7 +95,7 @@ Blocked updates still surface in scheduled check runs so you stay informed, but 
 Auto-update is opt-in per stack. A stack participates in unattended updates only when an enabled scheduled task covers it. To leave a stack out (databases, self-built images, anything pinned to a fixed tag), simply do not create a schedule for it.
 
 - **Per-stack schedule.** Create a **Auto-update Stack** task targeting that stack alone. Only this stack is updated when the cron fires.
-- **Fleet-wide schedule.** Create a **Auto-update All Stacks on Node** task targeting a node. Every stack on that node is checked and updated when new images are available. If you do not want every stack covered, create per-stack schedules instead.
+- **Fleet-wide schedule.** Create a **Auto-update All Stacks on Node** task targeting a node. Every stack on that node is checked when the cron fires, and stacks with same-tag digest drift are pulled and recreated. If you do not want every stack covered, create per-stack schedules instead.
 - **Stack list dot.** Image-update *detection* runs on the configured interval (every 2 hours by default) regardless of whether any schedule is configured. The sidebar dot and the readiness board still show available updates so you can decide what to do with them.
 - **Manual updates are always available.** The lifecycle **Update** action on a stack applies an update on demand, independent of any scheduled task.
 
@@ -119,7 +119,9 @@ Auto-update is a first-class action in the Schedules view. To create a recurring
 
 The task lives alongside restart, prune, snapshot, and scan tasks in the same timeline and table. Run history, notifications, and the Run Now button behave the same as for every other scheduled action. See [Scheduled Operations](/features/scheduled-operations) for details.
 
-A scheduled run applies an update the same way **Apply now** does: an atomic backup first, then the pull or build-aware rebuild, then the [post-update health gate](/features/health-gated-updates) observing the result. A schedule never bypasses a [deploy enforcement](/features/deploy-enforcement) policy: a run that a policy would block fails with the policy violation recorded in the run history, rather than applying partway.
+A scheduled run (including **Run Now**) only auto-applies when Compose already pins the tag that has new registry content: same-tag digest drift, the gray **Digest rebuild** case. Sencho then follows the same update path as **Apply now**: an atomic backup first, then the pull or build-aware rebuild, then the [post-update health gate](/features/health-gated-updates) observing the result.
+
+When detection finds a higher semver tag while Compose still pins the older one (for example Compose says `nginx:1.2.3` and the registry also publishes `1.2.4`), the readiness board and sidebar keep showing the advisory update. The schedule does not rewrite the Compose image reference, so it skips Compose pull and recreate until you change the pin yourself and deploy, or use **Apply now** / the stack **Update** action after review. A schedule never bypasses a [deploy enforcement](/features/deploy-enforcement) policy: a run that a policy would block fails with the policy violation recorded in the run history, rather than applying partway.
 
 ## Multi-node support
 
@@ -157,7 +159,12 @@ A stack that mixes registry images and `build:` services still gets a card, scor
     Image update detection runs on the configured interval (every 2 hours by default) on each node, and the readiness board uses the same cached status. Trigger **Recheck** to force a fresh check across every reachable node, or shorten the interval under **Settings > Automation > Image update checks**.
   </Accordion>
   <Accordion title='Scheduled auto-update runs are not applying to a specific stack'>
-    No schedule covers that stack. Open **Schedules** in the top nav, create a new **Auto-update Stack** task targeting the stack (or an **Auto-update All Stacks on Node** task on its node), and pick a cron. The next firing will include the stack, or you can trigger an immediate run from the row.
+    First confirm a schedule covers that stack: open **Schedules**, create or enable an **Auto-update Stack** task (or an **Auto-update All Stacks on Node** task on its node), and pick a cron. The next firing includes the stack, or you can trigger an immediate run from the row.
+
+    If a schedule already covers the stack and the run history says newer tags are available but the Compose pin is unchanged, detection found a higher tag than the image reference in Compose. Scheduled auto-update only pulls same-tag digest rebuilds; it does not bump `image:1.2.3` to `image:1.2.4` for you. Edit the Compose image pin (or use **Apply now** / the stack **Update** action after review), then deploy.
+  </Accordion>
+  <Accordion title='Run history says newer tags are available but Compose pin unchanged'>
+    The registry publishes a higher pinned semver tag than the one written in Compose. The readiness board and sidebar keep that advisory visible. Scheduled auto-update leaves Compose as the source of truth, so it skips pull and recreate until the pin is updated. Change the image tag in Compose and deploy, or apply from the Updates board / stack **Update** action when you are ready to move.
   </Accordion>
   <Accordion title='Banner says "X of Y nodes reachable"'>
     One or more nodes that are marked online in your fleet did not respond within the request timeout. Pending updates from those nodes are not shown until they come back. Check the node's status from the Fleet view and the network path between this Sencho instance and the unreachable node.
