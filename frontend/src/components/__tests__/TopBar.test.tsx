@@ -10,6 +10,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Home, Radar } from 'lucide-react';
 import { TopBar, type TopBarNavItem } from '../TopBar';
+import { MAX_QUICK_LINKS } from '@/hooks/use-top-nav-quick-links';
 
 const navItems: TopBarNavItem[] = [
   { value: 'dashboard', label: 'Home', icon: Home },
@@ -211,15 +212,18 @@ describe('TopBar smart and compact modes', () => {
   it('disables Add when persisted capacity is full even if fewer pins are visible', () => {
     renderTopBar({
       navMode: 'compact',
-      persistedQuickLinkIds: ['dashboard', 'fleet', 'resources', 'security', 'networking'],
+      // Capacity is a count check, so the IDs only need to be distinct and unpinned-candidate free.
+      persistedQuickLinkIds: Array.from({ length: MAX_QUICK_LINKS }, (_, i) => `pinned-${i}`),
       quickLinks: [{ value: 'dashboard', label: 'Home', icon: Home }],
       navModel: {
         ...emptyModel,
         launcherGroups,
-        quickLinkCandidates: emptyModel.quickLinkCandidates,
+        quickLinkCandidates: [{ value: 'fleet' as const, label: 'Fleet', icon: Radar }],
       },
     });
-    expect(screen.getByRole('button', { name: 'Add quick link' })).toBeDisabled();
+    const add = screen.getByRole('button', { name: 'Add quick link' });
+    expect(add).toBeDisabled();
+    expect(add.closest('[title]')).toHaveAttribute('title', 'Remove a quick link to free a slot');
   });
 
   it('offers Compact launcher context Add for unpinned destinations', async () => {

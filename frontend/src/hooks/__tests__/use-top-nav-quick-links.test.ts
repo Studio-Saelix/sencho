@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { recommendedQuickLinkIds } from '@/lib/navigation/appNavRegistry';
+import type { ActiveView } from '@/lib/router/routeTypes';
 import {
   useTopNavQuickLinks,
   TOP_NAV_QUICK_LINKS_KEY,
@@ -8,6 +9,17 @@ import {
   sanitizeQuickLinkIds,
   MAX_QUICK_LINKS,
 } from '../use-top-nav-quick-links';
+
+/** A full pin list: eligible IDs, spelled out so the cap value stays pinned independently. */
+const maxedPins: ActiveView[] = [
+  'dashboard',
+  'fleet',
+  'security',
+  'resources',
+  'networking',
+  'templates',
+  'global-observability',
+];
 
 describe('useTopNavQuickLinks', () => {
   beforeEach(() => localStorage.clear());
@@ -31,7 +43,7 @@ describe('useTopNavQuickLinks', () => {
     expect(result.current.persistedIds).toEqual([]);
   });
 
-  it('sanitizes unknown, ineligible, and duplicate IDs and caps at five', () => {
+  it('sanitizes unknown, ineligible, and duplicate IDs and caps at seven', () => {
     expect(
       sanitizeQuickLinkIds([
         'dashboard',
@@ -43,18 +55,12 @@ describe('useTopNavQuickLinks', () => {
         'resources',
         'networking',
         'templates',
+        'global-observability',
+        'auto-updates',
+        'scheduled-ops',
       ]),
-    ).toEqual(['dashboard', 'fleet', 'security', 'resources', 'networking']);
-    expect(
-      sanitizeQuickLinkIds([
-        'dashboard',
-        'fleet',
-        'security',
-        'resources',
-        'networking',
-        'templates',
-      ]).length,
-    ).toBe(MAX_QUICK_LINKS);
+    ).toEqual(maxedPins);
+    expect(sanitizeQuickLinkIds([...maxedPins, 'auto-updates']).length).toBe(MAX_QUICK_LINKS);
   });
 
   it('reset writes recommendedQuickLinkIds', () => {
@@ -78,23 +84,11 @@ describe('useTopNavQuickLinks', () => {
     expect(JSON.parse(localStorage.getItem(TOP_NAV_QUICK_LINKS_KEY)!)).toEqual([]);
   });
 
-  it('add refuses beyond the persisted max of five', () => {
+  it('add refuses beyond the persisted max of seven', () => {
     const { result } = renderHook(() => useTopNavQuickLinks());
-    act(() => result.current.setPersistedIds([
-      'dashboard',
-      'fleet',
-      'security',
-      'resources',
-      'networking',
-    ]));
-    act(() => result.current.addQuickLink('templates'));
-    expect(result.current.persistedIds).toEqual([
-      'dashboard',
-      'fleet',
-      'security',
-      'resources',
-      'networking',
-    ]);
+    act(() => result.current.setPersistedIds(maxedPins));
+    act(() => result.current.addQuickLink('auto-updates'));
+    expect(result.current.persistedIds).toEqual(maxedPins);
   });
 
   it('syncs a second hook in the same tab', () => {

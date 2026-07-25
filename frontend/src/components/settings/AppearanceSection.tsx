@@ -505,7 +505,7 @@ export function AppearanceSection({
                 {topNavMode === 'compact' && (
                     <SettingsField
                         label="Quick links"
-                        helper="Up to five pinned destinations on the top bar. Defaults are a starting set; add reachable destinations here or with the trailing + on the Compact bar."
+                        helper="Up to seven pinned destinations on the top bar. Defaults are a starting set; add reachable destinations here or with the trailing + on the Compact bar."
                     >
                         <div className="flex w-full flex-col gap-2">
                             {quickLinkIds.length === 0 ? (
