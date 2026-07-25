@@ -789,7 +789,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockGetContainersByStack.mockResolvedValue([
       { Id: 'c1', Image: 'nginx:latest' },
     ]);
-    mockCheckImage.mockResolvedValue({ hasUpdate: true }); // Update available
+    mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true }); // Update available
 
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(80);
@@ -814,7 +814,7 @@ describe('SchedulerService - executeUpdate', () => {
       last_status: null,
     });
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }]);
-    mockCheckImage.mockResolvedValue({ hasUpdate: true });
+    mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
 
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(82);
@@ -842,7 +842,7 @@ describe('SchedulerService - executeUpdate', () => {
         last_status: null,
       });
       mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }]);
-      mockCheckImage.mockResolvedValue({ hasUpdate: true });
+      mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
 
       await SchedulerService.getInstance().triggerTask(83);
 
@@ -875,6 +875,45 @@ describe('SchedulerService - executeUpdate', () => {
     expect(mockUpdateStack).not.toHaveBeenCalled();
   });
 
+
+  it('skips Compose apply for tag-only availability (pinned semver cannot be rewritten)', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 185,
+      name: 'update-tag-only',
+      action: 'update',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([
+      { Id: 'c1', Image: 'nginx:1.2.3' },
+    ]);
+    // Higher tag is visible (hasUpdate) but not actionable via Compose pull.
+    mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: false, tagUpdate: true });
+
+    const svc = SchedulerService.getInstance();
+    await svc.triggerTask(84);
+
+    expect(mockUpdateStack).not.toHaveBeenCalled();
+    expect(mockClearStackUpdateStatus).not.toHaveBeenCalled();
+    expect(mockDispatchAlert).not.toHaveBeenCalledWith(
+      'info',
+      'image_update_applied',
+      expect.any(String),
+      expect.anything(),
+    );
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        status: 'success',
+        output: expect.stringContaining('Compose pin unchanged'),
+      }),
+    );
+  });
+
   it('handles wildcard target (*) by updating all stacks', async () => {
     mockGetScheduledTask.mockReturnValue({
       id: 82,
@@ -891,7 +930,7 @@ describe('SchedulerService - executeUpdate', () => {
     mockGetContainersByStack.mockResolvedValue([
       { Id: 'c1', Image: 'nginx:latest' },
     ]);
-    mockCheckImage.mockResolvedValue({ hasUpdate: true });
+    mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
 
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(82);
@@ -1035,7 +1074,7 @@ describe('SchedulerService - executeUpdate', () => {
       last_status: null,
     });
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:1.14' }]);
-    mockCheckImage.mockResolvedValue({ hasUpdate: true });
+    mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
     mockEnforcePolicyPreDeploy.mockResolvedValue({
       ok: false,
       bypassed: false,
@@ -1114,7 +1153,7 @@ describe('SchedulerService - executeUpdate', () => {
     });
     mockGetStacks.mockResolvedValue(['app1', 'app2', 'app3']);
     mockGetContainersByStack.mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }]);
-    mockCheckImage.mockResolvedValue({ hasUpdate: true });
+    mockCheckImage.mockResolvedValue({ hasUpdate: true, digestUpdate: true });
 
     const svc = SchedulerService.getInstance();
     await svc.triggerTask(87);

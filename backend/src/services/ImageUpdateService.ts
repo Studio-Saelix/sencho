@@ -38,6 +38,10 @@ export const UPDATE_VERIFICATION_INCOMPLETE_WARNING =
 
 export interface ImageCheckResult {
     hasUpdate: boolean;
+    /** Same-tag registry digest drift; Compose pull can apply without pin change. */
+    digestUpdate?: boolean;
+    /** Higher semver tag exists; UI may show it but Compose auto-apply cannot pin it. */
+    tagUpdate?: boolean;
     error?: string;
     /**
      * The image is not registry-backed (locally built, or a bare digest ref
@@ -1113,31 +1117,26 @@ export class ImageUpdateService {
             console.log(`[ImageUpdateService] ${imageRef}: credentials ${credentials ? 'found' : 'none'}`);
         }
 
-        // Get local digest and platform from RepoDigests / Os+Architecture
-        let localDigest: string | null;
-        let platform: { os: string; architecture: string };
+        // Resolve local digest when possible. Missing/unusable digests still run
+        // the shared detector so a higher registry tag stays visible (same as
+        // Fleet/Anatomy preview with localDigest: null).
+        let localDigest: string | null = null;
+        let platform: { os: string; architecture: string } = { os: 'linux', architecture: 'amd64' };
+        let localInspectIssue: 'failed' | 'no_repo_digests' | 'unresolved_digest' | undefined;
         try {
             const inspect = await withTimeout(docker.getDocker().getImage(imageRef).inspect(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'inspect');
             const repoDigests: string[] = inspect.RepoDigests ?? [];
-
-            // No RepoDigests at all: locally built / not registry-backed, so update
-            // status does not apply.
-            if (repoDigests.length === 0) return { hasUpdate: false, notCheckable: true };
-
-            localDigest = selectLocalRepoDigest(repoDigests, parsed);
             platform = { os: inspect.Os, architecture: inspect.Architecture };
+            if (repoDigests.length === 0) {
+                localInspectIssue = 'no_repo_digests';
+            } else {
+                localDigest = selectLocalRepoDigest(repoDigests, parsed);
+                if (!localDigest) localInspectIssue = 'unresolved_digest';
+            }
         } catch {
-            return { hasUpdate: false, error: `Failed to inspect local image "${imageRef}"` };
+            localInspectIssue = 'failed';
         }
 
-        // RepoDigests were present but none resolved a usable digest: genuinely
-        // ambiguous, so surface it rather than silently call the image up to date.
-        if (!localDigest) {
-            return { hasUpdate: false, error: `Could not resolve a local registry digest for "${imageRef}"` };
-        }
-
-        // Same digest + semver-tag detection as Fleet/Anatomy preview so
-        // persisted sidebar status cannot disagree after Apply.
         const detection = await detectImageUpdateAvailability({
             localDigest,
             platform,
@@ -1146,15 +1145,31 @@ export class ImageUpdateService {
             tag: parsed.tag,
             credentials,
         });
-        if (!detection.hasUpdate && detection.digestError) {
-            return { hasUpdate: false, error: detection.digestError };
+        if (detection.hasUpdate) {
+            const digestUpdate = detection.digestUpdate;
+            const tagUpdate = detection.nextTag !== null;
+            const digestLabel = localDigest ? `${localDigest.slice(0, 27)}...` : 'none';
+            const nextSuffix = detection.nextTag ? ` next=${detection.nextTag}` : '';
+            console.log(
+                `[ImageUpdateService] ${imageRef}: local=${digestLabel} update=${detection.hasUpdate}`
+                + ` digest=${digestUpdate} tag=${tagUpdate}${nextSuffix}`,
+            );
+            return { hasUpdate: true, digestUpdate, tagUpdate };
         }
 
-        const nextSuffix = detection.nextTag ? ` next=${detection.nextTag}` : '';
-        console.log(
-            `[ImageUpdateService] ${imageRef}: local=${localDigest.slice(0, 27)}... update=${detection.hasUpdate}${nextSuffix}`,
-        );
-        return { hasUpdate: detection.hasUpdate };
+        if (localInspectIssue === 'failed') {
+            return { hasUpdate: false, error: `Failed to inspect local image "${imageRef}"` };
+        }
+        if (localInspectIssue === 'no_repo_digests') {
+            return { hasUpdate: false, notCheckable: true };
+        }
+        if (localInspectIssue === 'unresolved_digest') {
+            return { hasUpdate: false, error: `Could not resolve a local registry digest for "${imageRef}"` };
+        }
+        if (detection.digestError) {
+            return { hasUpdate: false, error: detection.digestError };
+        }
+        return { hasUpdate: false, digestUpdate: false, tagUpdate: false };
     }
 }
 

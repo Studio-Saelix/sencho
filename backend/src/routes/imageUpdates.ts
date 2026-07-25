@@ -365,7 +365,8 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           continue;
         }
 
-        let hasUpdate = false;
+        let hasDigestUpdate = false;
+        let hasTagOnlyUpdate = false;
         const updatedImages: string[] = [];
         const checkErrors: string[] = [];
         for (const imageRef of imageRefs) {
@@ -373,9 +374,11 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
             const result = await imageUpdateService.checkImage(docker, imageRef);
             if (result.error) {
               checkErrors.push(result.error);
-            } else if (result.hasUpdate) {
-              hasUpdate = true;
+            } else if (result.digestUpdate) {
+              hasDigestUpdate = true;
               updatedImages.push(imageRef);
+            } else if (result.tagUpdate) {
+              hasTagOnlyUpdate = true;
             }
           } catch (e) {
             const errMsg = getErrorMessage(e, String(e));
@@ -384,8 +387,13 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           }
         }
 
-        if (!hasUpdate) {
-          if (checkErrors.length > 0 && checkErrors.length === imageRefs.length) {
+        if (!hasDigestUpdate) {
+          if (hasTagOnlyUpdate) {
+            const errNote = checkErrors.length > 0
+              ? ` (${checkErrors.length} check(s) failed)`
+              : '';
+            results.push(`Stack "${stackName}": newer tag(s) available but Compose pin unchanged; skipped auto-apply.${errNote}`);
+          } else if (checkErrors.length > 0 && checkErrors.length === imageRefs.length) {
             results.push(`Stack "${stackName}": WARNING - all image checks failed (${checkErrors.join('; ')}). Unable to determine update status.`);
           } else if (checkErrors.length > 0) {
             results.push(`Stack "${stackName}": all reachable images up to date (${checkErrors.length} check(s) failed).`);

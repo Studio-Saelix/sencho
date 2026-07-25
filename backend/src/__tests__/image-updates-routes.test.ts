@@ -374,7 +374,7 @@ describe('POST /api/auto-update/execute', () => {
     const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
-      .mockResolvedValue({ hasUpdate: true } as never);
+      .mockResolvedValue({ hasUpdate: true, digestUpdate: true } as never);
     const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
     const gateSpy = vi.spyOn(PolicyEnforcement, 'enforcePolicyPreDeploy').mockResolvedValue({
       ok: false,
@@ -420,7 +420,7 @@ describe('POST /api/auto-update/execute', () => {
     const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
-      .mockResolvedValue({ hasUpdate: true } as never);
+      .mockResolvedValue({ hasUpdate: true, digestUpdate: true } as never);
     const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
     const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-au');
     try {
@@ -436,6 +436,60 @@ describe('POST /api/auto-update/execute', () => {
       checkSpy.mockRestore();
       updateSpy.mockRestore();
       beginSpy.mockRestore();
+    }
+  });
+
+  it('skips Compose apply for tag-only availability without clearing status', async () => {
+    const DockerController = (await import('../services/DockerController')).default;
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    const { ComposeService } = await import('../services/ComposeService');
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+
+    const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
+      .mockResolvedValue([{ Id: 'c1', Image: 'nginx:1.2.3' }] as never);
+    const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
+      .mockResolvedValue({ hasUpdate: true, digestUpdate: false, tagUpdate: true } as never);
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
+    const clearSpy = vi.spyOn(DatabaseService.getInstance(), 'clearStackUpdateStatus');
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Cookie', adminCookie)
+        .send({ target: 'auto-upd-tag-only' });
+      expect(res.status).toBe(200);
+      expect(res.body.result).toContain('Compose pin unchanged');
+      expect(updateSpy).not.toHaveBeenCalled();
+      expect(clearSpy).not.toHaveBeenCalledWith(nodeId, 'auto-upd-tag-only');
+    } finally {
+      containersSpy.mockRestore();
+      checkSpy.mockRestore();
+      updateSpy.mockRestore();
+      clearSpy.mockRestore();
+    }
+  });
+
+  it('still applies when checkImage reports same-tag digestUpdate', async () => {
+    const DockerController = (await import('../services/DockerController')).default;
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    const { ComposeService } = await import('../services/ComposeService');
+
+    const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
+      .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
+    const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
+      .mockResolvedValue({ hasUpdate: true, digestUpdate: true, tagUpdate: false } as never);
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Cookie', adminCookie)
+        .send({ target: 'auto-upd-digest' });
+      expect(res.status).toBe(200);
+      expect(updateSpy).toHaveBeenCalledWith('auto-upd-digest', undefined, true);
+    } finally {
+      containersSpy.mockRestore();
+      checkSpy.mockRestore();
+      updateSpy.mockRestore();
     }
   });
 });

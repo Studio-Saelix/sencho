@@ -1056,7 +1056,8 @@ export class SchedulerService {
             console.log(`[SchedulerService] Stack "${stackName}": checking ${imageRefs.length} image(s): ${imageRefs.join(', ')}`);
         }
 
-        let hasUpdate = false;
+        let hasDigestUpdate = false;
+        let hasTagOnlyUpdate = false;
         const updatedImages: string[] = [];
         const checkErrors: string[] = [];
 
@@ -1065,9 +1066,11 @@ export class SchedulerService {
                 const result: ImageCheckResult = await imageUpdateService.checkImage(docker, imageRef);
                 if (result.error) {
                     checkErrors.push(result.error);
-                } else if (result.hasUpdate) {
-                    hasUpdate = true;
+                } else if (result.digestUpdate) {
+                    hasDigestUpdate = true;
                     updatedImages.push(imageRef);
+                } else if (result.tagUpdate) {
+                    hasTagOnlyUpdate = true;
                 }
             } catch (e) {
                 const msg = getErrorMessage(e, String(e));
@@ -1076,7 +1079,13 @@ export class SchedulerService {
             }
         }
 
-        if (!hasUpdate) {
+        if (!hasDigestUpdate) {
+            if (hasTagOnlyUpdate) {
+                const errNote = checkErrors.length > 0
+                    ? ` (${checkErrors.length} check(s) failed)`
+                    : '';
+                return `Stack "${stackName}": newer tag(s) available but Compose pin unchanged; skipped auto-apply.${errNote}`;
+            }
             if (checkErrors.length > 0 && checkErrors.length === imageRefs.length) {
                 return `Stack "${stackName}": WARNING - all image checks failed (${checkErrors.join('; ')}). Unable to determine update status.`;
             }

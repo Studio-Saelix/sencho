@@ -242,10 +242,10 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
     }),
   } as any);
 
-  const dockerWithNginxSemver = () => ({
+  const dockerWithNginxSemver = (repoDigests: string[] = [`registry-1.docker.io/library/nginx@${LOCAL_DIGEST}`]) => ({
     getDocker: () => ({
       getImage: () => ({ inspect: vi.fn().mockResolvedValue({
-        RepoDigests: [`registry-1.docker.io/library/nginx@${LOCAL_DIGEST}`],
+        RepoDigests: repoDigests,
         Os: 'linux',
         Architecture: 'amd64',
       }) }),
@@ -261,13 +261,13 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
   it('reports an update when the comparison resolver classifies the remote as an update', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'update' });
     const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
-    expect(result).toEqual({ hasUpdate: true });
+    expect(result).toEqual({ hasUpdate: true, digestUpdate: true, tagUpdate: false });
   });
 
   it('reports no update when the comparison resolver classifies the remote as a match', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
     const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
-    expect(result).toEqual({ hasUpdate: false });
+    expect(result).toEqual({ hasUpdate: false, digestUpdate: false, tagUpdate: false });
   });
 
   it('passes the local digest, platform, and parsed ref through to the comparison resolver', async () => {
@@ -287,14 +287,20 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
     mockListRegistryTags.mockResolvedValue(['1.2.3', '1.2.4']);
     const result = await service.checkImage(dockerWithNginxSemver(), 'nginx:1.2.3');
-    expect(result).toEqual({ hasUpdate: true });
+    expect(result).toEqual({ hasUpdate: true, digestUpdate: false, tagUpdate: true });
   });
 
   it('reports an update when digest comparison errors but a higher semver tag exists', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' });
     mockListRegistryTags.mockResolvedValue(['1.2.3', '1.2.4']);
     const result = await service.checkImage(dockerWithNginxSemver(), 'nginx:1.2.3');
-    expect(result).toEqual({ hasUpdate: true });
+    expect(result).toEqual({ hasUpdate: true, digestUpdate: false, tagUpdate: true });
+  });
+
+  it('reports tag-only update when RepoDigests are empty but a higher semver tag exists', async () => {
+    mockListRegistryTags.mockResolvedValue(['1.2.3', '1.2.4']);
+    const result = await service.checkImage(dockerWithNginxSemver([]), 'nginx:1.2.3');
+    expect(result).toEqual({ hasUpdate: true, digestUpdate: false, tagUpdate: true });
   });
 });
 

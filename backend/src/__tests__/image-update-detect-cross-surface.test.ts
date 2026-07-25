@@ -14,12 +14,16 @@ const IMAGE = 'nginx:1.2.3';
  * the declared-tag digest matches but a higher semantic tag exists.
  */
 describe('cross-surface update detection (digest match + higher semver)', () => {
-  async function runDetectionAndPreview(comparison: DigestComparisonResult, tags: string[]) {
+  async function runDetectionAndPreview(
+    comparison: DigestComparisonResult,
+    tags: string[],
+    localDigest: string | null = LOCAL_DIGEST,
+  ) {
     const compareDigest = vi.fn().mockResolvedValue(comparison);
     const listTags = vi.fn().mockResolvedValue(tags);
 
     const detection = await detectImageUpdateAvailability({
-      localDigest: LOCAL_DIGEST,
+      localDigest,
       platform: PLATFORM,
       registry: 'registry-1.docker.io',
       repo: 'library/nginx',
@@ -30,12 +34,12 @@ describe('cross-surface update detection (digest match + higher semver)', () => 
 
     const preview = await computeImagePreview('app', IMAGE, {
       getCredentials: vi.fn().mockResolvedValue(CREDENTIALS),
-      getLocalDigest: vi.fn().mockResolvedValue({ digest: LOCAL_DIGEST, platform: PLATFORM }),
+      getLocalDigest: vi.fn().mockResolvedValue({ digest: localDigest, platform: PLATFORM }),
       compareDigest,
       listRegistryTags: listTags,
     });
 
-    return { detection, preview };
+    return { detection, preview, compareDigest };
   }
 
   it('shared detector and preview both report hasUpdate for app:1.2.3 when 1.2.4 exists', async () => {
@@ -70,6 +74,22 @@ describe('cross-surface update detection (digest match + higher semver)', () => 
     expect(detection.nextTag).toBe('1.2.4');
     expect(detection.digestUpdate).toBe(false);
     expect(detection.digestError).toBe('Registry unreachable');
+    expect(preview.has_update).toBe(true);
+    expect(preview.next_tag).toBe('1.2.4');
+    expect(preview.has_update).toBe(detection.hasUpdate);
+  });
+
+  it('shared detector and preview both report hasUpdate with no local digest when 1.2.4 exists', async () => {
+    const { detection, preview, compareDigest } = await runDetectionAndPreview(
+      { kind: 'update' },
+      ['1.2.3', '1.2.4'],
+      null,
+    );
+
+    expect(compareDigest).not.toHaveBeenCalled();
+    expect(detection.hasUpdate).toBe(true);
+    expect(detection.digestUpdate).toBe(false);
+    expect(detection.nextTag).toBe('1.2.4');
     expect(preview.has_update).toBe(true);
     expect(preview.next_tag).toBe('1.2.4');
     expect(preview.has_update).toBe(detection.hasUpdate);
