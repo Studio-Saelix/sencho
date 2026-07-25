@@ -40,7 +40,7 @@ Detection is separate from applying updates:
 
 - **Registry detection** is this interval. It only looks for newer images and raises an "update available" notification the first time a stack goes from up to date to having an update.
 - **Scheduled auto-update tasks** pull and recreate on their own cron schedule when the Compose-pinned tag has same-tag digest drift. A higher semver tag that is not yet written into Compose stays advisory on the readiness board and sidebar. See [Scheduling auto-updates](#scheduling-auto-updates).
-- **Apply now** updates a single stack on demand, regardless of either schedule.
+- **Apply now** pulls and recreates the tags currently written in Compose (same-tag digest rebuilds). It does not rewrite a higher semver pin.
 
 The interval is node-scoped: each node runs its own scanner on its own cadence, and across a fleet Sencho staggers the runs slightly so the nodes do not all poll at the same instant. Setting the interval requires an admin account.
 
