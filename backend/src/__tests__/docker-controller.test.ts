@@ -1742,6 +1742,28 @@ describe('DockerController - classifyLegacyOrphansForUpdate', () => {
     await expect(dc.classifyLegacyOrphansForUpdate('my-stack')).resolves.toEqual({ status: 'none' });
   });
 
+  it('returns orphans when compose ps is empty and fallback finds legacy containers', async () => {
+    const { default: DockerController } = await import('../services/DockerController');
+    const dc = DockerController.getInstance(1);
+    vi.spyOn(dc as any, 'fetchComposePsContainers').mockResolvedValue([]);
+    vi.spyOn(dc as any, 'smartFallback').mockResolvedValue([{ Id: 'legacy-c1' }, { Id: 'legacy-c2' }]);
+    await expect(dc.classifyLegacyOrphansForUpdate('my-stack')).resolves.toEqual({
+      status: 'orphans',
+      ids: ['legacy-c1', 'legacy-c2'],
+    });
+  });
+
+  it('returns classification_failed when compose ps throws, even if fallback would match containers', async () => {
+    const { default: DockerController } = await import('../services/DockerController');
+    const dc = DockerController.getInstance(1);
+    vi.spyOn(dc as any, 'fetchComposePsContainers').mockRejectedValue(new Error('compose boom'));
+    const fallbackSpy = vi.spyOn(dc as any, 'smartFallback').mockResolvedValue([{ Id: 'running-compose-c1' }]);
+    const result = await dc.classifyLegacyOrphansForUpdate('my-stack');
+    expect(result).toEqual({ status: 'classification_failed', error: 'compose boom' });
+    // Must not consult name-matching fallback: those IDs may be healthy Compose runtimes.
+    expect(fallbackSpy).not.toHaveBeenCalled();
+  });
+
   it('returns classification_failed when compose ps and fallback both fail', async () => {
     const { default: DockerController } = await import('../services/DockerController');
     const dc = DockerController.getInstance(1);
@@ -1749,6 +1771,7 @@ describe('DockerController - classifyLegacyOrphansForUpdate', () => {
     vi.spyOn(dc as any, 'smartFallback').mockRejectedValue(new Error('fallback boom'));
     const result = await dc.classifyLegacyOrphansForUpdate('my-stack');
     expect(result.status).toBe('classification_failed');
+    expect(result).toMatchObject({ error: 'compose boom' });
   });
 });
 
