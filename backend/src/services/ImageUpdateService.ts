@@ -964,28 +964,43 @@ export class ImageUpdateService {
     }
 
     /**
-     * Clear sticky scanner state after an authoritative-negative update preview.
-     * Reserves a generation only for this mutation (read-only previews must not
-     * call this). Only deletes rows that are still incomplete/failed (sticky);
-     * a confirmed ok scanner write that landed after the preview observation is
-     * left intact. Returns:
-     *   - cleared: sticky row deleted under this generation
-     *   - stale: a newer writer reserved after us; no delete committed
-     *   - absent: committed but nothing to clear (no row, or confirmed ok row)
+     * Current per-stack write-generation high-water mark (0 if never reserved).
+     * Snapshot before a read-only update-preview so commitPreviewClear can
+     * compare against writes that reserved or committed after observation.
+     */
+    public peekStackWriteGeneration(nodeId: number, stackName: string): number {
+        return this.stackWriteState.get(this.stackWriteKey(nodeId, stackName))?.generation ?? 0;
+    }
+
+    /**
+     * Clear persisted scanner update state after an authoritative-negative
+     * update preview. Does not reserve a new generation: the clear commits at
+     * `observedMemoryGeneration` (peeked before the preview) so any scanner that
+     * reserved after observation keeps a higher generation and supersedes this
+     * clear. `observedRowGeneration` is the services_json generation snapshotted
+     * before the preview; a row rewritten with a higher embedded generation is
+     * retained. Deletes ok+true rows at or below that watermark (the #1685
+     * contradiction), as well as sticky partial/failed rows.
+     * Returns:
+     *   - cleared: row deleted under the observation watermark
+     *   - stale: a newer writer reserved after observation; no delete committed
+     *   - absent: committed but nothing to clear (no row, or newer row gen)
      */
     public async commitPreviewClear(
         nodeId: number,
         stackName: string,
+        observedMemoryGeneration: number,
+        observedRowGeneration: number,
     ): Promise<'cleared' | 'stale' | 'absent'> {
-        const generation = this.reserveStackWriteGeneration(nodeId, stackName);
         let deleted = 0;
-        const committed = await this.withStackWriteLock(nodeId, stackName, generation, () => {
+        const committed = await this.withStackWriteLock(nodeId, stackName, observedMemoryGeneration, () => {
             const db = DatabaseService.getInstance();
             const detail = db.getStackUpdateDetail(nodeId)[stackName];
             if (!detail) return;
-            // Do not wipe a confirmed scanner result that may have landed after
-            // the preview was computed (or a clean ok/no-update row).
-            if (detail.checkStatus === 'ok') return;
+            // Compare DB-embedded generations only (same dimension as the
+            // pre-preview snapshot). Memory peek resets on restart; SQLite does not.
+            const rowGeneration = db.getStackUpdateWriteGeneration(nodeId, stackName);
+            if (rowGeneration > observedRowGeneration) return;
             deleted = db.clearStackUpdateStatus(nodeId, stackName);
         });
         if (!committed) return 'stale';

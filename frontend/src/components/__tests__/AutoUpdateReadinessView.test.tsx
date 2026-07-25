@@ -37,6 +37,7 @@ vi.mock('@/context/NodeContext', () => ({
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import AutoUpdateReadinessView, { MobileReadinessCard, CadenceStrip, type StackCard } from '../AutoUpdateReadinessView';
+import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
 
 function card(over: Partial<StackCard> = {}): StackCard {
   return {
@@ -453,5 +454,35 @@ describe('AutoUpdateReadinessView cadence fetch race', () => {
 
     expect(screen.queryByText(/Recheck ready/)).toBeNull();
     expect(screen.getByText(/Recheck available in/)).toBeInTheDocument();
+  });
+});
+
+describe('isAuthoritativeNegativePreview (Fleet card drop parity)', () => {
+  it('drops when a checkable image has ok + no update', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [{ check_status: 'ok' }],
+      summary: { has_update: false, check_status: 'ok' },
+    })).toBe(true);
+  });
+
+  it('retains not_checkable-only negative previews', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [{ check_status: 'not_checkable' }],
+      summary: { has_update: false, check_status: 'ok' },
+    })).toBe(false);
+  });
+
+  it('retains when summary check_status is missing (older remote)', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [{ check_status: 'ok' }],
+      summary: { has_update: false },
+    })).toBe(false);
+  });
+
+  it('retains empty image lists even with ok summary', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [],
+      summary: { has_update: false, check_status: 'ok' },
+    })).toBe(false);
   });
 });

@@ -7,6 +7,7 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import type { ImageUpdateStatus, StackUpdateInfo } from '@/types/imageUpdates';
+import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
 import { useNodes } from '@/context/NodeContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, Kicker } from '@/components/mobile/mobile-ui';
@@ -25,6 +26,8 @@ interface UpdatePreviewImage {
   next_tag: string | null;
   has_update: boolean;
   semver_bump: SemverBump;
+  /** Absent on older remotes; backend uses !== 'not_checkable' for checkability. */
+  check_status?: 'ok' | 'partial' | 'failed' | 'not_checkable';
 }
 
 type UpdateKind = 'tag' | 'digest' | 'none';
@@ -49,16 +52,6 @@ interface UpdatePreview {
   build_services?: string[];
   rollback_target: string | null;
   changelog: string | null;
-}
-
-function isAuthoritativeNegativePreview(preview: UpdatePreview | null | undefined): boolean {
-  if (!preview) return false;
-  const hasCheckable = preview.images.some((img) => img.service); // images present ⇒ checkable declared refs
-  // Older remotes omit check_status; treat missing as non-authoritative.
-  // Empty image lists (build-only) must not drop cards that came from scanner state.
-  return hasCheckable
-    && preview.summary.check_status === 'ok'
-    && preview.summary.has_update === false;
 }
 
 function declaredServiceCount(preview: UpdatePreview | null | undefined): number {

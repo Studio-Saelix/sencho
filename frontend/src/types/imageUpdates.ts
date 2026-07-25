@@ -80,3 +80,21 @@ export function isConfirmedServiceUpdate(info: {
 }): boolean {
     return info.hasUpdate && (info.checkStatus ?? 'ok') === 'ok';
 }
+
+/**
+ * True when a live update-preview is safe to treat as "no update" for Fleet
+ * card drops and similar UI reconcile. Mirrors backend
+ * UpdatePreviewService.isAuthoritativeNegativePreview:
+ * at least one checkable image, summary.check_status === 'ok', and !has_update.
+ * Missing summary.check_status (older remotes) is non-authoritative.
+ */
+export function isAuthoritativeNegativePreview(preview: {
+    images: Array<{ check_status?: string | null }>;
+    summary: { has_update: boolean; check_status?: string | null };
+} | null | undefined): boolean {
+    if (!preview) return false;
+    const hasCheckable = preview.images.some((i) => i.check_status !== 'not_checkable');
+    return hasCheckable
+        && preview.summary.check_status === 'ok'
+        && preview.summary.has_update === false;
+}

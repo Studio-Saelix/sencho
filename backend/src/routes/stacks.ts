@@ -2244,11 +2244,21 @@ stacksRouter.post('/:stackName/services/:serviceName/restore', async (req: Reque
 stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   try {
-    // Read-only preview first: do not reserve a scanner write generation here.
-    // Only an authoritative-negative result may mutate persisted update state.
+    // Snapshot write-generation watermarks before the read-only preview so a
+    // later clear can erase older confirmed/sticky rows without racing a
+    // scanner that reserved or rewrote the row after this observation.
+    const imageUpdates = ImageUpdateService.getInstance();
+    const db = DatabaseService.getInstance();
+    const observedMemoryGeneration = imageUpdates.peekStackWriteGeneration(req.nodeId, stackName);
+    const observedRowGeneration = db.getStackUpdateWriteGeneration(req.nodeId, stackName);
     const preview = await UpdatePreviewService.getInstance().getPreview(req.nodeId, stackName);
     if (isAuthoritativeNegativePreview(preview)) {
-      const clearResult = await ImageUpdateService.getInstance().commitPreviewClear(req.nodeId, stackName);
+      const clearResult = await imageUpdates.commitPreviewClear(
+        req.nodeId,
+        stackName,
+        observedMemoryGeneration,
+        observedRowGeneration,
+      );
       if (clearResult === 'cleared') {
         CacheService.getInstance().invalidate('fleet-updates');
         NotificationService.getInstance().broadcastEvent({

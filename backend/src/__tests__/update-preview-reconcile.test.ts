@@ -66,21 +66,112 @@ function negativeOkPreview(stackName = 'web') {
 }
 
 describe('ImageUpdateService.commitPreviewClear', () => {
-  it('clears aggregate and services_json and returns cleared', async () => {
+  it('clears sticky partial rows and returns cleared', async () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
     db.upsertStackUpdateStatus(nodeId, 'web', true, 1000, 'partial', 'half', [
       { service: 'web', image: 'web:1', hasUpdate: true, checkStatus: 'ok', lastError: null },
     ]);
-    const result = await ImageUpdateService.getInstance().commitPreviewClear(nodeId, 'web');
+    const svc = ImageUpdateService.getInstance();
+    const observedMem = svc.peekStackWriteGeneration(nodeId, 'web');
+    const observedRow = db.getStackUpdateWriteGeneration(nodeId, 'web');
+    const result = await svc.commitPreviewClear(nodeId, 'web', observedMem, observedRow);
     expect(result).toBe('cleared');
     expect(db.getStackUpdateDetail(nodeId).web).toBeUndefined();
+  });
+
+  it('clears an older confirmed ok+true row', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    const svc = ImageUpdateService.getInstance();
+    const writeGen = (svc as unknown as {
+      reserveStackWriteGeneration: (n: number, s: string) => number;
+    }).reserveStackWriteGeneration(nodeId, 'web');
+    db.upsertStackUpdateStatus(nodeId, 'web', true, 1000, 'ok', null, [
+      { service: 'web', image: 'web:1', hasUpdate: true, checkStatus: 'ok', lastError: null },
+    ], writeGen);
+    const observedMem = svc.peekStackWriteGeneration(nodeId, 'web');
+    const observedRow = db.getStackUpdateWriteGeneration(nodeId, 'web');
+    expect(observedRow).toBe(writeGen);
+    expect(await svc.commitPreviewClear(nodeId, 'web', observedMem, observedRow)).toBe('cleared');
+    expect(db.getStackUpdateDetail(nodeId).web).toBeUndefined();
+  });
+
+  it('clears a persisted ok+true row when in-memory generation was reset (restart)', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    // Simulate a prior process that wrote generation 7, then a restart that
+    // left only SQLite state (in-memory high-water is 0 for this stack key).
+    db.upsertStackUpdateStatus(nodeId, 'restart-web', true, 1000, 'ok', null, [
+      { service: 'web', image: 'web:1', hasUpdate: true, checkStatus: 'ok', lastError: null },
+    ], 7);
+    const svc = ImageUpdateService.getInstance();
+    expect(svc.peekStackWriteGeneration(nodeId, 'restart-web')).toBe(0);
+    expect(db.getStackUpdateWriteGeneration(nodeId, 'restart-web')).toBe(7);
+    expect(await svc.commitPreviewClear(nodeId, 'restart-web', 0, 7)).toBe('cleared');
+    expect(db.getStackUpdateDetail(nodeId)['restart-web']).toBeUndefined();
   });
 
   it('returns absent when no row exists', async () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
-    expect(await ImageUpdateService.getInstance().commitPreviewClear(nodeId, 'missing')).toBe('absent');
+    const svc = ImageUpdateService.getInstance();
+    expect(await svc.commitPreviewClear(nodeId, 'missing', 0, 0)).toBe('absent');
+  });
+
+  it('retains a row written after the observation watermark', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    const svc = ImageUpdateService.getInstance() as unknown as {
+      peekStackWriteGeneration: (n: number, s: string) => number;
+      reserveStackWriteGeneration: (n: number, s: string) => number;
+      commitPreviewClear: (
+        n: number,
+        s: string,
+        observedMem: number,
+        observedRow: number,
+      ) => Promise<'cleared' | 'stale' | 'absent'>;
+      withStackWriteLock: (
+        n: number,
+        s: string,
+        g: number,
+        write: () => void | Promise<void>,
+      ) => Promise<boolean>;
+    };
+
+    const observedMem = svc.peekStackWriteGeneration(nodeId, 'race');
+    const observedRow = db.getStackUpdateWriteGeneration(nodeId, 'race');
+    const scannerGen = svc.reserveStackWriteGeneration(nodeId, 'race');
+    expect(scannerGen).toBeGreaterThan(observedMem);
+
+    await svc.withStackWriteLock(nodeId, 'race', scannerGen, () => {
+      db.upsertStackUpdateStatus(nodeId, 'race', true, Date.now(), 'ok', null, [
+        { service: 'web', image: 'web:2', hasUpdate: true, checkStatus: 'ok', lastError: null },
+      ], scannerGen);
+    });
+
+    expect(await svc.commitPreviewClear(nodeId, 'race', observedMem, observedRow)).toBe('stale');
+    expect(db.getStackUpdateDetail(nodeId).race?.hasUpdate).toBe(true);
+    expect(db.getStackUpdateDetail(nodeId).race?.checkStatus).toBe('ok');
+  });
+
+  it('retains a row whose DB generation advanced after observation', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'adv', true, 1000, 'ok', null, [
+      { service: 'web', image: 'web:1', hasUpdate: true, checkStatus: 'ok', lastError: null },
+    ], 3);
+    const svc = ImageUpdateService.getInstance();
+    const observedMem = svc.peekStackWriteGeneration(nodeId, 'adv');
+    const observedRow = db.getStackUpdateWriteGeneration(nodeId, 'adv');
+    expect(observedRow).toBe(3);
+
+    db.upsertStackUpdateStatus(nodeId, 'adv', true, Date.now(), 'ok', null, [
+      { service: 'web', image: 'web:2', hasUpdate: true, checkStatus: 'ok', lastError: null },
+    ], 4);
+
+    expect(await svc.commitPreviewClear(nodeId, 'adv', observedMem, observedRow)).toBe('absent');
+    expect(db.getStackUpdateDetail(nodeId).adv?.hasUpdate).toBe(true);
   });
 });
 
@@ -104,6 +195,34 @@ describe('GET /api/stacks/:stackName/update-preview reconcile', () => {
     expect(broadcast).toHaveBeenCalledWith(expect.objectContaining({
       type: 'state-invalidate',
       scope: 'image-updates',
+      action: 'update-status-reconciled',
+      stackName: 'web',
+    }));
+  });
+
+  it('clears an older confirmed ok+true row and broadcasts', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    const svc = ImageUpdateService.getInstance() as unknown as {
+      reserveStackWriteGeneration: (n: number, s: string) => number;
+    };
+    const writeGen = svc.reserveStackWriteGeneration(nodeId, 'web');
+    db.upsertStackUpdateStatus(nodeId, 'web', true, 1000, 'ok', null, [
+      { service: 'web', image: 'nginx:1', hasUpdate: true, checkStatus: 'ok', lastError: null },
+    ], writeGen);
+
+    vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview').mockResolvedValue(negativeOkPreview('web'));
+    const broadcast = vi.spyOn(NotificationService.getInstance(), 'broadcastEvent').mockImplementation(() => undefined);
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate').mockImplementation(() => undefined);
+
+    const res = await request(app)
+      .get('/api/stacks/web/update-preview')
+      .set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(db.getStackUpdateDetail(nodeId).web).toBeUndefined();
+    expect(invalidate).toHaveBeenCalledWith('fleet-updates');
+    expect(broadcast).toHaveBeenCalledWith(expect.objectContaining({
       action: 'update-status-reconciled',
       stackName: 'web',
     }));
@@ -160,14 +279,12 @@ describe('GET /api/stacks/:stackName/update-preview reconcile', () => {
     expect(broadcast).not.toHaveBeenCalled();
     expect(invalidate).not.toHaveBeenCalled();
   });
-});
 
-describe('generation ordering for preview clear', () => {
-  it('a newer scanner reservation supersedes an in-flight clear', async () => {
+  it('retains a confirmed row written after the preview observation', async () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
-    db.upsertStackUpdateStatus(nodeId, 'ord', true, 1000, 'partial', 'half');
     const svc = ImageUpdateService.getInstance() as unknown as {
+      peekStackWriteGeneration: (n: number, s: string) => number;
       reserveStackWriteGeneration: (n: number, s: string) => number;
       withStackWriteLock: (
         n: number,
@@ -177,16 +294,60 @@ describe('generation ordering for preview clear', () => {
       ) => Promise<boolean>;
     };
 
-    // Start clear: reserve clear gen, but delay the lock body.
-    const clearGen = svc.reserveStackWriteGeneration(nodeId, 'ord');
-    // Scanner reserves after clear → higher gen.
-    const scannerGen = svc.reserveStackWriteGeneration(nodeId, 'ord');
-    expect(scannerGen).toBeGreaterThan(clearGen);
+    const observedBeforePreview = svc.peekStackWriteGeneration(nodeId, 'web');
+    let previewCalls = 0;
+    vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview').mockImplementation(async () => {
+      previewCalls += 1;
+      // Simulate a scanner reservation+commit that begins after observation.
+      const scannerGen = svc.reserveStackWriteGeneration(nodeId, 'web');
+      await svc.withStackWriteLock(nodeId, 'web', scannerGen, () => {
+        db.upsertStackUpdateStatus(nodeId, 'web', true, Date.now(), 'ok', null, [
+          { service: 'web', image: 'nginx:9', hasUpdate: true, checkStatus: 'ok', lastError: null },
+        ], scannerGen);
+      });
+      expect(scannerGen).toBeGreaterThan(observedBeforePreview);
+      return negativeOkPreview('web');
+    });
+    const broadcast = vi.spyOn(NotificationService.getInstance(), 'broadcastEvent').mockImplementation(() => undefined);
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate').mockImplementation(() => undefined);
 
-    const clearCommitted = await svc.withStackWriteLock(nodeId, 'ord', clearGen, () => {
+    const res = await request(app)
+      .get('/api/stacks/web/update-preview')
+      .set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(previewCalls).toBe(1);
+    expect(db.getStackUpdateDetail(nodeId).web?.hasUpdate).toBe(true);
+    expect(db.getStackUpdateDetail(nodeId).web?.checkStatus).toBe('ok');
+    expect(broadcast).not.toHaveBeenCalled();
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+});
+
+describe('generation ordering for preview clear', () => {
+  it('a newer scanner reservation supersedes an in-flight observation-watermark clear', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'ord', true, 1000, 'partial', 'half');
+    const svc = ImageUpdateService.getInstance() as unknown as {
+      peekStackWriteGeneration: (n: number, s: string) => number;
+      reserveStackWriteGeneration: (n: number, s: string) => number;
+      withStackWriteLock: (
+        n: number,
+        s: string,
+        g: number,
+        write: () => void | Promise<void>,
+      ) => Promise<boolean>;
+    };
+
+    const observed = svc.peekStackWriteGeneration(nodeId, 'ord');
+    const scannerGen = svc.reserveStackWriteGeneration(nodeId, 'ord');
+    expect(scannerGen).toBeGreaterThan(observed);
+
+    const clearCommitted = await svc.withStackWriteLock(nodeId, 'ord', observed, () => {
       db.clearStackUpdateStatus(nodeId, 'ord');
     });
-    expect(clearCommitted).toBe(false); // stale relative to scannerGen
+    expect(clearCommitted).toBe(false);
 
     const scannerCommitted = await svc.withStackWriteLock(nodeId, 'ord', scannerGen, () => {
       db.upsertStackUpdateStatus(nodeId, 'ord', true, Date.now(), 'ok', null);
@@ -196,7 +357,7 @@ describe('generation ordering for preview clear', () => {
     expect(db.getStackUpdateDetail(nodeId).ord?.checkStatus).toBe('ok');
   });
 
-  it('a clear reserved after an older scanner reservation supersedes it', async () => {
+  it('an observation-watermark clear supersedes an older scanner reservation', async () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
     db.upsertStackUpdateStatus(nodeId, 'ord2', true, 1000, 'partial', 'half');
@@ -211,15 +372,17 @@ describe('generation ordering for preview clear', () => {
     };
 
     const scannerGen = svc.reserveStackWriteGeneration(nodeId, 'ord2');
-    const clearGen = svc.reserveStackWriteGeneration(nodeId, 'ord2');
-    expect(clearGen).toBeGreaterThan(scannerGen);
+    // Observation after the older scanner reserved: watermark equals scanner gen.
+    // Clear commits at that watermark; the older reservation is equal, so clear
+    // runs. A still-older in-flight writer with a lower gen would be stale.
+    const observed = scannerGen;
 
-    const scannerCommitted = await svc.withStackWriteLock(nodeId, 'ord2', scannerGen, () => {
+    const scannerCommitted = await svc.withStackWriteLock(nodeId, 'ord2', scannerGen - 1, () => {
       db.upsertStackUpdateStatus(nodeId, 'ord2', true, Date.now(), 'ok', null);
     });
     expect(scannerCommitted).toBe(false);
 
-    const clearCommitted = await svc.withStackWriteLock(nodeId, 'ord2', clearGen, () => {
+    const clearCommitted = await svc.withStackWriteLock(nodeId, 'ord2', observed, () => {
       db.clearStackUpdateStatus(nodeId, 'ord2');
     });
     expect(clearCommitted).toBe(true);

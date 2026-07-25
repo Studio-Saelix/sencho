@@ -94,6 +94,20 @@ function parseServicesJson(raw: string | null | undefined): StackServiceStatus[]
     }
 }
 
+/** Write generation embedded in services_json; 0 when missing or unreadable. */
+function parseServicesJsonGeneration(raw: string | null | undefined): number {
+    if (!raw) return 0;
+    try {
+        const parsed = JSON.parse(raw) as { version?: unknown; generation?: unknown };
+        if (parsed?.version !== SERVICES_JSON_VERSION) return 0;
+        return typeof parsed.generation === 'number' && Number.isFinite(parsed.generation)
+            ? parsed.generation
+            : 0;
+    } catch {
+        return 0;
+    }
+}
+
 function stringifyServicesJson(services: StackServiceStatus[], generation: number): string {
     return JSON.stringify({ version: SERVICES_JSON_VERSION, generation, services });
 }
@@ -4702,6 +4716,18 @@ export class DatabaseService {
             'SELECT services_json FROM stack_update_status WHERE node_id = ? AND stack_name = ?'
         ).get(nodeId, stackName) as { services_json: string | null } | undefined;
         return parseServicesJson(row?.services_json);
+    }
+
+    /**
+     * Scanner write generation stored with services_json for this stack.
+     * Used by preview reconcile to skip clearing a row written after the
+     * preview observation watermark. Returns 0 when missing or unreadable.
+     */
+    public getStackUpdateWriteGeneration(nodeId: number, stackName: string): number {
+        const row = this.db.prepare(
+            'SELECT services_json FROM stack_update_status WHERE node_id = ? AND stack_name = ?'
+        ).get(nodeId, stackName) as { services_json: string | null } | undefined;
+        return parseServicesJsonGeneration(row?.services_json);
     }
 
     /** Deletes the full update row (aggregate + services_json). Returns deleted row count. */
