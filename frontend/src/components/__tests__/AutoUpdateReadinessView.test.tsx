@@ -284,6 +284,27 @@ it('holds full-stack Apply for review when one image confirms an update and anot
   expect(onApplyService).toHaveBeenCalledWith('nextcloud', 1, 'confirmed');
 });
 
+it('shows the blocked (major) badge, not the review-required badge, when both apply', () => {
+  render(
+    <MobileReadinessCard
+      card={card({
+        preview: {
+          stack_name: 'gitea', images: [], rollback_target: null, changelog: null,
+          summary: {
+            has_update: true, primary_image: 'gitea', current_tag: '1.21', next_tag: '2.0',
+            semver_bump: 'major', update_kind: 'tag', blocked: true, blocked_reason: 'Major version bump',
+            rebuild_available: false, verification_failed: true, verification_error: 'Registry unreachable',
+          },
+        },
+      })}
+      onApply={vi.fn()}
+    />,
+  );
+  expect(screen.getByText(/Blocked · major/i)).toBeInTheDocument();
+  expect(screen.queryByText(/Review · unverified/i)).toBeNull();
+  expect(apply()).toBeDisabled();
+});
+
 it('disables Apply while an update is in flight', () => {
   render(<MobileReadinessCard card={card({ applying: true })} onApply={vi.fn()} />);
   // While applying the button label switches to "Applying...".
@@ -467,6 +488,75 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     });
     await waitFor(() => {
       expect(mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview')).length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('holds the desktop full-stack Apply for review, but keeps per-service Apply enabled, when a confirmed update sits alongside another image failing verification', async () => {
+    mockNodeMeta.set(1, {
+      version: '1.0.0',
+      capabilities: ['service-scoped-update'],
+      fetchedAt: Date.now(),
+    });
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { mixed: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        stack_name: 'mixed',
+        images: [
+          { service: 'confirmed', image: 'alpine:latest', current_tag: 'latest', next_tag: 'latest', has_update: true, semver_bump: 'patch', check_error: null },
+          { service: 'failing', image: 'private.example/db:latest', current_tag: 'latest', next_tag: null, has_update: false, semver_bump: 'none', check_error: 'Registry unreachable' },
+        ],
+        summary: {
+          has_update: true,
+          primary_image: 'alpine:latest',
+          current_tag: 'latest',
+          next_tag: 'latest',
+          semver_bump: 'patch',
+          update_kind: 'digest',
+          blocked: false,
+          blocked_reason: null,
+          rebuild_available: false,
+          verification_failed: true,
+          verification_error: 'Registry unreachable',
+        },
+        rollback_target: null,
+        changelog: null,
+      }),
+    });
+    vi.mocked(requestServiceUpdate).mockResolvedValue({
+      ok: true,
+      mode: 'update',
+      serviceName: 'confirmed',
+      healthGateId: null,
+      observing: false,
+      recoveryId: null,
+      recoveryAvailable: false,
+    });
+
+    render(<AutoUpdateReadinessView />);
+
+    const applyBtn = await screen.findByRole('button', { name: /Apply now/i });
+    expect(applyBtn).toBeDisabled();
+    expect(screen.queryByText(/Safe · patch/i)).toBeNull();
+    expect(screen.getByText(/Review · unverified/i)).toBeInTheDocument();
+    expect(screen.getByTestId('readiness-verification-warning')).toBeInTheDocument();
+
+    const serviceApply = screen.getByRole('button', { name: /^Apply$/i });
+    expect(serviceApply).toBeEnabled();
+    await act(async () => { fireEvent.click(serviceApply); });
+    await waitFor(() => {
+      expect(requestServiceUpdate).toHaveBeenCalledWith(expect.objectContaining({
+        stackName: 'mixed',
+        serviceName: 'confirmed',
+      }));
     });
   });
 });

@@ -26,7 +26,13 @@ const COMPOSE = 'services:\n  web:\n    image: nginx:1.25\n';
 function previewBody(
   hasUpdate: boolean,
   buildServices: string[] = [],
-  over: { verification_failed?: boolean; verification_error?: string | null; check_error?: string | null } = {},
+  over: {
+    verification_failed?: boolean;
+    verification_error?: string | null;
+    check_error?: string | null;
+    blocked?: boolean;
+    blocked_reason?: string | null;
+  } = {},
 ) {
   const hasBuild = buildServices.length > 0;
   const verificationFailed = over.verification_failed ?? false;
@@ -50,8 +56,8 @@ function previewBody(
       next_tag: '1.26',
       semver_bump: hasUpdate ? 'minor' : 'none',
       update_kind: hasUpdate ? 'tag' : 'none',
-      blocked: false,
-      blocked_reason: null,
+      blocked: over.blocked ?? false,
+      blocked_reason: over.blocked_reason ?? null,
       has_build_services: hasBuild,
       rebuild_available: hasBuild,
       verification_failed: verificationFailed,
@@ -567,6 +573,26 @@ describe('StackAnatomyPanel digest verification failure', () => {
     expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
     expect(screen.getByText(/review required/i)).toBeInTheDocument();
     expect(screen.queryByText(/safe to apply/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
+  });
+
+  it('keeps the blocked (major-bump policy) banner precedence over the verification-failure review-required banner', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes(previewBody(true, [], {
+          verification_failed: true,
+          verification_error: 'Registry unreachable',
+          blocked: true,
+          blocked_reason: 'Major version bump',
+        }));
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    expect(await screen.findByText(/review required/i)).toBeInTheDocument();
+    expect(screen.getByText(/Major version bump/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
   });
 });

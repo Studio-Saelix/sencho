@@ -251,4 +251,16 @@ describe('updatePreviewSignal verification failure', () => {
     expect(signal.status).toBe('attention');
     expect(signal.detail).toMatch(/Registry unreachable/);
   });
+
+  it('holds a pending rebuild for review, not verification-only, when another image failed digest verification', () => {
+    const signal = updatePreviewSignal(summary({
+      rebuild_available: true,
+      has_build_services: true,
+      verification_failed: true,
+      verification_error: 'Registry unreachable',
+    }));
+    expect(signal.status).toBe('attention');
+    expect(signal.detail).toMatch(/rebuild/);
+    expect(signal.detail).toMatch(/Registry unreachable/);
+  });
 });
