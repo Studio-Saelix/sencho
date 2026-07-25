@@ -132,11 +132,8 @@ export class CacheService {
     // This caller owns the computation; the closure records whether it ended
     // as a fresh compute or a stale fallback, read after the promise settles.
     let outcome: CacheFetchOutcome = 'computed';
-    // Self-referential: finally compares against this binding after the async
-    // IIFE returns. `const` trips TS2454; prefer-const does not apply here.
-    // eslint-disable-next-line prefer-const -- self-ref before binding settles
-    let promise!: Promise<T>;
-    promise = (async () => {
+    const inflightSelf: { promise: Promise<T> | null } = { promise: null };
+    const promise = (async () => {
       try {
         const value = await fetcher();
         if (this.currentGeneration(key) === generation) {
@@ -153,11 +150,12 @@ export class CacheService {
       } finally {
         // Only clear the inflight slot if we still own it. invalidate() may
         // have already deleted this entry and allowed a newer owner.
-        if (this.inflight.get(key) === promise) {
+        if (this.inflight.get(key) === inflightSelf.promise) {
           this.inflight.delete(key);
         }
       }
     })();
+    inflightSelf.promise = promise;
 
     this.inflight.set(key, promise);
     const value = await promise;
