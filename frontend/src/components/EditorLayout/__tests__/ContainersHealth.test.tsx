@@ -7,7 +7,7 @@ vi.mock('../../Terminal', () => ({ default: () => null }));
 vi.mock('../../StructuredLogViewer', () => ({ default: () => null }));
 vi.mock('../../ImageSourceMenu', () => ({ ImageSourceMenu: () => null }));
 
-import { ContainersHealth } from '../editor-view-blocks';
+import { ContainersHealth, type ContainersHealthProps } from '../editor-view-blocks';
 import { copyToClipboard } from '@/lib/clipboard';
 import type { ContainerInfo } from '../EditorView';
 import type { Node } from '@/context/NodeContext';
@@ -96,11 +96,14 @@ describe('density toggle and summary strip', () => {
     } as unknown as ContainerInfo;
   }
 
-  function renderMany(containers: ContainerInfo[]) {
+  function renderMany(
+    containers: ContainerInfo[],
+    containerStats: ContainersHealthProps['containerStats'] = {},
+  ) {
     return render(
       <ContainersHealth
         safeContainers={containers}
-        containerStats={{}}
+        containerStats={containerStats}
         containerStatsError={null}
         isAdmin
         activeNode={LOCAL_NODE}
@@ -169,6 +172,24 @@ describe('density toggle and summary strip', () => {
     expect(screen.queryByText('cpu')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Detailed view' }));
     expect(screen.getAllByText('cpu')).toHaveLength(2);
+  });
+
+  it('gives NET I/O more column share and keeps the value on one line', () => {
+    renderMany([makeContainer({ Id: 'abc123def456' })], {
+      abc123def456: {
+        cpu: '0.12%',
+        ram: '12.3 MB',
+        net: '132 B/s ↓ / 168 B/s ↑',
+        history: { cpu: [], mem: [], netIn: [], netOut: [] },
+      },
+    });
+
+    const netValue = screen.getByText('132 B/s ↓ / 168 B/s ↑');
+    expect(netValue).toHaveClass('truncate');
+    expect(netValue).toHaveAttribute('title', '132 B/s ↓ / 168 B/s ↑');
+    const metricsGrid = netValue.closest('.grid');
+    expect(metricsGrid?.className).toContain('0.85fr');
+    expect(metricsGrid?.className).toContain('1.3fr');
   });
 
   it('keeps header row actions visible in compact mode', () => {
