@@ -23,9 +23,6 @@ function errored(message: string): ImageCheckResult {
 function notCheckable(): ImageCheckResult {
   return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
 }
-function partial(message: string, hasUpdate = false): ImageCheckResult {
-  return { hasUpdate, checkStatus: 'partial', error: message };
-}
 
 describe('reduceServiceStatus', () => {
   it('marks a service not_checkable when it has no checkable ref (STATUS-NOT-CHECKABLE-3)', () => {

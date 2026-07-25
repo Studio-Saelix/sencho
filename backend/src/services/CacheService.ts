@@ -132,6 +132,9 @@ export class CacheService {
     // This caller owns the computation; the closure records whether it ended
     // as a fresh compute or a stale fallback, read after the promise settles.
     let outcome: CacheFetchOutcome = 'computed';
+    // Self-referential: finally compares against this binding after the async
+    // IIFE returns. `const` trips TS2454; prefer-const does not apply here.
+    // eslint-disable-next-line prefer-const -- self-ref before binding settles
     let promise!: Promise<T>;
     promise = (async () => {
       try {

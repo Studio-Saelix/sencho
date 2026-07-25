@@ -5,7 +5,7 @@ import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
-import { FLEET_UPDATE_CACHE_KEY, invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
+import { FLEET_UPDATE_CACHE_KEY } from '../helpers/fleetUpdateCache';
 import {
   createAutoUpdateDigestGateState,
   messageWhenNoDigestUpdate,
