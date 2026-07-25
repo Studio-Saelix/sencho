@@ -185,6 +185,30 @@ describe('verification preview helpers', () => {
     expect(isActionableUpdatePreview(preview)).toBe(false);
   });
 
+  it('does not treat a legacy remote preview (verification_failed missing entirely) as cleared', () => {
+    // The current backend always sends verification_failed (true or false);
+    // its total absence means the response came from an older remote that
+    // predates digest verification and cannot vouch for a clean result.
+    const legacyPreview = {
+      stack_name: 'redis',
+      images: [],
+      rollback_target: null,
+      changelog: null,
+      summary: {
+        has_update: false,
+        primary_image: 'redis',
+        current_tag: '8.8.0',
+        next_tag: '8.8.0',
+        semver_bump: 'none' as const,
+        update_kind: 'none' as const,
+        blocked: false,
+        blocked_reason: null,
+        // verification_failed and rebuild_available intentionally omitted.
+      },
+    };
+    expect(isClearedUpdatePreview(legacyPreview)).toBe(false);
+  });
+
   it('returns false for null/undefined previews', () => {
     expect(isVerificationOnlyPreview(null)).toBe(false);
     expect(isVerificationOnlyPreview(undefined)).toBe(false);
@@ -904,6 +928,53 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
     expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
     expect(screen.queryByText(/could not be checked/i)).toBeNull();
     expect(screen.queryByText(/ready to apply automatically/)).toBeNull();
+  });
+
+  it('keeps a sticky card instead of silently clearing it when a remote sends a legacy preview missing verification_failed entirely', async () => {
+    // Same sticky-fleet shape as the cleared-preview test above, but the
+    // fresh preview response is missing verification_failed/rebuild_available
+    // entirely (an older remote node's shape), so it must not be trusted as
+    // proof the stack is clean.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { redis: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (url === '/image-updates/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockImplementation((url: string) => {
+      if (String(url).includes('/update-preview')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            stack_name: 'redis',
+            images: [],
+            summary: {
+              has_update: false, primary_image: 'redis:8.8.0', current_tag: '8.8.0', next_tag: '8.8.0',
+              semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
+              // verification_failed and rebuild_available intentionally omitted (legacy remote shape).
+            },
+            rollback_target: null, changelog: null,
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => null });
+    });
+
+    render(<AutoUpdateReadinessView />);
+
+    expect(await screen.findByText('redis')).toBeInTheDocument();
+    expect(screen.queryByText(/Everything is up to date/)).toBeNull();
   });
 
   it('labels remote verification-only stacks with the node name in the advisory', async () => {

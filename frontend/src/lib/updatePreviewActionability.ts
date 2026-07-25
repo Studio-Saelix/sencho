@@ -26,6 +26,19 @@ export interface UpdatePreviewActionInput {
   images?: UpdatePreviewActionImage[];
 }
 
+/**
+ * True when `verification_failed` is missing entirely, not merely false. The
+ * current backend always includes this field (`true` or `false`) in every
+ * update-preview response, so its absence after JSON parsing means the
+ * response came from an older remote node that predates digest verification
+ * reporting. That remote's clean-looking flags cannot be trusted as proof
+ * there is nothing pending; a sticky fleet card must not be silently cleared
+ * on the strength of a preview that never checked.
+ */
+function isLegacyPreview(summary: UpdatePreviewActionSummary): boolean {
+  return summary.verification_failed === undefined;
+}
+
 /** Digest verification failed with no confirmed update or rebuild. */
 export function isVerificationOnlyPreview(
   preview: UpdatePreviewActionInput | null | undefined,
@@ -93,6 +106,7 @@ export function isClearedUpdatePreview(
 ): boolean {
   if (!preview) return false;
   if (preview.summary.blocked) return false;
+  if (isLegacyPreview(preview.summary)) return false;
   if (isVerificationOnlyPreview(preview)) return false;
   if (isReviewRequiredUpdatePreview(preview)) return false;
   return !isActionableUpdatePreview(preview);

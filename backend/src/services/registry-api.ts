@@ -267,8 +267,11 @@ export function selectLocalRepoDigests(repoDigests: readonly string[], parsed: P
         seen.add(key);
         matched.push(e.digest);
     }
-    if (matched.length > 0) return matched;
-    return valid.length === 1 ? [valid[0].digest] : [];
+    // No digest matches the configured repository: comparing an unrelated
+    // repository's digest (e.g. a retag) risks a false update against a
+    // registry state that has nothing to do with the image actually
+    // declared. Report unresolved instead of guessing.
+    return matched;
 }
 
 /**
@@ -782,8 +785,10 @@ async function classifyManifest(
  *
  * `update` is returned only after a successful, complete remote classification
  * with no candidate matching the primary, an exact member, or a same-platform
- * runnable descriptor. Empty/all-malformed candidates, unknown platform when
- * platform matching is required, and classification failures return `error`.
+ * runnable descriptor that the index actually offers. Empty/all-malformed
+ * candidates, unknown platform when platform matching is required, an index
+ * with no descriptor at all for the local platform (including an empty or
+ * fully-filtered index), and classification failures return `error`.
  */
 export async function compareLocalToRemoteTag(
     localDigests: readonly string[],
@@ -824,11 +829,18 @@ export async function compareLocalToRemoteTag(
         return { kind: 'error', reason: `Local image platform is unknown; cannot verify multi-arch membership for ${ref}` };
     }
 
-    const isMember = classification.descriptors.some(
-        (d) => d.os === platform.os
-            && d.architecture === platform.architecture
-            && candidateSet.has(d.digest.toLowerCase()),
+    // An index that carries no descriptor at all for the local platform
+    // (including an empty or fully-filtered index: attestation-only, or a
+    // malformed body with no recognizable manifests) cannot be pulled onto
+    // this node; that is not the same as a genuine update being available.
+    const platformDescriptors = classification.descriptors.filter(
+        (d) => d.os === platform.os && d.architecture === platform.architecture,
     );
+    if (platformDescriptors.length === 0) {
+        return { kind: 'error', reason: `Remote image index has no ${platform.os}/${platform.architecture} variant for ${ref}` };
+    }
+
+    const isMember = platformDescriptors.some((d) => candidateSet.has(d.digest.toLowerCase()));
     return isMember ? { kind: 'match' } : { kind: 'update' };
 }
 
@@ -880,20 +892,28 @@ function parseNextCursor(linkHeader: string | string[] | undefined): string | un
 }
 
 /**
- * Typed tag list for the Resources registry browser. Never collapses auth
- * failures into an empty array (that would hide credential problems).
+ * Typed tag list for the Resources registry browser and update-preview's tag
+ * check. Never collapses auth failures into an empty array (that would hide
+ * credential problems). `credentials` is optional: registries that allow
+ * anonymous pulls of public repositories (Docker Hub, and any registry that
+ * issues a token without a WWW-Authenticate challenge) resolve a tag list
+ * with no credentials configured at all.
  */
 export async function listRegistryTagsResult(
     registry: string,
     repo: string,
-    credentials: RegistryCredentials,
+    credentials?: RegistryCredentials | null,
     opts: { limit?: number; cursor?: string } = {},
 ): Promise<TagListResult> {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
     try {
         const token = await getAuthToken(registry, repo, credentials);
         if (!token) {
-            return { ok: false, code: 'REGISTRY_UNAUTHORIZED', message: 'Registry rejected credentials' };
+            return {
+                ok: false,
+                code: 'REGISTRY_UNAUTHORIZED',
+                message: credentials ? 'Registry rejected credentials' : 'Registry requires credentials for this repository',
+            };
         }
         const headers: Record<string, string> = { Accept: 'application/json', Authorization: `Bearer ${token}` };
         const params = new URLSearchParams({ n: String(limit) });
@@ -924,13 +944,16 @@ export async function listRegistryTagsResult(
     }
 }
 
-/** Compatibility wrapper for update-preview: empty list on any failure. */
+/**
+ * Compatibility wrapper for update-preview: empty list on any failure,
+ * including a private repository with no configured credentials (a real
+ * auth failure, not evidence there is no newer tag).
+ */
 export async function listRegistryTags(
     registry: string,
     repo: string,
     credentials?: RegistryCredentials | null,
 ): Promise<string[]> {
-    if (!credentials) return [];
     const result = await listRegistryTagsResult(registry, repo, credentials);
     return result.ok ? result.tags : [];
 }

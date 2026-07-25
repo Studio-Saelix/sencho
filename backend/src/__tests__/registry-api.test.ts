@@ -58,6 +58,7 @@ import {
   getRemoteDigest,
   getRemoteDigestResult,
   getAuthToken,
+  listRegistryTags,
   listRegistryTagsResult,
   parseImageRef,
   selectLocalRepoDigest,
@@ -359,6 +360,31 @@ describe('listRegistryTagsResult', () => {
   });
 });
 
+describe('listRegistryTags (compatibility wrapper)', () => {
+  beforeEach(() => {
+    calls.length = 0;
+  });
+
+  it('lists tags for a public Docker Hub repository with no credentials configured', async () => {
+    route = (url) => tokenOk(url) ?? (
+      url.includes('/tags/list')
+        ? { statusCode: 200, headers: {}, body: JSON.stringify({ tags: ['8.7.0', '8.8.0'] }) }
+        : { statusCode: 500, headers: {} }
+    );
+    await expect(listRegistryTags('registry-1.docker.io', 'library/redis', null)).resolves.toEqual(['8.7.0', '8.8.0']);
+  });
+
+  it('still returns empty for a registry that actually requires credentials the caller does not have', async () => {
+    const CHALLENGE = 'Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:user/image:pull"';
+    route = (url): FakeResp => {
+      if (url === 'https://ghcr.io/v2/') return { statusCode: 401, headers: { 'www-authenticate': CHALLENGE } };
+      if (url.startsWith('https://ghcr.io/token')) return { statusCode: 401, headers: {} };
+      return { statusCode: 500, headers: {} };
+    };
+    await expect(listRegistryTags('ghcr.io', 'private/app', undefined)).resolves.toEqual([]);
+  });
+});
+
 // ─── selectLocalRepoDigest ───────────────────────────────────────────────
 
 describe('selectLocalRepoDigest', () => {
@@ -375,9 +401,9 @@ describe('selectLocalRepoDigest', () => {
     expect(selectLocalRepoDigest(repoDigests, parsed('nginx:latest'))).toBe(DIGEST_A);
   });
 
-  it('falls back to the sole valid entry when nothing matches the ref', () => {
+  it('returns null when the sole valid entry belongs to an unrelated repository, rather than guessing', () => {
     const repoDigests = [`ghcr.io/other/image@${DIGEST_A}`];
-    expect(selectLocalRepoDigest(repoDigests, parsed('nginx:latest'))).toBe(DIGEST_A);
+    expect(selectLocalRepoDigest(repoDigests, parsed('nginx:latest'))).toBeNull();
   });
 
   it('returns null when multiple valid entries exist and none matches the ref', () => {
@@ -441,8 +467,11 @@ describe('selectLocalRepoDigests', () => {
     expect(selectLocalRepoDigests(repoDigests, parsed('redis:latest'))).toEqual([DIGEST_A, DIGEST_B]);
   });
 
-  it('falls back to the sole valid entry when nothing matches the ref', () => {
-    expect(selectLocalRepoDigests([`ghcr.io/other/image@${DIGEST_A}`], parsed('nginx:latest'))).toEqual([DIGEST_A]);
+  it('returns empty when the sole valid entry belongs to an unrelated repository, rather than guessing', () => {
+    // A legitimate retag can leave a lone RepoDigest from a different repo, but
+    // comparing it against this ref's registry state risks a false update
+    // against a registry that has nothing to do with the declared image.
+    expect(selectLocalRepoDigests([`ghcr.io/other/image@${DIGEST_A}`], parsed('nginx:latest'))).toEqual([]);
   });
 
   it('returns empty when multiple valid entries exist and none matches the ref', () => {
@@ -631,6 +660,43 @@ describe('compareLocalToRemoteTag', () => {
     expect(result).toEqual({ kind: 'update' });
   });
 
+  it('errors (not update) when the remote index has no descriptor at all for the local platform', async () => {
+    // STANDARD_INDEX_BODY only carries linux/amd64 and linux/arm64 children.
+    // A windows/amd64 node cannot pull anything from this index; that is not
+    // the same fact as "a newer build is available".
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, { os: 'windows', architecture: 'amd64' });
+    expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('no windows/amd64 variant') });
+  });
+
+  it('errors (not update) for an empty index with no manifests, rather than a speculative update', async () => {
+    const emptyIndexBody = indexBody([]);
+    const emptyIndexDigest = contentDigest(emptyIndexBody);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': emptyIndexDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(emptyIndexDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': emptyIndexDigest }, body: emptyIndexBody };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+    expect(result.kind).toBe('error');
+  });
+
   it('never re-fetches the mutable tag: the expansion GET targets the primary digest from HEAD, not a second tag lookup', async () => {
     const DIVERGED_DIGEST = `sha256:${'e'.repeat(64)}`;
     let tagCallCount = 0;
@@ -795,7 +861,13 @@ describe('compareLocalToRemoteTag', () => {
   });
 
   it('misses the cache when the primary digest changes (new manifest, new immutable key)', async () => {
-    const INDEX_BODY_2 = indexBody([{ digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' }]);
+    // Carries a genuinely different arm64 child (not CHILD_ARM64) so the second
+    // lookup is a real same-platform mismatch, not an absent-platform index.
+    const NEW_CHILD_ARM64 = `sha256:${'9'.repeat(64)}`;
+    const INDEX_BODY_2 = indexBody([
+      { digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' },
+      { digest: NEW_CHILD_ARM64, os: 'linux', architecture: 'arm64' },
+    ]);
     const INDEX_DIGEST_2 = contentDigest(INDEX_BODY_2);
     let headDigest = INDEX_DIGEST;
     let digestGetCount = 0;
