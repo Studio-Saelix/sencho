@@ -697,6 +697,87 @@ describe('compareLocalToRemoteTag', () => {
     expect(result.kind).toBe('error');
   });
 
+  it('errors (not update) for an index whose only entries are filtered out (attestation-only), not just a literally empty one', async () => {
+    // Exercises the filtering path (parseIndexBody's attestation-manifest and
+    // unknown/unknown continues), distinct from manifests:[] never entering
+    // the per-entry loop at all.
+    const filteredIndexBody = indexBody([
+      {
+        digest: CHILD_AMD64, os: 'unknown', architecture: 'unknown',
+        annotations: { 'vnd.docker.reference.type': 'attestation-manifest', 'vnd.docker.reference.digest': CHILD_ARM64 },
+      },
+    ]);
+    const filteredIndexDigest = contentDigest(filteredIndexBody);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': filteredIndexDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(filteredIndexDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': filteredIndexDigest }, body: filteredIndexBody };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('no linux/amd64 variant') });
+  });
+
+  it('matches (not errors) a platform-less runnable descriptor even though no platform-labeled descriptor exists', async () => {
+    // OCI allows a runnable descriptor to omit platform; parseIndexBody routes
+    // it to exactDigests. The index has real, pullable content, so this must
+    // not be confused with the "nothing to pull" case.
+    const platformlessDigest = `sha256:${'7'.repeat(64)}`;
+    const noPlatformBody = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [{ digest: platformlessDigest, mediaType: 'application/vnd.oci.image.manifest.v1+json' }],
+    });
+    const noPlatformDigest = contentDigest(noPlatformBody);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': noPlatformDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(noPlatformDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': noPlatformDigest }, body: noPlatformBody };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag([platformlessDigest], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+  });
+
+  it('errors (not update) when a nested index also has no descriptor for the local platform after full expansion', async () => {
+    const nestedIndexBody = indexBody([{ digest: CHILD_ARM64, os: 'linux', architecture: 'arm64' }]);
+    const nestedIndexDigest = contentDigest(nestedIndexBody);
+    const outerIndexBody = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [{ digest: nestedIndexDigest, mediaType: INDEX_CONTENT_TYPE }],
+    });
+    const outerIndexDigest = contentDigest(outerIndexBody);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': outerIndexDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(outerIndexDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': outerIndexDigest }, body: outerIndexBody };
+      }
+      if (url === manifestDigestUrl(nestedIndexDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': nestedIndexDigest }, body: nestedIndexBody };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    // The outer index only nests an arm64-only child index; an amd64 node has
+    // no descriptor anywhere in the fully-expanded tree.
+    const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('no linux/amd64 variant') });
+  });
+
   it('never re-fetches the mutable tag: the expansion GET targets the primary digest from HEAD, not a second tag lookup', async () => {
     const DIVERGED_DIGEST = `sha256:${'e'.repeat(64)}`;
     let tagCallCount = 0;

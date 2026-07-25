@@ -35,8 +35,11 @@ export interface UpdatePreviewActionInput {
  * there is nothing pending; a sticky fleet card must not be silently cleared
  * on the strength of a preview that never checked.
  */
-function isLegacyPreview(summary: UpdatePreviewActionSummary): boolean {
-  return summary.verification_failed === undefined;
+export function isLegacyPreview(
+  preview: UpdatePreviewActionInput | null | undefined,
+): boolean {
+  if (!preview) return false;
+  return preview.summary.verification_failed === undefined;
 }
 
 /** Digest verification failed with no confirmed update or rebuild. */
@@ -106,7 +109,7 @@ export function isClearedUpdatePreview(
 ): boolean {
   if (!preview) return false;
   if (preview.summary.blocked) return false;
-  if (isLegacyPreview(preview.summary)) return false;
+  if (isLegacyPreview(preview)) return false;
   if (isVerificationOnlyPreview(preview)) return false;
   if (isReviewRequiredUpdatePreview(preview)) return false;
   return !isActionableUpdatePreview(preview);

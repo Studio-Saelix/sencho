@@ -9,7 +9,7 @@ import {
     type ComputePreviewDeps,
     type LocalDigestInfo,
 } from '../services/UpdatePreviewService';
-import type { DigestComparisonResult } from '../services/registry-api';
+import { selectLocalRepoDigests, type DigestComparisonResult, type ParsedRef } from '../services/registry-api';
 
 const PLATFORM = { os: 'linux', architecture: 'amd64' };
 
@@ -203,6 +203,30 @@ describe('computeImagePreview', () => {
         const compareDigest = vi.fn().mockResolvedValue({ kind: 'update' });
         const deps = makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest(null, 'unresolved')),
+            compareDigest,
+            listRegistryTags: vi.fn().mockResolvedValue([]),
+        });
+        const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
+        expect(compareDigest).not.toHaveBeenCalled();
+        expect(result.has_update).toBe(false);
+        expect(result.check_error).toBe('Could not resolve a local registry digest');
+    });
+
+    it('wires a real unrelated-repository RepoDigest through selectLocalRepoDigests to an unresolved verification failure', async () => {
+        // getLocalDigest here is not a canned stand-in: it runs the real
+        // selectLocalRepoDigests against a RepoDigests array whose sole valid
+        // entry belongs to a different repository, proving the removed
+        // sole-unmatched-digest fallback stays removed through the actual
+        // preview-computation path, not just at the registry-api unit level.
+        const compareDigest = vi.fn().mockResolvedValue({ kind: 'update' });
+        const deps = makeDeps({
+            getLocalDigest: async (_imageRef: string, parsed: ParsedRef) => {
+                const digests = selectLocalRepoDigests(
+                    [`ghcr.io/other/image@sha256:${'b'.repeat(64)}`],
+                    parsed,
+                );
+                return { digests, platform: PLATFORM, emptyReason: digests.length === 0 ? 'unresolved' as const : null };
+            },
             compareDigest,
             listRegistryTags: vi.fn().mockResolvedValue([]),
         });

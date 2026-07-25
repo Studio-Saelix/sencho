@@ -207,6 +207,17 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     expect(result.notCheckable).toBeUndefined();
     expect(result.error).toContain('Could not resolve a local registry digest');
   });
+
+  it('errors (not a comparison) when the sole valid RepoDigest belongs to an unrelated repository', async () => {
+    // A well-formed digest is present, but it names a different repo (e.g.
+    // left over from a retag): comparing it against this ref's registry state
+    // would risk a false update against unrelated content.
+    const docker = makeMockDocker([`ghcr.io/other/image@sha256:${'b'.repeat(64)}`]);
+    const result = await service.checkImage(docker, 'nginx:latest');
+    expect(result.hasUpdate).toBe(false);
+    expect(result.notCheckable).toBeUndefined();
+    expect(result.error).toContain('Could not resolve a local registry digest');
+  });
 });
 
 // ── checkImage surfaces the comparison resolver's outcome ──────────────

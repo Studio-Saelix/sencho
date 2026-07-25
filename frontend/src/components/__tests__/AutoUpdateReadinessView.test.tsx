@@ -185,6 +185,32 @@ describe('verification preview helpers', () => {
     expect(isActionableUpdatePreview(preview)).toBe(false);
   });
 
+  it('keeps a legacy preview that reports its own has_update:true fully actionable (trusts the remote\'s own confirmed update)', () => {
+    // isLegacyPreview only guards isClearedUpdatePreview: a legacy remote that
+    // itself confirms an update is not additionally gated by a verification
+    // signal it never had. This is deliberate, not an oversight -- the
+    // sticky/preview agreement (both say "update") is what matters here.
+    const legacyPreview = {
+      stack_name: 'redis',
+      images: [],
+      rollback_target: null,
+      changelog: null,
+      summary: {
+        has_update: true,
+        primary_image: 'redis',
+        current_tag: '8.8.0',
+        next_tag: '8.8.1',
+        semver_bump: 'patch' as const,
+        update_kind: 'tag' as const,
+        blocked: false,
+        blocked_reason: null,
+        // verification_failed and rebuild_available intentionally omitted.
+      },
+    };
+    expect(isActionableUpdatePreview(legacyPreview)).toBe(true);
+    expect(isClearedUpdatePreview(legacyPreview)).toBe(false);
+  });
+
   it('does not treat a legacy remote preview (verification_failed missing entirely) as cleared', () => {
     // The current backend always sends verification_failed (true or false);
     // its total absence means the response came from an older remote that
@@ -973,8 +999,11 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
 
     render(<AutoUpdateReadinessView />);
 
-    expect(await screen.findByText('redis')).toBeInTheDocument();
+    // Both the retained card and the advisory line name the stack.
+    expect((await screen.findAllByText('redis')).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText(/Everything is up to date/)).toBeNull();
+    // The retained card alone doesn't explain itself; the advisory must.
+    expect(screen.getByText(/predates digest verification/i)).toBeInTheDocument();
   });
 
   it('labels remote verification-only stacks with the node name in the advisory', async () => {

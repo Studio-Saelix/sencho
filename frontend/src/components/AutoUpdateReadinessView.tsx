@@ -18,6 +18,7 @@ import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import {
   isActionableUpdatePreview,
   isClearedUpdatePreview,
+  isLegacyPreview,
   isReviewRequiredUpdatePreview,
   isVerificationOnlyPreview,
 } from '@/lib/updatePreviewActionability';
@@ -903,6 +904,15 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             // Sticky fleet booleans can outlive a successful no-update preview.
             // Drop those cards without treating them as check failures.
             if (isClearedUpdatePreview(preview)) continue;
+            // A legacy preview (missing verification_failed entirely) is kept
+            // rather than cleared, but that alone renders as a pending card
+            // with nothing to explain it; flag why in the advisory too.
+            if (isLegacyPreview(preview)) {
+              previewAdvisory.push({
+                stack: g.nodeType === 'remote' ? `${c.stack} (${g.nodeName})` : c.stack,
+                reason: 'This node\'s preview predates digest verification reporting',
+              });
+            }
             cards.push({ ...c, preview, previewLoaded: true });
           }
           return { ...g, cards };

@@ -244,11 +244,12 @@ const SHA256_DIGEST_RE = /^sha256:[0-9a-f]{64}$/i;
 /**
  * All usable local RepoDigests for a parsed image ref, shared by the scanner
  * and update preview. Returns every valid digest whose repository matches the
- * ref (deduped, first-seen order), else the sole remaining valid entry when
- * nothing matches, else []. A truncated or malformed digest is never selected,
- * so a corrupted RepoDigests entry surfaces as "could not resolve" rather than
- * a false match or update. Callers must compare every candidate: Docker can
- * list a stale index digest ahead of the current one on the same image.
+ * ref (deduped, first-seen order), else []. A truncated or malformed digest is
+ * never selected, and a valid digest belonging to an unrelated repository
+ * (e.g. left over from a retag) is never selected either, so either surfaces
+ * as "could not resolve" rather than a guessed match or update. Callers must
+ * compare every candidate: Docker can list a stale index digest ahead of the
+ * current one on the same image.
  */
 export function selectLocalRepoDigests(repoDigests: readonly string[], parsed: ParsedRef): string[] {
     const valid = repoDigests
@@ -829,14 +830,19 @@ export async function compareLocalToRemoteTag(
         return { kind: 'error', reason: `Local image platform is unknown; cannot verify multi-arch membership for ${ref}` };
     }
 
-    // An index that carries no descriptor at all for the local platform
-    // (including an empty or fully-filtered index: attestation-only, or a
-    // malformed body with no recognizable manifests) cannot be pulled onto
-    // this node; that is not the same as a genuine update being available.
+    // An index that carries no runnable content at all for this node (no
+    // platform-labeled descriptor for the local os/architecture, AND no
+    // platform-less descriptor that OCI allows and exactDigests already
+    // checked above) cannot be pulled here; that is not the same as a
+    // genuine update being available. A platform-less-but-populated index,
+    // or an empty/fully-filtered one (attestation-only, or a malformed body
+    // with no recognizable manifests), both fall into this exactDigests
+    // check already having missed, so only the true nothing-to-pull case
+    // reaches here.
     const platformDescriptors = classification.descriptors.filter(
         (d) => d.os === platform.os && d.architecture === platform.architecture,
     );
-    if (platformDescriptors.length === 0) {
+    if (platformDescriptors.length === 0 && classification.exactDigests.length === 0) {
         return { kind: 'error', reason: `Remote image index has no ${platform.os}/${platform.architecture} variant for ${ref}` };
     }
 
@@ -894,10 +900,11 @@ function parseNextCursor(linkHeader: string | string[] | undefined): string | un
 /**
  * Typed tag list for the Resources registry browser and update-preview's tag
  * check. Never collapses auth failures into an empty array (that would hide
- * credential problems). `credentials` is optional: registries that allow
- * anonymous pulls of public repositories (Docker Hub, and any registry that
- * issues a token without a WWW-Authenticate challenge) resolve a tag list
- * with no credentials configured at all.
+ * credential problems). `credentials` is optional: `getAuthToken` already
+ * resolves an anonymous pull token for public repositories on registries
+ * whose `WWW-Authenticate` challenge grants one without credentials (Docker
+ * Hub unconditionally; others via the standard token-service challenge), so
+ * a public repository still returns a real tag list with none configured.
  */
 export async function listRegistryTagsResult(
     registry: string,
@@ -912,7 +919,7 @@ export async function listRegistryTagsResult(
             return {
                 ok: false,
                 code: 'REGISTRY_UNAUTHORIZED',
-                message: credentials ? 'Registry rejected credentials' : 'Registry requires credentials for this repository',
+                message: credentials ? 'Registry rejected credentials' : 'Registry did not issue an anonymous token for this repository',
             };
         }
         const headers: Record<string, string> = { Accept: 'application/json', Authorization: `Bearer ${token}` };
@@ -944,16 +951,33 @@ export async function listRegistryTagsResult(
     }
 }
 
+// Short TTL, unlike the 24h manifest-classification cache: a tag list is
+// mutable (registries publish new tags at any time), but update-preview now
+// fans this call out across every image in every stack on every Fleet
+// reload, and anonymous listing (no stored credentials) has no other rate
+// limiting. Balances staleness against hammering the registry.
+const TAG_LIST_CACHE_TTL_MS = 15 * 60 * 1000;
+const TAG_LIST_CACHE_NAMESPACE = 'img-upd-tags';
+
+function tagListCacheKey(registry: string, repo: string): string {
+    const repoHash = crypto.createHash('sha256').update(repo).digest('hex');
+    return `${TAG_LIST_CACHE_NAMESPACE}:${canonicalRegistry(registry)}/${repoHash}`;
+}
+
 /**
  * Compatibility wrapper for update-preview: empty list on any failure,
  * including a private repository with no configured credentials (a real
- * auth failure, not evidence there is no newer tag).
+ * auth failure, not evidence there is no newer tag). Cached (see
+ * TAG_LIST_CACHE_TTL_MS) since this is the first page only, matching what
+ * findNextTag actually consumes.
  */
 export async function listRegistryTags(
     registry: string,
     repo: string,
     credentials?: RegistryCredentials | null,
 ): Promise<string[]> {
-    const result = await listRegistryTagsResult(registry, repo, credentials);
-    return result.ok ? result.tags : [];
+    return CacheService.getInstance().getOrFetch(tagListCacheKey(registry, repo), TAG_LIST_CACHE_TTL_MS, async () => {
+        const result = await listRegistryTagsResult(registry, repo, credentials);
+        return result.ok ? result.tags : [];
+    });
 }
