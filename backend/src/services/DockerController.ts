@@ -2242,6 +2242,9 @@ class DockerController {
    * Legacy orphan containers that Compose ps cannot see but would block a deploy
    * (wrong project labels). When Compose already manages the stack, returns [] so
    * deploy can rely on selective `compose up` recreation.
+   * A thrown `compose ps` returns [] (fail closed): name-matched fallback must not
+   * run, because those IDs may still be healthy Compose runtimes that deploy would
+   * then destroy before `compose up` (which often fails for the same reason).
    */
   public async getLegacyOrphanContainersByStack(stackName: string): Promise<Array<{ Id: string }>> {
     const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
@@ -2252,23 +2255,23 @@ class DockerController {
     try {
       const composeContainers = await this.fetchComposePsContainers(stackName, stackDir);
       if (composeContainers.length > 0) return [];
+      // Empty successful ps: only then may name-matched leftovers be legacy orphans.
       return toIds(await this.smartFallback(stackName, stackDir));
     } catch (error) {
       const execError = error as NodeJS.ErrnoException & { stderr?: string };
       const mapped = describeSpawnError(execError, { command: 'docker compose ps' });
       const detail = execError.stderr || mapped.message;
       console.error('Docker Compose Error for %s:', sanitizeForLog(stackName), sanitizeForLog(detail));
-      try {
-        return toIds(await this.smartFallback(stackName, stackDir));
-      } catch {
-        return [];
-      }
+      // Fail closed: do not run smartFallback (see method JSDoc).
+      return [];
     }
   }
 
   /**
    * Strict Result API for full-stack updates. Never converts Compose-ps + fallback
    * failure into empty success. Compose-managed containers are never orphan IDs.
+   * A thrown `compose ps` is classification_failed (fail closed): name-matched
+   * fallback must not run, because those IDs may still be healthy Compose runtimes.
    */
   public async classifyLegacyOrphansForUpdate(
     stackName: string,
@@ -2302,18 +2305,15 @@ class DockerController {
       const composeContainers = await this.fetchComposePsContainers(stackName, stackDir);
       // Compose already manages this stack: no legacy orphan cleanup (same as deploy).
       if (composeContainers.length > 0) return { status: 'none' };
+      // Empty successful ps: only then may name-matched leftovers be legacy orphans.
       return await fallbackOrphans();
     } catch (error) {
       const execError = error as NodeJS.ErrnoException & { stderr?: string };
       const mapped = describeSpawnError(execError, { command: 'docker compose ps' });
       const detail = execError.stderr || mapped.message || getErrorMessage(error, 'docker compose ps failed');
       console.error('Docker Compose Error for %s:', sanitizeForLog(stackName), sanitizeForLog(detail));
-      // Unlike getLegacyOrphanContainersByStack, never convert dual failure into empty success.
-      const fallback = await fallbackOrphans();
-      if (fallback.status === 'classification_failed') {
-        return { status: 'classification_failed', error: String(detail) };
-      }
-      return fallback;
+      // Fail closed: do not run smartFallback (see method JSDoc).
+      return { status: 'classification_failed', error: String(detail) };
     }
   }
 

@@ -1720,35 +1720,63 @@ describe('DockerController - getLegacyOrphanContainersByStack', () => {
     fallbackSpy.mockRestore();
   });
 
-  it('falls back to legacy orphan lookup when compose ps throws', async () => {
+  it('returns [] when compose ps throws, even if fallback would match containers', async () => {
     const dc = DockerController.getInstance(1);
     const fetchSpy = vi.spyOn(dc as unknown as { fetchComposePsContainers: (...a: unknown[]) => Promise<unknown[]> }, 'fetchComposePsContainers')
       .mockRejectedValue(new Error('compose ps failed'));
     const fallbackSpy = vi.spyOn(dc as unknown as { smartFallback: (...a: unknown[]) => Promise<unknown[]> }, 'smartFallback')
-      .mockResolvedValue([{ Id: 'legacy-c2' }]);
+      .mockResolvedValue([{ Id: 'running-compose-c2' }]);
 
-    await expect(dc.getLegacyOrphanContainersByStack('my-stack')).resolves.toEqual([{ Id: 'legacy-c2' }]);
+    await expect(dc.getLegacyOrphanContainersByStack('my-stack')).resolves.toEqual([]);
+    // Must not consult name-matching fallback: those IDs may be healthy Compose runtimes.
+    expect(fallbackSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
     fallbackSpy.mockRestore();
   });
 });
 
 describe('DockerController - classifyLegacyOrphansForUpdate', () => {
+  type DcSpies = {
+    fetchComposePsContainers: (...a: unknown[]) => Promise<unknown[]>;
+    smartFallback: (...a: unknown[]) => Promise<unknown[]>;
+  };
+
   it('returns none when compose ps already manages containers', async () => {
-    // Reuse the same mocks as getLegacyOrphanContainersByStack tests in this file.
     const { default: DockerController } = await import('../services/DockerController');
     const dc = DockerController.getInstance(1);
-    vi.spyOn(dc as any, 'fetchComposePsContainers').mockResolvedValue([{ ID: 'c1' }]);
+    vi.spyOn(dc as unknown as DcSpies, 'fetchComposePsContainers').mockResolvedValue([{ ID: 'c1' }]);
     await expect(dc.classifyLegacyOrphansForUpdate('my-stack')).resolves.toEqual({ status: 'none' });
   });
 
-  it('returns classification_failed when compose ps and fallback both fail', async () => {
+  it('returns orphans when compose ps is empty and fallback finds legacy containers', async () => {
     const { default: DockerController } = await import('../services/DockerController');
     const dc = DockerController.getInstance(1);
-    vi.spyOn(dc as any, 'fetchComposePsContainers').mockRejectedValue(new Error('compose boom'));
-    vi.spyOn(dc as any, 'smartFallback').mockRejectedValue(new Error('fallback boom'));
+    vi.spyOn(dc as unknown as DcSpies, 'fetchComposePsContainers').mockResolvedValue([]);
+    vi.spyOn(dc as unknown as DcSpies, 'smartFallback').mockResolvedValue([{ Id: 'legacy-c1' }, { Id: 'legacy-c2' }]);
+    await expect(dc.classifyLegacyOrphansForUpdate('my-stack')).resolves.toEqual({
+      status: 'orphans',
+      ids: ['legacy-c1', 'legacy-c2'],
+    });
+  });
+
+  it('returns classification_failed when compose ps throws, even if fallback would match containers', async () => {
+    const { default: DockerController } = await import('../services/DockerController');
+    const dc = DockerController.getInstance(1);
+    vi.spyOn(dc as unknown as DcSpies, 'fetchComposePsContainers').mockRejectedValue(new Error('compose boom'));
+    const fallbackSpy = vi.spyOn(dc as unknown as DcSpies, 'smartFallback').mockResolvedValue([{ Id: 'running-compose-c1' }]);
     const result = await dc.classifyLegacyOrphansForUpdate('my-stack');
-    expect(result.status).toBe('classification_failed');
+    expect(result).toEqual({ status: 'classification_failed', error: 'compose boom' });
+    // Must not consult name-matching fallback: those IDs may be healthy Compose runtimes.
+    expect(fallbackSpy).not.toHaveBeenCalled();
+  });
+
+  it('returns classification_failed when compose ps is empty and fallback throws', async () => {
+    const { default: DockerController } = await import('../services/DockerController');
+    const dc = DockerController.getInstance(1);
+    vi.spyOn(dc as unknown as DcSpies, 'fetchComposePsContainers').mockResolvedValue([]);
+    vi.spyOn(dc as unknown as DcSpies, 'smartFallback').mockRejectedValue(new Error('fallback boom'));
+    const result = await dc.classifyLegacyOrphansForUpdate('my-stack');
+    expect(result).toEqual({ status: 'classification_failed', error: 'fallback boom' });
   });
 });
 
