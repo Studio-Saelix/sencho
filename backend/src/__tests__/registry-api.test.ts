@@ -383,6 +383,30 @@ describe('listRegistryTags (compatibility wrapper)', () => {
     };
     await expect(listRegistryTags('ghcr.io', 'private/app', undefined)).resolves.toEqual([]);
   });
+
+  it('caches a successful list: a repeat call for the same registry+repo does not hit the network again', async () => {
+    let tagsListRequests = 0;
+    route = (url) => tokenOk(url) ?? (
+      url.includes('/tags/list')
+        ? (tagsListRequests++, { statusCode: 200, headers: {}, body: JSON.stringify({ tags: ['1.0.0'] }) })
+        : { statusCode: 500, headers: {} }
+    );
+    await expect(listRegistryTags('registry-1.docker.io', 'library/redis', null)).resolves.toEqual(['1.0.0']);
+    await expect(listRegistryTags('registry-1.docker.io', 'library/redis', null)).resolves.toEqual(['1.0.0']);
+    expect(tagsListRequests).toBe(1);
+  });
+
+  it('does not cache a failure: a repeat call after a transient failure retries immediately instead of waiting out the TTL', async () => {
+    let fail = true;
+    route = (url) => tokenOk(url) ?? (
+      url.includes('/tags/list')
+        ? (fail ? { statusCode: 503, headers: {} } : { statusCode: 200, headers: {}, body: JSON.stringify({ tags: ['2.0.0'] }) })
+        : { statusCode: 500, headers: {} }
+    );
+    await expect(listRegistryTags('registry-1.docker.io', 'library/nginx', null)).resolves.toEqual([]);
+    fail = false;
+    await expect(listRegistryTags('registry-1.docker.io', 'library/nginx', null)).resolves.toEqual(['2.0.0']);
+  });
 });
 
 // ─── selectLocalRepoDigest ───────────────────────────────────────────────
@@ -747,6 +771,37 @@ describe('compareLocalToRemoteTag', () => {
     };
     const result = await compareLocalToRemoteTag([platformlessDigest], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'match' });
+  });
+
+  it('errors (not update) for a mixed index: a platform-less leaf cannot be attributed when another descriptor is explicitly labeled for a different platform', async () => {
+    // Regression: an index with one arm64-labeled descriptor and one
+    // unlabeled leaf must not let the unlabeled leaf stand in as amd64
+    // content just because SOME descriptor in the index is unlabeled.
+    const unrelatedLeaf = `sha256:${'6'.repeat(64)}`;
+    const mixedIndexBody = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [
+        { digest: CHILD_ARM64, mediaType: 'application/vnd.oci.image.manifest.v1+json', platform: { os: 'linux', architecture: 'arm64' } },
+        { digest: unrelatedLeaf, mediaType: 'application/vnd.oci.image.manifest.v1+json' },
+      ],
+    });
+    const mixedIndexDigest = contentDigest(mixedIndexBody);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': mixedIndexDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(mixedIndexDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': mixedIndexDigest }, body: mixedIndexBody };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    // A local candidate that matches neither the arm64 descriptor nor the
+    // unlabeled leaf: with no confirmed amd64 variant, this must fail closed.
+    const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('no confirmed linux/amd64 variant') });
   });
 
   it('errors (not update) when a nested index also has no descriptor for the local platform after full expansion', async () => {

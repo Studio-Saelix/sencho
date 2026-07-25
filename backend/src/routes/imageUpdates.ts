@@ -6,6 +6,7 @@ import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
 import { ImageUpdateService } from '../services/ImageUpdateService';
+import { invalidateTagListCache } from '../services/registry-api';
 import { FileSystemService } from '../services/FileSystemService';
 import { StackUpdateOrchestrator } from '../services/StackUpdateOrchestrator';
 import { StackOpLockService, stackOpSkipMessage } from '../services/StackOpLockService';
@@ -305,6 +306,9 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
   }
 
   CacheService.getInstance().invalidate(FLEET_UPDATE_CACHE_KEY);
+  // A manual recheck is the explicit "look again" affordance; a stale cached
+  // tag list would silently defeat it for up to TAG_LIST_CACHE_TTL_MS.
+  invalidateTagListCache();
   res.json({ triggered, rateLimited, failed });
 });
 

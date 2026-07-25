@@ -1000,10 +1000,57 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
     render(<AutoUpdateReadinessView />);
 
     // Both the retained card and the advisory line name the stack.
-    expect((await screen.findAllByText('redis')).length).toBeGreaterThanOrEqual(1);
+    expect(await screen.findAllByText('redis')).toHaveLength(2);
     expect(screen.queryByText(/Everything is up to date/)).toBeNull();
     // The retained card alone doesn't explain itself; the advisory must.
     expect(screen.getByText(/predates digest verification/i)).toBeInTheDocument();
+  });
+
+  it('does not pair a legacy preview\'s own confirmed update with a contradictory "could not be checked" advisory', async () => {
+    // The remote DID check and confirmed an update via its own (older) logic;
+    // flagging it as unchecked right next to an enabled Apply button would
+    // contradict the card sitting beside it.
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { redis: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (url === '/image-updates/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            redis: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockImplementation((url: string) => {
+      if (String(url).includes('/update-preview')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            stack_name: 'redis',
+            images: [],
+            summary: {
+              has_update: true, primary_image: 'redis:8.8.0', current_tag: '8.8.0', next_tag: '8.8.1',
+              semver_bump: 'patch', update_kind: 'tag', blocked: false, blocked_reason: null,
+              // verification_failed and rebuild_available intentionally omitted (legacy remote shape).
+            },
+            rollback_target: null, changelog: null,
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => null });
+    });
+
+    render(<AutoUpdateReadinessView />);
+
+    expect(await screen.findByRole('button', { name: /Apply now/i })).toBeEnabled();
+    expect(screen.queryByText(/predates digest verification/i)).toBeNull();
+    expect(screen.queryByText(/could not be checked/i)).toBeNull();
   });
 
   it('labels remote verification-only stacks with the node name in the advisory', async () => {

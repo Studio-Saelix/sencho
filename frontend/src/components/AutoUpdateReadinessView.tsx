@@ -906,8 +906,12 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             if (isClearedUpdatePreview(preview)) continue;
             // A legacy preview (missing verification_failed entirely) is kept
             // rather than cleared, but that alone renders as a pending card
-            // with nothing to explain it; flag why in the advisory too.
-            if (isLegacyPreview(preview)) {
+            // with nothing to explain it; flag why in the advisory too. Skip
+            // this when the preview is already actionable on its own terms
+            // (the remote's own has_update/rebuild_available): the card
+            // already speaks for itself, and pairing it with "could not be
+            // checked" would contradict the Apply affordance right next to it.
+            if (isLegacyPreview(preview) && !isActionableUpdatePreview(preview)) {
               previewAdvisory.push({
                 stack: g.nodeType === 'remote' ? `${c.stack} (${g.nodeName})` : c.stack,
                 reason: 'This node\'s preview predates digest verification reporting',

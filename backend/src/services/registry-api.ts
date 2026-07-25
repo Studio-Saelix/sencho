@@ -786,10 +786,16 @@ async function classifyManifest(
  *
  * `update` is returned only after a successful, complete remote classification
  * with no candidate matching the primary, an exact member, or a same-platform
- * runnable descriptor that the index actually offers. Empty/all-malformed
- * candidates, unknown platform when platform matching is required, an index
- * with no descriptor at all for the local platform (including an empty or
- * fully-filtered index), and classification failures return `error`.
+ * runnable descriptor that the index actually offers. When the index has no
+ * descriptor labeled for the local platform, a platform-less leaf (which OCI
+ * permits) is trusted as this platform's content only when it is the ONLY
+ * kind of descriptor present (nothing else in the index claims a different
+ * platform); an index that mixes platform-less leaves with descriptors
+ * labeled for other platforms cannot attribute the unlabeled ones and errors
+ * instead. Empty/all-malformed candidates, unknown platform when platform
+ * matching is required, an index with no runnable content for the local
+ * platform at all (including an empty or fully-filtered index), and
+ * classification failures also return `error`.
  */
 export async function compareLocalToRemoteTag(
     localDigests: readonly string[],
@@ -830,20 +836,26 @@ export async function compareLocalToRemoteTag(
         return { kind: 'error', reason: `Local image platform is unknown; cannot verify multi-arch membership for ${ref}` };
     }
 
-    // An index that carries no runnable content at all for this node (no
-    // platform-labeled descriptor for the local os/architecture, AND no
-    // platform-less descriptor that OCI allows and exactDigests already
-    // checked above) cannot be pulled here; that is not the same as a
-    // genuine update being available. A platform-less-but-populated index,
-    // or an empty/fully-filtered one (attestation-only, or a malformed body
-    // with no recognizable manifests), both fall into this exactDigests
-    // check already having missed, so only the true nothing-to-pull case
-    // reaches here.
     const platformDescriptors = classification.descriptors.filter(
         (d) => d.os === platform.os && d.architecture === platform.architecture,
     );
-    if (platformDescriptors.length === 0 && classification.exactDigests.length === 0) {
-        return { kind: 'error', reason: `Remote image index has no ${platform.os}/${platform.architecture} variant for ${ref}` };
+    if (platformDescriptors.length === 0) {
+        // No descriptor is labeled for this platform. exactDigests leaves omit
+        // platform entirely (OCI allows this), so they cannot be attributed to
+        // any specific platform; their mere presence does not prove content
+        // for THIS one, especially when other descriptors in the same index
+        // are explicitly labeled for a different platform. Only when every
+        // descriptor in the index is unlabeled (classification.descriptors is
+        // empty) does a leaf's presence plausibly represent this platform's
+        // content, since nothing else claims a different one; that is the one
+        // case where reporting `update` instead of failing closed is safe.
+        if (classification.exactDigests.length === 0) {
+            return { kind: 'error', reason: `Remote image index has no ${platform.os}/${platform.architecture} variant for ${ref}` };
+        }
+        if (classification.descriptors.length > 0) {
+            return { kind: 'error', reason: `Remote image index has no confirmed ${platform.os}/${platform.architecture} variant for ${ref}` };
+        }
+        return { kind: 'update' };
     }
 
     const isMember = platformDescriptors.some((d) => candidateSet.has(d.digest.toLowerCase()));
@@ -969,15 +981,30 @@ function tagListCacheKey(registry: string, repo: string): string {
  * including a private repository with no configured credentials (a real
  * auth failure, not evidence there is no newer tag). Cached (see
  * TAG_LIST_CACHE_TTL_MS) since this is the first page only, matching what
- * findNextTag actually consumes.
+ * findNextTag actually consumes. Only a successful list is ever cached: the
+ * fetcher throws on failure so CacheService's stale-on-error fallback can
+ * serve the last good list, and a failure with no prior success propagates
+ * out to this empty-list default rather than being written to the cache
+ * itself (a rate limit or a not-yet-configured credential must not keep
+ * reporting "no tags" for the rest of the TTL once it clears).
  */
 export async function listRegistryTags(
     registry: string,
     repo: string,
     credentials?: RegistryCredentials | null,
 ): Promise<string[]> {
-    return CacheService.getInstance().getOrFetch(tagListCacheKey(registry, repo), TAG_LIST_CACHE_TTL_MS, async () => {
-        const result = await listRegistryTagsResult(registry, repo, credentials);
-        return result.ok ? result.tags : [];
-    });
+    try {
+        return await CacheService.getInstance().getOrFetch(tagListCacheKey(registry, repo), TAG_LIST_CACHE_TTL_MS, async () => {
+            const result = await listRegistryTagsResult(registry, repo, credentials);
+            if (!result.ok) throw new Error(result.message);
+            return result.tags;
+        });
+    } catch {
+        return [];
+    }
+}
+
+/** Drops every cached tag list so a manual recheck sees newly-published tags immediately instead of waiting out TAG_LIST_CACHE_TTL_MS. */
+export function invalidateTagListCache(): void {
+    CacheService.getInstance().invalidateNamespace(TAG_LIST_CACHE_NAMESPACE);
 }
