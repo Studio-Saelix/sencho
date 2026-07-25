@@ -64,9 +64,7 @@ const healthcheckLabel = (
     health?: 'healthy' | 'unhealthy' | 'starting' | 'none',
 ): string | null => {
     if (!health || health === 'none') return null;
-    if (health === 'healthy') return 'healthcheck passing';
-    if (health === 'unhealthy') return 'healthcheck failing';
-    return 'healthcheck starting';
+    return health;
 };
 
 type StackPill = {
