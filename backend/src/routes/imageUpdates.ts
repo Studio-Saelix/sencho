@@ -5,6 +5,12 @@ import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
+import { FLEET_UPDATE_CACHE_KEY, invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
+import {
+  createAutoUpdateDigestGateState,
+  messageWhenNoDigestUpdate,
+  recordAutoUpdateImageCheck,
+} from '../helpers/autoUpdateDigestGate';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { FileSystemService } from '../services/FileSystemService';
 import { StackUpdateOrchestrator } from '../services/StackUpdateOrchestrator';
@@ -22,7 +28,6 @@ import { logDebugTiming } from '../utils/requestTiming';
 import { getErrorMessage } from '../utils/errors';
 
 // Fleet aggregation cache: 2-minute TTL, shared across dashboard tabs.
-const FLEET_UPDATE_CACHE_KEY = 'fleet-updates';
 const FLEET_CACHE_TTL = 120_000;
 const REMOTE_NODE_FETCH_TIMEOUT_MS = 5000;
 
@@ -367,35 +372,24 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           continue;
         }
 
-        let hasUpdate = false;
-        const updatedImages: string[] = [];
-        const checkErrors: string[] = [];
+        const gate = createAutoUpdateDigestGateState();
         for (const imageRef of imageRefs) {
           try {
             const result = await imageUpdateService.checkImage(docker, imageRef);
-            if (result.error) {
-              checkErrors.push(result.error);
-            } else if (result.hasUpdate) {
-              hasUpdate = true;
-              updatedImages.push(imageRef);
-            }
+            recordAutoUpdateImageCheck(gate, imageRef, result);
           } catch (e) {
             const errMsg = getErrorMessage(e, String(e));
-            checkErrors.push(errMsg);
+            gate.checkErrors.push(errMsg);
             console.warn('[AutoUpdate] Failed to check image %s:', sanitizeForLog(imageRef), sanitizeForLog((e as Error)?.message ?? String(e)));
           }
         }
 
-        if (!hasUpdate) {
-          if (checkErrors.length > 0 && checkErrors.length === imageRefs.length) {
-            results.push(`Stack "${stackName}": WARNING - all image checks failed (${checkErrors.join('; ')}). Unable to determine update status.`);
-          } else if (checkErrors.length > 0) {
-            results.push(`Stack "${stackName}": all reachable images up to date (${checkErrors.length} check(s) failed).`);
-          } else {
-            results.push(`Stack "${stackName}": all images up to date.`);
-          }
+        if (!gate.hasDigestUpdate) {
+          results.push(messageWhenNoDigestUpdate(stackName, gate, imageRefs.length));
           continue;
         }
+
+        const { updatedImages } = gate;
 
         // Auto-update runs from the scheduler: a policy bypass is never
         // appropriate. If updated images fail the gate, skip the stack and

@@ -15,13 +15,16 @@ import {
 import type { StackServiceStatus } from '../services/DatabaseService';
 
 function ok(hasUpdate: boolean): ImageCheckResult {
-  return { hasUpdate };
+  return { hasUpdate, checkStatus: 'ok', digestUpdate: hasUpdate, tagUpdate: false };
 }
 function errored(message: string): ImageCheckResult {
-  return { hasUpdate: false, error: message };
+  return { hasUpdate: false, checkStatus: 'failed', error: message };
 }
 function notCheckable(): ImageCheckResult {
-  return { hasUpdate: false, notCheckable: true };
+  return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
+}
+function partial(message: string, hasUpdate = false): ImageCheckResult {
+  return { hasUpdate, checkStatus: 'partial', error: message };
 }
 
 describe('reduceServiceStatus', () => {

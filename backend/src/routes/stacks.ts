@@ -19,6 +19,7 @@ import { DatabaseService, type StackDossierFields } from '../services/DatabaseSe
 import { CacheService, type CacheFetchOutcome } from '../services/CacheService';
 import { UpdatePreviewService, isAuthoritativeNegativePreview } from '../services/UpdatePreviewService';
 import { ImageUpdateService } from '../services/ImageUpdateService';
+import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
@@ -2244,6 +2245,19 @@ stacksRouter.post('/:stackName/services/:serviceName/restore', async (req: Reque
 stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   try {
+    // Read-only: sticky reconciliation lives on POST so UpdateGuard and other
+    // GET consumers never mutate persisted scanner state.
+    const preview = await UpdatePreviewService.getInstance().getPreview(req.nodeId, stackName);
+    res.json(preview);
+  } catch (error) {
+    console.error('[Stacks] Update preview failed: %s', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to compute update preview' });
+  }
+});
+
+stacksRouter.post('/:stackName/update-preview', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  try {
     // Snapshot write-generation watermarks before the read-only preview so a
     // later clear can erase older confirmed/sticky rows without racing a
     // scanner that reserved or rewrote the row after this observation.
@@ -2252,6 +2266,7 @@ stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Respons
     const observedMemoryGeneration = imageUpdates.peekStackWriteGeneration(req.nodeId, stackName);
     const observedRowGeneration = db.getStackUpdateWriteGeneration(req.nodeId, stackName);
     const preview = await UpdatePreviewService.getInstance().getPreview(req.nodeId, stackName);
+    let reconciled = false;
     if (isAuthoritativeNegativePreview(preview)) {
       const clearResult = await imageUpdates.commitPreviewClear(
         req.nodeId,
@@ -2260,7 +2275,8 @@ stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Respons
         observedRowGeneration,
       );
       if (clearResult === 'cleared') {
-        CacheService.getInstance().invalidate('fleet-updates');
+        reconciled = true;
+        invalidateFleetUpdateCache();
         NotificationService.getInstance().broadcastEvent({
           type: 'state-invalidate',
           scope: 'image-updates',
@@ -2271,9 +2287,9 @@ stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Respons
         });
       }
     }
-    res.json(preview);
+    res.json({ ...preview, reconciled });
   } catch (error) {
-    console.error('[Stacks] Update preview failed: %s', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+    console.error('[Stacks] Update preview reconcile failed: %s', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to compute update preview' });
   }
 });
@@ -2298,6 +2314,7 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
     );
     DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
+    invalidateFleetUpdateCache();
     invalidateNodeCaches(req.nodeId);
     NotificationService.getInstance().broadcastEvent({
       type: 'state-invalidate',

@@ -43,6 +43,8 @@ function negativeOkPreview(stackName = 'web') {
       current_tag: '1.2.3',
       next_tag: null,
       has_update: false,
+      digest_update: false,
+      tag_update: false,
       semver_bump: 'none' as const,
       check_status: 'ok' as const,
     }],
@@ -175,8 +177,8 @@ describe('ImageUpdateService.commitPreviewClear', () => {
   });
 });
 
-describe('GET /api/stacks/:stackName/update-preview reconcile', () => {
-  it('clears sticky state and broadcasts on authoritative-negative preview', async () => {
+describe('GET/POST /api/stacks/:stackName/update-preview reconcile', () => {
+  it('GET does not mutate sticky state even for authoritative-negative preview', async () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
     db.upsertStackUpdateStatus(nodeId, 'web', true, 1000, 'partial', 'half');
@@ -190,6 +192,27 @@ describe('GET /api/stacks/:stackName/update-preview reconcile', () => {
       .set('Cookie', adminCookie);
 
     expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBeUndefined();
+    expect(db.getStackUpdateDetail(nodeId).web?.hasUpdate).toBe(true);
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it('POST clears sticky state and broadcasts on authoritative-negative preview', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'web', true, 1000, 'partial', 'half');
+
+    vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview').mockResolvedValue(negativeOkPreview('web'));
+    const broadcast = vi.spyOn(NotificationService.getInstance(), 'broadcastEvent').mockImplementation(() => undefined);
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate').mockImplementation(() => undefined);
+
+    const res = await request(app)
+      .post('/api/stacks/web/update-preview')
+      .set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(true);
     expect(db.getStackUpdateDetail(nodeId).web).toBeUndefined();
     expect(invalidate).toHaveBeenCalledWith('fleet-updates');
     expect(broadcast).toHaveBeenCalledWith(expect.objectContaining({
@@ -200,7 +223,7 @@ describe('GET /api/stacks/:stackName/update-preview reconcile', () => {
     }));
   });
 
-  it('clears an older confirmed ok+true row and broadcasts', async () => {
+  it('POST clears an older confirmed ok+true row and broadcasts', async () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
     const svc = ImageUpdateService.getInstance() as unknown as {
@@ -216,10 +239,11 @@ describe('GET /api/stacks/:stackName/update-preview reconcile', () => {
     const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate').mockImplementation(() => undefined);
 
     const res = await request(app)
-      .get('/api/stacks/web/update-preview')
+      .post('/api/stacks/web/update-preview')
       .set('Cookie', adminCookie);
 
     expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(true);
     expect(db.getStackUpdateDetail(nodeId).web).toBeUndefined();
     expect(invalidate).toHaveBeenCalledWith('fleet-updates');
     expect(broadcast).toHaveBeenCalledWith(expect.objectContaining({
@@ -228,54 +252,87 @@ describe('GET /api/stacks/:stackName/update-preview reconcile', () => {
     }));
   });
 
-  it('does not mutate on partial negative preview', async () => {
-    const db = DatabaseService.getInstance();
-    const nodeId = db.getDefaultNode()!.id!;
-    db.upsertStackUpdateStatus(nodeId, 'web', true, 1000, 'partial', 'half');
-
-    vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview').mockResolvedValue({
-      ...negativeOkPreview('web'),
-      summary: { ...negativeOkPreview('web').summary, check_status: 'partial' },
-    });
-
-    const res = await request(app)
-      .get('/api/stacks/web/update-preview')
-      .set('Cookie', adminCookie);
-
-    expect(res.status).toBe(200);
-    expect(db.getStackUpdateDetail(nodeId).web?.hasUpdate).toBe(true);
-  });
-
-  it('does not mutate when check_status is missing', async () => {
+  it('POST does not mutate on partial negative preview', async () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
     db.upsertStackUpdateStatus(nodeId, 'web', true, 1000, 'partial', 'half');
 
     const preview = negativeOkPreview('web');
-    const { check_status: _omit, ...summaryWithout } = preview.summary;
     vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview').mockResolvedValue({
       ...preview,
-      summary: summaryWithout as typeof preview.summary,
+      images: [{ ...preview.images[0], check_status: 'partial' }],
+      summary: { ...preview.summary, check_status: 'partial' },
     });
 
     const res = await request(app)
-      .get('/api/stacks/web/update-preview')
+      .post('/api/stacks/web/update-preview')
       .set('Cookie', adminCookie);
 
     expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(false);
     expect(db.getStackUpdateDetail(nodeId).web?.hasUpdate).toBe(true);
   });
 
-  it('does not broadcast when clear finds no row', async () => {
+  it('POST does not mutate when an image is not_checkable alongside ok', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'web', true, 1000, 'partial', 'half');
+
+    const preview = negativeOkPreview('web');
+    vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview').mockResolvedValue({
+      ...preview,
+      images: [
+        preview.images[0],
+        {
+          ...preview.images[0],
+          service: 'bad',
+          image: 'not-a-valid-ref',
+          check_status: 'not_checkable' as const,
+        },
+      ],
+      summary: { ...preview.summary, check_status: 'partial' as const },
+    });
+
+    const res = await request(app)
+      .post('/api/stacks/web/update-preview')
+      .set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(false);
+    expect(db.getStackUpdateDetail(nodeId).web?.hasUpdate).toBe(true);
+  });
+
+  it('POST does not mutate when check_status is missing from summary rollup fields still fail every-ok', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'web', true, 1000, 'partial', 'half');
+
+    const preview = negativeOkPreview('web');
+    vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview').mockResolvedValue({
+      ...preview,
+      images: [{ ...preview.images[0], check_status: 'partial' as const }],
+    });
+
+    const res = await request(app)
+      .post('/api/stacks/web/update-preview')
+      .set('Cookie', adminCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(false);
+    expect(db.getStackUpdateDetail(nodeId).web?.hasUpdate).toBe(true);
+  });
+
+  it('POST does not broadcast when clear finds no row', async () => {
     vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview').mockResolvedValue(negativeOkPreview('ghost'));
     const broadcast = vi.spyOn(NotificationService.getInstance(), 'broadcastEvent').mockImplementation(() => undefined);
     const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate').mockImplementation(() => undefined);
 
     const res = await request(app)
-      .get('/api/stacks/ghost/update-preview')
+      .post('/api/stacks/ghost/update-preview')
       .set('Cookie', adminCookie);
 
     expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(false);
     expect(broadcast).not.toHaveBeenCalled();
     expect(invalidate).not.toHaveBeenCalled();
   });
@@ -312,10 +369,11 @@ describe('GET /api/stacks/:stackName/update-preview reconcile', () => {
     const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate').mockImplementation(() => undefined);
 
     const res = await request(app)
-      .get('/api/stacks/web/update-preview')
+      .post('/api/stacks/web/update-preview')
       .set('Cookie', adminCookie);
 
     expect(res.status).toBe(200);
+    expect(res.body.reconciled).toBe(false);
     expect(previewCalls).toBe(1);
     expect(db.getStackUpdateDetail(nodeId).web?.hasUpdate).toBe(true);
     expect(db.getStackUpdateDetail(nodeId).web?.checkStatus).toBe('ok');

@@ -11,7 +11,11 @@ import { FileSystemService } from './FileSystemService';
 import { HealthGateService } from './HealthGateService';
 import { ServiceUpdateRecoveryService } from './ServiceUpdateRecoveryService';
 import { ImageUpdateService } from './ImageUpdateService';
-import type { ImageCheckResult } from './ImageUpdateService';
+import {
+    createAutoUpdateDigestGateState,
+    messageWhenNoDigestUpdate,
+    recordAutoUpdateImageCheck,
+} from '../helpers/autoUpdateDigestGate';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { formatNoTargetError } from '../utils/remoteTarget';
@@ -1056,35 +1060,24 @@ export class SchedulerService {
             console.log(`[SchedulerService] Stack "${stackName}": checking ${imageRefs.length} image(s): ${imageRefs.join(', ')}`);
         }
 
-        let hasUpdate = false;
-        const updatedImages: string[] = [];
-        const checkErrors: string[] = [];
+        const gate = createAutoUpdateDigestGateState();
 
         for (const imageRef of imageRefs) {
             try {
-                const result: ImageCheckResult = await imageUpdateService.checkImage(docker, imageRef);
-                if (result.error) {
-                    checkErrors.push(result.error);
-                } else if (result.hasUpdate) {
-                    hasUpdate = true;
-                    updatedImages.push(imageRef);
-                }
+                const result = await imageUpdateService.checkImage(docker, imageRef);
+                recordAutoUpdateImageCheck(gate, imageRef, result);
             } catch (e) {
                 const msg = getErrorMessage(e, String(e));
-                checkErrors.push(msg);
+                gate.checkErrors.push(msg);
                 console.warn(`[SchedulerService] Failed to check image ${sanitizeForLog(imageRef)}:`, sanitizeForLog((e as Error)?.message ?? String(e)));
             }
         }
 
-        if (!hasUpdate) {
-            if (checkErrors.length > 0 && checkErrors.length === imageRefs.length) {
-                return `Stack "${stackName}": WARNING - all image checks failed (${checkErrors.join('; ')}). Unable to determine update status.`;
-            }
-            if (checkErrors.length > 0) {
-                return `Stack "${stackName}": all reachable images up to date (${checkErrors.length} check(s) failed).`;
-            }
-            return `Stack "${stackName}": all images up to date.`;
+        if (!gate.hasDigestUpdate) {
+            return messageWhenNoDigestUpdate(stackName, gate, imageRefs.length);
         }
+
+        const { updatedImages } = gate;
 
         await this.enforceSchedulerPolicyGate(
             stackName,

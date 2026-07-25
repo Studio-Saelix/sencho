@@ -54,11 +54,17 @@ function appendErrorDetail(base: string, lastError?: string): string {
   return `${base} ${lastError}`;
 }
 
-function partialUpdateTooltip(lastError?: string): string {
-  // Neutral copy: partial + hasUpdate can mean newly detected OR retained;
-  // provenance is not persisted on the wire.
+function partialUpdateTooltip(hasUpdate: boolean, lastError?: string): string {
+  if (hasUpdate) {
+    // Neutral copy: partial + hasUpdate can mean newly detected OR retained;
+    // provenance is not persisted on the wire.
+    return appendErrorDetail(
+      'The last check was incomplete; an update was detected or retained, but the full stack could not be verified.',
+      lastError,
+    );
+  }
   return appendErrorDetail(
-    'The last check was incomplete; an update was detected or retained, but the full stack could not be verified.',
+    'The last image-update check was incomplete; update status could not be fully verified.',
     lastError,
   );
 }
@@ -81,7 +87,7 @@ export function StackRow(props: StackRowProps) {
   } = props;
 
   const confirmedUpdate = isConfirmedImageUpdate({ hasUpdate, checkStatus });
-  const partialIncomplete = hasUpdate && checkStatus === 'partial';
+  const partialIncomplete = checkStatus === 'partial';
   const failedCheck = checkStatus === 'failed';
 
   const handleClick = () => {
@@ -150,7 +156,7 @@ export function StackRow(props: StackRowProps) {
         ) : partialIncomplete ? (
           <RowTooltip
             trigger={<span data-testid="stack-trailing-check-partial"><AlertCircle className="w-3 h-3 text-warning-foreground/80" strokeWidth={1.5} /></span>}
-            label={partialUpdateTooltip(lastError)}
+            label={partialUpdateTooltip(hasUpdate, lastError)}
           />
         ) : failedCheck ? (
           <RowTooltip

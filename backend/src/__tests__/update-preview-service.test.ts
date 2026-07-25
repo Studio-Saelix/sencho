@@ -17,7 +17,7 @@ import type { DigestComparisonResult, TagListResult } from '../services/registry
 const PLATFORM = { os: 'linux', architecture: 'amd64' };
 
 function localDigest(digest: string | null): LocalDigestInfo {
-    return { digest, platform: PLATFORM };
+    return { digests: digest ? [digest] : [], platform: PLATFORM };
 }
 
 function tagsOk(tags: string[], nextCursor?: string): TagListResult {
@@ -214,7 +214,7 @@ describe('computeImagePreview', () => {
             listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk([])),
         });
         await computeImagePreview('web', 'ghcr.io/linuxserver/radarr:latest', deps);
-        expect(compareDigest).toHaveBeenCalledWith('sha256:aaa', 'ghcr.io', 'linuxserver/radarr', 'latest', PLATFORM, null);
+        expect(compareDigest).toHaveBeenCalledWith(['sha256:aaa'], 'ghcr.io', 'linuxserver/radarr', 'latest', PLATFORM, null);
     });
 });
 
@@ -225,6 +225,8 @@ describe('buildSummary', () => {
         current_tag: '1.0.0',
         next_tag: null,
         has_update: false,
+        digest_update: false,
+        tag_update: false,
         semver_bump: 'none' as const,
         check_status: 'ok' as const,
         ...partial,
@@ -404,6 +406,8 @@ describe('preview authority', () => {
                 current_tag: 'unknown',
                 next_tag: null,
                 has_update: false,
+                digest_update: false,
+                tag_update: false,
                 semver_bump: 'none',
                 check_status: 'not_checkable',
             },
