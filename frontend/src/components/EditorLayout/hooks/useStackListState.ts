@@ -19,6 +19,7 @@ import { useBulkStackActions, type BulkAction } from '@/hooks/useBulkStackAction
 import { useCrossNodeStackSearch } from '@/hooks/useCrossNodeStackSearch';
 import { SENCHO_LABELS_CHANGED } from '@/lib/events';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
+import { isConfirmedImageUpdate } from '@/types/imageUpdates';
 import { isInputFocused, isPaletteOpen } from '@/lib/keyboard-guards';
 import type { StackAction, StackActionResult } from '../EditorView';
 import type { Label as StackLabel } from '../../label-types';
@@ -431,26 +432,25 @@ export function useStackListState() {
     [files, searchQuery],
   );
 
-  // Sticky has_update during a failed check is not a verified update for the chip.
-  const hasConfirmedUpdate = useCallback((file: string) => {
+  const hasConfirmedSidebarUpdate = (file: string): boolean => {
     const info = sidebarStackUpdates[file];
-    return Boolean(info?.hasUpdate && info.checkStatus !== 'failed');
-  }, [sidebarStackUpdates]);
+    return info != null && isConfirmedImageUpdate(info);
+  };
 
   const filterCounts = useMemo(() => ({
     all: filteredFiles.length,
     up: filteredFiles.filter(f => stackStatuses[f] === 'running').length,
     down: filteredFiles.filter(f => isDownStatus(stackStatuses[f])).length,
-    updates: filteredFiles.filter(hasConfirmedUpdate).length,
-  }), [filteredFiles, stackStatuses, hasConfirmedUpdate]);
+    updates: filteredFiles.filter(hasConfirmedSidebarUpdate).length,
+  }), [filteredFiles, stackStatuses, sidebarStackUpdates]);
 
   const chipFilteredFiles = useMemo(() => {
     if (filterChip === 'all') return filteredFiles;
     if (filterChip === 'up') return filteredFiles.filter(f => stackStatuses[f] === 'running');
     if (filterChip === 'down') return filteredFiles.filter(f => isDownStatus(stackStatuses[f]));
-    if (filterChip === 'updates') return filteredFiles.filter(hasConfirmedUpdate);
+    if (filterChip === 'updates') return filteredFiles.filter(hasConfirmedSidebarUpdate);
     return filteredFiles;
-  }, [filteredFiles, filterChip, stackStatuses, hasConfirmedUpdate]);
+  }, [filteredFiles, filterChip, stackStatuses, sidebarStackUpdates]);
 
   const toggleBulkMode = useCallback(() => {
     setBulkMode(prev => {

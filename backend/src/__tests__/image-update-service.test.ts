@@ -111,10 +111,20 @@ vi.mock('../services/NodeRegistry', () => ({
 
 // compareLocalToRemoteTag is module-scoped inside checkImage; mock it to drive the
 // comparison outcome while keeping the real parseImageRef / selectLocalRepoDigests.
-const { mockCompareLocalToRemoteTag } = vi.hoisted(() => ({ mockCompareLocalToRemoteTag: vi.fn() }));
+const { mockCompareLocalToRemoteTag, mockListRegistryTagsResult } = vi.hoisted(() => ({
+  mockCompareLocalToRemoteTag: vi.fn(),
+  // Detection now checks tags alongside digests; default to an empty, successful
+  // list so digest-focused tests are not accidentally driven by a real network
+  // call finding a genuine newer tag for whatever image ref they pass.
+  mockListRegistryTagsResult: vi.fn().mockResolvedValue({ ok: true, tags: [] }),
+}));
 vi.mock('../services/registry-api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/registry-api')>();
-  return { ...actual, compareLocalToRemoteTag: mockCompareLocalToRemoteTag };
+  return {
+    ...actual,
+    compareLocalToRemoteTag: mockCompareLocalToRemoteTag,
+    listRegistryTagsResult: mockListRegistryTagsResult,
+  };
 });
 
 // ── Re-export internal helpers via the module ─────────────────────────
@@ -158,7 +168,7 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
   it('marks sha256-only refs not-checkable (no tag to track)', async () => {
     const docker = makeMockDocker();
     const result = await service.checkImage(docker, 'sha256:abc123');
-    expect(result).toEqual({ hasUpdate: false, notCheckable: true });
+    expect(result).toEqual({ hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true });
   });
 
   it('returns error when local image inspect fails', async () => {
@@ -195,7 +205,7 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     // Empty RepoDigests means locally built / not registry-backed.
     const docker = makeMockDocker([]);
     const result = await service.checkImage(docker, 'nginx:latest');
-    expect(result).toEqual({ hasUpdate: false, notCheckable: true });
+    expect(result).toEqual({ hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true });
   });
 
   it('errors when RepoDigests are present but none resolves a digest', async () => {
@@ -248,19 +258,19 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
   it('surfaces the specific failure reason (not a generic "unreachable") as the check error', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'error', reason: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
     const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
-    expect(result).toEqual({ hasUpdate: false, error: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
+    expect(result).toMatchObject({ hasUpdate: false, checkStatus: 'failed', error: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
   });
 
   it('reports an update when the comparison resolver classifies the remote as an update', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'update' });
     const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
-    expect(result).toEqual({ hasUpdate: true });
+    expect(result).toMatchObject({ hasUpdate: true, digestUpdate: true, checkStatus: 'ok' });
   });
 
   it('reports no update when the comparison resolver classifies the remote as a match', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
     const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
-    expect(result).toEqual({ hasUpdate: false });
+    expect(result).toMatchObject({ hasUpdate: false, digestUpdate: false, checkStatus: 'ok' });
   });
 
   it('passes the local digest, platform, and parsed ref through to the comparison resolver', async () => {
@@ -295,7 +305,7 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
     } as any;
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
     const result = await service.checkImage(docker, 'redis:8.8.0');
-    expect(result).toEqual({ hasUpdate: false });
+    expect(result).toEqual({ hasUpdate: false, digestUpdate: false, tagUpdate: false, checkStatus: 'ok' });
     expect(mockCompareLocalToRemoteTag).toHaveBeenCalledWith(
       [STALE, CURRENT],
       'registry-1.docker.io',

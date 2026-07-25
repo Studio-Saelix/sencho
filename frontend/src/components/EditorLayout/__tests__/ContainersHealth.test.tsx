@@ -549,3 +549,58 @@ describe('containers load states', () => {
     expect(screen.queryByRole('button', { name: /Monitor / })).toBeNull();
   });
 });
+
+describe('ContainersHealth Docker health status labels', () => {
+  const OLD_PHRASES = ['healthcheck passing', 'healthcheck failing', 'healthcheck starting'] as const;
+  const HEALTH_TOKENS = ['healthy', 'unhealthy', 'starting'] as const;
+
+  function metaLine(): HTMLElement {
+    const parent = screen.getByText('up 2 hours').parentElement;
+    if (!parent) throw new Error('expected meta line parent');
+    return parent;
+  }
+
+  function metaSpanTexts(meta: HTMLElement = metaLine()): Array<string | null> {
+    return Array.from(meta.querySelectorAll('span')).map((el) => el.textContent);
+  }
+
+  function renderWithHealth(healthStatus?: ContainerInfo['healthStatus']) {
+    const base = container([{ PrivatePort: 80, PublicPort: 8080 }]);
+    return renderHealth(
+      healthStatus === undefined ? base : ({ ...base, healthStatus } as ContainerInfo),
+    );
+  }
+
+  function expectNoLegacyPhrases(meta: HTMLElement) {
+    for (const phrase of OLD_PHRASES) {
+      expect(meta.textContent).not.toContain(phrase);
+    }
+  }
+
+  it.each(HEALTH_TOKENS)('renders exact meta-line token for healthStatus %s', (token) => {
+    renderWithHealth(token);
+    const meta = metaLine();
+    const labels = metaSpanTexts(meta);
+    expect(labels[0]).toBe('up 2 hours');
+    expect(labels).toContain(token);
+    expect(labels.filter((t) => t === token)).toHaveLength(1);
+    expectNoLegacyPhrases(meta);
+    expect(screen.getByRole('link', { name: /8080/ })).toBeInTheDocument();
+  });
+
+  it.each([
+    ['none', 'none'],
+    ['omitted', undefined],
+  ] as const)('omits a health token when healthStatus is %s', (_case, healthStatus) => {
+    renderWithHealth(healthStatus);
+    const meta = metaLine();
+    const labels = metaSpanTexts(meta);
+    expect(labels).toContain('up 2 hours');
+    for (const token of HEALTH_TOKENS) {
+      expect(labels).not.toContain(token);
+    }
+    expect(labels.filter((t) => t === '·')).toHaveLength(1);
+    expectNoLegacyPhrases(meta);
+    expect(screen.getByRole('link', { name: /8080/ })).toBeInTheDocument();
+  });
+});

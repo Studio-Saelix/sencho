@@ -64,6 +64,9 @@ export class CacheService {
 
   private readonly store = new Map<string, CacheEntry<unknown>>();
   private readonly inflight = new Map<string, Promise<unknown>>();
+  /** Per-key write generation. Bumped on invalidate so an older in-flight
+   *  fetcher cannot commit after the key was intentionally cleared. */
+  private readonly generations = new Map<string, number>();
   private readonly stats = new Map<string, NamespaceStats>();
 
   public static getInstance(): CacheService {
@@ -121,13 +124,21 @@ export class CacheService {
       return { value, outcome: 'inflight' };
     }
 
+    // Capture generation before the fetch so invalidate() during the wait can
+    // supersede this writer's store commit (and drop the inflight slot so a
+    // later caller starts a fresh computation).
+    const generation = this.currentGeneration(key);
+
     // This caller owns the computation; the closure records whether it ended
     // as a fresh compute or a stale fallback, read after the promise settles.
     let outcome: CacheFetchOutcome = 'computed';
+    const inflightSelf: { promise: Promise<T> | null } = { promise: null };
     const promise = (async () => {
       try {
         const value = await fetcher();
-        this.set(key, value, ttlMs);
+        if (this.currentGeneration(key) === generation) {
+          this.set(key, value, ttlMs);
+        }
         return value;
       } catch (err) {
         if (existing) {
@@ -137,9 +148,14 @@ export class CacheService {
         }
         throw err;
       } finally {
-        this.inflight.delete(key);
+        // Only clear the inflight slot if we still own it. invalidate() may
+        // have already deleted this entry and allowed a newer owner.
+        if (this.inflight.get(key) === inflightSelf.promise) {
+          this.inflight.delete(key);
+        }
       }
     })();
+    inflightSelf.promise = promise;
 
     this.inflight.set(key, promise);
     const value = await promise;
@@ -177,17 +193,22 @@ export class CacheService {
     this.store.set(key, { value, expiresAt: Date.now() + ttlMs });
   }
 
-  /** Invalidate a single key. */
+  /** Invalidate a single key and supersede any in-flight writer for it. */
   public invalidate(key: string): void {
     this.store.delete(key);
+    this.inflight.delete(key);
+    this.bumpGeneration(key);
   }
 
   /** Invalidate every key whose namespace matches `namespace`. */
   public invalidateNamespace(namespace: string): void {
     const prefix = `${namespace}:`;
-    for (const key of this.store.keys()) {
+    const keys = new Set([...this.store.keys(), ...this.inflight.keys(), ...this.generations.keys()]);
+    for (const key of keys) {
       if (key === namespace || key.startsWith(prefix)) {
         this.store.delete(key);
+        this.inflight.delete(key);
+        this.bumpGeneration(key);
       }
     }
   }
@@ -196,6 +217,7 @@ export class CacheService {
   public flush(): void {
     this.store.clear();
     this.inflight.clear();
+    this.generations.clear();
     this.stats.clear();
   }
 
@@ -258,5 +280,15 @@ export class CacheService {
     for (const [key, entry] of this.store) {
       if (entry.expiresAt <= now) this.store.delete(key);
     }
+  }
+
+  private currentGeneration(key: string): number {
+    return this.generations.get(key) ?? 0;
+  }
+
+  private bumpGeneration(key: string): number {
+    const next = this.currentGeneration(key) + 1;
+    this.generations.set(key, next);
+    return next;
   }
 }

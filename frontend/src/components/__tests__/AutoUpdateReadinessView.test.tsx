@@ -51,6 +51,7 @@ import {
   isReviewRequiredUpdatePreview,
   isVerificationOnlyPreview,
 } from '@/lib/updatePreviewActionability';
+import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
 
 function card(over: Partial<StackCard> = {}): StackCard {
   return {
@@ -63,16 +64,20 @@ function card(over: Partial<StackCard> = {}): StackCard {
     scheduledTask: null,
     preview: {
       stack_name: 'nextcloud',
-      images: [],
+      images: [{
+        service: 'app', image: 'nextcloud:27.1.4', current_tag: '27.1.4', next_tag: '27.1.4',
+        has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch', check_status: 'ok',
+      }],
       summary: {
         has_update: true,
         primary_image: 'nextcloud',
         current_tag: '27.1.4',
-        next_tag: '27.1.5',
+        next_tag: '27.1.4',
         semver_bump: 'patch',
-        update_kind: 'tag',
+        update_kind: 'digest',
         blocked: false,
         blocked_reason: null,
+        check_status: 'ok',
       },
       rollback_target: null,
       changelog: 'Fixes. Security patch.',
@@ -99,6 +104,7 @@ function previewSummary(over: Record<string, unknown> = {}) {
       blocked: false,
       blocked_reason: null,
       rebuild_available: false,
+      check_status: 'ok' as const,
       verification_failed: false,
       verification_error: null,
       ...over,
@@ -148,14 +154,14 @@ describe('verification preview helpers', () => {
     expect(isClearedUpdatePreview(preview)).toBe(false);
   });
 
-  it('keeps a single image with its own confirmed tag update fully actionable even though that same image also failed its own digest check', () => {
-    // has_update and check_error are independent per image: a tag-based
-    // update can be confirmed via the registry's tag list even when that
-    // same image's digest comparison against the OLD tag errored. There is
-    // no "other image" here, so this must not be held for review.
+  it('keeps a single image with its own confirmed digest update fully actionable even though that same image also failed its own digest check', () => {
+    // has_update and check_error are independent per image: a confirmed
+    // digest update is not held for review by that same image's own
+    // diagnostic text. There is no "other image" here, so this must not be
+    // held for review.
     const preview = {
-      ...previewSummary({ verification_failed: true, has_update: true, update_kind: 'tag', semver_bump: 'patch', next_tag: '8.8.1' }),
-      images: [{ has_update: true, check_error: 'Registry unreachable' }],
+      ...previewSummary({ verification_failed: true, has_update: true, update_kind: 'digest', semver_bump: 'patch' }),
+      images: [{ has_update: true, digest_update: true, check_error: 'Registry unreachable' }],
     };
     expect(isReviewRequiredUpdatePreview(preview)).toBe(false);
     expect(isActionableUpdatePreview(preview)).toBe(true);
@@ -163,9 +169,9 @@ describe('verification preview helpers', () => {
 
   it('holds a confirmed update for review when a genuinely different image failed verification', () => {
     const preview = {
-      ...previewSummary({ verification_failed: true, has_update: true, update_kind: 'tag', semver_bump: 'patch', next_tag: '8.8.1' }),
+      ...previewSummary({ verification_failed: true, has_update: true, update_kind: 'digest', semver_bump: 'patch' }),
       images: [
-        { has_update: true, check_error: null },
+        { has_update: true, digest_update: true, check_error: null },
         { has_update: false, check_error: 'Registry unreachable' },
       ],
     };
@@ -201,10 +207,10 @@ describe('verification preview helpers', () => {
         current_tag: '8.8.0',
         next_tag: '8.8.1',
         semver_bump: 'patch' as const,
-        update_kind: 'tag' as const,
+        update_kind: 'digest' as const,
         blocked: false,
         blocked_reason: null,
-        // verification_failed and rebuild_available intentionally omitted.
+        // check_status, verification_failed, and rebuild_available intentionally omitted.
       },
     };
     expect(isActionableUpdatePreview(legacyPreview)).toBe(true);
@@ -271,6 +277,39 @@ it('enables Apply for a safe, non-blocked update', () => {
   render(<MobileReadinessCard card={card()} onApply={vi.fn()} />);
   expect(apply()).toBeEnabled();
 });
+
+it('disables Apply for tag-only advisory updates', () => {
+  render(
+    <MobileReadinessCard
+      card={card({
+        preview: {
+          stack_name: 'nextcloud',
+          images: [{
+            service: 'app', image: 'nextcloud:27.1.4', current_tag: '27.1.4', next_tag: '27.1.5',
+            has_update: true, digest_update: false, tag_update: true, semver_bump: 'patch', check_status: 'ok',
+          }],
+          summary: {
+            has_update: true,
+            primary_image: 'nextcloud',
+            current_tag: '27.1.4',
+            next_tag: '27.1.5',
+            semver_bump: 'patch',
+            update_kind: 'tag',
+            blocked: false,
+            blocked_reason: null,
+            check_status: 'ok',
+          },
+          rollback_target: null,
+          changelog: 'Fixes.',
+        },
+      })}
+      onApply={vi.fn()}
+    />,
+  );
+  expect(screen.getByText(/Newer tag/i)).toBeInTheDocument();
+  expect(apply()).toBeDisabled();
+});
+
 
 it('disables Apply when the update is blocked (major bump)', () => {
   render(
@@ -405,9 +444,12 @@ it('offers per-service Apply when build-only companions make the stack multi-ser
             service: 'app',
             image: 'nextcloud:27',
             current_tag: '27.1.4',
-            next_tag: '27.1.5',
+            next_tag: '27.1.4',
             has_update: true,
+            digest_update: true,
+            tag_update: false,
             semver_bump: 'patch',
+            check_status: 'ok',
           }],
           build_services: ['cron'],
           summary: {
@@ -416,10 +458,11 @@ it('offers per-service Apply when build-only companions make the stack multi-ser
             current_tag: '27.1.4',
             next_tag: '27.1.5',
             semver_bump: 'patch',
-            update_kind: 'tag',
+            update_kind: 'digest',
             blocked: false,
             blocked_reason: null,
             has_build_services: true,
+            check_status: 'ok',
           },
           rollback_target: null,
           changelog: 'Fixes.',
@@ -488,9 +531,12 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
           service: 'app',
           image: 'nextcloud:27',
           current_tag: '27.1.4',
-          next_tag: '27.1.5',
+          next_tag: '27.1.4',
           has_update: true,
+          digest_update: true,
+          tag_update: false,
           semver_bump: 'patch' as const,
+          check_status: 'ok' as const,
         },
         {
           service: 'redis',
@@ -498,18 +544,22 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
           current_tag: '7.2',
           next_tag: '7.2',
           has_update: false,
+          digest_update: false,
+          tag_update: false,
           semver_bump: 'none' as const,
+          check_status: 'ok' as const,
         },
       ],
       summary: {
         has_update: true,
         primary_image: 'nextcloud',
         current_tag: '27.1.4',
-        next_tag: '27.1.5',
+        next_tag: '27.1.4',
         semver_bump: 'patch' as const,
-        update_kind: 'tag' as const,
+        update_kind: 'digest' as const,
         blocked: false,
         blocked_reason: null,
+        check_status: 'ok' as const,
       },
       rollback_target: null,
       changelog: 'Fixes.',
@@ -517,7 +567,7 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     const refreshedPreview = {
       ...multiPreview,
       images: multiPreview.images.map((img) => (
-        img.service === 'app' ? { ...img, has_update: false, current_tag: '27.1.5', next_tag: '27.1.5' } : img
+        img.service === 'app' ? { ...img, has_update: false, digest_update: false, current_tag: '27.1.4', next_tag: '27.1.4' } : img
       )),
       summary: { ...multiPreview.summary, has_update: false, current_tag: '27.1.5' },
     };
@@ -863,11 +913,14 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
           ok: true,
           json: async () => ({
             stack_name: 'web',
-            images: [{ service: 'web', image: 'nginx:1', current_tag: '1', next_tag: '2', has_update: true, semver_bump: 'patch', check_error: null }],
+            images: [{
+              service: 'web', image: 'nginx:1', current_tag: '1', next_tag: '2',
+              has_update: true, digest_update: true, semver_bump: 'patch', check_status: 'ok', check_error: null,
+            }],
             summary: {
               has_update: true, primary_image: 'nginx:1', current_tag: '1', next_tag: '2',
-              semver_bump: 'patch', update_kind: 'tag', blocked: false, blocked_reason: null,
-              verification_failed: false, verification_error: null,
+              semver_bump: 'patch', update_kind: 'digest', blocked: false, blocked_reason: null,
+              check_status: 'ok', verification_failed: false, verification_error: null,
             },
             rollback_target: null, changelog: null,
           }),
@@ -933,12 +986,12 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
             stack_name: 'redis',
             images: [{
               service: 'redis', image: 'redis:8.8.0', current_tag: '8.8.0', next_tag: '8.8.0',
-              has_update: false, semver_bump: 'none', check_error: null,
+              has_update: false, semver_bump: 'none', check_status: 'ok', check_error: null,
             }],
             summary: {
               has_update: false, primary_image: 'redis:8.8.0', current_tag: '8.8.0', next_tag: '8.8.0',
               semver_bump: 'none', update_kind: 'none', blocked: false, blocked_reason: null,
-              rebuild_available: false, verification_failed: false, verification_error: null,
+              rebuild_available: false, check_status: 'ok', verification_failed: false, verification_error: null,
             },
             rollback_target: null, changelog: null,
           }),
@@ -1036,8 +1089,8 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
             images: [],
             summary: {
               has_update: true, primary_image: 'redis:8.8.0', current_tag: '8.8.0', next_tag: '8.8.1',
-              semver_bump: 'patch', update_kind: 'tag', blocked: false, blocked_reason: null,
-              // verification_failed and rebuild_available intentionally omitted (legacy remote shape).
+              semver_bump: 'patch', update_kind: 'digest', blocked: false, blocked_reason: null,
+              // check_status, verification_failed, and rebuild_available intentionally omitted (legacy remote shape).
             },
             rollback_target: null, changelog: null,
           }),
@@ -1236,5 +1289,42 @@ describe('AutoUpdateReadinessView cadence fetch race', () => {
 
     expect(screen.queryByText(/Recheck ready/)).toBeNull();
     expect(screen.getByText(/Recheck available in/)).toBeInTheDocument();
+  });
+});
+
+describe('isAuthoritativeNegativePreview (Fleet card drop parity)', () => {
+  it('drops when a checkable image has ok + no update', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [{ check_status: 'ok' }],
+      summary: { has_update: false, check_status: 'ok' },
+    })).toBe(true);
+  });
+
+  it('retains not_checkable-only negative previews', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [{ check_status: 'not_checkable' }],
+      summary: { has_update: false, check_status: 'ok' },
+    })).toBe(false);
+  });
+
+  it('clears when every image is ok even if summary check_status is omitted', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [{ check_status: 'ok' }],
+      summary: { has_update: false },
+    })).toBe(true);
+  });
+
+  it('retains when image check_status is missing', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [{}],
+      summary: { has_update: false, check_status: 'ok' },
+    })).toBe(false);
+  });
+
+  it('retains empty image lists even with ok summary', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [],
+      summary: { has_update: false, check_status: 'ok' },
+    })).toBe(false);
   });
 });

@@ -298,6 +298,26 @@ describe('CacheService', () => {
     it('is a no-op for missing keys', () => {
       expect(() => cache.invalidate('ns:missing')).not.toThrow();
     });
+
+    it('prevents an in-flight fetch started before invalidate from committing afterward', async () => {
+      let resolveFetch!: (value: string) => void;
+      const staleFetcher = vi.fn(() => new Promise<string>((resolve) => {
+        resolveFetch = resolve;
+      }));
+
+      const stalePromise = cache.getOrFetch('fleet-updates', 60_000, staleFetcher);
+      cache.invalidate('fleet-updates');
+
+      const freshFetcher = vi.fn().mockResolvedValue('fresh');
+      const fresh = await cache.getOrFetch('fleet-updates', 60_000, freshFetcher);
+      expect(fresh).toBe('fresh');
+      expect(freshFetcher).toHaveBeenCalledTimes(1);
+
+      resolveFetch('stale');
+      await expect(stalePromise).resolves.toBe('stale');
+      // Stale writer must not overwrite the post-invalidate entry.
+      expect(cache.get<string>('fleet-updates')).toBe('fresh');
+    });
   });
 
   describe('invalidateNamespace', () => {

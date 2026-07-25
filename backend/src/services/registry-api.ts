@@ -910,13 +910,14 @@ function parseNextCursor(linkHeader: string | string[] | undefined): string | un
 }
 
 /**
- * Typed tag list for the Resources registry browser and update-preview's tag
- * check. Never collapses auth failures into an empty array (that would hide
- * credential problems). `credentials` is optional: `getAuthToken` already
- * resolves an anonymous pull token for public repositories on registries
- * whose `WWW-Authenticate` challenge grants one without credentials (Docker
- * Hub unconditionally; others via the standard token-service challenge), so
- * a public repository still returns a real tag list with none configured.
+ * Typed tag list for the Resources registry browser and update-preview authority.
+ * Never collapses auth failures into an empty array (that would hide credential
+ * problems and falsely look like a successful empty listing). `credentials` is
+ * optional: `getAuthToken` already resolves an anonymous pull token for public
+ * repositories on registries whose `WWW-Authenticate` challenge grants one
+ * without credentials (Docker Hub unconditionally; others via the standard
+ * token-service challenge), so a public repository still returns a real tag
+ * list with none configured.
  */
 export async function listRegistryTagsResult(
     registry: string,
@@ -963,48 +964,12 @@ export async function listRegistryTagsResult(
     }
 }
 
-// Short TTL, unlike the 24h manifest-classification cache: a tag list is
-// mutable (registries publish new tags at any time), but update-preview now
-// fans this call out across every image in every stack on every Fleet
-// reload, and anonymous listing (no stored credentials) has no other rate
-// limiting. Balances staleness against hammering the registry.
-const TAG_LIST_CACHE_TTL_MS = 15 * 60 * 1000;
-const TAG_LIST_CACHE_NAMESPACE = 'img-upd-tags';
-
-function tagListCacheKey(registry: string, repo: string): string {
-    const repoHash = crypto.createHash('sha256').update(repo).digest('hex');
-    return `${TAG_LIST_CACHE_NAMESPACE}:${canonicalRegistry(registry)}/${repoHash}`;
-}
-
-/**
- * Compatibility wrapper for update-preview: empty list on any failure,
- * including a private repository with no configured credentials (a real
- * auth failure, not evidence there is no newer tag). Cached (see
- * TAG_LIST_CACHE_TTL_MS) since this is the first page only, matching what
- * findNextTag actually consumes. Only a successful list is ever cached: the
- * fetcher throws on failure so CacheService's stale-on-error fallback can
- * serve the last good list, and a failure with no prior success propagates
- * out to this empty-list default rather than being written to the cache
- * itself (a rate limit or a not-yet-configured credential must not keep
- * reporting "no tags" for the rest of the TTL once it clears).
- */
+/** Compatibility wrapper for callers that only need tags: empty list on any failure. */
 export async function listRegistryTags(
     registry: string,
     repo: string,
     credentials?: RegistryCredentials | null,
 ): Promise<string[]> {
-    try {
-        return await CacheService.getInstance().getOrFetch(tagListCacheKey(registry, repo), TAG_LIST_CACHE_TTL_MS, async () => {
-            const result = await listRegistryTagsResult(registry, repo, credentials);
-            if (!result.ok) throw new Error(result.message);
-            return result.tags;
-        });
-    } catch {
-        return [];
-    }
-}
-
-/** Drops every cached tag list so a manual recheck sees newly-published tags immediately instead of waiting out TAG_LIST_CACHE_TTL_MS. */
-export function invalidateTagListCache(): void {
-    CacheService.getInstance().invalidateNamespace(TAG_LIST_CACHE_NAMESPACE);
+    const result = await listRegistryTagsResult(registry, repo, credentials);
+    return result.ok ? result.tags : [];
 }

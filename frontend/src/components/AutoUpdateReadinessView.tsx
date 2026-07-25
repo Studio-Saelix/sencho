@@ -7,6 +7,18 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import type { ImageUpdateStatus, StackUpdateInfo } from '@/types/imageUpdates';
+import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
+import { fetchUpdatePreview } from '@/lib/fetchUpdatePreview';
+import {
+  isActionableUpdatePreview,
+  isClearedUpdatePreview,
+  isLegacyPreview,
+  isPreviewUncertain,
+  isReviewRequiredUpdatePreview,
+  isServiceApplyActionable,
+  isTagOnlyAdvisory,
+  isVerificationOnlyPreview,
+} from '@/lib/updatePreviewActionability';
 import { useNodes } from '@/context/NodeContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, Kicker } from '@/components/mobile/mobile-ui';
@@ -15,13 +27,6 @@ import type { ScheduledTask } from '@/types/scheduling';
 import { SERVICE_SCOPED_UPDATE_CAPABILITY } from '@/lib/capabilities';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
-import {
-  isActionableUpdatePreview,
-  isClearedUpdatePreview,
-  isLegacyPreview,
-  isReviewRequiredUpdatePreview,
-  isVerificationOnlyPreview,
-} from '@/lib/updatePreviewActionability';
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
 
@@ -31,7 +36,11 @@ interface UpdatePreviewImage {
   current_tag: string;
   next_tag: string | null;
   has_update: boolean;
+  digest_update?: boolean;
+  tag_update?: boolean;
   semver_bump: SemverBump;
+  /** Absent on older remotes; backend uses !== 'not_checkable' for checkability. */
+  check_status?: 'ok' | 'partial' | 'failed' | 'not_checkable';
   check_error?: string | null;
 }
 
@@ -51,6 +60,8 @@ interface UpdatePreview {
     blocked_reason: string | null;
     has_build_services?: boolean;
     rebuild_available?: boolean;
+    /** Absent on older remotes; treat missing as non-authoritative. */
+    check_status?: 'ok' | 'partial' | 'failed';
     verification_failed?: boolean;
     verification_error?: string | null;
   };
@@ -163,7 +174,27 @@ function formatClock(ts: number | null): string {
   });
 }
 
-function RiskBadge({ bump, blocked, reviewRequired }: { bump: SemverBump; blocked: boolean; reviewRequired?: boolean }) {
+function RiskBadge({
+  bump,
+  blocked,
+  reviewRequired,
+  uncertain,
+  tagOnly,
+}: {
+  bump: SemverBump;
+  blocked: boolean;
+  reviewRequired?: boolean;
+  uncertain?: boolean;
+  tagOnly?: boolean;
+}) {
+  if (uncertain) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-warning">
+        <AlertTriangle className="h-3 w-3" strokeWidth={1.5} />
+        Check uncertain
+      </span>
+    );
+  }
   if (blocked || bump === 'major') {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-destructive">
@@ -177,6 +208,13 @@ function RiskBadge({ bump, blocked, reviewRequired }: { bump: SemverBump; blocke
       <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-warning">
         <AlertTriangle className="h-3 w-3" strokeWidth={1.5} />
         Review · unverified
+      </span>
+    );
+  }
+  if (tagOnly) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
+        Newer tag · edit Compose
       </span>
     );
   }
@@ -255,7 +293,6 @@ function StackReadinessCard({
   const applyDisabled = !isActionableUpdatePreview(preview)
     || applying
     || applyingService !== null;
-  const serviceApplyDisabled = blocked || applying || applyingService !== null;
 
   return (
     <Card className="flex flex-col gap-4 p-5">
@@ -275,7 +312,15 @@ function StackReadinessCard({
               Auto: Off
             </span>
           )}
-          {previewLoaded && preview && <RiskBadge bump={bump} blocked={blocked} reviewRequired={reviewRequired} />}
+          {previewLoaded && preview && (
+            <RiskBadge
+              bump={bump}
+              blocked={blocked}
+              reviewRequired={reviewRequired}
+              uncertain={isPreviewUncertain(preview)}
+              tagOnly={isTagOnlyAdvisory(preview)}
+            />
+          )}
         </div>
       </div>
 
@@ -360,7 +405,7 @@ function StackReadinessCard({
                         variant="outline"
                         className="h-6 gap-1 rounded-md px-2 text-[11px]"
                         onClick={() => onApplyService?.(stack, nodeId, img.service)}
-                        disabled={serviceApplyDisabled}
+                        disabled={blocked || applying || applyingService !== null || !isServiceApplyActionable(preview, img.service)}
                       >
                         {applyingService === img.service ? 'Applying...' : 'Apply'}
                       </Button>
@@ -549,7 +594,6 @@ export function MobileReadinessCard({
   const applyDisabled = !isActionableUpdatePreview(preview)
     || applying
     || applyingService !== null;
-  const serviceApplyDisabled = blocked || applying || applyingService !== null;
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
   const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
@@ -568,7 +612,15 @@ export function MobileReadinessCard({
               <CircleSlash className="h-3 w-3" strokeWidth={1.5} />Auto: Off
             </span>
           )}
-          {previewLoaded && preview && <RiskBadge bump={bump} blocked={blocked} reviewRequired={reviewRequired} />}
+          {previewLoaded && preview && (
+            <RiskBadge
+              bump={bump}
+              blocked={blocked}
+              reviewRequired={reviewRequired}
+              uncertain={isPreviewUncertain(preview)}
+              tagOnly={isTagOnlyAdvisory(preview)}
+            />
+          )}
         </div>
       </div>
 
@@ -621,7 +673,7 @@ export function MobileReadinessCard({
                       variant="outline"
                       className="h-7 gap-1 rounded-md px-2 text-[11px]"
                       onClick={() => onApplyService?.(stack, nodeId, img.service)}
-                      disabled={serviceApplyDisabled}
+                      disabled={blocked || applying || applyingService !== null || !isServiceApplyActionable(preview, img.service)}
                     >
                       {applyingService === img.service ? 'Applying...' : 'Apply'}
                     </Button>
@@ -873,9 +925,11 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       const previews = await Promise.all(
         flatPairs.map(async ({ nodeId, stack }) => {
           try {
-            const res = await fetchForNode(`/stacks/${encodeURIComponent(stack)}/update-preview`, nodeId);
-            if (!res.ok) return null;
-            return await res.json() as UpdatePreview;
+            const result = await fetchUpdatePreview(stack, {
+              fetchImpl: (path, init) => fetchForNode(path, nodeId, init),
+            });
+            if (!result.ok || !result.preview) return null;
+            return result.preview as UpdatePreview;
           } catch {
             return null;
           }
@@ -1052,13 +1106,25 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         }
         // Reload authoritative preview so summary / Apply affordances stay accurate.
         try {
-          const res = await fetchForNode(`/stacks/${encodeURIComponent(stack)}/update-preview`, nodeId);
-          if (res.ok) {
-            const next = await res.json() as UpdatePreview;
-            setCardField(c => c.stack === stack && c.nodeId === nodeId, { preview: next, previewLoaded: true });
+          const result = await fetchUpdatePreview(stack, {
+            fetchImpl: (path, init) => fetchForNode(path, nodeId, init),
+          });
+          if (result.ok && result.preview) {
+            const next = result.preview as UpdatePreview;
+            if (isAuthoritativeNegativePreview(next)) {
+              setGroups(prev => prev
+                .map(g => g.nodeId === nodeId
+                  ? { ...g, cards: g.cards.filter(c => c.stack !== stack) }
+                  : g)
+                .filter(g => g.cards.length > 0));
+            } else {
+              setCardField(c => c.stack === stack && c.nodeId === nodeId, { preview: next, previewLoaded: true });
+            }
+          } else {
+            console.error(`[AutoUpdateReadinessView] post-apply update-preview failed (${result.status})`);
           }
-        } catch {
-          // Preview refresh is best-effort; the update itself already succeeded.
+        } catch (err) {
+          console.error('[AutoUpdateReadinessView] post-apply update-preview refresh failed', err);
         }
         return {
           ok: true as const,
@@ -1114,6 +1180,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
     const r = flatCards.filter(c =>
       c.autoUpdateEnabled
       && c.previewLoaded
+      && c.preview !== null
       && isActionableUpdatePreview(c.preview),
     ).length;
     return { total: t, ready: r };

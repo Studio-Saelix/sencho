@@ -383,30 +383,6 @@ describe('listRegistryTags (compatibility wrapper)', () => {
     };
     await expect(listRegistryTags('ghcr.io', 'private/app', undefined)).resolves.toEqual([]);
   });
-
-  it('caches a successful list: a repeat call for the same registry+repo does not hit the network again', async () => {
-    let tagsListRequests = 0;
-    route = (url) => tokenOk(url) ?? (
-      url.includes('/tags/list')
-        ? (tagsListRequests++, { statusCode: 200, headers: {}, body: JSON.stringify({ tags: ['1.0.0'] }) })
-        : { statusCode: 500, headers: {} }
-    );
-    await expect(listRegistryTags('registry-1.docker.io', 'library/redis', null)).resolves.toEqual(['1.0.0']);
-    await expect(listRegistryTags('registry-1.docker.io', 'library/redis', null)).resolves.toEqual(['1.0.0']);
-    expect(tagsListRequests).toBe(1);
-  });
-
-  it('does not cache a failure: a repeat call after a transient failure retries immediately instead of waiting out the TTL', async () => {
-    let fail = true;
-    route = (url) => tokenOk(url) ?? (
-      url.includes('/tags/list')
-        ? (fail ? { statusCode: 503, headers: {} } : { statusCode: 200, headers: {}, body: JSON.stringify({ tags: ['2.0.0'] }) })
-        : { statusCode: 500, headers: {} }
-    );
-    await expect(listRegistryTags('registry-1.docker.io', 'library/nginx', null)).resolves.toEqual([]);
-    fail = false;
-    await expect(listRegistryTags('registry-1.docker.io', 'library/nginx', null)).resolves.toEqual(['2.0.0']);
-  });
 });
 
 // ─── selectLocalRepoDigest ───────────────────────────────────────────────
@@ -504,6 +480,15 @@ describe('selectLocalRepoDigests', () => {
 
   it('returns empty for an empty list', () => {
     expect(selectLocalRepoDigests([], parsed('nginx:latest'))).toEqual([]);
+  });
+
+  it('returns every matching RepoDigest for the image ref', () => {
+    const digests = selectLocalRepoDigests([
+      `nginx@${DIGEST_A}`,
+      `nginx@${DIGEST_B}`,
+      `redis@sha256:${'c'.repeat(64)}`,
+    ], parsed('nginx:latest'));
+    expect(digests).toEqual([DIGEST_A, DIGEST_B]);
   });
 });
 

@@ -52,6 +52,7 @@ import type { useAuth } from '@/context/AuthContext';
 import type { ContainerInfo, ContainerStatsEntry, StackAction } from './EditorView';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
+import { isConfirmedServiceUpdate } from '@/types/imageUpdates';
 
 const extractUptime = (status: string | undefined): string | null => {
     if (!status) return null;
@@ -64,9 +65,7 @@ const healthcheckLabel = (
     health?: 'healthy' | 'unhealthy' | 'starting' | 'none',
 ): string | null => {
     if (!health || health === 'none') return null;
-    if (health === 'healthy') return 'healthcheck passing';
-    if (health === 'unhealthy') return 'healthcheck failing';
-    return 'healthcheck starting';
+    return health;
 };
 
 type StackPill = {
@@ -735,7 +734,7 @@ export function ContainersHealth({
                         const group = safeContainers.filter(c => c.Service === spec.name);
                         const status = serviceUpdateStatuses.find(s => s.service === spec.name);
                         const busy = serviceUpdateInProgress?.service === spec.name;
-                        const hasUpdate = status?.hasUpdate === true;
+                        const hasUpdate = status ? isConfirmedServiceUpdate(status) : false;
                         const mode: 'update' | 'rebuild' = !hasUpdate && spec.hasBuild ? 'rebuild' : 'update';
                         const showUpdateAction = spec.declaredImage !== null || spec.hasBuild;
                         const isServiceActive = group.some(c => c.State === 'running' || c.State === 'paused');

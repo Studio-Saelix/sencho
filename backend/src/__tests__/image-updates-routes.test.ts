@@ -44,6 +44,18 @@ describe('GET /api/image-updates', () => {
     expect(res.status).toBe(200);
     expect(res.body).toBeInstanceOf(Object);
   });
+
+  it('excludes partial and failed retained rows from the confirmed boolean map', async () => {
+    const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+    DatabaseService.getInstance().upsertStackUpdateStatus(nodeId, 'ok-stack', true, 1000, 'ok', null);
+    DatabaseService.getInstance().upsertStackUpdateStatus(nodeId, 'partial-stack', true, 1000, 'partial', 'half');
+    DatabaseService.getInstance().upsertStackUpdateStatus(nodeId, 'failed-stack', true, 1000, 'failed', 'boom');
+    const res = await request(app).get('/api/image-updates').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body['ok-stack']).toBe(true);
+    expect(res.body['partial-stack']).toBe(false);
+    expect(res.body['failed-stack']).toBe(false);
+  });
 });
 
 describe('GET /api/image-updates/detail', () => {
@@ -374,7 +386,7 @@ describe('POST /api/auto-update/execute', () => {
     const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
-      .mockResolvedValue({ hasUpdate: true } as never);
+      .mockResolvedValue({ hasUpdate: true, digestUpdate: true } as never);
     const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
     const gateSpy = vi.spyOn(PolicyEnforcement, 'enforcePolicyPreDeploy').mockResolvedValue({
       ok: false,
@@ -420,7 +432,7 @@ describe('POST /api/auto-update/execute', () => {
     const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
-      .mockResolvedValue({ hasUpdate: true } as never);
+      .mockResolvedValue({ hasUpdate: true, digestUpdate: true } as never);
     const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
     const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-au');
     try {

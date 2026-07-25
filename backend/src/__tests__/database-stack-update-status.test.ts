@@ -46,10 +46,40 @@ describe('stack_update_status tri-state accessors', () => {
     expect(db().getStackUpdateDetail(NODE).web.checkStatus).toBe('ok');
   });
 
-  it('keeps getStackUpdateStatus a boolean map for the fleet contract', () => {
+  it('keeps getStackUpdateStatus a raw boolean map ignoring check_status', () => {
     db().upsertStackUpdateStatus(NODE, 'web', true, 1000, 'ok', null);
     db().upsertStackUpdateStatus(NODE, 'api', false, 1000, 'failed', 'boom');
-    expect(db().getStackUpdateStatus(NODE)).toEqual({ web: true, api: false });
+    db().upsertStackUpdateStatus(NODE, 'sticky', true, 1000, 'partial', 'half');
+    expect(db().getStackUpdateStatus(NODE)).toEqual({ web: true, api: false, sticky: true });
+  });
+
+  it('projects confirmed updates only via getConfirmedStackUpdateStatus', () => {
+    db().upsertStackUpdateStatus(NODE, 'web', true, 1000, 'ok', null);
+    db().upsertStackUpdateStatus(NODE, 'sticky', true, 1000, 'partial', 'half');
+    db().upsertStackUpdateStatus(NODE, 'failed', true, 1000, 'failed', 'boom');
+    db().upsertStackUpdateStatus(NODE, 'clean', false, 1000, 'ok', null);
+    expect(db().getConfirmedStackUpdateStatus(NODE)).toEqual({
+      web: true,
+      sticky: false,
+      failed: false,
+      clean: false,
+    });
+  });
+
+  it('clearStackUpdateStatus returns deleted row count and removes services_json', () => {
+    db().upsertStackUpdateStatus(NODE, 'web', true, 1000, 'partial', 'half', [
+      { service: 'web', image: 'web:1', hasUpdate: true, checkStatus: 'ok', lastError: null },
+    ]);
+    expect(db().clearStackUpdateStatus(NODE, 'web')).toBe(1);
+    expect(db().getStackUpdateDetail(NODE).web).toBeUndefined();
+    expect(db().clearStackUpdateStatus(NODE, 'web')).toBe(0);
+  });
+
+  it('getNodeUpdateSummary counts only confirmed updates', () => {
+    db().upsertStackUpdateStatus(NODE, 'web', true, 1000, 'ok', null);
+    db().upsertStackUpdateStatus(NODE, 'sticky', true, 1000, 'partial', 'half');
+    const summary = db().getNodeUpdateSummary().find((r) => r.node_id === NODE);
+    expect(summary?.stacks_with_updates).toBe(1);
   });
 
   it('recordStackCheckFailure preserves a prior has_update while marking failed', () => {

@@ -209,7 +209,7 @@ test.describe('Sidebar stack name truncation', () => {
     });
   });
 
-  test('check-failed wins over a sticky update dot on a long stack name', async ({ page }) => {
+  test('failed icon wins over retained hasUpdate on a long stack name', async ({ page }) => {
     await page.route('**/api/image-updates/detail', async (route) => {
       await route.fulfill({
         status: 200,

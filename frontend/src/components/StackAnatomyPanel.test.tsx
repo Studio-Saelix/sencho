@@ -43,9 +43,12 @@ function previewBody(
         service: 'web',
         image: 'nginx:1.25',
         current_tag: '1.25',
-        next_tag: hasUpdate ? '1.26' : null,
+        next_tag: '1.25',
         has_update: hasUpdate,
-        semver_bump: hasUpdate ? 'minor' : 'none',
+        digest_update: hasUpdate,
+        tag_update: false,
+        semver_bump: hasUpdate ? 'patch' : 'none',
+        check_status: verificationFailed ? 'failed' : 'ok',
         check_error: over.check_error ?? null,
       },
     ],
@@ -53,13 +56,14 @@ function previewBody(
       has_update: hasUpdate,
       primary_image: 'nginx',
       current_tag: '1.25',
-      next_tag: '1.26',
-      semver_bump: hasUpdate ? 'minor' : 'none',
-      update_kind: hasUpdate ? 'tag' : 'none',
+      next_tag: '1.25',
+      semver_bump: hasUpdate ? 'patch' : 'none',
+      update_kind: hasUpdate ? 'digest' : 'none',
       blocked: over.blocked ?? false,
       blocked_reason: over.blocked_reason ?? null,
       has_build_services: hasBuild,
       rebuild_available: hasBuild,
+      check_status: verificationFailed ? 'failed' : 'ok',
       verification_failed: verificationFailed,
       verification_error: over.verification_error ?? null,
     },
@@ -67,31 +71,34 @@ function previewBody(
   };
 }
 
-/** Two-service preview: `web` confirms a tag update, `db` fails digest verification. */
+/** Two-service preview: `web` confirms a digest update, `db` fails digest verification. */
 function mixedPreviewBody(over: { blocked?: boolean; blocked_reason?: string | null } = {}) {
   return {
     build_services: [],
     images: [
       {
-        service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.26',
-        has_update: true, semver_bump: 'minor', check_error: null,
+        service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.25',
+        has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch',
+        check_status: 'ok', check_error: null,
       },
       {
         service: 'db', image: 'private.example/db:latest', current_tag: 'latest', next_tag: null,
-        has_update: false, semver_bump: 'none', check_error: 'Registry unreachable',
+        has_update: false, digest_update: false, tag_update: false, semver_bump: 'none',
+        check_status: 'failed', check_error: 'Registry unreachable',
       },
     ],
     summary: {
       has_update: true,
       primary_image: 'nginx',
       current_tag: '1.25',
-      next_tag: '1.26',
-      semver_bump: 'minor',
-      update_kind: 'tag',
+      next_tag: '1.25',
+      semver_bump: 'patch',
+      update_kind: 'digest',
       blocked: over.blocked ?? false,
       blocked_reason: over.blocked_reason ?? null,
       has_build_services: false,
       rebuild_available: false,
+      check_status: 'partial',
       verification_failed: true,
       verification_error: 'Registry unreachable',
     },
@@ -164,6 +171,33 @@ describe('StackAnatomyPanel edit affordance', () => {
 });
 
 describe('StackAnatomyPanel update banner', () => {
+  it('hides apply when only a newer tag is available', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes({
+          build_services: [],
+          images: [{
+            service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.26',
+            has_update: true, digest_update: false, tag_update: true, semver_bump: 'minor', check_status: 'ok',
+          }],
+          summary: {
+            has_update: true, primary_image: 'nginx', current_tag: '1.25', next_tag: '1.26',
+            semver_bump: 'minor', update_kind: 'tag', blocked: false, blocked_reason: null,
+            has_build_services: false, rebuild_available: false, check_status: 'ok',
+          },
+          changelog: null,
+        });
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    await waitFor(() => expect(screen.getByTestId('update-available-banner')).toBeInTheDocument());
+    expect(screen.getByText((t) => typeof t === 'string' && t.includes('newer tag') && t.includes('edit Compose pin'))).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'apply' })).not.toBeInTheDocument();
+  });
+
   it('shows the apply button and fires onApplyUpdate when clicked', async () => {
     const onApply = vi.fn();
     render(panel(false, onApply));
@@ -181,9 +215,9 @@ describe('StackAnatomyPanel update banner', () => {
         return jsonRes({
           build_services: [],
           images: [
-            { service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.26', has_update: true, semver_bump: 'minor' },
-            { service: 'cache', image: 'redis:7.2', current_tag: '7.2', next_tag: '7.4', has_update: true, semver_bump: 'minor' },
-            { service: 'db', image: 'postgres:16', current_tag: '16', next_tag: null, has_update: false, semver_bump: 'none' },
+            { service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.25', has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch', check_status: 'ok' },
+            { service: 'cache', image: 'redis:7.2', current_tag: '7.2', next_tag: '7.2', has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch', check_status: 'ok' },
+            { service: 'db', image: 'postgres:16', current_tag: '16', next_tag: null, has_update: false, digest_update: false, tag_update: false, semver_bump: 'none', check_status: 'ok' },
           ],
           summary: {
             has_update: true,
@@ -569,7 +603,7 @@ describe('StackAnatomyPanel capability gating (capability off)', () => {
 });
 
 describe('StackAnatomyPanel digest verification failure', () => {
-  it('shows a verification-failed banner instead of an update claim when digest check errors', async () => {
+  it('shows an update-check-status banner instead of an update claim when digest check errors', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/update-preview')) {
@@ -583,7 +617,7 @@ describe('StackAnatomyPanel digest verification failure', () => {
       return jsonRes(null, false);
     });
     render(panel(false));
-    expect(await screen.findByTestId('verification-failed-banner')).toBeInTheDocument();
+    expect(await screen.findByTestId('update-check-status-banner')).toBeInTheDocument();
     expect(screen.queryByTestId('update-available-banner')).toBeNull();
     expect(screen.getByText(/Registry unreachable/)).toBeInTheDocument();
   });
@@ -596,36 +630,49 @@ describe('StackAnatomyPanel digest verification failure', () => {
       return jsonRes(null, false);
     });
     render(panel(false));
-    expect(await screen.findByTestId('verification-failed-banner')).toBeInTheDocument();
+    // A confirmed update alongside a different image's failure renders only
+    // the update banner (mutually exclusive with the check-status banner);
+    // the review-required hold is inline in that banner's lead-in text.
     expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
+    expect(screen.queryByTestId('update-check-status-banner')).toBeNull();
     expect(screen.getByText(/review required/i)).toBeInTheDocument();
     expect(screen.queryByText(/safe to apply/i)).toBeNull();
     expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
   });
 
-  it('keeps a single image with its own confirmed tag update fully actionable even though that same image also failed its own digest check', async () => {
-    // has_update and check_error are independent per image: a tag-based update
-    // can be confirmed via the registry's tag list even when that same
-    // image's digest comparison against the OLD tag errored. There is no
-    // other image here, so this must NOT be held for review.
+  it('keeps a single image with its own confirmed digest update fully actionable even though that same image also carries diagnostic text', async () => {
+    // has_update and check_error are independent per image: a confirmed
+    // digest update (check_status 'ok') is not held for review by that same
+    // image's own diagnostic text. There is no other image here, so this
+    // must NOT be held for review.
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/update-preview')) {
-        return jsonRes(previewBody(true, [], {
-          verification_failed: true,
-          verification_error: 'Registry unreachable',
-          check_error: 'Registry unreachable',
-        }));
+        return jsonRes({
+          build_services: [],
+          images: [{
+            service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.25',
+            has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch',
+            check_status: 'ok', check_error: 'Registry unreachable',
+          }],
+          summary: {
+            has_update: true, primary_image: 'nginx', current_tag: '1.25', next_tag: '1.25',
+            semver_bump: 'patch', update_kind: 'digest', blocked: false, blocked_reason: null,
+            has_build_services: false, rebuild_available: false,
+            check_status: 'ok', verification_failed: true, verification_error: 'Registry unreachable',
+          },
+          changelog: null,
+        });
       }
       if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
       return jsonRes(null, false);
     });
     render(panel(false));
     expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
-    // previewBody's single image bumps 'minor', so the un-held lead-in reads
-    // "review recommended" (a semver-bump advisory), not "review required"
-    // (the blocked/mixed-state hold this test is proving does NOT apply here).
-    expect(screen.getByText(/review recommended/i)).toBeInTheDocument();
+    // previewBody's single image is a digest update, so the un-held lead-in
+    // reads "same-tag digest rebuild", not "review required" (the mixed-state
+    // hold this test is proving does NOT apply to a single image's own error).
+    expect(screen.getByText(/same-tag digest rebuild/i)).toBeInTheDocument();
     expect(screen.queryByText(/review required/i)).toBeNull();
     expect(screen.getByRole('button', { name: /^apply$/i })).toBeEnabled();
   });

@@ -37,6 +37,7 @@ const summary = (over: Partial<UpdatePreviewSummary> = {}): UpdatePreviewSummary
   blocked_reason: null,
   has_build_services: false,
   rebuild_available: false,
+  check_status: 'ok',
   verification_failed: false,
   verification_error: null,
   ...over,
@@ -270,7 +271,10 @@ describe('updatePreviewSignal verification failure', () => {
     current_tag: '1',
     next_tag: null,
     has_update: false,
+    digest_update: false,
+    tag_update: false,
     semver_bump: 'none',
+    check_status: 'ok',
     check_error: null,
     ...over,
   });

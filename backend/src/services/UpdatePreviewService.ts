@@ -12,13 +12,41 @@ import {
     parseImageRef,
     selectLocalRepoDigests,
     compareLocalToRemoteTag,
-    listRegistryTags,
+    listRegistryTagsResult,
     type ParsedRef,
     type RegistryCredentials,
-    type DigestComparisonResult,
 } from './registry-api';
+import {
+    detectImageUpdate,
+    type ImageUpdateDetectResult,
+    type ListRegistryTagsResultFn,
+    type PreviewImageCheckStatus,
+    type SemverBump,
+    computeSemverBump,
+    findNextTag,
+    isMovingTag,
+    listAllRegistryTagsBounded,
+    parseSemverTag,
+    PREVIEW_TAG_LIST_MAX_PAGES,
+    PREVIEW_TAG_LIST_MAX_TAGS,
+    PREVIEW_TAG_LIST_PAGE_SIZE,
+    type TagEnumOutcome,
+} from './imageUpdateDetect';
 
-export type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
+export type { SemverBump, PreviewImageCheckStatus, TagEnumOutcome, ListRegistryTagsResultFn };
+export {
+    computeSemverBump,
+    findNextTag,
+    isMovingTag,
+    listAllRegistryTagsBounded,
+    parseSemverTag,
+    PREVIEW_TAG_LIST_MAX_PAGES,
+    PREVIEW_TAG_LIST_MAX_TAGS,
+    PREVIEW_TAG_LIST_PAGE_SIZE,
+};
+
+/** Stack-level preview authority; absent on older remotes. */
+export type PreviewCheckStatus = 'ok' | 'partial' | 'failed';
 
 export interface UpdatePreviewImage {
     service: string;
@@ -26,11 +54,17 @@ export interface UpdatePreviewImage {
     current_tag: string;
     next_tag: string | null;
     has_update: boolean;
+    /** Same-tag content drift; Compose pull can apply without pin change. */
+    digest_update: boolean;
+    /** Higher pinned semver exists; advisory until Compose is edited. */
+    tag_update: boolean;
     semver_bump: SemverBump;
+    /** Authority of this image's checks; not_checkable for invalid refs. */
+    check_status: PreviewImageCheckStatus;
     /**
-     * Digest-comparison failure reason when the registry check could not be
-     * verified. Never paired with a digest-based has_update claim: callers must
-     * treat this as verification-failed / unknown, not as "up to date" or rebuild.
+     * Best operator-facing reason when check_status is not 'ok'/'not_checkable'.
+     * Never paired with a digest-based has_update claim: callers must treat
+     * this as verification-failed / unknown, not as "up to date" or rebuild.
      */
     check_error: string | null;
 }
@@ -56,7 +90,13 @@ export interface UpdatePreviewSummary {
     has_build_services: boolean;
     /** True when a manual update can rebuild local build services (always when has_build_services). */
     rebuild_available: boolean;
-    /** True when any image's digest comparison failed to verify. */
+    /**
+     * Whether every checkable image was verified authoritatively.
+     * Authoritative-negative reconcile requires check_status === 'ok' and !has_update.
+     * Older remotes omit this field; treat absence as non-authoritative.
+     */
+    check_status: PreviewCheckStatus;
+    /** True when any image's check_status is not 'ok' (excluding not_checkable). */
     verification_failed: boolean;
     /** First image check_error when verification_failed; otherwise null. */
     verification_error: string | null;
@@ -69,74 +109,6 @@ export interface UpdatePreview {
     summary: UpdatePreviewSummary;
     rollback_target: string | null;
     changelog: string | null;
-}
-
-interface SemverParts {
-    prefix: string;
-    major: number;
-    minor: number;
-    patch: number;
-    suffix: string;
-    raw: string;
-}
-
-const SEMVER_RE = /^(v)?(\d+)\.(\d+)\.(\d+)(?:-([A-Za-z][A-Za-z0-9.-]*))?$/;
-
-export function parseSemverTag(tag: string): SemverParts | null {
-    const m = tag.match(SEMVER_RE);
-    if (!m) return null;
-    return {
-        prefix: m[1] ?? '',
-        major: Number(m[2]),
-        minor: Number(m[3]),
-        patch: Number(m[4]),
-        suffix: m[5] ?? '',
-        raw: tag,
-    };
-}
-
-/**
- * A tag is "moving" when restoring the compose file would not revert the image
- * behind it: `latest`, a branch name, or an unpinned major/minor like `1.25`.
- * Only a fully-pinned semver tag (X.Y.Z, optionally `v`-prefixed and/or with a
- * `-prerelease` suffix) is treated as immutable, matching how a file rollback
- * restores the exact tag.
- */
-export function isMovingTag(tag: string): boolean {
-    return parseSemverTag(tag) === null;
-}
-
-function compareSemver(a: SemverParts, b: SemverParts): number {
-    if (a.major !== b.major) return a.major - b.major;
-    if (a.minor !== b.minor) return a.minor - b.minor;
-    return a.patch - b.patch;
-}
-
-export function findNextTag(currentTag: string, availableTags: string[]): string | null {
-    const current = parseSemverTag(currentTag);
-    if (!current) return null;
-    let best: SemverParts | null = null;
-    for (const tag of availableTags) {
-        const parsed = parseSemverTag(tag);
-        if (!parsed) continue;
-        if (parsed.prefix !== current.prefix) continue;
-        if (parsed.suffix !== current.suffix) continue;
-        if (compareSemver(parsed, current) <= 0) continue;
-        if (!best || compareSemver(parsed, best) > 0) best = parsed;
-    }
-    return best ? best.raw : null;
-}
-
-export function computeSemverBump(currentTag: string, nextTag: string | null): SemverBump {
-    if (!nextTag) return 'none';
-    if (nextTag === currentTag) return 'patch';
-    const current = parseSemverTag(currentTag);
-    const next = parseSemverTag(nextTag);
-    if (!current || !next) return 'unknown';
-    if (next.major > current.major) return 'major';
-    if (next.minor > current.minor) return 'minor';
-    if (next.patch > current.patch) return 'patch';
-    return 'none';
 }
 
 function maxBump(a: SemverBump, b: SemverBump): SemverBump {
@@ -191,8 +163,59 @@ export interface LocalDigestInfo {
 export interface ComputePreviewDeps {
     getLocalDigest: (imageRef: string, parsed: ParsedRef) => Promise<LocalDigestInfo>;
     compareDigest: typeof compareLocalToRemoteTag;
-    listRegistryTags: typeof listRegistryTags;
+    listRegistryTagsResult: ListRegistryTagsResultFn;
     getCredentials: (registry: string) => Promise<RegistryCredentials | null>;
+}
+
+function imageFromDetect(
+    service: string,
+    imageRef: string,
+    currentTag: string,
+    detected: ImageUpdateDetectResult,
+): UpdatePreviewImage {
+    return {
+        service,
+        image: imageRef,
+        current_tag: currentTag,
+        next_tag: detected.nextTag,
+        has_update: detected.hasUpdate,
+        digest_update: detected.digestUpdate,
+        tag_update: detected.tagUpdate,
+        semver_bump: detected.semverBump,
+        check_status: detected.checkStatus,
+        check_error: detected.reason,
+    };
+}
+
+function notCheckableImage(service: string, imageRef: string): UpdatePreviewImage {
+    return {
+        service,
+        image: imageRef,
+        current_tag: 'unknown',
+        next_tag: null,
+        has_update: false,
+        digest_update: false,
+        tag_update: false,
+        semver_bump: 'none',
+        check_status: 'not_checkable',
+        check_error: null,
+    };
+}
+
+/** Local digest could not be established at all; never reaches the registry. */
+function failedLocalDigestImage(service: string, imageRef: string, currentTag: string, reason: string): UpdatePreviewImage {
+    return {
+        service,
+        image: imageRef,
+        current_tag: currentTag,
+        next_tag: null,
+        has_update: false,
+        digest_update: false,
+        tag_update: false,
+        semver_bump: 'none',
+        check_status: 'failed',
+        check_error: reason,
+    };
 }
 
 export async function computeImagePreview(
@@ -202,65 +225,41 @@ export async function computeImagePreview(
 ): Promise<UpdatePreviewImage> {
     const parsed = parseImageRef(imageRef);
     if (!parsed) {
-        return {
-            service,
-            image: imageRef,
-            current_tag: 'unknown',
-            next_tag: null,
-            has_update: false,
-            semver_bump: 'none',
-            check_error: null,
-        };
+        return notCheckableImage(service, imageRef);
     }
 
     const credentials = await deps.getCredentials(parsed.registry);
-
-    // Digest-based: is a new build of the SAME tag available? Comparison errors
-    // never claim a digest update; they set check_error so operators see
-    // verification-failed. Empty RepoDigests stay not_checkable (no check_error),
-    // matching ImageUpdateService.
     const localInfo = await deps.getLocalDigest(imageRef, parsed);
-    const digestPromise: Promise<DigestComparisonResult | null> = localInfo.digests.length > 0
-        ? deps.compareDigest(localInfo.digests, parsed.registry, parsed.repo, parsed.tag, localInfo.platform, credentials)
-        : Promise.resolve(null);
-    const [comparison, tags] = await Promise.all([
-        digestPromise,
-        deps.listRegistryTags(parsed.registry, parsed.repo, credentials),
-    ]);
-    let digestUpdate = false;
-    let checkError: string | null = null;
-    if (comparison) {
-        digestUpdate = comparison.kind === 'update';
-        checkError = comparison.kind === 'error' ? comparison.reason : null;
-    } else if (localInfo.emptyReason === 'inspect_failed') {
-        checkError = 'Failed to inspect local image';
-    } else if (localInfo.emptyReason === 'unresolved') {
-        checkError = 'Could not resolve a local registry digest';
+    // A locally-built / non-registry-backed image (no RepoDigests at all) is
+    // not_checkable, matching ImageUpdateService.checkImage: it must never be
+    // funneled into detectImageUpdate's "no local digest" error path, which
+    // would misreport it as a verification failure instead of not applicable.
+    if (localInfo.emptyReason === 'not_checkable') {
+        return notCheckableImage(service, imageRef);
     }
-
-    // Tag-based: is a higher semver tag available?
-    const nextTag = findNextTag(parsed.tag, tags);
-
-    const hasUpdate = digestUpdate || nextTag !== null;
-    let semverBump: SemverBump = 'none';
-    let resolvedNext: string | null = null;
-    if (nextTag) {
-        resolvedNext = nextTag;
-        semverBump = computeSemverBump(parsed.tag, nextTag);
-    } else if (digestUpdate) {
-        resolvedNext = parsed.tag;
-        semverBump = 'patch';
+    // Inspect failure and unresolved RepoDigests never reach the registry, and
+    // detectImageUpdate's generic "no local digest" reason would blur these two
+    // distinct causes together; keep the specific reason, matching what
+    // ImageUpdateService.checkImage reports for the same two cases.
+    if (localInfo.emptyReason === 'inspect_failed') {
+        return failedLocalDigestImage(service, imageRef, parsed.tag, 'Failed to inspect local image');
     }
-
-    return {
-        service,
-        image: imageRef,
-        current_tag: parsed.tag,
-        next_tag: resolvedNext,
-        has_update: hasUpdate,
-        semver_bump: semverBump,
-        check_error: checkError,
-    };
+    if (localInfo.emptyReason === 'unresolved') {
+        return failedLocalDigestImage(service, imageRef, parsed.tag, 'Could not resolve a local registry digest');
+    }
+    const detected = await detectImageUpdate({
+        localDigests: localInfo.digests,
+        platform: localInfo.platform,
+        registry: parsed.registry,
+        repo: parsed.repo,
+        tag: parsed.tag,
+        credentials,
+        deps: {
+            compareDigest: deps.compareDigest,
+            listRegistryTagsResult: deps.listRegistryTagsResult,
+        },
+    });
+    return imageFromDetect(service, imageRef, parsed.tag, detected);
 }
 
 function buildRollbackTarget(image: string, currentTag: string): string | null {
@@ -274,6 +273,16 @@ function buildRollbackTarget(image: string, currentTag: string): string | null {
         : parsed.repo;
     const base = isDockerHub ? repo : `${parsed.registry}/${repo}`;
     return `${base}:${currentTag}`;
+}
+
+export function rollupPreviewCheckStatus(images: UpdatePreviewImage[]): PreviewCheckStatus {
+    const checkable = images.filter((i) => i.check_status !== 'not_checkable');
+    if (checkable.length === 0) return 'ok';
+    const allFailed = checkable.every((i) => i.check_status === 'failed');
+    if (allFailed) return 'failed';
+    const allOk = checkable.every((i) => i.check_status === 'ok');
+    if (allOk) return 'ok';
+    return 'partial';
 }
 
 export function buildSummary(
@@ -314,12 +323,22 @@ export function buildSummary(
             blocked_reason: blocked ? 'Major version jumps require human review before applying.' : null,
             has_build_services: hasBuildServices,
             rebuild_available: hasBuildServices,
+            check_status: rollupPreviewCheckStatus(images),
             verification_failed: verificationError !== null,
             verification_error: verificationError,
         },
         rollback_target: primary ? buildRollbackTarget(primary.image, primary.current_tag) : null,
         changelog: null,
     };
+}
+
+/** True when a preview is safe to clear sticky scanner state. */
+export function isAuthoritativeNegativePreview(preview: UpdatePreview): boolean {
+    // Every declared image must be explicitly ok. Mixed ok + not_checkable must
+    // not clear sticky rows that may still track unresolved services.
+    return preview.images.length > 0
+        && preview.images.every((i) => i.check_status === 'ok')
+        && preview.summary.has_update === false;
 }
 
 /** Filter a full-stack preview down to one service's images and recompute the summary from that subset. */
@@ -352,7 +371,7 @@ export class UpdatePreviewService {
         const deps: ComputePreviewDeps = {
             getCredentials: (registry) => RegistryService.getInstance().getAuthForRegistry(registry),
             compareDigest: compareLocalToRemoteTag,
-            listRegistryTags,
+            listRegistryTagsResult,
             getLocalDigest: async (imageRef: string, parsed: ParsedRef): Promise<LocalDigestInfo> => {
                 try {
                     const inspect = await docker.getDocker().getImage(imageRef).inspect();
@@ -370,14 +389,26 @@ export class UpdatePreviewService {
                         platform: { os: inspect.Os, architecture: inspect.Architecture },
                         emptyReason: digests.length === 0 ? 'unresolved' : null,
                     };
-                } catch {
+                } catch (err) {
+                    console.error('[UpdatePreview] local image inspect failed for %s', imageRef, err);
                     return { digests: [], platform: { os: '', architecture: '' }, emptyReason: 'inspect_failed' };
                 }
             },
         };
 
+        // Memoize service-independent detection by image ref so shared images
+        // hit the registry once, then attach each service name separately.
+        const detectByRef = new Map<string, Promise<UpdatePreviewImage>>();
         const results = await Promise.all(
-            stackImages.map(({ service, image }) => computeImagePreview(service, image, deps)),
+            stackImages.map(async ({ service, image }) => {
+                let shared = detectByRef.get(image);
+                if (!shared) {
+                    shared = computeImagePreview('_shared_', image, deps);
+                    detectByRef.set(image, shared);
+                }
+                const base = await shared;
+                return { ...base, service };
+            }),
         );
         return buildSummary(stackName, results, buildServices);
     }
