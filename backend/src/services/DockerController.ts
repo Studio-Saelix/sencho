@@ -2242,6 +2242,9 @@ class DockerController {
    * Legacy orphan containers that Compose ps cannot see but would block a deploy
    * (wrong project labels). When Compose already manages the stack, returns [] so
    * deploy can rely on selective `compose up` recreation.
+   * A thrown `compose ps` returns [] (fail closed): name-matched fallback must not
+   * run, because those IDs may still be healthy Compose runtimes that deploy would
+   * then destroy before `compose up` (which often fails for the same reason).
    */
   public async getLegacyOrphanContainersByStack(stackName: string): Promise<Array<{ Id: string }>> {
     const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
@@ -2252,17 +2255,17 @@ class DockerController {
     try {
       const composeContainers = await this.fetchComposePsContainers(stackName, stackDir);
       if (composeContainers.length > 0) return [];
+      // Empty successful ps: only then may name-matched leftovers be legacy orphans.
       return toIds(await this.smartFallback(stackName, stackDir));
     } catch (error) {
       const execError = error as NodeJS.ErrnoException & { stderr?: string };
       const mapped = describeSpawnError(execError, { command: 'docker compose ps' });
       const detail = execError.stderr || mapped.message;
       console.error('Docker Compose Error for %s:', sanitizeForLog(stackName), sanitizeForLog(detail));
-      try {
-        return toIds(await this.smartFallback(stackName, stackDir));
-      } catch {
-        return [];
-      }
+      // Fail closed: a thrown `compose ps` cannot prove the stack is unmanaged.
+      // Do not consult smartFallback — those name-matched IDs may be healthy
+      // Compose-managed runtimes that deploy would remove before up.
+      return [];
     }
   }
 

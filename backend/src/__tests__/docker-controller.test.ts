@@ -1720,14 +1720,16 @@ describe('DockerController - getLegacyOrphanContainersByStack', () => {
     fallbackSpy.mockRestore();
   });
 
-  it('falls back to legacy orphan lookup when compose ps throws', async () => {
+  it('returns [] when compose ps throws, even if fallback would match containers', async () => {
     const dc = DockerController.getInstance(1);
     const fetchSpy = vi.spyOn(dc as unknown as { fetchComposePsContainers: (...a: unknown[]) => Promise<unknown[]> }, 'fetchComposePsContainers')
       .mockRejectedValue(new Error('compose ps failed'));
     const fallbackSpy = vi.spyOn(dc as unknown as { smartFallback: (...a: unknown[]) => Promise<unknown[]> }, 'smartFallback')
-      .mockResolvedValue([{ Id: 'legacy-c2' }]);
+      .mockResolvedValue([{ Id: 'running-compose-c2' }]);
 
-    await expect(dc.getLegacyOrphanContainersByStack('my-stack')).resolves.toEqual([{ Id: 'legacy-c2' }]);
+    await expect(dc.getLegacyOrphanContainersByStack('my-stack')).resolves.toEqual([]);
+    // Must not consult name-matching fallback: those IDs may be healthy Compose runtimes.
+    expect(fallbackSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
     fallbackSpy.mockRestore();
   });
