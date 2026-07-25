@@ -35,7 +35,12 @@ export function parseImageRef(imageRef: string): ParsedRef | null {
     if (slashIdx !== -1) {
         const firstPart = imageRef.slice(0, slashIdx);
         if (firstPart.includes('.') || firstPart.includes(':') || firstPart === 'localhost') {
-            registry = firstPart;
+            // docker.io / index.docker.io are Docker Hub aliases; normalize them to the
+            // actual registry API host so requests never hit the marketing domain (which
+            // redirects instead of serving /v2/) and the library/ auto-prefix below still applies.
+            registry = (firstPart === 'docker.io' || firstPart === 'index.docker.io')
+                ? 'registry-1.docker.io'
+                : firstPart;
             rest = imageRef.slice(slashIdx + 1);
         }
     }
