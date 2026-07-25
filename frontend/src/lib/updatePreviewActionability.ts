@@ -28,3 +28,17 @@ export function isActionableUpdatePreview(
   return !preview.summary.blocked
     && Boolean(preview.summary.has_update || preview.summary.rebuild_available);
 }
+
+/**
+ * Fresh preview successfully proved there is nothing to apply, and the stack
+ * is not held for major-bump review. Sticky fleet booleans must not keep these
+ * cards pending.
+ */
+export function isClearedUpdatePreview(
+  preview: UpdatePreviewActionInput | null | undefined,
+): boolean {
+  if (!preview) return false;
+  if (preview.summary.blocked) return false;
+  if (isVerificationOnlyPreview(preview)) return false;
+  return !isActionableUpdatePreview(preview);
+}

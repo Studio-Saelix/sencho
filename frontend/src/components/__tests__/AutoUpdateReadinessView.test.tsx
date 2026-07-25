@@ -47,6 +47,7 @@ import AutoUpdateReadinessView, {
 } from '../AutoUpdateReadinessView';
 import {
   isActionableUpdatePreview,
+  isClearedUpdatePreview,
   isVerificationOnlyPreview,
 } from '@/lib/updatePreviewActionability';
 
@@ -150,6 +151,30 @@ describe('verification preview helpers', () => {
     expect(isVerificationOnlyPreview(undefined)).toBe(false);
     expect(isActionableUpdatePreview(null)).toBe(false);
     expect(isActionableUpdatePreview(undefined)).toBe(false);
+    expect(isClearedUpdatePreview(null)).toBe(false);
+    expect(isClearedUpdatePreview(undefined)).toBe(false);
+  });
+
+  it('treats a successful no-update preview as cleared', () => {
+    const preview = previewSummary({
+      has_update: false,
+      rebuild_available: false,
+      verification_failed: false,
+    });
+    expect(isClearedUpdatePreview(preview)).toBe(true);
+    expect(isActionableUpdatePreview(preview)).toBe(false);
+  });
+
+  it('does not treat blocked updates as cleared', () => {
+    const preview = previewSummary({
+      has_update: true,
+      blocked: true,
+      blocked_reason: 'Major version bump',
+      semver_bump: 'major',
+      update_kind: 'tag',
+    });
+    expect(isClearedUpdatePreview(preview)).toBe(false);
+    expect(isActionableUpdatePreview(preview)).toBe(false);
   });
 });
 
@@ -572,7 +597,9 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
     expect(screen.getByText('redis')).toBeInTheDocument();
     expect(screen.getByText(/Could not verify digest/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
-    expect(screen.getByText(/Everything is up to date/)).toBeInTheDocument();
+    expect(screen.getByText('No verified updates')).toBeInTheDocument();
+    expect(screen.queryByText(/Everything is up to date/)).toBeNull();
+    expect(screen.getByText('No verified updates pending')).toBeInTheDocument();
     expect(screen.queryByText(/ready to apply automatically/)).toBeNull();
   });
 
@@ -652,9 +679,9 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
     expect(screen.getByText(/verify failed/)).toBeInTheDocument();
   });
 
-  it('counts a sticky cleared preview as not ready while keeping the card', async () => {
-    // Sticky fleet still lists the stack, but fresh preview has no update and
-    // no verification failure. Card stays; ready filter must not count it.
+  it('drops a sticky cleared preview from the card grid without an advisory', async () => {
+    // Sticky fleet still lists the stack, but a successful fresh preview proves
+    // no update/rebuild. The false pending card must disappear.
     mockedFetch.mockImplementation((url: string) => {
       if (url === '/image-updates/fleet') {
         return Promise.resolve({ ok: true, json: async () => ({ '1': { redis: true } }) });
@@ -702,9 +729,11 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
 
     render(<AutoUpdateReadinessView />);
 
-    expect(await screen.findByRole('button', { name: /Apply now/i })).toBeEnabled();
-    expect(screen.getByText(/0 of 1 ready to apply automatically/)).toBeInTheDocument();
+    expect(await screen.findByText(/Everything is up to date/)).toBeInTheDocument();
+    expect(screen.getByText(/All stacks on current builds/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
     expect(screen.queryByText(/could not be checked/i)).toBeNull();
+    expect(screen.queryByText(/ready to apply automatically/)).toBeNull();
   });
 
   it('labels remote verification-only stacks with the node name in the advisory', async () => {

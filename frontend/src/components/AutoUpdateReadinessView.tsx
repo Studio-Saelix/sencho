@@ -15,7 +15,11 @@ import type { ScheduledTask } from '@/types/scheduling';
 import { SERVICE_SCOPED_UPDATE_CAPABILITY } from '@/lib/capabilities';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import { useDeployFeedback } from '@/context/DeployFeedbackContext';
-import { isActionableUpdatePreview, isVerificationOnlyPreview } from '@/lib/updatePreviewActionability';
+import {
+  isActionableUpdatePreview,
+  isClearedUpdatePreview,
+  isVerificationOnlyPreview,
+} from '@/lib/updatePreviewActionability';
 
 type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
 
@@ -233,7 +237,9 @@ function StackReadinessCard({
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImageCount > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
   const verificationOnly = isVerificationOnlyPreview(preview);
-  const applyDisabled = blocked || verificationOnly || applying || applyingService !== null;
+  const applyDisabled = !isActionableUpdatePreview(preview)
+    || applying
+    || applyingService !== null;
 
   return (
     <Card className="flex flex-col gap-4 p-5">
@@ -386,15 +392,17 @@ function ReadinessHero({
   nodeCount,
   refreshing,
   onRefresh,
+  unresolvedChecks = false,
 }: {
   total: number;
   ready: number;
   nodeCount: number;
   refreshing: boolean;
   onRefresh: () => void;
+  unresolvedChecks?: boolean;
 }) {
   const headline = total === 0
-    ? 'Everything is up to date'
+    ? (unresolvedChecks ? 'No verified updates' : 'Everything is up to date')
     : total === 1
       ? '1 update pending'
       : `${total} updates pending`;
@@ -520,7 +528,9 @@ export function MobileReadinessCard({
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImages.length > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
   const verificationOnly = isVerificationOnlyPreview(preview);
-  const applyDisabled = blocked || verificationOnly || applying || applyingService !== null;
+  const applyDisabled = !isActionableUpdatePreview(preview)
+    || applying
+    || applyingService !== null;
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
   const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
@@ -871,6 +881,9 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
               });
               continue;
             }
+            // Sticky fleet booleans can outlive a successful no-update preview.
+            // Drop those cards without treating them as check failures.
+            if (isClearedUpdatePreview(preview)) continue;
             cards.push({ ...c, preview, previewLoaded: true });
           }
           return { ...g, cards };
@@ -1082,10 +1095,14 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       <div className="flex h-full min-h-0 flex-col">
         <Masthead
           kicker="fleet · updates"
-          state={total === 0 ? 'Up to date' : `${total} pending`}
-          stateTone={total === 0 ? 'success' : 'warning'}
+          state={total === 0
+            ? (checkFailures.length > 0 ? 'No verified updates' : 'Up to date')
+            : `${total} pending`}
+          stateTone={total === 0 && checkFailures.length === 0 ? 'success' : 'warning'}
           live={total > 0}
-          meta={total > 0 ? `${ready} ready · ${total - ready} in review` : 'all stacks current'}
+          meta={total > 0
+            ? `${ready} ready · ${total - ready} in review`
+            : (checkFailures.length > 0 ? 'some checks unresolved' : 'all stacks current')}
           right={headerActions}
         />
         <div className="flex-1 min-h-0 overflow-y-auto p-4 [&>*+*]:mt-4">
@@ -1107,9 +1124,15 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             <div className="flex items-center justify-center py-16 font-mono text-xs text-stat-subtitle">Loading readiness...</div>
           ) : groups.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16 text-center">
-              <Shield className="h-8 w-8 text-success/70" strokeWidth={1.5} aria-hidden="true" />
-              <div className="font-display italic text-xl text-stat-value">All stacks on current builds</div>
-              <div className="font-mono text-[11px] text-stat-subtitle">Sencho rechecks registries on the configured interval.</div>
+              <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
+              <div className="font-display italic text-xl text-stat-value">
+                {checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
+              </div>
+              <div className="font-mono text-[11px] text-stat-subtitle">
+                {checkFailures.length > 0
+                  ? 'Review the unresolved checks above, then recheck.'
+                  : 'Sencho rechecks registries on the configured interval.'}
+              </div>
             </div>
           ) : (
             groups.map(group => (
@@ -1135,6 +1158,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         nodeCount={groups.length}
         refreshing={refreshing}
         onRefresh={handleRefresh}
+        unresolvedChecks={checkFailures.length > 0}
       />
 
       <CadenceStrip cadence={cadence} className="-mt-3 pl-7" />
@@ -1153,10 +1177,14 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         </div>
       ) : groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16">
-          <Shield className="h-8 w-8 text-success/70" strokeWidth={1.5} aria-hidden="true" />
-          <div className="font-display italic text-xl text-stat-value">All stacks on current builds</div>
+          <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
+          <div className="font-display italic text-xl text-stat-value">
+            {checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
+          </div>
           <div className="font-mono text-[11px] text-stat-subtitle">
-            Sencho rechecks registries on the configured interval.
+            {checkFailures.length > 0
+              ? 'Review the unresolved checks above, then recheck.'
+              : 'Sencho rechecks registries on the configured interval.'}
           </div>
         </div>
       ) : (
