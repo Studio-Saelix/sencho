@@ -158,7 +158,7 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
   it('marks sha256-only refs not-checkable (no tag to track)', async () => {
     const docker = makeMockDocker();
     const result = await service.checkImage(docker, 'sha256:abc123');
-    expect(result).toEqual({ hasUpdate: false, notCheckable: true });
+    expect(result).toEqual({ hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true });
   });
 
   it('returns error when local image inspect fails', async () => {
@@ -195,7 +195,7 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     // Empty RepoDigests means locally built / not registry-backed.
     const docker = makeMockDocker([]);
     const result = await service.checkImage(docker, 'nginx:latest');
-    expect(result).toEqual({ hasUpdate: false, notCheckable: true });
+    expect(result).toEqual({ hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true });
   });
 
   it('errors when RepoDigests are present but none resolves a digest', async () => {
@@ -237,26 +237,26 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
   it('surfaces the specific failure reason (not a generic "unreachable") as the check error', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'error', reason: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
     const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
-    expect(result).toEqual({ hasUpdate: false, error: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
+    expect(result).toMatchObject({ hasUpdate: false, checkStatus: 'failed', error: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
   });
 
   it('reports an update when the comparison resolver classifies the remote as an update', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'update' });
     const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
-    expect(result).toEqual({ hasUpdate: true });
+    expect(result).toMatchObject({ hasUpdate: true, digestUpdate: true, checkStatus: 'ok' });
   });
 
   it('reports no update when the comparison resolver classifies the remote as a match', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
     const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
-    expect(result).toEqual({ hasUpdate: false });
+    expect(result).toMatchObject({ hasUpdate: false, digestUpdate: false, checkStatus: 'ok' });
   });
 
   it('passes the local digest, platform, and parsed ref through to the comparison resolver', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
     await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
     expect(mockCompareLocalToRemoteTag).toHaveBeenCalledWith(
-      LOCAL_DIGEST,
+      [LOCAL_DIGEST],
       'ghcr.io',
       'linuxserver/radarr',
       'latest',

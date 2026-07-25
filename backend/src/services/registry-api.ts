@@ -242,14 +242,15 @@ export function repoDigestMatchesRef(repoDigest: string, parsed: ParsedRef): boo
 const SHA256_DIGEST_RE = /^sha256:[0-9a-f]{64}$/i;
 
 /**
- * Deterministic local RepoDigest selection shared by the scanner and the
- * update preview: the first entry whose repository matches the parsed
- * image ref, else the sole remaining valid entry, else null. A truncated
- * or malformed digest (not a complete "sha256:" + 64 hex chars) is never
- * selected, so a corrupted RepoDigests entry surfaces as "could not
- * resolve" rather than a false match or update.
+ * All usable local RepoDigests for a parsed image ref, shared by the scanner
+ * and update preview. Returns every valid digest whose repository matches the
+ * ref (deduped, first-seen order), else the sole remaining valid entry when
+ * nothing matches, else []. A truncated or malformed digest is never selected,
+ * so a corrupted RepoDigests entry surfaces as "could not resolve" rather than
+ * a false match or update. Callers must compare every candidate: Docker can
+ * list a stale index digest ahead of the current one on the same image.
  */
-export function selectLocalRepoDigest(repoDigests: string[], parsed: ParsedRef): string | null {
+export function selectLocalRepoDigests(repoDigests: readonly string[], parsed: ParsedRef): string[] {
     const valid = repoDigests
         .map((entry) => {
             const at = entry.indexOf('@');
@@ -257,9 +258,25 @@ export function selectLocalRepoDigest(repoDigests: string[], parsed: ParsedRef):
         })
         .filter((e): e is { entry: string; digest: string } => e !== null && SHA256_DIGEST_RE.test(e.digest));
 
-    const matched = valid.find((e) => repoDigestMatchesRef(e.entry, parsed));
-    if (matched) return matched.digest;
-    return valid.length === 1 ? valid[0].digest : null;
+    const matched: string[] = [];
+    const seen = new Set<string>();
+    for (const e of valid) {
+        if (!repoDigestMatchesRef(e.entry, parsed)) continue;
+        const key = e.digest.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        matched.push(e.digest);
+    }
+    if (matched.length > 0) return matched;
+    return valid.length === 1 ? [valid[0].digest] : [];
+}
+
+/**
+ * Scalar view of {@link selectLocalRepoDigests}: the first candidate, or null.
+ * Prefer the plural form when comparing against a remote tag.
+ */
+export function selectLocalRepoDigest(repoDigests: readonly string[], parsed: ParsedRef): string | null {
+    return selectLocalRepoDigests(repoDigests, parsed)[0] ?? null;
 }
 
 /** Outcome of a remote-digest lookup: the digest, or a human-readable reason it failed. */
@@ -762,16 +779,18 @@ async function classifyManifest(
  * always targets that digest.
  */
 export async function compareLocalToRemoteTag(
-    localDigest: string,
+    localDigests: readonly string[],
     registry: string,
     repo: string,
     tag: string,
     platform: { os: string; architecture: string },
     credentials?: RegistryCredentials | null,
 ): Promise<DigestComparisonResult> {
-    if (!SHA256_DIGEST_RE.test(localDigest)) {
+    const candidates = localDigests.filter((d) => SHA256_DIGEST_RE.test(d));
+    if (candidates.length === 0) {
         return { kind: 'error', reason: 'Local digest is malformed or truncated' };
     }
+    const candidateSet = new Set(candidates.map((d) => d.toLowerCase()));
 
     const ref = `${registry}/${repo}:${tag}`;
     const probe = await probeManifestForRef(registry, repo, tag, credentials, ref);
@@ -781,7 +800,7 @@ export async function compareLocalToRemoteTag(
     if (!SHA256_DIGEST_RE.test(primaryDigest)) {
         return { kind: 'error', reason: `Registry returned a malformed digest for ${ref}` };
     }
-    if (localDigest === primaryDigest) return { kind: 'match' };
+    if (candidateSet.has(primaryDigest.toLowerCase())) return { kind: 'match' };
 
     let classification: ManifestClassification;
     try {
@@ -792,14 +811,16 @@ export async function compareLocalToRemoteTag(
 
     if (classification.kind === 'single') return { kind: 'update' };
 
-    if (classification.exactDigests.includes(localDigest)) return { kind: 'match' };
+    if (classification.exactDigests.some((d) => candidateSet.has(d.toLowerCase()))) return { kind: 'match' };
 
     if (!platform.os || !platform.architecture) {
         return { kind: 'error', reason: `Local image platform is unknown; cannot verify multi-arch membership for ${ref}` };
     }
 
     const isMember = classification.descriptors.some(
-        (d) => d.os === platform.os && d.architecture === platform.architecture && d.digest === localDigest,
+        (d) => d.os === platform.os
+            && d.architecture === platform.architecture
+            && candidateSet.has(d.digest.toLowerCase()),
     );
     return isMember ? { kind: 'match' } : { kind: 'update' };
 }
@@ -852,13 +873,15 @@ function parseNextCursor(linkHeader: string | string[] | undefined): string | un
 }
 
 /**
- * Typed tag list for the Resources registry browser. Never collapses auth
- * failures into an empty array (that would hide credential problems).
+ * Typed tag list for the Resources registry browser and update-preview authority.
+ * Never collapses auth failures into an empty array (that would hide credential
+ * problems and falsely look like a successful empty listing).
+ * Pass null/undefined credentials to attempt anonymous pull.
  */
 export async function listRegistryTagsResult(
     registry: string,
     repo: string,
-    credentials: RegistryCredentials,
+    credentials?: RegistryCredentials | null,
     opts: { limit?: number; cursor?: string } = {},
 ): Promise<TagListResult> {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
@@ -896,13 +919,12 @@ export async function listRegistryTagsResult(
     }
 }
 
-/** Compatibility wrapper for update-preview: empty list on any failure. */
+/** Compatibility wrapper for callers that only need tags: empty list on any failure. */
 export async function listRegistryTags(
     registry: string,
     repo: string,
     credentials?: RegistryCredentials | null,
 ): Promise<string[]> {
-    if (!credentials) return [];
     const result = await listRegistryTagsResult(registry, repo, credentials);
     return result.ok ? result.tags : [];
 }

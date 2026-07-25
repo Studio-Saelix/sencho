@@ -63,3 +63,36 @@ export interface StackUpdateInfo {
     /** Per-service breakdown; absent when the stack has no persisted per-service data yet. */
     services?: StackServiceUpdateStatus[];
 }
+
+/**
+ * Confirmed update for sidebar / Updates filter / dashboard / Fleet.
+ * Missing checkStatus is treated as 'ok' for older-node /detail fallbacks.
+ * Partial or failed rows with hasUpdate=true are NOT confirmed.
+ */
+export function isConfirmedImageUpdate(info: { hasUpdate: boolean; checkStatus?: CheckStatus }): boolean {
+    return info.hasUpdate && (info.checkStatus ?? 'ok') === 'ok';
+}
+
+/** Confirmed per-service update for editor Update badges. */
+export function isConfirmedServiceUpdate(info: {
+    hasUpdate: boolean;
+    checkStatus?: ServiceCheckStatus;
+}): boolean {
+    return info.hasUpdate && (info.checkStatus ?? 'ok') === 'ok';
+}
+
+/**
+ * True when a live update-preview is safe to treat as "no update" for Fleet
+ * card drops and similar UI reconcile. Mirrors backend
+ * UpdatePreviewService.isAuthoritativeNegativePreview: every image must be
+ * explicitly ok, and !has_update. Empty / mixed not_checkable previews never clear.
+ */
+export function isAuthoritativeNegativePreview(preview: {
+    images: Array<{ check_status?: string | null }>;
+    summary: { has_update: boolean; check_status?: string | null };
+} | null | undefined): boolean {
+    if (!preview) return false;
+    return preview.images.length > 0
+        && preview.images.every((i) => i.check_status === 'ok')
+        && preview.summary.has_update === false;
+}

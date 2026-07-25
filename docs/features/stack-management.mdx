@@ -144,8 +144,9 @@ Each row leads with a two-character status indicator that summarizes the stack's
 
 Additional indicators appear to the right of the stack name:
 
-- A pulsing fuchsia dot flags that an image update is available.
-- A muted alert icon replaces the dot when the update check ran but failed to reach the registry or errored.
+- A pulsing fuchsia dot flags that an image update is available and the latest check completed successfully. That signal covers Compose-actionable digest drift (same tag, new registry content) as well as a newer tag that requires editing the Compose pin.
+- A muted warning icon appears when the last check was incomplete. When an update was also detected or previously recorded, the tooltip notes that the full stack could not be verified. When no update is recorded, the tooltip notes that update status could not be fully verified. Incomplete results are not counted under **Updates**.
+- A muted alert icon appears when the update check failed (and, when an earlier update was recorded, notes that the previous status was retained).
 - A branch icon signals that the Git source's upstream branch has moved ahead of the working copy.
 
 ### Search and filter chips
@@ -159,7 +160,7 @@ The search box above the list filters stacks by name. The chip row below it filt
 - **All**: every stack discovered in `COMPOSE_DIR`.
 - **Up**: stacks where every container is running.
 - **Down**: stacks with at least one stopped or exited container.
-- **Updates**: stacks with a pending image update.
+- **Updates**: stacks with a confirmed pending image update (latest check completed successfully). Incomplete or failed checks are excluded from this chip.
 
 Each chip carries a live count. Click **Hide filters** in the top-right of the row to collapse the chips when you want a denser list. Search and chips combine: filtering by **Updates** and typing a few characters returns the intersection.
 
@@ -281,7 +282,13 @@ Each row maps one compose concept to the value it resolves to right now:
 
 A footer card under the rows surfaces the first published port as a clickable **EXPOSED** link, so you can jump straight to the running app.
 
-If an image update is available, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows. Registry updates name each image with a pending update and show its version transition (for example `27.1.4 -> 27.1.5`); the detail line below reads `patch · safe to apply` (green), `minor · review recommended` (amber), or `major · breaking changes possible` (rose), followed by an **apply** button. Build-only stacks show **Rebuild available** instead of a version bump, with a **Rebuild & Update** button. A stack that mixes registry images and local builds still shows a single banner, with the rebuild note folded into the same detail line. Major bumps use the rose styling and are worth reviewing before applying.
+If an image update is available, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows.
+
+- **Digest rebuild / rebuild**: same-tag registry content changed, or a local `build:` service needs rebuilding. The banner shows the version context and an **apply** (or **Rebuild & Update**) button when the check completed successfully.
+- **Newer tag**: a higher semver tag exists than the pin in Compose. The detail line reads `newer tag · edit Compose pin`. There is no **apply** button; Compose pull does not rewrite image pins. Edit the Compose file (or use your usual pin-change workflow), then deploy.
+- **Incomplete or failed check** with no confirmed update: a separate amber banner explains that status is uncertain until a full check succeeds.
+
+For actionable registry updates, the detail line also reads `patch · safe to apply` (green), `minor · review recommended` (amber), or `major · breaking changes possible` (rose). Build-only stacks show **Rebuild available** instead of a version bump, with a **Rebuild & Update** button. A stack that mixes registry images and local builds still shows a single banner, with the rebuild note folded into the same detail line. Major bumps use the rose styling and are worth reviewing before applying.
 
 Rebuilds can take longer than a registry pull and depend on the local Dockerfile context, network access, and base-image availability. Atomic rollback restores compose and env files only; previously built image layers are not rolled back automatically.
 

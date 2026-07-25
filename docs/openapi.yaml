@@ -149,6 +149,69 @@ components:
           type: boolean
           example: true
 
+    UpdatePreviewImage:
+      type: object
+      required:
+        [service, image, current_tag, next_tag, has_update, digest_update, tag_update, semver_bump, check_status]
+      properties:
+        service: { type: string }
+        image: { type: string }
+        current_tag: { type: string }
+        next_tag: { type: ["string", "null"] }
+        has_update: { type: boolean }
+        digest_update:
+          type: boolean
+          description: Same-tag registry content drift; Compose pull can apply without changing the pin.
+        tag_update:
+          type: boolean
+          description: A higher pinned semver exists; advisory until Compose is edited.
+        semver_bump:
+          type: string
+          enum: [none, unknown, patch, minor, major]
+        check_status:
+          type: string
+          enum: [ok, partial, failed, not_checkable]
+
+    UpdatePreviewSummary:
+      type: object
+      required:
+        [has_update, primary_image, current_tag, next_tag, semver_bump, update_kind, blocked, blocked_reason, has_build_services, rebuild_available, check_status]
+      properties:
+        has_update: { type: boolean }
+        primary_image: { type: ["string", "null"] }
+        current_tag: { type: ["string", "null"] }
+        next_tag: { type: ["string", "null"] }
+        semver_bump:
+          type: string
+          enum: [none, unknown, patch, minor, major]
+        update_kind:
+          type: string
+          enum: [tag, digest, none]
+        blocked: { type: boolean }
+        blocked_reason: { type: ["string", "null"] }
+        has_build_services: { type: boolean }
+        rebuild_available: { type: boolean }
+        check_status:
+          type: string
+          enum: [ok, partial, failed]
+
+    UpdatePreview:
+      type: object
+      required: [stack_name, images, build_services, summary, rollback_target, changelog]
+      properties:
+        stack_name: { type: string }
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/UpdatePreviewImage"
+        build_services:
+          type: array
+          items: { type: string }
+        summary:
+          $ref: "#/components/schemas/UpdatePreviewSummary"
+        rollback_target: { type: ["string", "null"] }
+        changelog: { type: ["string", "null"] }
+
     LabelSource:
       type: string
       description: Provenance of a label. `unknown` when a container or image could not be inspected.
@@ -1785,6 +1848,68 @@ paths:
                     description: Unix timestamp of the backup, or null if no backup exists.
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/stacks/{stackName}/update-preview:
+    get:
+      operationId: getStackUpdatePreview
+      tags: [Stacks]
+      summary: Compute image update preview (read-only)
+      description: |
+        Computes the current registry update preview for the stack without
+        mutating persisted scanner state. Use POST when the client should
+        reconcile sticky update indicators after an authoritative-negative
+        result. Requires `stack:read` permission.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Update preview.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdatePreview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: reconcileStackUpdatePreview
+      tags: [Stacks]
+      summary: Compute update preview and reconcile sticky state
+      description: |
+        Computes the same preview as GET. When every image reports
+        `check_status: ok` and `has_update` is false (mixed `ok` +
+        `not_checkable` does not clear), clears sticky confirmed update rows
+        for the stack and sets `reconciled: true`. Requires `stack:read`
+        permission.
+      parameters:
+        - $ref: "#/components/parameters/stackName"
+        - $ref: "#/components/parameters/nodeId"
+      responses:
+        "200":
+          description: Update preview, with reconcile outcome.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UpdatePreview"
+                  - type: object
+                    required: [reconciled]
+                    properties:
+                      reconciled:
+                        type: boolean
+                        description: |
+                          True when sticky update rows were cleared after an
+                          authoritative-negative preview.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 

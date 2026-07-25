@@ -37,6 +37,7 @@ vi.mock('@/context/NodeContext', () => ({
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
 import AutoUpdateReadinessView, { MobileReadinessCard, CadenceStrip, type StackCard } from '../AutoUpdateReadinessView';
+import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
 
 function card(over: Partial<StackCard> = {}): StackCard {
   return {
@@ -49,16 +50,20 @@ function card(over: Partial<StackCard> = {}): StackCard {
     scheduledTask: null,
     preview: {
       stack_name: 'nextcloud',
-      images: [],
+      images: [{
+        service: 'app', image: 'nextcloud:27.1.4', current_tag: '27.1.4', next_tag: '27.1.4',
+        has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch', check_status: 'ok',
+      }],
       summary: {
         has_update: true,
         primary_image: 'nextcloud',
         current_tag: '27.1.4',
-        next_tag: '27.1.5',
+        next_tag: '27.1.4',
         semver_bump: 'patch',
-        update_kind: 'tag',
+        update_kind: 'digest',
         blocked: false,
         blocked_reason: null,
+        check_status: 'ok',
       },
       rollback_target: null,
       changelog: 'Fixes. Security patch.',
@@ -73,6 +78,39 @@ it('enables Apply for a safe, non-blocked update', () => {
   render(<MobileReadinessCard card={card()} onApply={vi.fn()} />);
   expect(apply()).toBeEnabled();
 });
+
+it('disables Apply for tag-only advisory updates', () => {
+  render(
+    <MobileReadinessCard
+      card={card({
+        preview: {
+          stack_name: 'nextcloud',
+          images: [{
+            service: 'app', image: 'nextcloud:27.1.4', current_tag: '27.1.4', next_tag: '27.1.5',
+            has_update: true, digest_update: false, tag_update: true, semver_bump: 'patch', check_status: 'ok',
+          }],
+          summary: {
+            has_update: true,
+            primary_image: 'nextcloud',
+            current_tag: '27.1.4',
+            next_tag: '27.1.5',
+            semver_bump: 'patch',
+            update_kind: 'tag',
+            blocked: false,
+            blocked_reason: null,
+            check_status: 'ok',
+          },
+          rollback_target: null,
+          changelog: 'Fixes.',
+        },
+      })}
+      onApply={vi.fn()}
+    />,
+  );
+  expect(screen.getByText(/Newer tag/i)).toBeInTheDocument();
+  expect(apply()).toBeDisabled();
+});
+
 
 it('disables Apply when the update is blocked (major bump)', () => {
   render(
@@ -117,9 +155,12 @@ it('offers per-service Apply when build-only companions make the stack multi-ser
             service: 'app',
             image: 'nextcloud:27',
             current_tag: '27.1.4',
-            next_tag: '27.1.5',
+            next_tag: '27.1.4',
             has_update: true,
+            digest_update: true,
+            tag_update: false,
             semver_bump: 'patch',
+            check_status: 'ok',
           }],
           build_services: ['cron'],
           summary: {
@@ -128,10 +169,11 @@ it('offers per-service Apply when build-only companions make the stack multi-ser
             current_tag: '27.1.4',
             next_tag: '27.1.5',
             semver_bump: 'patch',
-            update_kind: 'tag',
+            update_kind: 'digest',
             blocked: false,
             blocked_reason: null,
             has_build_services: true,
+            check_status: 'ok',
           },
           rollback_target: null,
           changelog: 'Fixes.',
@@ -200,9 +242,12 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
           service: 'app',
           image: 'nextcloud:27',
           current_tag: '27.1.4',
-          next_tag: '27.1.5',
+          next_tag: '27.1.4',
           has_update: true,
+          digest_update: true,
+          tag_update: false,
           semver_bump: 'patch' as const,
+          check_status: 'ok' as const,
         },
         {
           service: 'redis',
@@ -210,18 +255,22 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
           current_tag: '7.2',
           next_tag: '7.2',
           has_update: false,
+          digest_update: false,
+          tag_update: false,
           semver_bump: 'none' as const,
+          check_status: 'ok' as const,
         },
       ],
       summary: {
         has_update: true,
         primary_image: 'nextcloud',
         current_tag: '27.1.4',
-        next_tag: '27.1.5',
+        next_tag: '27.1.4',
         semver_bump: 'patch' as const,
-        update_kind: 'tag' as const,
+        update_kind: 'digest' as const,
         blocked: false,
         blocked_reason: null,
+        check_status: 'ok' as const,
       },
       rollback_target: null,
       changelog: 'Fixes.',
@@ -229,7 +278,7 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     const refreshedPreview = {
       ...multiPreview,
       images: multiPreview.images.map((img) => (
-        img.service === 'app' ? { ...img, has_update: false, current_tag: '27.1.5', next_tag: '27.1.5' } : img
+        img.service === 'app' ? { ...img, has_update: false, digest_update: false, current_tag: '27.1.4', next_tag: '27.1.4' } : img
       )),
       summary: { ...multiPreview.summary, has_update: false, current_tag: '27.1.5' },
     };
@@ -453,5 +502,42 @@ describe('AutoUpdateReadinessView cadence fetch race', () => {
 
     expect(screen.queryByText(/Recheck ready/)).toBeNull();
     expect(screen.getByText(/Recheck available in/)).toBeInTheDocument();
+  });
+});
+
+describe('isAuthoritativeNegativePreview (Fleet card drop parity)', () => {
+  it('drops when a checkable image has ok + no update', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [{ check_status: 'ok' }],
+      summary: { has_update: false, check_status: 'ok' },
+    })).toBe(true);
+  });
+
+  it('retains not_checkable-only negative previews', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [{ check_status: 'not_checkable' }],
+      summary: { has_update: false, check_status: 'ok' },
+    })).toBe(false);
+  });
+
+  it('clears when every image is ok even if summary check_status is omitted', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [{ check_status: 'ok' }],
+      summary: { has_update: false },
+    })).toBe(true);
+  });
+
+  it('retains when image check_status is missing', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [{}],
+      summary: { has_update: false, check_status: 'ok' },
+    })).toBe(false);
+  });
+
+  it('retains empty image lists even with ok summary', () => {
+    expect(isAuthoritativeNegativePreview({
+      images: [],
+      summary: { has_update: false, check_status: 'ok' },
+    })).toBe(false);
   });
 });

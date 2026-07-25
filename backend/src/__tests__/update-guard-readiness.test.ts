@@ -37,6 +37,7 @@ const summary = (over: Partial<UpdatePreviewSummary> = {}): UpdatePreviewSummary
   blocked_reason: null,
   has_build_services: false,
   rebuild_available: false,
+  check_status: 'ok',
   ...over,
 });
 

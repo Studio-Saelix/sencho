@@ -94,6 +94,20 @@ function parseServicesJson(raw: string | null | undefined): StackServiceStatus[]
     }
 }
 
+/** Write generation embedded in services_json; 0 when missing or unreadable. */
+function parseServicesJsonGeneration(raw: string | null | undefined): number {
+    if (!raw) return 0;
+    try {
+        const parsed = JSON.parse(raw) as { version?: unknown; generation?: unknown };
+        if (parsed?.version !== SERVICES_JSON_VERSION) return 0;
+        return typeof parsed.generation === 'number' && Number.isFinite(parsed.generation)
+            ? parsed.generation
+            : 0;
+    } catch {
+        return 0;
+    }
+}
+
 function stringifyServicesJson(services: StackServiceStatus[], generation: number): string {
     return JSON.stringify({ version: SERVICES_JSON_VERSION, generation, services });
 }
@@ -4628,6 +4642,13 @@ export class DatabaseService {
         ).run(nodeId, stackName, lastError, checkedAt, servicesJson);
     }
 
+    /**
+     * Raw has_update map for scanner retention and notification transitions.
+     * Ignores check_status: a partial/failed row with has_update=1 stays true
+     * so ImageUpdateService can preserve sticky state across incomplete runs.
+     * API/Fleet consumers that need "confirmed update" must use
+     * getConfirmedStackUpdateStatus instead.
+     */
     public getStackUpdateStatus(nodeId?: number): Record<string, boolean> {
         const rows = nodeId !== undefined
             ? this.db.prepare('SELECT stack_name, has_update FROM stack_update_status WHERE node_id = ?').all(nodeId) as Array<{ stack_name: string; has_update: number }>
@@ -4640,9 +4661,31 @@ export class DatabaseService {
     }
 
     /**
+     * Confirmed-update projection for GET /api/image-updates and Fleet local
+     * aggregation. True only when has_update=1 and the latest check completed
+     * successfully (check_status='ok'). Partial/failed retained rows are false.
+     */
+    public getConfirmedStackUpdateStatus(nodeId?: number): Record<string, boolean> {
+        const rows = nodeId !== undefined
+            ? this.db.prepare(
+                `SELECT stack_name, has_update, check_status FROM stack_update_status WHERE node_id = ?`
+            ).all(nodeId) as Array<{ stack_name: string; has_update: number; check_status: string | null }>
+            : this.db.prepare(
+                `SELECT stack_name, has_update, check_status FROM stack_update_status`
+            ).all() as Array<{ stack_name: string; has_update: number; check_status: string | null }>;
+        const result: Record<string, boolean> = {};
+        for (const row of rows) {
+            // Match getNodeUpdateSummary / frontend isConfirmedImageUpdate:
+            // null check_status is treated as ok (legacy rows).
+            result[row.stack_name] = row.has_update === 1 && (row.check_status ?? 'ok') === 'ok';
+        }
+        return result;
+    }
+
+    /**
      * Rich per-stack update status (hasUpdate + check outcome + reason) for the
-     * sidebar/readiness UI. GET /api/image-updates stays the boolean map so the
-     * cross-version fleet aggregation contract is unaffected.
+     * sidebar/readiness UI. Confirmed boolean maps use getConfirmedStackUpdateStatus;
+     * raw prior state for the scanner stays on getStackUpdateStatus.
      */
     public getStackUpdateDetail(nodeId: number): Record<string, StackUpdateDetail> {
         const rows = this.db.prepare(
@@ -4675,8 +4718,22 @@ export class DatabaseService {
         return parseServicesJson(row?.services_json);
     }
 
-    public clearStackUpdateStatus(nodeId: number, stackName: string): void {
-        this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+    /**
+     * Scanner write generation stored with services_json for this stack.
+     * Used by preview reconcile to skip clearing a row written after the
+     * preview observation watermark. Returns 0 when missing or unreadable.
+     */
+    public getStackUpdateWriteGeneration(nodeId: number, stackName: string): number {
+        const row = this.db.prepare(
+            'SELECT services_json FROM stack_update_status WHERE node_id = ? AND stack_name = ?'
+        ).get(nodeId, stackName) as { services_json: string | null } | undefined;
+        return parseServicesJsonGeneration(row?.services_json);
+    }
+
+    /** Deletes the full update row (aggregate + services_json). Returns deleted row count. */
+    public clearStackUpdateStatus(nodeId: number, stackName: string): number {
+        const result = this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+        return result.changes;
     }
 
     // --- Stack Scan Attempts ---
@@ -4718,7 +4775,10 @@ export class DatabaseService {
 
     public getNodeUpdateSummary(): Array<{ node_id: number; stacks_with_updates: number }> {
         return this.db.prepare(
-            'SELECT node_id, SUM(has_update) as stacks_with_updates FROM stack_update_status WHERE has_update = 1 GROUP BY node_id'
+            `SELECT node_id, SUM(has_update) as stacks_with_updates
+             FROM stack_update_status
+             WHERE has_update = 1 AND COALESCE(check_status, 'ok') = 'ok'
+             GROUP BY node_id`
         ).all() as Array<{ node_id: number; stacks_with_updates: number }>;
     }
 

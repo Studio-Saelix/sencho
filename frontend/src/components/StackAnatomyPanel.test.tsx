@@ -32,22 +32,26 @@ function previewBody(hasUpdate: boolean, buildServices: string[] = []) {
         service: 'web',
         image: 'nginx:1.25',
         current_tag: '1.25',
-        next_tag: hasUpdate ? '1.26' : null,
+        next_tag: '1.25',
         has_update: hasUpdate,
-        semver_bump: hasUpdate ? 'minor' : 'none',
+        digest_update: hasUpdate,
+        tag_update: false,
+        semver_bump: hasUpdate ? 'patch' : 'none',
+        check_status: 'ok',
       },
     ],
     summary: {
       has_update: hasUpdate,
       primary_image: 'nginx',
       current_tag: '1.25',
-      next_tag: '1.26',
-      semver_bump: 'minor',
-      update_kind: hasUpdate ? 'tag' : 'none',
+      next_tag: '1.25',
+      semver_bump: hasUpdate ? 'patch' : 'none',
+      update_kind: hasUpdate ? 'digest' : 'none',
       blocked: false,
       blocked_reason: null,
       has_build_services: hasBuild,
       rebuild_available: hasBuild,
+      check_status: 'ok',
     },
     changelog: null,
   };
@@ -118,6 +122,33 @@ describe('StackAnatomyPanel edit affordance', () => {
 });
 
 describe('StackAnatomyPanel update banner', () => {
+  it('hides apply when only a newer tag is available', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes({
+          build_services: [],
+          images: [{
+            service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.26',
+            has_update: true, digest_update: false, tag_update: true, semver_bump: 'minor', check_status: 'ok',
+          }],
+          summary: {
+            has_update: true, primary_image: 'nginx', current_tag: '1.25', next_tag: '1.26',
+            semver_bump: 'minor', update_kind: 'tag', blocked: false, blocked_reason: null,
+            has_build_services: false, rebuild_available: false, check_status: 'ok',
+          },
+          changelog: null,
+        });
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    await waitFor(() => expect(screen.getByTestId('update-available-banner')).toBeInTheDocument());
+    expect(screen.getByText((t) => typeof t === 'string' && t.includes('newer tag') && t.includes('edit Compose pin'))).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'apply' })).not.toBeInTheDocument();
+  });
+
   it('shows the apply button and fires onApplyUpdate when clicked', async () => {
     const onApply = vi.fn();
     render(panel(false, onApply));
@@ -135,9 +166,9 @@ describe('StackAnatomyPanel update banner', () => {
         return jsonRes({
           build_services: [],
           images: [
-            { service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.26', has_update: true, semver_bump: 'minor' },
-            { service: 'cache', image: 'redis:7.2', current_tag: '7.2', next_tag: '7.4', has_update: true, semver_bump: 'minor' },
-            { service: 'db', image: 'postgres:16', current_tag: '16', next_tag: null, has_update: false, semver_bump: 'none' },
+            { service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.25', has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch', check_status: 'ok' },
+            { service: 'cache', image: 'redis:7.2', current_tag: '7.2', next_tag: '7.2', has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch', check_status: 'ok' },
+            { service: 'db', image: 'postgres:16', current_tag: '16', next_tag: null, has_update: false, digest_update: false, tag_update: false, semver_bump: 'none', check_status: 'ok' },
           ],
           summary: {
             has_update: true,

@@ -111,13 +111,34 @@ describe('StackRow', () => {
     expect(container.querySelector('.bg-update')).toBeNull();
   });
 
-  it('prefers the update dot over the check-failed indicator', () => {
+  it('prefers the failed indicator over the update dot when checkStatus is failed', () => {
     const { container } = render(<StackRow {...base({ status: 'running', hasUpdate: true, checkStatus: 'failed' })} />);
+    expect(container.querySelector('.bg-update')).toBeNull();
+    expect(screen.getByTestId('stack-trailing-check-failed')).toBeInTheDocument();
+  });
+
+  it('shows a partial indicator (not purple) for incomplete checks with hasUpdate', async () => {
+    const { container } = render(<StackRow {...base({
+      hasUpdate: true,
+      checkStatus: 'partial',
+      lastError: 'ghcr.io unreachable',
+    })} />);
+    expect(container.querySelector('.bg-update')).toBeNull();
+    expect(screen.getByTestId('stack-trailing-check-partial')).toBeInTheDocument();
+    fireEvent.pointerMove(screen.getByTestId('stack-trailing-check-partial'));
+    const tips = await screen.findAllByText(/last check was incomplete/i);
+    expect(tips.length).toBeGreaterThan(0);
+    expect(screen.queryByText(/previous result was retained/i)).toBeNull();
+    expect((await screen.findAllByText(/ghcr.io unreachable/i)).length).toBeGreaterThan(0);
+  });
+
+  it('shows the purple update dot only for confirmed ok+hasUpdate', () => {
+    const { container } = render(<StackRow {...base({ hasUpdate: true, checkStatus: 'ok' })} />);
     expect(container.querySelector('.bg-update')).not.toBeNull();
   });
 
   it('names outdated services in the update tooltip', async () => {
-    render(<StackRow {...base({ hasUpdate: true, outdatedServices: ['api', 'worker'] })} />);
+    render(<StackRow {...base({ hasUpdate: true, checkStatus: 'ok', outdatedServices: ['api', 'worker'] })} />);
     fireEvent.pointerMove(screen.getByTestId('stack-trailing-update'));
     expect((await screen.findAllByText('Update available: api, worker')).length).toBeGreaterThan(0);
   });

@@ -11,6 +11,11 @@ interface UseNotificationsOptions {
   onImageUpdatesChange: () => void;
 }
 
+/** Local stack-updated and preview-reconcile clears both refresh the update map. */
+function isImageUpdatesRefreshAction(action: unknown): boolean {
+  return action === 'stack-updated' || action === 'update-status-reconciled';
+}
+
 export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChange }: UseNotificationsOptions) {
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [tickerConnected, setTickerConnected] = useState(false);
@@ -189,7 +194,7 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
             onStateInvalidateRef.current();
             if (msg.scope === 'notifications') {
               reconcileNotificationsInvalidateRef.current(msg);
-            } else if (msg.scope === 'image-updates' && msg.action === 'stack-updated') {
+            } else if (msg.scope === 'image-updates' && isImageUpdatesRefreshAction(msg.action)) {
               onImageUpdatesChangeRef.current();
             }
           }
@@ -271,7 +276,7 @@ export function useNotifications({ nodes, onStateInvalidate, onImageUpdatesChang
                 // Remote payloads use the remote's local DB node ID. Hub UI state
                 // is keyed by rn.id, so always reconcile with the hub node ID.
                 reconcileNotificationsInvalidateRef.current({ ...msg, nodeId: rn.id });
-              } else if (msg.scope === 'image-updates' && msg.action === 'stack-updated') {
+              } else if (msg.scope === 'image-updates' && isImageUpdatesRefreshAction(msg.action)) {
                 onImageUpdatesChangeRef.current();
               }
             }
