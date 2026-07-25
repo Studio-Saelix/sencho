@@ -373,10 +373,15 @@ export default function StackAnatomyPanel({
   const showUpdateBanner = hasUpdate || rebuildAvailable;
   const updateKind = updatePreview?.summary.update_kind ?? 'none';
   const blocked = Boolean(updatePreview?.summary.blocked);
+  // Another image in the stack failed digest verification: applying the
+  // full-stack update would pull/recreate that image as collateral, so the
+  // banner must not claim "safe to apply" and the Apply button is withheld
+  // (per-service update actions elsewhere are unaffected).
+  const reviewRequired = verificationFailed && showUpdateBanner;
   const updatedImages = (updatePreview?.images ?? []).filter((img) => img.has_update);
   const bannerSeverity: 'danger' | 'warn' | 'ok' = bump === 'major' || blocked
     ? 'danger'
-    : bump === 'minor' ? 'warn' : 'ok';
+    : bump === 'minor' || reviewRequired ? 'warn' : 'ok';
   const bannerTone = bannerSeverity === 'danger'
     ? 'border-destructive/40 bg-destructive/[0.06] text-destructive'
     : bannerSeverity === 'warn'
@@ -388,9 +393,9 @@ export default function StackAnatomyPanel({
       ? 'border-warning/40 text-warning hover:bg-warning/10'
       : 'border-success/40 text-success hover:bg-success/10';
   const bumpLabel = bump === 'none' || bump === 'unknown' ? '' : `${bump}`;
-  const bannerLeadIn = blocked
+  const bannerLeadIn = blocked || reviewRequired
     ? 'review required'
-    : hasUpdate && updateKind === 'digest' && !verificationFailed
+    : hasUpdate && updateKind === 'digest'
       ? 'same-tag digest rebuild'
       : hasUpdate && hasBuildServices
         ? 'registry update + local rebuild'
@@ -636,7 +641,7 @@ export default function StackAnatomyPanel({
                   <div className="mt-1 font-mono text-[10px] text-destructive">{updatePreview.summary.blocked_reason}</div>
                 )}
               </div>
-              {canEdit && !blocked && (
+              {canEdit && !blocked && !reviewRequired && (
                 <Button
                   type="button"
                   size="sm"

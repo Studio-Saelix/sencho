@@ -48,6 +48,7 @@ import AutoUpdateReadinessView, {
 import {
   isActionableUpdatePreview,
   isClearedUpdatePreview,
+  isReviewRequiredUpdatePreview,
   isVerificationOnlyPreview,
 } from '@/lib/updatePreviewActionability';
 
@@ -112,7 +113,7 @@ describe('verification preview helpers', () => {
     expect(isActionableUpdatePreview(preview)).toBe(false);
   });
 
-  it('keeps a verified update actionable even when verification_failed is set', () => {
+  it('holds a verified update for review, not full-stack-actionable, when another image failed verification', () => {
     const preview = previewSummary({
       verification_failed: true,
       has_update: true,
@@ -121,17 +122,30 @@ describe('verification preview helpers', () => {
       next_tag: '8.8.1',
     });
     expect(isVerificationOnlyPreview(preview)).toBe(false);
-    expect(isActionableUpdatePreview(preview)).toBe(true);
+    expect(isReviewRequiredUpdatePreview(preview)).toBe(true);
+    expect(isActionableUpdatePreview(preview)).toBe(false);
   });
 
-  it('keeps a rebuild actionable even when verification_failed is set', () => {
+  it('holds a rebuild for review, not full-stack-actionable, when another image failed verification', () => {
     const preview = previewSummary({
       verification_failed: true,
       rebuild_available: true,
       update_kind: 'digest',
     });
     expect(isVerificationOnlyPreview(preview)).toBe(false);
-    expect(isActionableUpdatePreview(preview)).toBe(true);
+    expect(isReviewRequiredUpdatePreview(preview)).toBe(true);
+    expect(isActionableUpdatePreview(preview)).toBe(false);
+  });
+
+  it('does not treat a review-required mixed state as cleared', () => {
+    const preview = previewSummary({
+      verification_failed: true,
+      has_update: true,
+      update_kind: 'tag',
+      semver_bump: 'patch',
+      next_tag: '8.8.1',
+    });
+    expect(isClearedUpdatePreview(preview)).toBe(false);
   });
 
   it('rejects blocked updates as actionable', () => {
@@ -227,6 +241,47 @@ it('disables Apply for verification-only preview (no confirmed update)', () => {
   );
   expect(apply()).toBeDisabled();
   expect(screen.getByTestId('readiness-verification-failed')).toBeInTheDocument();
+});
+
+it('holds full-stack Apply for review when one image confirms an update and another fails verification, but keeps per-service Apply enabled', () => {
+  const onApplyService = vi.fn();
+  render(
+    <MobileReadinessCard
+      card={card({
+        preview: {
+          stack_name: 'mixed', rollback_target: null, changelog: null,
+          images: [
+            { service: 'confirmed', image: 'alpine:latest', current_tag: 'latest', next_tag: 'latest', has_update: true, semver_bump: 'patch', check_error: null },
+            { service: 'failing', image: 'private.example/db:latest', current_tag: 'latest', next_tag: null, has_update: false, semver_bump: 'none', check_error: 'Registry unreachable' },
+          ],
+          summary: {
+            has_update: true,
+            primary_image: 'alpine:latest',
+            current_tag: 'latest',
+            next_tag: 'latest',
+            semver_bump: 'patch',
+            update_kind: 'digest',
+            blocked: false,
+            blocked_reason: null,
+            rebuild_available: false,
+            verification_failed: true,
+            verification_error: 'Registry unreachable',
+          },
+        },
+      })}
+      canServiceUpdate
+      onApply={vi.fn()}
+      onApplyService={onApplyService}
+    />,
+  );
+  expect(apply()).toBeDisabled();
+  expect(screen.getByTestId('readiness-verification-warning')).toBeInTheDocument();
+  expect(screen.queryByText(/Safe · patch/i)).toBeNull();
+  expect(screen.getByText(/Review · unverified/i)).toBeInTheDocument();
+  const serviceApply = screen.getByRole('button', { name: /^Apply$/i });
+  expect(serviceApply).toBeEnabled();
+  fireEvent.click(serviceApply);
+  expect(onApplyService).toHaveBeenCalledWith('nextcloud', 1, 'confirmed');
 });
 
 it('disables Apply while an update is in flight', () => {

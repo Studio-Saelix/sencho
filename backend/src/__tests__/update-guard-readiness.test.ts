@@ -239,4 +239,16 @@ describe('updatePreviewSignal verification failure', () => {
     expect(signal.detail).toMatch(/Registry unreachable/);
     expect(signal.detail).not.toMatch(/No pending image update detected/);
   });
+
+  it('holds a confirmed update for review, not ok, when another image failed digest verification', () => {
+    const signal = updatePreviewSignal(summary({
+      has_update: true,
+      semver_bump: 'patch',
+      update_kind: 'digest',
+      verification_failed: true,
+      verification_error: 'Registry unreachable',
+    }));
+    expect(signal.status).toBe('attention');
+    expect(signal.detail).toMatch(/Registry unreachable/);
+  });
 });

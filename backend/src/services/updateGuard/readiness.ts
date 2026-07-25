@@ -134,10 +134,19 @@ export function updatePreviewSignal(input: UpdatePreviewSummary | Errored): Read
     const buildNote = input.has_build_services
       ? ' Local build services will also be rebuilt from source.'
       : '';
-    const verifyNote = input.verification_failed
-      ? ` Digest verification also failed${input.verification_error ? `: ${input.verification_error}` : '.'}`
-      : '';
-    return { ...base, status: 'ok', affectsVerdict: true, detail: `Pending: ${kind}.${buildNote}${verifyNote}` };
+    // Another image in the stack failed digest verification: a full-stack
+    // apply would pull/recreate that image as collateral, so this is held for
+    // review rather than reported ready.
+    if (input.verification_failed) {
+      const verifyNote = input.verification_error ? `: ${input.verification_error}` : '.';
+      return {
+        ...base,
+        status: 'attention',
+        affectsVerdict: true,
+        detail: `Pending: ${kind}.${buildNote} Another image failed digest verification${verifyNote} Review before a full-stack update.`,
+      };
+    }
+    return { ...base, status: 'ok', affectsVerdict: true, detail: `Pending: ${kind}.${buildNote}` };
   }
   if (input.verification_failed && !input.has_update) {
     return {

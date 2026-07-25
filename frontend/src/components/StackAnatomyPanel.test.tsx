@@ -549,4 +549,24 @@ describe('StackAnatomyPanel digest verification failure', () => {
     expect(screen.queryByTestId('update-available-banner')).toBeNull();
     expect(screen.getByText(/Registry unreachable/)).toBeInTheDocument();
   });
+
+  it('does not claim "safe to apply" and withholds the full-stack Apply button when a confirmed update sits alongside a verification failure', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes(previewBody(true, [], {
+          verification_failed: true,
+          verification_error: 'Registry unreachable',
+        }));
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    expect(await screen.findByTestId('verification-failed-banner')).toBeInTheDocument();
+    expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
+    expect(screen.getByText(/review required/i)).toBeInTheDocument();
+    expect(screen.queryByText(/safe to apply/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
+  });
 });

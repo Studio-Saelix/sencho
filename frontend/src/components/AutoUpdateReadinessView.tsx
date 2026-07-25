@@ -18,6 +18,7 @@ import { useDeployFeedback } from '@/context/DeployFeedbackContext';
 import {
   isActionableUpdatePreview,
   isClearedUpdatePreview,
+  isReviewRequiredUpdatePreview,
   isVerificationOnlyPreview,
 } from '@/lib/updatePreviewActionability';
 
@@ -161,12 +162,20 @@ function formatClock(ts: number | null): string {
   });
 }
 
-function RiskBadge({ bump, blocked }: { bump: SemverBump; blocked: boolean }) {
+function RiskBadge({ bump, blocked, reviewRequired }: { bump: SemverBump; blocked: boolean; reviewRequired?: boolean }) {
   if (blocked || bump === 'major') {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-destructive">
         <ShieldAlert className="h-3 w-3" strokeWidth={1.5} />
         Blocked · major
+      </span>
+    );
+  }
+  if (reviewRequired) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-warning">
+        <AlertTriangle className="h-3 w-3" strokeWidth={1.5} />
+        Review · unverified
       </span>
     );
   }
@@ -237,9 +246,15 @@ function StackReadinessCard({
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImageCount > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
   const verificationOnly = isVerificationOnlyPreview(preview);
+  const reviewRequired = isReviewRequiredUpdatePreview(preview);
+  // Full-stack apply is held for review when another image in the same stack
+  // failed digest verification: applying would pull/recreate that image as
+  // collateral. Per-service apply targets only images with their own confirmed
+  // update, so it is not gated by a different image's verification failure.
   const applyDisabled = !isActionableUpdatePreview(preview)
     || applying
     || applyingService !== null;
+  const serviceApplyDisabled = blocked || applying || applyingService !== null;
 
   return (
     <Card className="flex flex-col gap-4 p-5">
@@ -259,7 +274,7 @@ function StackReadinessCard({
               Auto: Off
             </span>
           )}
-          {previewLoaded && preview && <RiskBadge bump={bump} blocked={blocked} />}
+          {previewLoaded && preview && <RiskBadge bump={bump} blocked={blocked} reviewRequired={reviewRequired} />}
         </div>
       </div>
 
@@ -278,6 +293,7 @@ function StackReadinessCard({
           let applyTitle: string | undefined;
           if (blocked) applyTitle = blockedReason ?? undefined;
           else if (verificationOnly) applyTitle = 'Digest verification failed';
+          else if (reviewRequired) applyTitle = 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
 
           let headline: ReactNode;
           if (verificationFailed && !p.summary.has_update) {
@@ -343,7 +359,7 @@ function StackReadinessCard({
                         variant="outline"
                         className="h-6 gap-1 rounded-md px-2 text-[11px]"
                         onClick={() => onApplyService?.(stack, nodeId, img.service)}
-                        disabled={applyDisabled}
+                        disabled={serviceApplyDisabled}
                       >
                         {applyingService === img.service ? 'Applying...' : 'Apply'}
                       </Button>
@@ -528,9 +544,11 @@ export function MobileReadinessCard({
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImages.length > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
   const verificationOnly = isVerificationOnlyPreview(preview);
+  const reviewRequired = isReviewRequiredUpdatePreview(preview);
   const applyDisabled = !isActionableUpdatePreview(preview)
     || applying
     || applyingService !== null;
+  const serviceApplyDisabled = blocked || applying || applyingService !== null;
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
   const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
@@ -549,7 +567,7 @@ export function MobileReadinessCard({
               <CircleSlash className="h-3 w-3" strokeWidth={1.5} />Auto: Off
             </span>
           )}
-          {previewLoaded && preview && <RiskBadge bump={bump} blocked={blocked} />}
+          {previewLoaded && preview && <RiskBadge bump={bump} blocked={blocked} reviewRequired={reviewRequired} />}
         </div>
       </div>
 
@@ -602,7 +620,7 @@ export function MobileReadinessCard({
                       variant="outline"
                       className="h-7 gap-1 rounded-md px-2 text-[11px]"
                       onClick={() => onApplyService?.(stack, nodeId, img.service)}
-                      disabled={applyDisabled}
+                      disabled={serviceApplyDisabled}
                     >
                       {applyingService === img.service ? 'Applying...' : 'Apply'}
                     </Button>
@@ -616,7 +634,7 @@ export function MobileReadinessCard({
               </span>
               <Button
                 size="sm"
-                variant={blocked || verificationOnly ? 'outline' : 'default'}
+                variant={blocked || verificationOnly || reviewRequired ? 'outline' : 'default'}
                 onClick={() => onApply(stack, nodeId)}
                 disabled={applyDisabled}
                 className="gap-1.5"
