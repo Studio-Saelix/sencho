@@ -120,32 +120,14 @@ describe('parseImageRef', () => {
   // the literal 'registry-1.docker.io' is recognized elsewhere (getAuthToken, the
   // library/ auto-prefix in parseImageRef). An unnormalized 'docker.io' or 'index.docker.io'
   // leaks through into request URLs and hits the marketing domain instead of the registry API.
-  it('normalizes an explicit docker.io host to the registry API host', () => {
-    expect(parseImageRef('docker.io/library/traefik:latest')).toEqual({
-      registry: 'registry-1.docker.io',
-      repo: 'library/traefik',
-      tag: 'latest',
-    });
-  });
-
-  it('normalizes docker.io and still applies the library/ auto-prefix when the namespace is omitted', () => {
-    expect(parseImageRef('docker.io/traefik:latest')).toEqual({
-      registry: 'registry-1.docker.io',
-      repo: 'library/traefik',
-      tag: 'latest',
-    });
-  });
-
-  it('normalizes an explicit index.docker.io host to the registry API host', () => {
-    expect(parseImageRef('index.docker.io/library/traefik:latest')).toEqual({
-      registry: 'registry-1.docker.io',
-      repo: 'library/traefik',
-      tag: 'latest',
-    });
-  });
-
-  it('normalizes index.docker.io and still applies the library/ auto-prefix when the namespace is omitted', () => {
-    expect(parseImageRef('index.docker.io/traefik:latest')).toEqual({
+  // Each alias is listed with and without an explicit library/ namespace to pin both paths.
+  it.each([
+    'docker.io/library/traefik:latest',
+    'docker.io/traefik:latest',
+    'index.docker.io/library/traefik:latest',
+    'index.docker.io/traefik:latest',
+  ])('normalizes %s to the registry API host and the library/ namespace', (ref) => {
+    expect(parseImageRef(ref)).toEqual({
       registry: 'registry-1.docker.io',
       repo: 'library/traefik',
       tag: 'latest',
