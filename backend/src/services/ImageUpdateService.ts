@@ -974,17 +974,18 @@ export class ImageUpdateService {
 
     /**
      * Clear persisted scanner update state after an authoritative-negative
-     * update preview. Does not reserve a new generation: the clear commits at
-     * `observedMemoryGeneration` (peeked before the preview) so any scanner that
-     * reserved after observation keeps a higher generation and supersedes this
-     * clear. `observedRowGeneration` is the services_json generation snapshotted
-     * before the preview; a row rewritten with a higher embedded generation is
-     * retained. Deletes ok+true rows at or below that watermark (the #1685
-     * contradiction), as well as sticky partial/failed rows.
-     * Returns:
-     *   - cleared: row deleted under the observation watermark
-     *   - stale: a newer writer reserved after observation; no delete committed
-     *   - absent: committed but nothing to clear (no row, or newer row gen)
+     * update preview. `observedMemoryGeneration` and `observedRowGeneration`
+     * are snapshotted before the preview.
+     *
+     * Ordering:
+     * - If memory generation advanced after observation, abort (stale).
+     * - If memory generation still equals the observation watermark, advance
+     *   (tombstone) so an equal-generation writer reserved before observation
+     *   cannot commit after the clear (SF-4).
+     * - If the persisted row generation advanced after observation, keep the row.
+     * - Otherwise delete partial, failed, and confirmed ok+true rows.
+     *
+     * Returns cleared | stale | absent.
      */
     public async commitPreviewClear(
         nodeId: number,
@@ -992,8 +993,27 @@ export class ImageUpdateService {
         observedMemoryGeneration: number,
         observedRowGeneration: number,
     ): Promise<'cleared' | 'stale' | 'absent'> {
+        const key = this.stackWriteKey(nodeId, stackName);
+        let state = this.stackWriteState.get(key);
+        if (!state) {
+            state = { chain: Promise.resolve(), generation: observedMemoryGeneration };
+            this.stackWriteState.set(key, state);
+        }
+
+        // A reservation after observation already owns a higher generation.
+        if (state.generation > observedMemoryGeneration) {
+            return 'stale';
+        }
+
+        // Tombstone the equal watermark so pre-observation writers reserved at
+        // this generation become stale when they later try to commit.
+        if (state.generation === observedMemoryGeneration) {
+            state.generation += 1;
+        }
+        const clearGeneration = state.generation;
+
         let deleted = 0;
-        const committed = await this.withStackWriteLock(nodeId, stackName, observedMemoryGeneration, () => {
+        const committed = await this.withStackWriteLock(nodeId, stackName, clearGeneration, () => {
             const db = DatabaseService.getInstance();
             const detail = db.getStackUpdateDetail(nodeId)[stackName];
             if (!detail) return;

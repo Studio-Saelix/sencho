@@ -329,27 +329,24 @@ describe('generation ordering for preview clear', () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
     db.upsertStackUpdateStatus(nodeId, 'ord', true, 1000, 'partial', 'half');
-    const svc = ImageUpdateService.getInstance() as unknown as {
-      peekStackWriteGeneration: (n: number, s: string) => number;
+    const svc = ImageUpdateService.getInstance();
+    const observedMem = svc.peekStackWriteGeneration(nodeId, 'ord');
+    const observedRow = db.getStackUpdateWriteGeneration(nodeId, 'ord');
+    const scannerGen = (svc as unknown as {
       reserveStackWriteGeneration: (n: number, s: string) => number;
+    }).reserveStackWriteGeneration(nodeId, 'ord');
+    expect(scannerGen).toBeGreaterThan(observedMem);
+
+    expect(await svc.commitPreviewClear(nodeId, 'ord', observedMem, observedRow)).toBe('stale');
+
+    const scannerCommitted = await (svc as unknown as {
       withStackWriteLock: (
         n: number,
         s: string,
         g: number,
         write: () => void | Promise<void>,
       ) => Promise<boolean>;
-    };
-
-    const observed = svc.peekStackWriteGeneration(nodeId, 'ord');
-    const scannerGen = svc.reserveStackWriteGeneration(nodeId, 'ord');
-    expect(scannerGen).toBeGreaterThan(observed);
-
-    const clearCommitted = await svc.withStackWriteLock(nodeId, 'ord', observed, () => {
-      db.clearStackUpdateStatus(nodeId, 'ord');
-    });
-    expect(clearCommitted).toBe(false);
-
-    const scannerCommitted = await svc.withStackWriteLock(nodeId, 'ord', scannerGen, () => {
+    }).withStackWriteLock(nodeId, 'ord', scannerGen, () => {
       db.upsertStackUpdateStatus(nodeId, 'ord', true, Date.now(), 'ok', null);
     });
     expect(scannerCommitted).toBe(true);
@@ -357,12 +354,21 @@ describe('generation ordering for preview clear', () => {
     expect(db.getStackUpdateDetail(nodeId).ord?.checkStatus).toBe('ok');
   });
 
-  it('an observation-watermark clear supersedes an older scanner reservation', async () => {
+  it('equal-generation scanner reserved before observation cannot rewrite after clear', async () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;
-    db.upsertStackUpdateStatus(nodeId, 'ord2', true, 1000, 'partial', 'half');
+    db.upsertStackUpdateStatus(nodeId, 'ord2', true, 1000, 'partial', 'half', [
+      { service: 'web', image: 'web:1', hasUpdate: true, checkStatus: 'partial', lastError: 'half' },
+    ], 1);
     const svc = ImageUpdateService.getInstance() as unknown as {
+      peekStackWriteGeneration: (n: number, s: string) => number;
       reserveStackWriteGeneration: (n: number, s: string) => number;
+      commitPreviewClear: (
+        n: number,
+        s: string,
+        observedMem: number,
+        observedRow: number,
+      ) => Promise<'cleared' | 'stale' | 'absent'>;
       withStackWriteLock: (
         n: number,
         s: string,
@@ -371,21 +377,23 @@ describe('generation ordering for preview clear', () => {
       ) => Promise<boolean>;
     };
 
+    // Full scan reserved generation N before its slow registry work.
     const scannerGen = svc.reserveStackWriteGeneration(nodeId, 'ord2');
-    // Observation after the older scanner reserved: watermark equals scanner gen.
-    // Clear commits at that watermark; the older reservation is equal, so clear
-    // runs. A still-older in-flight writer with a lower gen would be stale.
-    const observed = scannerGen;
+    // Preview observation sees that same watermark.
+    const observedMem = svc.peekStackWriteGeneration(nodeId, 'ord2');
+    const observedRow = db.getStackUpdateWriteGeneration(nodeId, 'ord2');
+    expect(observedMem).toBe(scannerGen);
 
-    const scannerCommitted = await svc.withStackWriteLock(nodeId, 'ord2', scannerGen - 1, () => {
-      db.upsertStackUpdateStatus(nodeId, 'ord2', true, Date.now(), 'ok', null);
+    expect(await svc.commitPreviewClear(nodeId, 'ord2', observedMem, observedRow)).toBe('cleared');
+    expect(db.getStackUpdateDetail(nodeId).ord2).toBeUndefined();
+
+    // Delayed scanner write using the pre-observation reservation must not commit.
+    const scannerCommitted = await svc.withStackWriteLock(nodeId, 'ord2', scannerGen, () => {
+      db.upsertStackUpdateStatus(nodeId, 'ord2', true, Date.now(), 'ok', null, [
+        { service: 'web', image: 'web:2', hasUpdate: true, checkStatus: 'ok', lastError: null },
+      ], scannerGen);
     });
     expect(scannerCommitted).toBe(false);
-
-    const clearCommitted = await svc.withStackWriteLock(nodeId, 'ord2', observed, () => {
-      db.clearStackUpdateStatus(nodeId, 'ord2');
-    });
-    expect(clearCommitted).toBe(true);
     expect(db.getStackUpdateDetail(nodeId).ord2).toBeUndefined();
   });
 });
