@@ -4,6 +4,67 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.96.0](https://github.com/Studio-Saelix/sencho/compare/v0.95.0...v0.96.0) (2026-07-26)
+
+
+### Added
+
+* add Admiral Hardened Build channel and business assurance surfaces ([#1629](https://github.com/Studio-Saelix/sencho/issues/1629)) ([381ed2a](https://github.com/Studio-Saelix/sencho/commit/381ed2a91fa7ff5743a365511d9f5cd6bff141a9))
+* add Apprise as a fourth notification channel ([#1644](https://github.com/Studio-Saelix/sencho/issues/1644)) ([83b3d93](https://github.com/Studio-Saelix/sencho/commit/83b3d932e5a9664264b4b5ac40d601925654e4b1))
+* add configurable notification dispatch retries ([#1655](https://github.com/Studio-Saelix/sencho/issues/1655)) ([090a0d7](https://github.com/Studio-Saelix/sencho/commit/090a0d73acbad1a85db1603372d79b65e044392d))
+* add developer-mode startup and stack hydration timing ([#1619](https://github.com/Studio-Saelix/sencho/issues/1619)) ([b70a529](https://github.com/Studio-Saelix/sencho/commit/b70a529656a232df0012c56b3280aed9aa49c4fa))
+* add service-scoped Compose update and restore ([#1648](https://github.com/Studio-Saelix/sencho/issues/1648)) ([63213c0](https://github.com/Studio-Saelix/sencho/commit/63213c096026551f9fb3b10ada625eb2be8ff35f))
+* add service-scoped stack alert rules ([#1681](https://github.com/Studio-Saelix/sencho/issues/1681)) ([85842cc](https://github.com/Studio-Saelix/sencho/commit/85842cc54788b453071890fb57764ab608de78a0))
+* **blueprints:** require confirmed rollout preview before reconcile ([#1649](https://github.com/Studio-Saelix/sencho/issues/1649)) ([d94e586](https://github.com/Studio-Saelix/sencho/commit/d94e586af3011733af5f2d9c991c745385b7b29e))
+* graduate Host Console to Community admins ([#1669](https://github.com/Studio-Saelix/sencho/issues/1669)) ([dd54a2e](https://github.com/Studio-Saelix/sencho/commit/dd54a2e483f4432c59f602ea1129a47ec87c1ec8))
+* guide missing external network creation during deploy ([#1645](https://github.com/Studio-Saelix/sencho/issues/1645)) ([35bb744](https://github.com/Studio-Saelix/sencho/commit/35bb74425be6d906d13dc9a2fd67f7c8acd5b534))
+* node-scoped Networking operator page ([#1603](https://github.com/Studio-Saelix/sencho/issues/1603)) ([8980910](https://github.com/Studio-Saelix/sencho/commit/8980910153c1c6264af35076dbeb64fca0f3301e))
+* stack glob patterns and route severity levels ([#1651](https://github.com/Studio-Saelix/sencho/issues/1651)) ([972f2b9](https://github.com/Studio-Saelix/sencho/commit/972f2b9483432648689ba01aa7a2d64bb0eed917))
+* surface stack Monitor from header and service cards ([#1693](https://github.com/Studio-Saelix/sencho/issues/1693)) ([524cc56](https://github.com/Studio-Saelix/sencho/commit/524cc56d2ff43d1d38b737c0a8751509e72d29bc))
+* **ui:** add Classic, Smart, and Compact desktop navigation styles ([#1642](https://github.com/Studio-Saelix/sencho/issues/1642)) ([25586fc](https://github.com/Studio-Saelix/sencho/commit/25586fc8ab8a8fdd8d2ef7b23d57b41be6c11d83))
+* weekly UTC maintenance windows for mute rules ([#1661](https://github.com/Studio-Saelix/sencho/issues/1661)) ([a3edee5](https://github.com/Studio-Saelix/sencho/commit/a3edee5e6a6c6319bb292f2e37d96aa3260acf3f))
+
+
+### Fixed
+
+* assorted UI/UX polish fixes ([#1670](https://github.com/Studio-Saelix/sencho/issues/1670)) ([cfb42af](https://github.com/Studio-Saelix/sencho/commit/cfb42af4e098ce8375529eff9c78c33b17c0e9fa))
+* **blueprints:** fail closed on marker ownership for apply and withdraw ([#1694](https://github.com/Studio-Saelix/sencho/issues/1694)) ([17a8dc8](https://github.com/Studio-Saelix/sencho/commit/17a8dc8a94b18b396492735de8cd89bc2cf45c97))
+* **blueprints:** gate confirmed apply on live intent fingerprint ([#1663](https://github.com/Studio-Saelix/sencho/issues/1663)) ([155db30](https://github.com/Studio-Saelix/sencho/commit/155db30554e566fcb1a449451fc79b6e6bb4e3d9))
+* **blueprints:** write compose.yaml so first-time apply is not shadowed ([#1668](https://github.com/Studio-Saelix/sencho/issues/1668)) ([e15b9d1](https://github.com/Studio-Saelix/sencho/commit/e15b9d1244f1e59f7140aaa2139fe34a16f681bb))
+* bump brace-expansion override to 5.0.8 to clear high-severity audit ([#1702](https://github.com/Studio-Saelix/sencho/issues/1702)) ([d0a4f1e](https://github.com/Studio-Saelix/sencho/commit/d0a4f1ead9652667580319e1c83f31baea675060))
+* dedupe healthcheck alerts and share crash rate limits ([#1690](https://github.com/Studio-Saelix/sencho/issues/1690)) ([ec0f59a](https://github.com/Studio-Saelix/sencho/commit/ec0f59a85e3a54f29670d2424e4e04d21b07d6c4))
+* **docs:** remove duplicate license url key in openapi.yaml ([#1628](https://github.com/Studio-Saelix/sencho/issues/1628)) ([8ca8eba](https://github.com/Studio-Saelix/sencho/commit/8ca8ebaa2468ad6df79bd0be87a94dba6c4faf15))
+* **fleet:** expose Community cordon on NodeCard ([#1646](https://github.com/Studio-Saelix/sencho/issues/1646)) ([674220b](https://github.com/Studio-Saelix/sencho/commit/674220b9deaee8f4e8a58626fdf1d0679a7c669b))
+* **fleet:** isolate corrupt snapshot file decrypt failures ([#1650](https://github.com/Studio-Saelix/sencho/issues/1650)) ([3b02795](https://github.com/Studio-Saelix/sencho/commit/3b027957c4369a4d8c0ea5513b9e631b1bf2508b))
+* **fleet:** refresh prune reclaimable estimate after successful run ([#1675](https://github.com/Studio-Saelix/sencho/issues/1675)) ([ed5ca9c](https://github.com/Studio-Saelix/sencho/commit/ed5ca9c4f690d07dc1ccf25c3a8557e57780410d))
+* **fleet:** verify update status before removing readiness cards ([#1697](https://github.com/Studio-Saelix/sencho/issues/1697)) ([719180f](https://github.com/Studio-Saelix/sencho/commit/719180f156c49bea48ad2b319d81cb9823cfb9fa))
+* **image-updates:** match any local RepoDigest against the remote tag ([#1695](https://github.com/Studio-Saelix/sencho/issues/1695)) ([6688da9](https://github.com/Studio-Saelix/sencho/commit/6688da97b1e3b107b379539354ceddc56b549b7d))
+* **image-updates:** normalize docker.io host aliases to the registry API host ([#1706](https://github.com/Studio-Saelix/sencho/issues/1706)) ([bb7c76b](https://github.com/Studio-Saelix/sencho/commit/bb7c76ba4664abcdfafcdc5816e35073076c66d7))
+* **image-updates:** treat multi-arch child digests as up to date ([#1641](https://github.com/Studio-Saelix/sencho/issues/1641)) ([66ec4eb](https://github.com/Studio-Saelix/sencho/commit/66ec4ebdd2c6c67576f6e4c328bd7fe87c28285c))
+* keep running containers until stack pull/build succeeds ([#1657](https://github.com/Studio-Saelix/sencho/issues/1657)) ([3f1f15a](https://github.com/Studio-Saelix/sencho/commit/3f1f15a6f433eb137206833550c2eb0a0134fbf0))
+* leave editor after deleting the open stack ([#1665](https://github.com/Studio-Saelix/sencho/issues/1665)) ([55fa29f](https://github.com/Studio-Saelix/sencho/commit/55fa29f565473865f4c262f2b8516bc1899faa82))
+* **notifications:** align Sencho update alerts with Fleet cache ([#1620](https://github.com/Studio-Saelix/sencho/issues/1620)) ([4079cb9](https://github.com/Studio-Saelix/sencho/commit/4079cb919817509e17ba4ed9f13889be892a09e0))
+* **notifications:** neutralize satellite-local node names in alert bodies ([#1640](https://github.com/Studio-Saelix/sencho/issues/1640)) ([d8e4ede](https://github.com/Studio-Saelix/sencho/commit/d8e4ede94f1fcacc631e70eaca5ec3a8540951e5))
+* **notifications:** stop embedding Local in janitor alerts ([#1631](https://github.com/Studio-Saelix/sencho/issues/1631)) ([678c198](https://github.com/Studio-Saelix/sencho/commit/678c198faadc065c081013590dd810dfbcf35242))
+* **notifications:** version mute replica retractions for soft-cleanup restore ([#1703](https://github.com/Studio-Saelix/sencho/issues/1703)) ([9859ce6](https://github.com/Studio-Saelix/sencho/commit/9859ce60b813fd3fc5247234a1f21ac7259eb9e3))
+* pin brace-expansion to a patched version in both packages ([#1658](https://github.com/Studio-Saelix/sencho/issues/1658)) ([8598390](https://github.com/Studio-Saelix/sencho/commit/859839082c89f912b346b11a42acfc0576268314))
+* pin postcss override to clear backend audit vulnerability ([#1701](https://github.com/Studio-Saelix/sencho/issues/1701)) ([e33eda3](https://github.com/Studio-Saelix/sencho/commit/e33eda3c38423b047f1c870ea7a452cf11b1741f))
+* prevent false empty states during stack hydration ([#1659](https://github.com/Studio-Saelix/sencho/issues/1659)) ([b06dfd7](https://github.com/Studio-Saelix/sencho/commit/b06dfd71754242e6a09104aa9b61f38ba1bcbc7c))
+* purge deleted-stack notifications from panel and ticker ([#1674](https://github.com/Studio-Saelix/sencho/issues/1674)) ([698b7d0](https://github.com/Studio-Saelix/sencho/commit/698b7d0713919b9f91a63e05d84b44057b7f1d12))
+* **rate-limit:** verify node_proxy JWT before skipping limiters ([#1647](https://github.com/Studio-Saelix/sencho/issues/1647)) ([31d4e46](https://github.com/Studio-Saelix/sencho/commit/31d4e4669b335ce270cece716045b34072385e7b))
+* **rbac:** cover stack assignment cleanup on blueprint withdraw ([#1664](https://github.com/Studio-Saelix/sencho/issues/1664)) ([6484c79](https://github.com/Studio-Saelix/sencho/commit/6484c79015b5da7321379a76bc34d43478eb7dd0))
+* recognize clean one-shot completions in health gate and drift ([#1691](https://github.com/Studio-Saelix/sencho/issues/1691)) ([79914fe](https://github.com/Studio-Saelix/sencho/commit/79914fe7503923edebe64e9f006b4fbe5b7d189f))
+* reconcile sticky update indicators with Anatomy preview ([#1698](https://github.com/Studio-Saelix/sencho/issues/1698)) ([0daddfd](https://github.com/Studio-Saelix/sencho/commit/0daddfde00dfe37a8e0622f639d2a84125c031f3))
+* **security:** bump grpc to 1.82.1 in docker CLI and compose builds ([#1678](https://github.com/Studio-Saelix/sencho/issues/1678)) ([ce4eeb6](https://github.com/Studio-Saelix/sencho/commit/ce4eeb6b933b299a880dd566d40148c970a78422))
+* **settings:** toast and block save when node settings fail to load ([#1654](https://github.com/Studio-Saelix/sencho/issues/1654)) ([ad00517](https://github.com/Studio-Saelix/sencho/commit/ad00517a0ea5c9ab1a2b992e0cad622b0f2d4503))
+* **sso:** correct settings description to drop unsupported SAML claim ([#1662](https://github.com/Studio-Saelix/sencho/issues/1662)) ([a4d9fa7](https://github.com/Studio-Saelix/sencho/commit/a4d9fa79a1d6043708fb3f951b58337b2c0abfaa))
+* **stacks:** fail closed when compose ps errors during update orphan classify ([#1708](https://github.com/Studio-Saelix/sencho/issues/1708)) ([6887670](https://github.com/Studio-Saelix/sencho/commit/688767092a3b4be5a11709fac72ffcd7ffadb299))
+* **ui:** default Reduced Motion on Calm and quiet decorative rails ([#1622](https://github.com/Studio-Saelix/sencho/issues/1622)) ([c170c3f](https://github.com/Studio-Saelix/sencho/commit/c170c3f30ca0673df1e5e395dcd82dd1baed33b6))
+* **ui:** hide log service chips on single-service stacks ([#1689](https://github.com/Studio-Saelix/sencho/issues/1689)) ([a89498a](https://github.com/Studio-Saelix/sencho/commit/a89498ae5b4bb8b88178fe8088e1acb46e3821b9))
+* **ui:** lower-overhead Reduced effects for constrained GPUs ([#1616](https://github.com/Studio-Saelix/sencho/issues/1616)) ([c01f247](https://github.com/Studio-Saelix/sencho/commit/c01f2479b94b2214a949ae736a3c5141cc52b5be))
+* **ui:** use Docker health status terms on container cards ([#1696](https://github.com/Studio-Saelix/sencho/issues/1696)) ([4d2270a](https://github.com/Studio-Saelix/sencho/commit/4d2270a097b797c632353efaf513b67ccd5f57a6)), closes [#1677](https://github.com/Studio-Saelix/sencho/issues/1677)
+* unlock Community deploy policy hard-blocking ([#1643](https://github.com/Studio-Saelix/sencho/issues/1643)) ([b91025d](https://github.com/Studio-Saelix/sencho/commit/b91025dc8b5d476dd295f12695f4225a88081b90))
+
 ## [0.95.0](https://github.com/Studio-Saelix/sencho/compare/v0.94.1...v0.95.0) (2026-07-12)
 
 
