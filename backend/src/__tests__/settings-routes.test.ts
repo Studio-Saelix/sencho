@@ -272,6 +272,14 @@ describe('session_sliding_refresh (keep active sessions alive)', () => {
     expect(res.body.error).toBe('Validation failed');
     expect(DatabaseService.getInstance().getGlobalSettings().session_sliding_refresh).not.toBe('banana');
   });
+
+  it('rejects a non-admin write with 403', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', viewerCookie)
+      .send({ key: 'session_sliding_refresh', value: '0' });
+    expect(res.status).toBe(403);
+  });
 });
 
 describe('prune_orphaned_scans (purge scans for deleted images/stacks)', () => {

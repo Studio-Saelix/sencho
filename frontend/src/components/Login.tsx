@@ -188,7 +188,7 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
               />
               <label
                 htmlFor="remember-me"
-                className="text-sm text-stat-subtitle"
+                className="text-sm text-stat-subtitle cursor-pointer select-none"
               >
                 Stay signed in
               </label>

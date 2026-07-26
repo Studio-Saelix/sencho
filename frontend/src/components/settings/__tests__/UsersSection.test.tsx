@@ -17,9 +17,11 @@ vi.mock('../MastheadStatsContext', () => ({ useMastheadStats: () => {} }));
 vi.mock('@/components/CapabilityGate', () => ({ CapabilityGate: ({ children }: { children: React.ReactNode }) => children }));
 
 import { apiFetch } from '@/lib/api';
+import { toast } from '@/components/ui/toast-store';
 import { UsersSection } from '../UsersSection';
 
 const mockedFetch = apiFetch as unknown as ReturnType<typeof vi.fn>;
+const mockedToastError = toast.error as unknown as ReturnType<typeof vi.fn>;
 
 function mockApi(settingsOverrides: Record<string, string> = {}) {
     mockedFetch.mockImplementation(async (path: string, opts?: { method?: string }) => {
@@ -44,6 +46,22 @@ describe('UsersSection > session policy', () => {
         render(<UsersSection />);
         const toggle = await screen.findByRole('switch');
         await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
+    });
+
+    it('shows an error state and does not present the default value as real when the load fails', async () => {
+        mockedFetch.mockImplementation(async (path: string, opts?: { method?: string }) => {
+            if (path === '/users') return { ok: true, json: async () => [] };
+            if (path === '/settings' && (!opts?.method || opts.method === 'GET')) {
+                return { ok: false, status: 500, json: async () => ({ error: 'boom' }) };
+            }
+            return { ok: true, json: async () => ({}) };
+        });
+        render(<UsersSection />);
+
+        await screen.findByText(/could not load session policy/i);
+        expect(screen.queryByRole('switch')).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /save session policy/i })).not.toBeInTheDocument();
+        expect(mockedToastError).toHaveBeenCalled();
     });
 
     it('renders OFF when the settings payload has it disabled, and PATCHes only that key on save', async () => {

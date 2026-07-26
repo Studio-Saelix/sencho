@@ -13,7 +13,7 @@ import { apiFetch } from '@/lib/api';
 import { useAuth, type UserRole } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
 import { CapabilityGate } from '@/components/CapabilityGate';
-import { RefreshCw, Trash2, Plus, Pencil, ShieldOff } from 'lucide-react';
+import { RefreshCw, Trash2, Plus, Pencil, ShieldOff, AlertTriangle } from 'lucide-react';
 import { SettingsCallout } from './SettingsCallout';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
@@ -49,14 +49,17 @@ function SessionPolicySkeleton() {
 
 /**
  * Instance-wide session behavior: whether an actively-used session silently
- * renews itself instead of hard-expiring. Hub-only like the rest of this
- * page (localOnly reads/writes, ignores the active-node selector), since it
- * governs sign-in to this instance's own user table, not a remote node's.
+ * renews itself instead of hard-expiring. Pinned to the local instance via
+ * `localOnly: true` on every fetch, like the rest of this page (a frontend
+ * convention, not a backend hub-only guard such as registries/secrets have),
+ * since it governs sign-in to this instance's own user table, not a remote
+ * node's.
  */
 function SessionPolicySection() {
     const { isAdmin } = useAuth();
     const readOnly = !isAdmin;
     const [loading, setLoading] = useState(true);
+    const [loadFailed, setLoadFailed] = useState(false);
     const [value, setValue] = useState<'0' | '1'>(DEFAULT_SETTINGS.session_sliding_refresh as '0' | '1');
     const [saved, setSaved] = useState<'0' | '1'>(DEFAULT_SETTINGS.session_sliding_refresh as '0' | '1');
     const [isSaving, setIsSaving] = useState(false);
@@ -67,11 +70,22 @@ function SessionPolicySection() {
         (async () => {
             try {
                 const res = await apiFetch('/settings', { localOnly: true });
-                if (cancelled || !res.ok) return;
+                if (cancelled) return;
+                if (!res.ok) {
+                    setLoadFailed(true);
+                    toast.error('Failed to load session policy.');
+                    return;
+                }
                 const data = await res.json();
+                if (cancelled) return;
                 const loaded = (data.session_sliding_refresh as '0' | '1') ?? DEFAULT_SETTINGS.session_sliding_refresh as '0' | '1';
                 setValue(loaded);
                 setSaved(loaded);
+            } catch {
+                if (!cancelled) {
+                    setLoadFailed(true);
+                    toast.error('Failed to load session policy.');
+                }
             } finally {
                 if (!cancelled) setLoading(false);
             }
@@ -102,6 +116,17 @@ function SessionPolicySection() {
     };
 
     if (loading) return <SessionPolicySkeleton />;
+
+    if (loadFailed) {
+        return (
+            <SettingsCallout
+                tone="error"
+                icon={<AlertTriangle className="h-4 w-4" />}
+                title="Could not load session policy"
+                subtitle="The current value could not be confirmed, so editing is unavailable. Reload the page to try again."
+            />
+        );
+    }
 
     return (
         <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-6 border-0 p-0">
