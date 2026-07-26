@@ -43,7 +43,8 @@ test.describe('Desktop navigation styles', () => {
     await setTopNavMode(page, 'smart');
     await expect(page.locator('[data-sn-chrome="topbar"]')).toHaveAttribute('data-sn-nav-mode', 'smart');
     await page.getByRole('button', { name: 'More navigation' }).click();
-    await expect(page.locator('.font-heading').filter({ hasText: 'More' })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: /Logs/i })).toBeVisible();
+    await expect(page.locator('.font-heading').filter({ hasText: 'More' })).toHaveCount(0);
     await page.getByRole('menuitem', { name: /Logs/i }).click();
     await expect(page.locator('body')).toContainText(/Logs|Central|Observability/i);
   });

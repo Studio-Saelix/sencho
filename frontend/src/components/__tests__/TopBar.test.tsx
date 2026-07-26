@@ -10,6 +10,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Home, Radar } from 'lucide-react';
 import { TopBar, type TopBarNavItem } from '../TopBar';
+import { MAX_QUICK_LINKS } from '@/hooks/use-top-nav-quick-links';
 
 const navItems: TopBarNavItem[] = [
   { value: 'dashboard', label: 'Home', icon: Home },
@@ -142,7 +143,7 @@ describe('TopBar smart and compact modes', () => {
     expect(screen.getByRole('button', { name: 'More navigation' })).toHaveTextContent('More');
   });
 
-  it('opens the More menu with masthead chrome and keeps overflow labels', async () => {
+  it('opens the More menu without a redundant masthead title and keeps overflow labels', async () => {
     const onNavigate = vi.fn();
     renderTopBar({
       navMode: 'smart',
@@ -155,8 +156,8 @@ describe('TopBar smart and compact modes', () => {
     const more = screen.getByRole('button', { name: 'More navigation' });
     more.focus();
     fireEvent.keyDown(more, { key: 'Enter' });
-    expect(await screen.findByText('More', { selector: '.font-heading' })).toBeInTheDocument();
     expect(await screen.findByRole('menuitem', { name: /Logs/i })).toBeInTheDocument();
+    expect(screen.queryByText('More', { selector: '.font-heading' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('menuitem', { name: /Logs/i }));
     expect(onNavigate).toHaveBeenCalledWith('global-observability');
   });
@@ -211,15 +212,18 @@ describe('TopBar smart and compact modes', () => {
   it('disables Add when persisted capacity is full even if fewer pins are visible', () => {
     renderTopBar({
       navMode: 'compact',
-      persistedQuickLinkIds: ['dashboard', 'fleet', 'resources', 'security', 'networking'],
+      // Capacity is a count check, so the IDs only need to be distinct and unpinned-candidate free.
+      persistedQuickLinkIds: Array.from({ length: MAX_QUICK_LINKS }, (_, i) => `pinned-${i}`),
       quickLinks: [{ value: 'dashboard', label: 'Home', icon: Home }],
       navModel: {
         ...emptyModel,
         launcherGroups,
-        quickLinkCandidates: emptyModel.quickLinkCandidates,
+        quickLinkCandidates: [{ value: 'fleet' as const, label: 'Fleet', icon: Radar }],
       },
     });
-    expect(screen.getByRole('button', { name: 'Add quick link' })).toBeDisabled();
+    const add = screen.getByRole('button', { name: 'Add quick link' });
+    expect(add).toBeDisabled();
+    expect(add.closest('[title]')).toHaveAttribute('title', 'Remove a quick link to free a slot');
   });
 
   it('offers Compact launcher context Add for unpinned destinations', async () => {

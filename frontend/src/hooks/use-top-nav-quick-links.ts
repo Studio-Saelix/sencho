@@ -7,7 +7,7 @@ import type { ActiveView } from '@/lib/router/routeTypes';
 import { SENCHO_SETTINGS_CHANGED } from '@/lib/events';
 
 export const TOP_NAV_QUICK_LINKS_KEY = 'sencho.appearance.topNavQuickLinks';
-export const MAX_QUICK_LINKS = 5;
+export const MAX_QUICK_LINKS = 7;
 
 /**
  * Sanitize a candidate ID list: keep registry-known eligible IDs, dedupe,

@@ -449,17 +449,6 @@ export default function StackAnatomyPanel({
           <TabsList className="h-7 w-max gap-0.5 bg-transparent border-none p-0">
             <TabsTrigger value="anatomy" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
             <TabsTrigger value="activity" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
-            <TabsTrigger value="dossier" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
-            <TabsTrigger value="drift" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
-            {envInventoryEnabled && (
-              <TabsTrigger value="environment" data-testid="environment-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Environment</TabsTrigger>
-            )}
-            {composeLabelsEnabled && (
-              <TabsTrigger value="compose-labels" data-testid="compose-labels-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Compose Labels</TabsTrigger>
-            )}
-            {networkingEnabled && (
-              <TabsTrigger value="networking" data-testid="networking-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Networking</TabsTrigger>
-            )}
             {doctorEnabled && (
               <TabsTrigger value="doctor" data-testid="doctor-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">
                 <span className="inline-flex items-center gap-1">
@@ -472,6 +461,17 @@ export default function StackAnatomyPanel({
                   )}
                 </span>
               </TabsTrigger>
+            )}
+            <TabsTrigger value="drift" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
+            <TabsTrigger value="dossier" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
+            {envInventoryEnabled && (
+              <TabsTrigger value="environment" data-testid="environment-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Environment</TabsTrigger>
+            )}
+            {composeLabelsEnabled && (
+              <TabsTrigger value="compose-labels" data-testid="compose-labels-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Compose Labels</TabsTrigger>
+            )}
+            {networkingEnabled && (
+              <TabsTrigger value="networking" data-testid="networking-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Networking</TabsTrigger>
             )}
             {storageEnabled && (
               <TabsTrigger value="storage" data-testid="storage-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Storage</TabsTrigger>
@@ -733,12 +733,17 @@ export default function StackAnatomyPanel({
         </div>
       )}
       </TabsContent>
-      <TabsContent value="dossier" className="flex flex-col flex-1 min-h-0 mt-0">
-        <StackDossierPanel stackName={stackName} anatomy={anatomyInput} canEdit={canEdit} />
-      </TabsContent>
       <TabsContent value="drift" className="flex flex-col flex-1 min-h-0 mt-0">
         <DriftPanel stackName={stackName} />
       </TabsContent>
+      <TabsContent value="dossier" className="flex flex-col flex-1 min-h-0 mt-0">
+        <StackDossierPanel stackName={stackName} anatomy={anatomyInput} canEdit={canEdit} />
+      </TabsContent>
+      {doctorEnabled && (
+        <TabsContent value="doctor" className="flex flex-col flex-1 min-h-0 mt-0">
+          <PreflightPanel stackName={stackName} canEdit={canEdit} />
+        </TabsContent>
+      )}
       {networkingEnabled && (
         <TabsContent value="networking" className="flex flex-col flex-1 min-h-0 mt-0">
           <StackNetworkingPanel stackName={stackName} canEdit={canEdit} doctorEnabled={doctorEnabled} />
@@ -752,11 +757,6 @@ export default function StackAnatomyPanel({
       {composeLabelsEnabled && (
         <TabsContent value="compose-labels" className="flex flex-col flex-1 min-h-0 mt-0">
           <ComposeLabelsPanel stackName={stackName} />
-        </TabsContent>
-      )}
-      {doctorEnabled && (
-        <TabsContent value="doctor" className="flex flex-col flex-1 min-h-0 mt-0">
-          <PreflightPanel stackName={stackName} canEdit={canEdit} />
         </TabsContent>
       )}
       {storageEnabled && (

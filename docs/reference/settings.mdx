@@ -145,7 +145,7 @@ A live preview card shows a sample fleet-status tile so you can see a color choi
 
 | Control | What it does |
 |---------|--------------|
-| **Navigation style** | **Smart bar** (recommended default): primary destinations stay visible in the top bar and the rest live under **More**. **Classic bar** keeps the full horizontal strip of destinations. **Compact launcher** puts every destination in a menu, with optional quick links. |
+| **Navigation style** | **Smart bar** (recommended default): primary destinations stay visible in the top bar and the rest live under **More**. **Classic bar** keeps the full horizontal strip of destinations (retiring soon; a callout appears while it is selected). **Compact launcher** puts every destination in a menu, with optional quick links. |
 | **Top navigation labels** | On by default. Shows text labels beside the top navigation icons; turn off for a more compact bar with icons only. |
 
 Deploy-progress behavior and the diff-preview-before-save step are stack workflow preferences and live in their own [Stacks](#stacks) section under Infrastructure.
@@ -293,7 +293,7 @@ Configure the reclaimable-space alert, the reclaimable-space banner, and automat
 | Setting | Default | Description |
 |---------|---------|-------------|
 | **Reclaimable Docker data threshold** | 5 GiB | Alert when reclaimable Docker data (images, volumes, build cache that `docker prune` could free) exceeds this size. Set to `0` to disable the alert. |
-| **Show reclaimable-space banner** | On | Show the reclaimable-space banner at the top of the Resource Hub when this node has unused images, stopped containers, or dangling volumes to clear. |
+| **Show reclaimable-space banner** | Off | Show the reclaimable-space banner at the top of the Resource Hub when this node has unused images, stopped containers, or dangling volumes to clear. |
 
 ### Image cleanup
 
@@ -403,7 +403,7 @@ Quick reference:
 
 Configure external destinations for alert notifications. Four agent types are available on separate tabs: **Discord**, **Slack**, **Webhook**, and **Apprise**. The masthead publishes a **CHANNELS** pill showing how many agents are enabled (for example, `2/4`).
 
-**Delivery retries** (admin-only) sets how many extra in-process attempts (0 to 3, default 0) this node makes after a transient channel failure, with a fixed one-second delay between attempts. There is no durable queue; ambiguous network failures can produce duplicate notifications.
+Below the channel tabs, **Delivery retries** (admin-only) sets how many extra in-process attempts (0 to 3, default 0) this node makes after a transient channel failure, with a fixed one-second delay between attempts. There is no durable queue; ambiguous network failures can produce duplicate notifications.
 
 For each agent:
 
@@ -721,6 +721,7 @@ Links to help resources, with an additional channel for Admiral operators.
 |----------|-------------|
 | **Documentation** | Opens docs.sencho.io. |
 | **GitHub Issues** | Report bugs and request features on GitHub. |
+| **Discord** | Chat with the community and the team. |
 
 ### Admiral support
 

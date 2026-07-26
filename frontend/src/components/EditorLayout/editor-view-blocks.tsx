@@ -648,34 +648,30 @@ export function ContainersHealth({
                                     </div>
                                 </div>
                                 {isActive && density === 'detailed' ? (
-                                    <div className="mt-2 grid grid-cols-3 gap-2">
-                                        <div className="flex items-center gap-2 rounded-md bg-background/60 px-2 py-1.5">
-                                            <div className="flex flex-col">
-                                                <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">cpu</span>
-                                                <span className="font-mono text-xs tabular-nums text-foreground">{stats?.cpu ?? '-'}</span>
+                                    <div className="mt-2 grid grid-cols-[minmax(0,0.85fr)_minmax(0,0.85fr)_minmax(0,1.3fr)] gap-2">
+                                        {[
+                                            { label: 'cpu', value: stats?.cpu ?? '-', points: history?.cpu ?? [] },
+                                            { label: 'mem', value: stats?.ram ?? '-', points: history?.mem ?? [] },
+                                            { label: 'net i/o', value: stats?.net ?? '-', points: history?.netIn ?? [] },
+                                        ].map(({ label, value, points }) => (
+                                            <div
+                                                key={label}
+                                                className="flex min-w-0 items-center gap-2 rounded-md bg-background/60 px-2 py-1.5"
+                                            >
+                                                <div className="min-w-0 flex flex-col">
+                                                    <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">{label}</span>
+                                                    <span
+                                                        className="font-mono text-xs tabular-nums truncate text-foreground"
+                                                        title={value === '-' ? undefined : value}
+                                                    >
+                                                        {value}
+                                                    </span>
+                                                </div>
+                                                <div className="ml-auto h-5 w-16 shrink min-w-8">
+                                                    <Sparkline points={points} stroke={sparkStroke} fill={sparkStroke} showPeak={false} />
+                                                </div>
                                             </div>
-                                            <div className="ml-auto h-5 w-16">
-                                                <Sparkline points={history?.cpu ?? []} stroke={sparkStroke} fill={sparkStroke} showPeak={false} />
-                                            </div>
-                                        </div>
-                                        <div className="flex items-center gap-2 rounded-md bg-background/60 px-2 py-1.5">
-                                            <div className="flex flex-col">
-                                                <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">mem</span>
-                                                <span className="font-mono text-xs tabular-nums text-foreground">{stats?.ram ?? '-'}</span>
-                                            </div>
-                                            <div className="ml-auto h-5 w-16">
-                                                <Sparkline points={history?.mem ?? []} stroke={sparkStroke} fill={sparkStroke} showPeak={false} />
-                                            </div>
-                                        </div>
-                                        <div className="flex items-center gap-2 rounded-md bg-background/60 px-2 py-1.5">
-                                            <div className="flex flex-col">
-                                                <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">net i/o</span>
-                                                <span className="font-mono text-xs tabular-nums text-foreground">{stats?.net ?? '-'}</span>
-                                            </div>
-                                            <div className="ml-auto h-5 w-16">
-                                                <Sparkline points={history?.netIn ?? []} stroke={sparkStroke} fill={sparkStroke} showPeak={false} />
-                                            </div>
-                                        </div>
+                                        ))}
                                     </div>
                                 ) : null}
                             </div>

@@ -315,7 +315,7 @@ export function ScanComparisonSheet({
               )}
             </div>
 
-            <ScrollArea block className="max-h-[60vh]">
+            <ScrollArea block className="h-[60vh] max-md:h-auto">
               {pageItems.length === 0 ? (
                 <div className="flex flex-col items-center justify-center text-center py-16 gap-2">
                   <ShieldCheck className="w-8 h-8 text-success" strokeWidth={1.5} />

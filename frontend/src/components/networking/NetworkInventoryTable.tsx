@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Eye, Search, Trash2, ExternalLink, GitBranch } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { cn } from '@/lib/utils';
 import { filterNetworkRows, rowHasDriftFinding, type NetworkFilter } from '@/lib/networking';
 import { type NetworkingFinding, type NetworkingFindingKind, type NetworkingNetworkRow, type NetworkingOwnership } from '@/types/networking';
@@ -207,7 +208,7 @@ export function NetworkInventoryTable({
       </div>
 
       <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-        <div className="max-h-[62vh] overflow-auto">
+        <ScrollArea className="h-[62vh] max-md:h-auto">
           <TooltipProvider>
             <Table>
               <TableHeader>
@@ -329,7 +330,7 @@ export function NetworkInventoryTable({
               )}
             </Table>
           </TooltipProvider>
-        </div>
+        </ScrollArea>
       </div>
     </div>
   );

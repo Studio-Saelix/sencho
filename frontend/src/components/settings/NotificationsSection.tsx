@@ -457,6 +457,28 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
 
     return (
         <div className="flex flex-col gap-6">
+            <Tabs value={notifTab} onValueChange={(v) => setNotifTab(v as ChannelType)} className="w-full">
+                <TabsList className="w-full mb-4 grid grid-cols-4">
+                    <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
+                        <TabsHighlightItem value="discord">
+                            <TabsTrigger value="discord">Discord</TabsTrigger>
+                        </TabsHighlightItem>
+                        <TabsHighlightItem value="slack">
+                            <TabsTrigger value="slack">Slack</TabsTrigger>
+                        </TabsHighlightItem>
+                        <TabsHighlightItem value="webhook">
+                            <TabsTrigger value="webhook">Webhook</TabsTrigger>
+                        </TabsHighlightItem>
+                        <TabsHighlightItem value="apprise">
+                            <TabsTrigger value="apprise">Apprise</TabsTrigger>
+                        </TabsHighlightItem>
+                    </TabsHighlight>
+                </TabsList>
+                <TabsContent value="discord">{renderAgentTab('discord', 'Discord')}</TabsContent>
+                <TabsContent value="slack">{renderAgentTab('slack', 'Slack')}</TabsContent>
+                <TabsContent value="webhook">{renderAgentTab('webhook', 'Custom Webhook')}</TabsContent>
+                <TabsContent value="apprise">{renderAgentTab('apprise', 'Apprise')}</TabsContent>
+            </Tabs>
             <fieldset disabled={readOnly} className="min-w-0 border-0 p-0 m-0">
                 <SettingsSection title="Delivery retries" kicker={retriesKicker}>
                     <SettingsField
@@ -508,28 +530,6 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
                     </SettingsActions>
                 </SettingsSection>
             </fieldset>
-            <Tabs value={notifTab} onValueChange={(v) => setNotifTab(v as ChannelType)} className="w-full">
-                <TabsList className="w-full mb-4 grid grid-cols-4">
-                    <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
-                        <TabsHighlightItem value="discord">
-                            <TabsTrigger value="discord">Discord</TabsTrigger>
-                        </TabsHighlightItem>
-                        <TabsHighlightItem value="slack">
-                            <TabsTrigger value="slack">Slack</TabsTrigger>
-                        </TabsHighlightItem>
-                        <TabsHighlightItem value="webhook">
-                            <TabsTrigger value="webhook">Webhook</TabsTrigger>
-                        </TabsHighlightItem>
-                        <TabsHighlightItem value="apprise">
-                            <TabsTrigger value="apprise">Apprise</TabsTrigger>
-                        </TabsHighlightItem>
-                    </TabsHighlight>
-                </TabsList>
-                <TabsContent value="discord">{renderAgentTab('discord', 'Discord')}</TabsContent>
-                <TabsContent value="slack">{renderAgentTab('slack', 'Slack')}</TabsContent>
-                <TabsContent value="webhook">{renderAgentTab('webhook', 'Custom Webhook')}</TabsContent>
-                <TabsContent value="apprise">{renderAgentTab('apprise', 'Apprise')}</TabsContent>
-            </Tabs>
         </div>
     );
 }

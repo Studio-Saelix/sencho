@@ -403,6 +403,11 @@ describe('NotificationsSection', () => {
         );
         expect(screen.getByText('Delivery retries')).toBeInTheDocument();
         expect(screen.getByText('0')).toBeInTheDocument();
+        const discordTab = screen.getByRole('tab', { name: 'Discord' });
+        const retriesHeading = screen.getByText('Delivery retries');
+        expect(
+            discordTab.compareDocumentPosition(retriesHeading) & Node.DOCUMENT_POSITION_FOLLOWING,
+        ).toBeTruthy();
     });
 
     it('PATCHes only notification_dispatch_retries when saving retries', async () => {

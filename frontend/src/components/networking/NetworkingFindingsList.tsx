@@ -1,5 +1,6 @@
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import type { useAuth } from '@/context/AuthContext';
 import { isNetworkingActionVisible } from '@/lib/networking';
 import {
@@ -48,7 +49,7 @@ export function NetworkingFindingsList({
               {FINDING_GROUP_LABELS[group]} · {items.length}
             </p>
             <div className="rounded-lg border border-card-border border-t-card-border-top bg-card shadow-card-bevel overflow-hidden">
-              <div className="max-h-[62vh] overflow-auto">
+              <ScrollArea className="h-[62vh] max-md:h-auto">
                 <Table>
                   <TableHeader>
                     <TableRow className="hover:bg-transparent">
@@ -102,7 +103,7 @@ export function NetworkingFindingsList({
                     })}
                   </TableBody>
                 </Table>
-              </div>
+              </ScrollArea>
             </div>
           </section>
         );

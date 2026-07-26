@@ -18,6 +18,8 @@ interface MultiSelectComboboxProps {
   disabled?: boolean
   className?: string
   renderOption?: (option: MultiSelectOption, isSelected: boolean) => React.ReactNode
+  /** Noun used in the trigger's selected-count label, e.g. "2 nodes". Defaults to "tag". */
+  selectedLabel?: string
 }
 
 export function MultiSelectCombobox({
@@ -30,6 +32,7 @@ export function MultiSelectCombobox({
   disabled = false,
   className,
   renderOption,
+  selectedLabel = "tag",
 }: MultiSelectComboboxProps) {
   const [open, setOpen] = React.useState(false)
   const [search, setSearch] = React.useState("")
@@ -75,7 +78,7 @@ export function MultiSelectCombobox({
   }
 
   const triggerLabel = selected.size > 0
-    ? `${selected.size} tag${selected.size !== 1 ? 's' : ''}`
+    ? `${selected.size} ${selectedLabel}${selected.size !== 1 ? 's' : ''}`
     : placeholder
 
   return (
