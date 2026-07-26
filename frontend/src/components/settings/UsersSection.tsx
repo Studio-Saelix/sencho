@@ -392,9 +392,7 @@ export function UsersSection() {
 
     return (
         <CapabilityGate capability="users" featureName="User Management">
-            <div className="space-y-6">
-                <SessionPolicySection />
-
+            <div className="flex flex-col gap-10">
                 {!showForm && (
                     <div className="flex justify-end">
                         <SettingsPrimaryButton size="sm" onClick={() => { resetForm(); setShowForm(true); }}>
@@ -555,71 +553,75 @@ export function UsersSection() {
                         subtitle="Add an operator to give someone else access to this control plane."
                     />
                 ) : (
-                    <div className="border border-glass-border rounded-lg overflow-hidden">
-                        <table className="w-full text-sm">
-                            <thead>
-                                <tr className="bg-muted/30 border-b border-glass-border">
-                                    <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Username</th>
-                                    <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Role</th>
-                                    <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Created</th>
-                                    <th className="text-right px-4 py-2.5 font-medium text-muted-foreground">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {users.map((u) => {
-                                    const isSelf = u.username === currentUser?.username;
-                                    return (
-                                        <tr key={u.id} className="border-b border-glass-border last:border-0 hover:bg-muted/10">
-                                            <td className="px-4 py-2.5 font-medium">
-                                                {u.username}
-                                                {isSelf && <span className="ml-2 text-xs text-muted-foreground">(you)</span>}
-                                            </td>
-                                            <td className="px-4 py-2.5">
-                                                <Badge variant={u.role === 'admin' ? 'default' : u.role === 'viewer' ? 'secondary' : 'outline'} className="text-xs capitalize">
-                                                    {u.role}
-                                                </Badge>
-                                            </td>
-                                            <td className="px-4 py-2.5 text-muted-foreground">
-                                                {new Date(u.created_at).toLocaleDateString()}
-                                            </td>
-                                            <td className="px-4 py-2.5 text-right">
-                                                <div className="flex gap-1 justify-end">
-                                                    <Button variant="ghost" size="sm" onClick={() => startEdit(u)}>
-                                                        <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                    </Button>
-                                                    {u.mfaEnabled && (
-                                                        <TooltipProvider>
-                                                            <Tooltip>
-                                                                <TooltipTrigger asChild>
-                                                                    <Button
-                                                                        variant="ghost"
-                                                                        size="sm"
-                                                                        onClick={() => setResetMfaTarget(u)}
-                                                                    >
-                                                                        <ShieldOff className="w-3.5 h-3.5 text-warning" strokeWidth={1.5} />
-                                                                    </Button>
-                                                                </TooltipTrigger>
-                                                                <TooltipContent>Reset 2FA</TooltipContent>
-                                                            </Tooltip>
-                                                        </TooltipProvider>
-                                                    )}
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        disabled={isSelf}
-                                                        onClick={() => setDeleteTarget(u)}
-                                                    >
-                                                        <Trash2 className="w-3.5 h-3.5 text-destructive" strokeWidth={1.5} />
-                                                    </Button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
-                    </div>
+                    <SettingsSection title="Users" kicker={`${users.length} total`}>
+                        <div className="mt-3 border border-glass-border rounded-lg overflow-hidden">
+                            <table className="w-full text-sm">
+                                <thead>
+                                    <tr className="bg-muted/30 border-b border-glass-border">
+                                        <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Username</th>
+                                        <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Role</th>
+                                        <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Created</th>
+                                        <th className="text-right px-4 py-2.5 font-medium text-muted-foreground">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {users.map((u) => {
+                                        const isSelf = u.username === currentUser?.username;
+                                        return (
+                                            <tr key={u.id} className="border-b border-glass-border last:border-0 hover:bg-muted/10">
+                                                <td className="px-4 py-2.5 font-medium">
+                                                    {u.username}
+                                                    {isSelf && <span className="ml-2 text-xs text-muted-foreground">(you)</span>}
+                                                </td>
+                                                <td className="px-4 py-2.5">
+                                                    <Badge variant={u.role === 'admin' ? 'default' : u.role === 'viewer' ? 'secondary' : 'outline'} className="text-xs capitalize">
+                                                        {u.role}
+                                                    </Badge>
+                                                </td>
+                                                <td className="px-4 py-2.5 text-muted-foreground">
+                                                    {new Date(u.created_at).toLocaleDateString()}
+                                                </td>
+                                                <td className="px-4 py-2.5 text-right">
+                                                    <div className="flex gap-1 justify-end">
+                                                        <Button variant="ghost" size="sm" onClick={() => startEdit(u)}>
+                                                            <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                        </Button>
+                                                        {u.mfaEnabled && (
+                                                            <TooltipProvider>
+                                                                <Tooltip>
+                                                                    <TooltipTrigger asChild>
+                                                                        <Button
+                                                                            variant="ghost"
+                                                                            size="sm"
+                                                                            onClick={() => setResetMfaTarget(u)}
+                                                                        >
+                                                                            <ShieldOff className="w-3.5 h-3.5 text-warning" strokeWidth={1.5} />
+                                                                        </Button>
+                                                                    </TooltipTrigger>
+                                                                    <TooltipContent>Reset 2FA</TooltipContent>
+                                                                </Tooltip>
+                                                            </TooltipProvider>
+                                                        )}
+                                                        <Button
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            disabled={isSelf}
+                                                            onClick={() => setDeleteTarget(u)}
+                                                        >
+                                                            <Trash2 className="w-3.5 h-3.5 text-destructive" strokeWidth={1.5} />
+                                                        </Button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </SettingsSection>
                 )}
+
+                <SessionPolicySection />
 
                 <ConfirmModal
                     open={resetMfaTarget !== null}
