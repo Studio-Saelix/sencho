@@ -22,7 +22,7 @@ import {
   type PruneTarget,
 } from './prunePlan';
 import type { NetworkingNetworkBase } from './network/networkingTypes';
-import { isPathWithinBase } from '../utils/validation';
+import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -2230,8 +2230,12 @@ class DockerController {
         try {
           const lines = stdout.trim().split('\n').filter(line => line.trim() !== '');
           containers = lines.map(line => JSON.parse(line) as ComposePsContainer);
-        } catch (innerError) {
-          console.error('Docker Compose JSON Parse Error for %s:', sanitizeForLog(stackName), sanitizeForLog(stderr || (parseError as Error).message));
+        } catch {
+          const detail = stderr || (parseError as Error).message || 'unparseable compose ps output';
+          console.error('Docker Compose JSON Parse Error for %s:', sanitizeForLog(stackName), sanitizeForLog(detail));
+          // Fail closed: garbage stdout is not a successful empty ps. Callers must not
+          // treat this as "no containers" and run name-matched orphan removal.
+          throw new Error(`docker compose ps returned unparseable JSON: ${detail}`);
         }
       }
     }
@@ -2242,6 +2246,9 @@ class DockerController {
    * Legacy orphan containers that Compose ps cannot see but would block a deploy
    * (wrong project labels). When Compose already manages the stack, returns [] so
    * deploy can rely on selective `compose up` recreation.
+   * A thrown `compose ps` returns [] (fail closed): name-matched fallback must not
+   * run, because those IDs may still be healthy Compose runtimes that deploy would
+   * then destroy before `compose up` (which often fails for the same reason).
    */
   public async getLegacyOrphanContainersByStack(stackName: string): Promise<Array<{ Id: string }>> {
     const stackDir = path.join(NodeRegistry.getInstance().getComposeDir(this.nodeId), stackName);
@@ -2249,26 +2256,36 @@ class DockerController {
       list.filter((c): c is { Id: string } => typeof c.Id === 'string' && c.Id.length > 0)
         .map((c) => ({ Id: c.Id }));
 
+    let composeContainers: ComposePsContainer[];
     try {
-      const composeContainers = await this.fetchComposePsContainers(stackName, stackDir);
-      if (composeContainers.length > 0) return [];
-      return toIds(await this.smartFallback(stackName, stackDir));
+      composeContainers = await this.fetchComposePsContainers(stackName, stackDir);
     } catch (error) {
       const execError = error as NodeJS.ErrnoException & { stderr?: string };
       const mapped = describeSpawnError(execError, { command: 'docker compose ps' });
-      const detail = execError.stderr || mapped.message;
+      const detail = execError.stderr || mapped.message || getErrorMessage(error, 'docker compose ps failed');
       console.error('Docker Compose Error for %s:', sanitizeForLog(stackName), sanitizeForLog(detail));
-      try {
-        return toIds(await this.smartFallback(stackName, stackDir));
-      } catch {
-        return [];
-      }
+      // Fail closed: do not run smartFallback (see method JSDoc).
+      return [];
+    }
+    if (composeContainers.length > 0) return [];
+    // Empty successful ps: only then may smartFallback report leftovers (name + stack-dir evidence).
+    try {
+      return toIds(await this.smartFallback(stackName, stackDir));
+    } catch (fallbackError) {
+      console.error(
+        'Smart Fallback failed for %s:',
+        sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(fallbackError, 'smartFallback failed')),
+      );
+      return [];
     }
   }
 
   /**
    * Strict Result API for full-stack updates. Never converts Compose-ps + fallback
    * failure into empty success. Compose-managed containers are never orphan IDs.
+   * A thrown `compose ps` is classification_failed (fail closed): name-matched
+   * fallback must not run, because those IDs may still be healthy Compose runtimes.
    */
   public async classifyLegacyOrphansForUpdate(
     stackName: string,
@@ -2302,18 +2319,15 @@ class DockerController {
       const composeContainers = await this.fetchComposePsContainers(stackName, stackDir);
       // Compose already manages this stack: no legacy orphan cleanup (same as deploy).
       if (composeContainers.length > 0) return { status: 'none' };
+      // Empty successful ps: only then may smartFallback report leftovers (name + stack-dir evidence).
       return await fallbackOrphans();
     } catch (error) {
       const execError = error as NodeJS.ErrnoException & { stderr?: string };
       const mapped = describeSpawnError(execError, { command: 'docker compose ps' });
       const detail = execError.stderr || mapped.message || getErrorMessage(error, 'docker compose ps failed');
       console.error('Docker Compose Error for %s:', sanitizeForLog(stackName), sanitizeForLog(detail));
-      // Unlike getLegacyOrphanContainersByStack, never convert dual failure into empty success.
-      const fallback = await fallbackOrphans();
-      if (fallback.status === 'classification_failed') {
-        return { status: 'classification_failed', error: String(detail) };
-      }
-      return fallback;
+      // Fail closed: do not run smartFallback (see method JSDoc).
+      return { status: 'classification_failed', error: String(detail) };
     }
   }
 
@@ -2349,11 +2363,6 @@ class DockerController {
         });
         return await this.enrichContainers(mapped);
       }
-
-      // SMART FALLBACK: Trigger when docker compose ps returns empty
-      // This handles legacy containers with incorrect project labels
-      return await this.enrichContainers(await this.smartFallback(stackName, stackDir));
-
     } catch (error) {
       // If command fails (e.g., stack not deployed, invalid YAML, missing env_file,
       // or host under memory pressure causing posix_spawn to fail with ENOMEM,
@@ -2362,9 +2371,23 @@ class DockerController {
       const mapped = describeSpawnError(execError, { command: 'docker compose ps' });
       const detail = execError.stderr || mapped.message;
       console.error('Docker Compose Error for %s:', sanitizeForLog(stackName), sanitizeForLog(detail));
+    }
 
-      // Try smart fallback even on error
+    // Empty successful ps or compose error: soft fallback for UI listing (never break the page).
+    return this.listViaSoftSmartFallback(stackName, stackDir);
+  }
+
+  /** UI listing path: smartFallback, or empty list if it throws. */
+  private async listViaSoftSmartFallback(stackName: string, stackDir: string) {
+    try {
       return await this.enrichContainers(await this.smartFallback(stackName, stackDir));
+    } catch (fallbackError) {
+      console.error(
+        'Smart Fallback failed for %s:',
+        sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(fallbackError, 'smartFallback failed')),
+      );
+      return this.enrichContainers([]);
     }
   }
 
@@ -2389,94 +2412,115 @@ class DockerController {
   }
 
   /**
+   * True when container labels bind this runtime to `stackDir` (working_dir or
+   * config_files). Name match alone is not enough for orphan removal.
+   */
+  private static containerHasStackDirEvidence(
+    labels: Record<string, string> | undefined,
+    stackDir: string,
+  ): boolean {
+    if (!labels) return false;
+    const resolvedStackDir = path.resolve(stackDir);
+    const pathKey = (p: string) =>
+      process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p);
+    const stackKey = pathKey(resolvedStackDir);
+
+    const workingDir = labels['com.docker.compose.project.working_dir'];
+    if (workingDir && pathKey(workingDir) === stackKey) return true;
+
+    const firstFile = labels['com.docker.compose.project.config_files']?.split(',')[0]?.trim();
+    if (!firstFile) return false;
+    const fileKey = pathKey(firstFile);
+    return fileKey === stackKey || fileKey.startsWith(stackKey + path.sep);
+  }
+
+  /**
    * Smart Fallback: Find legacy containers by parsing compose YAML definitions.
-   * This handles containers that were deployed with incorrect project labels
-   * that cause `docker compose ps` to ignore them.
+   * Handles containers with incorrect project labels that `docker compose ps`
+   * ignores. Name match alone is insufficient: a container must also have
+   * working_dir or config_files evidence for this stack directory. Errors
+   * propagate to callers (classify fail-closes; UI listing soft-catches).
    */
   private async smartFallback(stackName: string, stackDir: string): Promise<any[]> {
-    try {
-      // 1. Flexible Compose File Discovery
-      // Try multiple valid compose file names
-      const composeFileNames = COMPOSE_FILE_NAMES;
-      let yamlContent: string | null = null;
+    if (!isValidStackName(stackName)) {
+      throw new Error('Invalid stack path');
+    }
+    // Canonical inline js/path-injection barrier at the fs.readFile sink below.
+    // CodeQL credits neither wrapped isPathWithinBase nor a barrier separated
+    // from the sink; resolve under the compose root and require containment.
+    const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(this.nodeId));
+    const resolvedStackDir = path.resolve(baseResolved, stackName);
+    if (!resolvedStackDir.startsWith(baseResolved + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
+    // Prefer the validated path over the caller-provided stackDir.
+    stackDir = resolvedStackDir;
 
-      for (const fileName of composeFileNames) {
-        try {
-          yamlContent = await fs.readFile(path.join(stackDir, fileName), 'utf-8');
-          break; // Successfully read a file, stop trying
-        } catch {
-          // File doesn't exist, try next
+    let yamlContent: string | null = null;
+    for (const fileName of COMPOSE_FILE_NAMES) {
+      try {
+        const composePath = path.resolve(stackDir, fileName);
+        if (!composePath.startsWith(stackDir + path.sep)) {
           continue;
         }
+        yamlContent = await fs.readFile(composePath, 'utf-8');
+        break;
+      } catch {
+        continue;
       }
-
-      if (!yamlContent) {
-        // No compose file found
-        return [];
-      }
-
-      const parsedYaml = yaml.parse(yamlContent);
-
-      if (!parsedYaml || !parsedYaml.services) return [];
-
-      // 2. Extract expected container names with legacy prefix support
-      const expectedNames: string[] = [];
-      const nameToService = new Map<string, string>();
-      for (const [serviceName, serviceConfig] of Object.entries(parsedYaml.services)) {
-        const config = serviceConfig as { container_name?: string };
-        nameToService.set(serviceName, serviceName);
-        if (config.container_name) {
-          expectedNames.push(config.container_name);
-          nameToService.set(config.container_name, serviceName);
-        } else {
-          // Standard v2 naming
-          expectedNames.push(serviceName);
-          expectedNames.push(`${stackName}-${serviceName}-1`);
-          // Legacy project prefix catch - accounts for orphan containers
-          expectedNames.push(`compose-${serviceName}-1`);
-          expectedNames.push(`compose_${serviceName}_1`);
-        }
-      }
-
-      // 3. Query the raw Docker daemon
-      const allContainers = await this.docker.listContainers({ all: true });
-
-      // 4. Match containers by name
-      const fallbackContainers = allContainers.filter(container => {
-        // container.Names usually looks like ['/plex']
-        return container.Names.some(name => {
-          const strippedName = name.replace(/^\//, '');
-          return expectedNames.includes(strippedName);
-        });
-      });
-
-      // 5. Map to the frontend interface
-      return fallbackContainers.map(c => {
-        const strippedName = c.Names?.[0]?.replace(/^\//, '') ?? '';
-        const labelService = c.Labels?.['com.docker.compose.service'];
-        const service = (typeof labelService === 'string' && labelService.length > 0
-          ? labelService
-          : nameToService.get(strippedName)) ?? '';
-        let Ports: { PrivatePort: number, PublicPort: number, Type?: string }[] = [];
-        if (c.Ports && Array.isArray(c.Ports)) {
-          Ports = c.Ports
-            .filter((p: any) => typeof p.PublicPort === 'number' && p.PublicPort > 0)
-            .map((p: any) => ({ PrivatePort: (p.PrivatePort || 0) as number, PublicPort: p.PublicPort as number, Type: typeof p.Type === 'string' ? p.Type.toLowerCase() : undefined }));
-        }
-        return {
-          Id: c.Id,
-          Names: c.Names,
-          Service: service,
-          State: c.State,
-          Status: c.Status,
-          Labels: c.Labels,
-          Ports
-        };
-      });
-    } catch (fallbackError) {
-      console.error('Smart Fallback failed for %s:', sanitizeForLog(stackName), sanitizeForLog((fallbackError as Error)?.message ?? String(fallbackError)));
-      return [];
     }
+    if (!yamlContent) return [];
+
+    const parsedYaml = yaml.parse(yamlContent);
+    if (!parsedYaml || !parsedYaml.services) return [];
+
+    const expectedNames: string[] = [];
+    const nameToService = new Map<string, string>();
+    for (const [serviceName, serviceConfig] of Object.entries(parsedYaml.services)) {
+      const config = serviceConfig as { container_name?: string };
+      nameToService.set(serviceName, serviceName);
+      if (config.container_name) {
+        expectedNames.push(config.container_name);
+        nameToService.set(config.container_name, serviceName);
+      } else {
+        expectedNames.push(serviceName);
+        expectedNames.push(`${stackName}-${serviceName}-1`);
+        // Legacy project prefixes for orphan containers
+        expectedNames.push(`compose-${serviceName}-1`);
+        expectedNames.push(`compose_${serviceName}_1`);
+      }
+    }
+
+    const allContainers = await this.docker.listContainers({ all: true });
+    const fallbackContainers = allContainers.filter(container => {
+      const nameMatch = container.Names.some(name =>
+        expectedNames.includes(name.replace(/^\//, '')),
+      );
+      return nameMatch && DockerController.containerHasStackDirEvidence(container.Labels, stackDir);
+    });
+
+    return fallbackContainers.map(c => {
+      const strippedName = c.Names?.[0]?.replace(/^\//, '') ?? '';
+      const labelService = c.Labels?.['com.docker.compose.service'];
+      const service = (typeof labelService === 'string' && labelService.length > 0
+        ? labelService
+        : nameToService.get(strippedName)) ?? '';
+      let Ports: { PrivatePort: number, PublicPort: number, Type?: string }[] = [];
+      if (c.Ports && Array.isArray(c.Ports)) {
+        Ports = c.Ports
+          .filter((p: any) => typeof p.PublicPort === 'number' && p.PublicPort > 0)
+          .map((p: any) => ({ PrivatePort: (p.PrivatePort || 0) as number, PublicPort: p.PublicPort as number, Type: typeof p.Type === 'string' ? p.Type.toLowerCase() : undefined }));
+      }
+      return {
+        Id: c.Id,
+        Names: c.Names,
+        Service: service,
+        State: c.State,
+        Status: c.Status,
+        Labels: c.Labels,
+        Ports
+      };
+    });
   }
 
   public async streamContainerLogs(containerId: string, req: any, res: any): Promise<void> {
