@@ -35,10 +35,15 @@ beforeAll(async () => {
 
 afterAll(() => cleanupTestDb(tmpDir));
 
+/** All Set-Cookie entries in a response for one cookie name. */
+function cookieEntries(setCookieHeader: string | string[] | undefined, name: string): string[] {
+  const cookies = Array.isArray(setCookieHeader) ? setCookieHeader : setCookieHeader ? [setCookieHeader] : [];
+  return cookies.filter((c) => c.startsWith(`${name}=`));
+}
+
 /** All sencho_token Set-Cookie entries in a response (should never be more than one). */
 function sessionCookieEntries(setCookieHeader: string | string[] | undefined): string[] {
-  const cookies = Array.isArray(setCookieHeader) ? setCookieHeader : setCookieHeader ? [setCookieHeader] : [];
-  return cookies.filter((c) => c.startsWith('sencho_token='));
+  return cookieEntries(setCookieHeader, 'sencho_token');
 }
 
 /** Extract the sencho_token cookie's raw JWT value from a Set-Cookie header. */
@@ -177,8 +182,7 @@ describe('"stay signed in" at login', () => {
       .post('/api/auth/login')
       .send({ username: 'mfa-remember-user', password: 'mfa-remember-pass', remember: true });
     expect(loginRes.body.mfaRequired).toBe(true);
-    const pendingCookies = loginRes.headers['set-cookie'] as string | string[];
-    const pendingCookieHeader = (Array.isArray(pendingCookies) ? pendingCookies : [pendingCookies]).find((c) => c.startsWith('sencho_mfa_pending='));
+    const pendingCookieHeader = cookieEntries(loginRes.headers['set-cookie'], 'sencho_mfa_pending')[0];
     expect(pendingCookieHeader).toBeDefined();
 
     const code = authenticator.generateSync({ secret, ...TOTP_PARAMS });
@@ -206,8 +210,7 @@ describe('reissueSessionAfterTokenBump preserves "stay signed in"', () => {
       .post('/api/auth/login')
       .send({ username: 'bump-test-user', password: 'bump-test-pass', remember: true });
     const rememberedCookie = extractSessionToken(loginRes.headers['set-cookie']);
-    const cookies = loginRes.headers['set-cookie'] as string | string[];
-    const cookieHeader = (Array.isArray(cookies) ? cookies : [cookies]).find((c) => c.startsWith('sencho_token='));
+    const cookieHeader = sessionCookieEntries(loginRes.headers['set-cookie'])[0];
 
     const changeRes = await request(app)
       .put('/api/auth/password')

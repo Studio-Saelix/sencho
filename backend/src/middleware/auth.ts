@@ -177,7 +177,8 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
 
     // Use the DB role (not the JWT role) so role changes take effect immediately
     req.user = { username: dbUser.username, role: dbUser.role as UserRole, userId: dbUser.id };
-    req.sessionRemember = decoded.remember === true;
+    const remember = decoded.remember === true;
+    req.sessionRemember = remember;
 
     // Sliding refresh: a session nearing its expiry gets silently reissued with
     // a fresh full TTL (matching whichever TTL, 24h or "stay signed in" 30d, the
@@ -192,7 +193,7 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
       if (isDebugEnabled()) console.log('[Auth:diag] Sliding refresh check:', decoded.username, 'remainingMs:', remainingMs, 'refreshed:', shouldRefresh);
       if (shouldRefresh) {
         try {
-          issueSessionCookie(res, req, dbUser, jwtSecret, decoded.remember === true);
+          issueSessionCookie(res, req, dbUser, jwtSecret, remember);
         } catch (refreshErr) {
           console.error('[Auth] Sliding session refresh failed for', dbUser.username, getErrorMessage(refreshErr, 'unknown'));
         }

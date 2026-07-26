@@ -39,6 +39,10 @@ interface RoleAssignmentItem {
     created_at: number;
 }
 
+type SlidingRefresh = '0' | '1';
+
+const DEFAULT_SLIDING_REFRESH: SlidingRefresh = DEFAULT_SETTINGS.session_sliding_refresh ?? '1';
+
 function SessionPolicySkeleton() {
     return (
         <div className="space-y-3 rounded-lg border border-glass-border bg-glass p-4">
@@ -58,10 +62,9 @@ function SessionPolicySkeleton() {
 function SessionPolicySection() {
     const { isAdmin } = useAuth();
     const readOnly = !isAdmin;
-    const [loading, setLoading] = useState(true);
-    const [loadFailed, setLoadFailed] = useState(false);
-    const [value, setValue] = useState<'0' | '1'>(DEFAULT_SETTINGS.session_sliding_refresh as '0' | '1');
-    const [saved, setSaved] = useState<'0' | '1'>(DEFAULT_SETTINGS.session_sliding_refresh as '0' | '1');
+    const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
+    const [value, setValue] = useState<SlidingRefresh>(DEFAULT_SLIDING_REFRESH);
+    const [saved, setSaved] = useState<SlidingRefresh>(DEFAULT_SLIDING_REFRESH);
     const [isSaving, setIsSaving] = useState(false);
     const hasChanges = value !== saved;
 
@@ -72,41 +75,44 @@ function SessionPolicySection() {
                 const res = await apiFetch('/settings', { localOnly: true });
                 if (cancelled) return;
                 if (!res.ok) {
-                    setLoadFailed(true);
+                    setPhase('error');
                     toast.error('Failed to load session policy.');
                     return;
                 }
-                const data = await res.json();
+                const raw = (await res.json())?.session_sliding_refresh;
                 if (cancelled) return;
-                const loaded = (data.session_sliding_refresh as '0' | '1') ?? DEFAULT_SETTINGS.session_sliding_refresh as '0' | '1';
+                const loaded: SlidingRefresh = raw === '0' || raw === '1' ? raw : DEFAULT_SLIDING_REFRESH;
                 setValue(loaded);
                 setSaved(loaded);
+                setPhase('ready');
             } catch {
                 if (!cancelled) {
-                    setLoadFailed(true);
+                    setPhase('error');
                     toast.error('Failed to load session policy.');
                 }
-            } finally {
-                if (!cancelled) setLoading(false);
             }
         })();
         return () => { cancelled = true; };
     }, []);
 
     const saveSettings = async () => {
+        // Snapshot the submitted value: the toggle stays live while the PATCH is
+        // in flight, so adopting `value` after the await could mark an edit made
+        // meanwhile as already saved.
+        const submitted = value;
         setIsSaving(true);
         try {
             const res = await apiFetch('/settings', {
                 method: 'PATCH',
                 localOnly: true,
-                body: JSON.stringify({ session_sliding_refresh: value }),
+                body: JSON.stringify({ session_sliding_refresh: submitted }),
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({}));
                 toast.error(err?.error || err?.message || 'Failed to save settings.');
                 return;
             }
-            setSaved(value);
+            setSaved(submitted);
             toast.success('Session policy saved.');
         } catch (e: unknown) {
             toast.error((e as Error)?.message || 'Something went wrong.');
@@ -115,9 +121,9 @@ function SessionPolicySection() {
         }
     };
 
-    if (loading) return <SessionPolicySkeleton />;
+    if (phase === 'loading') return <SessionPolicySkeleton />;
 
-    if (loadFailed) {
+    if (phase === 'error') {
         return (
             <SettingsCallout
                 tone="error"
