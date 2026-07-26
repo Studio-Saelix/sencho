@@ -8,8 +8,8 @@ import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
-import { parseImageRef, selectLocalRepoDigest } from './registry-api';
-import { detectImageUpdateAvailability } from './imageUpdateDetect';
+import { parseImageRef, selectLocalRepoDigests } from './registry-api';
+import { detectImageUpdate, type PreviewImageCheckStatus } from './imageUpdateDetect';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -42,6 +42,8 @@ export interface ImageCheckResult {
     digestUpdate?: boolean;
     /** Higher semver tag exists; UI may show it but Compose auto-apply cannot pin it. */
     tagUpdate?: boolean;
+    /** Detector authority; consumed by reduceServiceStatus / writeStackUpdateStatus. */
+    checkStatus?: PreviewImageCheckStatus;
     error?: string;
     /**
      * The image is not registry-backed (locally built, or a bare digest ref
@@ -50,6 +52,17 @@ export interface ImageCheckResult {
      * tally rather than counted as a failed or up-to-date check.
      */
     notCheckable?: boolean;
+}
+
+/**
+ * Normalize check authority for reduction. Test stubs / older callers may omit
+ * checkStatus: error means failed, else ok.
+ */
+export function normalizeImageCheckStatus(r: ImageCheckResult): PreviewImageCheckStatus {
+    if (r.notCheckable) return 'not_checkable';
+    if (r.checkStatus) return r.checkStatus;
+    if (r.error) return 'failed';
+    return 'ok';
 }
 
 /**
@@ -297,7 +310,8 @@ export function reduceServiceStatus(
     const checkableResults: ImageCheckResult[] = [];
     for (const ref of refs) {
         const result = imageUpdateMap.get(ref);
-        if (!result || result.notCheckable) continue;
+        if (!result) continue;
+        if (normalizeImageCheckStatus(result) === 'not_checkable') continue;
         checkableResults.push(result);
     }
 
@@ -308,12 +322,14 @@ export function reduceServiceStatus(
         };
     }
 
-    const errored = checkableResults.filter((r) => r.error !== undefined);
+    const statuses = checkableResults.map(normalizeImageCheckStatus);
+    const failed = checkableResults.filter((_, i) => statuses[i] === 'failed');
+    const partial = checkableResults.filter((_, i) => statuses[i] === 'partial');
     const confirmedUpdateThisRun = checkableResults.some(
-        (r) => r.error === undefined && r.hasUpdate === true,
+        (r, i) => statuses[i] === 'ok' && r.hasUpdate === true,
     );
 
-    if (errored.length === checkableResults.length) {
+    if (failed.length === checkableResults.length) {
         const priorHasUpdate = prior?.hasUpdate ?? false;
         return {
             status: {
@@ -322,14 +338,16 @@ export function reduceServiceStatus(
                 ...(dedupedRuntime.length > 0 ? { runtimeImages: dedupedRuntime } : {}),
                 hasUpdate: priorHasUpdate,
                 checkStatus: 'failed',
-                lastError: errored[0].error ?? 'Update check failed',
+                lastError: failed[0].error ?? 'Update check failed',
             },
             confirmedUpdateThisRun: false,
         };
     }
 
-    const checkStatus: StackServiceStatus['checkStatus'] = errored.length > 0 ? 'partial' : 'ok';
-    const lastError = errored.length > 0 ? (errored[0].error ?? null) : null;
+    const checkStatus: StackServiceStatus['checkStatus'] =
+        failed.length > 0 || partial.length > 0 ? 'partial' : 'ok';
+    const uncertain = [...partial, ...failed];
+    const lastError = uncertain.length > 0 ? (uncertain[0].error ?? null) : null;
     const hasUpdate = checkStatus === 'partial'
         ? (confirmedUpdateThisRun || (prior?.hasUpdate ?? false))
         : confirmedUpdateThisRun;
@@ -794,7 +812,11 @@ export class ImageUpdateService {
                 console.error(`[ImageUpdateService] Error checking ${sanitizeForLog(imageRef)}:`, sanitizeForLog((e as Error)?.message ?? String(e)));
                 // getErrorMessage (not raw String(e)) because this value can surface
                 // verbatim in the sidebar tooltip / readiness advisory as lastError.
-                imageUpdateMap.set(imageRef, { hasUpdate: false, error: getErrorMessage(e, 'Update check failed') });
+                imageUpdateMap.set(imageRef, {
+                    hasUpdate: false,
+                    checkStatus: 'failed',
+                    error: getErrorMessage(e, 'Update check failed'),
+                });
             }
             await sleep(ImageUpdateService.INTER_IMAGE_DELAY_MS);
         }
@@ -920,7 +942,11 @@ export class ImageUpdateService {
             try {
                 imageUpdateMap.set(imageRef, await this.checkImage(docker, imageRef));
             } catch (e) {
-                imageUpdateMap.set(imageRef, { hasUpdate: false, error: getErrorMessage(e, 'Update check failed') });
+                imageUpdateMap.set(imageRef, {
+                    hasUpdate: false,
+                    checkStatus: 'failed',
+                    error: getErrorMessage(e, 'Update check failed'),
+                });
             }
             await sleep(ImageUpdateService.INTER_IMAGE_DELAY_MS);
         }
@@ -1003,6 +1029,70 @@ export class ImageUpdateService {
         return committed;
     }
 
+    /**
+     * Current per-stack write-generation high-water mark (0 if never reserved).
+     * Snapshot before a read-only update-preview so commitPreviewClear can
+     * compare against writes that reserved or committed after observation.
+     */
+    public peekStackWriteGeneration(nodeId: number, stackName: string): number {
+        return this.stackWriteState.get(this.stackWriteKey(nodeId, stackName))?.generation ?? 0;
+    }
+
+    /**
+     * Clear persisted scanner update state after an authoritative-negative
+     * update preview. `observedMemoryGeneration` and `observedRowGeneration`
+     * are snapshotted before the preview.
+     *
+     * Ordering:
+     * - If memory generation advanced after observation, abort (stale).
+     * - If memory generation still equals the observation watermark, advance
+     *   (tombstone) so an equal-generation writer reserved before observation
+     *   cannot commit after the clear (SF-4).
+     * - If the persisted row generation advanced after observation, keep the row.
+     * - Otherwise delete partial, failed, and confirmed ok+true rows.
+     *
+     * Returns cleared | stale | absent.
+     */
+    public async commitPreviewClear(
+        nodeId: number,
+        stackName: string,
+        observedMemoryGeneration: number,
+        observedRowGeneration: number,
+    ): Promise<'cleared' | 'stale' | 'absent'> {
+        const key = this.stackWriteKey(nodeId, stackName);
+        let state = this.stackWriteState.get(key);
+        if (!state) {
+            state = { chain: Promise.resolve(), generation: observedMemoryGeneration };
+            this.stackWriteState.set(key, state);
+        }
+
+        // A reservation after observation already owns a higher generation.
+        if (state.generation > observedMemoryGeneration) {
+            return 'stale';
+        }
+
+        // Tombstone the equal watermark so pre-observation writers reserved at
+        // this generation become stale when they later try to commit.
+        if (state.generation === observedMemoryGeneration) {
+            state.generation += 1;
+        }
+        const clearGeneration = state.generation;
+
+        let deleted = 0;
+        const committed = await this.withStackWriteLock(nodeId, stackName, clearGeneration, () => {
+            const db = DatabaseService.getInstance();
+            const detail = db.getStackUpdateDetail(nodeId)[stackName];
+            if (!detail) return;
+            // Compare DB-embedded generations only (same dimension as the
+            // pre-preview snapshot). Memory peek resets on restart; SQLite does not.
+            const rowGeneration = db.getStackUpdateWriteGeneration(nodeId, stackName);
+            if (rowGeneration > observedRowGeneration) return;
+            deleted = db.clearStackUpdateStatus(nodeId, stackName);
+        });
+        if (!committed) return 'stale';
+        return deleted > 0 ? 'cleared' : 'absent';
+    }
+
     private runtimeImagesByService(
         stackName: string,
         containers: Array<{ Image?: string; Labels?: Record<string, string> }>,
@@ -1068,14 +1158,16 @@ export class ImageUpdateService {
 
         const checkable = Array.from(images)
             .map((img) => imageUpdateMap.get(img))
-            .filter((r): r is ImageCheckResult => !!r && !r.notCheckable);
-        const errored = checkable.filter((r) => r.error !== undefined);
-        const confirmedHasUpdate = checkable.some((r) => r.error === undefined && r.hasUpdate === true);
+            .filter((r): r is ImageCheckResult => !!r && normalizeImageCheckStatus(r) !== 'not_checkable');
+        const statuses = checkable.map(normalizeImageCheckStatus);
+        const failed = checkable.filter((_, i) => statuses[i] === 'failed');
+        const partial = checkable.filter((_, i) => statuses[i] === 'partial');
+        const confirmedHasUpdate = checkable.some((r, i) => statuses[i] === 'ok' && r.hasUpdate === true);
 
-        if (checkable.length > 0 && errored.length === checkable.length) {
+        if (checkable.length > 0 && failed.length === checkable.length) {
             const committed = await this.withStackWriteLock(nodeId, stackName, generation, async () => {
                 db.recordStackCheckFailure(
-                    nodeId, stackName, errored[0].error ?? 'Update check failed', checkedAt,
+                    nodeId, stackName, failed[0].error ?? 'Update check failed', checkedAt,
                 );
             });
             return {
@@ -1085,8 +1177,10 @@ export class ImageUpdateService {
             };
         }
 
-        const checkStatus: StackCheckStatus = errored.length > 0 ? 'partial' : 'ok';
-        const lastError = errored.length > 0 ? (errored[0].error ?? null) : null;
+        const checkStatus: StackCheckStatus =
+            failed.length > 0 || partial.length > 0 ? 'partial' : 'ok';
+        const uncertain = [...partial, ...failed];
+        const lastError = uncertain.length > 0 ? (uncertain[0].error ?? null) : null;
         const hasUpdate = checkStatus === 'partial'
             ? (confirmedHasUpdate || previousState[stackName] === true)
             : confirmedHasUpdate;
@@ -1105,71 +1199,80 @@ export class ImageUpdateService {
     public async checkImage(docker: DockerController, imageRef: string): Promise<ImageCheckResult> {
         const parsed = parseImageRef(imageRef);
         // A bare digest ref (sha256:...) has no tag to track upstream; not applicable.
-        if (!parsed) return { hasUpdate: false, notCheckable: true };
+        if (!parsed) {
+            return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
+        }
 
         if (isDebugEnabled()) {
             console.log(`[ImageUpdateService] Checking ${imageRef}: registry=${parsed.registry} repo=${parsed.repo} tag=${parsed.tag}`);
         }
 
-        // Look up stored credentials for this registry
         const credentials = await RegistryService.getInstance().getAuthForRegistry(parsed.registry);
         if (isDebugEnabled()) {
             console.log(`[ImageUpdateService] ${imageRef}: credentials ${credentials ? 'found' : 'none'}`);
         }
 
-        // Resolve local digest when possible. Missing/unusable digests still run
-        // the shared detector so a higher registry tag stays visible (same as
-        // Fleet/Anatomy preview with localDigest: null).
-        let localDigest: string | null = null;
-        let platform: { os: string; architecture: string } = { os: 'linux', architecture: 'amd64' };
-        let localInspectIssue: 'failed' | 'no_repo_digests' | 'unresolved_digest' | undefined;
+        // Get local digests and platform from RepoDigests / Os+Architecture
+        let localDigests: string[];
+        let platform: { os: string; architecture: string };
         try {
             const inspect = await withTimeout(docker.getDocker().getImage(imageRef).inspect(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'inspect');
             const repoDigests: string[] = inspect.RepoDigests ?? [];
-            platform = { os: inspect.Os, architecture: inspect.Architecture };
+
+            // No RepoDigests at all: locally built / not registry-backed, so update
+            // status does not apply.
             if (repoDigests.length === 0) {
-                localInspectIssue = 'no_repo_digests';
-            } else {
-                localDigest = selectLocalRepoDigest(repoDigests, parsed);
-                if (!localDigest) localInspectIssue = 'unresolved_digest';
+                return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
             }
+
+            localDigests = selectLocalRepoDigests(repoDigests, parsed);
+            platform = { os: inspect.Os, architecture: inspect.Architecture };
         } catch {
-            localInspectIssue = 'failed';
+            return {
+                hasUpdate: false,
+                checkStatus: 'failed',
+                error: `Failed to inspect local image "${imageRef}"`,
+            };
         }
 
-        const detection = await detectImageUpdateAvailability({
-            localDigest,
+        // RepoDigests were present but none resolved a usable digest: genuinely
+        // ambiguous, so surface it rather than silently call the image up to date.
+        if (localDigests.length === 0) {
+            return {
+                hasUpdate: false,
+                checkStatus: 'failed',
+                error: `Could not resolve a local registry digest for "${imageRef}"`,
+            };
+        }
+
+        const detection = await detectImageUpdate({
+            localDigests,
             platform,
             registry: parsed.registry,
             repo: parsed.repo,
             tag: parsed.tag,
             credentials,
         });
-        if (detection.hasUpdate) {
-            const digestUpdate = detection.digestUpdate;
-            const tagUpdate = detection.nextTag !== null;
-            const digestLabel = localDigest ? `${localDigest.slice(0, 27)}...` : 'none';
-            const nextSuffix = detection.nextTag ? ` next=${detection.nextTag}` : '';
-            console.log(
-                `[ImageUpdateService] ${imageRef}: local=${digestLabel} update=${detection.hasUpdate}`
-                + ` digest=${digestUpdate} tag=${tagUpdate}${nextSuffix}`,
-            );
-            return { hasUpdate: true, digestUpdate, tagUpdate };
+
+        const digestLabel = localDigests[0] ? `${localDigests[0].slice(0, 27)}...` : 'none';
+        const nextSuffix = detection.nextTag ? ` next=${detection.nextTag}` : '';
+        console.log(
+            `[ImageUpdateService] ${imageRef}: local=${digestLabel} update=${detection.hasUpdate}`
+            + ` digest=${detection.digestUpdate} tag=${detection.tagUpdate}`
+            + ` status=${detection.checkStatus}${nextSuffix}`,
+        );
+
+        if (detection.checkStatus === 'not_checkable') {
+            return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
         }
 
-        if (localInspectIssue === 'failed') {
-            return { hasUpdate: false, error: `Failed to inspect local image "${imageRef}"` };
-        }
-        if (localInspectIssue === 'no_repo_digests') {
-            return { hasUpdate: false, notCheckable: true };
-        }
-        if (localInspectIssue === 'unresolved_digest') {
-            return { hasUpdate: false, error: `Could not resolve a local registry digest for "${imageRef}"` };
-        }
-        if (detection.digestError) {
-            return { hasUpdate: false, error: detection.digestError };
-        }
-        return { hasUpdate: false, digestUpdate: false, tagUpdate: false };
+        return {
+            hasUpdate: detection.hasUpdate,
+            digestUpdate: detection.digestUpdate,
+            tagUpdate: detection.tagUpdate,
+            checkStatus: detection.checkStatus,
+            ...(detection.reason ? { error: detection.reason } : {}),
+        };
     }
 }
 

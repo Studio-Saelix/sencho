@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import { GitBranch, Loader2, AlertCircle } from 'lucide-react';
 import type { CheckStatus } from '@/types/imageUpdates';
+import { isConfirmedImageUpdate } from '@/types/imageUpdates';
 import { Checkbox } from '@/components/ui/checkbox';
 import type { Label } from '@/components/label-types';
 import { cn } from '@/lib/utils';
@@ -23,8 +24,8 @@ interface StackRowProps {
   hasUpdate: boolean;
   /** Outdated service names for the update tooltip; empty keeps the generic label. */
   outdatedServices?: string[];
-  // Last image-update check outcome. 'failed' surfaces a muted "couldn't check"
-  // indicator so an undeterminable check is not mistaken for "up to date".
+  // Last image-update check outcome. Incomplete/failed checks with hasUpdate
+  // use a distinct indicator so they are not mistaken for a confirmed update.
   checkStatus?: CheckStatus;
   lastError?: string;
   hasGitPending: boolean;
@@ -48,12 +49,46 @@ function RowTooltip({ trigger, label }: { trigger: ReactNode; label: string }) {
   );
 }
 
+function appendErrorDetail(base: string, lastError?: string): string {
+  if (!lastError) return base;
+  return `${base} ${lastError}`;
+}
+
+function partialUpdateTooltip(hasUpdate: boolean, lastError?: string): string {
+  if (hasUpdate) {
+    // Neutral copy: partial + hasUpdate can mean newly detected OR retained;
+    // provenance is not persisted on the wire.
+    return appendErrorDetail(
+      'The last check was incomplete; an update was detected or retained, but the full stack could not be verified.',
+      lastError,
+    );
+  }
+  return appendErrorDetail(
+    'The last image-update check was incomplete; update status could not be fully verified.',
+    lastError,
+  );
+}
+
+function failedCheckTooltip(hasUpdate: boolean, lastError?: string): string {
+  if (hasUpdate) {
+    return appendErrorDetail(
+      'Previous update status retained; the last check failed.',
+      lastError,
+    );
+  }
+  return lastError ? `Update check failed: ${lastError}` : 'Update check failed';
+}
+
 export function StackRow(props: StackRowProps) {
   const {
     file, displayName, status, running, total, isBusy, isActive,
     hasUpdate, outdatedServices, checkStatus, lastError, hasGitPending, onSelect, kebabSlot,
     bulkMode = false, isSelected = false, onToggleSelect,
   } = props;
+
+  const confirmedUpdate = isConfirmedImageUpdate({ hasUpdate, checkStatus });
+  const partialIncomplete = checkStatus === 'partial';
+  const failedCheck = checkStatus === 'failed';
 
   const handleClick = () => {
     if (bulkMode) onToggleSelect?.(file);
@@ -106,9 +141,9 @@ export function StackRow(props: StackRowProps) {
       {/* Stack name */}
       <span className="flex-1 truncate font-mono text-sm min-w-0">{displayName}</span>
 
-      {/* Fixed trailing icon slot: update dot > check-failed > git pending */}
+      {/* Trailing: confirmed update > partial incomplete > failed > git pending */}
       <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0" data-testid="stack-row-trailing">
-        {hasUpdate ? (
+        {confirmedUpdate ? (
           <RowTooltip
             trigger={(
               <span className="relative inline-flex w-2 h-2" data-testid="stack-trailing-update">
@@ -118,10 +153,15 @@ export function StackRow(props: StackRowProps) {
             )}
             label={updateAvailableLabel(outdatedServices)}
           />
-        ) : checkStatus === 'failed' ? (
+        ) : partialIncomplete ? (
+          <RowTooltip
+            trigger={<span data-testid="stack-trailing-check-partial"><AlertCircle className="w-3 h-3 text-warning-foreground/80" strokeWidth={1.5} /></span>}
+            label={partialUpdateTooltip(hasUpdate, lastError)}
+          />
+        ) : failedCheck ? (
           <RowTooltip
             trigger={<span data-testid="stack-trailing-check-failed"><AlertCircle className="w-3 h-3 text-muted-foreground/70" strokeWidth={1.5} /></span>}
-            label={lastError ? `Update check failed: ${lastError}` : 'Update check failed'}
+            label={failedCheckTooltip(hasUpdate, lastError)}
           />
         ) : hasGitPending ? (
           <RowTooltip

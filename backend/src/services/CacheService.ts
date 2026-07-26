@@ -132,8 +132,8 @@ export class CacheService {
     // This caller owns the computation; the closure records whether it ended
     // as a fresh compute or a stale fallback, read after the promise settles.
     let outcome: CacheFetchOutcome = 'computed';
-    const holder: { promise?: Promise<T> } = {};
-    holder.promise = (async () => {
+    const inflightSelf: { promise: Promise<T> | null } = { promise: null };
+    const promise = (async () => {
       try {
         const value = await fetcher();
         if (this.currentGeneration(key) === generation) {
@@ -150,14 +150,15 @@ export class CacheService {
       } finally {
         // Only clear the inflight slot if we still own it. invalidate() may
         // have already deleted this entry and allowed a newer owner.
-        if (this.inflight.get(key) === holder.promise) {
+        if (this.inflight.get(key) === inflightSelf.promise) {
           this.inflight.delete(key);
         }
       }
     })();
+    inflightSelf.promise = promise;
 
-    this.inflight.set(key, holder.promise);
-    const value = await holder.promise;
+    this.inflight.set(key, promise);
+    const value = await promise;
     return { value, outcome };
   }
 

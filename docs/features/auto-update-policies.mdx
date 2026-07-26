@@ -68,8 +68,8 @@ Once the cause is resolved, the next check (on the interval, or via **Recheck**)
 ## Workflow
 
 1. Open **Update** from the top nav strip.
-2. Skim the card grid. The badge tells you the risk at a glance: `Safe · patch` is green, `Review · minor` is amber, `Blocked · major` is red, and a digest-only rebuild on a non-semver tag shows the gray `Digest rebuild` badge.
-3. For a **Digest rebuild** (same Compose tag, new registry content), click **Apply now** on the card to pull and recreate the stack immediately.
+2. Skim the card grid. The badge tells you the risk at a glance: `Safe · patch` is green, `Review · minor` is amber, `Blocked · major` is red, a digest-only rebuild on a non-semver tag shows the gray `Digest rebuild` badge, `Check uncertain` appears when the last preview check was incomplete or failed, and `Newer tag · edit Compose` marks a higher tag that requires editing the Compose pin.
+3. For a **Digest rebuild** (same Compose tag, new registry content), click **Apply now** on the card to pull and recreate the stack immediately. **Apply now** stays disabled for tag-only advisories and for uncertain checks.
 4. For a higher pinned semver tag (a version diff such as `1.2.3` → `1.2.4`, including major bumps), edit the Compose `image:` reference to the next tag, then deploy the stack from the editor. **Apply now** and the lifecycle **Update** action pull the currently pinned tag only; they do not rewrite the pin.
 5. For a major bump, review the changelog preview and upstream release notes before changing the pin and deploying. **Apply now** is disabled on blocked cards.
 
@@ -86,6 +86,8 @@ On multi-service stacks, the Updates view can also apply a single service when t
 | `Review · minor` | Amber (AlertTriangle icon) | Minor semver bump (e.g. `1.2.3` to `1.3.0`). Resolve by editing the Compose pin, then deploying. |
 | `Blocked · major` | Red (ShieldAlert icon) | Major semver bump (e.g. `1.2.3` to `2.0.0`). **Apply now** is disabled; the card surfaces the reason "Major version jumps require human review before applying." After review, edit the Compose pin, then deploy. |
 | `Digest rebuild` | Gray | Non-semver tag (e.g. `main`, `stable`) with an updated digest (tag name unchanged; content changed; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests)). **Apply now** pulls this rebuild. |
+| `Check uncertain` | Amber | Preview check incomplete or failed; **Apply now** stays disabled until a full successful check. |
+| `Newer tag · edit Compose` | Amber | A higher tag exists than the Compose pin; edit Compose (do not use **Apply now**). |
 
 Blocked major bumps still surface in scheduled check runs so you stay informed, but **Apply now** stays disabled until you review them, change the Compose pin, and deploy.
 
@@ -136,7 +138,7 @@ For each stack with a pending image update, Sencho computes a preview by:
 
 1. Parsing the compose file to enumerate every service that pulls a registry image (a service declaring only `build:`, with no `image:` key, has no registry reference to check and is excluded from this preview).
 2. Calling the registry with your configured credentials to fetch the current tag list and remote digest.
-3. Picking the highest semver tag greater than the current tag (keeping the same prefix and suffix). If the highest available tag matches the current one but the remote digest has changed, the card surfaces as a `Rebuild available` update. Sencho checks both a newer semver tag and a digest change behind the same tag; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
+3. Picking the highest semver tag greater than the current tag (keeping the same prefix and suffix). If a higher tag exists, the card surfaces as a tag-only advisory (`Newer tag · edit Compose`); scheduled auto-update and **Apply now** do not rewrite Compose pins. If the highest available tag matches the current one but the remote digest has changed, the card surfaces as a Compose-actionable `Rebuild available` / digest update. Sencho checks both a newer semver tag and a digest change behind the same tag; see [Tags vs digests](/features/vulnerability-scanning#tags-vs-digests).
 4. Scoring the overall stack by the most severe image bump. Any major bump marks the stack as blocked.
 5. Normalizing Docker Hub library paths so credentials and changelog lookups resolve correctly.
 

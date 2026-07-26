@@ -16,6 +16,11 @@ vi.mock('@/context/NodeContext', () => ({
   useNodes: () => useNodesMock(),
 }));
 
+const useImageUpdatesMock = vi.fn();
+vi.mock('@/hooks/useImageUpdates', () => ({
+  useImageUpdates: (...args: unknown[]) => useImageUpdatesMock(...args),
+}));
+
 import { useStackListState } from './useStackListState';
 
 function okJson(payload: unknown): Response {
@@ -32,9 +37,15 @@ function notFound(): Response {
 beforeEach(() => {
   apiFetchMock.mockReset();
   useNodesMock.mockReset();
+  useImageUpdatesMock.mockReset();
   useNodesMock.mockReturnValue({
     activeNode: { id: 1, name: 'Local', type: 'local' },
     nodes: [{ id: 1, name: 'Local', type: 'local' }],
+  });
+  useImageUpdatesMock.mockReturnValue({
+    stackUpdates: {},
+    refresh: vi.fn(),
+    sidebarIndicators: true,
   });
 });
 
@@ -136,5 +147,52 @@ describe('useStackListState.refreshStacks failure classification', () => {
     });
 
     expect(result.current.files).toEqual(['web.yml']);
+  });
+});
+
+describe('useStackListState Updates chip confirmed-only', () => {
+  async function loadStacks() {
+    apiFetchMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/stacks') {
+        return Promise.resolve(okJson(['ok.yml', 'partial.yml', 'failed.yml']));
+      }
+      if (endpoint === '/stacks/statuses') {
+        return Promise.resolve(okJson({
+          'ok.yml': { status: 'running' },
+          'partial.yml': { status: 'running' },
+          'failed.yml': { status: 'running' },
+        }));
+      }
+      return Promise.resolve(notFound());
+    });
+
+    useImageUpdatesMock.mockReturnValue({
+      stackUpdates: {
+        'ok.yml': { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+        'partial.yml': { hasUpdate: true, checkStatus: 'partial', lastError: 'timeout', checkedAt: 1 },
+        'failed.yml': { hasUpdate: true, checkStatus: 'failed', lastError: 'unreachable', checkedAt: 1 },
+      },
+      refresh: vi.fn(),
+      sidebarIndicators: true,
+    });
+
+    const { result } = renderHook(() => useStackListState());
+    await act(async () => {
+      await result.current.refreshStacks();
+    });
+    return result;
+  }
+
+  it('counts only ok+true stacks under Updates', async () => {
+    const result = await loadStacks();
+    expect(result.current.filterCounts.updates).toBe(1);
+  });
+
+  it('filters the Updates chip to confirmed stacks only', async () => {
+    const result = await loadStacks();
+    await act(async () => {
+      result.current.setFilterChip('updates');
+    });
+    expect(result.current.chipFilteredFiles).toEqual(['ok.yml']);
   });
 });

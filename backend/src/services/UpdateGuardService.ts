@@ -152,7 +152,7 @@ export class UpdateGuardService {
       driftSignal(drift),
       containersSignal(containers),
       healthchecksSignal(containers),
-      updatePreviewSignal(preview === 'error' ? 'error' : preview.summary),
+      updatePreviewSignal(preview === 'error' ? 'error' : preview.summary, preview === 'error' ? undefined : preview.images),
       buildServicesSignal(preview === 'error' ? 'error' : preview.build_services),
       backupSlotSignal(backup, now),
       diskSignal(typeof disk === 'number' ? { usePercent: disk, limitPercent } : 'error'),

@@ -4,6 +4,7 @@ import {
   FLEET_UPDATE_CACHE_KEY,
   invalidateFleetUpdateCache,
   isFullStackUpdatePath,
+  isUpdatePreviewPath,
 } from '../helpers/fleetUpdateCache';
 
 describe('isFullStackUpdatePath', () => {
@@ -16,6 +17,18 @@ describe('isFullStackUpdatePath', () => {
     expect(isFullStackUpdatePath('/stacks/paperless/services/redis/update')).toBe(false);
     expect(isFullStackUpdatePath('/stacks/paperless/services/redis/restore')).toBe(false);
     expect(isFullStackUpdatePath('/stacks/paperless/deploy')).toBe(false);
+  });
+});
+
+describe('isUpdatePreviewPath', () => {
+  it('matches update-preview paths after the /api mount strip', () => {
+    expect(isUpdatePreviewPath('/stacks/paperless/update-preview')).toBe(true);
+    expect(isUpdatePreviewPath('/stacks/paperless/update-preview?nodeId=2')).toBe(true);
+  });
+
+  it('rejects full-stack update and other stack paths', () => {
+    expect(isUpdatePreviewPath('/stacks/paperless/update')).toBe(false);
+    expect(isUpdatePreviewPath('/stacks/paperless/services/redis/update')).toBe(false);
   });
 });
 

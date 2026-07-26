@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { detectImageUpdateAvailability } from '../services/imageUpdateDetect';
+import { detectImageUpdate } from '../services/imageUpdateDetect';
 import { computeImagePreview } from '../services/UpdatePreviewService';
 import type { DigestComparisonResult } from '../services/registry-api';
 
@@ -9,7 +9,7 @@ const CREDENTIALS = { username: 'u', password: 'p' };
 const IMAGE = 'nginx:1.2.3';
 
 /**
- * COR-1 regression: persisted sidebar status (via detectImageUpdateAvailability /
+ * COR-1 regression: persisted sidebar status (via detectImageUpdate /
  * checkImage) and Fleet/Anatomy preview (computeImagePreview) must agree when
  * the declared-tag digest matches but a higher semantic tag exists.
  */
@@ -17,26 +17,26 @@ describe('cross-surface update detection (digest match + higher semver)', () => 
   async function runDetectionAndPreview(
     comparison: DigestComparisonResult,
     tags: string[],
-    localDigest: string | null = LOCAL_DIGEST,
+    localDigests: string[] = [LOCAL_DIGEST],
   ) {
     const compareDigest = vi.fn().mockResolvedValue(comparison);
-    const listTags = vi.fn().mockResolvedValue(tags);
+    const listRegistryTagsResult = vi.fn().mockResolvedValue({ ok: true, tags });
 
-    const detection = await detectImageUpdateAvailability({
-      localDigest,
+    const detection = await detectImageUpdate({
+      localDigests,
       platform: PLATFORM,
       registry: 'registry-1.docker.io',
       repo: 'library/nginx',
       tag: '1.2.3',
       credentials: CREDENTIALS,
-      deps: { compareDigest, listTags },
+      deps: { compareDigest, listRegistryTagsResult },
     });
 
     const preview = await computeImagePreview('app', IMAGE, {
       getCredentials: vi.fn().mockResolvedValue(CREDENTIALS),
-      getLocalDigest: vi.fn().mockResolvedValue({ digest: localDigest, platform: PLATFORM }),
+      getLocalDigest: vi.fn().mockResolvedValue({ digests: localDigests, platform: PLATFORM, emptyReason: null }),
       compareDigest,
-      listRegistryTags: listTags,
+      listRegistryTagsResult,
     });
 
     return { detection, preview, compareDigest };
@@ -79,11 +79,11 @@ describe('cross-surface update detection (digest match + higher semver)', () => 
     expect(preview.has_update).toBe(detection.hasUpdate);
   });
 
-  it('shared detector and preview both report hasUpdate with no local digest when 1.2.4 exists', async () => {
+  it('shared detector and preview both report hasUpdate with no local digests when 1.2.4 exists', async () => {
     const { detection, preview, compareDigest } = await runDetectionAndPreview(
       { kind: 'update' },
       ['1.2.3', '1.2.4'],
-      null,
+      [],
     );
 
     expect(compareDigest).not.toHaveBeenCalled();

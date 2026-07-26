@@ -10,26 +10,43 @@ import {
 } from './ImageUpdateService';
 import {
     parseImageRef,
-    selectLocalRepoDigest,
+    selectLocalRepoDigests,
     compareLocalToRemoteTag,
-    listRegistryTags,
+    listRegistryTagsResult,
     type ParsedRef,
     type RegistryCredentials,
 } from './registry-api';
 import {
-    computeSemverBump,
-    detectImageUpdateAvailability,
+    detectImageUpdate,
+    type ImageUpdateDetectResult,
+    type ListRegistryTagsResultFn,
+    type PreviewImageCheckStatus,
     type SemverBump,
+    computeSemverBump,
+    findNextTag,
+    isMovingTag,
+    listAllRegistryTagsBounded,
+    parseSemverTag,
+    PREVIEW_TAG_LIST_MAX_PAGES,
+    PREVIEW_TAG_LIST_MAX_TAGS,
+    PREVIEW_TAG_LIST_PAGE_SIZE,
+    type TagEnumOutcome,
 } from './imageUpdateDetect';
 
-// Re-export shared helpers so existing callers keep importing from this module.
+export type { SemverBump, PreviewImageCheckStatus, TagEnumOutcome, ListRegistryTagsResultFn };
 export {
-    parseSemverTag,
-    findNextTag,
     computeSemverBump,
+    findNextTag,
     isMovingTag,
-    type SemverBump,
-} from './imageUpdateDetect';
+    listAllRegistryTagsBounded,
+    parseSemverTag,
+    PREVIEW_TAG_LIST_MAX_PAGES,
+    PREVIEW_TAG_LIST_MAX_TAGS,
+    PREVIEW_TAG_LIST_PAGE_SIZE,
+};
+
+/** Stack-level preview authority; absent on older remotes. */
+export type PreviewCheckStatus = 'ok' | 'partial' | 'failed';
 
 export interface UpdatePreviewImage {
     service: string;
@@ -37,7 +54,30 @@ export interface UpdatePreviewImage {
     current_tag: string;
     next_tag: string | null;
     has_update: boolean;
+    /** Same-tag content drift; Compose pull can apply without pin change. */
+    digest_update: boolean;
+    /** Higher pinned semver exists; advisory until Compose is edited. */
+    tag_update: boolean;
     semver_bump: SemverBump;
+    /** Authority of this image's checks; not_checkable for invalid refs. */
+    check_status: PreviewImageCheckStatus;
+    /**
+     * Best operator-facing reason when check_status is not 'ok'/'not_checkable'.
+     * Never paired with a digest-based has_update claim: callers must treat
+     * this as verification-failed / unknown, not as "up to date" or rebuild.
+     */
+    check_error: string | null;
+    /**
+     * This image's own digest-comparison failure reason, independent of
+     * check_status. A confirmed tag-based update on the SAME image resolves
+     * check_status to 'ok' and nulls check_error even when the digest compare
+     * itself errored (the tag confirmation is authoritative for that image),
+     * but a full-stack apply still pulls/recreates this image's CURRENT tag
+     * content, which was never verified. Callers gating collateral risk to a
+     * full-stack apply must read this field, not check_error, so that
+     * masking never hides an unverified image from the mixed-state gate.
+     */
+    digest_error: string | null;
 }
 
 export type UpdateKind = 'tag' | 'digest' | 'none';
@@ -61,6 +101,16 @@ export interface UpdatePreviewSummary {
     has_build_services: boolean;
     /** True when a manual update can rebuild local build services (always when has_build_services). */
     rebuild_available: boolean;
+    /**
+     * Whether every checkable image was verified authoritatively.
+     * Authoritative-negative reconcile requires check_status === 'ok' and !has_update.
+     * Older remotes omit this field; treat absence as non-authoritative.
+     */
+    check_status: PreviewCheckStatus;
+    /** True when any image's check_status is not 'ok' (excluding not_checkable). */
+    verification_failed: boolean;
+    /** First image check_error when verification_failed; otherwise null. */
+    verification_error: string | null;
 }
 
 export interface UpdatePreview {
@@ -107,16 +157,79 @@ async function loadStackImages(
     return extractServiceImagesFromCompose(composeContent, merged);
 }
 
+export type LocalDigestEmptyReason = 'not_checkable' | 'inspect_failed' | 'unresolved';
+
 export interface LocalDigestInfo {
-    digest: string | null;
+    /** All usable RepoDigests for the image ref; compared as a set against the remote tag. */
+    digests: string[];
     platform: { os: string; architecture: string };
+    /**
+     * Why digests is empty. `not_checkable` mirrors the scanner (no RepoDigests /
+     * locally built) and must not surface as verification-failed. Inspect failure
+     * and unresolved selection do.
+     */
+    emptyReason: LocalDigestEmptyReason | null;
 }
 
 export interface ComputePreviewDeps {
     getLocalDigest: (imageRef: string, parsed: ParsedRef) => Promise<LocalDigestInfo>;
     compareDigest: typeof compareLocalToRemoteTag;
-    listRegistryTags: typeof listRegistryTags;
+    listRegistryTagsResult: ListRegistryTagsResultFn;
     getCredentials: (registry: string) => Promise<RegistryCredentials | null>;
+}
+
+function imageFromDetect(
+    service: string,
+    imageRef: string,
+    currentTag: string,
+    detected: ImageUpdateDetectResult,
+): UpdatePreviewImage {
+    return {
+        service,
+        image: imageRef,
+        current_tag: currentTag,
+        next_tag: detected.nextTag,
+        has_update: detected.hasUpdate,
+        digest_update: detected.digestUpdate,
+        tag_update: detected.tagUpdate,
+        semver_bump: detected.semverBump,
+        check_status: detected.checkStatus,
+        check_error: detected.reason,
+        digest_error: detected.digestError,
+    };
+}
+
+function notCheckableImage(service: string, imageRef: string): UpdatePreviewImage {
+    return {
+        service,
+        image: imageRef,
+        current_tag: 'unknown',
+        next_tag: null,
+        has_update: false,
+        digest_update: false,
+        tag_update: false,
+        semver_bump: 'none',
+        check_status: 'not_checkable',
+        check_error: null,
+        digest_error: null,
+    };
+}
+
+/** Local digest could not be established at all; never reaches the registry. */
+function failedLocalDigestImage(service: string, imageRef: string, currentTag: string, reason: string): UpdatePreviewImage {
+    return {
+        service,
+        image: imageRef,
+        current_tag: currentTag,
+        next_tag: null,
+        has_update: false,
+        digest_update: false,
+        tag_update: false,
+        semver_bump: 'none',
+        check_status: 'failed',
+        check_error: reason,
+        digest_error: reason,
+    };
 }
 
 export async function computeImagePreview(
@@ -126,20 +239,30 @@ export async function computeImagePreview(
 ): Promise<UpdatePreviewImage> {
     const parsed = parseImageRef(imageRef);
     if (!parsed) {
-        return {
-            service,
-            image: imageRef,
-            current_tag: 'unknown',
-            next_tag: null,
-            has_update: false,
-            semver_bump: 'none',
-        };
+        return notCheckableImage(service, imageRef);
     }
 
     const credentials = await deps.getCredentials(parsed.registry);
     const localInfo = await deps.getLocalDigest(imageRef, parsed);
-    const detection = await detectImageUpdateAvailability({
-        localDigest: localInfo.digest,
+    // A locally-built / non-registry-backed image (no RepoDigests at all) is
+    // not_checkable, matching ImageUpdateService.checkImage: it must never be
+    // funneled into detectImageUpdate's "no local digest" error path, which
+    // would misreport it as a verification failure instead of not applicable.
+    if (localInfo.emptyReason === 'not_checkable') {
+        return notCheckableImage(service, imageRef);
+    }
+    // Inspect failure and unresolved RepoDigests never reach the registry, and
+    // detectImageUpdate's generic "no local digest" reason would blur these two
+    // distinct causes together; keep the specific reason, matching what
+    // ImageUpdateService.checkImage reports for the same two cases.
+    if (localInfo.emptyReason === 'inspect_failed') {
+        return failedLocalDigestImage(service, imageRef, parsed.tag, 'Failed to inspect local image');
+    }
+    if (localInfo.emptyReason === 'unresolved') {
+        return failedLocalDigestImage(service, imageRef, parsed.tag, 'Could not resolve a local registry digest');
+    }
+    const detected = await detectImageUpdate({
+        localDigests: localInfo.digests,
         platform: localInfo.platform,
         registry: parsed.registry,
         repo: parsed.repo,
@@ -147,28 +270,10 @@ export async function computeImagePreview(
         credentials,
         deps: {
             compareDigest: deps.compareDigest,
-            listTags: deps.listRegistryTags,
+            listRegistryTagsResult: deps.listRegistryTagsResult,
         },
     });
-
-    let semverBump: SemverBump = 'none';
-    let resolvedNext: string | null = null;
-    if (detection.nextTag) {
-        resolvedNext = detection.nextTag;
-        semverBump = computeSemverBump(parsed.tag, detection.nextTag);
-    } else if (detection.digestUpdate) {
-        resolvedNext = parsed.tag;
-        semverBump = 'patch';
-    }
-
-    return {
-        service,
-        image: imageRef,
-        current_tag: parsed.tag,
-        next_tag: resolvedNext,
-        has_update: detection.hasUpdate,
-        semver_bump: semverBump,
-    };
+    return imageFromDetect(service, imageRef, parsed.tag, detected);
 }
 
 function buildRollbackTarget(image: string, currentTag: string): string | null {
@@ -182,6 +287,16 @@ function buildRollbackTarget(image: string, currentTag: string): string | null {
         : parsed.repo;
     const base = isDockerHub ? repo : `${parsed.registry}/${repo}`;
     return `${base}:${currentTag}`;
+}
+
+export function rollupPreviewCheckStatus(images: UpdatePreviewImage[]): PreviewCheckStatus {
+    const checkable = images.filter((i) => i.check_status !== 'not_checkable');
+    if (checkable.length === 0) return 'ok';
+    const allFailed = checkable.every((i) => i.check_status === 'failed');
+    if (allFailed) return 'failed';
+    const allOk = checkable.every((i) => i.check_status === 'ok');
+    if (allOk) return 'ok';
+    return 'partial';
 }
 
 export function buildSummary(
@@ -206,6 +321,7 @@ export function buildSummary(
         : updated.some(i => i.next_tag !== null && i.next_tag !== i.current_tag)
             ? 'tag'
             : 'digest';
+    const verificationError = images.find(i => i.check_error)?.check_error ?? null;
     return {
         stack_name: stackName,
         images,
@@ -221,10 +337,22 @@ export function buildSummary(
             blocked_reason: blocked ? 'Major version jumps require human review before applying.' : null,
             has_build_services: hasBuildServices,
             rebuild_available: hasBuildServices,
+            check_status: rollupPreviewCheckStatus(images),
+            verification_failed: verificationError !== null,
+            verification_error: verificationError,
         },
         rollback_target: primary ? buildRollbackTarget(primary.image, primary.current_tag) : null,
         changelog: null,
     };
+}
+
+/** True when a preview is safe to clear sticky scanner state. */
+export function isAuthoritativeNegativePreview(preview: UpdatePreview): boolean {
+    // Every declared image must be explicitly ok. Mixed ok + not_checkable must
+    // not clear sticky rows that may still track unresolved services.
+    return preview.images.length > 0
+        && preview.images.every((i) => i.check_status === 'ok')
+        && preview.summary.has_update === false;
 }
 
 /** Filter a full-stack preview down to one service's images and recompute the summary from that subset. */
@@ -257,21 +385,44 @@ export class UpdatePreviewService {
         const deps: ComputePreviewDeps = {
             getCredentials: (registry) => RegistryService.getInstance().getAuthForRegistry(registry),
             compareDigest: compareLocalToRemoteTag,
-            listRegistryTags,
+            listRegistryTagsResult,
             getLocalDigest: async (imageRef: string, parsed: ParsedRef): Promise<LocalDigestInfo> => {
                 try {
                     const inspect = await docker.getDocker().getImage(imageRef).inspect();
                     const repoDigests: string[] = inspect.RepoDigests ?? [];
-                    const digest = selectLocalRepoDigest(repoDigests, parsed);
-                    return { digest, platform: { os: inspect.Os, architecture: inspect.Architecture } };
-                } catch {
-                    return { digest: null, platform: { os: '', architecture: '' } };
+                    if (repoDigests.length === 0) {
+                        return {
+                            digests: [],
+                            platform: { os: inspect.Os, architecture: inspect.Architecture },
+                            emptyReason: 'not_checkable',
+                        };
+                    }
+                    const digests = selectLocalRepoDigests(repoDigests, parsed);
+                    return {
+                        digests,
+                        platform: { os: inspect.Os, architecture: inspect.Architecture },
+                        emptyReason: digests.length === 0 ? 'unresolved' : null,
+                    };
+                } catch (err) {
+                    console.error('[UpdatePreview] local image inspect failed for %s', imageRef, err);
+                    return { digests: [], platform: { os: '', architecture: '' }, emptyReason: 'inspect_failed' };
                 }
             },
         };
 
+        // Memoize service-independent detection by image ref so shared images
+        // hit the registry once, then attach each service name separately.
+        const detectByRef = new Map<string, Promise<UpdatePreviewImage>>();
         const results = await Promise.all(
-            stackImages.map(({ service, image }) => computeImagePreview(service, image, deps)),
+            stackImages.map(async ({ service, image }) => {
+                let shared = detectByRef.get(image);
+                if (!shared) {
+                    shared = computeImagePreview('_shared_', image, deps);
+                    detectByRef.set(image, shared);
+                }
+                const base = await shared;
+                return { ...base, service };
+            }),
         );
         return buildSummary(stackName, results, buildServices);
     }

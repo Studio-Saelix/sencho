@@ -11,6 +11,10 @@ export function invalidateFleetUpdateCache(): void {
   CacheService.getInstance().invalidate(FLEET_UPDATE_CACHE_KEY);
 }
 
+function pathWithoutQuery(pathAfterApi: string): string {
+  return pathAfterApi.split('?')[0] ?? pathAfterApi;
+}
+
 /**
  * True when `pathAfterApi` is a full-stack update route
  * (`/stacks/:name/update`), not a service-scoped update/restore.
@@ -18,6 +22,13 @@ export function invalidateFleetUpdateCache(): void {
  * (for example `/stacks/paperless/update`).
  */
 export function isFullStackUpdatePath(pathAfterApi: string): boolean {
-  const pathname = pathAfterApi.split('?')[0] ?? pathAfterApi;
-  return /^\/stacks\/[^/]+\/update\/?$/.test(pathname);
+  return /^\/stacks\/[^/]+\/update\/?$/.test(pathWithoutQuery(pathAfterApi));
+}
+
+/**
+ * True when `pathAfterApi` is the stack update-preview route
+ * (`/stacks/:name/update-preview`).
+ */
+export function isUpdatePreviewPath(pathAfterApi: string): boolean {
+  return /^\/stacks\/[^/]+\/update-preview\/?$/.test(pathWithoutQuery(pathAfterApi));
 }

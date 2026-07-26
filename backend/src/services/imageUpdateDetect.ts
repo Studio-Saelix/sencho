@@ -5,19 +5,24 @@
  *
  * An update is available when either:
  *   1. the local digest no longer matches the registry manifest for the
- *      currently declared tag, or
- *   2. a higher pinned semver tag exists in the registry tag list.
+ *      currently declared tag (digestUpdate; Compose-actionable), or
+ *   2. a higher pinned semver tag exists in a complete bounded tag list
+ *      (tagUpdate; advisory only until Compose is edited).
  */
 import {
     compareLocalToRemoteTag,
-    listRegistryTags,
+    listRegistryTagsResult,
     type DigestComparisonResult,
     type RegistryCredentials,
+    type TagListResult,
 } from './registry-api';
 
 export type SemverBump = 'none' | 'patch' | 'minor' | 'major' | 'unknown';
 
-export interface SemverParts {
+/** Per-image check confidence for preview authority and scanner persistence. */
+export type PreviewImageCheckStatus = 'ok' | 'partial' | 'failed' | 'not_checkable';
+
+interface SemverParts {
     prefix: string;
     major: number;
     minor: number;
@@ -27,6 +32,13 @@ export interface SemverParts {
 }
 
 const SEMVER_RE = /^(v)?(\d+)\.(\d+)\.(\d+)(?:-([A-Za-z][A-Za-z0-9.-]*))?$/;
+
+/** Max pages when enumerating tags for a pinned-semver authoritative-negative. */
+export const PREVIEW_TAG_LIST_MAX_PAGES = 20;
+/** Max tags accumulated across pages for the same purpose. */
+export const PREVIEW_TAG_LIST_MAX_TAGS = 2000;
+/** Per-page size passed to listRegistryTagsResult. */
+export const PREVIEW_TAG_LIST_PAGE_SIZE = 100;
 
 export function parseSemverTag(tag: string): SemverParts | null {
     const m = tag.match(SEMVER_RE);
@@ -85,61 +97,197 @@ export function computeSemverBump(currentTag: string, nextTag: string | null): S
     return 'none';
 }
 
-export interface ImageUpdateDetection {
-    hasUpdate: boolean;
-    digestUpdate: boolean;
-    nextTag: string | null;
-    /**
-     * Digest comparison failure reason when the digest path did not confirm an
-     * update. Callers that need fail-closed persistence surface this as an
-     * error only when hasUpdate is also false.
-     */
-    digestError: string | null;
-}
+export type ListRegistryTagsResultFn = (
+    registry: string,
+    repo: string,
+    credentials?: RegistryCredentials | null,
+    opts?: { limit?: number; cursor?: string },
+) => Promise<TagListResult>;
 
-export interface DetectImageUpdateDeps {
-    compareDigest?: typeof compareLocalToRemoteTag;
-    listTags?: typeof listRegistryTags;
-}
+export type TagEnumOutcome =
+    | { kind: 'complete'; tags: string[] }
+    | { kind: 'incomplete'; tags: string[]; reason: string }
+    | { kind: 'error'; reason: string }
+    | { kind: 'skipped' };
 
 /**
- * Core availability check shared by preview and persistence.
- * Digest comparison errors fail soft for the digest signal (never claim a
- * digest-based update) but a higher semver tag can still set hasUpdate.
+ * Enumerate tags with bounded pagination. Hitting the page/tag cap while a
+ * nextCursor remains is incomplete (non-authoritative), not a successful empty
+ * or "no newer tag" result.
  */
-export async function detectImageUpdateAvailability(args: {
-    localDigest: string | null;
+export async function listAllRegistryTagsBounded(
+    listFn: ListRegistryTagsResultFn,
+    registry: string,
+    repo: string,
+    credentials: RegistryCredentials | null,
+    opts: { maxPages?: number; maxTags?: number; pageSize?: number } = {},
+): Promise<TagEnumOutcome> {
+    const maxPages = opts.maxPages ?? PREVIEW_TAG_LIST_MAX_PAGES;
+    const maxTags = opts.maxTags ?? PREVIEW_TAG_LIST_MAX_TAGS;
+    const pageSize = opts.pageSize ?? PREVIEW_TAG_LIST_PAGE_SIZE;
+    const tags: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < maxPages; page++) {
+        const result = await listFn(registry, repo, credentials, { limit: pageSize, cursor });
+        if (!result.ok) {
+            return { kind: 'error', reason: result.message };
+        }
+        tags.push(...result.tags);
+        if (tags.length > maxTags) {
+            return {
+                kind: 'incomplete',
+                tags: tags.slice(0, maxTags),
+                reason: `Tag list exceeded ${maxTags} tags before pagination completed`,
+            };
+        }
+        if (!result.nextCursor) {
+            return { kind: 'complete', tags };
+        }
+        cursor = result.nextCursor;
+    }
+    return {
+        kind: 'incomplete',
+        tags,
+        reason: `Tag list exceeded ${maxPages} pages before pagination completed`,
+    };
+}
+
+export interface ImageUpdateDetectInput {
+    localDigests: readonly string[];
     platform: { os: string; architecture: string };
     registry: string;
     repo: string;
     tag: string;
     credentials: RegistryCredentials | null;
-    deps?: DetectImageUpdateDeps;
-}): Promise<ImageUpdateDetection> {
-    const compareDigest = args.deps?.compareDigest ?? compareLocalToRemoteTag;
-    const listTags = args.deps?.listTags ?? listRegistryTags;
+}
 
-    const [comparison, tags] = await Promise.all([
-        args.localDigest
-            ? compareDigest(
-                args.localDigest,
-                args.registry,
-                args.repo,
-                args.tag,
-                args.platform,
-                args.credentials,
-            )
-            : Promise.resolve<DigestComparisonResult>({
-                kind: 'error',
-                reason: 'No local registry digest available',
-            }),
-        listTags(args.registry, args.repo, args.credentials),
-    ]);
+export interface ImageUpdateDetectResult {
+    hasUpdate: boolean;
+    digestUpdate: boolean;
+    tagUpdate: boolean;
+    nextTag: string | null;
+    digestError: string | null;
+    tagEnumKind: 'complete' | 'incomplete' | 'error' | 'skipped';
+    tagEnumReason: string | null;
+    checkStatus: PreviewImageCheckStatus;
+    /** Best operator-facing uncertainty reason for lastError / tooltips. */
+    reason: string | null;
+    semverBump: SemverBump;
+}
+
+export interface DetectImageUpdateDeps {
+    compareDigest?: typeof compareLocalToRemoteTag;
+    listRegistryTagsResult?: ListRegistryTagsResultFn;
+}
+
+export function resolveImageCheckStatus(args: {
+    digest: DigestComparisonResult['kind'];
+    tagApplicable: boolean;
+    tagOutcome: TagEnumOutcome;
+    hasUpdate: boolean;
+}): PreviewImageCheckStatus {
+    const { digest, tagApplicable, tagOutcome, hasUpdate } = args;
+
+    if (digest === 'update') return 'ok';
+
+    if (!tagApplicable) {
+        return digest === 'match' ? 'ok' : 'failed';
+    }
+
+    if (tagOutcome.kind === 'complete') {
+        if (hasUpdate) return 'ok';
+        if (digest === 'match') return 'ok';
+        return 'partial';
+    }
+
+    if (tagOutcome.kind === 'incomplete') {
+        if (hasUpdate) return 'ok';
+        return 'partial';
+    }
+
+    if (hasUpdate) return 'partial';
+    if (digest === 'match') return 'partial';
+    return 'failed';
+}
+
+function uncertaintyReason(
+    checkStatus: PreviewImageCheckStatus,
+    digestError: string | null,
+    tagEnumReason: string | null,
+): string | null {
+    if (checkStatus === 'ok' || checkStatus === 'not_checkable') return null;
+    return tagEnumReason ?? digestError;
+}
+
+/**
+ * Core availability check shared by preview and persistence.
+ */
+export async function detectImageUpdate(args: ImageUpdateDetectInput & {
+    deps?: DetectImageUpdateDeps;
+}): Promise<ImageUpdateDetectResult> {
+    const compareDigest = args.deps?.compareDigest ?? compareLocalToRemoteTag;
+    const listFn = args.deps?.listRegistryTagsResult ?? listRegistryTagsResult;
+    const tagApplicable = !isMovingTag(args.tag);
+
+    const comparisonPromise: Promise<DigestComparisonResult> = args.localDigests.length > 0
+        ? compareDigest(
+            args.localDigests,
+            args.registry,
+            args.repo,
+            args.tag,
+            args.platform,
+            args.credentials,
+        )
+        : Promise.resolve({ kind: 'error', reason: 'No local registry digest available' });
+
+    const tagPromise: Promise<TagEnumOutcome> = tagApplicable
+        ? listAllRegistryTagsBounded(listFn, args.registry, args.repo, args.credentials)
+        : Promise.resolve({ kind: 'skipped' });
+
+    const [comparison, tagOutcome] = await Promise.all([comparisonPromise, tagPromise]);
+
+    let nextTag: string | null = null;
+    if (tagOutcome.kind === 'complete' || tagOutcome.kind === 'incomplete') {
+        nextTag = findNextTag(args.tag, tagOutcome.tags);
+    }
 
     const digestUpdate = comparison.kind === 'update';
-    const nextTag = findNextTag(args.tag, tags);
-    const hasUpdate = digestUpdate || nextTag !== null;
-    const digestError = comparison.kind === 'error' ? comparison.reason : null;
+    const tagUpdate = nextTag !== null;
+    const hasUpdate = digestUpdate || tagUpdate;
 
-    return { hasUpdate, digestUpdate, nextTag, digestError };
+    let resolvedNext: string | null = null;
+    let semverBump: SemverBump = 'none';
+    if (nextTag) {
+        resolvedNext = nextTag;
+        semverBump = computeSemverBump(args.tag, nextTag);
+    } else if (digestUpdate) {
+        resolvedNext = args.tag;
+        semverBump = 'patch';
+    }
+
+    const digestError = comparison.kind === 'error' ? comparison.reason : null;
+    const tagEnumKind = tagOutcome.kind;
+    const tagEnumReason = tagOutcome.kind === 'incomplete' || tagOutcome.kind === 'error'
+        ? tagOutcome.reason
+        : null;
+
+    const checkStatus = resolveImageCheckStatus({
+        digest: comparison.kind,
+        tagApplicable,
+        tagOutcome,
+        hasUpdate,
+    });
+
+    return {
+        hasUpdate,
+        digestUpdate,
+        tagUpdate,
+        nextTag: resolvedNext,
+        digestError,
+        tagEnumKind,
+        tagEnumReason,
+        checkStatus,
+        reason: uncertaintyReason(checkStatus, digestError, tagEnumReason),
+        semverBump,
+    };
 }
