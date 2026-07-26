@@ -919,7 +919,7 @@ export class ImageUpdateService {
             };
         }
 
-        let containers: Array<{ Image?: string; Labels?: Record<string, string> }> = [];
+        let containers: Array<{ Image?: string; Labels?: Record<string, string> }>;
         try {
             containers = await withTimeout(docker.getAllContainers(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getAllContainers');
         } catch (e) {

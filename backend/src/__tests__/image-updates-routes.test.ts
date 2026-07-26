@@ -440,7 +440,7 @@ describe('POST /api/auto-update/execute', () => {
         callOrder.push('recheckStack');
         return { outcome: 'cleared', warning: null } as never;
       });
-    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockImplementation((...args) => {
+    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockImplementation(() => {
       callOrder.push('beginStack');
       return 'gate-au';
     });
