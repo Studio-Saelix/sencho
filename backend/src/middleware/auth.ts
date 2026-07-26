@@ -17,6 +17,9 @@ import {
   MFA_PENDING_COOKIE_NAME,
   MFA_PENDING_SCOPE,
   MFA_PENDING_TTL_MS,
+  SESSION_COOKIE_MAX_AGE_MS,
+  REMEMBER_SESSION_MAX_AGE_MS,
+  SESSION_REFRESH_THRESHOLD_MS,
 } from '../helpers/constants';
 import { getCookieOptions } from '../helpers/cookies';
 import { looksLikeApiToken } from '../utils/apiTokenFormat';
@@ -79,7 +82,7 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
     const settings = DatabaseService.getInstance().getGlobalSettings();
     const jwtSecret = settings.auth_jwt_secret;
     if (!jwtSecret) throw new Error('No JWT secret');
-    const decoded = jwt.verify(token, jwtSecret) as { username?: string; role?: string; scope?: string; tv?: number; user_id?: number; sso?: boolean };
+    const decoded = jwt.verify(token, jwtSecret) as { username?: string; role?: string; scope?: string; tv?: number; user_id?: number; sso?: boolean; remember?: boolean; exp?: number };
 
     if (isDebugEnabled()) console.log('[Auth:diag] Token type:', bearerToken ? 'bearer' : 'cookie', 'scope:', decoded.scope || 'user-session');
 
@@ -96,6 +99,7 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
       }
       req.mfaPendingUserId = typeof decoded.user_id === 'number' ? decoded.user_id : undefined;
       req.mfaPendingSso = decoded.sso === true;
+      req.mfaPendingRemember = decoded.remember === true;
       next();
       return;
     }
@@ -173,6 +177,19 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
 
     // Use the DB role (not the JWT role) so role changes take effect immediately
     req.user = { username: dbUser.username, role: dbUser.role as UserRole, userId: dbUser.id };
+    req.sessionRemember = decoded.remember === true;
+
+    // Sliding refresh: a session nearing its expiry gets silently reissued with
+    // a fresh full TTL (matching whichever TTL, 24h or "stay signed in" 30d, the
+    // original login chose), so an actively-used tab never runs into the hard
+    // cutoff. Disabled via the session_sliding_refresh setting (default on) for
+    // admins who want a strict absolute session ceiling.
+    if (settings.session_sliding_refresh !== '0' && typeof decoded.exp === 'number') {
+      const remainingMs = decoded.exp * 1000 - Date.now();
+      if (remainingMs < SESSION_REFRESH_THRESHOLD_MS) {
+        issueSessionCookie(res, req, dbUser, jwtSecret, decoded.remember === true);
+      }
+    }
 
     next();
   } catch (err) {
@@ -182,19 +199,27 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
   }
 };
 
-/** Sign a session JWT and set it as an httpOnly cookie. */
+/**
+ * Sign a session JWT and set it as an httpOnly cookie. `remember` extends the
+ * session to `REMEMBER_SESSION_MAX_AGE_MS` (30 days, "stay signed in") instead
+ * of the default `SESSION_COOKIE_MAX_AGE_MS` (24h); the choice is carried in
+ * the token's `remember` claim so a later sliding refresh (authMiddleware) or
+ * post-token-bump reissue (reissueSessionAfterTokenBump) reapplies the same TTL.
+ */
 export function issueSessionCookie(
   res: Response,
   req: Request,
   user: { username: string; role: string; token_version: number },
   jwtSecret: string,
+  remember = false,
 ): void {
+  const maxAgeMs = remember ? REMEMBER_SESSION_MAX_AGE_MS : SESSION_COOKIE_MAX_AGE_MS;
   const token = jwt.sign(
-    { username: user.username, role: user.role, tv: user.token_version },
+    { username: user.username, role: user.role, tv: user.token_version, remember },
     jwtSecret,
-    { expiresIn: '24h' },
+    { expiresIn: Math.floor(maxAgeMs / 1000) },
   );
-  res.cookie(COOKIE_NAME, token, getCookieOptions(req));
+  res.cookie(COOKIE_NAME, token, { ...getCookieOptions(req), maxAge: maxAgeMs });
 }
 
 /**
@@ -209,10 +234,10 @@ export function issueMfaPendingCookie(
   req: Request,
   user: { id: number; username: string },
   jwtSecret: string,
-  opts: { sso?: boolean } = {},
+  opts: { sso?: boolean; remember?: boolean } = {},
 ): void {
   const token = jwt.sign(
-    { scope: MFA_PENDING_SCOPE, user_id: user.id, username: user.username, sso: opts.sso === true },
+    { scope: MFA_PENDING_SCOPE, user_id: user.id, username: user.username, sso: opts.sso === true, remember: opts.remember === true },
     jwtSecret,
     { expiresIn: Math.floor(MFA_PENDING_TTL_MS / 1000) },
   );
@@ -239,6 +264,6 @@ export function reissueSessionAfterTokenBump(req: Request, res: Response, userId
   const refreshed = db.getUserById(userId);
   const settings = db.getGlobalSettings();
   if (refreshed && settings.auth_jwt_secret) {
-    issueSessionCookie(res, req, refreshed, settings.auth_jwt_secret);
+    issueSessionCookie(res, req, refreshed, settings.auth_jwt_secret, req.sessionRemember === true);
   }
 }

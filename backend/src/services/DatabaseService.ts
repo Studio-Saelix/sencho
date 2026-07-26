@@ -2022,6 +2022,11 @@ export class DatabaseService {
         stmt.run('notification_dispatch_retries', '0');
         stmt.run('env_block_deploy_on_missing_required', '0');
         stmt.run('auto_create_missing_external_networks', '0');
+        // Silently extend an actively-used session's cookie instead of hard
+        // expiring it. On by default (matches how most session-based web apps
+        // behave); admins who want a strict absolute session ceiling can turn
+        // it off in Settings > Users.
+        stmt.run('session_sliding_refresh', '1');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;

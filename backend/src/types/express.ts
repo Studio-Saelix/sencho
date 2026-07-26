@@ -19,6 +19,10 @@ declare global {
       mfaPendingUserId?: number;
       /** True when the pending MFA session originated from an SSO login (LDAP or OIDC) rather than a password login. */
       mfaPendingSso?: boolean;
+      /** True when the pending MFA session's originating login requested "stay signed in". Carried into the full session cookie once MFA completes. */
+      mfaPendingRemember?: boolean;
+      /** True when the caller's current user-session cookie was issued with "stay signed in". Read by reissueSessionAfterTokenBump so a password/MFA change doesn't silently shorten a remembered session. */
+      sessionRemember?: boolean;
       /** Cached remote-proxy target resolved by `remoteNodeProxy`'s outer gate so the http-proxy router/proxyReq callbacks do not re-resolve. */
       proxyTarget?: { apiUrl: string; apiToken: string };
       /** Trusted deploy provenance from machine auth or gateway overwrite. */

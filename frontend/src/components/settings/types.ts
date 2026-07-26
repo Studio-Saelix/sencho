@@ -23,6 +23,7 @@ export interface PatchableSettings {
     auto_create_missing_external_networks?: '0' | '1';
     image_update_sidebar_indicators?: '0' | '1';
     notification_dispatch_retries?: string;
+    session_sliding_refresh?: '0' | '1';
 }
 
 export const DEFAULT_SETTINGS: PatchableSettings = {
@@ -50,6 +51,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     auto_create_missing_external_networks: '0',
     image_update_sidebar_indicators: '1',
     notification_dispatch_retries: '0',
+    session_sliding_refresh: '1',
 };
 
 export type SectionId =

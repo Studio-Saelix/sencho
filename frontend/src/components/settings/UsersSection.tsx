@@ -8,14 +8,18 @@ import { Combobox } from '@/components/ui/combobox';
 import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { TogglePill } from '@/components/ui/toggle-pill';
 import { apiFetch } from '@/lib/api';
 import { useAuth, type UserRole } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
 import { CapabilityGate } from '@/components/CapabilityGate';
 import { RefreshCw, Trash2, Plus, Pencil, ShieldOff } from 'lucide-react';
 import { SettingsCallout } from './SettingsCallout';
-import { SettingsPrimaryButton } from './SettingsActions';
+import { SettingsSection } from './SettingsSection';
+import { SettingsField } from './SettingsField';
+import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { DEFAULT_SETTINGS } from './types';
 
 interface UserItem {
     id: number;
@@ -33,6 +37,102 @@ interface RoleAssignmentItem {
     resource_type: 'stack' | 'node';
     resource_id: string;
     created_at: number;
+}
+
+function SessionPolicySkeleton() {
+    return (
+        <div className="space-y-3 rounded-lg border border-glass-border bg-glass p-4">
+            <Skeleton className="h-10 w-full" />
+        </div>
+    );
+}
+
+/**
+ * Instance-wide session behavior: whether an actively-used session silently
+ * renews itself instead of hard-expiring. Hub-only like the rest of this
+ * page (localOnly reads/writes, ignores the active-node selector), since it
+ * governs sign-in to this instance's own user table, not a remote node's.
+ */
+function SessionPolicySection() {
+    const { isAdmin } = useAuth();
+    const readOnly = !isAdmin;
+    const [loading, setLoading] = useState(true);
+    const [value, setValue] = useState<'0' | '1'>(DEFAULT_SETTINGS.session_sliding_refresh as '0' | '1');
+    const [saved, setSaved] = useState<'0' | '1'>(DEFAULT_SETTINGS.session_sliding_refresh as '0' | '1');
+    const [isSaving, setIsSaving] = useState(false);
+    const hasChanges = value !== saved;
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await apiFetch('/settings', { localOnly: true });
+                if (cancelled || !res.ok) return;
+                const data = await res.json();
+                const loaded = (data.session_sliding_refresh as '0' | '1') ?? DEFAULT_SETTINGS.session_sliding_refresh as '0' | '1';
+                setValue(loaded);
+                setSaved(loaded);
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
+    const saveSettings = async () => {
+        setIsSaving(true);
+        try {
+            const res = await apiFetch('/settings', {
+                method: 'PATCH',
+                localOnly: true,
+                body: JSON.stringify({ session_sliding_refresh: value }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                toast.error(err?.error || err?.message || 'Failed to save settings.');
+                return;
+            }
+            setSaved(value);
+            toast.success('Session policy saved.');
+        } catch (e: unknown) {
+            toast.error((e as Error)?.message || 'Something went wrong.');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    if (loading) return <SessionPolicySkeleton />;
+
+    return (
+        <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-6 border-0 p-0">
+            <SettingsSection title="Session policy">
+                <SettingsField
+                    label="Keep active sessions alive"
+                    helper="Silently renew a signed-in session while it stays active, instead of hard-expiring it on a fixed schedule. On by default; turn off to enforce a strict session ceiling regardless of activity."
+                >
+                    <TogglePill
+                        checked={value === '1'}
+                        onChange={(next) => setValue(next ? '1' : '0')}
+                    />
+                </SettingsField>
+            </SettingsSection>
+
+            <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? '1 unsaved' : undefined)}>
+                {!readOnly && (
+                    <SettingsPrimaryButton size="sm" onClick={saveSettings} disabled={isSaving || !hasChanges}>
+                        {isSaving ? (
+                            <>
+                                <RefreshCw className="w-4 h-4 animate-spin" strokeWidth={1.5} />
+                                Saving
+                            </>
+                        ) : (
+                            'Save session policy'
+                        )}
+                    </SettingsPrimaryButton>
+                )}
+            </SettingsActions>
+        </fieldset>
+    );
 }
 
 export function UsersSection() {
@@ -262,6 +362,8 @@ export function UsersSection() {
     return (
         <CapabilityGate capability="users" featureName="User Management">
             <div className="space-y-6">
+                <SessionPolicySection />
+
                 {!showForm && (
                     <div className="flex justify-end">
                         <SettingsPrimaryButton size="sm" onClick={() => { resetForm(); setShowForm(true); }}>
