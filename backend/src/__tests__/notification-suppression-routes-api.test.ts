@@ -506,7 +506,7 @@ describe('Notification suppression - CRUD', () => {
     DatabaseService.getInstance().deleteNotificationSuppressionRule(940005);
   });
 
-  it('replica does not resurrect a rule after it was deleted, even with a newer updated_at', async () => {
+  it('omitted-body replica DELETE is permanent; delayed POST cannot resurrect', async () => {
     const jwt = await import('jsonwebtoken');
     const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
     const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
@@ -538,9 +538,8 @@ describe('Notification suppression - CRUD', () => {
     expect(del.status).toBe(200);
     expect(DatabaseService.getInstance().getNotificationSuppressionRule(950006)).toBeUndefined();
 
-    // A delayed POST arrives after the DELETE, reordered by the network. Even
-    // though its updated_at is newer than anything the sender ever sent before
-    // the delete, the delete is authoritative: this id must stay gone.
+    // Omitted DELETE body (old hub) fails closed as permanent. A delayed POST
+    // with any updated_at must stay blocked.
     const delayed = await request(app)
       .post('/api/notification-suppression-rules/replica')
       .set('Authorization', `Bearer ${token}`)
@@ -612,21 +611,479 @@ describe('Notification suppression - CRUD', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ rule: replicaRule({ updated_at: 1000 }) });
     expect(first.status).toBe(200);
+    expect(first.body.outcome).toBe('applied');
     expect(DatabaseService.getInstance().getNotificationSuppressionRule(970008)?.schedule).not.toBeNull();
 
-    // This is the worst case the fix protects: a capability-cleanup DELETE
-    // retracts an all-day/scheduled mute from a node that stopped supporting
-    // it. A delayed re-push of the scheduled rule must not undo that cleanup.
+    // Capability-cleanup DELETE is recoverable at the pushed version. A delayed
+    // re-push at the same or older watermark must not undo cleanup.
     const del = await request(app)
       .delete('/api/notification-suppression-rules/replica/970008')
-      .set('Authorization', `Bearer ${token}`);
+      .set('Authorization', `Bearer ${token}`)
+      .send({ kind: 'recoverable', source_updated_at: 1000 });
     expect(del.status).toBe(200);
+    expect(del.body.outcome).toBe('applied');
 
     const delayed = await request(app)
       .post('/api/notification-suppression-rules/replica')
       .set('Authorization', `Bearer ${token}`)
-      .send({ rule: replicaRule({ updated_at: 2000 }) });
+      .send({ rule: replicaRule({ updated_at: 1000 }) });
     expect(delayed.status).toBe(200);
+    expect(delayed.body.outcome).toBe('ignored_recoverable_watermark');
     expect(DatabaseService.getInstance().getNotificationSuppressionRule(970008)).toBeUndefined();
+    expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(970008)?.kind).toBe(
+      'recoverable',
+    );
+  });
+
+  it('recoverable soft-cleanup allows recreate when hub re-save is newer', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const replicaRule = (overrides: Record<string, unknown>) => ({
+      id: 980009,
+      name: 'replica-soft-cleanup-resave',
+      applies_to: 'both',
+      stack_patterns: [],
+      node_id: null,
+      label_ids: null,
+      categories: null,
+      levels: null,
+      enabled: true,
+      expires_at: null,
+      schedule: { days: [2], start_minute: 60, end_minute: 120, tz: 'UTC' },
+      created_at: 1,
+      ...overrides,
+    });
+
+    // Receiver clock skew must not affect ordering. Sign the JWT under the same
+    // mocked clock so exp verification stays valid.
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(9_000_000_000_000);
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1h' });
+    try {
+      const first = await request(app)
+        .post('/api/notification-suppression-rules/replica')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ rule: replicaRule({ updated_at: 1000 }) });
+      expect(first.status).toBe(200);
+      expect(first.body.outcome).toBe('applied');
+
+      const del = await request(app)
+        .delete('/api/notification-suppression-rules/replica/980009')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ kind: 'recoverable', source_updated_at: 1000 });
+      expect(del.status).toBe(200);
+      expect(del.body.outcome).toBe('applied');
+      expect(DatabaseService.getInstance().getNotificationSuppressionRule(980009)).toBeUndefined();
+
+      const tie = await request(app)
+        .post('/api/notification-suppression-rules/replica')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ rule: replicaRule({ updated_at: 1000 }) });
+      expect(tie.status).toBe(200);
+      expect(tie.body.outcome).toBe('ignored_recoverable_watermark');
+      expect(DatabaseService.getInstance().getNotificationSuppressionRule(980009)).toBeUndefined();
+
+      const resave = await request(app)
+        .post('/api/notification-suppression-rules/replica')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ rule: replicaRule({ name: 'replica-soft-cleanup-resave-v2', updated_at: 2000 }) });
+      expect(resave.status).toBe(200);
+      expect(resave.body.outcome).toBe('applied');
+      const restored = DatabaseService.getInstance().getNotificationSuppressionRule(980009);
+      expect(restored?.name).toBe('replica-soft-cleanup-resave-v2');
+      expect(restored?.updated_at).toBe(2000);
+      expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(980009)).toBeUndefined();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('permanent DELETE blocks any later POST regardless of updated_at', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    const del = await request(app)
+      .delete('/api/notification-suppression-rules/replica/990010')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ kind: 'permanent', source_updated_at: 50 });
+    expect(del.status).toBe(200);
+    expect(del.body.outcome).toBe('applied');
+
+    const post = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 990010,
+          name: 'should-not-return',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: Number.MAX_SAFE_INTEGER,
+        },
+      });
+    expect(post.status).toBe(200);
+    expect(post.body.outcome).toBe('ignored_permanent_tombstone');
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(990010)).toBeUndefined();
+    expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(990010)?.kind).toBe(
+      'permanent',
+    );
+  });
+
+  it('stale recoverable DELETE does not remove a newer stored row', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const replicaRule = (overrides: Record<string, unknown>) => ({
+      id: 991011,
+      name: 'v200',
+      applies_to: 'both',
+      stack_patterns: [],
+      node_id: null,
+      label_ids: null,
+      categories: null,
+      levels: null,
+      enabled: true,
+      expires_at: null,
+      created_at: 1,
+      ...overrides,
+    });
+
+    const post = await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ rule: replicaRule({ updated_at: 200 }) });
+    expect(post.status).toBe(200);
+
+    const del = await request(app)
+      .delete('/api/notification-suppression-rules/replica/991011')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ kind: 'recoverable', source_updated_at: 100 });
+    expect(del.status).toBe(200);
+    expect(del.body.outcome).toBe('ignored_stale');
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(991011)?.updated_at).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(991011)).toBeUndefined();
+  });
+
+  it('recoverable DELETE at exact stored version deletes and tombstones', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 992012,
+          name: 'exact-tie-delete',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: 150,
+        },
+      });
+
+    const del = await request(app)
+      .delete('/api/notification-suppression-rules/replica/992012')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ kind: 'recoverable', source_updated_at: 150 });
+    expect(del.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(992012)).toBeUndefined();
+    const tomb = DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(992012);
+    expect(tomb?.kind).toBe('recoverable');
+    expect(tomb?.source_updated_at).toBe(150);
+  });
+
+  it('reordered recoverable tombstones keep the max watermark; permanent wins', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    await request(app)
+      .delete('/api/notification-suppression-rules/replica/993013')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ kind: 'recoverable', source_updated_at: 200 });
+    await request(app)
+      .delete('/api/notification-suppression-rules/replica/993013')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ kind: 'recoverable', source_updated_at: 100 });
+    expect(
+      DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(993013)?.source_updated_at,
+    ).toBe(200);
+
+    await request(app)
+      .delete('/api/notification-suppression-rules/replica/993013')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ kind: 'permanent', source_updated_at: 50 });
+    const tomb = DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(993013);
+    expect(tomb?.kind).toBe('permanent');
+    expect(tomb?.source_updated_at).toBe(200);
+
+    // Later recoverable cannot weaken permanent.
+    await request(app)
+      .delete('/api/notification-suppression-rules/replica/993013')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ kind: 'recoverable', source_updated_at: 999 });
+    expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(993013)?.kind).toBe(
+      'permanent',
+    );
+  });
+
+  it('partial or invalid DELETE body returns 400 without mutation', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 994014,
+          name: 'keep-me',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: 10,
+        },
+      });
+
+    const cases: object[] = [
+      { kind: 'recoverable' },
+      { source_updated_at: 1 },
+      { kind: 'nope', source_updated_at: 1 },
+      { kind: 'recoverable', source_updated_at: 1.5 },
+      { kind: 'recoverable', source_updated_at: -1 },
+      { kind: 'recoverable', source_updated_at: '1' },
+      { kind: 'recoverable', source_updated_at: null },
+      { kind: 'recoverable', source_updated_at: Number.MAX_SAFE_INTEGER + 1 },
+    ];
+    for (const body of cases) {
+      const res = await request(app)
+        .delete('/api/notification-suppression-rules/replica/994014')
+        .set('Authorization', `Bearer ${token}`)
+        .send(body);
+      expect(res.status).toBe(400);
+    }
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(994014)?.name).toBe('keep-me');
+    expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(994014)).toBeUndefined();
+  });
+
+  it('replica POST rejects missing or invalid created_at and updated_at', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const base = {
+      id: 995015,
+      name: 'bad-ts',
+      applies_to: 'both',
+      stack_patterns: [],
+      node_id: null,
+      label_ids: null,
+      categories: null,
+      levels: null,
+      enabled: true,
+      expires_at: null,
+    };
+
+    for (const rule of [
+      { ...base, updated_at: 1 },
+      { ...base, created_at: 1 },
+      { ...base, created_at: -1, updated_at: 1 },
+      { ...base, created_at: 1, updated_at: 1.5 },
+      { ...base, created_at: 1, updated_at: '1' },
+    ]) {
+      const res = await request(app)
+        .post('/api/notification-suppression-rules/replica')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ rule });
+      expect(res.status).toBe(400);
+    }
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(995015)).toBeUndefined();
+  });
+
+  it('permanent DELETE removes a newer stored row', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    await request(app)
+      .post('/api/notification-suppression-rules/replica')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        rule: {
+          id: 999019,
+          name: 'newer-row',
+          applies_to: 'both',
+          stack_patterns: [],
+          node_id: null,
+          label_ids: null,
+          categories: null,
+          levels: null,
+          enabled: true,
+          expires_at: null,
+          created_at: 1,
+          updated_at: 200,
+        },
+      });
+
+    const del = await request(app)
+      .delete('/api/notification-suppression-rules/replica/999019')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ kind: 'permanent', source_updated_at: 50 });
+    expect(del.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(999019)).toBeUndefined();
+    expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(999019)?.kind).toBe(
+      'permanent',
+    );
+  });
+
+  it('empty JSON DELETE body fails closed as permanent', async () => {
+    const jwt = await import('jsonwebtoken');
+    const { TEST_JWT_SECRET } = await import('./helpers/testConstants');
+    const token = jwt.default.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+
+    const del = await request(app)
+      .delete('/api/notification-suppression-rules/replica/999020')
+      .set('Authorization', `Bearer ${token}`)
+      .set('Content-Type', 'application/json')
+      .send({});
+    expect(del.status).toBe(200);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(999020)?.kind).toBe(
+      'permanent',
+    );
+    expect(
+      DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(999020)?.source_updated_at,
+    ).toBe(0);
+  });
+
+  it('one-arg deleteNotificationSuppressionRule defaults to permanent', () => {
+    DatabaseService.getInstance().upsertNotificationSuppressionRuleReplica({
+      id: 996016,
+      name: 'one-arg',
+      applies_to: 'both',
+      stack_patterns: [],
+      node_id: null,
+      label_ids: null,
+      categories: null,
+      levels: null,
+      enabled: true,
+      expires_at: null,
+      schedule: null,
+      scheduleInvalid: false,
+      created_at: 1,
+      updated_at: 5,
+    });
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(996016);
+    expect(DatabaseService.getInstance().getNotificationSuppressionRule(996016)).toBeUndefined();
+    expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(996016)?.kind).toBe(
+      'permanent',
+    );
+  });
+
+  it('delete rolls back when tombstone upsert fails', () => {
+    const db = DatabaseService.getInstance();
+    db.upsertNotificationSuppressionRuleReplica({
+      id: 997017,
+      name: 'atomic-del',
+      applies_to: 'both',
+      stack_patterns: [],
+      node_id: null,
+      label_ids: null,
+      categories: null,
+      levels: null,
+      enabled: true,
+      expires_at: null,
+      schedule: null,
+      scheduleInvalid: false,
+      created_at: 1,
+      updated_at: 7,
+    });
+    const raw = db.getDb();
+    const orig = raw.prepare.bind(raw);
+    const spy = vi.spyOn(raw, 'prepare').mockImplementation(((sql: string) => {
+      if (
+        typeof sql === 'string' &&
+        sql.includes('INSERT INTO notification_suppression_rule_tombstones')
+      ) {
+        throw new Error('forced tombstone upsert failure');
+      }
+      return orig(sql);
+    }) as typeof raw.prepare);
+
+    expect(() =>
+      db.deleteNotificationSuppressionRule(997017, {
+        kind: 'recoverable',
+        source_updated_at: 7,
+      }),
+    ).toThrow(/forced tombstone upsert failure/);
+    spy.mockRestore();
+
+    expect(db.getNotificationSuppressionRule(997017)?.name).toBe('atomic-del');
+    expect(db.getNotificationSuppressionRuleTombstone(997017)).toBeUndefined();
+  });
+
+  it('recoverable recreate rolls back when insert fails after tombstone clear attempt', () => {
+    const db = DatabaseService.getInstance();
+    db.deleteNotificationSuppressionRule(998018, {
+      kind: 'recoverable',
+      source_updated_at: 10,
+    });
+    expect(db.getNotificationSuppressionRuleTombstone(998018)?.kind).toBe('recoverable');
+
+    const raw = db.getDb();
+    const orig = raw.prepare.bind(raw);
+    const spy = vi.spyOn(raw, 'prepare').mockImplementation(((sql: string) => {
+      if (
+        typeof sql === 'string' &&
+        sql.includes('INSERT INTO notification_suppression_rules')
+      ) {
+        throw new Error('forced replica insert failure');
+      }
+      return orig(sql);
+    }) as typeof raw.prepare);
+
+    expect(() =>
+      db.upsertNotificationSuppressionRuleReplica({
+        id: 998018,
+        name: 'recreate-fail',
+        applies_to: 'both',
+        stack_patterns: [],
+        node_id: null,
+        label_ids: null,
+        categories: null,
+        levels: null,
+        enabled: true,
+        expires_at: null,
+        schedule: null,
+        scheduleInvalid: false,
+        created_at: 1,
+        updated_at: 20,
+      }),
+    ).toThrow(/forced replica insert failure/);
+    spy.mockRestore();
+
+    expect(db.getNotificationSuppressionRule(998018)).toBeUndefined();
+    expect(db.getNotificationSuppressionRuleTombstone(998018)?.kind).toBe('recoverable');
+    expect(db.getNotificationSuppressionRuleTombstone(998018)?.source_updated_at).toBe(10);
   });
 });
