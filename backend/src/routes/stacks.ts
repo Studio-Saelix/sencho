@@ -18,8 +18,6 @@ import DockerController, { type BulkStackInfo } from '../services/DockerControll
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { CacheService, type CacheFetchOutcome } from '../services/CacheService';
 import { UpdatePreviewService, isAuthoritativeNegativePreview } from '../services/UpdatePreviewService';
-import { ImageUpdateService } from '../services/ImageUpdateService';
-import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
@@ -58,6 +56,11 @@ import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describeP
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
+import {
+  ImageUpdateService,
+  UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+} from '../services/ImageUpdateService';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
 import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
@@ -2313,7 +2316,26 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'manual', actor: req.user?.username ?? null },
       { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
     );
-    DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
+    // Health observation starts immediately after Compose; registry recheck is
+    // isolated so a verification failure cannot turn Compose success into 500.
+    ok = true;
+    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null);
+    const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
+    linkStackUpdateRecoveryGate(recoveryId, healthGateId);
+
+    let recheckWarning: string | undefined;
+    try {
+      const recheck = await ImageUpdateService.getInstance().recheckStack(req.nodeId, stackName);
+      if (recheck.warning) recheckWarning = recheck.warning;
+    } catch (recheckErr) {
+      console.warn(
+        '[Stacks] Post-update recheck failed for %s: %s',
+        sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(recheckErr, 'unknown')),
+      );
+      recheckWarning = UPDATE_VERIFICATION_INCOMPLETE_WARNING;
+    }
+
     invalidateFleetUpdateCache();
     invalidateNodeCaches(req.nodeId);
     NotificationService.getInstance().broadcastEvent({
@@ -2326,11 +2348,11 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     });
     dlog(`[Stacks] Update completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Update finished in ${Date.now() - t0}ms`);
-    ok = true;
-    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null);
-    const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
-    linkStackUpdateRecoveryGate(recoveryId, healthGateId);
-    res.json({ status: 'Update completed', healthGateId });
+    res.json({
+      status: 'Update completed',
+      healthGateId,
+      ...(recheckWarning ? { recheckWarning } : {}),
+    });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>

@@ -1775,6 +1775,12 @@ paths:
                       Id of the post-update health gate observation started for
                       this update, for use with the health-gate endpoint. Null
                       when the health gate is disabled on the node.
+                  recheckWarning:
+                    type: string
+                    description: |
+                      Present when Compose succeeded but post-update image
+                      verification still reports an available update or could
+                      not fully verify clearance. Optional for older nodes.
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":

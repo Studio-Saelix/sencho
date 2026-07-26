@@ -40,6 +40,7 @@ vi.mock('@/context/NodeContext', () => ({
 
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { requestServiceUpdate } from '@/lib/serviceUpdate';
+import { toast } from '@/components/ui/toast-store';
 import AutoUpdateReadinessView, {
   MobileReadinessCard,
   CadenceStrip,
@@ -49,6 +50,7 @@ import {
   isActionableUpdatePreview,
   isClearedUpdatePreview,
   isReviewRequiredUpdatePreview,
+  isTagOnlyAdvisory,
   isVerificationOnlyPreview,
 } from '@/lib/updatePreviewActionability';
 import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
@@ -62,6 +64,7 @@ function card(over: Partial<StackCard> = {}): StackCard {
     applyingService: null,
     autoUpdateEnabled: true,
     scheduledTask: null,
+    verificationNote: null,
     preview: {
       stack_name: 'nextcloud',
       images: [{
@@ -288,6 +291,29 @@ describe('verification preview helpers', () => {
     expect(isClearedUpdatePreview(preview)).toBe(false);
     expect(isActionableUpdatePreview(preview)).toBe(false);
   });
+
+  it('does not treat a tag-only advisory as cleared (Fleet must keep the card)', () => {
+    const preview = {
+      ...previewSummary({
+        has_update: true,
+        update_kind: 'tag',
+        semver_bump: 'patch',
+        next_tag: '1.31.3',
+        current_tag: '1.25.3',
+      }),
+      images: [{
+        service: 'web',
+        image: 'nginx:1.25.3',
+        has_update: true,
+        digest_update: false,
+        tag_update: true,
+        check_status: 'ok',
+      }],
+    };
+    expect(isTagOnlyAdvisory(preview)).toBe(true);
+    expect(isActionableUpdatePreview(preview)).toBe(false);
+    expect(isClearedUpdatePreview(preview)).toBe(false);
+  });
 });
 
 it('enables Apply for a safe, non-blocked update', () => {
@@ -509,6 +535,12 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     mockedFetchForNode.mockReset();
     mockNodeMeta.clear();
     vi.mocked(requestServiceUpdate).mockReset();
+    vi.mocked(toast.info).mockReset();
+    vi.mocked(toast.success).mockReset();
+    vi.mocked(toast.error).mockReset();
+    vi.mocked(toast.loading).mockReset();
+    vi.mocked(toast.dismiss).mockReset();
+    mockNodes.splice(0, mockNodes.length, { id: 1, name: 'Local', type: 'local', status: 'online' });
   });
 
   it('enables Apply for a safe update with no covering schedule', async () => {
@@ -631,6 +663,274 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     await waitFor(() => {
       expect(mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview')).length).toBeGreaterThanOrEqual(2);
     });
+  });
+
+  const basePreview = {
+    stack_name: 'nextcloud',
+    images: [{
+      service: 'app',
+      image: 'nextcloud:27',
+      current_tag: '27.1.4',
+      next_tag: '27.1.4',
+      has_update: true,
+      digest_update: true,
+      tag_update: false,
+      semver_bump: 'patch' as const,
+      check_status: 'ok' as const,
+      check_error: null,
+      digest_error: null,
+    }],
+    summary: {
+      has_update: true,
+      primary_image: 'nextcloud',
+      current_tag: '27.1.4',
+      next_tag: '27.1.4',
+      semver_bump: 'patch' as const,
+      update_kind: 'digest' as const,
+      blocked: false,
+      blocked_reason: null,
+      rebuild_available: false,
+      check_status: 'ok' as const,
+      verification_failed: false,
+      verification_error: null,
+    },
+    rollback_target: null,
+    changelog: 'Fixes.',
+  };
+
+  function mockFleetLoad(fleetMap: Record<string, Record<string, boolean>>) {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => fleetMap });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+  }
+
+  it('removes the card only after a cleared preview with no recheckWarning', async () => {
+    mockFleetLoad({ '1': { nextcloud: true } });
+    const cleared = {
+      ...basePreview,
+      images: basePreview.images.map((img) => ({ ...img, has_update: false, digest_update: false })),
+      summary: { ...basePreview.summary, has_update: false },
+    };
+    mockedFetchForNode.mockImplementation((url: string, _nodeId?: number, init?: { method?: string }) => {
+      if (String(url).includes('/update') && !String(url).includes('update-preview') && init?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'Update completed' }) });
+      }
+      if (String(url).includes('/update-preview')) {
+        const previewCalls = mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview')).length;
+        return Promise.resolve({
+          ok: true,
+          json: async () => (previewCalls <= 1 ? basePreview : cleared),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<AutoUpdateReadinessView />);
+    const applyBtn = await screen.findByRole('button', { name: /Apply now/i });
+    await act(async () => { fireEvent.click(applyBtn); });
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Apply now/i })).not.toBeInTheDocument();
+    });
+    const postIdx = mockedFetchForNode.mock.calls.findIndex(
+      (c) => String(c[0]).includes('/stacks/nextcloud/update') && !String(c[0]).includes('update-preview'),
+    );
+    const previewAfter = mockedFetchForNode.mock.calls.findIndex(
+      (c, i) => i > postIdx && String(c[0]).includes('/update-preview'),
+    );
+    expect(postIdx).toBeGreaterThanOrEqual(0);
+    expect(previewAfter).toBeGreaterThan(postIdx);
+    expect(mockedFetchForNode.mock.calls[postIdx][1]).toBe(1);
+    expect(mockedFetchForNode.mock.calls[previewAfter][1]).toBe(1);
+  });
+
+  it('retains the card and warns when the preview still reports an update', async () => {
+    mockFleetLoad({ '1': { nextcloud: true } });
+    mockedFetchForNode.mockImplementation((url: string, _nodeId?: number, init?: { method?: string }) => {
+      if (String(url).includes('/update') && !String(url).includes('update-preview') && init?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'Update completed' }) });
+      }
+      if (String(url).includes('/update-preview')) {
+        return Promise.resolve({ ok: true, json: async () => basePreview });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<AutoUpdateReadinessView />);
+    const applyBtn = await screen.findByRole('button', { name: /Apply now/i });
+    await act(async () => { fireEvent.click(applyBtn); });
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Apply now/i })).toBeEnabled();
+    });
+    expect(toast.info).toHaveBeenCalledWith(
+      'The update command completed, but Sencho still detects an available image update.',
+    );
+  });
+
+  it('retains the card when post-Apply preview is partial (not an authoritative clear)', async () => {
+    mockFleetLoad({ '1': { nextcloud: true } });
+    const partialNegative = {
+      ...basePreview,
+      images: basePreview.images.map((img) => ({
+        ...img,
+        has_update: false,
+        digest_update: false,
+        tag_update: false,
+        check_status: 'partial' as const,
+        check_error: 'registry timeout',
+      })),
+      summary: {
+        ...basePreview.summary,
+        has_update: false,
+        check_status: 'partial' as const,
+      },
+    };
+    mockedFetchForNode.mockImplementation((url: string, _nodeId?: number, init?: { method?: string }) => {
+      if (String(url).includes('/update') && !String(url).includes('update-preview') && init?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'Update completed' }) });
+      }
+      if (String(url).includes('/update-preview')) {
+        const previewCalls = mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview')).length;
+        return Promise.resolve({
+          ok: true,
+          json: async () => (previewCalls <= 1 ? basePreview : partialNegative),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<AutoUpdateReadinessView />);
+    const applyBtn = await screen.findByRole('button', { name: /Apply now/i });
+    await act(async () => { fireEvent.click(applyBtn); });
+
+    await waitFor(() => {
+      expect(screen.getAllByText('nextcloud').length).toBeGreaterThan(0);
+    });
+    expect(screen.queryByText(/Everything is up to date/)).toBeNull();
+    expect(screen.getByText(/1 update pending/)).toBeInTheDocument();
+    expect(isAuthoritativeNegativePreview(partialNegative)).toBe(false);
+    expect(isClearedUpdatePreview(partialNegative)).toBe(false);
+  });
+
+  it('retains an unknown card when recheckWarning disagrees with a cleared preview', async () => {
+    mockFleetLoad({ '1': { nextcloud: true } });
+    const cleared = {
+      ...basePreview,
+      images: basePreview.images.map((img) => ({ ...img, has_update: false, digest_update: false })),
+      summary: { ...basePreview.summary, has_update: false },
+    };
+    mockedFetchForNode.mockImplementation((url: string, _nodeId?: number, init?: { method?: string }) => {
+      if (String(url).includes('/update') && !String(url).includes('update-preview') && init?.method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            status: 'Update completed',
+            recheckWarning: 'The update command completed, but Sencho still detects an available image update.',
+          }),
+        });
+      }
+      if (String(url).includes('/update-preview')) {
+        const previewCalls = mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview')).length;
+        return Promise.resolve({
+          ok: true,
+          json: async () => (previewCalls <= 1 ? basePreview : cleared),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<AutoUpdateReadinessView />);
+    const applyBtn = await screen.findByRole('button', { name: /Apply now/i });
+    await act(async () => { fireEvent.click(applyBtn); });
+
+    await waitFor(() => {
+      expect(screen.getByText(
+        'The update command completed, but Sencho still detects an available image update.',
+      )).toBeInTheDocument();
+    });
+    expect(screen.getByText('nextcloud')).toBeInTheDocument();
+    expect(screen.queryByText(/Preview failed/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Apply now/i })).not.toBeInTheDocument();
+    expect(toast.info).toHaveBeenCalledWith(
+      'The update command completed, but Sencho still detects an available image update.',
+    );
+  });
+
+  it('retains an unknown card when the post-Apply preview request fails', async () => {
+    mockFleetLoad({ '1': { nextcloud: true } });
+    mockedFetchForNode.mockImplementation((url: string, _nodeId?: number, init?: { method?: string }) => {
+      if (String(url).includes('/update') && !String(url).includes('update-preview') && init?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'Update completed' }) });
+      }
+      if (String(url).includes('/update-preview')) {
+        const previewCalls = mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview')).length;
+        if (previewCalls <= 1) {
+          return Promise.resolve({ ok: true, json: async () => basePreview });
+        }
+        return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: 'boom' }) });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<AutoUpdateReadinessView />);
+    const applyBtn = await screen.findByRole('button', { name: /Apply now/i });
+    await act(async () => { fireEvent.click(applyBtn); });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Preview failed/i)).toBeInTheDocument();
+    });
+    expect(screen.getByText('nextcloud')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Apply now/i })).not.toBeInTheDocument();
+  });
+
+  it('pins full-stack Apply POST and preview to a remote card nodeId', async () => {
+    mockNodes.splice(0, mockNodes.length,
+      { id: 1, name: 'Local', type: 'local', status: 'online' },
+      { id: 2, name: 'Remote', type: 'remote', status: 'online' },
+    );
+    mockFleetLoad({ '2': { nextcloud: true } });
+    const cleared = {
+      ...basePreview,
+      images: basePreview.images.map((img) => ({ ...img, has_update: false, digest_update: false })),
+      summary: { ...basePreview.summary, has_update: false },
+    };
+    mockedFetchForNode.mockImplementation((url: string, _nodeId?: number, init?: { method?: string }) => {
+      if (String(url).includes('/update') && !String(url).includes('update-preview') && init?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'Update completed' }) });
+      }
+      if (String(url).includes('/update-preview')) {
+        const previewCalls = mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview')).length;
+        return Promise.resolve({
+          ok: true,
+          json: async () => (previewCalls <= 1 ? basePreview : cleared),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<AutoUpdateReadinessView />);
+    const applyBtn = await screen.findByRole('button', { name: /Apply now/i });
+    await act(async () => { fireEvent.click(applyBtn); });
+
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /Apply now/i })).not.toBeInTheDocument();
+    });
+    const postCall = mockedFetchForNode.mock.calls.find(
+      (c) => String(c[0]).includes('/stacks/nextcloud/update') && !String(c[0]).includes('update-preview'),
+    );
+    const postApplyPreview = mockedFetchForNode.mock.calls.filter(
+      (c) => String(c[0]).includes('/update-preview') && c[1] === 2,
+    );
+    expect(postCall?.[1]).toBe(2);
+    expect(postApplyPreview.length).toBeGreaterThanOrEqual(2);
+    mockNodes.splice(0, mockNodes.length, { id: 1, name: 'Local', type: 'local', status: 'online' });
   });
 
   it('holds the desktop full-stack Apply for review, but keeps per-service Apply enabled, when a confirmed update sits alongside another image failing verification', async () => {
@@ -1024,6 +1324,73 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
     expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
     expect(screen.queryByText(/could not be checked/i)).toBeNull();
     expect(screen.queryByText(/ready to apply automatically/)).toBeNull();
+  });
+
+  it('keeps a tag-only advisory card on load instead of treating it as cleared', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { nginx: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (url === '/image-updates/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            nginx: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockImplementation((url: string) => {
+      if (String(url).includes('/update-preview')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            stack_name: 'nginx',
+            images: [{
+              service: 'web',
+              image: 'nginx:1.25.3',
+              current_tag: '1.25.3',
+              next_tag: '1.31.3',
+              has_update: true,
+              digest_update: false,
+              tag_update: true,
+              semver_bump: 'minor',
+              check_status: 'ok',
+              check_error: null,
+              digest_error: null,
+            }],
+            summary: {
+              has_update: true,
+              primary_image: 'nginx',
+              current_tag: '1.25.3',
+              next_tag: '1.31.3',
+              semver_bump: 'minor',
+              update_kind: 'tag',
+              blocked: false,
+              blocked_reason: null,
+              rebuild_available: false,
+              check_status: 'ok',
+              verification_failed: false,
+              verification_error: null,
+            },
+            rollback_target: null,
+            changelog: null,
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => null });
+    });
+
+    render(<AutoUpdateReadinessView />);
+
+    expect(await screen.findByText(/1 update pending/)).toBeInTheDocument();
+    expect(screen.getAllByText('nginx').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Everything is up to date/)).toBeNull();
+    expect(screen.getByRole('button', { name: /Apply now/i })).toBeDisabled();
   });
 
   it('keeps a sticky card instead of silently clearing it when a remote sends a legacy preview missing verification_failed entirely', async () => {

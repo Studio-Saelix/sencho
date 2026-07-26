@@ -10,12 +10,15 @@ import { StackOpLockService, stackOpSkipMessage as skipMessage } from './StackOp
 import { FileSystemService } from './FileSystemService';
 import { HealthGateService } from './HealthGateService';
 import { ServiceUpdateRecoveryService } from './ServiceUpdateRecoveryService';
-import { ImageUpdateService } from './ImageUpdateService';
 import {
     createAutoUpdateDigestGateState,
+    messageWhenDigestApplyBlockedByCheckErrors,
     messageWhenNoDigestUpdate,
     recordAutoUpdateImageCheck,
 } from '../helpers/autoUpdateDigestGate';
+import { ImageUpdateService, UPDATE_VERIFICATION_INCOMPLETE_WARNING } from './ImageUpdateService';
+import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
+import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { formatNoTargetError } from '../utils/remoteTarget';
@@ -770,14 +773,13 @@ export class SchedulerService {
             console.log(`[SchedulerService] executeUpdate: ${stackNames.length} stack(s) to check, fleet=${isFleet}, wildcard=${isWildcard}`);
         }
 
-        const db = DatabaseService.getInstance();
         const docker = DockerController.getInstance(task.node_id);
         const imageUpdateService = ImageUpdateService.getInstance();
         const results: string[] = [];
 
         for (const stackName of stackNames) {
             try {
-                const output = await this.executeUpdateForStack(stackName, task.node_id, docker, imageUpdateService, db, isFleet || isWildcard);
+                const output = await this.executeUpdateForStack(stackName, task.node_id, docker, imageUpdateService, isFleet || isWildcard);
                 results.push(output);
             } catch (e) {
                 const msg = getErrorMessage(e, String(e));
@@ -1034,7 +1036,6 @@ export class SchedulerService {
         nodeId: number,
         docker: DockerController,
         imageUpdateService: ImageUpdateService,
-        db: DatabaseService,
         isWildcard = false
     ): Promise<string> {
         const containers = await docker.getContainersByStack(stackName);
@@ -1076,6 +1077,8 @@ export class SchedulerService {
         if (!gate.hasDigestUpdate) {
             return messageWhenNoDigestUpdate(stackName, gate, imageRefs.length);
         }
+        const checkErrorBlock = messageWhenDigestApplyBlockedByCheckErrors(stackName, gate);
+        if (checkErrorBlock) return checkErrorBlock;
 
         const { updatedImages } = gate;
 
@@ -1096,7 +1099,9 @@ export class SchedulerService {
             ),
         );
         if (!lock.ran) return skipMessage(stackName, lock.existing.action);
-        db.clearStackUpdateStatus(nodeId, stackName);
+
+        // Health observation starts immediately after Compose; registry recheck is
+        // isolated so a verification failure cannot turn Compose success into a failure.
         const healthGateId = HealthGateService.getInstance().beginStack(nodeId, stackName, 'update', 'system:scheduler');
         const orchResult = lock.result;
         const recoveryId = orchResult && orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
@@ -1105,6 +1110,30 @@ export class SchedulerService {
             StackUpdateRecoveryService.getInstance().linkGateOrRetain(recoveryId, healthGateId);
         }
 
+        // Recheck persists digest-cleared / tag-advisory state. Do not blind-clear.
+        let recheckWarning: string | undefined;
+        try {
+            const recheck = await imageUpdateService.recheckStack(nodeId, stackName);
+            if (recheck.warning) recheckWarning = recheck.warning;
+        } catch (recheckErr) {
+            console.warn(
+                `[SchedulerService] Post-update recheck failed for ${sanitizeForLog(stackName)}:`,
+                sanitizeForLog(getErrorMessage(recheckErr, 'unknown')),
+            );
+            recheckWarning = UPDATE_VERIFICATION_INCOMPLETE_WARNING;
+        }
+
+        invalidateFleetUpdateCache();
+        invalidateNodeCaches(nodeId);
+        NotificationService.getInstance().broadcastEvent({
+            type: 'state-invalidate',
+            scope: 'image-updates',
+            nodeId,
+            stackName,
+            action: 'stack-updated',
+            ts: Date.now(),
+        });
+
         this.safeDispatch(
             'info',
             'image_update_applied',
@@ -1112,7 +1141,8 @@ export class SchedulerService {
             stackName
         );
 
-        return `Stack "${stackName}": updated (${updatedImages.join(', ')}).`;
+        const base = `Stack "${stackName}": updated (${updatedImages.join(', ')}).`;
+        return recheckWarning ? `${base} ${recheckWarning}` : base;
     }
 
     private async executeScan(task: ScheduledTask): Promise<{ output: string; failed: number }> {

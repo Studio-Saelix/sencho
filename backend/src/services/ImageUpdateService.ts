@@ -17,6 +17,25 @@ import { buildEffectiveServiceModel } from './effectiveServiceModel';
 
 const BACKFILL_KEY = 'image_update_notifications_backfilled';
 
+/** Post-update scanner reconciliation outcome for a single stack. */
+export type StackRecheckOutcome =
+    | 'cleared'
+    | 'still_present'
+    | 'verification_incomplete'
+    | 'verification_failed';
+
+export interface StackRecheckResult {
+    outcome: StackRecheckOutcome;
+    /** Present when the update condition remains or could not be verified. */
+    warning: string | null;
+}
+
+export const UPDATE_STILL_PRESENT_WARNING =
+    'The update command completed, but Sencho still detects an available image update.';
+
+export const UPDATE_VERIFICATION_INCOMPLETE_WARNING =
+    'The update command completed, but Sencho could not fully verify whether an image update remains.';
+
 export interface ImageCheckResult {
     hasUpdate: boolean;
     /** Same-tag registry digest drift; Compose pull can apply without pin change. */
@@ -884,19 +903,23 @@ export class ImageUpdateService {
     }
 
     /**
-     * Re-check a single stack after a service-scoped update or restore. On a
-     * render failure the prior row is left untouched and a warning is returned.
+     * Re-check a single stack after a service-scoped update or restore, or
+     * after a manual full-stack update. On a render failure the prior row is
+     * left untouched and a verification_failed result is returned.
      */
-    public async recheckStack(nodeId: number, stackName: string): Promise<{ warning: string | null }> {
+    public async recheckStack(nodeId: number, stackName: string): Promise<StackRecheckResult> {
         const generation = this.reserveStackWriteGeneration(nodeId, stackName);
         const db = DatabaseService.getInstance();
         const docker = DockerController.getInstance(nodeId);
         const model = await buildEffectiveServiceModel(nodeId, stackName);
         if (!model.renderable) {
-            return { warning: model.error };
+            return {
+                outcome: 'verification_failed',
+                warning: model.error || UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+            };
         }
 
-        let containers: Array<{ Image?: string; Labels?: Record<string, string> }> = [];
+        let containers: Array<{ Image?: string; Labels?: Record<string, string> }>;
         try {
             containers = await withTimeout(docker.getAllContainers(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getAllContainers');
         } catch (e) {
@@ -905,6 +928,12 @@ export class ImageUpdateService {
                 sanitizeForLog(stackName),
                 sanitizeForLog(getErrorMessage(e, 'unknown')),
             );
+            // Do not clear or upsert from declared-image-only checks: runtime
+            // digests were never observed, so "cleared" would be a false negative.
+            return {
+                outcome: 'verification_incomplete',
+                warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+            };
         }
 
         const refs = new Set<string>();
@@ -942,15 +971,34 @@ export class ImageUpdateService {
         const lastError = stackStatusLastError(services);
         const now = Date.now();
 
-        await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
+        const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
             if (checkStatus === 'failed') {
                 db.recordStackCheckFailure(nodeId, stackName, lastError ?? 'Update check failed', now, services, gen);
             } else {
                 db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError, services, gen);
             }
         });
+        // A newer scanner reservation dropped this write; do not report cleared.
+        if (!committed) {
+            return {
+                outcome: 'verification_incomplete',
+                warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+            };
+        }
 
-        return { warning: null };
+        if (checkStatus === 'partial' || checkStatus === 'failed') {
+            return {
+                outcome: 'verification_incomplete',
+                warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+            };
+        }
+        if (hasUpdate) {
+            return {
+                outcome: 'still_present',
+                warning: UPDATE_STILL_PRESENT_WARNING,
+            };
+        }
+        return { outcome: 'cleared', warning: null };
     }
 
     private stackWriteKey(nodeId: number, stackName: string): string {

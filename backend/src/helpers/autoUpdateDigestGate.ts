@@ -40,6 +40,19 @@ export function recordAutoUpdateImageCheck(
   }
 }
 
+/**
+ * Operator message when a sibling image check failed and a full-stack Compose
+ * update must not run (it would pull/recreate the unverified image as
+ * collateral). Null when digest apply may proceed.
+ */
+export function messageWhenDigestApplyBlockedByCheckErrors(
+  stackName: string,
+  state: Pick<AutoUpdateDigestGateState, 'hasDigestUpdate' | 'checkErrors'>,
+): string | null {
+  if (!state.hasDigestUpdate || state.checkErrors.length === 0) return null;
+  return `Stack "${stackName}": WARNING - digest update available but ${state.checkErrors.length} image check(s) failed; skipped auto-update (${state.checkErrors.join('; ')}).`;
+}
+
 /** Operator message when no digest-actionable update was found. */
 export function messageWhenNoDigestUpdate(
   stackName: string,
