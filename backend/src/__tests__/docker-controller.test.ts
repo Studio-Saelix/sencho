@@ -2,11 +2,11 @@
  * Unit tests for DockerController — validateApiData, state-safe container ops,
  * disk usage, classified resources, orphan detection, and error paths.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Hoisted mocks ──────────────────────────────────────────────────────
 
-const { mockDocker } = vi.hoisted(() => {
+const { mockDocker, composeDirRef, mockExecFileAsync } = vi.hoisted(() => {
   const mockDocker = {
     df: vi.fn(),
     listImages: vi.fn().mockResolvedValue([]),
@@ -23,7 +23,11 @@ const { mockDocker } = vi.hoisted(() => {
     pruneVolumes: vi.fn().mockResolvedValue({ SpaceReclaimed: 0 }),
     createNetwork: vi.fn(),
   };
-  return { mockDocker };
+  return {
+    mockDocker,
+    composeDirRef: { current: '/test/compose' },
+    mockExecFileAsync: vi.fn(),
+  };
 });
 
 vi.mock('../services/NodeRegistry', () => ({
@@ -31,7 +35,16 @@ vi.mock('../services/NodeRegistry', () => ({
     getInstance: () => ({
       getDocker: () => mockDocker,
       getDefaultNodeId: () => 1,
-      getComposeDir: () => '/test/compose',
+      getComposeDir: () => composeDirRef.current,
+    }),
+  },
+}));
+
+vi.mock('../services/DatabaseService', () => ({
+  DatabaseService: {
+    getInstance: () => ({
+      getGitSource: () => undefined,
+      getStackProjectEnvFiles: () => [],
     }),
   },
 }));
@@ -42,14 +55,19 @@ vi.mock('child_process', () => ({
   execFile: vi.fn(),
 }));
 vi.mock('util', () => ({
-  promisify: () => vi.fn(),
+  promisify: () => mockExecFileAsync,
 }));
 
 import DockerController, { selectMainWebPort, parseExitCode, isContainerFailed } from '../services/DockerController';
 import { CacheService } from '../services/CacheService';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  composeDirRef.current = '/test/compose';
+  mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
 });
 
 // ── validateApiData ────────────────────────────────────────────────────
@@ -1694,13 +1712,23 @@ describe('DockerController - getBulkStackStatuses partial status', () => {
 
 // ── getLegacyOrphanContainersByStack (#1565) ───────────────────────────
 
+type OrphanDcSpies = {
+  fetchComposePsContainers: (...a: unknown[]) => Promise<unknown[]>;
+  smartFallback: (...a: unknown[]) => Promise<unknown[]>;
+};
+
+function spyOrphanDc(
+  dc: ReturnType<typeof DockerController.getInstance>,
+  method: keyof OrphanDcSpies,
+) {
+  return vi.spyOn(dc as unknown as OrphanDcSpies, method);
+}
+
 describe('DockerController - getLegacyOrphanContainersByStack', () => {
   it('returns [] when compose ps already manages containers', async () => {
     const dc = DockerController.getInstance(1);
-    const fetchSpy = vi.spyOn(dc as unknown as { fetchComposePsContainers: (...a: unknown[]) => Promise<unknown[]> }, 'fetchComposePsContainers')
-      .mockResolvedValue([{ ID: 'managed-c1', Name: 'web-1' }]);
-    const fallbackSpy = vi.spyOn(dc as unknown as { smartFallback: (...a: unknown[]) => Promise<unknown[]> }, 'smartFallback')
-      .mockResolvedValue([{ Id: 'legacy-c1' }]);
+    const fetchSpy = spyOrphanDc(dc, 'fetchComposePsContainers').mockResolvedValue([{ ID: 'managed-c1', Name: 'web-1' }]);
+    const fallbackSpy = spyOrphanDc(dc, 'smartFallback').mockResolvedValue([{ Id: 'legacy-c1' }]);
 
     await expect(dc.getLegacyOrphanContainersByStack('my-stack')).resolves.toEqual([]);
     expect(fallbackSpy).not.toHaveBeenCalled();
@@ -1710,10 +1738,8 @@ describe('DockerController - getLegacyOrphanContainersByStack', () => {
 
   it('returns legacy orphan IDs when compose ps is empty', async () => {
     const dc = DockerController.getInstance(1);
-    const fetchSpy = vi.spyOn(dc as unknown as { fetchComposePsContainers: (...a: unknown[]) => Promise<unknown[]> }, 'fetchComposePsContainers')
-      .mockResolvedValue([]);
-    const fallbackSpy = vi.spyOn(dc as unknown as { smartFallback: (...a: unknown[]) => Promise<unknown[]> }, 'smartFallback')
-      .mockResolvedValue([{ Id: 'legacy-c1' }, { Id: '' }, {}]);
+    const fetchSpy = spyOrphanDc(dc, 'fetchComposePsContainers').mockResolvedValue([]);
+    const fallbackSpy = spyOrphanDc(dc, 'smartFallback').mockResolvedValue([{ Id: 'legacy-c1' }, { Id: '' }, {}]);
 
     await expect(dc.getLegacyOrphanContainersByStack('my-stack')).resolves.toEqual([{ Id: 'legacy-c1' }]);
     fetchSpy.mockRestore();
@@ -1722,10 +1748,8 @@ describe('DockerController - getLegacyOrphanContainersByStack', () => {
 
   it('returns [] when compose ps throws, even if fallback would match containers', async () => {
     const dc = DockerController.getInstance(1);
-    const fetchSpy = vi.spyOn(dc as unknown as { fetchComposePsContainers: (...a: unknown[]) => Promise<unknown[]> }, 'fetchComposePsContainers')
-      .mockRejectedValue(new Error('compose ps failed'));
-    const fallbackSpy = vi.spyOn(dc as unknown as { smartFallback: (...a: unknown[]) => Promise<unknown[]> }, 'smartFallback')
-      .mockResolvedValue([{ Id: 'running-compose-c2' }]);
+    const fetchSpy = spyOrphanDc(dc, 'fetchComposePsContainers').mockRejectedValue(new Error('compose ps failed'));
+    const fallbackSpy = spyOrphanDc(dc, 'smartFallback').mockResolvedValue([{ Id: 'running-compose-c2' }]);
 
     await expect(dc.getLegacyOrphanContainersByStack('my-stack')).resolves.toEqual([]);
     // Must not consult name-matching fallback: those IDs may be healthy Compose runtimes.
@@ -1733,26 +1757,37 @@ describe('DockerController - getLegacyOrphanContainersByStack', () => {
     fetchSpy.mockRestore();
     fallbackSpy.mockRestore();
   });
+
+  it('returns [] and skips fallback when compose ps stdout is unparseable', async () => {
+    mockExecFileAsync.mockResolvedValue({
+      stdout: 'this is not json at all just random text { broken [',
+      stderr: '',
+    });
+    const dc = DockerController.getInstance(1);
+    const fallbackSpy = spyOrphanDc(dc, 'smartFallback').mockResolvedValue([{ Id: 'running-c1' }]);
+
+    await expect(dc.getLegacyOrphanContainersByStack('my-stack')).resolves.toEqual([]);
+    expect(fallbackSpy).not.toHaveBeenCalled();
+    fallbackSpy.mockRestore();
+  });
 });
 
 describe('DockerController - classifyLegacyOrphansForUpdate', () => {
-  type DcSpies = {
-    fetchComposePsContainers: (...a: unknown[]) => Promise<unknown[]>;
-    smartFallback: (...a: unknown[]) => Promise<unknown[]>;
-  };
+  async function classifyDc() {
+    const { default: DockerController } = await import('../services/DockerController');
+    return DockerController.getInstance(1);
+  }
 
   it('returns none when compose ps already manages containers', async () => {
-    const { default: DockerController } = await import('../services/DockerController');
-    const dc = DockerController.getInstance(1);
-    vi.spyOn(dc as unknown as DcSpies, 'fetchComposePsContainers').mockResolvedValue([{ ID: 'c1' }]);
+    const dc = await classifyDc();
+    spyOrphanDc(dc, 'fetchComposePsContainers').mockResolvedValue([{ ID: 'c1' }]);
     await expect(dc.classifyLegacyOrphansForUpdate('my-stack')).resolves.toEqual({ status: 'none' });
   });
 
   it('returns orphans when compose ps is empty and fallback finds legacy containers', async () => {
-    const { default: DockerController } = await import('../services/DockerController');
-    const dc = DockerController.getInstance(1);
-    vi.spyOn(dc as unknown as DcSpies, 'fetchComposePsContainers').mockResolvedValue([]);
-    vi.spyOn(dc as unknown as DcSpies, 'smartFallback').mockResolvedValue([{ Id: 'legacy-c1' }, { Id: 'legacy-c2' }]);
+    const dc = await classifyDc();
+    spyOrphanDc(dc, 'fetchComposePsContainers').mockResolvedValue([]);
+    spyOrphanDc(dc, 'smartFallback').mockResolvedValue([{ Id: 'legacy-c1' }, { Id: 'legacy-c2' }]);
     await expect(dc.classifyLegacyOrphansForUpdate('my-stack')).resolves.toEqual({
       status: 'orphans',
       ids: ['legacy-c1', 'legacy-c2'],
@@ -1760,10 +1795,9 @@ describe('DockerController - classifyLegacyOrphansForUpdate', () => {
   });
 
   it('returns classification_failed when compose ps throws, even if fallback would match containers', async () => {
-    const { default: DockerController } = await import('../services/DockerController');
-    const dc = DockerController.getInstance(1);
-    vi.spyOn(dc as unknown as DcSpies, 'fetchComposePsContainers').mockRejectedValue(new Error('compose boom'));
-    const fallbackSpy = vi.spyOn(dc as unknown as DcSpies, 'smartFallback').mockResolvedValue([{ Id: 'running-compose-c1' }]);
+    const dc = await classifyDc();
+    spyOrphanDc(dc, 'fetchComposePsContainers').mockRejectedValue(new Error('compose boom'));
+    const fallbackSpy = spyOrphanDc(dc, 'smartFallback').mockResolvedValue([{ Id: 'running-compose-c1' }]);
     const result = await dc.classifyLegacyOrphansForUpdate('my-stack');
     expect(result).toEqual({ status: 'classification_failed', error: 'compose boom' });
     // Must not consult name-matching fallback: those IDs may be healthy Compose runtimes.
@@ -1771,12 +1805,107 @@ describe('DockerController - classifyLegacyOrphansForUpdate', () => {
   });
 
   it('returns classification_failed when compose ps is empty and fallback throws', async () => {
-    const { default: DockerController } = await import('../services/DockerController');
-    const dc = DockerController.getInstance(1);
-    vi.spyOn(dc as unknown as DcSpies, 'fetchComposePsContainers').mockResolvedValue([]);
-    vi.spyOn(dc as unknown as DcSpies, 'smartFallback').mockRejectedValue(new Error('fallback boom'));
+    const dc = await classifyDc();
+    spyOrphanDc(dc, 'fetchComposePsContainers').mockResolvedValue([]);
+    spyOrphanDc(dc, 'smartFallback').mockRejectedValue(new Error('fallback boom'));
     const result = await dc.classifyLegacyOrphansForUpdate('my-stack');
     expect(result).toEqual({ status: 'classification_failed', error: 'fallback boom' });
+  });
+
+  it('returns classification_failed when compose ps stdout is unparseable', async () => {
+    mockExecFileAsync.mockResolvedValue({
+      stdout: 'this is not json at all just random text { broken [',
+      stderr: '',
+    });
+    const dc = await classifyDc();
+    const fallbackSpy = spyOrphanDc(dc, 'smartFallback').mockResolvedValue([{ Id: 'running-c1' }]);
+    const result = await dc.classifyLegacyOrphansForUpdate('my-stack');
+    expect(result.status).toBe('classification_failed');
+    expect(String((result as { error?: string }).error ?? '')).toMatch(/unparseable JSON/i);
+    expect(fallbackSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('DockerController - smartFallback stack-dir evidence', () => {
+  const composeYaml = `services:\n  web:\n    image: nginx:alpine\n`;
+  let stackDir: string;
+  let tmpRoot: string;
+
+  function runningContainer(id: string, name: string, labels: Record<string, string> = {}) {
+    return { Id: id, Names: [name], Labels: labels, State: 'running', Status: 'Up', Ports: [] };
+  }
+
+  async function orphansWithEmptyPs() {
+    const dc = DockerController.getInstance(1);
+    spyOrphanDc(dc, 'fetchComposePsContainers').mockResolvedValue([]);
+    return dc.getLegacyOrphanContainersByStack('my-stack');
+  }
+
+  beforeEach(async () => {
+    tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'sencho-orphan-'));
+    composeDirRef.current = tmpRoot;
+    stackDir = path.join(tmpRoot, 'my-stack');
+    await fs.mkdir(stackDir);
+    await fs.writeFile(path.join(stackDir, 'docker-compose.yml'), composeYaml);
+  });
+
+  afterEach(async () => {
+    composeDirRef.current = '/test/compose';
+    await fs.rm(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('excludes name-matched containers without stack-dir evidence', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      runningContainer('unrelated-web', '/web'),
+    ]);
+    await expect(orphansWithEmptyPs()).resolves.toEqual([]);
+  });
+
+  it('includes name-matched containers whose working_dir equals the stack dir', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      runningContainer('legacy-web', '/web', {
+        'com.docker.compose.project.working_dir': stackDir,
+      }),
+    ]);
+    await expect(orphansWithEmptyPs()).resolves.toEqual([{ Id: 'legacy-web' }]);
+  });
+
+  it('matches working_dir case-insensitively on win32', async () => {
+    if (process.platform !== 'win32') return;
+    mockDocker.listContainers.mockResolvedValue([
+      runningContainer('legacy-web-case', '/web', {
+        'com.docker.compose.project.working_dir': stackDir.toUpperCase(),
+      }),
+    ]);
+    await expect(orphansWithEmptyPs()).resolves.toEqual([{ Id: 'legacy-web-case' }]);
+  });
+
+  it('excludes name-matched containers whose working_dir points elsewhere', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      runningContainer('other-stack-web', '/web', {
+        'com.docker.compose.project.working_dir': path.join(tmpRoot, 'other-stack'),
+      }),
+    ]);
+    await expect(orphansWithEmptyPs()).resolves.toEqual([]);
+  });
+
+  it('includes name-matched containers whose config_files path is under the stack dir', async () => {
+    mockDocker.listContainers.mockResolvedValue([
+      runningContainer('legacy-cfg', '/my-stack-web-1', {
+        'com.docker.compose.project.config_files': path.join(stackDir, 'docker-compose.yml'),
+      }),
+    ]);
+    await expect(orphansWithEmptyPs()).resolves.toEqual([{ Id: 'legacy-cfg' }]);
+  });
+
+  it('surfaces listContainers failure as classification_failed on update', async () => {
+    mockDocker.listContainers.mockRejectedValue(new Error('daemon unavailable'));
+
+    const { default: DockerController } = await import('../services/DockerController');
+    const dc = DockerController.getInstance(1);
+    spyOrphanDc(dc, 'fetchComposePsContainers').mockResolvedValue([]);
+    const result = await dc.classifyLegacyOrphansForUpdate('my-stack');
+    expect(result).toEqual({ status: 'classification_failed', error: 'daemon unavailable' });
   });
 });
 
