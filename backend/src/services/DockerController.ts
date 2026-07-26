@@ -22,7 +22,7 @@ import {
   type PruneTarget,
 } from './prunePlan';
 import type { NetworkingNetworkBase } from './network/networkingTypes';
-import { isPathWithinBase } from '../utils/validation';
+import { isPathWithinBase, isValidStackName } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -2442,10 +2442,28 @@ class DockerController {
    * propagate to callers (classify fail-closes; UI listing soft-catches).
    */
   private async smartFallback(stackName: string, stackDir: string): Promise<any[]> {
+    if (!isValidStackName(stackName)) {
+      throw new Error('Invalid stack path');
+    }
+    // Canonical inline js/path-injection barrier at the fs.readFile sink below.
+    // CodeQL credits neither wrapped isPathWithinBase nor a barrier separated
+    // from the sink; resolve under the compose root and require containment.
+    const baseResolved = path.resolve(NodeRegistry.getInstance().getComposeDir(this.nodeId));
+    const resolvedStackDir = path.resolve(baseResolved, stackName);
+    if (!resolvedStackDir.startsWith(baseResolved + path.sep)) {
+      throw new Error('Invalid stack path');
+    }
+    // Prefer the validated path over the caller-provided stackDir.
+    stackDir = resolvedStackDir;
+
     let yamlContent: string | null = null;
     for (const fileName of COMPOSE_FILE_NAMES) {
       try {
-        yamlContent = await fs.readFile(path.join(stackDir, fileName), 'utf-8');
+        const composePath = path.resolve(stackDir, fileName);
+        if (!composePath.startsWith(stackDir + path.sep)) {
+          continue;
+        }
+        yamlContent = await fs.readFile(composePath, 'utf-8');
         break;
       } catch {
         continue;
