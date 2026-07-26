@@ -37,6 +37,7 @@ export const CAPABILITIES = [
   'notification-routing',
   'notification-suppression',
   'notification-suppression-schedule',
+  'notification-suppression-replica-retraction',
   'host-console',
   'host-console-community',
   'container-exec',
@@ -82,6 +83,14 @@ export const HOST_CONSOLE_COMMUNITY_CAPABILITY = 'host-console-community' as con
 /** Remotes that evaluate weekly maintenance windows on mute/suppression replicas. */
 export const NOTIFICATION_SUPPRESSION_SCHEDULE_CAPABILITY =
   'notification-suppression-schedule' as const satisfies Capability;
+
+/**
+ * Remotes that accept hub-authored `{ kind, source_updated_at }` on replica DELETE
+ * and persist versioned tombstones. Without this, hubs must not send recoverable
+ * soft-cleanup DELETEs (pre-tombstone remotes would bare-delete with no guard).
+ */
+export const NOTIFICATION_SUPPRESSION_REPLICA_RETRACTION_CAPABILITY =
+  'notification-suppression-replica-retraction' as const satisfies Capability;
 
 /** Capability for optional `?removeVolumes=true` on POST /stacks/:name/down. */
 export const STACK_DOWN_REMOVE_VOLUMES_CAPABILITY = 'stack-down-remove-volumes' as const satisfies Capability;

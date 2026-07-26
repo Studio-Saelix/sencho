@@ -6,6 +6,7 @@ import { AutoHealService } from '../services/AutoHealService';
 import { HealthGateService } from '../services/HealthGateService';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import { FleetSyncRetryService } from '../services/FleetSyncRetryService';
+import { SuppressionRetractionRetryService } from '../services/SuppressionRetractionRetryService';
 import { DockerEventManager } from '../services/DockerEventManager';
 import { ImageUpdateService } from '../services/ImageUpdateService';
 import { SchedulerService } from '../services/SchedulerService';
@@ -37,6 +38,9 @@ export function installShutdownHandlers(server: Server): void {
       try { HealthGateService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] HealthGateService cleanup failed:', (e as Error).message); }
       try { ServiceUpdateRecoveryService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] ServiceUpdateRecoveryService cleanup failed:', (e as Error).message); }
       try { FleetSyncRetryService.getInstance().stop(); } catch (e) { console.warn('[Shutdown] FleetSyncRetryService cleanup failed:', (e as Error).message); }
+      try { SuppressionRetractionRetryService.getInstance().stop(); } catch (e) {
+        console.warn('[Shutdown] SuppressionRetractionRetryService cleanup failed:', (e as Error).message);
+      }
       try { DockerEventManager.getInstance().stop(); } catch (e) {
         console.warn('[Shutdown] DockerEventManager cleanup failed:', (e as Error).message);
       }

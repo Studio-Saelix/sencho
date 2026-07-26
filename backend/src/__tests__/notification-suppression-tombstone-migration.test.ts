@@ -109,4 +109,51 @@ describe('notification suppression tombstone migration', () => {
     expect(db.getNotificationSuppressionRule(42)).toBeUndefined();
     expect(db.getNotificationSuppressionRuleTombstone(42)?.kind).toBe('permanent');
   });
+
+  it('creates pending retractions table and merges permanent over recoverable', { timeout: 60_000 }, () => {
+    scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sencho-supp-pending-'));
+    prevDataDir = process.env.DATA_DIR;
+    process.env.DATA_DIR = scratchDir;
+    resetDatabaseSingleton();
+    const db = DatabaseService.getInstance();
+
+    const cols = db.getDb().prepare('PRAGMA table_info(notification_suppression_pending_retractions)').all() as Array<{
+      name: string;
+    }>;
+    expect(cols.map((c) => c.name)).toEqual(
+      expect.arrayContaining([
+        'rule_id',
+        'node_id',
+        'kind',
+        'source_updated_at',
+        'attempts',
+        'last_error',
+      ]),
+    );
+
+    db.upsertNotificationSuppressionPendingRetraction({
+      rule_id: 7,
+      node_id: 3,
+      kind: 'recoverable',
+      source_updated_at: 100,
+      last_error: 'unsupported',
+    });
+    db.upsertNotificationSuppressionPendingRetraction({
+      rule_id: 7,
+      node_id: 3,
+      kind: 'permanent',
+      source_updated_at: 50,
+      last_error: 'offline',
+    });
+
+    const rows = db.listNotificationSuppressionPendingRetractions(3);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('permanent');
+    expect(rows[0].source_updated_at).toBe(100);
+    expect(rows[0].attempts).toBe(2);
+    expect(rows[0].last_error).toBe('offline');
+
+    db.deleteNotificationSuppressionPendingRetraction(7, 3);
+    expect(db.listNotificationSuppressionPendingRetractions(3)).toHaveLength(0);
+  });
 });

@@ -768,6 +768,25 @@ export interface NotificationSuppressionRuleTombstone {
     source_updated_at: number;
 }
 
+export type SuppressionReplicaWriteOutcome =
+    | 'applied'
+    | 'ignored_stale'
+    | 'ignored_permanent_tombstone'
+    | 'ignored_recoverable_watermark';
+
+export type SuppressionReplicaDeleteOutcome = 'applied' | 'ignored_stale';
+
+export interface NotificationSuppressionPendingRetraction {
+    rule_id: number;
+    node_id: number;
+    kind: NotificationSuppressionRetractionKind;
+    source_updated_at: number;
+    created_at: number;
+    updated_at: number;
+    attempts: number;
+    last_error: string | null;
+}
+
 /** Fail closed: anything other than recoverable is permanent. */
 function normalizeSuppressionRetractionKind(kind: unknown): NotificationSuppressionRetractionKind {
     return kind === 'recoverable' ? 'recoverable' : 'permanent';
@@ -2297,6 +2316,21 @@ export class DatabaseService {
              SET source_updated_at = deleted_at
              WHERE source_updated_at IS NULL`,
         ).run();
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS notification_suppression_pending_retractions (
+                rule_id INTEGER NOT NULL,
+                node_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                source_updated_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                PRIMARY KEY (rule_id, node_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_supp_pending_retract_node
+                ON notification_suppression_pending_retractions(node_id);
+        `);
     }
 
     private migrateNotificationHistoryContext(): void {
@@ -2996,7 +3030,7 @@ export class DatabaseService {
         );
     }
 
-    public upsertNotificationSuppressionRuleReplica(rule: NotificationSuppressionRule): void {
+    public upsertNotificationSuppressionRuleReplica(rule: NotificationSuppressionRule): SuppressionReplicaWriteOutcome {
         const scheduleJson = rule.schedule ? JSON.stringify(rule.schedule) : null;
         const existing = this.getNotificationSuppressionRule(rule.id);
         if (existing) {
@@ -3007,7 +3041,7 @@ export class DatabaseService {
                     `[DatabaseService] Ignoring stale suppression replica write for rule id=${sanitizeForLog(rule.id)} ` +
                         `(incoming updated_at=${sanitizeForLog(rule.updated_at)} <= stored updated_at=${sanitizeForLog(existing.updated_at)})`,
                 );
-                return;
+                return 'ignored_stale';
             }
             this.db.prepare(
                 `UPDATE notification_suppression_rules SET
@@ -3028,10 +3062,11 @@ export class DatabaseService {
                 rule.updated_at,
                 rule.id,
             );
-            return;
+            return 'applied';
         }
         // Re-read tombstone inside the transaction so a concurrent permanent
         // retract cannot be cleared after an outer eligibility check.
+        let outcome: SuppressionReplicaWriteOutcome = 'applied';
         this.transaction(() => {
             const tombstone = this.db.prepare(
                 `SELECT id, deleted_at, kind, source_updated_at
@@ -3047,6 +3082,7 @@ export class DatabaseService {
                         `[DatabaseService] Ignoring suppression replica write for rule id=${sanitizeForLog(rule.id)}: ` +
                             `permanent tombstone (source_updated_at=${sanitizeForLog(sourceUpdatedAt)})`,
                     );
+                    outcome = 'ignored_permanent_tombstone';
                     return;
                 }
                 if (!Number.isSafeInteger(sourceUpdatedAt) || rule.updated_at <= sourceUpdatedAt) {
@@ -3055,6 +3091,7 @@ export class DatabaseService {
                             `recoverable tombstone source_updated_at=${sanitizeForLog(sourceUpdatedAt)}; ` +
                             `incoming updated_at=${sanitizeForLog(rule.updated_at)} is not newer`,
                     );
+                    outcome = 'ignored_recoverable_watermark';
                     return;
                 }
                 this.db.prepare(
@@ -3062,7 +3099,9 @@ export class DatabaseService {
                 ).run(rule.id);
             }
             this.insertNotificationSuppressionRuleReplicaRow(rule, scheduleJson);
+            outcome = 'applied';
         });
+        return outcome;
     }
 
     public updateNotificationSuppressionRule(
@@ -3102,7 +3141,7 @@ export class DatabaseService {
     public deleteNotificationSuppressionRule(
         id: number,
         retraction: NotificationSuppressionRetraction = { kind: 'permanent', source_updated_at: 0 },
-    ): number {
+    ): { changes: number; outcome: SuppressionReplicaDeleteOutcome } {
         const kind = normalizeSuppressionRetractionKind(retraction.kind);
         const sourceUpdatedAt = retraction.source_updated_at;
 
@@ -3117,7 +3156,7 @@ export class DatabaseService {
                     `[DatabaseService] Ignoring stale recoverable suppression DELETE for rule id=${sanitizeForLog(id)}: ` +
                         `source_updated_at=${sanitizeForLog(sourceUpdatedAt)} < stored updated_at=${sanitizeForLog(existing.updated_at)}`,
                 );
-                return 0;
+                return { changes: 0, outcome: 'ignored_stale' };
             }
 
             const changes = this.db.prepare(
@@ -3150,7 +3189,7 @@ export class DatabaseService {
                     source_updated_at = excluded.source_updated_at`,
             ).run(id, Date.now(), mergedKind, mergedSource);
 
-            return changes;
+            return { changes, outcome: 'applied' };
         });
     }
 
@@ -3170,6 +3209,86 @@ export class DatabaseService {
             // surface any truthy Number() result; merge/write paths coerce separately.
             source_updated_at: Number(row.source_updated_at) || 0,
         };
+    }
+
+
+    public upsertNotificationSuppressionPendingRetraction(row: {
+        rule_id: number;
+        node_id: number;
+        kind: NotificationSuppressionRetractionKind;
+        source_updated_at: number;
+        last_error?: string;
+    }): void {
+        const now = Date.now();
+        const kind = normalizeSuppressionRetractionKind(row.kind);
+        const prior = this.db.prepare(
+            `SELECT kind, source_updated_at, attempts FROM notification_suppression_pending_retractions
+             WHERE rule_id = ? AND node_id = ?`,
+        ).get(row.rule_id, row.node_id) as { kind: string; source_updated_at: number; attempts: number } | undefined;
+        let mergedKind = kind;
+        let mergedSource = row.source_updated_at;
+        let attempts = 1;
+        if (prior) {
+            const priorKind = normalizeSuppressionRetractionKind(prior.kind);
+            mergedKind =
+                priorKind === 'permanent' || kind === 'permanent' ? 'permanent' : 'recoverable';
+            mergedSource = Math.max(
+                safeTombstoneSourceUpdatedAt(prior.source_updated_at),
+                row.source_updated_at,
+            );
+            attempts = (prior.attempts || 0) + 1;
+        }
+        this.db.prepare(
+            `INSERT INTO notification_suppression_pending_retractions
+                (rule_id, node_id, kind, source_updated_at, created_at, updated_at, attempts, last_error)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(rule_id, node_id) DO UPDATE SET
+                kind = excluded.kind,
+                source_updated_at = excluded.source_updated_at,
+                updated_at = excluded.updated_at,
+                attempts = excluded.attempts,
+                last_error = excluded.last_error`,
+        ).run(
+            row.rule_id,
+            row.node_id,
+            mergedKind,
+            mergedSource,
+            now,
+            now,
+            attempts,
+            row.last_error ?? null,
+        );
+    }
+
+    public deleteNotificationSuppressionPendingRetraction(ruleId: number, nodeId: number): void {
+        this.db.prepare(
+            'DELETE FROM notification_suppression_pending_retractions WHERE rule_id = ? AND node_id = ?',
+        ).run(ruleId, nodeId);
+    }
+
+    public listNotificationSuppressionPendingRetractions(
+        nodeId?: number,
+    ): NotificationSuppressionPendingRetraction[] {
+        const rows = (
+            nodeId == null
+                ? this.db.prepare(
+                    `SELECT * FROM notification_suppression_pending_retractions ORDER BY updated_at ASC`,
+                ).all()
+                : this.db.prepare(
+                    `SELECT * FROM notification_suppression_pending_retractions
+                     WHERE node_id = ? ORDER BY updated_at ASC`,
+                ).all(nodeId)
+        ) as Array<Record<string, unknown>>;
+        return rows.map((r) => ({
+            rule_id: r.rule_id as number,
+            node_id: r.node_id as number,
+            kind: normalizeSuppressionRetractionKind(r.kind),
+            source_updated_at: Number(r.source_updated_at) || 0,
+            created_at: r.created_at as number,
+            updated_at: r.updated_at as number,
+            attempts: (r.attempts as number) || 0,
+            last_error: (r.last_error as string | null) ?? null,
+        }));
     }
 
     // --- Global Settings ---
@@ -4575,6 +4694,9 @@ export class DatabaseService {
             this.deleteRoleAssignmentsByResource('node', String(id));
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM node_update_skips WHERE node_id = ?').run(id);
+            this.db.prepare(
+                'DELETE FROM notification_suppression_pending_retractions WHERE node_id = ?',
+            ).run(id);
             this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
         })();
     }

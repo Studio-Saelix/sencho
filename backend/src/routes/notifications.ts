@@ -600,7 +600,7 @@ notificationSuppressionRouter.post('/replica', authMiddleware, (req: Request, re
       return;
     }
 
-    DatabaseService.getInstance().upsertNotificationSuppressionRuleReplica({
+    const outcome = DatabaseService.getInstance().upsertNotificationSuppressionRuleReplica({
       ...rule,
       stack_patterns: patterns.patterns,
       label_ids: Array.isArray(rule.label_ids) && rule.label_ids.length > 0 ? rule.label_ids : null,
@@ -616,7 +616,7 @@ notificationSuppressionRouter.post('/replica', authMiddleware, (req: Request, re
       // is a hub-local scoping concept and never trustworthy as a foreign key here.
       node_id: null,
     });
-    res.json({ success: true });
+    res.json({ success: true, outcome });
   } catch (error) {
     console.error('Failed to apply suppression rule replica:', error);
     res.status(500).json({ error: 'Failed to apply suppression rule replica' });
@@ -630,8 +630,8 @@ notificationSuppressionRouter.delete('/replica/:id', authMiddleware, (req: Reque
     if (id === null) return;
     const retraction = parseReplicaRetractionBody(req.body, res);
     if (retraction === false) return;
-    DatabaseService.getInstance().deleteNotificationSuppressionRule(id, retraction);
-    res.json({ success: true });
+    const { outcome } = DatabaseService.getInstance().deleteNotificationSuppressionRule(id, retraction);
+    res.json({ success: true, outcome });
   } catch (error) {
     console.error('Failed to delete suppression rule replica:', error);
     res.status(500).json({ error: 'Failed to delete suppression rule replica' });

@@ -611,6 +611,7 @@ describe('Notification suppression - CRUD', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ rule: replicaRule({ updated_at: 1000 }) });
     expect(first.status).toBe(200);
+    expect(first.body.outcome).toBe('applied');
     expect(DatabaseService.getInstance().getNotificationSuppressionRule(970008)?.schedule).not.toBeNull();
 
     // Capability-cleanup DELETE is recoverable at the pushed version. A delayed
@@ -620,12 +621,14 @@ describe('Notification suppression - CRUD', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ kind: 'recoverable', source_updated_at: 1000 });
     expect(del.status).toBe(200);
+    expect(del.body.outcome).toBe('applied');
 
     const delayed = await request(app)
       .post('/api/notification-suppression-rules/replica')
       .set('Authorization', `Bearer ${token}`)
       .send({ rule: replicaRule({ updated_at: 1000 }) });
     expect(delayed.status).toBe(200);
+    expect(delayed.body.outcome).toBe('ignored_recoverable_watermark');
     expect(DatabaseService.getInstance().getNotificationSuppressionRule(970008)).toBeUndefined();
     expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(970008)?.kind).toBe(
       'recoverable',
@@ -661,12 +664,14 @@ describe('Notification suppression - CRUD', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({ rule: replicaRule({ updated_at: 1000 }) });
       expect(first.status).toBe(200);
+      expect(first.body.outcome).toBe('applied');
 
       const del = await request(app)
         .delete('/api/notification-suppression-rules/replica/980009')
         .set('Authorization', `Bearer ${token}`)
         .send({ kind: 'recoverable', source_updated_at: 1000 });
       expect(del.status).toBe(200);
+      expect(del.body.outcome).toBe('applied');
       expect(DatabaseService.getInstance().getNotificationSuppressionRule(980009)).toBeUndefined();
 
       const tie = await request(app)
@@ -674,6 +679,7 @@ describe('Notification suppression - CRUD', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({ rule: replicaRule({ updated_at: 1000 }) });
       expect(tie.status).toBe(200);
+      expect(tie.body.outcome).toBe('ignored_recoverable_watermark');
       expect(DatabaseService.getInstance().getNotificationSuppressionRule(980009)).toBeUndefined();
 
       const resave = await request(app)
@@ -681,6 +687,7 @@ describe('Notification suppression - CRUD', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({ rule: replicaRule({ name: 'replica-soft-cleanup-resave-v2', updated_at: 2000 }) });
       expect(resave.status).toBe(200);
+      expect(resave.body.outcome).toBe('applied');
       const restored = DatabaseService.getInstance().getNotificationSuppressionRule(980009);
       expect(restored?.name).toBe('replica-soft-cleanup-resave-v2');
       expect(restored?.updated_at).toBe(2000);
@@ -700,6 +707,7 @@ describe('Notification suppression - CRUD', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ kind: 'permanent', source_updated_at: 50 });
     expect(del.status).toBe(200);
+    expect(del.body.outcome).toBe('applied');
 
     const post = await request(app)
       .post('/api/notification-suppression-rules/replica')
@@ -721,6 +729,7 @@ describe('Notification suppression - CRUD', () => {
         },
       });
     expect(post.status).toBe(200);
+    expect(post.body.outcome).toBe('ignored_permanent_tombstone');
     expect(DatabaseService.getInstance().getNotificationSuppressionRule(990010)).toBeUndefined();
     expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(990010)?.kind).toBe(
       'permanent',
@@ -757,6 +766,7 @@ describe('Notification suppression - CRUD', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ kind: 'recoverable', source_updated_at: 100 });
     expect(del.status).toBe(200);
+    expect(del.body.outcome).toBe('ignored_stale');
     expect(DatabaseService.getInstance().getNotificationSuppressionRule(991011)?.updated_at).toBe(200);
     expect(DatabaseService.getInstance().getNotificationSuppressionRuleTombstone(991011)).toBeUndefined();
   });
