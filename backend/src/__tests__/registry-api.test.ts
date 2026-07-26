@@ -115,6 +115,34 @@ describe('repoDigestMatchesRef', () => {
   });
 });
 
+describe('parseImageRef', () => {
+  // docker.io / index.docker.io / registry-1.docker.io are the same registry, but only
+  // the literal 'registry-1.docker.io' is recognized elsewhere (getAuthToken, the
+  // library/ auto-prefix in parseImageRef). An unnormalized 'docker.io' or 'index.docker.io'
+  // leaks through into request URLs and hits the marketing domain instead of the registry API.
+  // Each alias is listed with and without an explicit library/ namespace to pin both paths.
+  it.each([
+    'docker.io/library/traefik:latest',
+    'docker.io/traefik:latest',
+    'index.docker.io/library/traefik:latest',
+    'index.docker.io/traefik:latest',
+  ])('normalizes %s to the registry API host and the library/ namespace', (ref) => {
+    expect(parseImageRef(ref)).toEqual({
+      registry: 'registry-1.docker.io',
+      repo: 'library/traefik',
+      tag: 'latest',
+    });
+  });
+
+  it('leaves a bare official image name unchanged (regression guard)', () => {
+    expect(parseImageRef('traefik:latest')).toEqual({
+      registry: 'registry-1.docker.io',
+      repo: 'library/traefik',
+      tag: 'latest',
+    });
+  });
+});
+
 describe('getRemoteDigest HEAD-first lookup', () => {
   beforeEach(() => {
     calls.length = 0;

@@ -432,6 +432,15 @@ describe('buildSummary', () => {
         expect(buildSummary('stacky', images).rollback_target).toBe('postgres:16');
     });
 
+    it('computes rollback target for an explicit docker.io/ ref the same as the bare form', () => {
+        // docker.io is a Docker Hub alias normalized by parseImageRef; the rollback target
+        // must render the same shortened form as the bare-name case above, not the literal host.
+        const images = [
+            baseImage({ service: 'db', image: 'docker.io/library/postgres:16', has_update: true, semver_bump: 'patch', next_tag: '16', current_tag: '16' }),
+        ];
+        expect(buildSummary('stacky', images).rollback_target).toBe('postgres:16');
+    });
+
     it('computes rollback target for registry with port', () => {
         const images = [
             baseImage({
