@@ -23,8 +23,19 @@ import StackAnatomyPanel from './StackAnatomyPanel';
 
 const COMPOSE = 'services:\n  web:\n    image: nginx:1.25\n';
 
-function previewBody(hasUpdate: boolean, buildServices: string[] = []) {
+function previewBody(
+  hasUpdate: boolean,
+  buildServices: string[] = [],
+  over: {
+    verification_failed?: boolean;
+    verification_error?: string | null;
+    check_error?: string | null;
+    blocked?: boolean;
+    blocked_reason?: string | null;
+  } = {},
+) {
   const hasBuild = buildServices.length > 0;
+  const verificationFailed = over.verification_failed ?? false;
   return {
     build_services: buildServices,
     images: [
@@ -37,7 +48,8 @@ function previewBody(hasUpdate: boolean, buildServices: string[] = []) {
         digest_update: hasUpdate,
         tag_update: false,
         semver_bump: hasUpdate ? 'patch' : 'none',
-        check_status: 'ok',
+        check_status: verificationFailed ? 'failed' : 'ok',
+        check_error: over.check_error ?? null,
       },
     ],
     summary: {
@@ -47,11 +59,48 @@ function previewBody(hasUpdate: boolean, buildServices: string[] = []) {
       next_tag: '1.25',
       semver_bump: hasUpdate ? 'patch' : 'none',
       update_kind: hasUpdate ? 'digest' : 'none',
-      blocked: false,
-      blocked_reason: null,
+      blocked: over.blocked ?? false,
+      blocked_reason: over.blocked_reason ?? null,
       has_build_services: hasBuild,
       rebuild_available: hasBuild,
-      check_status: 'ok',
+      check_status: verificationFailed ? 'failed' : 'ok',
+      verification_failed: verificationFailed,
+      verification_error: over.verification_error ?? null,
+    },
+    changelog: null,
+  };
+}
+
+/** Two-service preview: `web` confirms a digest update, `db` fails digest verification. */
+function mixedPreviewBody(over: { blocked?: boolean; blocked_reason?: string | null } = {}) {
+  return {
+    build_services: [],
+    images: [
+      {
+        service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.25',
+        has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch',
+        check_status: 'ok', check_error: null,
+      },
+      {
+        service: 'db', image: 'private.example/db:latest', current_tag: 'latest', next_tag: null,
+        has_update: false, digest_update: false, tag_update: false, semver_bump: 'none',
+        check_status: 'failed', check_error: 'Registry unreachable', digest_error: 'Registry unreachable',
+      },
+    ],
+    summary: {
+      has_update: true,
+      primary_image: 'nginx',
+      current_tag: '1.25',
+      next_tag: '1.25',
+      semver_bump: 'patch',
+      update_kind: 'digest',
+      blocked: over.blocked ?? false,
+      blocked_reason: over.blocked_reason ?? null,
+      has_build_services: false,
+      rebuild_available: false,
+      check_status: 'partial',
+      verification_failed: true,
+      verification_error: 'Registry unreachable',
     },
     changelog: null,
   };
@@ -550,5 +599,115 @@ describe('StackAnatomyPanel capability gating (capability off)', () => {
     expect(screen.queryByTestId('networking-tab')).not.toBeInTheDocument();
     expect(screen.queryByTestId('doctor-tab')).not.toBeInTheDocument();
     expect(screen.queryByTestId('storage-tab')).not.toBeInTheDocument();
+  });
+});
+
+describe('StackAnatomyPanel digest verification failure', () => {
+  it('shows an update-check-status banner instead of an update claim when digest check errors', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes(previewBody(false, [], {
+          verification_failed: true,
+          verification_error: 'Registry unreachable',
+          check_error: 'Registry unreachable',
+        }));
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    expect(await screen.findByTestId('update-check-status-banner')).toBeInTheDocument();
+    expect(screen.queryByTestId('update-available-banner')).toBeNull();
+    expect(screen.getByText(/Registry unreachable/)).toBeInTheDocument();
+  });
+
+  it('does not claim "safe to apply" and withholds the full-stack Apply button when a confirmed update sits alongside a DIFFERENT image failing verification', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) return jsonRes(mixedPreviewBody());
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    // A confirmed update alongside a different image's failure renders only
+    // the update banner (mutually exclusive with the check-status banner);
+    // the review-required hold is inline in that banner's lead-in text.
+    expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
+    expect(screen.queryByTestId('update-check-status-banner')).toBeNull();
+    expect(screen.getByText(/review required/i)).toBeInTheDocument();
+    expect(screen.queryByText(/safe to apply/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
+  });
+
+  it('keeps a single image with a confirmed digest update fully actionable when there is no digest error anywhere in the stack', async () => {
+    // digest_update and digest_error are mutually exclusive for one image (both
+    // derive from the same comparison), so a confirmed digest update is always
+    // its own clean case, with nothing to hold it for review.
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) return jsonRes(previewBody(true));
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
+    expect(screen.getByText(/same-tag digest rebuild/i)).toBeInTheDocument();
+    expect(screen.queryByText(/review required/i)).toBeNull();
+    expect(screen.getByRole('button', { name: /^apply$/i })).toBeEnabled();
+  });
+
+  it('holds a confirmed update for review even when the other image\'s own tag update masks its digest error into an overall ok check_status', async () => {
+    // The db image's tag compare confirmed an update, so the backend masks its
+    // digest failure into check_status 'ok' + check_error null. Only the
+    // unmasked digest_error still reports that its content went unverified.
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes({
+          build_services: [],
+          images: [
+            {
+              service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.25',
+              has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch',
+              check_status: 'ok', check_error: null, digest_error: null,
+            },
+            {
+              service: 'db', image: 'private.example/db:latest', current_tag: '2.0', next_tag: '2.1',
+              has_update: true, digest_update: false, tag_update: true, semver_bump: 'minor',
+              check_status: 'ok', check_error: null, digest_error: 'Registry unreachable',
+            },
+          ],
+          summary: {
+            has_update: true, primary_image: 'nginx', current_tag: '1.25', next_tag: '1.25',
+            semver_bump: 'patch', update_kind: 'digest', blocked: false, blocked_reason: null,
+            has_build_services: false, rebuild_available: false,
+            check_status: 'ok', verification_failed: false, verification_error: null,
+          },
+          changelog: null,
+        });
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
+    expect(screen.getByText(/review required/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
+  });
+
+  it('keeps the blocked (major-bump policy) banner precedence over the verification-failure review-required banner', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) {
+        return jsonRes(mixedPreviewBody({ blocked: true, blocked_reason: 'Major version bump' }));
+      }
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    expect(await screen.findByText(/review required/i)).toBeInTheDocument();
+    expect(screen.getByText(/Major version bump/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
   });
 });

@@ -1177,6 +1177,7 @@ export class ImageUpdateService {
             console.log(`[ImageUpdateService] ${imageRef}: credentials ${credentials ? 'found' : 'none'}`);
         }
 
+        // Get local digests and platform from RepoDigests / Os+Architecture
         let localDigests: string[];
         let platform: { os: string; architecture: string };
         try {

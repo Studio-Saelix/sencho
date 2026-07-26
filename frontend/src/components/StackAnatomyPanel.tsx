@@ -8,6 +8,7 @@ import { fetchUpdatePreview } from '@/lib/fetchUpdatePreview';
 import {
   isActionableUpdatePreview,
   isPreviewUncertain,
+  isReviewRequiredUpdatePreview,
   isTagOnlyAdvisory,
 } from '@/lib/updatePreviewActionability';
 import { cn } from '@/lib/utils';
@@ -56,6 +57,9 @@ interface UpdatePreviewImage {
   tag_update?: boolean;
   semver_bump: SemverBump;
   check_status?: 'ok' | 'partial' | 'failed' | 'not_checkable';
+  check_error?: string | null;
+  /** This image's own digest-comparison failure; not masked by a confirmed tag update. */
+  digest_error?: string | null;
 }
 
 interface UpdatePreviewSummary {
@@ -70,6 +74,8 @@ interface UpdatePreviewSummary {
   has_build_services: boolean;
   rebuild_available: boolean;
   check_status?: 'ok' | 'partial' | 'failed';
+  verification_failed?: boolean;
+  verification_error?: string | null;
 }
 
 interface UpdatePreview {
@@ -372,16 +378,26 @@ export default function StackAnatomyPanel({
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
   const hasBuildServices = Boolean(updatePreview?.summary.has_build_services);
   const rebuildAvailable = Boolean(updatePreview?.summary.rebuild_available);
+  const verificationError = updatePreview?.summary.verification_error ?? null;
   const previewCheckStatus = updatePreview?.summary.check_status;
   const previewUncertain = isPreviewUncertain(updatePreview);
+  // Failed digest verification is never a verified rebuild claim, but a confirmed
+  // tag update or intentional local rebuild affordance still shows.
   const showUpdateBanner = hasUpdate || rebuildAvailable;
   const showCheckStatusBanner = previewUncertain && !showUpdateBanner;
   const updateKind = updatePreview?.summary.update_kind ?? 'none';
   const blocked = Boolean(updatePreview?.summary.blocked);
+  // Another image in the stack failed digest verification: applying the
+  // full-stack update would pull/recreate that image as collateral, so the
+  // banner must not claim "safe to apply" and the Apply button is withheld
+  // (per-service update actions elsewhere are unaffected). Uses the same
+  // per-image logic as Fleet so the two surfaces never disagree; a stack
+  // whose only unverified image is the one being updated is unaffected.
+  const reviewRequired = isReviewRequiredUpdatePreview(updatePreview);
   const updatedImages = (updatePreview?.images ?? []).filter((img) => img.has_update);
   const bannerSeverity: 'danger' | 'warn' | 'ok' = bump === 'major' || blocked
     ? 'danger'
-    : bump === 'minor' ? 'warn' : 'ok';
+    : bump === 'minor' || reviewRequired ? 'warn' : 'ok';
   const bannerTone = bannerSeverity === 'danger'
     ? 'border-destructive/40 bg-destructive/[0.06] text-destructive'
     : bannerSeverity === 'warn'
@@ -397,7 +413,7 @@ export default function StackAnatomyPanel({
   const canApplyPreview = isActionableUpdatePreview(updatePreview);
 
   let bannerLeadIn = '';
-  if (blocked) {
+  if (blocked || reviewRequired) {
     bannerLeadIn = 'review required';
   } else if (tagOnlyAdvisory) {
     bannerLeadIn = 'newer tag · edit Compose pin';
@@ -598,14 +614,16 @@ export default function StackAnatomyPanel({
           <div
             data-testid="update-check-status-banner"
             className="mt-3 mb-3 rounded-lg border border-warning/40 bg-warning/[0.06] p-3 text-warning"
+            role="status"
           >
             <div className="font-mono text-xs uppercase tracking-wide">
               {previewCheckStatus === 'failed' ? 'Update check failed' : 'Update check incomplete'}
             </div>
             <div className="mt-1 font-mono text-xs text-foreground/80 leading-relaxed">
-              {previewCheckStatus === 'failed'
-                ? 'Registry checks could not verify image status. Retained update indicators may be stale.'
-                : 'Some image checks did not complete. Status is uncertain until a full check succeeds.'}
+              {verificationError
+                ?? (previewCheckStatus === 'failed'
+                  ? 'Registry checks could not verify image status. Retained update indicators may be stale.'
+                  : 'Some image checks did not complete. Status is uncertain until a full check succeeds.')}
             </div>
           </div>
         )}

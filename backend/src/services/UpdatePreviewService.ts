@@ -61,6 +61,23 @@ export interface UpdatePreviewImage {
     semver_bump: SemverBump;
     /** Authority of this image's checks; not_checkable for invalid refs. */
     check_status: PreviewImageCheckStatus;
+    /**
+     * Best operator-facing reason when check_status is not 'ok'/'not_checkable'.
+     * Never paired with a digest-based has_update claim: callers must treat
+     * this as verification-failed / unknown, not as "up to date" or rebuild.
+     */
+    check_error: string | null;
+    /**
+     * This image's own digest-comparison failure reason, independent of
+     * check_status. A confirmed tag-based update on the SAME image resolves
+     * check_status to 'ok' and nulls check_error even when the digest compare
+     * itself errored (the tag confirmation is authoritative for that image),
+     * but a full-stack apply still pulls/recreates this image's CURRENT tag
+     * content, which was never verified. Callers gating collateral risk to a
+     * full-stack apply must read this field, not check_error, so that
+     * masking never hides an unverified image from the mixed-state gate.
+     */
+    digest_error: string | null;
 }
 
 export type UpdateKind = 'tag' | 'digest' | 'none';
@@ -90,6 +107,10 @@ export interface UpdatePreviewSummary {
      * Older remotes omit this field; treat absence as non-authoritative.
      */
     check_status: PreviewCheckStatus;
+    /** True when any image's check_status is not 'ok' (excluding not_checkable). */
+    verification_failed: boolean;
+    /** First image check_error when verification_failed; otherwise null. */
+    verification_error: string | null;
 }
 
 export interface UpdatePreview {
@@ -136,9 +157,18 @@ async function loadStackImages(
     return extractServiceImagesFromCompose(composeContent, merged);
 }
 
+export type LocalDigestEmptyReason = 'not_checkable' | 'inspect_failed' | 'unresolved';
+
 export interface LocalDigestInfo {
+    /** All usable RepoDigests for the image ref; compared as a set against the remote tag. */
     digests: string[];
     platform: { os: string; architecture: string };
+    /**
+     * Why digests is empty. `not_checkable` mirrors the scanner (no RepoDigests /
+     * locally built) and must not surface as verification-failed. Inspect failure
+     * and unresolved selection do.
+     */
+    emptyReason: LocalDigestEmptyReason | null;
 }
 
 export interface ComputePreviewDeps {
@@ -164,6 +194,8 @@ function imageFromDetect(
         tag_update: detected.tagUpdate,
         semver_bump: detected.semverBump,
         check_status: detected.checkStatus,
+        check_error: detected.reason,
+        digest_error: detected.digestError,
     };
 }
 
@@ -178,6 +210,25 @@ function notCheckableImage(service: string, imageRef: string): UpdatePreviewImag
         tag_update: false,
         semver_bump: 'none',
         check_status: 'not_checkable',
+        check_error: null,
+        digest_error: null,
+    };
+}
+
+/** Local digest could not be established at all; never reaches the registry. */
+function failedLocalDigestImage(service: string, imageRef: string, currentTag: string, reason: string): UpdatePreviewImage {
+    return {
+        service,
+        image: imageRef,
+        current_tag: currentTag,
+        next_tag: null,
+        has_update: false,
+        digest_update: false,
+        tag_update: false,
+        semver_bump: 'none',
+        check_status: 'failed',
+        check_error: reason,
+        digest_error: reason,
     };
 }
 
@@ -193,6 +244,23 @@ export async function computeImagePreview(
 
     const credentials = await deps.getCredentials(parsed.registry);
     const localInfo = await deps.getLocalDigest(imageRef, parsed);
+    // A locally-built / non-registry-backed image (no RepoDigests at all) is
+    // not_checkable, matching ImageUpdateService.checkImage: it must never be
+    // funneled into detectImageUpdate's "no local digest" error path, which
+    // would misreport it as a verification failure instead of not applicable.
+    if (localInfo.emptyReason === 'not_checkable') {
+        return notCheckableImage(service, imageRef);
+    }
+    // Inspect failure and unresolved RepoDigests never reach the registry, and
+    // detectImageUpdate's generic "no local digest" reason would blur these two
+    // distinct causes together; keep the specific reason, matching what
+    // ImageUpdateService.checkImage reports for the same two cases.
+    if (localInfo.emptyReason === 'inspect_failed') {
+        return failedLocalDigestImage(service, imageRef, parsed.tag, 'Failed to inspect local image');
+    }
+    if (localInfo.emptyReason === 'unresolved') {
+        return failedLocalDigestImage(service, imageRef, parsed.tag, 'Could not resolve a local registry digest');
+    }
     const detected = await detectImageUpdate({
         localDigests: localInfo.digests,
         platform: localInfo.platform,
@@ -253,6 +321,7 @@ export function buildSummary(
         : updated.some(i => i.next_tag !== null && i.next_tag !== i.current_tag)
             ? 'tag'
             : 'digest';
+    const verificationError = images.find(i => i.check_error)?.check_error ?? null;
     return {
         stack_name: stackName,
         images,
@@ -269,6 +338,8 @@ export function buildSummary(
             has_build_services: hasBuildServices,
             rebuild_available: hasBuildServices,
             check_status: rollupPreviewCheckStatus(images),
+            verification_failed: verificationError !== null,
+            verification_error: verificationError,
         },
         rollback_target: primary ? buildRollbackTarget(primary.image, primary.current_tag) : null,
         changelog: null,
@@ -319,11 +390,22 @@ export class UpdatePreviewService {
                 try {
                     const inspect = await docker.getDocker().getImage(imageRef).inspect();
                     const repoDigests: string[] = inspect.RepoDigests ?? [];
+                    if (repoDigests.length === 0) {
+                        return {
+                            digests: [],
+                            platform: { os: inspect.Os, architecture: inspect.Architecture },
+                            emptyReason: 'not_checkable',
+                        };
+                    }
                     const digests = selectLocalRepoDigests(repoDigests, parsed);
-                    return { digests, platform: { os: inspect.Os, architecture: inspect.Architecture } };
+                    return {
+                        digests,
+                        platform: { os: inspect.Os, architecture: inspect.Architecture },
+                        emptyReason: digests.length === 0 ? 'unresolved' : null,
+                    };
                 } catch (err) {
                     console.error('[UpdatePreview] local image inspect failed for %s', imageRef, err);
-                    return { digests: [], platform: { os: '', architecture: '' } };
+                    return { digests: [], platform: { os: '', architecture: '' }, emptyReason: 'inspect_failed' };
                 }
             },
         };

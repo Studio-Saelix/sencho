@@ -47,6 +47,8 @@ function negativeOkPreview(stackName = 'web') {
       tag_update: false,
       semver_bump: 'none' as const,
       check_status: 'ok' as const,
+      check_error: null,
+      digest_error: null,
     }],
     build_services: [] as string[],
     summary: {
@@ -61,6 +63,8 @@ function negativeOkPreview(stackName = 'web') {
       has_build_services: false,
       rebuild_available: false,
       check_status: 'ok' as const,
+      verification_failed: false,
+      verification_error: null,
     },
     rollback_target: null,
     changelog: null,

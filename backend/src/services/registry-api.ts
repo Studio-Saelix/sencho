@@ -244,11 +244,12 @@ const SHA256_DIGEST_RE = /^sha256:[0-9a-f]{64}$/i;
 /**
  * All usable local RepoDigests for a parsed image ref, shared by the scanner
  * and update preview. Returns every valid digest whose repository matches the
- * ref (deduped, first-seen order), else the sole remaining valid entry when
- * nothing matches, else []. A truncated or malformed digest is never selected,
- * so a corrupted RepoDigests entry surfaces as "could not resolve" rather than
- * a false match or update. Callers must compare every candidate: Docker can
- * list a stale index digest ahead of the current one on the same image.
+ * ref (deduped, first-seen order), else []. A truncated or malformed digest is
+ * never selected, and a valid digest belonging to an unrelated repository
+ * (e.g. left over from a retag) is never selected either, so either surfaces
+ * as "could not resolve" rather than a guessed match or update. Callers must
+ * compare every candidate: Docker can list a stale index digest ahead of the
+ * current one on the same image.
  */
 export function selectLocalRepoDigests(repoDigests: readonly string[], parsed: ParsedRef): string[] {
     const valid = repoDigests
@@ -267,8 +268,11 @@ export function selectLocalRepoDigests(repoDigests: readonly string[], parsed: P
         seen.add(key);
         matched.push(e.digest);
     }
-    if (matched.length > 0) return matched;
-    return valid.length === 1 ? [valid[0].digest] : [];
+    // No digest matches the configured repository: comparing an unrelated
+    // repository's digest (e.g. a retag) risks a false update against a
+    // registry state that has nothing to do with the image actually
+    // declared. Report unresolved instead of guessing.
+    return matched;
 }
 
 /**
@@ -771,12 +775,27 @@ async function classifyManifest(
 }
 
 /**
- * Compare a local image digest to the registry's current manifest for a tag.
- * `platform` is the local image's Os/Architecture (from `docker image inspect`),
- * required to safely match against an index's platform descriptors; without it,
- * an index mismatch is an error rather than a speculative match. Never retries
- * against the mutable tag once a primary digest is established: classification
- * always targets that digest.
+ * Compare local image digests to the registry's current manifest for a tag.
+ * Any candidate that equals the remote primary or is a member of that primary's
+ * index counts as current (Docker often lists a stale index digest ahead of the
+ * current one). `platform` is the local image's Os/Architecture (from
+ * `docker image inspect`), required to safely match against an index's platform
+ * descriptors; without it, an index mismatch is an error rather than a
+ * speculative match. Never retries against the mutable tag once a primary
+ * digest is established: classification always targets that digest.
+ *
+ * `update` is returned only after a successful, complete remote classification
+ * with no candidate matching the primary, an exact member, or a same-platform
+ * runnable descriptor that the index actually offers. When the index has no
+ * descriptor labeled for the local platform, a platform-less leaf (which OCI
+ * permits) is trusted as this platform's content only when it is the ONLY
+ * kind of descriptor present (nothing else in the index claims a different
+ * platform); an index that mixes platform-less leaves with descriptors
+ * labeled for other platforms cannot attribute the unlabeled ones and errors
+ * instead. Empty/all-malformed candidates, unknown platform when platform
+ * matching is required, an index with no runnable content for the local
+ * platform at all (including an empty or fully-filtered index), and
+ * classification failures also return `error`.
  */
 export async function compareLocalToRemoteTag(
     localDigests: readonly string[],
@@ -817,11 +836,29 @@ export async function compareLocalToRemoteTag(
         return { kind: 'error', reason: `Local image platform is unknown; cannot verify multi-arch membership for ${ref}` };
     }
 
-    const isMember = classification.descriptors.some(
-        (d) => d.os === platform.os
-            && d.architecture === platform.architecture
-            && candidateSet.has(d.digest.toLowerCase()),
+    const platformDescriptors = classification.descriptors.filter(
+        (d) => d.os === platform.os && d.architecture === platform.architecture,
     );
+    if (platformDescriptors.length === 0) {
+        // No descriptor is labeled for this platform. exactDigests leaves omit
+        // platform entirely (OCI allows this), so they cannot be attributed to
+        // any specific platform; their mere presence does not prove content
+        // for THIS one, especially when other descriptors in the same index
+        // are explicitly labeled for a different platform. Only when every
+        // descriptor in the index is unlabeled (classification.descriptors is
+        // empty) does a leaf's presence plausibly represent this platform's
+        // content, since nothing else claims a different one; that is the one
+        // case where reporting `update` instead of failing closed is safe.
+        if (classification.exactDigests.length === 0) {
+            return { kind: 'error', reason: `Remote image index has no ${platform.os}/${platform.architecture} variant for ${ref}` };
+        }
+        if (classification.descriptors.length > 0) {
+            return { kind: 'error', reason: `Remote image index has no confirmed ${platform.os}/${platform.architecture} variant for ${ref}` };
+        }
+        return { kind: 'update' };
+    }
+
+    const isMember = platformDescriptors.some((d) => candidateSet.has(d.digest.toLowerCase()));
     return isMember ? { kind: 'match' } : { kind: 'update' };
 }
 
@@ -875,8 +912,12 @@ function parseNextCursor(linkHeader: string | string[] | undefined): string | un
 /**
  * Typed tag list for the Resources registry browser and update-preview authority.
  * Never collapses auth failures into an empty array (that would hide credential
- * problems and falsely look like a successful empty listing).
- * Pass null/undefined credentials to attempt anonymous pull.
+ * problems and falsely look like a successful empty listing). `credentials` is
+ * optional: `getAuthToken` already resolves an anonymous pull token for public
+ * repositories on registries whose `WWW-Authenticate` challenge grants one
+ * without credentials (Docker Hub unconditionally; others via the standard
+ * token-service challenge), so a public repository still returns a real tag
+ * list with none configured.
  */
 export async function listRegistryTagsResult(
     registry: string,
@@ -888,7 +929,11 @@ export async function listRegistryTagsResult(
     try {
         const token = await getAuthToken(registry, repo, credentials);
         if (!token) {
-            return { ok: false, code: 'REGISTRY_UNAUTHORIZED', message: 'Registry rejected credentials' };
+            return {
+                ok: false,
+                code: 'REGISTRY_UNAUTHORIZED',
+                message: credentials ? 'Registry rejected credentials' : 'Registry did not issue an anonymous token for this repository',
+            };
         }
         const headers: Record<string, string> = { Accept: 'application/json', Authorization: `Bearer ${token}` };
         const params = new URLSearchParams({ n: String(limit) });

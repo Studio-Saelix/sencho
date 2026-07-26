@@ -12,12 +12,21 @@ import {
     type ComputePreviewDeps,
     type LocalDigestInfo,
 } from '../services/UpdatePreviewService';
-import type { DigestComparisonResult, TagListResult } from '../services/registry-api';
+import { selectLocalRepoDigests, type DigestComparisonResult, type ParsedRef, type TagListResult } from '../services/registry-api';
 
 const PLATFORM = { os: 'linux', architecture: 'amd64' };
 
-function localDigest(digest: string | null): LocalDigestInfo {
-    return { digests: digest ? [digest] : [], platform: PLATFORM };
+function localDigest(
+    digest: string | null | string[],
+    emptyReason: LocalDigestInfo['emptyReason'] = null,
+): LocalDigestInfo {
+    if (Array.isArray(digest)) return { digests: digest, platform: PLATFORM, emptyReason };
+    if (digest) return { digests: [digest], platform: PLATFORM, emptyReason: null };
+    return {
+        digests: [],
+        platform: PLATFORM,
+        emptyReason: emptyReason ?? 'not_checkable',
+    };
 }
 
 function tagsOk(tags: string[], nextCursor?: string): TagListResult {
@@ -168,9 +177,13 @@ describe('computeImagePreview', () => {
         expect(result.has_update).toBe(true);
         expect(result.next_tag).toBe('1.2.4');
         expect(result.semver_bump).toBe('patch');
+        // A confirmed tag-based update overrides the digest hiccup: the overall
+        // check_status resolves 'ok' and check_error is not surfaced (see the
+        // "treats digest error + higher tag as a confirmed update" test below).
+        expect(result.check_error).toBeNull();
     });
 
-    it('fails soft to no-update when the comparison resolver errors and no higher tag exists', async () => {
+    it('surfaces verification failure when the comparison resolver errors and no higher tag exists', async () => {
         const deps = makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
             compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' }),
@@ -180,10 +193,11 @@ describe('computeImagePreview', () => {
         expect(result.has_update).toBe(false);
         expect(result.next_tag).toBeNull();
         expect(result.semver_bump).toBe('none');
+        expect(result.check_error).toBe('Registry unreachable');
         expect(result.check_status).toBe('partial');
     });
 
-    it('treats digest error + higher tag as a confirmed update (ok)', async () => {
+    it('treats digest error + higher tag as a confirmed update (ok), but keeps digest_error unmasked for the collateral-risk gate', async () => {
         const result = await computeImagePreview('web', 'nginx:1.2.3', makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
             compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' }),
@@ -192,18 +206,71 @@ describe('computeImagePreview', () => {
         expect(result.has_update).toBe(true);
         expect(result.next_tag).toBe('1.2.4');
         expect(result.check_status).toBe('ok');
+        // The tag compare independently confirmed the update, so check_status
+        // masks the digest failure. digest_error must survive that masking: a
+        // full-stack apply still re-pulls this image's unverified current tag.
+        expect(result.digest_error).toBe('Registry unreachable');
     });
 
-    it('never calls the comparison resolver when no local digest is resolvable', async () => {
+    it('treats empty RepoDigests as not_checkable (no verification failure)', async () => {
         const compareDigest = vi.fn().mockResolvedValue({ kind: 'update' });
         const deps = makeDeps({
-            getLocalDigest: vi.fn().mockResolvedValue(localDigest(null)),
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest(null, 'not_checkable')),
             compareDigest,
             listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk([])),
         });
         const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
         expect(compareDigest).not.toHaveBeenCalled();
         expect(result.has_update).toBe(false);
+        expect(result.check_error).toBeNull();
+    });
+
+    it('surfaces unresolved RepoDigests as verification failure without claiming an update', async () => {
+        const compareDigest = vi.fn().mockResolvedValue({ kind: 'update' });
+        const deps = makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest(null, 'unresolved')),
+            compareDigest,
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk([])),
+        });
+        const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
+        expect(compareDigest).not.toHaveBeenCalled();
+        expect(result.has_update).toBe(false);
+        expect(result.check_error).toBe('Could not resolve a local registry digest');
+    });
+
+    it('wires a real unrelated-repository RepoDigest through selectLocalRepoDigests to an unresolved verification failure', async () => {
+        // getLocalDigest here is not a canned stand-in: it runs the real
+        // selectLocalRepoDigests against a RepoDigests array whose sole valid
+        // entry belongs to a different repository, proving the removed
+        // sole-unmatched-digest fallback stays removed through the actual
+        // preview-computation path, not just at the registry-api unit level.
+        const compareDigest = vi.fn().mockResolvedValue({ kind: 'update' });
+        const deps = makeDeps({
+            getLocalDigest: async (_imageRef: string, parsed: ParsedRef) => {
+                const digests = selectLocalRepoDigests(
+                    [`ghcr.io/other/image@sha256:${'b'.repeat(64)}`],
+                    parsed,
+                );
+                return { digests, platform: PLATFORM, emptyReason: digests.length === 0 ? 'unresolved' as const : null };
+            },
+            compareDigest,
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk([])),
+        });
+        const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
+        expect(compareDigest).not.toHaveBeenCalled();
+        expect(result.has_update).toBe(false);
+        expect(result.check_error).toBe('Could not resolve a local registry digest');
+    });
+
+    it('surfaces inspect failure as verification failure', async () => {
+        const deps = makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest(null, 'inspect_failed')),
+            compareDigest: vi.fn(),
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk([])),
+        });
+        const result = await computeImagePreview('web', 'nginx:1.2.3', deps);
+        expect(result.has_update).toBe(false);
+        expect(result.check_error).toBe('Failed to inspect local image');
     });
 
     it('passes the local digest, tag, and platform through to the comparison resolver', async () => {
@@ -216,10 +283,35 @@ describe('computeImagePreview', () => {
         await computeImagePreview('web', 'ghcr.io/linuxserver/radarr:latest', deps);
         expect(compareDigest).toHaveBeenCalledWith(['sha256:aaa'], 'ghcr.io', 'linuxserver/radarr', 'latest', PLATFORM, null);
     });
+
+    it('forwards every local digest candidate and reports no same-tag rebuild on match', async () => {
+        const STALE = `sha256:${'f'.repeat(64)}`;
+        const CURRENT = `sha256:${'e'.repeat(64)}`;
+        const compareDigest = vi.fn().mockResolvedValue({ kind: 'match' });
+        const deps = makeDeps({
+            getLocalDigest: vi.fn().mockResolvedValue(localDigest([STALE, CURRENT])),
+            compareDigest,
+            listRegistryTagsResult: vi.fn().mockResolvedValue(tagsOk([])),
+        });
+        const result = await computeImagePreview('broker', 'redis:8.8.0', deps);
+        expect(compareDigest).toHaveBeenCalledWith(
+            [STALE, CURRENT],
+            'registry-1.docker.io',
+            'library/redis',
+            '8.8.0',
+            PLATFORM,
+            null,
+        );
+        expect(result).toMatchObject({
+            has_update: false,
+            next_tag: null,
+            semver_bump: 'none',
+        });
+    });
 });
 
 describe('buildSummary', () => {
-    const baseImage = (partial: Partial<Parameters<typeof buildSummary>[1][number]>) => ({
+    const baseImage = (partial: Partial<Parameters<typeof buildSummary>[1][number]> = {}) => ({
         service: 'svc',
         image: 'nginx:1.0.0',
         current_tag: '1.0.0',
@@ -229,6 +321,8 @@ describe('buildSummary', () => {
         tag_update: false,
         semver_bump: 'none' as const,
         check_status: 'ok' as const,
+        check_error: null as string | null,
+        digest_error: null as string | null,
         ...partial,
     });
 
@@ -241,6 +335,41 @@ describe('buildSummary', () => {
         expect(preview.summary.blocked).toBe(true);
         expect(preview.summary.blocked_reason).toMatch(/major/i);
         expect(preview.summary.semver_bump).toBe('major');
+        expect(preview.summary.verification_failed).toBe(false);
+        expect(preview.summary.verification_error).toBeNull();
+    });
+
+    it('aggregates digest verification failure without claiming a digest rebuild', () => {
+        const images = [
+            baseImage({
+                service: 'broker',
+                image: 'redis:8.8.0',
+                current_tag: '8.8.0',
+                check_error: 'Local image platform is unknown; cannot verify multi-arch membership',
+            }),
+        ];
+        const preview = buildSummary('app', images);
+        expect(preview.summary.has_update).toBe(false);
+        expect(preview.summary.update_kind).toBe('none');
+        expect(preview.summary.verification_failed).toBe(true);
+        expect(preview.summary.verification_error).toContain('cannot verify multi-arch membership');
+    });
+
+    it('keeps a tag update when digest verification failed on the same image', () => {
+        const images = [
+            baseImage({
+                service: 'web',
+                has_update: true,
+                semver_bump: 'patch',
+                next_tag: '1.0.1',
+                check_error: 'Registry unreachable',
+            }),
+        ];
+        const preview = buildSummary('app', images);
+        expect(preview.summary.has_update).toBe(true);
+        expect(preview.summary.update_kind).toBe('tag');
+        expect(preview.summary.verification_failed).toBe(true);
+        expect(preview.summary.verification_error).toBe('Registry unreachable');
     });
 
     it('picks first updated image as primary', () => {
@@ -410,6 +539,8 @@ describe('preview authority', () => {
                 tag_update: false,
                 semver_bump: 'none',
                 check_status: 'not_checkable',
+                check_error: null,
+                digest_error: null,
             },
         ]))).toBe(false);
     });

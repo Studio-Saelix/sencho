@@ -11,9 +11,13 @@ import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
 import { fetchUpdatePreview } from '@/lib/fetchUpdatePreview';
 import {
   isActionableUpdatePreview,
+  isClearedUpdatePreview,
+  isLegacyPreview,
   isPreviewUncertain,
+  isReviewRequiredUpdatePreview,
   isServiceApplyActionable,
   isTagOnlyAdvisory,
+  isVerificationOnlyPreview,
 } from '@/lib/updatePreviewActionability';
 import { useNodes } from '@/context/NodeContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
@@ -37,6 +41,9 @@ interface UpdatePreviewImage {
   semver_bump: SemverBump;
   /** Absent on older remotes; backend uses !== 'not_checkable' for checkability. */
   check_status?: 'ok' | 'partial' | 'failed' | 'not_checkable';
+  check_error?: string | null;
+  /** This image's own digest-comparison failure; not masked by a confirmed tag update. */
+  digest_error?: string | null;
 }
 
 type UpdateKind = 'tag' | 'digest' | 'none';
@@ -57,6 +64,8 @@ interface UpdatePreview {
     rebuild_available?: boolean;
     /** Absent on older remotes; treat missing as non-authoritative. */
     check_status?: 'ok' | 'partial' | 'failed';
+    verification_failed?: boolean;
+    verification_error?: string | null;
   };
   build_services?: string[];
   rollback_target: string | null;
@@ -69,6 +78,11 @@ function declaredServiceCount(preview: UpdatePreview | null | undefined): number
   for (const img of preview.images) names.add(img.service);
   for (const name of preview.build_services ?? []) names.add(name);
   return names.size;
+}
+
+/** Append `: reason` when present, otherwise end the lead-in with a period. */
+function withErrorDetail(lead: string, error: string | null | undefined): string {
+  return error ? `${lead}: ${error}` : `${lead}.`;
 }
 
 export interface StackCard {
@@ -165,27 +179,37 @@ function formatClock(ts: number | null): string {
 function RiskBadge({
   bump,
   blocked,
+  reviewRequired,
   uncertain,
   tagOnly,
 }: {
   bump: SemverBump;
   blocked: boolean;
+  reviewRequired?: boolean;
   uncertain?: boolean;
   tagOnly?: boolean;
 }) {
-  if (uncertain) {
-    return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-warning">
-        <AlertTriangle className="h-3 w-3" strokeWidth={1.5} />
-        Check uncertain
-      </span>
-    );
-  }
   if (blocked || bump === 'major') {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-destructive">
         <ShieldAlert className="h-3 w-3" strokeWidth={1.5} />
         Blocked · major
+      </span>
+    );
+  }
+  if (reviewRequired) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-warning">
+        <AlertTriangle className="h-3 w-3" strokeWidth={1.5} />
+        Review · unverified
+      </span>
+    );
+  }
+  if (uncertain) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-warning">
+        <AlertTriangle className="h-3 w-3" strokeWidth={1.5} />
+        Check uncertain
       </span>
     );
   }
@@ -262,6 +286,15 @@ function StackReadinessCard({
   // build-only), not preview.images.length (shared tags collapse that list).
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImageCount > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
+  const verificationOnly = isVerificationOnlyPreview(preview);
+  const reviewRequired = isReviewRequiredUpdatePreview(preview);
+  // Full-stack apply is held for review when another image in the same stack
+  // failed digest verification: applying would pull/recreate that image as
+  // collateral. Per-service apply targets only images with their own confirmed
+  // update, so it is not gated by a different image's verification failure.
+  const applyDisabled = !isActionableUpdatePreview(preview)
+    || applying
+    || applyingService !== null;
 
   return (
     <Card className="flex flex-col gap-4 p-5">
@@ -281,7 +314,15 @@ function StackReadinessCard({
               Auto: Off
             </span>
           )}
-          {previewLoaded && preview && <RiskBadge bump={bump} blocked={blocked} uncertain={isPreviewUncertain(preview)} tagOnly={isTagOnlyAdvisory(preview)} />}
+          {previewLoaded && preview && (
+            <RiskBadge
+              bump={bump}
+              blocked={blocked}
+              reviewRequired={reviewRequired}
+              uncertain={isPreviewUncertain(preview)}
+              tagOnly={isTagOnlyAdvisory(preview)}
+            />
+          )}
         </div>
       </div>
 
@@ -295,20 +336,45 @@ function StackReadinessCard({
         (() => {
           const p = preview!;
           const blockedReason = p.summary.blocked_reason;
+          const verificationFailed = Boolean(p.summary.verification_failed);
+          const verificationError = p.summary.verification_error;
+          let applyTitle: string | undefined;
+          if (blocked) applyTitle = blockedReason ?? undefined;
+          else if (verificationOnly) applyTitle = 'Digest verification failed';
+          else if (reviewRequired) applyTitle = 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
+
+          let headline: ReactNode;
+          if (verificationFailed && !p.summary.has_update) {
+            headline = (
+              <div className="font-mono text-xs text-warning" data-testid="readiness-verification-failed">
+                {withErrorDetail('Digest verification failed', verificationError)}
+              </div>
+            );
+          } else if (p.summary.update_kind === 'digest') {
+            headline = (
+              <div className="flex items-baseline gap-2 font-mono text-sm">
+                <span className="text-stat-subtitle">{p.summary.current_tag}</span>
+                <span className="text-brand text-[10px] leading-3 uppercase tracking-[0.18em]">
+                  Rebuild available
+                </span>
+              </div>
+            );
+          } else {
+            headline = (
+              <VersionDiff
+                current={p.summary.current_tag}
+                next={p.summary.next_tag}
+              />
+            );
+          }
+
           return (
             <>
-              {p.summary.update_kind === 'digest' ? (
-                <div className="flex items-baseline gap-2 font-mono text-sm">
-                  <span className="text-stat-subtitle">{p.summary.current_tag}</span>
-                  <span className="text-brand text-[10px] leading-3 uppercase tracking-[0.18em]">
-                    Rebuild available
-                  </span>
+              {headline}
+              {verificationFailed && p.summary.has_update && (
+                <div className="font-mono text-[11px] text-warning" data-testid="readiness-verification-warning">
+                  {withErrorDetail('Digest check could not be verified', verificationError)}
                 </div>
-              ) : (
-                <VersionDiff
-                  current={p.summary.current_tag}
-                  next={p.summary.next_tag}
-                />
               )}
 
               <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle/80">
@@ -368,8 +434,8 @@ function StackReadinessCard({
                 <Button
                   size="sm"
                   onClick={() => onApply(stack, nodeId)}
-                  disabled={blocked || applying || applyingService !== null || !isActionableUpdatePreview(preview)}
-                  title={blocked ? (blockedReason ?? undefined) : undefined}
+                  disabled={applyDisabled}
+                  title={applyTitle}
                   className="gap-1.5"
                 >
                   <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
@@ -390,15 +456,17 @@ function ReadinessHero({
   nodeCount,
   refreshing,
   onRefresh,
+  unresolvedChecks = false,
 }: {
   total: number;
   ready: number;
   nodeCount: number;
   refreshing: boolean;
   onRefresh: () => void;
+  unresolvedChecks?: boolean;
 }) {
   const headline = total === 0
-    ? 'Everything is up to date'
+    ? (unresolvedChecks ? 'No verified updates' : 'Everything is up to date')
     : total === 1
       ? '1 update pending'
       : `${total} updates pending`;
@@ -523,6 +591,11 @@ export function MobileReadinessCard({
   const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImages.length > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
+  const verificationOnly = isVerificationOnlyPreview(preview);
+  const reviewRequired = isReviewRequiredUpdatePreview(preview);
+  const applyDisabled = !isActionableUpdatePreview(preview)
+    || applying
+    || applyingService !== null;
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
   const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
@@ -541,7 +614,15 @@ export function MobileReadinessCard({
               <CircleSlash className="h-3 w-3" strokeWidth={1.5} />Auto: Off
             </span>
           )}
-          {previewLoaded && preview && <RiskBadge bump={bump} blocked={blocked} uncertain={isPreviewUncertain(preview)} tagOnly={isTagOnlyAdvisory(preview)} />}
+          {previewLoaded && preview && (
+            <RiskBadge
+              bump={bump}
+              blocked={blocked}
+              reviewRequired={reviewRequired}
+              uncertain={isPreviewUncertain(preview)}
+              tagOnly={isTagOnlyAdvisory(preview)}
+            />
+          )}
         </div>
       </div>
 
@@ -549,55 +630,78 @@ export function MobileReadinessCard({
         <div className="font-mono text-xs text-stat-subtitle/80">Checking registry...</div>
       ) : failed ? (
         <div className="font-mono text-xs text-destructive/80">Preview failed. Registry may be unreachable.</div>
-      ) : (
-        <>
-          {preview!.summary.update_kind === 'digest' ? (
+      ) : (() => {
+        const p = preview!;
+        const verificationFailed = Boolean(p.summary.verification_failed);
+        const verificationError = p.summary.verification_error;
+
+        let headline: ReactNode;
+        if (verificationFailed && !p.summary.has_update) {
+          headline = (
+            <div className="font-mono text-xs text-warning" data-testid="readiness-verification-failed">
+              {withErrorDetail('Digest verification failed', verificationError)}
+            </div>
+          );
+        } else if (p.summary.update_kind === 'digest') {
+          headline = (
             <div className="flex items-baseline gap-2 font-mono text-[13px]">
-              <span className="text-stat-subtitle">{preview!.summary.current_tag}</span>
+              <span className="text-stat-subtitle">{p.summary.current_tag}</span>
               <span className="text-[10px] uppercase tracking-[0.12em] text-brand">Rebuild available</span>
             </div>
-          ) : (
-            <VersionDiff current={preview!.summary.current_tag} next={preview!.summary.next_tag} />
-          )}
-          <div className="truncate font-mono text-[11px] text-stat-subtitle">{preview!.summary.primary_image ?? '-'}</div>
-          <div className="border-t border-dashed border-card-border pt-[9px] text-[12.5px] leading-[18px] text-stat-subtitle">
-            {lead && <b className="text-stat-title">{lead}</b>}{rest}
-          </div>
-          {showServiceApply && (
-            <div className="flex flex-col gap-1.5 rounded-md border border-card-border bg-muted/20 p-2">
-              {updatingImages.map(img => (
-                <div key={img.service} className="flex items-center justify-between gap-2">
-                  <span className="truncate font-mono text-[11px] text-stat-subtitle">{img.service}</span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 gap-1 rounded-md px-2 text-[11px]"
-                    onClick={() => onApplyService?.(stack, nodeId, img.service)}
-                    disabled={blocked || applying || applyingService !== null || !isServiceApplyActionable(preview, img.service)}
-                  >
-                    {applyingService === img.service ? 'Applying...' : 'Apply'}
-                  </Button>
-                </div>
-              ))}
+          );
+        } else {
+          headline = <VersionDiff current={p.summary.current_tag} next={p.summary.next_tag} />;
+        }
+
+        return (
+          <>
+            {headline}
+            {verificationFailed && p.summary.has_update && (
+              <div className="font-mono text-[11px] text-warning" data-testid="readiness-verification-warning">
+                {withErrorDetail('Digest check could not be verified', verificationError)}
+              </div>
+            )}
+            <div className="truncate font-mono text-[11px] text-stat-subtitle">{p.summary.primary_image ?? '-'}</div>
+            <div className="border-t border-dashed border-card-border pt-[9px] text-[12.5px] leading-[18px] text-stat-subtitle">
+              {lead && <b className="text-stat-title">{lead}</b>}{rest}
             </div>
-          )}
-          <div className="flex items-center justify-between gap-[10px] pt-0.5">
-            <span className={`font-mono text-[11px] ${blocked ? 'text-destructive' : 'text-stat-subtitle'}`}>
-              {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked ? 'Held for review' : 'No schedule')}
-            </span>
-            <Button
-              size="sm"
-              variant={blocked ? 'outline' : 'default'}
-              onClick={() => onApply(stack, nodeId)}
-              disabled={blocked || applying || applyingService !== null || !isActionableUpdatePreview(preview)}
-              className="gap-1.5"
-            >
-              <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-              {applying ? 'Applying...' : 'Apply now'}
-            </Button>
-          </div>
-        </>
-      )}
+            {showServiceApply && (
+              <div className="flex flex-col gap-1.5 rounded-md border border-card-border bg-muted/20 p-2">
+                {updatingImages.map(img => (
+                  <div key={img.service} className="flex items-center justify-between gap-2">
+                    <span className="truncate font-mono text-[11px] text-stat-subtitle">{img.service}</span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 gap-1 rounded-md px-2 text-[11px]"
+                      onClick={() => onApplyService?.(stack, nodeId, img.service)}
+                      disabled={blocked || applying || applyingService !== null || !isServiceApplyActionable(preview, img.service)}
+                    >
+                      {applyingService === img.service ? 'Applying...' : 'Apply'}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center justify-between gap-[10px] pt-0.5">
+              <span className={`font-mono text-[11px] ${blocked || reviewRequired ? 'text-destructive' : 'text-stat-subtitle'}`}>
+                {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked || reviewRequired ? 'Held for review' : 'No schedule')}
+              </span>
+              <Button
+                size="sm"
+                variant={blocked || verificationOnly || reviewRequired ? 'outline' : 'default'}
+                onClick={() => onApply(stack, nodeId)}
+                disabled={applyDisabled}
+                title={reviewRequired ? 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.' : undefined}
+                className="gap-1.5"
+              >
+                <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                {applying ? 'Applying...' : 'Apply now'}
+              </Button>
+            </div>
+          </>
+        );
+      })()}
     </div>
   );
 }
@@ -718,14 +822,17 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
 
       // Local-node check failures: surfaced separately because the fleet map is
       // boolean and the card grid only lists stacks with a confirmed update.
+      // Sticky has_update during a failed check is not a verified rebuild, so those
+      // stacks stay in the advisory only.
+      let failedLocalStacks = new Set<string>();
       if (detailRes.ok) {
         const detail = await detailRes.json() as Record<string, StackUpdateInfo>;
-        setCheckFailures(
-          Object.entries(detail)
-            .filter(([, info]) => info.checkStatus === 'failed')
-            .map(([stack, info]) => ({ stack, reason: info.lastError }))
-            .sort((a, b) => a.stack.localeCompare(b.stack)),
-        );
+        const failures = Object.entries(detail)
+          .filter(([, info]) => info.checkStatus === 'failed')
+          .map(([stack, info]) => ({ stack, reason: info.lastError }))
+          .sort((a, b) => a.stack.localeCompare(b.stack));
+        failedLocalStacks = new Set(failures.map(f => f.stack));
+        setCheckFailures(failures);
       } else {
         // Clear stale failures rather than persist them across a load, but log:
         // an empty advisory must not silently stand in for "detail unavailable".
@@ -769,7 +876,9 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         const node = currentNodes.find(n => n.id === nodeId);
         if (!node) continue;
         const stacks = Object.entries(stackMap)
-          .filter(([, hasUpdate]) => hasUpdate)
+          .filter(([stack, hasUpdate]) =>
+            hasUpdate && !(node.type === 'local' && failedLocalStacks.has(stack)),
+          )
           .map(([stack]) => stack)
           .sort();
         if (stacks.length === 0) continue;
@@ -835,18 +944,52 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         previewByKey.set(`${pair.nodeId}::${pair.stack}`, previews[idx]);
       });
 
-      setGroups(initialGroups.map(g => ({
-        ...g,
-        cards: g.cards
-          .map(c => ({
-            ...c,
-            preview: previewByKey.get(`${c.nodeId}::${c.stack}`) ?? null,
-            previewLoaded: true,
-          }))
-          // Drop cards whose live preview authoritatively reports no update.
-          // Missing check_status (older remotes) or non-ok status keeps the card.
-          .filter(c => !isAuthoritativeNegativePreview(c.preview)),
-      })).filter(g => g.cards.length > 0));
+      const previewAdvisory: { stack: string; reason: string | null }[] = [];
+      const groupsWithPreview = initialGroups
+        .map(g => {
+          const cards: StackCard[] = [];
+          for (const c of g.cards) {
+            const preview = previewByKey.get(`${c.nodeId}::${c.stack}`) ?? null;
+            if (isVerificationOnlyPreview(preview)) {
+              previewAdvisory.push({
+                stack: g.nodeType === 'remote' ? `${c.stack} (${g.nodeName})` : c.stack,
+                reason: preview?.summary.verification_error ?? 'Digest verification failed',
+              });
+              continue;
+            }
+            // Sticky fleet booleans can outlive a successful no-update preview.
+            // Drop those cards without treating them as check failures.
+            if (isClearedUpdatePreview(preview)) continue;
+            // A legacy preview (missing verification_failed entirely) is kept
+            // rather than cleared, but that alone renders as a pending card
+            // with nothing to explain it; flag why in the advisory too. Skip
+            // this when the preview is already actionable on its own terms
+            // (the remote's own has_update/rebuild_available): the card
+            // already speaks for itself, and pairing it with "could not be
+            // checked" would contradict the Apply affordance right next to it.
+            if (isLegacyPreview(preview) && !isActionableUpdatePreview(preview)) {
+              previewAdvisory.push({
+                stack: g.nodeType === 'remote' ? `${c.stack} (${g.nodeName})` : c.stack,
+                reason: 'This node\'s preview predates digest verification reporting',
+              });
+            }
+            cards.push({ ...c, preview, previewLoaded: true });
+          }
+          return { ...g, cards };
+        })
+        .filter(g => g.cards.length > 0);
+
+      if (previewAdvisory.length > 0) {
+        setCheckFailures(prev => {
+          const byStack = new Map(prev.map(f => [f.stack, f]));
+          for (const entry of previewAdvisory) {
+            if (!byStack.has(entry.stack)) byStack.set(entry.stack, entry);
+          }
+          return [...byStack.values()].sort((a, b) => a.stack.localeCompare(b.stack));
+        });
+      }
+
+      setGroups(groupsWithPreview);
     } catch (err) {
       if (token !== loadTokenRef.current) return;
       toast.error((err as Error)?.message || 'Failed to load readiness');
@@ -1035,9 +1178,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   const flatCards = useMemo(() => groups.flatMap(g => g.cards), [groups]);
   const { total, ready } = useMemo(() => {
     const t = flatCards.length;
-    // "Ready" means a schedule covers the stack, the preview loaded without
-    // error, and no major-bump blocked it. Without a covering schedule the
-    // stack cannot apply automatically regardless of preview state.
+    // Schedule-covered and actionable (confirmed update/rebuild, not blocked).
     const r = flatCards.filter(c =>
       c.autoUpdateEnabled
       && c.previewLoaded
@@ -1056,10 +1197,14 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       <div className="flex h-full min-h-0 flex-col">
         <Masthead
           kicker="fleet · updates"
-          state={total === 0 ? 'Up to date' : `${total} pending`}
-          stateTone={total === 0 ? 'success' : 'warning'}
+          state={total === 0
+            ? (checkFailures.length > 0 ? 'No verified updates' : 'Up to date')
+            : `${total} pending`}
+          stateTone={total === 0 && checkFailures.length === 0 ? 'success' : 'warning'}
           live={total > 0}
-          meta={total > 0 ? `${ready} ready · ${total - ready} in review` : 'all stacks current'}
+          meta={total > 0
+            ? `${ready} ready · ${total - ready} in review`
+            : (checkFailures.length > 0 ? 'some checks unresolved' : 'all stacks current')}
           right={headerActions}
         />
         <div className="flex-1 min-h-0 overflow-y-auto p-4 [&>*+*]:mt-4">
@@ -1081,9 +1226,15 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             <div className="flex items-center justify-center py-16 font-mono text-xs text-stat-subtitle">Loading readiness...</div>
           ) : groups.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16 text-center">
-              <Shield className="h-8 w-8 text-success/70" strokeWidth={1.5} aria-hidden="true" />
-              <div className="font-display italic text-xl text-stat-value">All stacks on current builds</div>
-              <div className="font-mono text-[11px] text-stat-subtitle">Sencho rechecks registries on the configured interval.</div>
+              <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
+              <div className="font-display italic text-xl text-stat-value">
+                {checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
+              </div>
+              <div className="font-mono text-[11px] text-stat-subtitle">
+                {checkFailures.length > 0
+                  ? 'Review the unresolved checks above, then recheck.'
+                  : 'Sencho rechecks registries on the configured interval.'}
+              </div>
             </div>
           ) : (
             groups.map(group => (
@@ -1109,6 +1260,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         nodeCount={groups.length}
         refreshing={refreshing}
         onRefresh={handleRefresh}
+        unresolvedChecks={checkFailures.length > 0}
       />
 
       <CadenceStrip cadence={cadence} className="-mt-3 pl-7" />
@@ -1127,10 +1279,14 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         </div>
       ) : groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16">
-          <Shield className="h-8 w-8 text-success/70" strokeWidth={1.5} aria-hidden="true" />
-          <div className="font-display italic text-xl text-stat-value">All stacks on current builds</div>
+          <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
+          <div className="font-display italic text-xl text-stat-value">
+            {checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
+          </div>
           <div className="font-mono text-[11px] text-stat-subtitle">
-            Sencho rechecks registries on the configured interval.
+            {checkFailures.length > 0
+              ? 'Review the unresolved checks above, then recheck.'
+              : 'Sencho rechecks registries on the configured interval.'}
           </div>
         </div>
       ) : (
