@@ -62,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **ui:** default Reduced Motion on Calm and quiet decorative rails ([#1622](https://github.com/Studio-Saelix/sencho/issues/1622)) ([c170c3f](https://github.com/Studio-Saelix/sencho/commit/c170c3f30ca0673df1e5e395dcd82dd1baed33b6))
 * **ui:** hide log service chips on single-service stacks ([#1689](https://github.com/Studio-Saelix/sencho/issues/1689)) ([a89498a](https://github.com/Studio-Saelix/sencho/commit/a89498ae5b4bb8b88178fe8088e1acb46e3821b9))
 * **ui:** lower-overhead Reduced effects for constrained GPUs ([#1616](https://github.com/Studio-Saelix/sencho/issues/1616)) ([c01f247](https://github.com/Studio-Saelix/sencho/commit/c01f2479b94b2214a949ae736a3c5141cc52b5be))
-* **ui:** use Docker health status terms on container cards ([#1696](https://github.com/Studio-Saelix/sencho/issues/1696)) ([4d2270a](https://github.com/Studio-Saelix/sencho/commit/4d2270a097b797c632353efaf513b67ccd5f57a6)), closes [#1677](https://github.com/Studio-Saelix/sencho/issues/1677)
+* **ui:** use Docker health status terms on container cards ([#1696](https://github.com/Studio-Saelix/sencho/issues/1696)) ([4d2270a](https://github.com/Studio-Saelix/sencho/commit/4d2270a097b797c632353efaf513b67ccd5f57a6)), closes [#1677](https://github.com/Studio-Saelix/sencho/issues/1677), thanks @Crosis47
 * unlock Community deploy policy hard-blocking ([#1643](https://github.com/Studio-Saelix/sencho/issues/1643)) ([b91025d](https://github.com/Studio-Saelix/sencho/commit/b91025dc8b5d476dd295f12695f4225a88081b90))
 
 ## [0.95.0](https://github.com/Studio-Saelix/sencho/compare/v0.94.1...v0.95.0) (2026-07-12)
