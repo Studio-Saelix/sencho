@@ -18,8 +18,8 @@ const {
   mockStartContainer, mockStopContainer, mockPruneSystem,
   mockUpdateStack,
   mockGetStacks, mockGetStackContent, mockGetEnvContent,
-  mockCheckImage,
-  mockDispatchAlert,
+  mockCheckImage, mockRecheckStack,
+  mockDispatchAlert, mockBroadcastEvent,
   mockGetProxyTarget,
   mockIsTrivyAvailable,
   mockScanAllNodeImages,
@@ -59,7 +59,9 @@ const {
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockResolvedValue(''),
   mockCheckImage: vi.fn().mockResolvedValue({ hasUpdate: false }),
+  mockRecheckStack: vi.fn().mockResolvedValue({ outcome: 'cleared', warning: null }),
   mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
+  mockBroadcastEvent: vi.fn(),
   mockGetProxyTarget: vi.fn().mockReturnValue(null),
   mockIsTrivyAvailable: vi.fn().mockReturnValue(true),
   mockScanAllNodeImages: vi.fn().mockResolvedValue({
@@ -167,14 +169,18 @@ vi.mock('../services/ImageUpdateService', () => ({
   ImageUpdateService: {
     getInstance: () => ({
       checkImage: mockCheckImage,
+      recheckStack: mockRecheckStack,
     }),
   },
+  UPDATE_VERIFICATION_INCOMPLETE_WARNING:
+    'The update command completed, but Sencho could not fully verify whether an image update remains.',
 }));
 
 vi.mock('../services/NotificationService', () => ({
   NotificationService: {
     getInstance: () => ({
       dispatchAlert: mockDispatchAlert,
+      broadcastEvent: mockBroadcastEvent,
     }),
   },
 }));
@@ -795,7 +801,47 @@ describe('SchedulerService - executeUpdate', () => {
     await svc.triggerTask(80);
 
     expect(mockUpdateStack).toHaveBeenCalledWith('web-app', undefined, true);
-    expect(mockClearStackUpdateStatus).toHaveBeenCalledWith(1, 'web-app');
+    expect(mockRecheckStack).toHaveBeenCalledWith(1, 'web-app');
+    expect(mockClearStackUpdateStatus).not.toHaveBeenCalled();
+    expect(mockBroadcastEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'state-invalidate',
+      scope: 'image-updates',
+      nodeId: 1,
+      stackName: 'web-app',
+    }));
+  });
+
+  it('blocks scheduled Compose apply when a sibling image check failed', async () => {
+    mockGetScheduledTask.mockReturnValue({
+      id: 186,
+      name: 'update-check-errors',
+      action: 'update',
+      cron_expression: '0 4 * * *',
+      enabled: true,
+      target_id: 'web-app',
+      node_id: 1,
+      created_by: 'admin',
+      last_status: null,
+    });
+    mockGetContainersByStack.mockResolvedValue([
+      { Id: 'c1', Image: 'nginx:latest' },
+      { Id: 'c2', Image: 'redis:latest' },
+    ]);
+    mockCheckImage
+      .mockResolvedValueOnce({ hasUpdate: true, digestUpdate: true, tagUpdate: false })
+      .mockResolvedValueOnce({ hasUpdate: false, error: 'registry timeout', checkStatus: 'failed' });
+
+    await SchedulerService.getInstance().triggerTask(186);
+
+    expect(mockUpdateStack).not.toHaveBeenCalled();
+    expect(mockRecheckStack).not.toHaveBeenCalled();
+    expect(mockUpdateScheduledTaskRun).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({
+        status: 'success',
+        output: expect.stringContaining('image check(s) failed'),
+      }),
+    );
   });
 
   it('runs a scheduled update on the community tier (no paid gate)', async () => {
@@ -828,7 +874,15 @@ describe('SchedulerService - executeUpdate', () => {
 
   it('begins a health gate after a scheduled update succeeds', async () => {
     const { HealthGateService } = await import('../services/HealthGateService');
-    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-1');
+    const callOrder: string[] = [];
+    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockImplementation(() => {
+      callOrder.push('beginStack');
+      return 'gate-1';
+    });
+    mockRecheckStack.mockImplementation(async () => {
+      callOrder.push('recheckStack');
+      return { outcome: 'cleared', warning: null };
+    });
     try {
       mockGetScheduledTask.mockReturnValue({
         id: 83,
@@ -847,6 +901,8 @@ describe('SchedulerService - executeUpdate', () => {
       await SchedulerService.getInstance().triggerTask(83);
 
       expect(beginSpy).toHaveBeenCalledWith(1, 'web-app', 'update', 'system:scheduler');
+      expect(mockRecheckStack).toHaveBeenCalledWith(1, 'web-app');
+      expect(callOrder.indexOf('beginStack')).toBeLessThan(callOrder.indexOf('recheckStack'));
     } finally {
       beginSpy.mockRestore();
     }

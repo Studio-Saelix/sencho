@@ -7,10 +7,11 @@ import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
 import {
   createAutoUpdateDigestGateState,
+  messageWhenDigestApplyBlockedByCheckErrors,
   messageWhenNoDigestUpdate,
   recordAutoUpdateImageCheck,
 } from '../helpers/autoUpdateDigestGate';
-import { ImageUpdateService } from '../services/ImageUpdateService';
+import { ImageUpdateService, UPDATE_VERIFICATION_INCOMPLETE_WARNING } from '../services/ImageUpdateService';
 import { FileSystemService } from '../services/FileSystemService';
 import { StackUpdateOrchestrator } from '../services/StackUpdateOrchestrator';
 import { StackOpLockService, stackOpSkipMessage } from '../services/StackOpLockService';
@@ -21,6 +22,7 @@ import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
 import { FLEET_UPDATE_CACHE_KEY, invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
+import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { summarizeBlockReasons } from '../utils/policy-risk';
 import { isValidStackName } from '../utils/validation';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -349,7 +351,6 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
 
     const docker = DockerController.getInstance(req.nodeId);
     const imageUpdateService = ImageUpdateService.getInstance();
-    const db = DatabaseService.getInstance();
     const atomic = true;
     const results: string[] = [];
 
@@ -388,6 +389,11 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           results.push(messageWhenNoDigestUpdate(stackName, gate, imageRefs.length));
           continue;
         }
+        const checkErrorBlock = messageWhenDigestApplyBlockedByCheckErrors(stackName, gate);
+        if (checkErrorBlock) {
+          results.push(checkErrorBlock);
+          continue;
+        }
 
         const { updatedImages } = gate;
 
@@ -421,7 +427,9 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           results.push(stackOpSkipMessage(stackName, lock.existing.action));
           continue;
         }
-        db.clearStackUpdateStatus(req.nodeId, stackName);
+
+        // Health observation starts immediately after Compose; registry recheck is
+        // isolated so a verification failure cannot turn Compose success into a failure.
         const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', `auto-update:${req.user?.username ?? 'scheduler'}`);
         const orchResult = lock.result;
         const recoveryId = orchResult && orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
@@ -430,6 +438,21 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           StackUpdateRecoveryService.getInstance().linkGateOrRetain(recoveryId, healthGateId);
         }
 
+        // Recheck persists digest-cleared / tag-advisory state. Do not blind-clear.
+        let recheckWarning: string | undefined;
+        try {
+          const recheck = await imageUpdateService.recheckStack(req.nodeId, stackName);
+          if (recheck.warning) recheckWarning = recheck.warning;
+        } catch (recheckErr) {
+          console.warn(
+            '[AutoUpdate] Post-update recheck failed for %s: %s',
+            sanitizeForLog(stackName),
+            sanitizeForLog(getErrorMessage(recheckErr, 'unknown')),
+          );
+          recheckWarning = UPDATE_VERIFICATION_INCOMPLETE_WARNING;
+        }
+
+        invalidateNodeCaches(req.nodeId);
         NotificationService.getInstance().broadcastEvent({
           type: 'state-invalidate',
           scope: 'image-updates',
@@ -446,7 +469,8 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           { stackName, actor: 'system:image-update' },
         );
 
-        results.push(`Stack "${stackName}": updated (${updatedImages.join(', ')}).`);
+        const base = `Stack "${stackName}": updated (${updatedImages.join(', ')}).`;
+        results.push(recheckWarning ? `${base} ${recheckWarning}` : base);
       } catch (e) {
         const msg = getErrorMessage(e, String(e));
         results.push(`Stack "${stackName}" failed: ${msg}`);

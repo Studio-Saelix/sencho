@@ -1778,5 +1778,46 @@ services:
       expect(mockRecordStackCheckFailure).toHaveBeenCalled();
       expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
     });
+
+    it('returns verification_incomplete when the write lock discards a stale commit', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({ hasUpdate: false });
+      (service as any).withStackWriteLock = vi.fn().mockResolvedValue(false);
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({
+        outcome: 'verification_incomplete',
+        warning: 'The update command completed, but Sencho could not fully verify whether an image update remains.',
+      });
+      expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+      expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+    });
+
+    it('returns verification_incomplete when container listing fails', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockGetAllContainers.mockRejectedValueOnce(new Error('docker socket down'));
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({ hasUpdate: false });
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({
+        outcome: 'verification_incomplete',
+        warning: 'The update command completed, but Sencho could not fully verify whether an image update remains.',
+      });
+      expect((service as any).checkImage).not.toHaveBeenCalled();
+      expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+    });
   });
 });

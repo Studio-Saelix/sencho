@@ -50,6 +50,7 @@ import {
   isActionableUpdatePreview,
   isClearedUpdatePreview,
   isReviewRequiredUpdatePreview,
+  isTagOnlyAdvisory,
   isVerificationOnlyPreview,
 } from '@/lib/updatePreviewActionability';
 import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
@@ -289,6 +290,29 @@ describe('verification preview helpers', () => {
     });
     expect(isClearedUpdatePreview(preview)).toBe(false);
     expect(isActionableUpdatePreview(preview)).toBe(false);
+  });
+
+  it('does not treat a tag-only advisory as cleared (Fleet must keep the card)', () => {
+    const preview = {
+      ...previewSummary({
+        has_update: true,
+        update_kind: 'tag',
+        semver_bump: 'patch',
+        next_tag: '1.31.3',
+        current_tag: '1.25.3',
+      }),
+      images: [{
+        service: 'web',
+        image: 'nginx:1.25.3',
+        has_update: true,
+        digest_update: false,
+        tag_update: true,
+        check_status: 'ok',
+      }],
+    };
+    expect(isTagOnlyAdvisory(preview)).toBe(true);
+    expect(isActionableUpdatePreview(preview)).toBe(false);
+    expect(isClearedUpdatePreview(preview)).toBe(false);
   });
 });
 
@@ -748,6 +772,51 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
     expect(toast.info).toHaveBeenCalledWith(
       'The update command completed, but Sencho still detects an available image update.',
     );
+  });
+
+  it('retains the card when post-Apply preview is partial (not an authoritative clear)', async () => {
+    mockFleetLoad({ '1': { nextcloud: true } });
+    const partialNegative = {
+      ...basePreview,
+      images: basePreview.images.map((img) => ({
+        ...img,
+        has_update: false,
+        digest_update: false,
+        tag_update: false,
+        check_status: 'partial' as const,
+        check_error: 'registry timeout',
+      })),
+      summary: {
+        ...basePreview.summary,
+        has_update: false,
+        check_status: 'partial' as const,
+      },
+    };
+    mockedFetchForNode.mockImplementation((url: string, _nodeId?: number, init?: { method?: string }) => {
+      if (String(url).includes('/update') && !String(url).includes('update-preview') && init?.method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'Update completed' }) });
+      }
+      if (String(url).includes('/update-preview')) {
+        const previewCalls = mockedFetchForNode.mock.calls.filter((c) => String(c[0]).includes('/update-preview')).length;
+        return Promise.resolve({
+          ok: true,
+          json: async () => (previewCalls <= 1 ? basePreview : partialNegative),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+
+    render(<AutoUpdateReadinessView />);
+    const applyBtn = await screen.findByRole('button', { name: /Apply now/i });
+    await act(async () => { fireEvent.click(applyBtn); });
+
+    await waitFor(() => {
+      expect(screen.getAllByText('nextcloud').length).toBeGreaterThan(0);
+    });
+    expect(screen.queryByText(/Everything is up to date/)).toBeNull();
+    expect(screen.getByText(/1 update pending/)).toBeInTheDocument();
+    expect(isAuthoritativeNegativePreview(partialNegative)).toBe(false);
+    expect(isClearedUpdatePreview(partialNegative)).toBe(false);
   });
 
   it('retains an unknown card when recheckWarning disagrees with a cleared preview', async () => {
@@ -1255,6 +1324,73 @@ describe('AutoUpdateReadinessView check-failed advisory', () => {
     expect(screen.queryByRole('button', { name: /Apply now/i })).toBeNull();
     expect(screen.queryByText(/could not be checked/i)).toBeNull();
     expect(screen.queryByText(/ready to apply automatically/)).toBeNull();
+  });
+
+  it('keeps a tag-only advisory card on load instead of treating it as cleared', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/image-updates/fleet') {
+        return Promise.resolve({ ok: true, json: async () => ({ '1': { nginx: true } }) });
+      }
+      if (url.startsWith('/scheduled-tasks')) {
+        return Promise.resolve({ ok: true, json: async () => [] });
+      }
+      if (url === '/image-updates/detail') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            nginx: { hasUpdate: true, checkStatus: 'ok', lastError: null, checkedAt: 1 },
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) });
+    });
+    mockedFetchForNode.mockImplementation((url: string) => {
+      if (String(url).includes('/update-preview')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            stack_name: 'nginx',
+            images: [{
+              service: 'web',
+              image: 'nginx:1.25.3',
+              current_tag: '1.25.3',
+              next_tag: '1.31.3',
+              has_update: true,
+              digest_update: false,
+              tag_update: true,
+              semver_bump: 'minor',
+              check_status: 'ok',
+              check_error: null,
+              digest_error: null,
+            }],
+            summary: {
+              has_update: true,
+              primary_image: 'nginx',
+              current_tag: '1.25.3',
+              next_tag: '1.31.3',
+              semver_bump: 'minor',
+              update_kind: 'tag',
+              blocked: false,
+              blocked_reason: null,
+              rebuild_available: false,
+              check_status: 'ok',
+              verification_failed: false,
+              verification_error: null,
+            },
+            rollback_target: null,
+            changelog: null,
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => null });
+    });
+
+    render(<AutoUpdateReadinessView />);
+
+    expect(await screen.findByText(/1 update pending/)).toBeInTheDocument();
+    expect(screen.getAllByText('nginx').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Everything is up to date/)).toBeNull();
+    expect(screen.getByRole('button', { name: /Apply now/i })).toBeDisabled();
   });
 
   it('keeps a sticky card instead of silently clearing it when a remote sends a legacy preview missing verification_failed entirely', async () => {

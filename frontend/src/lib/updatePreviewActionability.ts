@@ -171,9 +171,9 @@ export function isServiceApplyActionable(
 }
 
 /**
- * Fresh preview successfully proved there is nothing to apply, and the stack
- * is not held for major-bump review. Sticky fleet booleans must not keep these
- * cards pending.
+ * Fresh preview successfully proved there is nothing pending (no digest
+ * rebuild, no higher-tag advisory). Tag-only advisories set has_update and
+ * must not clear: Fleet keeps showing them even though Apply is disabled.
  */
 export function isClearedUpdatePreview(
   preview: UpdatePreviewActionInput | null | undefined,
@@ -184,5 +184,6 @@ export function isClearedUpdatePreview(
   if (isPreviewUncertain(preview)) return false;
   if (isVerificationOnlyPreview(preview)) return false;
   if (isReviewRequiredUpdatePreview(preview)) return false;
-  return !isActionableUpdatePreview(preview);
+  if (preview.summary.has_update || preview.summary.rebuild_available) return false;
+  return summaryCheckOk(preview.summary);
 }

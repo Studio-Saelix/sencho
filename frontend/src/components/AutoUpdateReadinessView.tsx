@@ -1213,8 +1213,11 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
           retainPreviewFailed();
           return;
         }
-        if (next.summary.has_update) {
-          if (!recheckWarning) {
+        // Drop only when the live preview proves nothing remains (tag-only
+        // advisories stay pending via isClearedUpdatePreview).
+        const cleared = isAuthoritativeNegativePreview(next) || isClearedUpdatePreview(next);
+        if (!cleared) {
+          if (next.summary.has_update && !recheckWarning) {
             toast.info(
               'The update command completed, but Sencho still detects an available image update.',
             );
@@ -1223,7 +1226,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             applying: false,
             preview: next,
             previewLoaded: true,
-            verificationNote: null,
+            verificationNote: recheckWarning ?? null,
           });
           return;
         }
@@ -1232,7 +1235,8 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
           return;
         }
         removeCard();
-      } catch {
+      } catch (previewErr) {
+        console.error('[AutoUpdate] post-Apply preview reconciliation failed', previewErr);
         retainPreviewFailed();
       }
     } catch (err) {

@@ -928,6 +928,12 @@ export class ImageUpdateService {
                 sanitizeForLog(stackName),
                 sanitizeForLog(getErrorMessage(e, 'unknown')),
             );
+            // Do not clear or upsert from declared-image-only checks: runtime
+            // digests were never observed, so "cleared" would be a false negative.
+            return {
+                outcome: 'verification_incomplete',
+                warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+            };
         }
 
         const refs = new Set<string>();
@@ -965,13 +971,20 @@ export class ImageUpdateService {
         const lastError = stackStatusLastError(services);
         const now = Date.now();
 
-        await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
+        const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
             if (checkStatus === 'failed') {
                 db.recordStackCheckFailure(nodeId, stackName, lastError ?? 'Update check failed', now, services, gen);
             } else {
                 db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError, services, gen);
             }
         });
+        // A newer scanner reservation dropped this write; do not report cleared.
+        if (!committed) {
+            return {
+                outcome: 'verification_incomplete',
+                warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+            };
+        }
 
         if (checkStatus === 'partial' || checkStatus === 'failed') {
             return {
