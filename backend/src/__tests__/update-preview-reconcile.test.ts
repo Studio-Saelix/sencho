@@ -48,6 +48,7 @@ function negativeOkPreview(stackName = 'web') {
       semver_bump: 'none' as const,
       check_status: 'ok' as const,
       check_error: null,
+      digest_error: null,
     }],
     build_services: [] as string[],
     summary: {

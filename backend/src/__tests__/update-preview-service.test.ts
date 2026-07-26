@@ -197,7 +197,7 @@ describe('computeImagePreview', () => {
         expect(result.check_status).toBe('partial');
     });
 
-    it('treats digest error + higher tag as a confirmed update (ok)', async () => {
+    it('treats digest error + higher tag as a confirmed update (ok), but keeps digest_error unmasked for the collateral-risk gate', async () => {
         const result = await computeImagePreview('web', 'nginx:1.2.3', makeDeps({
             getLocalDigest: vi.fn().mockResolvedValue(localDigest('sha256:aaa')),
             compareDigest: vi.fn().mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' }),
@@ -206,6 +206,10 @@ describe('computeImagePreview', () => {
         expect(result.has_update).toBe(true);
         expect(result.next_tag).toBe('1.2.4');
         expect(result.check_status).toBe('ok');
+        // The tag compare independently confirmed the update, so check_status
+        // masks the digest failure. digest_error must survive that masking: a
+        // full-stack apply still re-pulls this image's unverified current tag.
+        expect(result.digest_error).toBe('Registry unreachable');
     });
 
     it('treats empty RepoDigests as not_checkable (no verification failure)', async () => {
@@ -318,6 +322,7 @@ describe('buildSummary', () => {
         semver_bump: 'none' as const,
         check_status: 'ok' as const,
         check_error: null as string | null,
+        digest_error: null as string | null,
         ...partial,
     });
 
@@ -535,6 +540,7 @@ describe('preview authority', () => {
                 semver_bump: 'none',
                 check_status: 'not_checkable',
                 check_error: null,
+                digest_error: null,
             },
         ]))).toBe(false);
     });

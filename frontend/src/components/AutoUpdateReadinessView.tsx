@@ -42,6 +42,8 @@ interface UpdatePreviewImage {
   /** Absent on older remotes; backend uses !== 'not_checkable' for checkability. */
   check_status?: 'ok' | 'partial' | 'failed' | 'not_checkable';
   check_error?: string | null;
+  /** This image's own digest-comparison failure; not masked by a confirmed tag update. */
+  digest_error?: string | null;
 }
 
 type UpdateKind = 'tag' | 'digest' | 'none';
@@ -187,14 +189,6 @@ function RiskBadge({
   uncertain?: boolean;
   tagOnly?: boolean;
 }) {
-  if (uncertain) {
-    return (
-      <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-warning">
-        <AlertTriangle className="h-3 w-3" strokeWidth={1.5} />
-        Check uncertain
-      </span>
-    );
-  }
   if (blocked || bump === 'major') {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-destructive">
@@ -208,6 +202,14 @@ function RiskBadge({
       <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-warning">
         <AlertTriangle className="h-3 w-3" strokeWidth={1.5} />
         Review · unverified
+      </span>
+    );
+  }
+  if (uncertain) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-warning">
+        <AlertTriangle className="h-3 w-3" strokeWidth={1.5} />
+        Check uncertain
       </span>
     );
   }

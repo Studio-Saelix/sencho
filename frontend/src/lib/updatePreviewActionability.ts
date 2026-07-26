@@ -10,6 +10,13 @@ export interface UpdatePreviewActionImage {
   tag_update?: boolean;
   check_status?: string | null;
   check_error?: string | null;
+  /**
+   * This image's own digest-comparison failure reason, independent of
+   * check_error: a confirmed tag-based update on the SAME image resolves
+   * check_status to 'ok' and nulls check_error, but digest_error stays set
+   * since the image's current tag content was never actually verified.
+   */
+  digest_error?: string | null;
 }
 
 export interface UpdatePreviewActionSummary {
@@ -25,7 +32,7 @@ export interface UpdatePreviewActionSummary {
 export interface UpdatePreviewActionInput {
   summary: UpdatePreviewActionSummary;
   /**
-   * Per-image detail backing the summary. `has_update` and `check_error` are
+   * Per-image detail backing the summary. `has_update` and `digest_error` are
    * independent per image (a tag-based update can be confirmed via the
    * registry's tag list even when that same image's own digest comparison
    * errored), so the stack-level `verification_failed` alone cannot say
@@ -104,10 +111,12 @@ export function isPreviewUncertain(preview: UpdatePreviewActionInput | null | un
 
 /**
  * True when a full-stack apply would pull/recreate an image whose digest
- * verification failed as collateral of applying a DIFFERENT image's confirmed
- * update or a local rebuild. Excludes the case where the only verification
- * failure belongs to the very image whose update is confirmed (that image's
- * own stale-digest check does not block moving it to a newer tag).
+ * content was never verified, as collateral of applying a DIFFERENT image's
+ * confirmed update or a local rebuild. Reads digest_error, not check_error:
+ * a confirmed tag-based update on the SAME image resolves check_status to
+ * 'ok' and nulls check_error, but a full-stack apply still re-pulls that
+ * image's current tag, whose digest_error means its content was never
+ * confirmed.
  */
 function hasUnverifiedOtherImage(preview: UpdatePreviewActionInput): boolean {
   const s = preview.summary;
@@ -116,12 +125,8 @@ function hasUnverifiedOtherImage(preview: UpdatePreviewActionInput): boolean {
     // No per-image detail: fall back to the aggregate flags.
     return Boolean(s.verification_failed) && Boolean(s.has_update || s.rebuild_available);
   }
-  // An image with its own check_error and no has_update cannot be the same
-  // image as one that confirmed an update (has_update requires no error to
-  // land in this bucket), so finding one proves a genuinely different image
-  // is unverified.
-  const hasPureFailureImage = images.some((i) => Boolean(i.check_error) && !i.has_update);
-  if (!hasPureFailureImage) return false;
+  const hasUnverifiedImage = images.some((i) => Boolean(i.digest_error));
+  if (!hasUnverifiedImage) return false;
   return images.some((i) => Boolean(i.has_update)) || Boolean(s.rebuild_available);
 }
 

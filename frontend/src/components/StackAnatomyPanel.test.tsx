@@ -84,7 +84,7 @@ function mixedPreviewBody(over: { blocked?: boolean; blocked_reason?: string | n
       {
         service: 'db', image: 'private.example/db:latest', current_tag: 'latest', next_tag: null,
         has_update: false, digest_update: false, tag_update: false, semver_bump: 'none',
-        check_status: 'failed', check_error: 'Registry unreachable',
+        check_status: 'failed', check_error: 'Registry unreachable', digest_error: 'Registry unreachable',
       },
     ],
     summary: {
@@ -640,26 +640,49 @@ describe('StackAnatomyPanel digest verification failure', () => {
     expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
   });
 
-  it('keeps a single image with its own confirmed digest update fully actionable even though that same image also carries diagnostic text', async () => {
-    // has_update and check_error are independent per image: a confirmed
-    // digest update (check_status 'ok') is not held for review by that same
-    // image's own diagnostic text. There is no other image here, so this
-    // must NOT be held for review.
+  it('keeps a single image with a confirmed digest update fully actionable when there is no digest error anywhere in the stack', async () => {
+    // digest_update and digest_error are mutually exclusive for one image (both
+    // derive from the same comparison), so a confirmed digest update is always
+    // its own clean case, with nothing to hold it for review.
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/update-preview')) return jsonRes(previewBody(true));
+      if (url.includes('/scan-status')) return jsonRes({ status: 'ok' });
+      return jsonRes(null, false);
+    });
+    render(panel(false));
+    expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
+    expect(screen.getByText(/same-tag digest rebuild/i)).toBeInTheDocument();
+    expect(screen.queryByText(/review required/i)).toBeNull();
+    expect(screen.getByRole('button', { name: /^apply$/i })).toBeEnabled();
+  });
+
+  it('holds a confirmed update for review even when the other image\'s own tag update masks its digest error into an overall ok check_status', async () => {
+    // The db image's tag compare confirmed an update, so the backend masks its
+    // digest failure into check_status 'ok' + check_error null. Only the
+    // unmasked digest_error still reports that its content went unverified.
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes('/update-preview')) {
         return jsonRes({
           build_services: [],
-          images: [{
-            service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.25',
-            has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch',
-            check_status: 'ok', check_error: 'Registry unreachable',
-          }],
+          images: [
+            {
+              service: 'web', image: 'nginx:1.25', current_tag: '1.25', next_tag: '1.25',
+              has_update: true, digest_update: true, tag_update: false, semver_bump: 'patch',
+              check_status: 'ok', check_error: null, digest_error: null,
+            },
+            {
+              service: 'db', image: 'private.example/db:latest', current_tag: '2.0', next_tag: '2.1',
+              has_update: true, digest_update: false, tag_update: true, semver_bump: 'minor',
+              check_status: 'ok', check_error: null, digest_error: 'Registry unreachable',
+            },
+          ],
           summary: {
             has_update: true, primary_image: 'nginx', current_tag: '1.25', next_tag: '1.25',
             semver_bump: 'patch', update_kind: 'digest', blocked: false, blocked_reason: null,
             has_build_services: false, rebuild_available: false,
-            check_status: 'ok', verification_failed: true, verification_error: 'Registry unreachable',
+            check_status: 'ok', verification_failed: false, verification_error: null,
           },
           changelog: null,
         });
@@ -669,12 +692,8 @@ describe('StackAnatomyPanel digest verification failure', () => {
     });
     render(panel(false));
     expect(await screen.findByTestId('update-available-banner')).toBeInTheDocument();
-    // previewBody's single image is a digest update, so the un-held lead-in
-    // reads "same-tag digest rebuild", not "review required" (the mixed-state
-    // hold this test is proving does NOT apply to a single image's own error).
-    expect(screen.getByText(/same-tag digest rebuild/i)).toBeInTheDocument();
-    expect(screen.queryByText(/review required/i)).toBeNull();
-    expect(screen.getByRole('button', { name: /^apply$/i })).toBeEnabled();
+    expect(screen.getByText(/review required/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^apply$/i })).toBeNull();
   });
 
   it('keeps the blocked (major-bump policy) banner precedence over the verification-failure review-required banner', async () => {

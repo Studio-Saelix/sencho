@@ -58,6 +58,8 @@ interface UpdatePreviewImage {
   semver_bump: SemverBump;
   check_status?: 'ok' | 'partial' | 'failed' | 'not_checkable';
   check_error?: string | null;
+  /** This image's own digest-comparison failure; not masked by a confirmed tag update. */
+  digest_error?: string | null;
 }
 
 interface UpdatePreviewSummary {

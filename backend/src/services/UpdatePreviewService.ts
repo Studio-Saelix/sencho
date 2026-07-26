@@ -67,6 +67,17 @@ export interface UpdatePreviewImage {
      * this as verification-failed / unknown, not as "up to date" or rebuild.
      */
     check_error: string | null;
+    /**
+     * This image's own digest-comparison failure reason, independent of
+     * check_status. A confirmed tag-based update on the SAME image resolves
+     * check_status to 'ok' and nulls check_error even when the digest compare
+     * itself errored (the tag confirmation is authoritative for that image),
+     * but a full-stack apply still pulls/recreates this image's CURRENT tag
+     * content, which was never verified. Callers gating collateral risk to a
+     * full-stack apply must read this field, not check_error, so that
+     * masking never hides an unverified image from the mixed-state gate.
+     */
+    digest_error: string | null;
 }
 
 export type UpdateKind = 'tag' | 'digest' | 'none';
@@ -184,6 +195,7 @@ function imageFromDetect(
         semver_bump: detected.semverBump,
         check_status: detected.checkStatus,
         check_error: detected.reason,
+        digest_error: detected.digestError,
     };
 }
 
@@ -199,6 +211,7 @@ function notCheckableImage(service: string, imageRef: string): UpdatePreviewImag
         semver_bump: 'none',
         check_status: 'not_checkable',
         check_error: null,
+        digest_error: null,
     };
 }
 
@@ -215,6 +228,7 @@ function failedLocalDigestImage(service: string, imageRef: string, currentTag: s
         semver_bump: 'none',
         check_status: 'failed',
         check_error: reason,
+        digest_error: reason,
     };
 }
 

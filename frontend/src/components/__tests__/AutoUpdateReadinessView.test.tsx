@@ -154,25 +154,42 @@ describe('verification preview helpers', () => {
     expect(isClearedUpdatePreview(preview)).toBe(false);
   });
 
-  it('keeps a single image with its own confirmed digest update fully actionable even though that same image also failed its own digest check', () => {
-    // has_update and check_error are independent per image: a confirmed
-    // digest update is not held for review by that same image's own
-    // diagnostic text. There is no "other image" here, so this must not be
-    // held for review.
+  it('keeps a single image with a confirmed digest update actionable when there is no digest error anywhere in the stack', () => {
+    // digest_update and digest_error are mutually exclusive for one image (both
+    // derive from the same comparison), so a confirmed digest update is always
+    // its own clean case, with nothing to hold it for review.
     const preview = {
-      ...previewSummary({ verification_failed: true, has_update: true, update_kind: 'digest', semver_bump: 'patch' }),
-      images: [{ has_update: true, digest_update: true, check_error: 'Registry unreachable' }],
+      ...previewSummary({ has_update: true, update_kind: 'digest', semver_bump: 'patch' }),
+      images: [{ has_update: true, digest_update: true, digest_error: null }],
     };
     expect(isReviewRequiredUpdatePreview(preview)).toBe(false);
     expect(isActionableUpdatePreview(preview)).toBe(true);
   });
 
-  it('holds a confirmed update for review when a genuinely different image failed verification', () => {
+  it('holds a confirmed update for review when a genuinely different image failed digest verification', () => {
     const preview = {
       ...previewSummary({ verification_failed: true, has_update: true, update_kind: 'digest', semver_bump: 'patch' }),
       images: [
-        { has_update: true, digest_update: true, check_error: null },
-        { has_update: false, check_error: 'Registry unreachable' },
+        { has_update: true, digest_update: true, digest_error: null },
+        { has_update: false, digest_update: false, digest_error: 'Registry unreachable' },
+      ],
+    };
+    expect(isReviewRequiredUpdatePreview(preview)).toBe(true);
+    expect(isActionableUpdatePreview(preview)).toBe(false);
+  });
+
+  it('holds a confirmed update for review even when the other image\'s own tag update masks its digest error into an overall ok check_status', () => {
+    // The second image's tag compare confirmed an update, so the backend masks
+    // its digest failure into check_status 'ok' + check_error null. Only the
+    // unmasked digest_error still reports that its content went unverified.
+    const preview = {
+      ...previewSummary({ has_update: true, update_kind: 'digest', semver_bump: 'patch', check_status: 'ok' }),
+      images: [
+        { has_update: true, digest_update: true, check_status: 'ok', check_error: null, digest_error: null },
+        {
+          has_update: true, digest_update: false, tag_update: true,
+          check_status: 'ok', check_error: null, digest_error: 'Registry unreachable',
+        },
       ],
     };
     expect(isReviewRequiredUpdatePreview(preview)).toBe(true);
@@ -365,8 +382,8 @@ it('holds full-stack Apply for review when one image confirms an update and anot
         preview: {
           stack_name: 'mixed', rollback_target: null, changelog: null,
           images: [
-            { service: 'confirmed', image: 'alpine:latest', current_tag: 'latest', next_tag: 'latest', has_update: true, semver_bump: 'patch', check_error: null },
-            { service: 'failing', image: 'private.example/db:latest', current_tag: 'latest', next_tag: null, has_update: false, semver_bump: 'none', check_error: 'Registry unreachable' },
+            { service: 'confirmed', image: 'alpine:latest', current_tag: 'latest', next_tag: 'latest', has_update: true, digest_update: true, semver_bump: 'patch', digest_error: null },
+            { service: 'failing', image: 'private.example/db:latest', current_tag: 'latest', next_tag: null, has_update: false, digest_update: false, semver_bump: 'none', digest_error: 'Registry unreachable' },
           ],
           summary: {
             has_update: true,
@@ -636,8 +653,8 @@ describe('AutoUpdateReadinessView desktop Apply now', () => {
       json: async () => ({
         stack_name: 'mixed',
         images: [
-          { service: 'confirmed', image: 'alpine:latest', current_tag: 'latest', next_tag: 'latest', has_update: true, semver_bump: 'patch', check_error: null },
-          { service: 'failing', image: 'private.example/db:latest', current_tag: 'latest', next_tag: null, has_update: false, semver_bump: 'none', check_error: 'Registry unreachable' },
+          { service: 'confirmed', image: 'alpine:latest', current_tag: 'latest', next_tag: 'latest', has_update: true, digest_update: true, semver_bump: 'patch', digest_error: null },
+          { service: 'failing', image: 'private.example/db:latest', current_tag: 'latest', next_tag: null, has_update: false, digest_update: false, semver_bump: 'none', digest_error: 'Registry unreachable' },
         ],
         summary: {
           has_update: true,

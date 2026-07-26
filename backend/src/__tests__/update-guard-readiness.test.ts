@@ -276,6 +276,7 @@ describe('updatePreviewSignal verification failure', () => {
     semver_bump: 'none',
     check_status: 'ok',
     check_error: null,
+    digest_error: null,
     ...over,
   });
 
