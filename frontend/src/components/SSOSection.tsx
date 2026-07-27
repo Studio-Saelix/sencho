@@ -70,6 +70,13 @@ function ProviderCard({ providerId, type, label, initialConfig, onSave }: {
     const [testResult, setTestResult] = useState<{ success: boolean; error?: string } | null>(null);
     const [expanded, setExpanded] = useState(!!initialConfig?.enabled);
 
+    // Keep local draft aligned with the saved config once it loads (or refreshes
+    // after save). Without this, cards mount with enabled:false before fetch
+    // completes and the Active badge (from initialConfig) disagrees with the OFF toggle.
+    useEffect(() => {
+        setConfig(initialConfig || { enabled: false });
+    }, [initialConfig]);
+
     const update = (field: string, value: string | boolean) => {
         setConfig(prev => ({ ...prev, [field]: value }));
     };
@@ -153,7 +160,7 @@ function ProviderCard({ providerId, type, label, initialConfig, onSave }: {
             >
                 <div className="flex items-center gap-3">
                     <span className="font-medium text-sm">{label}</span>
-                    {initialConfig?.enabled && (
+                    {config.enabled && (
                         <Badge variant="secondary" className="text-xs bg-success-muted text-success border-success/20">
                             Active
                         </Badge>
