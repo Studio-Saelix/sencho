@@ -8,8 +8,9 @@ export type ComposeHealthcheckClass = 'active' | 'disabled' | 'absent';
 
 /**
  * Classify a Compose `healthcheck:` value from the rendered effective model.
- * `disable: true` and `test: NONE` / `["NONE"]` are explicit disablement, not
- * an active healthcheck.
+ * `disable: true` and `test: NONE` / `["NONE"]` are explicit disablement.
+ * An empty object, `disable: false` alone, or timing-only fields without a
+ * `test` are absent (fall through to runtime/image evidence), not active.
  */
 export function classifyComposeHealthcheck(healthcheck: unknown): ComposeHealthcheckClass {
   if (healthcheck == null) return 'absent';
@@ -17,7 +18,8 @@ export function classifyComposeHealthcheck(healthcheck: unknown): ComposeHealthc
   const hc = healthcheck as Record<string, unknown>;
   if (hc.disable === true) return 'disabled';
   if (isNoneTest(hc.test)) return 'disabled';
-  return 'active';
+  if (hasActiveTest(hc.test)) return 'active';
+  return 'absent';
 }
 
 /** True when the Compose healthcheck is an active (non-disabled) declaration. */
@@ -30,10 +32,19 @@ export function isComposeHealthcheckActive(healthcheck: unknown): boolean {
  * Empty / missing / `NONE` / `["NONE"]` are inactive.
  */
 export function isDockerHealthcheckActive(test: unknown): boolean {
+  return hasActiveTest(test);
+}
+
+/** True when `test` is a non-empty, non-NONE healthcheck command. */
+function hasActiveTest(test: unknown): boolean {
   if (test == null) return false;
-  if (typeof test === 'string') return !isNoneToken(test);
+  if (typeof test === 'string') {
+    const trimmed = test.trim();
+    return trimmed.length > 0 && !isNoneToken(trimmed);
+  }
   if (!Array.isArray(test) || test.length === 0) return false;
-  return !isNoneTest(test);
+  if (isNoneTest(test)) return false;
+  return true;
 }
 
 function isNoneTest(test: unknown): boolean {

@@ -27,6 +27,13 @@ describe('classifyComposeHealthcheck', () => {
     expect(classifyComposeHealthcheck({ test: ['CMD', 'true'] })).toBe('active');
     expect(isComposeHealthcheckActive({ test: ['CMD', 'curl', '-f', 'http://localhost'] })).toBe(true);
   });
+
+  it('treats empty or timing-only healthcheck objects as absent, not active', () => {
+    expect(classifyComposeHealthcheck({})).toBe('absent');
+    expect(classifyComposeHealthcheck({ disable: false })).toBe('absent');
+    expect(classifyComposeHealthcheck({ interval: '30s', timeout: '3s' })).toBe('absent');
+    expect(isComposeHealthcheckActive({ disable: false })).toBe(false);
+  });
 });
 
 describe('isDockerHealthcheckActive', () => {

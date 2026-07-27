@@ -54,18 +54,21 @@ export async function collectServiceHealthcheckEvidence(
 
   let listed: ListedContainer[] = [];
   let listFailed = false;
+  // Compose's top-level `name:` becomes com.docker.compose.project; that often
+  // differs from the Sencho stack directory name used as stackName.
+  const projectLabel = model.projectName || stackName;
   if (nodeStateAvailable && needsDocker) {
     try {
       const docker = DockerController.getInstance(nodeId).getDocker();
       listed = await docker.listContainers({
         all: true,
-        filters: { label: [`com.docker.compose.project=${stackName}`] },
+        filters: { label: [`com.docker.compose.project=${projectLabel}`] },
       }) as ListedContainer[];
     } catch (err) {
       listFailed = true;
       console.warn(
         '[ComposeDoctor] Healthcheck container list failed for %s:',
-        sanitizeForLog(stackName),
+        sanitizeForLog(projectLabel),
         sanitizeForLog(getErrorMessage(err, 'unknown')),
       );
     }

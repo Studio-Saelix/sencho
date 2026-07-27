@@ -77,6 +77,31 @@ describe('collectServiceHealthcheckEvidence', () => {
     expect(evidence.web.state).toBe('explicitly-disabled');
   });
 
+  it('lists containers by Compose projectName, not the stack directory name', async () => {
+    const { listContainers } = mockDocker({
+      list: [{
+        Id: 'c1',
+        Labels: { 'com.docker.compose.service': 'web' },
+        Image: 'nginx:1.27',
+      }],
+      inspectById: {
+        c1: { Config: { Image: 'nginx:1.27', Healthcheck: { Test: ['CMD', 'true'] } } },
+      },
+    });
+    const m: EffectiveModel = {
+      projectName: 'qa-hc-1713',
+      services: [svc({ composeHealthcheck: 'absent', image: 'nginx:1.27' })],
+      networks: {},
+      volumes: {},
+    };
+    const evidence = await collectServiceHealthcheckEvidence(1, 'qa-healthcheck', m, true);
+    expect(listContainers).toHaveBeenCalledWith({
+      all: true,
+      filters: { label: ['com.docker.compose.project=qa-hc-1713'] },
+    });
+    expect(evidence.web.state).toBe('runtime-inherited');
+  });
+
   it('recognizes runtime-inherited healthchecks and never returns Test text', async () => {
     mockDocker({
       list: [{
