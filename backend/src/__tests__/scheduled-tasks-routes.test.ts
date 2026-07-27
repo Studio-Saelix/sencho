@@ -78,7 +78,7 @@ describe('GET /api/scheduled-tasks', () => {
       last_error: null,
       prune_targets: null,
       target_services: null,
-      prune_label_filter: null,
+      prune_label_filter: null, selector_type: null, selector_value: null,
     });
 
     const res = await request(app).get('/api/scheduled-tasks?window_hours=48').set('Cookie', adminCookie);
@@ -108,7 +108,7 @@ describe('GET /api/scheduled-tasks', () => {
       last_error: null,
       prune_targets: null,
       target_services: null,
-      prune_label_filter: null,
+      prune_label_filter: null, selector_type: null, selector_value: null,
     });
     db.createScheduledTask({
       name: 'daily-snapshot',
@@ -127,7 +127,7 @@ describe('GET /api/scheduled-tasks', () => {
       last_error: null,
       prune_targets: null,
       target_services: null,
-      prune_label_filter: null,
+      prune_label_filter: null, selector_type: null, selector_value: null,
     });
     db.createScheduledTask({
       name: 'system-prune',
@@ -146,7 +146,7 @@ describe('GET /api/scheduled-tasks', () => {
       last_error: null,
       prune_targets: JSON.stringify(['images']),
       target_services: null,
-      prune_label_filter: null,
+      prune_label_filter: null, selector_type: null, selector_value: null,
     });
 
     const res = await request(app).get('/api/scheduled-tasks').set('Cookie', adminCookie);
@@ -440,7 +440,7 @@ describe('GET /api/scheduled-tasks/:id', () => {
       name: 't', target_type: 'stack', target_id: 's', node_id: 1, action: 'update',
       cron_expression: '0 3 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: null, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null,
     });
   });
 
@@ -468,7 +468,7 @@ describe('PATCH /api/scheduled-tasks/:id/toggle', () => {
       name: 't', target_type: 'stack', target_id: 's', node_id: 1, action: 'update',
       cron_expression: '0 3 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: now + 1000, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null,
     });
 
     const off = await request(app).patch(`/api/scheduled-tasks/${id}/toggle`).set('Cookie', adminCookie);
@@ -490,7 +490,7 @@ describe('PATCH /api/scheduled-tasks/:id/toggle', () => {
       name: 'once', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
       cron_expression: '0 23 1 7 *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: pinned, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1, run_at: pinned,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null, delete_after_run: 1, run_at: pinned,
     });
 
     const off = await request(app).patch(`/api/scheduled-tasks/${id}/toggle`).set('Cookie', adminCookie);
@@ -515,7 +515,7 @@ describe('DELETE /api/scheduled-tasks/:id', () => {
       name: 't', target_type: 'stack', target_id: 's', node_id: 1, action: 'update',
       cron_expression: '0 3 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: null, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null,
     });
 
     const del = await request(app).delete(`/api/scheduled-tasks/${id}`).set('Cookie', adminCookie);
@@ -534,7 +534,7 @@ describe('GET /api/scheduled-tasks/:id/runs', () => {
       name: 't', target_type: 'stack', target_id: 's', node_id: 1, action: 'update',
       cron_expression: '0 3 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: null, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null,
     });
 
     const res = await request(app).get(`/api/scheduled-tasks/${id}/runs`).set('Cookie', adminCookie);
@@ -712,7 +712,7 @@ describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
       name: 't', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
       cron_expression: '0 3 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: null, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 0,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null, delete_after_run: 0,
     });
 
     const res = await request(app)
@@ -736,7 +736,7 @@ describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
       name: 'once', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
       cron_expression: '0 23 1 7 *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: now + 1000, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null, delete_after_run: 1,
     });
 
     const runAt = new Date(new Date().getFullYear() + 1, 6, 1, 23, 0, 0, 0).getTime();
@@ -757,7 +757,7 @@ describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
       name: 'once', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
       cron_expression: '0 23 1 7 *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: pinned, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1, run_at: pinned,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null, delete_after_run: 1, run_at: pinned,
     });
 
     // Editing to a recurring daily schedule sends run_at: null (the frontend
@@ -780,7 +780,7 @@ describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
       name: 'once', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
       cron_expression: '0 23 1 7 *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: pinned, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1, run_at: pinned,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null, delete_after_run: 1, run_at: pinned,
     });
 
     // Disabling via Save: next_run_at clears, but the pinned instant is retained
@@ -800,7 +800,7 @@ describe('PUT /api/scheduled-tasks/:id - delete_after_run', () => {
       name: 'once', target_type: 'stack', target_id: 's', node_id: 1, action: 'auto_backup',
       cron_expression: '0 23 1 7 *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: now + 1000, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 1,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null, delete_after_run: 1,
     });
 
     const res = await request(app)
@@ -821,7 +821,7 @@ describe('PUT /api/scheduled-tasks/:id - stack target validation', () => {
       name: 't', target_type: 'stack', target_id: 's', node_id: 1, action: 'update',
       cron_expression: '0 3 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: null, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 0,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null, delete_after_run: 0,
     });
   });
 
@@ -862,7 +862,7 @@ describe('PUT /api/scheduled-tasks/:id - stack target validation', () => {
       name: 'prune', target_type: 'system', target_id: null, node_id: 1, action: 'prune',
       cron_expression: '0 4 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: null, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null,
     });
 
     const res = await request(app)
@@ -881,7 +881,7 @@ describe('PUT /api/scheduled-tasks/:id - stack target validation', () => {
       name: 'prune', target_type: 'system', target_id: null, node_id: 1, action: 'prune',
       cron_expression: '0 4 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: null, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null,
     });
     const remoteNodeId = db.addNode({
       name: 'remote-prune-update-node', type: 'remote', api_url: 'http://remote.local:1852',
@@ -937,7 +937,7 @@ describe('PUT /api/scheduled-tasks/:id - stack target validation', () => {
       last_error: null,
       prune_targets: null,
       target_services: JSON.stringify(['api']),
-      prune_label_filter: null,
+      prune_label_filter: null, selector_type: null, selector_value: null,
       delete_after_run: 0,
     });
 
@@ -966,7 +966,7 @@ describe('PUT /api/scheduled-tasks/:id - cron validation', () => {
       name: 't', target_type: 'stack', target_id: 's', node_id: 1, action: 'update',
       cron_expression: '0 3 * * *', enabled: 1, created_by: 'admin', created_at: now, updated_at: now,
       last_run_at: null, next_run_at: null, last_status: null, last_error: null,
-      prune_targets: null, target_services: null, prune_label_filter: null, delete_after_run: 0,
+      prune_targets: null, target_services: null, prune_label_filter: null, selector_type: null, selector_value: null, delete_after_run: 0,
     });
   });
 
@@ -1085,5 +1085,85 @@ describe('scheduled-tasks state-invalidate broadcast', () => {
     } finally {
       broadcastSpy.mockRestore();
     }
+  });
+});
+
+describe('POST/PUT /api/scheduled-tasks - stack-label selector', () => {
+  const labelPayload = {
+    name: 'label-update',
+    target_type: 'fleet',
+    target_id: null,
+    node_id: null,
+    action: 'update',
+    cron_expression: '0 3 * * *',
+    enabled: true,
+    selector_type: 'stack-label',
+    selector_value: 'production',
+  };
+
+  it('creates a fleet-wide label update with node_id null', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send(labelPayload);
+    expect(res.status).toBe(201);
+    expect(res.body.selector_type).toBe('stack-label');
+    expect(res.body.selector_value).toBe('production');
+    expect(res.body.node_id).toBeNull();
+    expect(res.body.action).toBe('update');
+    expect(res.body.target_type).toBe('fleet');
+  });
+
+  it('persists selector_value changes through PUT (column map)', async () => {
+    const create = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send(labelPayload);
+    expect(create.status).toBe(201);
+    const id = create.body.id as number;
+
+    const put = await request(app)
+      .put(`/api/scheduled-tasks/${id}`)
+      .set('Cookie', adminCookie)
+      .send({ selector_type: 'stack-label', selector_value: 'staging' });
+    expect(put.status).toBe(200);
+    expect(put.body.selector_value).toBe('staging');
+
+    const get = await request(app).get(`/api/scheduled-tasks/${id}`).set('Cookie', adminCookie);
+    expect(get.status).toBe(200);
+    expect(get.body.selector_value).toBe('staging');
+  });
+
+  it('still requires node_id for non-selector fleet updates', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'fleet-no-node',
+      target_type: 'fleet',
+      action: 'update',
+      cron_expression: '0 3 * * *',
+      node_id: null,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('Fleet update requires node_id.');
+  });
+
+  it('rejects selector fields on unsupported actions', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      name: 'restart-with-selector',
+      target_type: 'stack',
+      target_id: 'my-stack',
+      node_id: 1,
+      action: 'restart',
+      cron_expression: '0 3 * * *',
+      selector_type: 'stack-label',
+      selector_value: 'prod',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/selector fields can only be used with update action on fleet target/);
+  });
+
+  it('creates a node-scoped label update when node_id is set', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...labelPayload,
+      name: 'label-update-node',
+      node_id: 1,
+      selector_value: 'Databases',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.node_id).toBe(1);
+    expect(res.body.selector_value).toBe('Databases');
   });
 });

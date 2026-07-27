@@ -17,6 +17,8 @@ export interface ScheduledTask {
   prune_targets: string | null;
   target_services: string | null;
   prune_label_filter: string | null;
+  selector_type?: string | null;
+  selector_value?: string | null;
   delete_after_run?: number;
   // Absolute epoch-ms fire time for a one-time ('once') schedule; null/absent for
   // recurring shapes. Persisted so the chosen instant (including year) survives

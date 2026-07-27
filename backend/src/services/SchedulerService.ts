@@ -739,6 +739,10 @@ export class SchedulerService {
     }
 
     private async executeUpdate(task: ScheduledTask): Promise<string> {
+        if (task.selector_type === 'stack-label') {
+            return this.executeUpdateByStackLabel(task);
+        }
+
         if (task.node_id == null) {
             throw new Error('Auto-update requires node_id');
         }
@@ -792,6 +796,140 @@ export class SchedulerService {
     }
 
     /**
+     * Resolve live stack-label membership (fleet-wide or one node) and run the
+     * existing per-stack auto-update path. Remotes receive an explicit stack
+     * list; they do not evaluate the selector themselves.
+     */
+    private async executeUpdateByStackLabel(task: ScheduledTask): Promise<string> {
+        const labelName = (task.selector_value ?? '').trim();
+        if (!labelName) {
+            throw new Error('Label-targeted auto-update requires selector_value');
+        }
+
+        const { collectFleetLabelSummaries } = await import('../helpers/fleetLabelSummary');
+        let summaries = await collectFleetLabelSummaries();
+        if (task.node_id != null) {
+            summaries = summaries.filter(s => s.nodeId === task.node_id);
+            if (summaries.length === 0) {
+                throw new Error(`Target node (id=${task.node_id}) no longer exists`);
+            }
+        }
+
+        type NodePlan = {
+            nodeId: number;
+            nodeName: string;
+            reachable: boolean;
+            stacks: string[];
+            error?: string;
+        };
+
+        const plans: NodePlan[] = [];
+        const seen = new Set<string>();
+        for (const summary of summaries) {
+            if (!summary.reachable) {
+                plans.push({
+                    nodeId: summary.nodeId,
+                    nodeName: summary.nodeName,
+                    reachable: false,
+                    stacks: [],
+                    error: summary.error ?? 'unreachable',
+                });
+                continue;
+            }
+            const match = summary.labels.find(l => l.name === labelName);
+            const stacks: string[] = [];
+            if (match) {
+                for (const stackName of match.stackNames) {
+                    const key = `${summary.nodeId}\0${stackName}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    stacks.push(stackName);
+                }
+            }
+            plans.push({
+                nodeId: summary.nodeId,
+                nodeName: summary.nodeName,
+                reachable: true,
+                stacks,
+            });
+        }
+
+        const lines: string[] = [
+            `Selector: stack-label="${labelName}" · scope=${task.node_id == null ? 'entire fleet' : `node ${task.node_id}`}`,
+        ];
+        for (const plan of plans) {
+            if (!plan.reachable) {
+                lines.push(`Node "${plan.nodeName}" (id=${plan.nodeId}): unreachable (${plan.error})`);
+            } else if (plan.stacks.length === 0) {
+                lines.push(`Node "${plan.nodeName}" (id=${plan.nodeId}): no stacks with label "${labelName}"`);
+            } else {
+                lines.push(`Node "${plan.nodeName}" (id=${plan.nodeId}): ${plan.stacks.length} stack(s) → ${plan.stacks.join(', ')}`);
+            }
+        }
+
+        const matchedStacks = plans.reduce((n, p) => n + p.stacks.length, 0);
+        const unreachableCount = plans.filter(p => !p.reachable).length;
+        if (matchedStacks === 0 && unreachableCount === 0) {
+            lines.push(`No stacks currently match label "${labelName}"; skipped.`);
+            return lines.join('\n');
+        }
+
+        let materialFailure = unreachableCount > 0;
+        const work = plans.filter(p => p.reachable && p.stacks.length > 0);
+        const NODE_CONCURRENCY = 3;
+        // Label-targeted runs fail closed on material stack failures or
+        // unreachable scoped nodes (unlike plain node fleet update, which
+        // historically returns failure lines as a successful run output).
+
+        const looksLikeStackFailure = (text: string): boolean =>
+          /^Stack ".+" failed:/m.test(text);
+
+        const runNode = async (plan: NodePlan): Promise<void> => {
+            const node = NodeRegistry.getInstance().getNode(plan.nodeId);
+            try {
+                if (node?.type === 'remote') {
+                    const remoteOut = await this.executeUpdateRemoteTargets(plan.nodeId, plan.stacks);
+                    lines.push(`Node "${plan.nodeName}" (id=${plan.nodeId}) results:\n${remoteOut}`);
+                    if (looksLikeStackFailure(remoteOut)) materialFailure = true;
+                } else {
+                    const docker = DockerController.getInstance(plan.nodeId);
+                    const imageUpdateService = ImageUpdateService.getInstance();
+                    const stackLines: string[] = [];
+                    for (const stackName of plan.stacks) {
+                        try {
+                            const out = await this.executeUpdateForStack(
+                                stackName, plan.nodeId, docker, imageUpdateService, true,
+                            );
+                            stackLines.push(out);
+                        } catch (e) {
+                            materialFailure = true;
+                            const msg = getErrorMessage(e, String(e));
+                            stackLines.push(`Stack "${stackName}" failed: ${msg}`);
+                            console.error(`[SchedulerService] Label auto-update failed for stack "${stackName}" on node ${plan.nodeId}:`, e);
+                        }
+                    }
+                    lines.push(`Node "${plan.nodeName}" (id=${plan.nodeId}) results:\n${stackLines.join('\n')}`);
+                }
+            } catch (e) {
+                materialFailure = true;
+                const msg = getErrorMessage(e, String(e));
+                lines.push(`Node "${plan.nodeName}" (id=${plan.nodeId}): failed (${msg})`);
+                console.error(`[SchedulerService] Label auto-update failed for node ${plan.nodeId}:`, e);
+            }
+        };
+
+        for (let i = 0; i < work.length; i += NODE_CONCURRENCY) {
+            const batch = work.slice(i, i + NODE_CONCURRENCY);
+            await Promise.all(batch.map(runNode));
+        }
+
+        if (materialFailure) {
+            throw new Error(lines.join('\n'));
+        }
+        return lines.join('\n');
+    }
+
+    /**
      * Proxy auto-update execution to a remote Sencho instance.
      * The remote node runs the image checks and compose update locally.
      */
@@ -822,6 +960,55 @@ export class SchedulerService {
             const body = await response.json() as { result?: string };
             if (isDebugEnabled()) {
                 console.log(`[SchedulerService] executeUpdateRemote: completed in ${Date.now() - startTime}ms`);
+            }
+            return body.result || 'Remote auto-update completed (no details returned).';
+        } catch (err) {
+            this.rethrowRemoteProxyError(nodeId, err);
+        }
+    }
+
+    /** Proxy auto-update for an explicit stack list on a remote node (label selector). */
+    private async executeUpdateRemoteTargets(nodeId: number, targets: string[]): Promise<string> {
+        const proxyTarget = this.requireRemoteProxyTarget(nodeId);
+        const baseUrl = proxyTarget.apiUrl.replace(/\/$/, '');
+        const proxyHeaders = LicenseService.getInstance().getProxyHeaders();
+        if (isDebugEnabled()) {
+            console.log(`[SchedulerService] executeUpdateRemoteTargets: node=${nodeId} count=${targets.length}`);
+        }
+        const startTime = Date.now();
+        try {
+            const response = await fetch(`${baseUrl}/api/auto-update/execute`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${proxyTarget.apiToken}`,
+                    [PROXY_TIER_HEADER]: proxyHeaders.tier,
+                },
+                body: JSON.stringify({ targets }),
+                signal: AbortSignal.timeout(300_000),
+            });
+
+            // Older remotes only accept { target }. Fall back to one call per
+            // stack so mixed-version fleets still complete the label schedule.
+            if (response.status === 400) {
+                const detail = await this.remoteResponseDetail(response);
+                if (/target/i.test(detail)) {
+                    const parts: string[] = [];
+                    for (const stackName of targets) {
+                        parts.push(await this.executeUpdateRemote(nodeId, stackName));
+                    }
+                    return parts.join('\n');
+                }
+                throw new Error(this.remoteProxyFailureMessage(nodeId, detail));
+            }
+
+            if (!response.ok) {
+                throw new Error(this.remoteProxyFailureMessage(nodeId, await this.remoteResponseDetail(response)));
+            }
+
+            const body = await response.json() as { result?: string };
+            if (isDebugEnabled()) {
+                console.log(`[SchedulerService] executeUpdateRemoteTargets: completed in ${Date.now() - startTime}ms`);
             }
             return body.result || 'Remote auto-update completed (no details returned).';
         } catch (err) {

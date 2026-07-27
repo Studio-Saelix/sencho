@@ -41,8 +41,25 @@ import {
   RISK_DOT_CLASSES,
   RISK_LABEL,
 } from '@/lib/scheduledActions';
+import { LabelNameAutocomplete, type LabelNameSuggestion } from '@/components/labels/LabelNameAutocomplete';
 
 const DEFAULT_PRUNE_TARGETS = ['containers', 'images', 'networks', 'volumes'];
+
+interface LabelMatchPreviewNode {
+  nodeId: number;
+  nodeName: string;
+  reachable: boolean;
+  labelExists: boolean;
+  stackCount: number;
+  stackNames: string[];
+  error?: string;
+}
+interface LabelMatchPreview {
+  matchedNodes: number;
+  matchedStacks: number;
+  unreachableNodes: number;
+  perNode: LabelMatchPreviewNode[];
+}
 const DEFAULT_SIMPLE_SCHEDULE: SimpleSchedule = {
   frequency: 'daily', minute: 0, hour: 3, weekdays: [], dayOfMonth: 1, date: null,
 };
@@ -114,6 +131,12 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const [formPruneTargets, setFormPruneTargets] = useState<string[]>(DEFAULT_PRUNE_TARGETS);
   const [formTargetServices, setFormTargetServices] = useState<string[]>([]);
   const [formPruneLabelFilter, setFormPruneLabelFilter] = useState('');
+  const [formSelectorValue, setFormSelectorValue] = useState('');
+  const [formLabelScope, setFormLabelScope] = useState<'fleet' | 'node'>('fleet');
+  const [labelSuggestions, setLabelSuggestions] = useState<LabelNameSuggestion[]>([]);
+  const [labelPreview, setLabelPreview] = useState<
+    { kind: 'idle' } | { kind: 'loading' } | { kind: 'unavailable' } | { kind: 'ready'; data: LabelMatchPreview }
+  >({ kind: 'idle' });
   const [availableServices, setAvailableServices] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [runningTaskId, setRunningTaskId] = useState<number | null>(null);
@@ -237,6 +260,65 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   }, [formAction, formTargetId, formNodeId]);
 
   useEffect(() => {
+    if (!dialogOpen || formAction !== 'update-by-label') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch('/fleet/labels/suggestions', { localOnly: true });
+        if (!res.ok || cancelled) return;
+        const body = await res.json() as { suggestions?: LabelNameSuggestion[] };
+        const list = Array.isArray(body.suggestions)
+          ? body.suggestions.filter(s => s && typeof s.name === 'string' && s.scope === 'stack')
+          : [];
+        if (!cancelled) setLabelSuggestions(list);
+      } catch {
+        if (!cancelled) setLabelSuggestions([]);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [dialogOpen, formAction]);
+
+  useEffect(() => {
+    if (!dialogOpen || formAction !== 'update-by-label') {
+      setLabelPreview({ kind: 'idle' });
+      return;
+    }
+    const trimmed = formSelectorValue.trim();
+    if (!trimmed) {
+      setLabelPreview({ kind: 'idle' });
+      return;
+    }
+    let cancelled = false;
+    setLabelPreview({ kind: 'loading' });
+    const timer = window.setTimeout(async () => {
+      try {
+        const res = await apiFetch('/fleet/labels/match-preview', {
+          method: 'POST',
+          body: JSON.stringify({ labelName: trimmed }),
+          localOnly: true,
+        });
+        if (cancelled) return;
+        if (!res.ok) {
+          setLabelPreview({ kind: 'unavailable' });
+          return;
+        }
+        const data = await res.json() as LabelMatchPreview;
+        if (!data || !Array.isArray(data.perNode)) {
+          setLabelPreview({ kind: 'unavailable' });
+          return;
+        }
+        setLabelPreview({ kind: 'ready', data });
+      } catch {
+        if (!cancelled) setLabelPreview({ kind: 'unavailable' });
+      }
+    }, 500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [dialogOpen, formAction, formSelectorValue]);
+
+  useEffect(() => {
     if (!dialogOpen) return;
     const actionDef = getActionById(formAction);
     if (actionDef?.requiresContainer && formNodeId) {
@@ -267,6 +349,9 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     setFormPruneTargets(DEFAULT_PRUNE_TARGETS);
     setFormTargetServices([]);
     setFormPruneLabelFilter('');
+    setFormSelectorValue('');
+    setFormLabelScope('fleet');
+    setLabelPreview({ kind: 'idle' });
     setDialogOpen(true);
     if (nodeId) fetchStacks(nodeId);
   };
@@ -299,6 +384,13 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       task.target_services ? JSON.parse(task.target_services) : []
     );
     setFormPruneLabelFilter(task.prune_label_filter || '');
+    setFormSelectorValue(task.selector_value || '');
+    setFormLabelScope(
+      task.selector_type === 'stack-label'
+        ? (task.node_id == null ? 'fleet' : 'node')
+        : 'fleet',
+    );
+    setLabelPreview({ kind: 'idle' });
     setDialogOpen(true);
   };
 
@@ -328,6 +420,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     // every recurring shape and for Advanced mode, where the cron is authoritative.
     const runAt = scheduleMode === 'simple' ? getOnceRunAt(simpleSchedule) : null;
 
+    const isLabelUpdate = formAction === 'update-by-label';
     const body: Record<string, unknown> = {
       name: formName,
       target_type: actionDef.targetType,
@@ -337,10 +430,14 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       delete_after_run: formDeleteAfterRun,
       run_at: runAt,
       target_id: (actionDef.requiresStack || actionDef.requiresContainer) ? formTargetId : null,
-      node_id: actionDef.requiresNode && formNodeId ? parseInt(formNodeId, 10) : null,
+      node_id: isLabelUpdate
+        ? (formLabelScope === 'node' && formNodeId ? parseInt(formNodeId, 10) : null)
+        : (actionDef.requiresNode && formNodeId ? parseInt(formNodeId, 10) : null),
       prune_targets: formAction === 'prune' && formPruneTargets.length > 0 ? formPruneTargets : null,
       target_services: actionDef.supportsServiceSelection && formTargetServices.length > 0 ? formTargetServices : null,
       prune_label_filter: formAction === 'prune' && formPruneLabelFilter.trim() ? formPruneLabelFilter.trim() : null,
+      selector_type: isLabelUpdate ? 'stack-label' : null,
+      selector_value: isLabelUpdate ? formSelectorValue.trim() : null,
     };
 
     setSaving(true);
@@ -515,7 +612,11 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     || (!!currentAction?.requiresStack && (!formTargetId || !formNodeId))
     || (!!currentAction?.requiresContainer && (!formTargetId || !formNodeId))
     || (!!currentAction?.requiresNode && !currentAction.requiresStack && !currentAction.requiresContainer && !formNodeId)
-    || (formAction === 'prune' && formPruneTargets.length === 0);
+    || (formAction === 'prune' && formPruneTargets.length === 0)
+    || (formAction === 'update-by-label' && (
+      !formSelectorValue.trim()
+      || (formLabelScope === 'node' && !formNodeId)
+    ));
 
   const windowEnd = now + TIMELINE_WINDOW_MS;
   const timelinePills = filteredTasks
@@ -738,15 +839,20 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                       </Badge>
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
-                      {task.target_type === 'stack'
-                        ? task.target_services
-                          ? `${task.target_id} (${(JSON.parse(task.target_services) as string[]).join(', ')})`
-                          : task.target_id
-                        : task.target_type === 'container'
-                          ? task.target_id
-                        : task.action === 'update'
-                          ? 'All eligible stacks'
-                          : task.target_type}
+                      {task.selector_type === 'stack-label' && task.selector_value
+                        ? scheduleTargetDescriptor(
+                          task,
+                          task.node_id != null ? nodes.find(n => n.id === task.node_id)?.name : undefined,
+                        )
+                        : task.target_type === 'stack'
+                          ? task.target_services
+                            ? `${task.target_id} (${(JSON.parse(task.target_services) as string[]).join(', ')})`
+                            : task.target_id
+                          : task.target_type === 'container'
+                            ? task.target_id
+                            : task.action === 'update'
+                              ? 'All eligible stacks'
+                              : task.target_type}
                     </TableCell>
                     <TableCell>
                       <div className="text-sm">{getCronDescription(task.cron_expression)}</div>
@@ -855,7 +961,16 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
               <Combobox
                 options={actionOptions}
                 value={formAction}
-                onValueChange={(val) => { setFormAction(val); setFormTargetId(''); setFormNodeId(''); setFormTargetServices([]); setFormPruneLabelFilter(''); }}
+                onValueChange={(val) => {
+                  setFormAction(val);
+                  setFormTargetId('');
+                  setFormNodeId('');
+                  setFormTargetServices([]);
+                  setFormPruneLabelFilter('');
+                  setFormSelectorValue('');
+                  setFormLabelScope('fleet');
+                  setLabelPreview({ kind: 'idle' });
+                }}
                 placeholder="Select action..."
               />
               {currentAction && (
@@ -958,6 +1073,93 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                 </div>
                 <p className="text-xs text-muted-foreground">Captures every node's compose and .env files. No node or stack to choose.</p>
               </div>
+            )}
+
+            {formAction === 'update-by-label' && (
+              <>
+                <div className="space-y-2">
+                  <Label>Stack Label</Label>
+                  <LabelNameAutocomplete
+                    id="schedule-label-input"
+                    value={formSelectorValue}
+                    onChange={setFormSelectorValue}
+                    suggestions={labelSuggestions}
+                    placeholder="Select or type a label name..."
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Scope</Label>
+                  <SegmentedControl<'fleet' | 'node'>
+                    value={formLabelScope}
+                    options={[
+                      { value: 'fleet', label: 'Entire fleet' },
+                      { value: 'node', label: 'Selected node' },
+                    ]}
+                    onChange={(v) => {
+                      setFormLabelScope(v);
+                      if (v === 'fleet') setFormNodeId('');
+                    }}
+                  />
+                </div>
+                {formLabelScope === 'node' && (
+                  <div className="space-y-2">
+                    <Label>Node</Label>
+                    <Combobox
+                      options={nodeOptions}
+                      value={formNodeId}
+                      onValueChange={setFormNodeId}
+                      placeholder="Select node..."
+                    />
+                  </div>
+                )}
+                <div className="rounded-md border border-glass-border bg-input/40 px-3 py-2 space-y-1.5">
+                  <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-stat-subtitle">Current matches</div>
+                  {labelPreview.kind === 'idle' && (
+                    <p className="text-xs text-muted-foreground">Enter a label name to preview matching stacks.</p>
+                  )}
+                  {labelPreview.kind === 'loading' && (
+                    <p className="text-xs text-muted-foreground">Resolving label membership...</p>
+                  )}
+                  {labelPreview.kind === 'unavailable' && (
+                    <p className="text-xs text-warning">Preview unavailable. You can still save; membership is resolved at run time.</p>
+                  )}
+                  {labelPreview.kind === 'ready' && (() => {
+                    const scoped = formLabelScope === 'node' && formNodeId
+                      ? {
+                          ...labelPreview.data,
+                          perNode: labelPreview.data.perNode.filter(n => String(n.nodeId) === formNodeId),
+                        }
+                      : labelPreview.data;
+                    const matchedStacks = scoped.perNode
+                      .filter(n => n.reachable)
+                      .reduce((sum, n) => sum + n.stackCount, 0);
+                    const reachableNodes = scoped.perNode.filter(n => n.reachable && n.stackCount > 0).length;
+                    const unreachable = scoped.perNode.filter(n => !n.reachable);
+                    return (
+                      <div className="space-y-1.5">
+                        <p className="text-xs text-foreground">
+                          {matchedStacks} stack{matchedStacks === 1 ? '' : 's'} on {reachableNodes} node{reachableNodes === 1 ? '' : 's'}
+                          {unreachable.length > 0 ? ` · ${unreachable.length} unreachable` : ''}
+                        </p>
+                        {matchedStacks === 0 && (
+                          <p className="text-xs text-warning">
+                            No stacks currently match this label. You can still save; membership is resolved at each run.
+                          </p>
+                        )}
+                        <ul className="space-y-1 max-h-28 overflow-y-auto">
+                          {scoped.perNode.map(n => (
+                            <li key={n.nodeId} className="text-[11px] font-mono text-stat-subtitle">
+                              {n.nodeName}: {n.reachable
+                                ? (n.stackCount > 0 ? n.stackNames.slice(0, 8).join(', ') + (n.stackNames.length > 8 ? '…' : '') : 'no match')
+                                : `unreachable${n.error ? ` (${n.error})` : ''}`}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    );
+                  })()}
+                </div>
+              </>
             )}
 
             {currentAction?.requiresNode && !currentAction.requiresStack && !currentAction.requiresContainer && (

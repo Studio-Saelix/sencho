@@ -353,6 +353,35 @@ describe('POST /api/auto-update/execute', () => {
     expect(res.body.error).toMatch(/Missing "target"/);
   });
 
+  it('rejects an empty targets array with 400', async () => {
+    const res = await request(app)
+      .post('/api/auto-update/execute')
+      .set('Cookie', adminCookie)
+      .send({ targets: [] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/non-empty array/);
+  });
+
+  it('rejects invalid names in targets with 400', async () => {
+    const res = await request(app)
+      .post('/api/auto-update/execute')
+      .set('Cookie', adminCookie)
+      .send({ targets: ['ok-stack', '../bad'] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid stack name/);
+  });
+
+  it('accepts targets[] and returns a per-stack summary string', async () => {
+    const res = await request(app)
+      .post('/api/auto-update/execute')
+      .set('Cookie', adminCookie)
+      .send({ targets: ['missing-a', 'missing-b'] });
+    expect(res.status).toBe(200);
+    expect(typeof res.body.result).toBe('string');
+    expect(res.body.result).toMatch(/missing-a/);
+    expect(res.body.result).toMatch(/missing-b/);
+  });
+
   it('rejects invalid stack name with 400', async () => {
     const res = await request(app)
       .post('/api/auto-update/execute')

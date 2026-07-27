@@ -1873,7 +1873,7 @@ function makeLifecycleTask(action: ScheduledTask['action'], overrides: Partial<S
     last_error: null,
     prune_targets: null,
     target_services: null,
-    prune_label_filter: null,
+    prune_label_filter: null, selector_type: null, selector_value: null,
     delete_after_run: 0,
     ...overrides,
   };

@@ -113,7 +113,7 @@ describe('GET /api/dashboard/configuration', () => {
       last_error: null,
       prune_targets: null,
       target_services: null,
-      prune_label_filter: null,
+      prune_label_filter: null, selector_type: null, selector_value: null,
     };
     const idA = db.createScheduledTask({
       ...baseTask,
