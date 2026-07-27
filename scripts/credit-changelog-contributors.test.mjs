@@ -7,7 +7,7 @@
  * main script; main() is never invoked because the CLI guard fires.
  */
 
-import { describe, it, afterEach } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
@@ -23,7 +23,6 @@ import {
   creditChangelogEntries,
   splitLines,
   joinLines,
-  fetchClosingIssueNumbers,
 } from './credit-changelog-contributors.mjs'
 
 const OWNER = 'Studio-Saelix'
@@ -331,78 +330,6 @@ describe('shouldRetry', () => {
 })
 
 // ---------------------------------------------------------------------------
-// fetchClosingIssueNumbers
-// ---------------------------------------------------------------------------
-
-describe('fetchClosingIssueNumbers', () => {
-  const originalFetch = globalThis.fetch
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch
-  })
-
-  function mockFetch(jsonBody) {
-    globalThis.fetch = async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers(),
-      json: async () => jsonBody,
-      text: async () => JSON.stringify(jsonBody),
-    })
-  }
-
-  it('returns [] when GraphQL resolves pullRequest to null (plain issue number)', async () => {
-    mockFetch({ data: { repository: { pullRequest: null } } })
-    const result = await fetchClosingIssueNumbers(OWNER, REPO, 42, 'tok')
-    assert.deepEqual(result, [])
-  })
-
-  it('maps same-repo closing issue nodes to numbers', async () => {
-    mockFetch({
-      data: {
-        repository: {
-          pullRequest: {
-            closingIssuesReferences: {
-              nodes: [{ number: 1652, repository: { nameWithOwner: `${OWNER}/${REPO}` } }],
-            },
-          },
-        },
-      },
-    })
-    const result = await fetchClosingIssueNumbers(OWNER, REPO, 1651, 'tok')
-    assert.deepEqual(result, [1652])
-  })
-
-  it('drops a closing reference from another repository', async () => {
-    mockFetch({
-      data: {
-        repository: {
-          pullRequest: {
-            closingIssuesReferences: {
-              nodes: [{ number: 99, repository: { nameWithOwner: 'OtherOrg/other' } }],
-            },
-          },
-        },
-      },
-    })
-    const result = await fetchClosingIssueNumbers(OWNER, REPO, 1651, 'tok')
-    assert.deepEqual(result, [])
-  })
-
-  it('throws a non-retryable error on GraphQL body errors', async () => {
-    mockFetch({ errors: [{ message: 'Field does not exist' }] })
-    await assert.rejects(
-      () => fetchClosingIssueNumbers(OWNER, REPO, 1651, 'tok'),
-      (err) => {
-        assert.match(err.message, /Field does not exist/)
-        assert.equal(err.status, 'graphql-error')
-        return true
-      },
-    )
-  })
-})
-
-// ---------------------------------------------------------------------------
 // Inline thanks helpers
 // ---------------------------------------------------------------------------
 
@@ -457,7 +384,7 @@ describe('creditChangelogEntries', () => {
       `* **drift:** resolve explicit network names that equal compose keys (${sameRepo(1588)}) ([4123793](...)), closes ${sameRepo(1581)}`,
     ].join('\n')
 
-    const map = new Map([[1581, ['auspex']]])
+    const map = new Map([[1581, 'auspex']])
     const result = creditChangelogEntries(section, map, OWNER, REPO)
     assert.ok(result.includes(`, closes ${sameRepo(1581)}, thanks @auspex`))
     assert.ok(!result.includes('thanks @auspex, thanks'))
@@ -472,7 +399,7 @@ describe('creditChangelogEntries', () => {
       `  ([abc](...)), closes ${sameRepo(1444)}`,
     ].join('\n')
 
-    const map = new Map([[1444, ['Crosis47']]])
+    const map = new Map([[1444, 'Crosis47']])
     const result = creditChangelogEntries(section, map, OWNER, REPO)
     assert.ok(result.includes(`closes ${sameRepo(1444)}, thanks @Crosis47`))
     assert.ok(!result.split('\n')[3].includes('thanks'))
@@ -485,7 +412,7 @@ describe('creditChangelogEntries', () => {
       `### Fixed`,
       `- fix: thing (${sameRepo(10)})`,
     ].join('\n')
-    const map = new Map([[10, ['dashUser']]])
+    const map = new Map([[10, 'dashUser']])
     const result = creditChangelogEntries(section, map, OWNER, REPO)
     assert.ok(result.includes(`- fix: thing (${sameRepo(10)}), thanks @dashUser`))
   })
@@ -498,7 +425,7 @@ describe('creditChangelogEntries', () => {
       `* same (${sameRepo(123)})`,
       '* cross ([#123](https://github.com/OtherOrg/other/issues/123))',
     ].join('\n')
-    const map = new Map([[123, ['sameRepoUser']]])
+    const map = new Map([[123, 'sameRepoUser']])
     const result = creditChangelogEntries(section, map, OWNER, REPO)
     const lines = result.split('\n')
     assert.ok(lines[3].includes(', thanks @sameRepoUser'))
@@ -512,26 +439,11 @@ describe('creditChangelogEntries', () => {
       `* fix (${sameRepo(1)}) closes ${sameRepo(2)}`,
     ].join('\n')
     const map = new Map([
-      [1, ['zoe']],
-      [2, ['alice']],
+      [1, 'zoe'],
+      [2, 'alice'],
     ])
     const result = creditChangelogEntries(section, map, OWNER, REPO)
     assert.ok(result.includes(', thanks @alice, @zoe'))
-  })
-
-  it('credits a login attributed to the PR number even when its own number never appears in text (silently-linked issue)', () => {
-    // The PR number (1651) is the only thing visible in the changelog text.
-    // The issue it silently closes (1652, via GitHub's Development sidebar,
-    // with no "closes #" text anywhere) is discovered out-of-band and its
-    // opener's login is credited under the PR's own visible number.
-    const section = [
-      '## [1.0.0]',
-      '',
-      `* stack glob patterns (${sameRepo(1651)})`,
-    ].join('\n')
-    const map = new Map([[1651, ['prAuthorExternal', 'issueOpenerExternal']]])
-    const result = creditChangelogEntries(section, map, OWNER, REPO)
-    assert.ok(result.includes(', thanks @issueOpenerExternal, @prAuthorExternal'))
   })
 
   it('one contributor on multiple bullets credits each applicable bullet', () => {
@@ -543,8 +455,8 @@ describe('creditChangelogEntries', () => {
       `* c (${sameRepo(2)})`,
     ].join('\n')
     const map = new Map([
-      [1, ['helper']],
-      [2, ['other']],
+      [1, 'helper'],
+      [2, 'other'],
     ])
     const result = creditChangelogEntries(section, map, OWNER, REPO)
     const lines = result.split('\n')
@@ -561,7 +473,7 @@ describe('creditChangelogEntries', () => {
       `* feat (${sameRepo(1448)})`,
       `  ([abc](...)), closes ${sameRepo(1444)}`,
     ].join('\n')
-    const map = new Map([[1444, ['Crosis47']]])
+    const map = new Map([[1444, 'Crosis47']])
     const first = creditChangelogEntries(section, map, OWNER, REPO)
     const second = creditChangelogEntries(first, map, OWNER, REPO)
     assert.equal(second, first)
@@ -574,7 +486,7 @@ describe('creditChangelogEntries', () => {
       `* feat (${sameRepo(1)}), thanks @old`,
       `  continuation closes ${sameRepo(2)}`,
     ].join('\n')
-    const map = new Map([[2, ['newUser']]])
+    const map = new Map([[2, 'newUser']])
     const result = creditChangelogEntries(section, map, OWNER, REPO)
     const lines = result.split('\n')
     assert.equal(lines[2], `* feat (${sameRepo(1)})`)
@@ -622,7 +534,7 @@ describe('creditChangelogEntries', () => {
       '  * nested child stays put',
       '* sibling',
     ].join('\n')
-    const map = new Map([[7, ['parentUser']]])
+    const map = new Map([[7, 'parentUser']])
     const result = creditChangelogEntries(section, map, OWNER, REPO)
     const lines = result.split('\n')
     assert.equal(lines[2], `* parent with ref (${sameRepo(7)}), thanks @parentUser`)
@@ -637,7 +549,7 @@ describe('creditChangelogEntries', () => {
       '* parent with no refs',
       `  * nested closes ${sameRepo(7)}`,
     ].join('\n')
-    const map = new Map([[7, ['nestedUser']]])
+    const map = new Map([[7, 'nestedUser']])
     const result = creditChangelogEntries(section, map, OWNER, REPO)
     assert.equal(result, section)
     assert.ok(!result.includes('thanks'))
@@ -651,7 +563,7 @@ describe('creditChangelogEntries', () => {
       '',
       '  later prose that looks indented',
     ].join('\n')
-    const map = new Map([[1, ['user']]])
+    const map = new Map([[1, 'user']])
     const result = creditChangelogEntries(section, map, OWNER, REPO)
     const lines = result.split('\n')
     assert.equal(lines[2], `* parent (${sameRepo(1)}), thanks @user`)
@@ -662,14 +574,14 @@ describe('creditChangelogEntries', () => {
   it('preserves LF after an actual inline rewrite', () => {
     const section = `## [1.0.0]\n\n* feat (${sameRepo(1)})\n`
     assert.ok(!section.includes('\r'))
-    const result = creditChangelogEntries(section, new Map([[1, ['u']]]), OWNER, REPO)
+    const result = creditChangelogEntries(section, new Map([[1, 'u']]), OWNER, REPO)
     assert.ok(!result.includes('\r'))
     assert.ok(result.includes(`* feat (${sameRepo(1)}), thanks @u\n`))
   })
 
   it('preserves CRLF after an actual inline rewrite', () => {
     const section = `## [1.0.0]\r\n\r\n* feat (${sameRepo(1)})\r\n`
-    const result = creditChangelogEntries(section, new Map([[1, ['u']]]), OWNER, REPO)
+    const result = creditChangelogEntries(section, new Map([[1, 'u']]), OWNER, REPO)
     assert.ok(result.includes('## [1.0.0]\r\n'))
     assert.ok(result.includes(`* feat (${sameRepo(1)}), thanks @u\r\n`))
     assert.equal(result.includes('\n') && !result.includes('\r\n'), false)
@@ -727,7 +639,7 @@ describe('removeThanksSection and bounded mutation', () => {
 
     const parsed = parseVersionSection(full)
     const section = full.slice(parsed.start, parsed.end)
-    const credited = creditChangelogEntries(section, new Map([[1, ['x']]]), OWNER, REPO)
+    const credited = creditChangelogEntries(section, new Map([[1, 'x']]), OWNER, REPO)
     const out = full.slice(0, parsed.start) + credited + full.slice(parsed.end)
 
     assert.equal(out.slice(0, parsed.start), prefix)
