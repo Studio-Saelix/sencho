@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.96.1](https://github.com/Studio-Saelix/sencho/compare/v0.96.0...v0.96.1) (2026-07-27)
+
+
+### Fixed
+
+* credit issue openers linked to a PR without closing text ([#1718](https://github.com/Studio-Saelix/sencho/issues/1718)) ([ea38113](https://github.com/Studio-Saelix/sencho/commit/ea381131940d35c506f16d8122df3725f91538a1))
+
 ## [0.96.0](https://github.com/Studio-Saelix/sencho/compare/v0.95.0...v0.96.0) (2026-07-26)
 
 
