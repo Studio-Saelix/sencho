@@ -365,7 +365,7 @@ describe('NodeUpdatesSheet', () => {
     expect(screen.queryByLabelText('Dismiss')).not.toBeInTheDocument();
   });
 
-  it('shows Reapply configuration on an up-to-date Compose-managed node without requiring updateAvailable', () => {
+  it('shows an icon-only Reapply control on an up-to-date Compose-managed node', () => {
     const triggerNodeReapply = vi.fn();
     const statuses: NodeUpdateStatus[] = [
       {
@@ -381,7 +381,9 @@ describe('NodeUpdatesSheet', () => {
     ];
     render(<NodeUpdatesSheet {...baseProps({ updateStatuses: statuses, triggerNodeReapply })} />);
     expect(screen.queryByRole('button', { name: /Update$/ })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Reapply configuration/ }));
+    const reapply = screen.getByRole('button', { name: 'Reapply configuration' });
+    expect(reapply).not.toHaveTextContent(/Reapply configuration/);
+    fireEvent.click(reapply);
     expect(triggerNodeReapply).toHaveBeenCalledWith(1);
   });
 });

@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatVersion, isValidVersion } from '@/lib/version';
@@ -421,7 +422,7 @@ export function NodeUpdatesSheet({
                                             />
                                         )}
                                         {!s.updateStatus && !s.updateAvailable && !s.skipActive && (
-                                            <Badge className="text-[10px] px-1.5 py-0 h-5 bg-success-muted text-success border-success/30">
+                                            <Badge className="text-[10px] px-1.5 py-0 h-5 shrink-0 whitespace-nowrap bg-success-muted text-success border-success/30">
                                                 <Check className="w-2.5 h-2.5 mr-0.5" /> Up to date
                                             </Badge>
                                         )}
@@ -463,19 +464,29 @@ export function NodeUpdatesSheet({
                                             </Button>
                                         )}
                                         {isAdmin && !s.updateStatus && s.canReapplyCompose && (
-                                            <Button
-                                                variant="ghost"
-                                                size="sm"
-                                                className="h-6 text-[11px] px-2.5 text-muted-foreground hover:text-stat-value"
-                                                onClick={() => triggerNodeReapply(s.nodeId)}
-                                                disabled={updatingNodeId === s.nodeId}
-                                            >
-                                                {updatingNodeId === s.nodeId ? (
-                                                    <><Loader2 className="w-3 h-3 mr-1 animate-spin" />Reapplying</>
-                                                ) : (
-                                                    <><RefreshCw className="w-3 h-3 mr-1" strokeWidth={1.5} />Reapply configuration</>
-                                                )}
-                                            </Button>
+                                            <TooltipProvider delayDuration={300}>
+                                                <Tooltip>
+                                                    <TooltipTrigger asChild>
+                                                        <Button
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            className="h-6 w-6 p-0 shrink-0 text-muted-foreground hover:text-stat-value"
+                                                            onClick={() => triggerNodeReapply(s.nodeId)}
+                                                            disabled={updatingNodeId === s.nodeId}
+                                                            aria-label={updatingNodeId === s.nodeId ? 'Reapplying configuration' : 'Reapply configuration'}
+                                                        >
+                                                            {updatingNodeId === s.nodeId ? (
+                                                                <Loader2 className="w-3 h-3 animate-spin" />
+                                                            ) : (
+                                                                <RefreshCw className="w-3 h-3" strokeWidth={1.5} />
+                                                            )}
+                                                        </Button>
+                                                    </TooltipTrigger>
+                                                    <TooltipContent side="bottom">
+                                                        {updatingNodeId === s.nodeId ? 'Reapplying…' : 'Reapply configuration'}
+                                                    </TooltipContent>
+                                                </Tooltip>
+                                            </TooltipProvider>
                                         )}
                                         {isAdmin && !s.updateStatus && s.canReapplyCompose === false && (
                                             <span

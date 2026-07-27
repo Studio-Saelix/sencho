@@ -280,7 +280,7 @@ The table lists every registered node, filtered by the search box at the top. Co
 | **Type** | `local` or `remote` outline pill |
 | **Current** | The node's reported Sencho version, in mono. Reads `unknown` if the node has not reported (offline, unreachable, or never connected). |
 | **Latest** | The newest published Sencho release. Highlighted when newer than Current. |
-| **Status** | Either an `Up to date` success badge, an `Update` button when a newer release is available, a **Reapply configuration** action for Compose-managed nodes (including up-to-date rows), an in-progress / failed badge with retry and dismiss controls, or a `Skipped` badge when the version has been deferred. |
+| **Status** | Either an `Up to date` success badge, an `Update` button when a newer release is available, an icon-only **Reapply configuration** control (tooltip) for Compose-managed nodes (including up-to-date rows), an in-progress / failed badge with retry and dismiss controls, or a `Skipped` badge when the version has been deferred. |
 
 The latest-version label is resolved from the GitHub Releases API (with a Docker Hub fallback) and cached for 30 minutes. **Recheck** flushes the cache and re-resolves immediately. See [Remote Updates · Reapply configuration](/features/remote-updates#reapply-configuration) for what reapply does and when to use it.
 
