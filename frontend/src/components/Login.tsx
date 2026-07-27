@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,19 @@ interface SSOProvider {
   provider: string;
   displayName: string;
   type: 'ldap' | 'oidc';
+}
+
+/** Authorize URL when SSO-only has exactly one OIDC provider and no LDAP; otherwise null. */
+export function oidcAutoRedirectUrl(opts: {
+  localLoginEnabled: boolean;
+  providers: Array<{ provider: string; type: string }>;
+  hadSsoError: boolean;
+}): string | null {
+  if (opts.localLoginEnabled || opts.hadSsoError) return null;
+  if (opts.providers.some((p) => p.type === 'ldap')) return null;
+  const oidc = opts.providers.filter((p) => p.type === 'oidc');
+  if (oidc.length !== 1) return null;
+  return `/api/auth/sso/oidc/${oidc[0].provider}/authorize`;
 }
 
 const INPUT_CLASS =
@@ -59,12 +72,15 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
     }
     return '';
   });
+  // Capture once: returning from a failed OIDC attempt must stay on Login, not bounce again.
+  const hadSsoErrorRef = useRef(error.length > 0);
   const [isLoading, setIsLoading] = useState(false);
   const [loginMode, setLoginMode] = useState<'local' | 'ldap'>('local');
   const [ssoProviders, setSsoProviders] = useState<SSOProvider[]>([]);
   const [localLoginEnabled, setLocalLoginEnabled] = useState(false);
   const [discoveryError, setDiscoveryError] = useState('');
   const [discoveryReady, setDiscoveryReady] = useState(false);
+  const [oidcRedirecting, setOidcRedirecting] = useState(false);
   const [capsLock, setCapsLock] = useState(false);
 
   useEffect(() => {
@@ -98,6 +114,17 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
         }
         const providers = await providersRes.json() as SSOProvider[];
         const list = Array.isArray(providers) ? providers : [];
+        const autoUrl = oidcAutoRedirectUrl({
+          localLoginEnabled: enabled,
+          providers: list,
+          hadSsoError: hadSsoErrorRef.current,
+        });
+        if (autoUrl) {
+          setOidcRedirecting(true);
+          setDiscoveryReady(true);
+          window.location.replace(autoUrl);
+          return;
+        }
         setSsoProviders(list);
         if (!enabled && list.some((p) => p.type === 'ldap')) {
           setLoginMode('ldap');
@@ -194,7 +221,18 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
             <ErrorRail>{discoveryError}</ErrorRail>
           )}
 
-          {discoveryReady && !blockLocalFallback && showPasswordForm && (
+          {discoveryReady && oidcRedirecting && (
+            <div className="flex items-center justify-center gap-2 text-stat-subtitle">
+              <Loader2 className="h-4 w-4 animate-spin" strokeWidth={1.5} aria-hidden />
+              <span className="font-sans text-sm">Redirecting to your identity provider...</span>
+            </div>
+          )}
+
+          {discoveryReady && !blockLocalFallback && !oidcRedirecting && error && !showPasswordForm && (
+            <ErrorRail>{error}</ErrorRail>
+          )}
+
+          {discoveryReady && !blockLocalFallback && !oidcRedirecting && showPasswordForm && (
             <form onSubmit={handleSubmit} className="flex flex-col gap-5">
               <div className="flex flex-col gap-1.5">
                 <label
@@ -264,7 +302,7 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
             </form>
           )}
 
-          {discoveryReady && !blockLocalFallback && oidcProviders.length > 0 && (
+          {discoveryReady && !blockLocalFallback && !oidcRedirecting && oidcProviders.length > 0 && (
             <div className="flex flex-col gap-3">
               {showPasswordForm && (
                 <div className="flex items-center gap-3">
@@ -302,7 +340,7 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
             </div>
           )}
 
-          {discoveryReady && !blockLocalFallback && !showPasswordForm && oidcProviders.length === 0 && !discoveryError && (
+          {discoveryReady && !blockLocalFallback && !oidcRedirecting && !showPasswordForm && oidcProviders.length === 0 && !discoveryError && (
             <ErrorRail>No identity providers are available. Contact your administrator.</ErrorRail>
           )}
         </div>

@@ -83,7 +83,7 @@ Admins manage SSO providers in **Settings → Access → SSO** (admin only). The
 At the top of the page, **Authentication mode** chooses how interactive login works:
 
 - **Local and SSO** (default): local username/password login remains available alongside configured providers.
-- **SSO only**: local password login is disabled. The login page shows only LDAP and/or OIDC providers. Direct calls to the password login endpoint are rejected.
+- **SSO only**: local password login is disabled. The login page shows only LDAP and/or OIDC providers. Direct calls to the password login endpoint are rejected. When exactly one OIDC provider is enabled and LDAP is not, the login page redirects straight to that provider's authorization endpoint. Multiple OIDC providers still show chooser buttons. A failed SSO attempt that returns to the login page with an error stays on the page so the message is visible.
 
 SSO only cannot be enabled until at least one provider is enabled, a connection test succeeds, and the signed-in administrator authenticated through SSO with the Admin role. Confirm the outage-risk warning before saving. Existing sessions stay valid until they expire or are revoked.
 
