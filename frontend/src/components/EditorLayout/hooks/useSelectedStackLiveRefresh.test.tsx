@@ -8,7 +8,7 @@ vi.mock('@/lib/utils', async () => {
   const actual = await vi.importActual<typeof import('@/lib/utils')>('@/lib/utils');
   return {
     ...actual,
-    visibilityInterval: (fn: () => void, _ms: number) => {
+    visibilityInterval: (fn: () => void) => {
       visibilityFns.push(fn);
       const cleanup = () => {
         const idx = visibilityFns.indexOf(fn);
