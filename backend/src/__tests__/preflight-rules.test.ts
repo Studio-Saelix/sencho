@@ -241,11 +241,14 @@ describe('hygiene rules', () => {
     expect(ids(runRules(ctx({
       model: bare,
       healthchecks: { web: { state: 'runtime-inherited', origin: 'runtime', consistentReplicas: true } },
-    })), 'healthcheck-inherited')[0].severity).toBe('info');
+    })), 'healthcheck-inherited')[0]).toMatchObject({
+      severity: 'info',
+      title: 'Healthcheck inherited from image',
+    });
     expect(ids(runRules(ctx({
       model: bare,
       healthchecks: { web: { state: 'local-image-inherited', origin: 'local-image', consistentReplicas: null } },
-    })), 'healthcheck-inherited')).toHaveLength(1);
+    })), 'healthcheck-inherited')[0].remediation).toMatch(/Optionally declare/);
     expect(ids(runRules(ctx({
       model: bare,
       healthchecks: { web: { state: 'unverifiable', origin: 'none', consistentReplicas: null } },

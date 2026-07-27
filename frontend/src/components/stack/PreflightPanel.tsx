@@ -14,6 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Combobox, type ComboboxOption } from '@/components/ui/combobox';
 import { Modal, ModalHeader, ModalBody, ModalFooter, ConfirmModal } from '@/components/ui/modal';
+import { isPreflightNoteFinding } from '@/lib/preflightNotes';
 
 type PreflightSeverity = 'blocker' | 'high' | 'warning' | 'info';
 type PreflightStatus = 'never-run' | 'pass' | 'unrenderable' | PreflightSeverity;
@@ -70,7 +71,10 @@ const EXPIRY_LABELS: Record<PreflightAckExpiryMode, string> = {
   until_image_change: 'Until image changes',
 };
 
-function summaryMeta(report: PreflightReport): { label: string; icon: LucideIcon; tone: string; line: string } {
+function summaryMeta(
+  report: PreflightReport,
+  activeFindings: PreflightFinding[],
+): { label: string; icon: LucideIcon; tone: string; line: string } {
   if (!report.renderable) {
     return {
       label: 'cannot render',
@@ -84,7 +88,7 @@ function summaryMeta(report: PreflightReport): { label: string; icon: LucideIcon
   }
   const meta = SEVERITY_META[report.activeHighestSeverity ?? 'info'];
   const activeParts = GROUP_ORDER
-    .map(sev => ({ sev, n: report.findings.filter(f => !f.acknowledged && f.severity === sev).length }))
+    .map(sev => ({ sev, n: activeFindings.filter(f => f.severity === sev).length }))
     .filter(c => c.n > 0)
     .map(c => `${c.n} ${SEVERITY_META[c.sev].label}`)
     .join(' · ');
@@ -267,16 +271,19 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
     }
   };
 
-  const activeFindings = useMemo(
-    () => report?.findings.filter(f => !f.acknowledged) ?? [],
-    [report?.findings],
-  );
-  const acknowledgedFindings = useMemo(
-    () => report?.findings.filter(f => f.acknowledged) ?? [],
-    [report?.findings],
-  );
+  const { activeFindings, noteFindings, acknowledgedFindings } = useMemo(() => {
+    const notes: PreflightFinding[] = [];
+    const active: PreflightFinding[] = [];
+    const acknowledged: PreflightFinding[] = [];
+    for (const f of report?.findings ?? []) {
+      if (isPreflightNoteFinding(f.ruleId)) notes.push(f);
+      else if (f.acknowledged) acknowledged.push(f);
+      else active.push(f);
+    }
+    return { activeFindings: active, noteFindings: notes, acknowledgedFindings: acknowledged };
+  }, [report?.findings]);
 
-  const summary = report && report.status !== 'never-run' ? summaryMeta(report) : null;
+  const summary = report && report.status !== 'never-run' ? summaryMeta(report, activeFindings) : null;
   const SummaryIcon = summary?.icon;
   const busy = loading || running;
 
@@ -416,6 +423,21 @@ export default function PreflightPanel({ stackName, canEdit = false }: { stackNa
               </div>
               <div className="mt-1 font-mono text-[11px] leading-relaxed text-foreground/80">{summary.line}</div>
             </div>
+          )}
+
+          {noteFindings.length > 0 && (
+            <section data-testid="preflight-notes-section">
+              <div className={cn(LABEL_CLASS, 'mb-1.5')}>notes · {noteFindings.length}</div>
+              <div className="rounded-lg border border-muted bg-card/40 px-3 py-1">
+                {noteFindings.map((f, i) => (
+                  <FindingRow
+                    key={`note-${f.ruleId}-${f.service ?? ''}-${i}`}
+                    finding={f}
+                    canEdit={false}
+                  />
+                ))}
+              </div>
+            </section>
           )}
 
           {GROUP_ORDER.map(sev => {

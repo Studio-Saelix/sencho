@@ -7,6 +7,18 @@ import { classifyMissingExternalNetworks } from '../network/missingExternalNetwo
 /** Higher number = more severe. Used to derive a run's overall status. */
 export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warning: 1, high: 2, blocker: 3 };
 
+/**
+ * Rule IDs that are informational notes, not issue findings. They appear in the
+ * report for context but do not affect All Clear, active severity, or Update Guard.
+ */
+export const PREFLIGHT_NOTE_RULE_IDS: ReadonlySet<string> = new Set([
+  'healthcheck-inherited',
+]);
+
+export function isPreflightNoteFinding(ruleId: string): boolean {
+  return PREFLIGHT_NOTE_RULE_IDS.has(ruleId);
+}
+
 /** The one rule whose message doubles as the report's render error. Shared so the
  *  service that reconstructs renderError from it cannot drift from the rule id. */
 export const RENDER_FAILED_RULE_ID = 'render-failed';
@@ -421,15 +433,17 @@ const healthcheckInherited: PreflightRule = {
       })
       .map(s => {
         const origin = ctx.healthchecks[s.name]?.origin;
-        const from = origin === 'runtime' ? 'the currently running container' : 'the locally available image';
+        const from = origin === 'runtime'
+          ? 'Docker is using the healthcheck from the currently running container image'
+          : 'Docker is using the healthcheck defined by the locally available container image';
         return {
           ruleId: 'healthcheck-inherited',
           severity: 'info' as const,
-          title: 'Healthcheck inherited from current image',
-          message: `Service "${s.name}" does not declare a Compose healthcheck, but ${from} provides an effective one.`,
+          title: 'Healthcheck inherited from image',
+          message: `Service "${s.name}" does not declare a healthcheck in Compose. ${from}.`,
           sourcePath: s.name,
           service: s.name,
-          remediation: 'Optionally declare the healthcheck in Compose so coverage stays explicit across redeploys.',
+          remediation: 'Optionally declare the healthcheck in Compose so its configuration remains explicit and independently controlled.',
         };
       });
   },

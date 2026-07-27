@@ -121,7 +121,7 @@ All 36 rules are listed below, organized by topic.
 | No restart policy | Warning | A service has no restart policy and will not come back after a crash or host reboot. |
 | No effective healthcheck detected | Warning | Sencho verified that the service has no effective healthcheck in the Compose model, running containers, or a locally available image. |
 | Healthcheck explicitly disabled | Warning | The Compose model disables the healthcheck (`disable: true` or `test: NONE`). |
-| Healthcheck inherited from current image | Info | The Compose model does not declare a healthcheck, but the running container or a local image provides one. |
+| Healthcheck inherited from image | Note | The Compose model does not declare a healthcheck, but the running container or a local image provides one. Coverage is treated as satisfied (All Clear); the note explains the origin. |
 | Healthcheck inheritance could not be verified | Info | No Compose healthcheck is declared, and Sencho could not verify inheritance (Docker unreachable, image not present locally, or incomplete inspection). Doctor never pulls images. |
 | Replica healthcheck coverage is inconsistent | Warning | Running replicas for the service disagree on effective healthcheck coverage. |
 

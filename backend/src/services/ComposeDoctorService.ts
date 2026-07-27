@@ -11,7 +11,7 @@ import { parseComposeDependencies } from '../helpers/composeDependencyParse';
 import { parseEffectiveModel, type EffectiveModel } from './preflight/effectiveModel';
 import { getExposureContext } from './network/exposureContext';
 import type { ExposureIntent } from './network/types';
-import { runRules, SEVERITY_RANK, RULE_IDS, RENDER_FAILED_RULE_ID } from './preflight/rules';
+import { runRules, SEVERITY_RANK, RULE_IDS, RENDER_FAILED_RULE_ID, isPreflightNoteFinding } from './preflight/rules';
 import type {
   BindCheck, NodePortBinding, PreflightContext, PreflightFinding, PreflightReport, PreflightSeverity, PreflightStatus, MissingEnvFile,
   ServiceHealthcheckEvidence,
@@ -40,6 +40,7 @@ function sortFindings(findings: PreflightFinding[]): PreflightFinding[] {
 function highestOf(findings: PreflightFinding[]): PreflightSeverity | null {
   let best: PreflightSeverity | null = null;
   for (const f of findings) {
+    if (isPreflightNoteFinding(f.ruleId)) continue;
     if (best === null || SEVERITY_RANK[f.severity] > SEVERITY_RANK[best]) best = f.severity;
   }
   return best;
@@ -49,8 +50,10 @@ function activeFields(
   renderable: boolean,
   findings: PreflightFinding[],
 ): Pick<PreflightReport, 'activeStatus' | 'activeHighestSeverity' | 'activeCount' | 'acknowledgedCount'> {
-  const active = findings.filter(f => !f.acknowledged);
-  const acknowledgedCount = findings.length - active.length;
+  // Notes stay in `findings` for display but do not affect All Clear or active severity.
+  const issueFindings = findings.filter(f => !isPreflightNoteFinding(f.ruleId));
+  const active = issueFindings.filter(f => !f.acknowledged);
+  const acknowledgedCount = issueFindings.length - active.length;
   const activeHighestSeverity = highestOf(active);
   const activeStatus: PreflightStatus = !renderable
     ? 'unrenderable'
