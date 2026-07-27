@@ -11,10 +11,15 @@ import type { EffService, EffectiveModel } from '../services/preflight/effective
 import type { PreflightContext, PreflightFinding } from '../services/preflight/types';
 
 function svc(over: Partial<EffService> = {}): EffService {
+  const hasHealthcheck = over.hasHealthcheck ?? true;
+  const composeHealthcheck = over.composeHealthcheck ?? (hasHealthcheck ? 'active' : 'absent');
   return {
     name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [], storageMounts: [],
-    privileged: false, hasHealthcheck: true, restart: 'unless-stopped', envKeys: [],
-    networks: [], extraHosts: [], labelKeys: [], ...over,
+    privileged: false, restart: 'unless-stopped', envKeys: [],
+    networks: [], extraHosts: [], labelKeys: [],
+    ...over,
+    hasHealthcheck,
+    composeHealthcheck,
   };
 }
 
@@ -33,7 +38,9 @@ function ctx(over: Partial<PreflightContext> = {}): PreflightContext {
     existingContainers: [], nodeStateAvailable: true, bindChecks: [],
     stackIntent: null, serviceIntents: {}, accessUrlPorts: new Set(), hasAccessUrls: false,
     exposureAvailable: true,
-    isSelfStack: false, ...over,
+    isSelfStack: false,
+    healthchecks: {},
+    ...over,
   };
 }
 
@@ -217,9 +224,52 @@ describe('hygiene rules', () => {
     expect(restartFindings[0].remediation).toMatch(/one-shot|init jobs/i);
     expect(restartFindings[0].remediation).toMatch(/restart: "no"/);
     expect(restartFindings[0].remediation).toMatch(/unless-stopped/);
-    expect(ids(runRules(ctx({ model: bare })), 'no-healthcheck')).toHaveLength(1);
+    expect(ids(runRules(ctx({
+      model: bare,
+      healthchecks: { web: { state: 'absent', origin: 'local-image', consistentReplicas: null } },
+    })), 'no-healthcheck')).toHaveLength(1);
     const withDeployRestart = model([svc({ restart: undefined, deploy: { restart_policy: { condition: 'any' } }})]);
     expect(ids(runRules(ctx({ model: withDeployRestart })), 'no-restart-policy')).toHaveLength(0);
+  });
+
+  it('emits the healthcheck evidence rule family', () => {
+    const bare = model([svc({ hasHealthcheck: false })]);
+    expect(ids(runRules(ctx({
+      model: bare,
+      healthchecks: { web: { state: 'explicitly-disabled', origin: 'compose', consistentReplicas: null } },
+    })), 'healthcheck-disabled')).toHaveLength(1);
+    expect(ids(runRules(ctx({
+      model: bare,
+      healthchecks: { web: { state: 'runtime-inherited', origin: 'runtime', consistentReplicas: true } },
+    })), 'healthcheck-inherited')[0].severity).toBe('info');
+    expect(ids(runRules(ctx({
+      model: bare,
+      healthchecks: { web: { state: 'local-image-inherited', origin: 'local-image', consistentReplicas: null } },
+    })), 'healthcheck-inherited')).toHaveLength(1);
+    expect(ids(runRules(ctx({
+      model: bare,
+      healthchecks: { web: { state: 'unverifiable', origin: 'none', consistentReplicas: null } },
+    })), 'healthcheck-unverifiable')[0].severity).toBe('info');
+    expect(ids(runRules(ctx({
+      model: bare,
+      healthchecks: { web: { state: 'inconsistent-replicas', origin: 'runtime', consistentReplicas: false } },
+    })), 'healthcheck-inconsistent')).toHaveLength(1);
+    expect(ids(runRules(ctx({
+      model: bare,
+      healthchecks: { web: { state: 'compose-declared', origin: 'compose', consistentReplicas: null } },
+    })), 'no-healthcheck')).toHaveLength(0);
+  });
+
+  it('never embeds healthcheck Test command text in findings', () => {
+    const bare = model([svc({ hasHealthcheck: false })]);
+    const findings = runRules(ctx({
+      model: bare,
+      healthchecks: { web: { state: 'runtime-inherited', origin: 'runtime', consistentReplicas: true } },
+    }));
+    const blob = findings.map(f => `${f.title}\n${f.message}\n${f.remediation ?? ''}`).join('\n');
+    expect(blob).not.toMatch(/\bCMD\b/);
+    expect(blob).not.toMatch(/CMD-SHELL/);
+    expect(blob).not.toContain('secret-token');
   });
   it('flags swarm-only deploy fields but not honored ones', () => {
     expect(ids(runRules(ctx({ model: model([svc({ deploy: { placement: {} }})]) })), 'deploy-swarm-only')).toHaveLength(1);
@@ -491,7 +541,9 @@ describe('rule registry completeness', () => {
   const EXPECTED_RULE_IDS = [
     'render-failed', 'env-unset', 'env-literal-dollar', 'env-file-missing', 'port-conflict-node', 'port-conflict-internal', 'port-exposed-all-interfaces',
     'bind-path-missing', 'bind-path-permission', 'docker-socket-mount', 'privileged', 'network-mode-host',
-    'uid-gid-risk', 'image-latest', 'no-restart-policy', 'no-healthcheck', 'deploy-swarm-only',
+    'uid-gid-risk', 'image-latest', 'no-restart-policy', 'no-healthcheck',
+    'healthcheck-disabled', 'healthcheck-inherited', 'healthcheck-unverifiable', 'healthcheck-inconsistent',
+    'deploy-swarm-only',
     'node-state-unavailable',
     'external-network-missing', 'external-volume-missing', 'new-network', 'new-volume', 'anonymous-volume',
     'container-name-internal-dup', 'container-name-collision',

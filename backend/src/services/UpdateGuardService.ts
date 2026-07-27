@@ -6,6 +6,7 @@ import { ComposeDoctorService } from './ComposeDoctorService';
 import { UpdatePreviewService, isMovingTag, filterPreviewForService } from './UpdatePreviewService';
 import { buildEffectiveServiceModel, type EffectiveServiceModelResult } from './effectiveServiceModel';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
+import { isDockerHealthcheckActive } from '../helpers/healthcheckPresence';
 import { withTimeout } from '../utils/withTimeout';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -97,7 +98,7 @@ export class UpdateGuardService {
           state: inspect.State?.Status ?? info.State ?? 'unknown',
           health: inspect.State?.Health?.Status ?? null,
           exitCode: typeof inspect.State?.ExitCode === 'number' ? inspect.State.ExitCode : null,
-          hasHealthcheck: !!inspect.Config?.Healthcheck?.Test?.length,
+          hasHealthcheck: isDockerHealthcheckActive(inspect.Config?.Healthcheck?.Test),
           restartPolicy: inspect.HostConfig?.RestartPolicy?.Name || null,
           mounts,
         };

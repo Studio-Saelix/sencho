@@ -12,6 +12,7 @@ export interface EffectiveServiceSpec {
     /** May be 0 (explicit `scale: 0` or `deploy.replicas: 0`); defaults to 1 when neither is set. */
     expectedReplicas: number;
     dependsOn: string[];
+    /** False when Compose omits the healthcheck, sets disable: true, or uses test NONE. */
     hasHealthcheck: boolean;
 }
 

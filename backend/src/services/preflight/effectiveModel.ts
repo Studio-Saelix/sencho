@@ -6,6 +6,8 @@
  * are handled by the caller, not here.
  */
 
+import { classifyComposeHealthcheck } from '../../helpers/healthcheckPresence';
+
 /** A host-published port range declared by a service (start==end for one port). */
 export interface EffPortSpec {
   startPort: number;
@@ -55,7 +57,13 @@ export interface EffService {
   privileged: boolean;
   networkMode?: string;
   restart?: string;
+  /**
+   * True when the rendered Compose model declares an active healthcheck.
+   * False for absent, `disable: true`, and `test: NONE` / `["NONE"]`.
+   */
   hasHealthcheck: boolean;
+  /** Compose-layer classification used by healthcheck evidence collection. */
+  composeHealthcheck: 'active' | 'disabled' | 'absent';
   /** Raw deploy block (preflight uses key presence; Drift also reads restart_policy.condition). Undefined = none. */
   deploy?: Record<string, unknown>;
   containerName?: string;
@@ -393,10 +401,7 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       : [];
     const { binds, named } = parseVolumes(svc.volumes);
     const storageMounts = parseStorageMounts(svc.volumes, svc.tmpfs);
-    const healthcheck = svc.healthcheck;
-    const hasHealthcheck = !!healthcheck
-      && typeof healthcheck === 'object'
-      && (healthcheck as Record<string, unknown>).disable !== true;
+    const composeHealthcheck = classifyComposeHealthcheck(svc.healthcheck);
     services.push({
       name,
       image: str(svc.image),
@@ -407,7 +412,8 @@ export function parseEffectiveModel(parsed: unknown, fallbackProjectName: string
       privileged: svc.privileged === true,
       networkMode: str(svc.network_mode),
       restart: str(svc.restart),
-      hasHealthcheck,
+      hasHealthcheck: composeHealthcheck === 'active',
+      composeHealthcheck,
       deploy: (svc.deploy && typeof svc.deploy === 'object') ? svc.deploy as Record<string, unknown> : undefined,
       containerName: str(svc.container_name),
       user: str(svc.user),

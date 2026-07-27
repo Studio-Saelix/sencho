@@ -5,7 +5,7 @@ description: Run a preflight check on a stack before you deploy. Compose Doctor 
 
 The **Doctor** tab in the right-hand **Anatomy** panel answers one question before you apply a change: *what will Docker actually run, and is it safe on this node?* Compose Doctor renders the effective Compose model (the fully resolved result after interpolation, includes, profiles, `.env`, and `env_file` are applied) and then runs a set of deterministic checks against it and the live Docker state on the node it would deploy to.
 
-The check is advisory: on its own it never blocks a deploy or changes a stack. (One rule is the exception: see [Self-management](#self-management) below for the one case where Sencho actively blocks an action, independent of this report.) It runs on demand: press **run preflight** and Sencho renders the model, runs all 32 checks, and stores the result so the tab still shows it the next time you open the stack.
+The check is advisory: on its own it never blocks a deploy or changes a stack. (One rule is the exception: see [Self-management](#self-management) below for the one case where Sencho actively blocks an action, independent of this report.) It runs on demand: press **run preflight** and Sencho renders the model, runs all 36 checks, and stores the result so the tab still shows it the next time you open the stack.
 
 ## Where to find it
 
@@ -24,7 +24,7 @@ Every preflight run follows three steps:
 
 1. **Render** the effective model. Sencho calls `docker compose config` on the stack, which resolves all variable interpolation, `include` directives, profile overrides, and `env_file` references into a single, normalized model.
 2. **Snapshot** live Docker state. Sencho reads which host ports are in use, which containers are running, and which named networks and volumes exist on the target node.
-3. **Run 32 deterministic rules** against the combination. Each rule is pure and produces zero or more findings with a severity, a message, and a suggested fix.
+3. **Run 36 deterministic rules** against the combination. Each rule is pure and produces zero or more findings with a severity, a message, and a suggested fix.
 
 Sencho stores exactly one run per stack per node, so a new run immediately overwrites the previous one; there is no history.
 
@@ -73,7 +73,7 @@ A small colored dot appears on the **Doctor** tab label when the last run's acti
 
 ## What it checks
 
-All 32 rules are listed below, organized by topic.
+All 36 rules are listed below, organized by topic.
 
 ### Model rendering
 
@@ -119,7 +119,11 @@ All 32 rules are listed below, organized by topic.
 |------|----------|----------------|
 | Image uses a moving tag | Warning | A service uses `:latest` or a tag-less image reference, making deploys non-reproducible and subject to unexpected changes. |
 | No restart policy | Warning | A service has no restart policy and will not come back after a crash or host reboot. |
-| No healthcheck | Warning | A service declares no healthcheck in the Compose model. The image itself may define one, but Sencho cannot see it from the model alone. |
+| No effective healthcheck detected | Warning | Sencho verified that the service has no effective healthcheck in the Compose model, running containers, or a locally available image. |
+| Healthcheck explicitly disabled | Warning | The Compose model disables the healthcheck (`disable: true` or `test: NONE`). |
+| Healthcheck inherited from current image | Info | The Compose model does not declare a healthcheck, but the running container or a local image provides one. |
+| Healthcheck inheritance could not be verified | Info | No Compose healthcheck is declared, and Sencho could not verify inheritance (Docker unreachable, image not present locally, or incomplete inspection). Doctor never pulls images. |
+| Replica healthcheck coverage is inconsistent | Warning | Running replicas for the service disagree on effective healthcheck coverage. |
 
 ### Compose semantics
 
@@ -163,7 +167,7 @@ These rules activate when the stack publishes at least one host port. They use t
 
 ## Exposure intent checks
 
-Five of the 32 rules cross-reference the stack's exposure intent and the access URLs documented in the Stack Dossier. These rules only fire when the stack publishes at least one host port.
+Five of the 36 rules cross-reference the stack's exposure intent and the access URLs documented in the Stack Dossier. These rules only fire when the stack publishes at least one host port.
 
 To resolve exposure-related findings:
 
@@ -186,7 +190,7 @@ The networking-relevant rules on this page (host mode, exposure intent, port con
 
 ## Node-state checks and graceful degradation
 
-Six of the 32 rules require live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision) and one is "Host port is already in use" in Port conflicts. All six are skipped when the Docker daemon is unreachable.
+Six of the 36 rules require live Docker state to run: five are in the Node state category (external networks and volumes, new-resource notices, and container_name collision) and one is "Host port is already in use" in Port conflicts. All six are skipped when the Docker daemon is unreachable. Healthcheck inheritance checks also read Docker when Compose does not declare a healthcheck; those degrade to an Info finding when the daemon or image is unavailable.
 
 When the daemon is unreachable:
 
@@ -260,7 +264,7 @@ There is no tier gate: Compose Doctor is available on all plans.
 - **Advisory only, with one exception.** Compose Doctor's report never blocks a deploy or changes any stack configuration; act on findings or ignore them. The one exception is the self-management guard: Sencho refuses generic deploy, update, stop, down, and delete actions on its own compose project regardless of whether that finding is acknowledged. See [Self-management](#self-management).
 - **Dismissing the summary is local to your browser.** The **X** on the summary card and the Doctor tab dot share a per-stack, per-node dismissal stored in your browser's local storage. It is not synced across devices or between teammates, so a dismissal you make is invisible to anyone else looking at the same stack.
 - **Bind-mount checks are scoped.** Only paths that resolve inside the node's Compose base directory can be checked for existence and ownership. Absolute host paths outside that directory (such as `/mnt/media`) are not reported as missing.
-- **Healthcheck rule cannot see image-level healthchecks.** The no-healthcheck rule fires when the Compose model does not declare a healthcheck. Many images define one internally that Sencho cannot see from the rendered model; treat the finding as a prompt to confirm the image provides one.
+- **Healthcheck coverage uses Compose, runtime, and local image evidence.** Doctor checks the rendered Compose model first, then running containers for the service, then the locally available declared image. It never pulls an image. When evidence is incomplete, it reports that inheritance could not be verified instead of claiming a definitive absence.
 - **One run stored per node.** There is no history. Each new run overwrites the previous one for that stack on that node.
 - **Node-state rules require a reachable Docker daemon.** See [Node-state checks and graceful degradation](#node-state-checks-and-graceful-degradation).
 - **Port conflict check excludes the checked stack.** Host ports already held by the stack being checked are ignored, so redeploying a running stack does not generate a false conflict with itself.
@@ -276,7 +280,7 @@ There is no tier gate: Compose Doctor is available on all plans.
     Compose Doctor can only check paths that resolve inside the node's Compose base directory, such as a relative `./data` mount. An absolute host path like `/mnt/media` is outside what Sencho can see from inside its container and is never reported as missing. A missing relative path is a real finding: Docker would create it as a root-owned directory on deploy.
   </Accordion>
   <Accordion title="Every service is flagged for no healthcheck">
-    The no-healthcheck rule fires when the Compose model does not declare a healthcheck. Many images define their own healthcheck internally, which Sencho cannot see from the model alone. Treat these findings as a prompt to confirm the image provides a healthcheck rather than a hard problem.
+    Doctor reports missing healthcheck coverage only after checking the Compose model, running containers for the service, and any locally available declared image. An Info finding means inheritance could not be verified (for example the image is not present locally). Doctor does not pull images during a run. Add an explicit Compose healthcheck, or make sure the image is available on the node and run preflight again.
   </Accordion>
   <Accordion title="A port conflict is flagged for a port my own stack uses">
     Preflight ignores ports already held by the stack being checked, so redeploying a running stack does not flag its own bindings. A conflict finding means a different stack or an unmanaged container holds that host port on this node.

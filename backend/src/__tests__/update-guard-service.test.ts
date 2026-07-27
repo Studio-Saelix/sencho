@@ -116,6 +116,21 @@ describe('UpdateGuardService.probeContainers', () => {
     expect(probes[0].name).toBe('app-web-1');
   });
 
+  it('treats Test NONE as no effective healthcheck', async () => {
+    mockListContainers.mockResolvedValue([
+      { Id: 'aaa', Names: ['/app-web-1'], State: 'running' },
+    ]);
+    mockGetContainer.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue(inspectResult({
+        Config: { Healthcheck: { Test: ['NONE'] } },
+      })),
+    });
+
+    const probes = await UpdateGuardService.getInstance().probeContainers(0, 'app');
+    expect(probes).toHaveLength(1);
+    expect(probes[0].hasHealthcheck).toBe(false);
+  });
+
   it('propagates non-404 inspect failures so the whole signal degrades honestly', async () => {
     mockListContainers.mockResolvedValue([
       { Id: 'aaa', Names: ['/app-web-1'], State: 'running' },

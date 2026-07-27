@@ -14,7 +14,9 @@ import type { ExposureIntent } from './network/types';
 import { runRules, SEVERITY_RANK, RULE_IDS, RENDER_FAILED_RULE_ID } from './preflight/rules';
 import type {
   BindCheck, NodePortBinding, PreflightContext, PreflightFinding, PreflightReport, PreflightSeverity, PreflightStatus, MissingEnvFile,
+  ServiceHealthcheckEvidence,
 } from './preflight/types';
+import { collectServiceHealthcheckEvidence } from './healthcheck/collectServiceHealthcheckEvidence';
 import { applyPreflightAcknowledgements, parseServiceImages } from '../utils/preflight-ack-filter';
 
 import { isPathWithinBase } from '../utils/validation';
@@ -265,7 +267,12 @@ export class ComposeDoctorService {
     }
 
     const { nodePorts, existingNetworkNames, existingVolumeNames, existingContainers, nodeStateAvailable } = await this.nodeState(nodeId, fsSvc, stackName);
-    const bindChecks = model ? await this.resolveBindChecks(model, baseDir) : [];
+    const [bindChecks, healthchecks] = await Promise.all([
+      model ? this.resolveBindChecks(model, baseDir) : Promise.resolve([] as BindCheck[]),
+      model
+        ? collectServiceHealthcheckEvidence(nodeId, stackName, model, nodeStateAvailable)
+        : Promise.resolve({} as Record<string, ServiceHealthcheckEvidence>),
+    ]);
     const { stackIntent, serviceIntents, accessUrlPorts, hasAccessUrls, exposureAvailable } = this.exposureState(nodeId, stackName);
     const selfStack = await isSelfStack(stackName);
 
@@ -292,6 +299,7 @@ export class ComposeDoctorService {
       hasAccessUrls,
       exposureAvailable,
       isSelfStack: selfStack,
+      healthchecks,
     };
   }
 

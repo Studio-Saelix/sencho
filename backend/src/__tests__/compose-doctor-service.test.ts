@@ -41,6 +41,13 @@ function stubDocker(
     getDependencySnapshot: snapshot === 'reject'
       ? vi.fn().mockRejectedValue(new Error('docker down'))
       : vi.fn().mockResolvedValue(snapshot),
+    getDocker: vi.fn(() => ({
+      listContainers: vi.fn().mockResolvedValue([]),
+      getContainer: vi.fn(() => ({
+        inspect: vi.fn().mockResolvedValue({ Config: {} }),
+      })),
+    })),
+    inspectImage: vi.fn().mockRejectedValue(Object.assign(new Error('No such image'), { statusCode: 404 })),
   } as unknown as DockerController);
 }
 
@@ -85,7 +92,7 @@ describe('runPreflight', () => {
     expect(report.renderable).toBe(true);
     expect(report.status).toBe('high'); // env-unset + 0.0.0.0 exposure are high
     expect(report.highestSeverity).toBe('high');
-    expect(report.findings.map(f => f.ruleId)).toEqual(expect.arrayContaining(['env-literal-dollar', 'port-exposed-all-interfaces', 'image-latest', 'no-healthcheck']));
+    expect(report.findings.map(f => f.ruleId)).toEqual(expect.arrayContaining(['env-literal-dollar', 'port-exposed-all-interfaces', 'image-latest', 'healthcheck-unverifiable']));
     expect(report.ranBy).toBe('tester');
     expect(report.sourceHash).toBeTruthy();
 
