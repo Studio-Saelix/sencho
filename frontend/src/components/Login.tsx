@@ -62,7 +62,7 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
   const [isLoading, setIsLoading] = useState(false);
   const [loginMode, setLoginMode] = useState<'local' | 'ldap'>('local');
   const [ssoProviders, setSsoProviders] = useState<SSOProvider[]>([]);
-  const [localLoginEnabled, setLocalLoginEnabled] = useState(true);
+  const [localLoginEnabled, setLocalLoginEnabled] = useState(false);
   const [discoveryError, setDiscoveryError] = useState('');
   const [discoveryReady, setDiscoveryReady] = useState(false);
   const [capsLock, setCapsLock] = useState(false);
@@ -78,6 +78,8 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
         if (cancelled) return;
 
         if (!statusRes.ok) {
+          // Fail closed: keep localLoginEnabled false so a status outage never
+          // reveals the password form under SSO-only.
           setDiscoveryError('Could not load authentication status. Refresh the page and try again.');
           setDiscoveryReady(true);
           return;
@@ -141,11 +143,13 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
     }
   };
 
-  const footerLabel = !localLoginEnabled
-    ? 'Console · SSO'
-    : loginMode === 'ldap'
-      ? 'Console · LDAP'
-      : 'Console · Local';
+  const footerLabel = !discoveryReady
+    ? 'Console'
+    : !localLoginEnabled
+      ? 'Console · SSO'
+      : loginMode === 'ldap'
+        ? 'Console · LDAP'
+        : 'Console · Local';
 
   return (
     <div className={cn('relative', className)} {...props}>
@@ -271,13 +275,21 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
                   <div className="h-px flex-1 bg-card-border" />
                 </div>
               )}
-              <div className="grid grid-cols-2 gap-2">
+              <div
+                className={cn(
+                  'grid gap-2',
+                  oidcProviders.length === 1 ? 'grid-cols-1 justify-items-center' : 'grid-cols-2',
+                )}
+              >
                 {oidcProviders.map((p) => (
                   <Button
                     key={p.provider}
                     type="button"
                     variant="outline"
-                    className="h-10 justify-center gap-2 font-sans"
+                    className={cn(
+                      'h-10 justify-center gap-2 font-sans',
+                      oidcProviders.length === 1 && 'w-full max-w-[14rem]',
+                    )}
                     onClick={() => {
                       window.location.href = `/api/auth/sso/oidc/${p.provider}/authorize`;
                     }}

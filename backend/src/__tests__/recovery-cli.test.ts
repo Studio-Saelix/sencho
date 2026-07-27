@@ -145,6 +145,22 @@ describe('disableSso', () => {
         expect(db.getGlobalSettings().authentication_mode).toBe('sso_only');
     });
 
+    it('preserves sso_only when disabling one of several providers', () => {
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('authentication_mode', 'sso_only');
+        for (const cfg of db.getEnabledSSOConfigs()) {
+            db.upsertSSOConfig(cfg.provider, false, cfg.config_json);
+        }
+        db.upsertSSOConfig('oidc_google', true, '{"clientId":"g"}');
+        db.upsertSSOConfig('oidc_github', true, '{"clientId":"h"}');
+        const result = disableSso('oidc_google');
+        expect(result.ok).toBe(true);
+        expect(result.message).toMatch(/remains SSO only/i);
+        expect(db.getGlobalSettings().authentication_mode).toBe('sso_only');
+        const remaining = db.getEnabledSSOConfigs().map(c => c.provider).sort();
+        expect(remaining).toEqual(['oidc_github']);
+    });
+
     it('restores local_and_sso before disabling all providers under sso_only', () => {
         const db = DatabaseService.getInstance();
         db.updateGlobalSetting('authentication_mode', 'sso_only');

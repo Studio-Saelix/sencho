@@ -10,11 +10,12 @@
  * is preserved (only the enabled flag is cleared) so it can be fixed and
  * re-enabled from the UI. Written to the audit log with actor `cli`.
  *
- * When authentication_mode is sso_only, this command restores local_and_sso
- * before disabling providers so the operator is never left with SSO-only and
- * zero providers. A named-provider disable that would remove the last enabled
- * provider under sso_only is rejected; use the no-argument form or
- * enableLocalLogin instead.
+ * When authentication_mode is sso_only and every provider is disabled (no
+ * argument), this command restores local_and_sso first so the operator is
+ * never left with SSO-only and zero providers. A named-provider disable that
+ * would remove the last enabled provider under sso_only is rejected; use the
+ * no-argument form or enableLocalLogin instead. Disabling one of several
+ * providers leaves authentication_mode unchanged.
  */
 import { DatabaseService } from '../services/DatabaseService';
 import {
@@ -64,12 +65,17 @@ export function disableSso(provider?: string): CliResult {
       }
     }
 
-    const modeError = restoreLocalLoginIfNeeded(db);
-    if (modeError) return modeError;
-
+    // Named disable leaves authentication_mode unchanged (including sso_only).
     db.upsertSSOConfig(provider, false, config.config_json);
     auditCli(db, `/cli/disable-sso/${provider}`, `CLI disabled SSO provider ${provider}`);
-    return { ok: true, message: `Disabled SSO provider ${provider}. Its configuration was preserved.` };
+    const modeNote =
+      mode === 'sso_only'
+        ? ' Authentication mode remains SSO only; remaining providers stay available.'
+        : '';
+    return {
+      ok: true,
+      message: `Disabled SSO provider ${provider}. Its configuration was preserved.${modeNote}`,
+    };
   }
 
   const enabled = db.getEnabledSSOConfigs();
