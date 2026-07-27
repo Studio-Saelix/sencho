@@ -58,9 +58,9 @@ The summary card at the top of the Doctor tab reflects the overall outcome of th
 | **High risk** | Highest active finding is high risk | Amber card with a count of active findings by severity |
 | **Warning** | Highest active finding is a warning | Blue card with a count of active findings by severity |
 | **Info** | All active findings are informational | Muted card with a count of active findings by severity |
-| **Acknowledged** | Every finding from the last run has been acknowledged | Muted card noting all findings are acknowledged |
+| **All clear · findings acknowledged** | Model rendered; every finding from the last run has been acknowledged | Green card with "No active findings remain. One or more detected issues were reviewed and acknowledged by an authorized operator." |
 
-The summary card also shows when the run happened and who triggered it: "ran 5 minutes ago by admin". If any findings are acknowledged, the line adds a count: "3 active (1 blocker · 2 warning) · 2 acknowledged".
+The summary card also shows when the run happened and who triggered it: "ran 5 minutes ago by admin". When active findings remain alongside acknowledgements, the line adds a count: "3 active (1 blocker · 2 warning) · 2 acknowledged".
 
 A small colored dot appears on the **Doctor** tab label when the last run's active findings include a blocker (red) or a high-risk finding (amber). Click the **X** on the summary card to dismiss it; this also clears the tab dot. The dismissal is remembered per stack and node, and clears itself automatically the moment the finding set changes (a rule clearing, a new rule firing, or a severity change), so a stale dismissal can never hide a genuinely new problem. It never clears just by opening the tab or re-running preflight to the same result, and it does not sync across browsers or teammates: it is stored in your browser only.
 

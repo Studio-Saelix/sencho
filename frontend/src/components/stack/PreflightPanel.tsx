@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Check, TriangleAlert, ShieldAlert, Info, RefreshCw, Stethoscope, X,
-  ChevronDown, ChevronRight, ShieldCheck, type LucideIcon,
+  ChevronDown, ChevronRight, type LucideIcon,
 } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { cn } from '@/lib/utils';
@@ -79,8 +79,16 @@ function summaryMeta(report: PreflightReport): { label: string; icon: LucideIcon
       line: report.renderError ?? 'Sencho could not render the effective Compose model.',
     };
   }
-  if (report.activeCount === 0 && report.acknowledgedCount === 0) {
-    return { label: 'all clear', icon: Check, tone: 'border-success/40 bg-success/[0.06] text-success', line: 'No issues found in the effective model.' };
+  if (report.activeCount === 0) {
+    const acknowledgedOnly = report.acknowledgedCount > 0;
+    return {
+      label: acknowledgedOnly ? 'all clear · findings acknowledged' : 'all clear',
+      icon: Check,
+      tone: 'border-success/40 bg-success/[0.06] text-success',
+      line: acknowledgedOnly
+        ? 'No active findings remain. One or more detected issues were reviewed and acknowledged by an authorized operator.'
+        : 'No issues found in the effective model.',
+    };
   }
   const meta = SEVERITY_META[report.activeHighestSeverity ?? 'info'];
   const activeParts = GROUP_ORDER
@@ -91,7 +99,7 @@ function summaryMeta(report: PreflightReport): { label: string; icon: LucideIcon
   const line = report.acknowledgedCount > 0
     ? `${report.activeCount} active${activeParts ? ` (${activeParts})` : ''} · ${report.acknowledgedCount} acknowledged`
     : (activeParts || `${report.activeCount} active`);
-  return { label: report.activeCount === 0 ? 'acknowledged' : meta.label, icon: report.activeCount === 0 ? ShieldCheck : meta.icon, tone: report.activeCount === 0 ? 'border-muted bg-card/40 text-stat-subtitle' : meta.tone, line };
+  return { label: meta.label, icon: meta.icon, tone: meta.tone, line };
 }
 
 function expiryComboboxOptions(finding: PreflightFinding): ComboboxOption[] {
