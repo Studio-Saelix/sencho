@@ -327,12 +327,13 @@ describe('Token version (session invalidation)', () => {
     db.deleteUser(id);
   });
 
-  it('pre-migration token (no tv claim) still works', async () => {
-    // Sign without tv claim (simulates pre-migration token)
+  it('pre-migration token (no tv claim) is rejected', async () => {
+    // Sign without tv claim (simulates pre-migration token). Legacy
+    // tokens without a tv claim are rejected so they cannot survive
+    // password changes, MFA resets, or other security invalidation.
     const token = jwt.sign({ username: TEST_USERNAME, role: 'admin' }, TEST_JWT_SECRET, { expiresIn: '1m' });
     const res = await request(app).get('/api/stacks').set('Authorization', `Bearer ${token}`);
-    // Should not be 401 (backward compat)
-    expect(res.status).not.toBe(401);
+    expect(res.status).toBe(401);
   });
 
   it('uses DB role so role changes take effect immediately', async () => {

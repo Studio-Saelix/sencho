@@ -164,9 +164,10 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
     }
 
     // Token version check: rejects sessions after password change, role change, or admin reset.
-    // Pre-migration tokens (no tv claim) are accepted for backward compat and, like any other
-    // session, are subject to the sliding refresh below rather than a fixed 24h cutoff.
-    if (decoded.tv !== undefined && dbUser.token_version !== decoded.tv) {
+    // A token without a tv claim is a pre-migration legacy token. Reject it the
+    // same as a version mismatch so security events (password change, MFA reset,
+    // role change, admin-enforced invalidation) cannot be bypassed.
+    if (decoded.tv === undefined || dbUser.token_version !== decoded.tv) {
       if (isDebugEnabled()) console.log('[Auth:diag] Token version mismatch for:', decoded.username, 'jwt:', decoded.tv, 'db:', dbUser.token_version);
       console.log('[Auth] Session rejected: token version mismatch for:', decoded.username);
       res.status(401).json({ error: 'Session invalidated. Please log in again.' });

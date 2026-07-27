@@ -70,7 +70,7 @@ describe('authMiddleware', () => {
 
   it('accepts a valid Bearer token', async () => {
     // Issue a real token using the known test secret
-    const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const token = jwt.sign({ username: TEST_USERNAME, tv: 1 }, TEST_JWT_SECRET, { expiresIn: '1m' });
     const res = await request(app)
       .get('/api/stacks')
       .set('Authorization', `Bearer ${token}`);
@@ -112,7 +112,7 @@ describe('POST /api/system/console-token', () => {
   });
 
   it('returns a token when authenticated', async () => {
-    const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const token = jwt.sign({ username: TEST_USERNAME, tv: 1 }, TEST_JWT_SECRET, { expiresIn: '1m' });
     const res = await request(app)
       .post('/api/system/console-token')
       .set('Authorization', `Bearer ${token}`)

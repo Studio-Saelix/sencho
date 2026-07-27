@@ -58,7 +58,7 @@ describe('sliding session refresh', () => {
   });
 
   it('refreshes a session nearing expiry', async () => {
-    const nearExpiryToken = jwt.sign({ username: TEST_USERNAME, remember: false }, TEST_JWT_SECRET, { expiresIn: '30s' });
+    const nearExpiryToken = jwt.sign({ username: TEST_USERNAME, remember: false, tv: 1 }, TEST_JWT_SECRET, { expiresIn: '30s' });
     const res = await request(app)
       .get('/api/auth/check')
       .set('Authorization', `Bearer ${nearExpiryToken}`);
@@ -83,7 +83,7 @@ describe('sliding session refresh', () => {
   });
 
   it('reissues a "stay signed in" session back to a 30-day TTL, not 24h', async () => {
-    const nearExpiryRememberToken = jwt.sign({ username: TEST_USERNAME, remember: true }, TEST_JWT_SECRET, { expiresIn: '30s' });
+    const nearExpiryRememberToken = jwt.sign({ username: TEST_USERNAME, remember: true, tv: 1 }, TEST_JWT_SECRET, { expiresIn: '30s' });
     const res = await request(app)
       .get('/api/auth/check')
       .set('Authorization', `Bearer ${nearExpiryRememberToken}`);
@@ -97,7 +97,7 @@ describe('sliding session refresh', () => {
 
   it('does not refresh when session_sliding_refresh is disabled', async () => {
     DatabaseService.getInstance().updateGlobalSetting('session_sliding_refresh', '0');
-    const nearExpiryToken = jwt.sign({ username: TEST_USERNAME, remember: false }, TEST_JWT_SECRET, { expiresIn: '30s' });
+    const nearExpiryToken = jwt.sign({ username: TEST_USERNAME, remember: false, tv: 1 }, TEST_JWT_SECRET, { expiresIn: '30s' });
     const res = await request(app)
       .get('/api/auth/check')
       .set('Authorization', `Bearer ${nearExpiryToken}`);
