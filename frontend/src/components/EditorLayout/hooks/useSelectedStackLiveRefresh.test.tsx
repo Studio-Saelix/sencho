@@ -130,6 +130,7 @@ describe('useSelectedStackLiveRefresh', () => {
   function renderLive(overrides: Partial<{
     selectedFile: string | null;
     activeNodeId: number | undefined;
+    isDetailVisible: boolean;
     containers: ContainerInfo[];
     composeContent: string;
     containersLoadStatus: 'idle' | 'loading' | 'success' | 'error';
@@ -138,6 +139,7 @@ describe('useSelectedStackLiveRefresh', () => {
       (props) => useSelectedStackLiveRefresh({
         selectedFile: props.selectedFile,
         activeNodeId: props.activeNodeId,
+        isDetailVisible: props.isDetailVisible,
         containers: props.containers,
         composeContent: props.composeContent,
         containersLoadStatus: props.containersLoadStatus,
@@ -150,6 +152,7 @@ describe('useSelectedStackLiveRefresh', () => {
         initialProps: {
           selectedFile: 'web.yml' as string | null,
           activeNodeId: 1 as number | undefined,
+          isDetailVisible: true,
           containers: [container('c1')] as ContainerInfo[],
           composeContent: 'services:\n  web:\n    image: nginx\n',
           containersLoadStatus: 'success' as const,
@@ -264,7 +267,7 @@ describe('useSelectedStackLiveRefresh', () => {
     expect(refreshMock).toHaveBeenCalledTimes(2);
   });
 
-  it('does not refresh after stack switch mid-flight', async () => {
+  it('does not trailing-refresh after stack switch mid-flight when no trailing was queued', async () => {
     let resolveRefresh: (v: SoftRefreshOutcome) => void = () => {};
     refreshMock.mockImplementation(() => new Promise<SoftRefreshOutcome>((resolve) => {
       resolveRefresh = resolve;
@@ -286,6 +289,7 @@ describe('useSelectedStackLiveRefresh', () => {
     rerender({
       selectedFile: 'other.yml',
       activeNodeId: 1,
+      isDetailVisible: true,
       containers: [],
       composeContent: '',
       containersLoadStatus: 'success',
@@ -296,7 +300,97 @@ describe('useSelectedStackLiveRefresh', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
+    // No trailing was queued, so selection change alone does not fire another refresh.
     expect(refreshMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes the new selection when a trailing event was queued during stack switch', async () => {
+    let resolveRefresh: (v: SoftRefreshOutcome) => void = () => {};
+    refreshMock.mockImplementation(() => new Promise<SoftRefreshOutcome>((resolve) => {
+      resolveRefresh = resolve;
+    }));
+
+    const { rerender } = renderLive();
+    await act(async () => { await Promise.resolve(); });
+    refreshMock.mockClear();
+
+    act(() => {
+      fireInvalidate({ scope: 'stack', nodeId: 1, stackName: 'web' });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(INVALIDATE_DEBOUNCE_MS);
+      await Promise.resolve();
+    });
+    expect(refreshMock).toHaveBeenCalledTimes(1);
+
+    // Switch stacks while the first soft refresh is still in flight.
+    rerender({
+      selectedFile: 'other.yml',
+      activeNodeId: 1,
+      isDetailVisible: true,
+      containers: [],
+      composeContent: '',
+      containersLoadStatus: 'success',
+    });
+
+    // Event for the new stack arrives before the old request completes.
+    act(() => {
+      fireInvalidate({ scope: 'stack', nodeId: 1, stackName: 'other' });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(INVALIDATE_DEBOUNCE_MS);
+      await Promise.resolve();
+    });
+    expect(refreshMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveRefresh('ok');
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(refreshMock).toHaveBeenCalledTimes(2);
+    expect(refreshMock).toHaveBeenLastCalledWith('other', 'other.yml');
+  });
+
+  it('stops polling and ignores invalidates when stack detail is not visible', async () => {
+    const { rerender } = renderLive();
+    await act(async () => { await Promise.resolve(); });
+    expect(visibilityFns.length).toBe(1);
+    refreshMock.mockClear();
+
+    rerender({
+      selectedFile: 'web.yml',
+      activeNodeId: 1,
+      isDetailVisible: false,
+      containers: [container('c1')],
+      composeContent: 'services:\n  web:\n    image: nginx\n',
+      containersLoadStatus: 'success',
+    });
+    expect(visibilityFns.length).toBe(0);
+
+    act(() => {
+      fireInvalidate({ scope: 'stack', nodeId: 1, stackName: 'web', action: 'health_status' });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(INVALIDATE_DEBOUNCE_MS);
+      await Promise.resolve();
+    });
+    expect(refreshMock).not.toHaveBeenCalled();
+  });
+
+  it('does not register a poll interval when detail starts hidden', async () => {
+    renderLive({ isDetailVisible: false });
+    await act(async () => { await Promise.resolve(); });
+    expect(visibilityFns.length).toBe(0);
+
+    act(() => {
+      fireInvalidate({ scope: 'stack', nodeId: 1, stackName: 'web' });
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(INVALIDATE_DEBOUNCE_MS);
+      await Promise.resolve();
+    });
+    expect(refreshMock).not.toHaveBeenCalled();
   });
 
   it('sets syncStale after consecutive soft failures including confirmed-empty', async () => {
@@ -322,6 +416,7 @@ describe('useSelectedStackLiveRefresh', () => {
     rerender({
       selectedFile: 'web.yml',
       activeNodeId: 1,
+      isDetailVisible: true,
       containers: [],
       composeContent: '',
       containersLoadStatus: 'error',
@@ -370,6 +465,7 @@ describe('useSelectedStackLiveRefresh', () => {
     rerender({
       selectedFile: 'web.yml',
       activeNodeId: 1,
+      isDetailVisible: true,
       containers: [container('c1', { healthStatus: 'healthy' })],
       composeContent: 'services:\n  web:\n    image: nginx\n',
       containersLoadStatus: 'success',

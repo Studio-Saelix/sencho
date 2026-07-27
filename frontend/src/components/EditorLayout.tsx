@@ -300,6 +300,7 @@ export default function EditorLayout() {
   const { syncStale: containersSyncStale, retrySync: retryContainersSync } = useSelectedStackLiveRefresh({
     selectedFile,
     activeNodeId: activeNode?.id,
+    isDetailVisible: activeView === 'editor',
     containers,
     composeContent: content,
     containersLoadStatus,

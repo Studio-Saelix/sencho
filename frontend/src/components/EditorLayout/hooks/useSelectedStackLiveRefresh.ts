@@ -23,6 +23,8 @@ export type StateInvalidateDetail = {
 export type UseSelectedStackLiveRefreshArgs = {
   selectedFile: string | null;
   activeNodeId: number | undefined;
+  /** False when activeView is not the stack editor (e.g. Security, Fleet). */
+  isDetailVisible: boolean;
   containers: ContainerInfo[];
   composeContent: string;
   containersLoadStatus: 'idle' | 'loading' | 'success' | 'error';
@@ -110,6 +112,7 @@ export function shouldRefreshForInvalidate(
 export function useSelectedStackLiveRefresh({
   selectedFile,
   activeNodeId,
+  isDetailVisible,
   containers,
   composeContent,
   containersLoadStatus,
@@ -119,6 +122,7 @@ export function useSelectedStackLiveRefresh({
 
   const selectedFileRef = useRef(selectedFile);
   const activeNodeIdRef = useRef(activeNodeId);
+  const isDetailVisibleRef = useRef(isDetailVisible);
   const refreshRef = useRef(refreshSelectedContainers);
   const failureCountRef = useRef(0);
   const inFlightRef = useRef(false);
@@ -132,8 +136,15 @@ export function useSelectedStackLiveRefresh({
 
   selectedFileRef.current = selectedFile;
   activeNodeIdRef.current = activeNodeId;
+  isDetailVisibleRef.current = isDetailVisible;
   refreshRef.current = refreshSelectedContainers;
   containerIdsRef.current = new Set(containers.map((c) => c.Id).filter(Boolean));
+
+  function clearInvalidateTimer(): void {
+    if (!invalidateTimerRef.current) return;
+    clearTimeout(invalidateTimerRef.current);
+    invalidateTimerRef.current = null;
+  }
 
   // Cache compose project alias when content changes (not per event).
   useEffect(() => {
@@ -144,13 +155,25 @@ export function useSelectedStackLiveRefresh({
   useEffect(() => {
     learnedAliasesRef.current = new Set();
     failureCountRef.current = 0;
-    trailingNeededRef.current = false;
-    if (invalidateTimerRef.current) {
-      clearTimeout(invalidateTimerRef.current);
-      invalidateTimerRef.current = null;
+    // Keep trailingNeeded while a soft refresh is in flight so the finally
+    // block can refresh the *current* selection instead of dropping the event.
+    if (!inFlightRef.current) {
+      trailingNeededRef.current = false;
     }
+    clearInvalidateTimer();
     setSyncStale(false); // eslint-disable-line react-hooks/set-state-in-effect -- reset on selection identity change
   }, [selectedFile, activeNodeId]);
+
+  // Drop pending debounce when leaving stack detail (Security / Fleet / etc.).
+  // Keep trailingNeeded while in flight so finally can refresh if the user
+  // returns before the request finishes (gated on isDetailVisibleRef there).
+  useEffect(() => {
+    if (isDetailVisible) return;
+    if (!inFlightRef.current) {
+      trailingNeededRef.current = false;
+    }
+    clearInvalidateTimer();
+  }, [isDetailVisible]);
 
   // Successful container list from any path clears the failure counter.
   // Fingerprint includes State + healthStatus so same-ID health transitions clear stale.
@@ -172,6 +195,7 @@ export function useSelectedStackLiveRefresh({
   prevLoadStatusRef.current = containersLoadStatus;
 
   const runRefresh = useCallback(async () => {
+    if (!isDetailVisibleRef.current) return;
     const file = selectedFileRef.current;
     const nodeId = activeNodeIdRef.current;
     if (!file || nodeId === undefined) return;
@@ -201,17 +225,24 @@ export function useSelectedStackLiveRefresh({
       }
     } finally {
       inFlightRef.current = false;
-      const shouldTrail =
-        trailingNeededRef.current
-        && selectedFileRef.current === file
-        && activeNodeIdRef.current === nodeId;
+      const hadTrailing = trailingNeededRef.current;
       trailingNeededRef.current = false;
-      if (shouldTrail) void runRefresh();
+      // Trailing refresh targets the current selection (may have changed mid-flight).
+      if (
+        !hadTrailing
+        || !isDetailVisibleRef.current
+        || !selectedFileRef.current
+        || activeNodeIdRef.current === undefined
+      ) {
+        return;
+      }
+      void runRefresh();
     }
   }, []);
 
   const scheduleDebouncedRefresh = useCallback(() => {
-    if (invalidateTimerRef.current) clearTimeout(invalidateTimerRef.current);
+    if (!isDetailVisibleRef.current) return;
+    clearInvalidateTimer();
     invalidateTimerRef.current = setTimeout(() => {
       invalidateTimerRef.current = null;
       void runRefresh();
@@ -219,7 +250,11 @@ export function useSelectedStackLiveRefresh({
   }, [runRefresh]);
 
   useEffect(() => {
+    if (!isDetailVisible) return;
+
     const onInvalidate = (e: Event) => {
+      // Ref guard covers the gap between isDetailVisible flipping and effect cleanup.
+      if (!isDetailVisibleRef.current) return;
       const detail = (e as CustomEvent<StateInvalidateDetail>).detail ?? {};
       const file = selectedFileRef.current;
       if (!file) return;
@@ -249,19 +284,16 @@ export function useSelectedStackLiveRefresh({
     window.addEventListener('sencho:state-invalidate', onInvalidate);
     return () => {
       window.removeEventListener('sencho:state-invalidate', onInvalidate);
-      if (invalidateTimerRef.current) {
-        clearTimeout(invalidateTimerRef.current);
-        invalidateTimerRef.current = null;
-      }
+      clearInvalidateTimer();
     };
-  }, [scheduleDebouncedRefresh]);
+  }, [isDetailVisible, scheduleDebouncedRefresh]);
 
   useEffect(() => {
-    if (!selectedFile || activeNodeId === undefined) return;
+    if (!isDetailVisible || !selectedFile || activeNodeId === undefined) return;
     return visibilityInterval(() => {
       void runRefresh();
     }, POLL_INTERVAL_MS);
-  }, [selectedFile, activeNodeId, runRefresh]);
+  }, [isDetailVisible, selectedFile, activeNodeId, runRefresh]);
 
   const retrySync = useCallback(() => {
     failureCountRef.current = 0;
