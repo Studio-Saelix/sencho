@@ -139,7 +139,7 @@ export class UpdateGuardService {
         : Promise.resolve<ContainerProbe[] | Errored>([]),
       this.collect('update preview', stackName, async () => {
         // Check inside the thunk so the read stays with the getPreview call.
-        // Explicit Update still uses stacks update-preview (ungated).
+        // Stack GET/POST update-preview use the same isChecksEnabled gate.
         if (!ImageUpdateService.isChecksEnabled()) {
           const disabled = buildDetectionDisabledPreview(stackName);
           return serviceName ? filterPreviewForService(disabled, serviceName) : disabled;

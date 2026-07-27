@@ -367,7 +367,7 @@ export function filterPreviewForService(preview: UpdatePreview, serviceName: str
     return buildSummary(preview.stack_name, images, buildServices);
 }
 
-/** Minimal preview used by readiness when background detection is disabled. */
+/** Minimal preview when node-scoped image update detection is disabled. */
 export function buildDetectionDisabledPreview(stackName: string): UpdatePreview {
     return {
         stack_name: stackName,

@@ -986,6 +986,11 @@ export class ImageUpdateService {
      * left untouched and a verification_failed result is returned.
      */
     public async recheckStack(nodeId: number, stackName: string): Promise<StackRecheckResult> {
+        // While detection is off, skip registry probes and do not write
+        // stack_update_status (avoids stale findings after re-enable).
+        if (!ImageUpdateService.isChecksEnabled()) {
+            return { outcome: 'cleared', warning: null };
+        }
         const generation = this.reserveStackWriteGeneration(nodeId, stackName);
         const db = DatabaseService.getInstance();
         const docker = DockerController.getInstance(nodeId);

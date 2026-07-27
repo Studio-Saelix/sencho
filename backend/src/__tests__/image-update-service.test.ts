@@ -1639,6 +1639,7 @@ services:
     mockGetSystemState.mockReturnValue('1');
     mockGetAllContainers.mockResolvedValue([]);
     mockEnvExists.mockResolvedValue(false);
+    mockGetGlobalSettings.mockReturnValue({ developer_mode: '0' });
   });
 
   it('reduces per-service status through the effective model and persists services_json with a generation', async () => {
@@ -1760,6 +1761,25 @@ services:
   });
 
   describe('recheckStack', () => {
+    it('skips registry probes and DB writes when checks are disabled', async () => {
+      mockGetGlobalSettings.mockReturnValueOnce({ image_update_checks_enabled: '0' });
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({ hasUpdate: true });
+      const genBefore = service.peekStackWriteGeneration(1, 'stackA');
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({ outcome: 'cleared', warning: null });
+      expect(service.peekStackWriteGeneration(1, 'stackA')).toBe(genBefore);
+      expect(mockBuildEffectiveServiceModel).not.toHaveBeenCalled();
+      expect(mockGetAllContainers).not.toHaveBeenCalled();
+      expect((service as any).checkImage).not.toHaveBeenCalled();
+      expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+      expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+      expect(mockClearStackUpdateStatus).not.toHaveBeenCalled();
+      expect(mockClearAllStackUpdateStatus).not.toHaveBeenCalled();
+    });
+
     it('returns still_present when a checkable service still has an update', async () => {
       mockBuildEffectiveServiceModel.mockResolvedValueOnce({
         renderable: true,
