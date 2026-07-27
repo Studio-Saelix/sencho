@@ -11,7 +11,6 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { CapabilityGate } from './CapabilityGate';
 import { PaidGate } from './PaidGate';
-import { useLicense } from '@/context/LicenseContext';
 import { Loader2, CheckCircle, XCircle } from 'lucide-react';
 import { SettingsPrimaryButton } from './settings/SettingsActions';
 import { useMastheadStats } from './settings/MastheadStatsContext';
@@ -428,7 +427,6 @@ function AuthenticationModePanel({
 }: {
     enabledProviderNames: string[];
 }) {
-    const { isPaid } = useLicense();
     const [mode, setMode] = useState<AuthMode>('local_and_sso');
     const [loaded, setLoaded] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -491,10 +489,6 @@ function AuthenticationModePanel({
     const handleModeChange = (next: AuthMode) => {
         if (next === mode) return;
         if (next === 'sso_only') {
-            if (!isPaid) {
-                toast.error('SSO-only mode requires Sencho Admiral.');
-                return;
-            }
             setPendingMode('sso_only');
             setConfirmRisk(false);
             return;

@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { SSOService } from '../services/SSOService';
-import { requireAdmin, requirePaid } from '../middleware/tierGates';
+import { requireAdmin } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import {
   getAuthenticationMode,
@@ -51,9 +51,7 @@ authModeRouter.put('/', async (req: Request, res: Response): Promise<void> => {
       return;
     }
 
-    // Entering sso_only: Admiral + safety gates.
-    if (!requirePaid(req, res)) return;
-
+    // Entering sso_only: safety gates.
     if (req.body?.confirm !== true) {
       res.status(400).json({ error: 'confirm must be true to enable SSO-only mode' });
       return;

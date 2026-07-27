@@ -100,7 +100,7 @@ describe('PUT /api/sso/auth-mode', () => {
     expect(falsy.body.error).toMatch(/confirm/i);
   });
 
-  it('rejects Community admin entering sso_only (403)', async () => {
+  it('allows Community admin to enable sso_only', async () => {
     markAdminAsSso();
     enableGithubProvider();
     vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('community');
@@ -110,8 +110,9 @@ describe('PUT /api/sso/auth-mode', () => {
       .put('/api/sso/auth-mode')
       .set('Cookie', adminCookie)
       .send({ mode: 'sso_only', confirm: true });
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe('PAID_REQUIRED');
+    expect(res.status).toBe(200);
+    expect(res.body.authenticationMode).toBe('sso_only');
+    expect(res.body.localLoginEnabled).toBe(false);
   });
 
   it('rejects local-only admin entering sso_only', async () => {
@@ -136,7 +137,7 @@ describe('PUT /api/sso/auth-mode', () => {
     expect(res.body.error).toMatch(/at least one SSO provider/i);
   });
 
-  it('enables sso_only for an SSO admin on Admiral when a provider test passes', async () => {
+  it('enables sso_only for an SSO admin when a provider test passes', async () => {
     markAdminAsSso();
     enableGithubProvider();
     vi.spyOn(SSOService.getInstance(), 'testOidcDiscovery').mockResolvedValue({ success: true });

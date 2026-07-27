@@ -4,9 +4,9 @@ sidebarTitle: SSO and LDAP
 description: Authenticate with your existing identity provider, including LDAP, Google, GitHub, Okta, and any spec-compliant OIDC provider.
 ---
 
-Sencho lets your team sign in with the identity provider you already use instead of maintaining a second set of credentials. By default, SSO works alongside local password authentication. On Sencho Admiral you can switch to **SSO only** so interactive local password login is disabled and only configured LDAP or OIDC providers are accepted.
+Sencho lets your team sign in with the identity provider you already use instead of maintaining a second set of credentials. By default, SSO works alongside local password authentication. You can switch to **SSO only** so interactive local password login is disabled and only configured LDAP or OIDC providers are accepted.
 
-SSO provider configuration is available on every Sencho tier. Custom OIDC and the preset providers for Google, GitHub, and Okta work on every tier; LDAP and Active Directory require Sencho Admiral. SSO-only authentication mode requires Sencho Admiral.
+SSO provider configuration and authentication mode are available on every Sencho tier. Custom OIDC and the preset providers for Google, GitHub, and Okta work on every tier; LDAP and Active Directory require Sencho Admiral.
 
 ## Supported providers
 
@@ -83,7 +83,7 @@ Admins manage SSO providers in **Settings → Access → SSO** (admin only). The
 At the top of the page, **Authentication mode** chooses how interactive login works:
 
 - **Local and SSO** (default): local username/password login remains available alongside configured providers.
-- **SSO only** (Sencho Admiral): local password login is disabled. The login page shows only LDAP and/or OIDC providers. Direct calls to the password login endpoint are rejected.
+- **SSO only**: local password login is disabled. The login page shows only LDAP and/or OIDC providers. Direct calls to the password login endpoint are rejected.
 
 SSO only cannot be enabled until at least one provider is enabled, a connection test succeeds, and the signed-in administrator authenticated through SSO with the Admin role. Confirm the outage-risk warning before saving. Existing sessions stay valid until they expire or are revoked.
 
