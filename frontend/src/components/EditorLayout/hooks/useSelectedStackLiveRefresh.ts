@@ -229,14 +229,13 @@ export function useSelectedStackLiveRefresh({
       trailingNeededRef.current = false;
       // Trailing refresh targets the current selection (may have changed mid-flight).
       if (
-        !hadTrailing
-        || !isDetailVisibleRef.current
-        || !selectedFileRef.current
-        || activeNodeIdRef.current === undefined
+        hadTrailing
+        && isDetailVisibleRef.current
+        && selectedFileRef.current
+        && activeNodeIdRef.current !== undefined
       ) {
-        return;
+        void runRefresh();
       }
-      void runRefresh();
     }
   }, []);
 
