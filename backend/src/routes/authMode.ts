@@ -42,7 +42,7 @@ authModeRouter.put('/', async (req: Request, res: Response): Promise<void> => {
   try {
     if (mode === 'local_and_sso') {
       setAuthenticationMode('local_and_sso');
-      console.log('[AuthMode] Authentication mode set to local_and_sso by', req.user?.username);
+      console.log('[AuthMode] Authentication mode set to local_and_sso');
       res.json({
         success: true,
         authenticationMode: 'local_and_sso' satisfies AuthenticationMode,
@@ -101,7 +101,7 @@ authModeRouter.put('/', async (req: Request, res: Response): Promise<void> => {
     }
 
     setAuthenticationMode('sso_only');
-    console.log('[AuthMode] Authentication mode set to sso_only by', req.user?.username);
+    console.log('[AuthMode] Authentication mode set to sso_only');
     res.json({
       success: true,
       authenticationMode: 'sso_only' satisfies AuthenticationMode,

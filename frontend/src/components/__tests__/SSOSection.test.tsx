@@ -25,6 +25,10 @@ vi.mock('@/components/ui/toast-store', () => ({
   },
 }));
 
+vi.mock('@/context/LicenseContext', () => ({
+  useLicense: () => ({ isPaid: true }),
+}));
+
 // Render the gated cards directly; tier/capability gating is exercised in the
 // backend suite and is not what this test is about.
 vi.mock('../CapabilityGate', () => ({
