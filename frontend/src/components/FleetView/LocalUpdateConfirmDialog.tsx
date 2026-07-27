@@ -1,4 +1,5 @@
-import { Download } from 'lucide-react';
+import { Download, RefreshCw } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { ConfirmModal } from '@/components/ui/modal';
 import { formatVersion } from '@/lib/version';
 import type { ImagePinKind } from './types';
@@ -7,6 +8,7 @@ interface LocalUpdateConfirmDialogProps {
     open: boolean;
     onOpenChange: (open: boolean) => void;
     onConfirm: () => void;
+    mode?: 'update' | 'reapply';
     imagePinKind?: ImagePinKind | null;
     composeImageRef?: string | null;
     targetImageRef?: string | null;
@@ -14,33 +16,59 @@ interface LocalUpdateConfirmDialogProps {
 }
 
 export function LocalUpdateConfirmDialog({
-    open, onOpenChange, onConfirm, imagePinKind, composeImageRef, targetImageRef, targetVersion,
+    open, onOpenChange, onConfirm, mode = 'update',
+    imagePinKind, composeImageRef, targetImageRef, targetVersion,
 }: LocalUpdateConfirmDialogProps) {
+    const isReapply = mode === 'reapply';
     const versionLabel = formatVersion(targetVersion) ?? 'the latest release';
+
+    let body: ReactNode;
+    if (isReapply) {
+        body = (
+            <p className="text-sm text-stat-subtitle">
+                Recreates this Sencho service from its current Compose configuration.
+                No newer Sencho version is selected, and Sencho will not rewrite the
+                configured image reference. The dashboard may briefly disconnect and
+                reconnects automatically when the restart completes.
+            </p>
+        );
+    } else if (imagePinKind === 'semver' && composeImageRef && targetImageRef) {
+        body = (
+            <p className="text-sm text-stat-subtitle">
+                This install pins <code className="text-stat-value">{composeImageRef}</code>. Updating rewrites it to{' '}
+                <code className="text-stat-value">{targetImageRef}</code> and restarts the server. The dashboard briefly disconnects and reconnects automatically when the update completes.
+            </p>
+        );
+    } else {
+        body = (
+            <p className="text-sm text-stat-subtitle">
+                Pulls Sencho {versionLabel} and restarts the server. The dashboard briefly disconnects and reconnects automatically when the update completes.
+            </p>
+        );
+    }
+
     return (
         <ConfirmModal
             open={open}
             onOpenChange={onOpenChange}
-            kicker="LOCAL · UPDATE"
-            title="Update local node"
+            kicker={isReapply ? 'LOCAL · REAPPLY' : 'LOCAL · UPDATE'}
+            title={isReapply ? 'Reapply configuration' : 'Update local node'}
             confirmLabel={
-                <>
-                    <Download className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
-                    Update &amp; restart
-                </>
+                isReapply ? (
+                    <>
+                        <RefreshCw className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
+                        Reapply &amp; restart
+                    </>
+                ) : (
+                    <>
+                        <Download className="w-4 h-4 mr-1.5" strokeWidth={1.5} />
+                        Update &amp; restart
+                    </>
+                )
             }
             onConfirm={onConfirm}
         >
-            {imagePinKind === 'semver' && composeImageRef && targetImageRef ? (
-                <p className="text-sm text-stat-subtitle">
-                    This install pins <code className="text-stat-value">{composeImageRef}</code>. Updating rewrites it to{' '}
-                    <code className="text-stat-value">{targetImageRef}</code> and restarts the server. The dashboard briefly disconnects and reconnects automatically when the update completes.
-                </p>
-            ) : (
-                <p className="text-sm text-stat-subtitle">
-                    Pulls Sencho {versionLabel} and restarts the server. The dashboard briefly disconnects and reconnects automatically when the update completes.
-                </p>
-            )}
+            {body}
         </ConfirmModal>
     );
 }

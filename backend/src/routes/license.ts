@@ -175,3 +175,23 @@ systemUpdateRouter.post('/update', async (req: Request, res: Response): Promise<
     });
   }, 500);
 });
+
+systemUpdateRouter.post('/reapply-compose', async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  const selfUpdate = SelfUpdateService.getInstance();
+  if (!selfUpdate.isAvailable()) {
+    res.status(503).json({ error: 'Compose reapply unavailable. Sencho must be deployed via Docker Compose.' });
+    return;
+  }
+  const claim = await ImageOperationService.getInstance().claimComposeReapply();
+  if (!claim.ok) {
+    res.status(409).json({ error: 'An image operation is already in progress.', code: claim.failureCode });
+    return;
+  }
+  res.status(202).json({ message: 'Compose reapply initiated. The server will restart shortly.' });
+  setTimeout(() => {
+    ImageOperationService.getInstance().executeClaimedComposeReapply().catch(error => {
+      console.error('[ImageOperation] Unexpected compose reapply failure:', error);
+    });
+  }, 500);
+});

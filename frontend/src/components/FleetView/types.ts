@@ -61,6 +61,10 @@ export interface NodeUpdateStatus {
     updateBlockedReason?: string | null;
     /** Coarse image channel from meta/update-status. Hardened digests still POST. */
     imageChannel?: 'community' | 'hardened' | 'unknown' | null;
+    /** Active fleet self-management operation, when a tracker is present. */
+    operationKind?: 'update' | 'reapply_configuration' | null;
+    /** True when this Compose-managed node can reapply its on-disk configuration. */
+    canReapplyCompose?: boolean;
 }
 
 export type ViewMode = 'grid' | 'topology';

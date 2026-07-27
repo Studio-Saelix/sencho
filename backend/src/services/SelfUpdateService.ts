@@ -205,6 +205,27 @@ export function buildSelfUpdateRunArgs(
   ];
 }
 
+/**
+ * Build the argv for a throwaway helper that runs `docker compose … config`
+ * against the host compose project. Reuses the recreate helper's mount layout
+ * (socket + working dir + host binds) without mounting /app/data, since
+ * validation is read-only. Pure and exported for unit testing.
+ */
+export function buildComposeConfigValidateArgs(
+  ctx: Pick<ComposeContext, 'workingDir' | 'imageName' | 'hostBindMounts'> & { configFiles: string },
+): string[] {
+  const { workingDir, imageName, hostBindMounts, configFiles } = ctx;
+  const fFlags = configFiles.split(',').flatMap(f => {
+    const trimmed = f.trim();
+    return trimmed ? ['-f', trimmed] : [];
+  });
+  const composeCmd = ['docker compose', ...fFlags.map(shQuote), 'config'].join(' ');
+  return buildSelfUpdateRunArgs(
+    { workingDir, imageName, dataDirHost: null, hostBindMounts },
+    composeCmd,
+  );
+}
+
 class SelfUpdateService {
   private static instance: SelfUpdateService;
   private canSelfUpdate = false;
@@ -528,6 +549,46 @@ class SelfUpdateService {
   }
 
   /**
+   * Recreate the Sencho service from the exact current on-disk Compose project
+   * without pulling or rewriting the image reference. Used by Fleet "Reapply
+   * configuration". Validates the authored compose via a throwaway helper
+   * before the last-breath recreate so invalid config fails before shutdown.
+   */
+  async triggerComposeReapply(options?: {
+    successMarkerFile?: string;
+    successMarkerContent?: string;
+  }): Promise<void> {
+    if (!this.composeContext) return;
+    const env = this.buildEnv();
+    this.lastUpdateError = null;
+    this.pendingHelperExitError = undefined;
+
+    try { fs.unlinkSync(UPDATE_ERROR_FILE); } catch { /* absent is the steady state */ }
+    try { fs.unlinkSync(STAGED_PATCH_FILE); } catch { /* absent is the steady state */ }
+
+    const { workingDir, configFiles, imageName, hostBindMounts } = this.composeContext;
+    console.log('[SelfUpdate] Validating compose configuration before reapply...');
+    try {
+      await execFileAsync(
+        'docker',
+        buildComposeConfigValidateArgs({ workingDir, imageName, hostBindMounts, configFiles }),
+        { env, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
+      );
+    } catch (error) {
+      const stderr = (error as { stderr?: Buffer | string })?.stderr?.toString().trim();
+      const stdout = (error as { stdout?: Buffer | string })?.stdout?.toString().trim();
+      this.lastUpdateError =
+        stderr || stdout || (error as Error).message || 'Compose configuration validation failed.';
+      console.error('[SelfUpdate] Compose reapply validation failed:', this.lastUpdateError);
+      return;
+    }
+
+    // No pull and no compose rewrite: the authored image ref is authoritative.
+    // Skip dangling-image prune (nothing was pulled).
+    this.spawnHelper(env, undefined, options?.successMarkerFile, options?.successMarkerContent, false);
+  }
+
+  /**
    * Spawn the "last breath" helper container that recreates Sencho (and, when a
    * repin is staged, copies the rewritten compose file onto the host first).
    * Runs attached (no -d): if the recreate fails before it kills us, execFile's
@@ -538,6 +599,7 @@ class SelfUpdateService {
     composeCopy?: ComposeCopy,
     successMarkerFile?: string,
     successMarkerContent?: string,
+    pruneOnUpdateOverride?: boolean,
   ): void {
     if (!this.composeContext) return;
     const { workingDir, configFiles, serviceName, imageName, dataDirHost, hostBindMounts } = this.composeContext;
@@ -551,8 +613,9 @@ class SelfUpdateService {
     // Opt-out (default ON): after a clean recreate, prune the dangling image
     // layers the pull orphaned. Read fresh so this node honors its own setting.
     const stderrTmp = '/tmp/_sencho_err';
-    const pruneOnUpdate =
-      DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1';
+    const pruneOnUpdate = pruneOnUpdateOverride ?? (
+      DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1'
+    );
     const composeCmd = buildSelfUpdateComposeCmd(
       fFlags,
       serviceName,

@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button';
 interface ReconnectingOverlayProps {
     /** Gateway boot timestamp captured pre-update. Null falls back to offline-then-online detection. */
     preUpdateStartedAt: number | null;
+    /** Distinguishes version-update copy from compose reapply copy. */
+    mode?: 'update' | 'reapply';
 }
 
 // Mirrors the backend UPDATE_TIMEOUT_MS (5 minutes) in routes/fleet.ts. Past
@@ -13,9 +15,13 @@ interface ReconnectingOverlayProps {
 // run longer than the auto-reload budget.
 const RECONNECT_TIMEOUT_SECONDS = 5 * 60;
 
-export function ReconnectingOverlay({ preUpdateStartedAt }: ReconnectingOverlayProps) {
+export function ReconnectingOverlay({
+    preUpdateStartedAt,
+    mode = 'update',
+}: ReconnectingOverlayProps) {
     const [elapsed, setElapsed] = useState(0);
     const timedOut = elapsed >= RECONNECT_TIMEOUT_SECONDS;
+    const isReapply = mode === 'reapply';
 
     useEffect(() => {
         const timer = setInterval(() => setElapsed(s => s + 1), 1000);
@@ -62,7 +68,9 @@ export function ReconnectingOverlay({ preUpdateStartedAt }: ReconnectingOverlayP
                         <AlertTriangle className="w-10 h-10 text-warning mx-auto" strokeWidth={1.5} />
                         <h2 className="text-lg font-medium">Taking longer than expected</h2>
                         <p className="text-sm text-muted-foreground max-w-sm">
-                            Sencho has not come back online yet. A large image pull can take a while, so the update may still be finishing. Reload to check, or inspect the Docker host if it persists.
+                            {isReapply
+                                ? 'Sencho has not come back online yet. The recreate may still be finishing. Reload to check, or inspect the Docker host if it persists.'
+                                : 'Sencho has not come back online yet. A large image pull can take a while, so the update may still be finishing. Reload to check, or inspect the Docker host if it persists.'}
                         </p>
                         <Button variant="outline" size="sm" onClick={() => window.location.reload()}>
                             Reload to check
@@ -71,9 +79,13 @@ export function ReconnectingOverlay({ preUpdateStartedAt }: ReconnectingOverlayP
                 ) : (
                     <>
                         <Loader2 className="w-10 h-10 text-muted-foreground animate-spin mx-auto" strokeWidth={1.5} />
-                        <h2 className="text-lg font-medium">Updating Sencho...</h2>
+                        <h2 className="text-lg font-medium">
+                            {isReapply ? 'Reapplying configuration...' : 'Updating Sencho...'}
+                        </h2>
                         <p className="text-sm text-muted-foreground max-w-sm">
-                            The server is pulling the update and restarting. This page will reload automatically.
+                            {isReapply
+                                ? 'The server is recreating from its current Compose configuration and restarting. This page will reload automatically.'
+                                : 'The server is pulling the update and restarting. This page will reload automatically.'}
                         </p>
                         <p className="text-xs text-muted-foreground tabular-nums">{elapsed}s elapsed</p>
                     </>

@@ -78,6 +78,8 @@ export function FleetView({
     const localUpdateConfirmStatus = updateStatus.localUpdateConfirm !== null
         ? updateStatus.updateStatuses.find(s => s.nodeId === updateStatus.localUpdateConfirm)
         : undefined;
+    const localConfirmMode = updateStatus.localReapplyConfirm !== null ? 'reapply' as const : 'update' as const;
+    const localConfirmOpen = updateStatus.localUpdateConfirm !== null || updateStatus.localReapplyConfirm !== null;
     const topology = useTopologyPreferences();
     const { exporting, exportDossier } = useFleetDossierExport();
 
@@ -340,7 +342,10 @@ export function FleetView({
             </Tabs>
 
             {updateStatus.reconnecting && (
-                <ReconnectingOverlay preUpdateStartedAt={updateStatus.preUpdateStartedAt} />
+                <ReconnectingOverlay
+                    preUpdateStartedAt={updateStatus.preUpdateStartedAt}
+                    mode={updateStatus.reconnectMode}
+                />
             )}
 
             <NodeUpdatesSheet
@@ -353,15 +358,24 @@ export function FleetView({
                 initialTab={initialUpdatesTab}
                 fetchUpdateStatus={updateStatus.fetchUpdateStatus}
                 triggerNodeUpdate={updateStatus.triggerNodeUpdate}
+                triggerNodeReapply={updateStatus.triggerNodeReapply}
                 retryNodeUpdate={updateStatus.retryNodeUpdate}
                 dismissNodeUpdate={updateStatus.dismissNodeUpdate}
                 triggerUpdateAll={updateStatus.triggerUpdateAll}
             />
 
             <LocalUpdateConfirmDialog
-                open={updateStatus.localUpdateConfirm !== null}
-                onOpenChange={(open) => { if (!open) updateStatus.setLocalUpdateConfirm(null); }}
-                onConfirm={updateStatus.confirmLocalUpdate}
+                open={localConfirmOpen}
+                mode={localConfirmMode}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        updateStatus.setLocalUpdateConfirm(null);
+                        updateStatus.setLocalReapplyConfirm(null);
+                    }
+                }}
+                onConfirm={localConfirmMode === 'reapply'
+                    ? updateStatus.confirmLocalReapply
+                    : updateStatus.confirmLocalUpdate}
                 imagePinKind={localUpdateConfirmStatus?.imagePinKind}
                 composeImageRef={localUpdateConfirmStatus?.composeImageRef}
                 targetImageRef={localUpdateConfirmStatus?.targetImageRef}

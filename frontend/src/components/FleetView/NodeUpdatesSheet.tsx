@@ -29,6 +29,7 @@ interface NodeUpdatesSheetProps {
     initialTab?: 'nodes' | 'changelog';
     fetchUpdateStatus: () => Promise<void>;
     triggerNodeUpdate: (nodeId: number) => void;
+    triggerNodeReapply: (nodeId: number) => void;
     retryNodeUpdate: (nodeId: number) => void;
     dismissNodeUpdate: (nodeId: number) => void;
     triggerUpdateAll: () => Promise<void>;
@@ -37,7 +38,7 @@ interface NodeUpdatesSheetProps {
 export function NodeUpdatesSheet({
     open, onOpenChange, checkingUpdates, updateStatuses, updatingNodeId, isAdmin,
     initialTab = 'nodes',
-    fetchUpdateStatus, triggerNodeUpdate, retryNodeUpdate, dismissNodeUpdate, triggerUpdateAll,
+    fetchUpdateStatus, triggerNodeUpdate, triggerNodeReapply, retryNodeUpdate, dismissNodeUpdate, triggerUpdateAll,
 }: NodeUpdatesSheetProps) {
     const [search, setSearch] = useState('');
     const [recheckingUpdates, setRecheckingUpdates] = useState(false);
@@ -410,7 +411,12 @@ export function NodeUpdatesSheet({
                                             <UpdateStatusBadge
                                                 status={s.updateStatus}
                                                 error={s.error}
-                                                onRetry={isAdmin ? () => retryNodeUpdate(s.nodeId) : undefined}
+                                                operationKind={s.operationKind}
+                                                onRetry={isAdmin ? () => (
+                                                    s.operationKind === 'reapply_configuration'
+                                                        ? triggerNodeReapply(s.nodeId)
+                                                        : retryNodeUpdate(s.nodeId)
+                                                ) : undefined}
                                                 onDismiss={isAdmin ? () => dismissNodeUpdate(s.nodeId) : undefined}
                                             />
                                         )}
@@ -455,6 +461,31 @@ export function NodeUpdatesSheet({
                                                     <><Download className="w-3 h-3 mr-1" strokeWidth={1.5} />Update</>
                                                 )}
                                             </Button>
+                                        )}
+                                        {isAdmin && !s.updateStatus && s.canReapplyCompose && (
+                                            <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                className="h-6 text-[11px] px-2.5 text-muted-foreground hover:text-stat-value"
+                                                onClick={() => triggerNodeReapply(s.nodeId)}
+                                                disabled={updatingNodeId === s.nodeId}
+                                            >
+                                                {updatingNodeId === s.nodeId ? (
+                                                    <><Loader2 className="w-3 h-3 mr-1 animate-spin" />Reapplying</>
+                                                ) : (
+                                                    <><RefreshCw className="w-3 h-3 mr-1" strokeWidth={1.5} />Reapply configuration</>
+                                                )}
+                                            </Button>
+                                        )}
+                                        {isAdmin && !s.updateStatus && s.canReapplyCompose === false && (
+                                            <span
+                                                className="text-[10px] text-muted-foreground/70 max-w-[9rem] text-right leading-tight"
+                                                title={s.type === 'local'
+                                                    ? 'This node is not Compose-managed, so configuration reapply is unavailable.'
+                                                    : 'This node does not advertise Compose self-management, or is unreachable.'}
+                                            >
+                                                Reapply unavailable
+                                            </span>
                                         )}
                                         {showSkip(s) && (
                                             <Button

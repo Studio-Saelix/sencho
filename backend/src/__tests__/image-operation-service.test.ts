@@ -270,4 +270,46 @@ describe('ImageOperationService', () => {
 
     expect(changed).not.toBe(baseline);
   });
+
+  it('executeClaimedComposeReapply transitions to recreating and watches helper exit before trigger', async () => {
+    const callOrder: string[] = [];
+    vi.spyOn(SelfUpdateService.getInstance(), 'getResolvedComposeImageForUpdate').mockResolvedValue(null);
+    vi.spyOn(SelfUpdateService.getInstance(), 'getComposeServiceName').mockReturnValue('sencho');
+    vi.spyOn(SelfUpdateService.getInstance(), 'onceHelperExit').mockImplementation(() => {
+      callOrder.push('watch');
+    });
+    vi.spyOn(SelfUpdateService.getInstance(), 'triggerComposeReapply').mockImplementation(async () => {
+      callOrder.push('trigger');
+    });
+    vi.spyOn(SelfUpdateService.getInstance(), 'getLastError').mockReturnValue(null);
+
+    const service = ImageOperationService.getInstance();
+    const claim = await service.claimComposeReapply();
+    expect(claim).toEqual({ ok: true });
+    const result = await service.executeClaimedComposeReapply();
+    const current = await service.getCurrentOperation();
+
+    expect(result).toEqual({ ok: true });
+    expect(current?.kind).toBe('compose_reapply');
+    expect(current?.state).toBe('recreating');
+    expect(callOrder).toEqual(['watch', 'trigger']);
+  });
+
+  it('reconcileOnStartup resolves compose_reapply via marker-only success without pin match', async () => {
+    const service = ImageOperationService.getInstance();
+    vi.spyOn(SelfUpdateService.getInstance(), 'getResolvedComposeImageForUpdate').mockResolvedValue(null);
+    vi.spyOn(SelfUpdateService.getInstance(), 'getComposeServiceName').mockReturnValue('sencho');
+    const claim = await service.claimComposeReapply();
+    expect(claim).toEqual({ ok: true });
+    const current = await service.getCurrentOperation();
+    expect(current?.kind).toBe('compose_reapply');
+    expect(current?.targetImageRef).toBeNull();
+
+    const markerPath = path.join(tmpDir, `image-op-success-${current!.operationId}.json`);
+    await fs.writeFile(markerPath, JSON.stringify({ ok: true, operationId: current!.operationId }), 'utf8');
+
+    await service.reconcileOnStartup();
+    const resolved = await service.getCurrentOperation();
+    expect(resolved?.state).toBe('succeeded');
+  });
 });

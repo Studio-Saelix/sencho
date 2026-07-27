@@ -1114,6 +1114,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         let remoteImagePinKind: ImagePinKind | null = null;
         let remoteUpdateBlocked = false;
         let remoteImageChannel: 'community' | 'hardened' | 'unknown' | null = null;
+        let remoteCapabilities: string[] = [];
         if (node.type === 'local') {
           version = gatewayVersion;
         } else {
@@ -1125,7 +1126,17 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           remoteImagePinKind = meta.imagePinKind;
           remoteUpdateBlocked = meta.updateBlocked;
           remoteImageChannel = meta.imageChannel;
+          remoteCapabilities = meta.capabilities ?? [];
         }
+
+        const isReapply = tracker?.operationKind === 'reapply_configuration';
+        const earlyFailMsg = isReapply
+          ? (node.type === 'local'
+            ? 'Local reapply did not complete. The container may not have restarted; check Docker logs on the host.'
+            : 'Reapply may have failed. The node is still running and its process start time has not changed.')
+          : (node.type === 'local'
+            ? 'Local update did not complete. The container may not have restarted; check Docker logs on the host.'
+            : 'Update may have failed. The node is still running and its version has not changed.');
 
         if (tracker?.status === 'updating') {
           const elapsed = Date.now() - tracker.startedAt;
@@ -1136,7 +1147,9 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
 
           if (elapsed > UPDATE_TIMEOUT_MS) {
             if (debug) console.debug('[Fleet:debug] Node', node.id, 'timed out after', Math.round(elapsed / 1000) + 's');
-            resolveTerminal(node, tracker, 'timeout', UPDATE_TIMEOUT_MSG);
+            resolveTerminal(node, tracker, 'timeout', isReapply
+              ? 'Node did not come back online within 5 minutes after reapply.'
+              : UPDATE_TIMEOUT_MSG);
           } else if (node.type === 'remote') {
             if (remoteUpdateError) {
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'reported pull failure:', remoteUpdateError);
@@ -1146,10 +1159,9 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
                 if (debug) console.debug('[Fleet:debug] Node', node.id, 'went offline (restarting)');
                 updateTracker.set(node.id, { ...tracker, wasOffline: true });
               }
-            } else if (isValidVersion(version) && version !== tracker.previousVersion) {
-              // Signal 1: a valid, different version. A null/unparseable version
-              // from a transient /api/meta blip is NOT a version change, so it
-              // must not complete a still-running, same-process node here.
+            } else if (!isReapply && isValidVersion(version) && version !== tracker.previousVersion) {
+              // Signal 1: a valid, different version. Skipped for reapply because
+              // the authored image/version is not expected to change.
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via signal 1 (version changed):', tracker.previousVersion, '->', version);
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (
@@ -1173,20 +1185,20 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via signal 3 (offline then online, startedAt unavailable)');
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (
+              !isReapply &&
               elapsed > 15_000 &&
               isValidVersion(version) &&
               gatewayValid &&
               !semver.lt(version, compareVersion!)
             ) {
               // Signal 4: remote is now at or above gateway version (after
-              // minimum processing time). Catches fast restarts where the 5s
-              // polling interval misses the offline window and startedAt
-              // hasn't been observed to change yet.
+              // minimum processing time). Never used for reapply: an already
+              // current node would false-complete before the helper runs.
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'completed via signal 4 (version >= compare target):', version, '>=', compareVersion);
               updateTracker.set(node.id, updateTracker.resolve(tracker, 'completed'));
             } else if (elapsed > EARLY_FAIL_MS) {
               if (debug) console.debug('[Fleet:debug] Node', node.id, 'early fail after', Math.round(elapsed / 1000) + 's - no signals detected');
-              resolveTerminal(node, tracker, 'failed', 'Update may have failed. The node is still running and its version has not changed.');
+              resolveTerminal(node, tracker, 'failed', earlyFailMsg);
             }
           } else if (node.type === 'local') {
             // Local node has only two failure signals: an explicit pull/spawn
@@ -1202,7 +1214,7 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
               selfUpdate.clearLastError();
             } else if (elapsed > EARLY_FAIL_MS) {
               if (debug) console.debug('[Fleet:debug] Local node', node.id, 'early fail after', Math.round(elapsed / 1000) + 's');
-              resolveTerminal(node, tracker, 'failed', 'Local update did not complete. The container may not have restarted; check Docker logs on the host.');
+              resolveTerminal(node, tracker, 'failed', earlyFailMsg);
             }
           }
         }
@@ -1286,6 +1298,10 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
           updateBlocked,
           updateBlockedReason,
           imageChannel,
+          operationKind: currentTracker?.operationKind ?? null,
+          canReapplyCompose: node.type === 'local'
+            ? SelfUpdateService.getInstance().isAvailable()
+            : remoteOnline && remoteCapabilities.includes('self-update'),
         };
       }),
     );
@@ -1305,6 +1321,8 @@ fleetRouter.get('/update-status', authMiddleware, async (req: Request, res: Resp
         skipActive: false,
         skippedVersion: null,
         ...EMPTY_PIN_STATUS,
+        operationKind: null,
+        canReapplyCompose: false,
       };
     });
 
@@ -1345,15 +1363,44 @@ fleetRouter.get('/update-status/release-notes', authMiddleware, async (req: Requ
 // repin a semver-pinned compose to that release. It is omitted otherwise (never
 // sent as null/invalid), and an older remote that predates this field simply
 // ignores the extra body key and behaves as before.
-function postSystemUpdate(target: { apiUrl: string; apiToken: string }, targetVersion?: string) {
+function postSystemEndpoint(
+  target: { apiUrl: string; apiToken: string },
+  endpoint: '/api/system/update' | '/api/system/reapply-compose',
+  body: Record<string, unknown> = {},
+) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (target.apiToken) headers.Authorization = `Bearer ${target.apiToken}`;
-  return fetch(`${target.apiUrl.replace(/\/$/, '')}/api/system/update`, {
+  return fetch(`${target.apiUrl.replace(/\/$/, '')}${endpoint}`, {
     method: 'POST',
     headers,
-    body: JSON.stringify(targetVersion ? { targetVersion } : {}),
+    body: JSON.stringify(body),
     signal: AbortSignal.timeout(10000),
   });
+}
+
+function postSystemUpdate(target: { apiUrl: string; apiToken: string }, targetVersion?: string) {
+  return postSystemEndpoint(target, '/api/system/update', targetVersion ? { targetVersion } : {});
+}
+
+function postSystemReapplyCompose(target: { apiUrl: string; apiToken: string }) {
+  return postSystemEndpoint(target, '/api/system/reapply-compose');
+}
+
+/** Clear a terminal tracker row, or time out a stale in-flight one. Returns a
+ *  conflict message when another update/reapply is still actively running. */
+function beginTrackerOperation(nodeId: number, conflictError: string): string | null {
+  const existing = updateTracker.get(nodeId);
+  if (existing?.status === 'updating') {
+    if (Date.now() - existing.startedAt > UPDATE_TIMEOUT_MS) {
+      updateTracker.set(nodeId, updateTracker.resolve(existing, 'timeout', UPDATE_TIMEOUT_MSG));
+    } else {
+      return conflictError;
+    }
+  }
+  if (existing && (existing.status === 'timeout' || existing.status === 'failed' || existing.status === 'completed')) {
+    updateTracker.delete(nodeId);
+  }
+  return null;
 }
 
 function parseRemoteUpdateFailure(payload: unknown): { error: string; code?: string } {
@@ -1435,18 +1482,10 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
     const requestedTarget = parseRequestedTargetVersion(req, res);
     if (requestedTarget === null) return; // invalid supplied value; 400 already sent
 
-    const existing = updateTracker.get(nodeId);
-    if (existing?.status === 'updating') {
-      if (Date.now() - existing.startedAt > UPDATE_TIMEOUT_MS) {
-        updateTracker.set(nodeId, updateTracker.resolve(existing, 'timeout', UPDATE_TIMEOUT_MSG));
-      } else {
-        res.status(409).json({ error: 'Update already in progress for this node.' });
-        return;
-      }
-    }
-    // Clear terminal states to allow retry.
-    if (existing && (existing.status === 'timeout' || existing.status === 'failed' || existing.status === 'completed')) {
-      updateTracker.delete(nodeId);
+    const conflict = beginTrackerOperation(nodeId, 'Update already in progress for this node.');
+    if (conflict) {
+      res.status(409).json({ error: conflict });
+      return;
     }
 
     console.log('[Fleet] Update triggered for node', node.name, node.type);
@@ -1545,6 +1584,99 @@ fleetRouter.post('/nodes/:nodeId/update', authMiddleware, async (req: Request, r
       updateTracker.set(failedNodeId, updateTracker.create('failed', null, null, errorMsg));
     }
     res.status(500).json({ error: 'Failed to trigger node update.' });
+  }
+});
+
+fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const nodeId = parseIntParam(req, res, 'nodeId', 'node ID');
+    if (nodeId === null) return;
+    const db = DatabaseService.getInstance();
+    const node = db.getNode(nodeId);
+    if (!node) {
+      res.status(404).json({ error: 'Node not found' });
+      return;
+    }
+
+    const conflict = beginTrackerOperation(nodeId, 'An update or reapply is already in progress for this node.');
+    if (conflict) {
+      res.status(409).json({ error: conflict });
+      return;
+    }
+
+    console.log('[Fleet] Compose reapply triggered for node', node.name, node.type);
+
+    if (node.type === 'local') {
+      const selfUpdate = SelfUpdateService.getInstance();
+      if (!selfUpdate.isAvailable()) {
+        res.status(503).json({ error: 'Compose reapply unavailable on the local node.' });
+        return;
+      }
+      const claim = await ImageOperationService.getInstance().claimComposeReapply();
+      if (!claim.ok) {
+        res.status(409).json({ error: 'An image operation is already in progress.', code: claim.failureCode });
+        return;
+      }
+      updateTracker.set(
+        nodeId,
+        updateTracker.create('updating', getSenchoVersion(), null, undefined, undefined, 'reapply_configuration'),
+      );
+      res.status(202).json({ message: 'Compose reapply initiated on local node. The server will restart shortly.' });
+      setTimeout(() => {
+        ImageOperationService.getInstance().executeClaimedComposeReapply().catch(error => {
+          console.error('[ImageOperation] Unexpected compose reapply failure:', error);
+        });
+      }, 500);
+      return;
+    }
+
+    const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+    if (!target) {
+      res.status(503).json({ error: formatNoTargetError(node) });
+      return;
+    }
+
+    const meta = await NodeRegistry.getInstance().fetchMetaForNode(node.id);
+    if (!meta.online) {
+      res.status(503).json({ error: 'Remote node is unreachable. Verify the node is running and the API URL is correct.' });
+      return;
+    }
+    if (!meta.capabilities.includes('self-update')) {
+      res.status(503).json({ error: 'Remote node does not support compose reapply. It may need to be updated manually first.' });
+      return;
+    }
+    // Digest pins and updateBlocked are intentional non-gates: reapply never
+    // repins the image, so blocked update rows remain eligible.
+
+    const response = await postSystemReapplyCompose(target);
+
+    if (!response.ok) {
+      const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
+      updateTracker.set(
+        nodeId,
+        updateTracker.create('failed', meta.version, meta.startedAt, failure.error, failure.code, 'reapply_configuration'),
+      );
+      res.status(502).json(failure);
+      return;
+    }
+
+    updateTracker.set(
+      nodeId,
+      updateTracker.create('updating', meta.version, meta.startedAt, undefined, undefined, 'reapply_configuration'),
+    );
+    res.status(202).json({ message: `Compose reapply initiated on ${node.name}.` });
+  } catch (error) {
+    console.error('[Fleet] Node compose reapply error:', error);
+    const errorMsg = getErrorMessage(error, 'Failed to trigger compose reapply.');
+    const failedNodeId = parseInt(req.params.nodeId as string, 10);
+    if (!isNaN(failedNodeId)) {
+      updateTracker.set(
+        failedNodeId,
+        updateTracker.create('failed', null, null, errorMsg, undefined, 'reapply_configuration'),
+      );
+    }
+    res.status(500).json({ error: 'Failed to trigger compose reapply.' });
   }
 });
 

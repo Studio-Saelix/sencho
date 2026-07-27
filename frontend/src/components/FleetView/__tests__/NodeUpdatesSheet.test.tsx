@@ -27,6 +27,7 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof NodeUpdatesShe
     isAdmin: true,
     fetchUpdateStatus: vi.fn(async () => {}),
     triggerNodeUpdate: vi.fn(),
+    triggerNodeReapply: vi.fn(),
     retryNodeUpdate: vi.fn(),
     dismissNodeUpdate: vi.fn(),
     triggerUpdateAll: vi.fn(async () => {}),
@@ -362,5 +363,25 @@ describe('NodeUpdatesSheet', () => {
     expect(screen.queryByRole('button', { name: /Update$/ })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Retry update')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Dismiss')).not.toBeInTheDocument();
+  });
+
+  it('shows Reapply configuration on an up-to-date Compose-managed node without requiring updateAvailable', () => {
+    const triggerNodeReapply = vi.fn();
+    const statuses: NodeUpdateStatus[] = [
+      {
+        nodeId: 1,
+        name: 'Local',
+        type: 'local',
+        version: '1.1.0',
+        latestVersion: '1.1.0',
+        updateAvailable: false,
+        updateStatus: null,
+        canReapplyCompose: true,
+      },
+    ];
+    render(<NodeUpdatesSheet {...baseProps({ updateStatuses: statuses, triggerNodeReapply })} />);
+    expect(screen.queryByRole('button', { name: /Update$/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Reapply configuration/ }));
+    expect(triggerNodeReapply).toHaveBeenCalledWith(1);
   });
 });

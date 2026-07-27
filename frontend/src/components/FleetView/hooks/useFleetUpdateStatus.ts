@@ -28,12 +28,26 @@ function toastIfUpdateBlocked(status: NodeUpdateStatus | undefined): boolean {
     return true;
 }
 
+async function readBootStartedAt(): Promise<number | null> {
+    try {
+        const healthRes = await fetch('/api/health');
+        if (!healthRes.ok) return null;
+        const data = await healthRes.json();
+        return typeof data?.startedAt === 'number' ? data.startedAt : null;
+    } catch {
+        // Fall back to offline-then-online detection in the reconnect overlay.
+        return null;
+    }
+}
+
 export function useFleetUpdateStatus() {
     const [updateStatuses, setUpdateStatuses] = useState<NodeUpdateStatus[]>([]);
     const [updatingNodeId, setUpdatingNodeId] = useState<number | null>(null);
     const [reconnecting, setReconnecting] = useState(false);
     const [preUpdateStartedAt, setPreUpdateStartedAt] = useState<number | null>(null);
     const [localUpdateConfirm, setLocalUpdateConfirm] = useState<number | null>(null);
+    const [localReapplyConfirm, setLocalReapplyConfirm] = useState<number | null>(null);
+    const [reconnectMode, setReconnectMode] = useState<'update' | 'reapply'>('update');
     const [showUpdateModal, setShowUpdateModal] = useState(false);
     const [checkingUpdates, setCheckingUpdates] = useState(false);
 
@@ -65,6 +79,58 @@ export function useFleetUpdateStatus() {
         }
     }, []);
 
+    const postRemoteAction = useCallback(async (
+        nodeId: number,
+        path: string,
+        init: RequestInit & { localOnly: true },
+        successMsg: string,
+        failFallback: string,
+    ) => {
+        setUpdatingNodeId(nodeId);
+        try {
+            const res = await apiFetch(path, init);
+            if (res.ok) {
+                toast.success(successMsg);
+                fetchUpdateStatus();
+            } else {
+                const err = await res.json().catch(() => ({}));
+                toast.error(parseUpdateError(err, failFallback));
+            }
+        } catch (e: unknown) {
+            toast.error((e as Error)?.message || 'Something went wrong.');
+        } finally {
+            setUpdatingNodeId(null);
+        }
+    }, [fetchUpdateStatus]);
+
+    const startLocalRestart = useCallback(async (
+        nodeId: number,
+        path: string,
+        init: RequestInit & { localOnly: true },
+        mode: 'update' | 'reapply',
+        failFallback: string,
+    ) => {
+        setUpdatingNodeId(nodeId);
+        try {
+            // Capture pre-restart boot timestamp so the overlay can detect a real
+            // restart vs a false "online" response from the still-running process.
+            const bootBefore = await readBootStartedAt();
+            const res = await apiFetch(path, init);
+            if (res.ok) {
+                setReconnectMode(mode);
+                setPreUpdateStartedAt(bootBefore);
+                setReconnecting(true);
+            } else {
+                const err = await res.json().catch(() => ({}));
+                toast.error(parseUpdateError(err, failFallback));
+            }
+        } catch (e: unknown) {
+            toast.error((e as Error)?.message || 'Something went wrong.');
+        } finally {
+            setUpdatingNodeId(null);
+        }
+    }, []);
+
     const triggerNodeUpdate = useCallback(async (nodeId: number) => {
         const status = updateStatusesRef.current.find(s => s.nodeId === nodeId);
         // A pin we cannot repin (digest/unknown) has no update action; the button
@@ -75,22 +141,14 @@ export function useFleetUpdateStatus() {
             return;
         }
 
-        setUpdatingNodeId(nodeId);
-        try {
-            const res = await apiFetch(`/fleet/nodes/${nodeId}/update`, updateRequestInit(status));
-            if (res.ok) {
-                toast.success(`Update initiated on ${status?.name ?? 'node'}.`);
-                fetchUpdateStatus();
-            } else {
-                const err = await res.json().catch(() => ({}));
-                toast.error(parseUpdateError(err, 'Failed to trigger update.'));
-            }
-        } catch (e: unknown) {
-            toast.error((e as Error)?.message || 'Something went wrong.');
-        } finally {
-            setUpdatingNodeId(null);
-        }
-    }, [fetchUpdateStatus]);
+        await postRemoteAction(
+            nodeId,
+            `/fleet/nodes/${nodeId}/update`,
+            updateRequestInit(status),
+            `Update initiated on ${status?.name ?? 'node'}.`,
+            'Failed to trigger update.',
+        );
+    }, [postRemoteAction]);
 
     const confirmLocalUpdate = useCallback(async () => {
         const nodeId = localUpdateConfirm;
@@ -99,35 +157,44 @@ export function useFleetUpdateStatus() {
         const status = updateStatusesRef.current.find(s => s.nodeId === nodeId);
         if (toastIfUpdateBlocked(status)) return;
 
-        setUpdatingNodeId(nodeId);
-        try {
-            // Capture pre-update boot timestamp so the overlay can detect a real restart
-            // vs a false "online" response from the still-running old process mid-pull.
-            let bootBefore: number | null = null;
-            try {
-                const healthRes = await fetch('/api/health');
-                if (healthRes.ok) {
-                    const data = await healthRes.json();
-                    if (typeof data?.startedAt === 'number') bootBefore = data.startedAt;
-                }
-            } catch { /* fall back to offline-then-online detection */ }
+        await startLocalRestart(
+            nodeId,
+            `/fleet/nodes/${nodeId}/update`,
+            updateRequestInit(status),
+            'update',
+            'Failed to trigger local update.',
+        );
+    }, [localUpdateConfirm, startLocalRestart]);
 
-            const res = await apiFetch(`/fleet/nodes/${nodeId}/update`, updateRequestInit(status));
-            if (res.ok) {
-                setPreUpdateStartedAt(bootBefore);
-                setReconnecting(true);
-            } else {
-                // A blocked pin returns 409 fast (before any 202), so the overlay
-                // never starts here; surface the reason through the toast path.
-                const err = await res.json().catch(() => ({}));
-                toast.error(parseUpdateError(err, 'Failed to trigger local update.'));
-            }
-        } catch (e: unknown) {
-            toast.error((e as Error)?.message || 'Something went wrong.');
-        } finally {
-            setUpdatingNodeId(null);
+    const triggerNodeReapply = useCallback(async (nodeId: number) => {
+        const status = updateStatusesRef.current.find(s => s.nodeId === nodeId);
+        if (status?.type === 'local') {
+            setLocalReapplyConfirm(nodeId);
+            return;
         }
-    }, [localUpdateConfirm]);
+
+        await postRemoteAction(
+            nodeId,
+            `/fleet/nodes/${nodeId}/reapply-compose`,
+            { method: 'POST', localOnly: true },
+            `Compose reapply initiated on ${status?.name ?? 'node'}.`,
+            'Failed to trigger compose reapply.',
+        );
+    }, [postRemoteAction]);
+
+    const confirmLocalReapply = useCallback(async () => {
+        const nodeId = localReapplyConfirm;
+        setLocalReapplyConfirm(null);
+        if (!nodeId) return;
+
+        await startLocalRestart(
+            nodeId,
+            `/fleet/nodes/${nodeId}/reapply-compose`,
+            { method: 'POST', localOnly: true },
+            'reapply',
+            'Failed to trigger local compose reapply.',
+        );
+    }, [localReapplyConfirm, startLocalRestart]);
 
     const triggerUpdateAll = useCallback(async () => {
         try {
@@ -196,7 +263,10 @@ export function useFleetUpdateStatus() {
                 if (local && (local.updateStatus === 'failed' || local.updateStatus === 'timeout')) {
                     setReconnecting(false);
                     setPreUpdateStartedAt(null);
-                    toast.error(local.error || 'Local update failed. The server did not restart.');
+                    const failedReapply = local.operationKind === 'reapply_configuration';
+                    toast.error(local.error || (failedReapply
+                        ? 'Local compose reapply failed. The server did not restart.'
+                        : 'Local update failed. The server did not restart.'));
                 }
             } catch (error) {
                 // Expected while the process restarts; the overlay's health poll
@@ -212,14 +282,19 @@ export function useFleetUpdateStatus() {
         updatingNodeId,
         reconnecting,
         preUpdateStartedAt,
+        reconnectMode,
         localUpdateConfirm,
+        localReapplyConfirm,
         showUpdateModal,
         checkingUpdates,
         setShowUpdateModal,
         setLocalUpdateConfirm,
+        setLocalReapplyConfirm,
         fetchUpdateStatus,
         triggerNodeUpdate,
         confirmLocalUpdate,
+        triggerNodeReapply,
+        confirmLocalReapply,
         triggerUpdateAll,
         dismissNodeUpdate,
         retryNodeUpdate,
