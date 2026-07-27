@@ -6,7 +6,7 @@
  * multiple OIDC providers, and a returning sso_error must not auto-redirect.
  */
 import { describe, it, expect } from 'vitest';
-import { oidcAutoRedirectUrl } from '../Login';
+import { oidcAutoRedirectUrl } from './oidcAutoRedirect';
 
 const github = { provider: 'oidc_github', type: 'oidc' };
 const google = { provider: 'oidc_google', type: 'oidc' };

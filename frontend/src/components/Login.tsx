@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { cn } from '@/lib/utils';
+import { oidcAutoRedirectUrl } from '@/lib/oidcAutoRedirect';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ArrowRight, KeyRound, Loader2 } from 'lucide-react';
@@ -12,19 +13,6 @@ interface SSOProvider {
   provider: string;
   displayName: string;
   type: 'ldap' | 'oidc';
-}
-
-/** Authorize URL when SSO-only has exactly one OIDC provider and no LDAP; otherwise null. */
-export function oidcAutoRedirectUrl(opts: {
-  localLoginEnabled: boolean;
-  providers: Array<{ provider: string; type: string }>;
-  hadSsoError: boolean;
-}): string | null {
-  if (opts.localLoginEnabled || opts.hadSsoError) return null;
-  if (opts.providers.some((p) => p.type === 'ldap')) return null;
-  const oidc = opts.providers.filter((p) => p.type === 'oidc');
-  if (oidc.length !== 1) return null;
-  return `/api/auth/sso/oidc/${oidc[0].provider}/authorize`;
 }
 
 const INPUT_CLASS =
@@ -120,6 +108,7 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
           hadSsoError: hadSsoErrorRef.current,
         });
         if (autoUrl) {
+          if (cancelled) return;
           setOidcRedirecting(true);
           setDiscoveryReady(true);
           window.location.replace(autoUrl);
