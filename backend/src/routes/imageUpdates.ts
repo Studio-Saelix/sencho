@@ -497,7 +497,11 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
       } catch (e) {
         const msg = getErrorMessage(e, String(e));
         results.push(`Stack "${stackName}" failed: ${msg}`);
-        console.error(`[AutoUpdate] Failed for stack "${stackName}":`, e);
+        console.error(
+          '[AutoUpdate] Failed for stack %s: %s',
+          sanitizeForLog(stackName),
+          sanitizeForLog(msg),
+        );
       }
     }
 
