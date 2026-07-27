@@ -671,17 +671,23 @@ export function useStackActions(options: UseStackActionsOptions) {
 
   // Re-sync the open stack's container list. Used after both successful and
   // failed/stalled operations so the detail never shows containers that no
-  // longer reflect reality. Returns true only when the live list was fetched;
-  // false on a non-applicable stack, a non-ok response, or a network error, so
-  // callers (e.g. the recovery panel's Refresh) can report the real outcome.
+  // longer reflect reality. Returns 'ok' when the live list was applied,
+  // 'skipped' when ownership arbitration dropped the result (stale/aborted or
+  // wrong selection), and 'failed' on a real soft fetch error. Callers that
+  // only care about a successful apply should check for 'ok'.
   // stackName is kept for call-site clarity; the fetch derives the name from stackFile.
-  const refreshSelectedContainers = async (_stackName: string, stackFile: string): Promise<boolean> => {
-    if (selectedFileRef.current !== stackFile) return false;
+  const refreshSelectedContainers = async (
+    _stackName: string,
+    stackFile: string,
+  ): Promise<'ok' | 'skipped' | 'failed'> => {
+    if (selectedFileRef.current !== stackFile) return 'skipped';
     const result = await fetchStackContainers(stackFile, 'soft', {
       expectedFile: stackFile,
       expectedNodeId: activeNodeIdRef.current,
     });
-    return result.ok;
+    if (result.ok) return 'ok';
+    if (result.reason === 'stale' || result.reason === 'aborted') return 'skipped';
+    return 'failed';
   };
 
   const retryContainersLoad = async () => {

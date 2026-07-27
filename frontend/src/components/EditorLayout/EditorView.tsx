@@ -138,6 +138,9 @@ export interface EditorViewProps {
     containersLoadStatus?: 'idle' | 'loading' | 'success' | 'error';
     containersLoadError?: string | null;
     onRetryContainersLoad?: () => void;
+    /** Live-refresh soft failures exhausted; advisory when container cards are shown. */
+    containersSyncStale?: boolean;
+    onRetrySync?: () => void;
     backupInfo: { exists: boolean; timestamp: number | null };
     gitSourcePendingMap: Record<string, boolean>;
     notifications: NotificationItem[];
@@ -252,6 +255,8 @@ export function EditorView(props: EditorViewProps) {
         containersLoadStatus = 'success',
         containersLoadError = null,
         onRetryContainersLoad,
+        containersSyncStale = false,
+        onRetrySync,
         backupInfo,
         gitSourcePendingMap,
         notifications,
@@ -500,6 +505,8 @@ export function EditorView(props: EditorViewProps) {
                                     containersLoadStatus={containersLoadStatus}
                                     containersLoadError={containersLoadError}
                                     onRetryContainersLoad={onRetryContainersLoad}
+                                    syncStale={containersSyncStale}
+                                    onRetrySync={onRetrySync}
                                     key={`${activeNode?.id ?? 'local'}:${stackName}`}
                                 />
                             </ScrollArea>
@@ -523,6 +530,8 @@ export function EditorView(props: EditorViewProps) {
                                 containersLoadStatus={containersLoadStatus}
                                 containersLoadError={containersLoadError}
                                 onRetryContainersLoad={onRetryContainersLoad}
+                                syncStale={containersSyncStale}
+                                onRetrySync={onRetrySync}
                                 key={`${activeNode?.id ?? 'local'}:${stackName}`}
                             />
                         </CardContent>

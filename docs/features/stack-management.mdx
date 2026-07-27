@@ -210,6 +210,8 @@ The same links button appears on update cards in [Auto-Update Policies](/feature
 
 Below the header, each container in the stack gets a single row that answers "is this piece working, and how do I reach it?" When the stack has multiple containers, a summary strip appears above the list showing total, running, paused, and unhealthy counts, along with a **Compact / Detailed** toggle. Compact mode shows status, name, uptime, port, and action buttons; detailed mode (the default) adds CPU, memory, and network I/O sparklines.
 
+While the stack detail stays open, Sencho keeps those rows aligned with Docker: health transitions and container lifecycle changes update the cards without reloading the compose file, environment files, or logs. If automatic refresh cannot reach the node for a stretch, a small stale notice appears with a Retry action so you can pull state manually.
+
 <Frame>
   <img src="/images/stack-view/containers.png" alt="Container card for the plex service showing health badge, uptime, port mapping, open link, action icons, and CPU, memory, and network stat tiles" />
 </Frame>
