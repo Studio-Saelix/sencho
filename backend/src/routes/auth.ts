@@ -24,6 +24,7 @@ import {
 import { isSecureRequest } from '../helpers/cookies';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { getAuthenticationMode, isLocalLoginEnabled } from '../helpers/authenticationMode';
 
 export const authRouter = Router();
 
@@ -34,6 +35,8 @@ authRouter.get('/status', async (req: Request, res: Response): Promise<void> => 
   try {
     const settings = DatabaseService.getInstance().getGlobalSettings();
     const needsSetup = !settings.auth_username || !settings.auth_password_hash || !settings.auth_jwt_secret;
+    const authenticationMode = getAuthenticationMode();
+    const localLoginEnabled = authenticationMode !== 'sso_only';
 
     let mfaPending = false;
     const mfaCookie = req.cookies?.[MFA_PENDING_COOKIE_NAME];
@@ -46,10 +49,10 @@ authRouter.get('/status', async (req: Request, res: Response): Promise<void> => 
       }
     }
 
-    res.json({ needsSetup, mfaPending });
+    res.json({ needsSetup, mfaPending, localLoginEnabled, authenticationMode });
   } catch (error) {
     console.error('Error checking setup status:', error);
-    res.json({ needsSetup: true, mfaPending: false });
+    res.json({ needsSetup: true, mfaPending: false, localLoginEnabled: true, authenticationMode: 'local_and_sso' });
   }
 });
 
@@ -113,6 +116,13 @@ authRouter.post('/login', authRateLimiter, async (req: Request, res: Response): 
   }
 
   try {
+    if (!isLocalLoginEnabled()) {
+      res.status(403).json({
+        error: 'Local password authentication is disabled. Sign in using SSO.',
+      });
+      return;
+    }
+
     const db = DatabaseService.getInstance();
     const user = db.getUserByUsername(username);
 

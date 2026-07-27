@@ -93,11 +93,10 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         group: 'access',
         label: 'SSO',
         description: 'Single sign-on via OIDC or LDAP identity providers.',
-        keywords: ['saml', 'oidc', 'okta', 'entra', 'azure', 'login'],
+        keywords: ['saml', 'oidc', 'okta', 'entra', 'azure', 'login', 'authentication mode'],
         tier: null,
         scope: 'global',
         adminOnly: true,
-        hiddenOnRemote: true,
     },
     {
         id: 'api-tokens',

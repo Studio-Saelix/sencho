@@ -22,6 +22,7 @@ export const CAPABILITIES = [
   'audit-log',
   'scheduled-ops',
   'sso',
+  'authentication-mode',
   'api-tokens',
   'users',
   'registries',

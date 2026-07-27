@@ -5,10 +5,13 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Combobox } from '@/components/ui/combobox';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
+import { SegmentedControl } from '@/components/ui/segmented-control';
 import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { CapabilityGate } from './CapabilityGate';
 import { PaidGate } from './PaidGate';
+import { useLicense } from '@/context/LicenseContext';
 import { Loader2, CheckCircle, XCircle } from 'lucide-react';
 import { SettingsPrimaryButton } from './settings/SettingsActions';
 import { useMastheadStats } from './settings/MastheadStatsContext';
@@ -411,6 +414,183 @@ function ProviderCardWithGate(props: {
     return card;
 }
 
+type AuthMode = 'local_and_sso' | 'sso_only';
+
+const AUTH_MODE_OPTIONS: Array<{ value: AuthMode; label: string }> = [
+    { value: 'local_and_sso', label: 'Local and SSO' },
+    { value: 'sso_only', label: 'SSO only' },
+];
+
+const ENABLE_LOCAL_LOGIN_CLI = 'node dist/cli/enableLocalLogin.js';
+
+function AuthenticationModePanel({
+    enabledProviderNames,
+}: {
+    enabledProviderNames: string[];
+}) {
+    const { isPaid } = useLicense();
+    const [mode, setMode] = useState<AuthMode>('local_and_sso');
+    const [loaded, setLoaded] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [confirmRisk, setConfirmRisk] = useState(false);
+    const [pendingMode, setPendingMode] = useState<AuthMode | null>(null);
+
+    const loadMode = async () => {
+        try {
+            const res = await apiFetch('/sso/auth-mode');
+            if (!res.ok) {
+                const data = await res.json().catch(() => null);
+                toast.error(data?.error || 'Failed to load authentication mode');
+                return;
+            }
+            const data = await res.json() as { authenticationMode?: AuthMode };
+            if (data.authenticationMode === 'sso_only' || data.authenticationMode === 'local_and_sso') {
+                setMode(data.authenticationMode);
+            }
+            setLoaded(true);
+        } catch (error: unknown) {
+            toast.error((error as Error)?.message || 'Failed to load authentication mode');
+        }
+    };
+
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    useEffect(() => { void loadMode(); }, []);
+
+    const saveMode = async (next: AuthMode, confirm: boolean) => {
+        setSaving(true);
+        try {
+            const body =
+                next === 'sso_only'
+                    ? { mode: next, confirm }
+                    : { mode: next };
+            const res = await apiFetch('/sso/auth-mode', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json().catch(() => null);
+            if (!res.ok) {
+                toast.error(data?.error || 'Failed to update authentication mode');
+                return;
+            }
+            setMode(next);
+            setPendingMode(null);
+            setConfirmRisk(false);
+            toast.success(
+                next === 'sso_only'
+                    ? 'SSO-only mode enabled. Local password login is disabled.'
+                    : 'Local and SSO mode enabled.',
+            );
+        } catch (error: unknown) {
+            toast.error((error as Error)?.message || 'Failed to update authentication mode');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleModeChange = (next: AuthMode) => {
+        if (next === mode) return;
+        if (next === 'sso_only') {
+            if (!isPaid) {
+                toast.error('SSO-only mode requires Sencho Admiral.');
+                return;
+            }
+            setPendingMode('sso_only');
+            setConfirmRisk(false);
+            return;
+        }
+        void saveMode('local_and_sso', false);
+    };
+
+    if (!loaded) {
+        return (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" strokeWidth={1.5} />
+                Loading authentication mode
+            </div>
+        );
+    }
+
+    return (
+        <div className="space-y-3 rounded-md border border-card-border bg-card/40 p-4">
+            <div className="space-y-1">
+                <Label className="font-mono text-[10px] uppercase tracking-[0.14em] text-stat-subtitle">
+                    Authentication mode
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                    Choose whether local password login remains available alongside SSO.
+                </p>
+            </div>
+
+            <SegmentedControl
+                value={pendingMode ?? mode}
+                options={AUTH_MODE_OPTIONS}
+                onChange={handleModeChange}
+                ariaLabel="Authentication mode"
+                disabled={saving}
+            />
+
+            {mode === 'sso_only' && (
+                <p className="text-xs text-muted-foreground">
+                    Local password login is disabled. Emergency recovery:{' '}
+                    <code className="bg-muted px-1 rounded">{ENABLE_LOCAL_LOGIN_CLI}</code>
+                    {' '}then restart Sencho.
+                </p>
+            )}
+
+            {pendingMode === 'sso_only' && (
+                <div className="space-y-3 rounded-md border border-warning/40 bg-warning/5 p-3">
+                    <p className="text-sm text-stat-value">
+                        Local password login will be disabled. Verify that SSO works and that your
+                        account receives the Admin role before continuing.
+                    </p>
+                    {enabledProviderNames.length > 0 ? (
+                        <p className="text-xs text-muted-foreground">
+                            Providers that will remain available: {enabledProviderNames.join(', ')}.
+                        </p>
+                    ) : (
+                        <p className="text-xs text-destructive">
+                            Enable and test at least one SSO provider before continuing.
+                        </p>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                        If the identity provider is unavailable, recover with{' '}
+                        <code className="bg-muted px-1 rounded">{ENABLE_LOCAL_LOGIN_CLI}</code>
+                        {' '}and restart Sencho.
+                    </p>
+                    <label className="flex items-start gap-2 text-sm">
+                        <Checkbox
+                            checked={confirmRisk}
+                            onCheckedChange={(v) => setConfirmRisk(v === true)}
+                            disabled={saving}
+                        />
+                        <span>I understand local password login will stop working until re-enabled.</span>
+                    </label>
+                    <div className="flex gap-2">
+                        <SettingsPrimaryButton
+                            disabled={saving || !confirmRisk || enabledProviderNames.length === 0}
+                            onClick={() => void saveMode('sso_only', true)}
+                        >
+                            {saving ? 'Saving…' : 'Enable SSO only'}
+                        </SettingsPrimaryButton>
+                        <Button
+                            type="button"
+                            variant="outline"
+                            disabled={saving}
+                            onClick={() => {
+                                setPendingMode(null);
+                                setConfirmRisk(false);
+                            }}
+                        >
+                            Cancel
+                        </Button>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+}
+
 export function SSOSection() {
     const [configs, setConfigs] = useState<SSOProviderConfig[]>([]);
 
@@ -442,10 +622,17 @@ export function SSOSection() {
     ]);
 
     const getConfig = (provider: string) => configs.find(c => c.provider === provider) || null;
+    const enabledProviderNames = configs
+        .filter(c => c.enabled)
+        .map(c => c.displayName || c.provider);
 
     return (
           <CapabilityGate capability="sso" featureName="SSO Authentication">
             <div className="space-y-6">
+                <CapabilityGate capability="authentication-mode" featureName="Authentication mode">
+                    <AuthenticationModePanel enabledProviderNames={enabledProviderNames} />
+                </CapabilityGate>
+
                 <div className="space-y-3">
                     {PROVIDERS.map(p => (
                         <ProviderCardWithGate

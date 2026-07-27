@@ -4,9 +4,9 @@ sidebarTitle: SSO and LDAP
 description: Authenticate with your existing identity provider, including LDAP, Google, GitHub, Okta, and any spec-compliant OIDC provider.
 ---
 
-Sencho lets your team sign in with the identity provider you already use instead of maintaining a second set of credentials. SSO works **alongside** password authentication; it does not replace it.
+Sencho lets your team sign in with the identity provider you already use instead of maintaining a second set of credentials. By default, SSO works alongside local password authentication. On Sencho Admiral you can switch to **SSO only** so interactive local password login is disabled and only configured LDAP or OIDC providers are accepted.
 
-SSO is available on every Sencho tier. Custom OIDC and the preset providers for Google, GitHub, and Okta work on every tier; LDAP and Active Directory require Sencho Admiral.
+SSO provider configuration is available on every Sencho tier. Custom OIDC and the preset providers for Google, GitHub, and Okta work on every tier; LDAP and Active Directory require Sencho Admiral. SSO-only authentication mode requires Sencho Admiral.
 
 ## Supported providers
 
@@ -78,7 +78,23 @@ SSO can be configured two ways:
 
 ### Via Settings UI
 
-Admins manage SSO providers in **Settings → Access → SSO** (admin only; hidden on remote nodes). The masthead shows the SCOPE (global), the number of configured **PROVIDERS**, and how many are **ENABLED**. The page lists every provider as a collapsible card with a label, an **enable / disable** toggle pill on the right, and an **Active** badge on the header when the provider is on.
+Admins manage SSO providers in **Settings → Access → SSO** (admin only). The masthead shows the SCOPE (global), the number of configured **PROVIDERS**, and how many are **ENABLED**. The page lists every provider as a collapsible card with a label, an **enable / disable** toggle pill on the right, and an **Active** badge on the header when the provider is on.
+
+At the top of the page, **Authentication mode** chooses how interactive login works:
+
+- **Local and SSO** (default): local username/password login remains available alongside configured providers.
+- **SSO only** (Sencho Admiral): local password login is disabled. The login page shows only LDAP and/or OIDC providers. Direct calls to the password login endpoint are rejected.
+
+SSO only cannot be enabled until at least one provider is enabled, a connection test succeeds, and the signed-in administrator authenticated through SSO with the Admin role. Confirm the outage-risk warning before saving. Existing sessions stay valid until they expire or are revoked.
+
+If the identity provider is unavailable after SSO only is enabled, restore local password login from the host:
+
+```bash
+docker compose exec sencho node dist/cli/enableLocalLogin.js
+docker compose restart sencho
+```
+
+Restart is required so the running process reloads the setting. The same command is listed under **Settings → System → Recovery**.
 
 <Frame>
   <img src="/images/sso/sso-settings.png" alt="SSO settings panel listing the five identity providers as collapsible cards with enable / disable toggles" />
@@ -310,7 +326,17 @@ If not set, Sencho auto-detects the URL from the request's `Host` header and pro
   </Accordion>
 
   <Accordion title="SSO buttons do not appear on the login page">
-    Verify the provider is **enabled** (toggle on, showing the **Active** badge) in **Settings → Access → SSO** and that the configuration saved successfully. The login page fetches the list of enabled providers when it loads; hard-refresh the tab if changes were just made.
+    Confirm the provider is enabled (toggle on, showing the Active badge) under **Settings → Access → SSO** and that the configuration saved successfully. The login page fetches the list of enabled providers when it loads; hard-refresh the tab if changes were just made.
+  </Accordion>
+  <Accordion title="Locked out after enabling SSO only">
+    From the host that runs Sencho, re-enable local password login and restart so the setting takes effect:
+
+    ```bash
+    docker compose exec sencho node dist/cli/enableLocalLogin.js
+    docker compose restart sencho
+    ```
+
+    Then sign in with a local administrator account and repair the identity provider configuration before enabling SSO only again.
   </Accordion>
 </AccordionGroup>
 
