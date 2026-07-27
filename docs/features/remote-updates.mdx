@@ -63,7 +63,7 @@ Reapply:
 - Works for digest-pinned installs, because no repin step runs.
 - Requires the admin role.
 
-Confirming a local reapply opens a dialog that states the node will recreate from its current Compose configuration, the dashboard may briefly disconnect, no newer version is selected, and the configured image reference is not rewritten. Remotes start immediately and show a **Reapplying** badge until the node restarts or the operation fails.
+Confirming a local reapply opens a dialog that states the node will recreate from its current Compose configuration, the dashboard may briefly disconnect, no newer version is selected, and the configured image reference is not rewritten. Confirming a remote reapply uses the same required acknowledgement (recreate from current Compose, no newer version, no image rewrite) before the request is sent; Fleet then shows a **Reapplying** badge until the node restarts or the operation fails.
 
 ## Updating the local (gateway) node
 

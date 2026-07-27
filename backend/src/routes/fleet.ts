@@ -62,6 +62,8 @@ import { PROXY_TIER_HEADER, deployProvenanceHeaders } from '../services/license-
 import { LicenseService } from '../services/LicenseService';
 
 const updateTracker = FleetUpdateTrackerService.getInstance();
+/** Sync lock for remote reapply while meta is fetched (before the pollable tracker exists). */
+const remoteReapplyDispatching = new Set<number>();
 const EARLY_FAIL_MS = 180 * 1000; // 3 minutes before declaring a probable pull failure
 // Shown in the Node Updates UI when a node's image is pinned in a way Fleet
 // cannot repin (digest or an unresolved value). Node-neutral so it reads the
@@ -1631,50 +1633,91 @@ fleetRouter.post('/nodes/:nodeId/reapply-compose', authMiddleware, async (req: R
       return;
     }
 
-    const target = NodeRegistry.getInstance().getProxyTarget(node.id);
-    if (!target) {
-      res.status(503).json({ error: formatNoTargetError(node) });
+    // Sync lock before any await so a concurrent reapply gets 409 without
+    // racing the remote POST. The pollable tracker is created only after meta
+    // is known (full process identity), immediately before dispatch.
+    if (remoteReapplyDispatching.has(nodeId)) {
+      res.status(409).json({ error: 'An update or reapply is already in progress for this node.' });
       return;
     }
+    remoteReapplyDispatching.add(nodeId);
 
-    const meta = await NodeRegistry.getInstance().fetchMetaForNode(node.id);
-    if (!meta.online) {
-      res.status(503).json({ error: 'Remote node is unreachable. Verify the node is running and the API URL is correct.' });
-      return;
-    }
-    if (!meta.capabilities.includes('self-update')) {
-      res.status(503).json({ error: 'Remote node does not support compose reapply. It may need to be updated manually first.' });
-      return;
-    }
-    // Digest pins and updateBlocked are intentional non-gates: reapply never
-    // repins the image, so blocked update rows remain eligible.
-
-    const response = await postSystemReapplyCompose(target);
-
-    if (!response.ok) {
-      const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
+    const failOwnedTracker = (
+      error: string,
+      code?: string,
+      previousVersion: string | null = null,
+      previousProcessStart: number | null = null,
+    ) => {
+      const current = updateTracker.get(nodeId);
+      if (current?.status !== 'updating' || current.operationKind !== 'reapply_configuration') return;
       updateTracker.set(
         nodeId,
-        updateTracker.create('failed', meta.version, meta.startedAt, failure.error, failure.code, 'reapply_configuration'),
+        updateTracker.create('failed', previousVersion, previousProcessStart, error, code, 'reapply_configuration'),
       );
-      res.status(502).json(failure);
-      return;
-    }
+    };
 
-    updateTracker.set(
-      nodeId,
-      updateTracker.create('updating', meta.version, meta.startedAt, undefined, undefined, 'reapply_configuration'),
-    );
-    res.status(202).json({ message: `Compose reapply initiated on ${node.name}.` });
+    try {
+      const target = NodeRegistry.getInstance().getProxyTarget(node.id);
+      if (!target) {
+        const error = formatNoTargetError(node);
+        res.status(503).json({ error });
+        return;
+      }
+
+      const meta = await NodeRegistry.getInstance().fetchMetaForNode(node.id);
+      if (!meta.online) {
+        const error = 'Remote node is unreachable. Verify the node is running and the API URL is correct.';
+        res.status(503).json({ error });
+        return;
+      }
+      if (!meta.capabilities.includes('self-update')) {
+        const error = 'Remote node does not support compose reapply. It may need to be updated manually first.';
+        res.status(503).json({ error });
+        return;
+      }
+      // Digest pins and updateBlocked are intentional non-gates: reapply never
+      // repins the image, so blocked update rows remain eligible.
+
+      // Reserve before the remote POST so a concurrent reapply still sees
+      // 'updating' after this request leaves the dispatch set in finally.
+      updateTracker.set(
+        nodeId,
+        updateTracker.create(
+          'updating',
+          meta.version,
+          meta.startedAt,
+          undefined,
+          undefined,
+          'reapply_configuration',
+        ),
+      );
+
+      const response = await postSystemReapplyCompose(target);
+
+      if (!response.ok) {
+        const failure = parseRemoteUpdateFailure(await response.json().catch(() => null));
+        failOwnedTracker(failure.error, failure.code, meta.version, meta.startedAt);
+        res.status(502).json(failure);
+        return;
+      }
+
+      res.status(202).json({ message: `Compose reapply initiated on ${node.name}.` });
+    } finally {
+      remoteReapplyDispatching.delete(nodeId);
+    }
   } catch (error) {
     console.error('[Fleet] Node compose reapply error:', error);
     const errorMsg = getErrorMessage(error, 'Failed to trigger compose reapply.');
     const failedNodeId = parseInt(req.params.nodeId as string, 10);
     if (!isNaN(failedNodeId)) {
-      updateTracker.set(
-        failedNodeId,
-        updateTracker.create('failed', null, null, errorMsg, undefined, 'reapply_configuration'),
-      );
+      remoteReapplyDispatching.delete(failedNodeId);
+      const current = updateTracker.get(failedNodeId);
+      if (current?.status === 'updating' && current.operationKind === 'reapply_configuration') {
+        updateTracker.set(
+          failedNodeId,
+          updateTracker.create('failed', null, null, errorMsg, undefined, 'reapply_configuration'),
+        );
+      }
     }
     res.status(500).json({ error: 'Failed to trigger compose reapply.' });
   }

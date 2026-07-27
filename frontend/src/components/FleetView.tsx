@@ -74,12 +74,14 @@ export function FleetView({
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
     const overview = useFleetOverview({ prefs, updatePrefs, updateStatuses: updateStatus.updateStatuses });
-    // The local node's status backs the confirm dialog copy (pin + target ref).
-    const localUpdateConfirmStatus = updateStatus.localUpdateConfirm !== null
-        ? updateStatus.updateStatuses.find(s => s.nodeId === updateStatus.localUpdateConfirm)
+    // Confirm dialogs: local update uses pin/target copy; reapply covers local
+    // and remote nodes with mode-specific wording. Prefer reapply when both set.
+    const confirmMode = updateStatus.reapplyConfirm !== null ? 'reapply' as const : 'update' as const;
+    const confirmNodeId = updateStatus.reapplyConfirm ?? updateStatus.localUpdateConfirm;
+    const confirmOpen = confirmNodeId !== null;
+    const confirmStatus = confirmNodeId !== null
+        ? updateStatus.updateStatuses.find(s => s.nodeId === confirmNodeId)
         : undefined;
-    const localConfirmMode = updateStatus.localReapplyConfirm !== null ? 'reapply' as const : 'update' as const;
-    const localConfirmOpen = updateStatus.localUpdateConfirm !== null || updateStatus.localReapplyConfirm !== null;
     const topology = useTopologyPreferences();
     const { exporting, exportDossier } = useFleetDossierExport();
 
@@ -365,21 +367,22 @@ export function FleetView({
             />
 
             <LocalUpdateConfirmDialog
-                open={localConfirmOpen}
-                mode={localConfirmMode}
+                open={confirmOpen}
+                mode={confirmMode}
+                nodeType={confirmStatus?.type ?? 'local'}
                 onOpenChange={(open) => {
                     if (!open) {
                         updateStatus.setLocalUpdateConfirm(null);
-                        updateStatus.setLocalReapplyConfirm(null);
+                        updateStatus.setReapplyConfirm(null);
                     }
                 }}
-                onConfirm={localConfirmMode === 'reapply'
-                    ? updateStatus.confirmLocalReapply
+                onConfirm={confirmMode === 'reapply'
+                    ? updateStatus.confirmReapply
                     : updateStatus.confirmLocalUpdate}
-                imagePinKind={localUpdateConfirmStatus?.imagePinKind}
-                composeImageRef={localUpdateConfirmStatus?.composeImageRef}
-                targetImageRef={localUpdateConfirmStatus?.targetImageRef}
-                targetVersion={localUpdateConfirmStatus?.latestVersion}
+                imagePinKind={confirmStatus?.imagePinKind}
+                composeImageRef={confirmStatus?.composeImageRef}
+                targetImageRef={confirmStatus?.targetImageRef}
+                targetVersion={confirmStatus?.latestVersion}
             />
 
             {NodeActionModals}

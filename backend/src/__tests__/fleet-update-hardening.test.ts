@@ -495,4 +495,90 @@ describe('compose reapply status and concurrency', () => {
     expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)?.operationKind)
       .toBe('reapply_configuration');
   });
+
+  it('reserves the tracker before remote dispatch so a concurrent reapply gets 409 without overwriting success', async () => {
+    mockTarget();
+    // Hold meta so the first request sits in the dispatch set before the
+    // pollable tracker exists; the second must still 409 on that lock.
+    let releaseMeta!: (value: RemoteMeta) => void;
+    const metaHeld = new Promise<RemoteMeta>((resolve) => { releaseMeta = resolve; });
+    vi.spyOn(NodeRegistry.getInstance(), 'fetchMetaForNode').mockImplementation(async () => metaHeld);
+
+    let releaseRemote!: (value: Response) => void;
+    const remoteHeld = new Promise<Response>((resolve) => { releaseRemote = resolve; });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      try {
+        if (new URL(url).hostname === 'api.github.com') {
+          return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+        }
+      } catch { /* fall through */ }
+      if (url.includes('/api/system/reapply-compose')) {
+        return remoteHeld;
+      }
+      return new Response('{}', { status: 200 });
+    });
+
+    // Supertest is lazy until the thenable is consumed; start the request now.
+    const firstPromise = request(app)
+      .post(`/api/fleet/nodes/${proxyNodeId}/reapply-compose`)
+      .set('Authorization', adminAuth)
+      .then((res) => res);
+
+    await vi.waitFor(() => {
+      expect(NodeRegistry.getInstance().fetchMetaForNode).toHaveBeenCalled();
+    });
+
+    const secondDuringMeta = await request(app)
+      .post(`/api/fleet/nodes/${proxyNodeId}/reapply-compose`)
+      .set('Authorization', adminAuth);
+    expect(secondDuringMeta.status).toBe(409);
+    expect(secondDuringMeta.body?.error).toMatch(/already in progress/i);
+
+    releaseMeta(ONLINE());
+
+    await vi.waitFor(() => {
+      expect(FleetUpdateTrackerService.getInstance().get(proxyNodeId)?.status).toBe('updating');
+    });
+
+    const secondDuringPost = await request(app)
+      .post(`/api/fleet/nodes/${proxyNodeId}/reapply-compose`)
+      .set('Authorization', adminAuth);
+    expect(secondDuringPost.status).toBe(409);
+
+    releaseRemote(new Response(JSON.stringify({ message: 'ok' }), { status: 202 }));
+    const first = await firstPromise;
+    expect(first.status).toBe(202);
+    const tracker = FleetUpdateTrackerService.getInstance().get(proxyNodeId);
+    expect(tracker?.status).toBe('updating');
+    expect(tracker?.operationKind).toBe('reapply_configuration');
+    expect(tracker?.previousVersion).toBe('0.83.0');
+    expect(tracker?.previousProcessStart).toBe(1);
+    expect(tracker?.error).toBeUndefined();
+  });
+
+  it('marks a reserved remote reapply as failed when the peer rejects, without leaving a false updating row for a second request', async () => {
+    mockTarget();
+    mockMeta(ONLINE());
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      try {
+        if (new URL(url).hostname === 'api.github.com') {
+          return new Response(JSON.stringify({ tag_name: 'v0.99.0' }), { status: 200 });
+        }
+      } catch { /* fall through */ }
+      return new Response(JSON.stringify({
+        error: 'An image operation is already in progress.',
+        code: 'IMAGE_OPERATION_IN_FLIGHT',
+      }), { status: 409 });
+    });
+
+    const res = await request(app)
+      .post(`/api/fleet/nodes/${proxyNodeId}/reapply-compose`)
+      .set('Authorization', adminAuth);
+    expect(res.status).toBe(502);
+    const tracker = FleetUpdateTrackerService.getInstance().get(proxyNodeId);
+    expect(tracker?.status).toBe('failed');
+    expect(tracker?.error).toMatch(/already in progress/i);
+  });
 });

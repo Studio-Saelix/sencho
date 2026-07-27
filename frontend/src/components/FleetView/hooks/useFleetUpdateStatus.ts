@@ -46,7 +46,7 @@ export function useFleetUpdateStatus() {
     const [reconnecting, setReconnecting] = useState(false);
     const [preUpdateStartedAt, setPreUpdateStartedAt] = useState<number | null>(null);
     const [localUpdateConfirm, setLocalUpdateConfirm] = useState<number | null>(null);
-    const [localReapplyConfirm, setLocalReapplyConfirm] = useState<number | null>(null);
+    const [reapplyConfirm, setReapplyConfirm] = useState<number | null>(null);
     const [reconnectMode, setReconnectMode] = useState<'update' | 'reapply'>('update');
     const [showUpdateModal, setShowUpdateModal] = useState(false);
     const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -166,10 +166,30 @@ export function useFleetUpdateStatus() {
         );
     }, [localUpdateConfirm, startLocalRestart]);
 
-    const triggerNodeReapply = useCallback(async (nodeId: number) => {
+    const triggerNodeReapply = useCallback((nodeId: number) => {
+        // Confirm for both local and remote: the operator must acknowledge
+        // recreate, no version selection, and no image rewrite.
+        setReapplyConfirm(nodeId);
+    }, []);
+
+    const confirmReapply = useCallback(async () => {
+        const nodeId = reapplyConfirm;
+        setReapplyConfirm(null);
+        if (!nodeId) return;
         const status = updateStatusesRef.current.find(s => s.nodeId === nodeId);
-        if (status?.type === 'local') {
-            setLocalReapplyConfirm(nodeId);
+        if (!status) {
+            toast.error('Node status is unavailable. Recheck updates and try again.');
+            return;
+        }
+
+        if (status.type === 'local') {
+            await startLocalRestart(
+                nodeId,
+                `/fleet/nodes/${nodeId}/reapply-compose`,
+                { method: 'POST', localOnly: true },
+                'reapply',
+                'Failed to trigger local compose reapply.',
+            );
             return;
         }
 
@@ -177,24 +197,10 @@ export function useFleetUpdateStatus() {
             nodeId,
             `/fleet/nodes/${nodeId}/reapply-compose`,
             { method: 'POST', localOnly: true },
-            `Compose reapply initiated on ${status?.name ?? 'node'}.`,
+            `Compose reapply initiated on ${status.name}.`,
             'Failed to trigger compose reapply.',
         );
-    }, [postRemoteAction]);
-
-    const confirmLocalReapply = useCallback(async () => {
-        const nodeId = localReapplyConfirm;
-        setLocalReapplyConfirm(null);
-        if (!nodeId) return;
-
-        await startLocalRestart(
-            nodeId,
-            `/fleet/nodes/${nodeId}/reapply-compose`,
-            { method: 'POST', localOnly: true },
-            'reapply',
-            'Failed to trigger local compose reapply.',
-        );
-    }, [localReapplyConfirm, startLocalRestart]);
+    }, [reapplyConfirm, startLocalRestart, postRemoteAction]);
 
     const triggerUpdateAll = useCallback(async () => {
         try {
@@ -284,17 +290,17 @@ export function useFleetUpdateStatus() {
         preUpdateStartedAt,
         reconnectMode,
         localUpdateConfirm,
-        localReapplyConfirm,
+        reapplyConfirm,
         showUpdateModal,
         checkingUpdates,
         setShowUpdateModal,
         setLocalUpdateConfirm,
-        setLocalReapplyConfirm,
+        setReapplyConfirm,
         fetchUpdateStatus,
         triggerNodeUpdate,
         confirmLocalUpdate,
         triggerNodeReapply,
-        confirmLocalReapply,
+        confirmReapply,
         triggerUpdateAll,
         dismissNodeUpdate,
         retryNodeUpdate,
