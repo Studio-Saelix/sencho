@@ -77,7 +77,17 @@ describe('UpdatesSection', () => {
     });
 
     it('disables the enable toggle with upgrade copy when enabled is absent', async () => {
-        const { enabled: _omit, ...older } = STATUS;
+        const older = {
+            checking: STATUS.checking,
+            intervalMinutes: STATUS.intervalMinutes,
+            lastCheckedAt: STATUS.lastCheckedAt,
+            nextCheckAt: STATUS.nextCheckAt,
+            manualCooldownMinutes: STATUS.manualCooldownMinutes,
+            manualCooldownRemainingMs: STATUS.manualCooldownRemainingMs,
+            mode: STATUS.mode,
+            cronExpression: STATUS.cronExpression,
+            sidebarIndicators: STATUS.sidebarIndicators,
+        };
         mockedFetch.mockResolvedValue({ ok: true, json: async () => older });
         render(<UpdatesSection />);
         await waitFor(() => expect(screen.getByText(/older version of Sencho/i)).toBeInTheDocument());
