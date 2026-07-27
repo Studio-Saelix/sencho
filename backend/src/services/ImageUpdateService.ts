@@ -14,6 +14,7 @@ import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { buildEffectiveServiceModel } from './effectiveServiceModel';
+import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 
 const BACKFILL_KEY = 'image_update_notifications_backfilled';
 
@@ -75,6 +76,8 @@ export function normalizeImageCheckStatus(r: ImageCheckResult): PreviewImageChec
  * `nextCheckAt` is meaningless while `checking` is true.
  * `mode` is the active scheduling mode; `cronExpression` is the 5-field
  * expression when mode is 'cron', null otherwise or when unconfigured.
+ * `enabled` is whether background image-update detection is armed; always
+ * present on current nodes, optional on the wire for older remotes.
  */
 export interface ImageUpdateStatus {
     checking: boolean;
@@ -86,6 +89,7 @@ export interface ImageUpdateStatus {
     mode: 'interval' | 'cron';
     cronExpression: string | null;
     sidebarIndicators: boolean;
+    enabled: boolean;
 }
 
 // ─── Compose file helpers ────────────────────────────────────────────────────
@@ -410,6 +414,7 @@ export class ImageUpdateService {
     private static readonly INTERVAL_SETTING_KEY = 'image_update_check_interval_minutes';
     private static readonly MODE_SETTING_KEY = 'image_update_check_mode';
     private static readonly CRON_SETTING_KEY = 'image_update_check_cron';
+    private static readonly ENABLED_SETTING_KEY = 'image_update_checks_enabled';
     private static readonly JITTER_FRACTION = 0.1;                // ±10% so a fleet does not poll in lockstep
     private static readonly STARTUP_DELAY_MS = 2 * 60 * 1000;    // 2 min after boot
 
@@ -452,8 +457,15 @@ export class ImageUpdateService {
 
     public start() {
         if (this.timer) return;
-        this.polling = true;
         this.configureFromSettings();
+        if (!ImageUpdateService.isChecksEnabled()) {
+            // Detection opted out: stay stopped across restarts so a boot does
+            // not re-arm registry polling until the setting is turned back on.
+            this.polling = false;
+            this.nextCheckAt = null;
+            return;
+        }
+        this.polling = true;
         // Interval mode keeps the 2-minute post-boot delay before the first check.
         // Cron mode honors its schedule: arm at the next cron fire time so a restart
         // never triggers an out-of-cadence check (e.g. a weekly cron must not run on
@@ -476,7 +488,8 @@ export class ImageUpdateService {
      * cadence without restarting Sencho. Safe to call repeatedly: it always
      * clears the existing timer first and only arms a new one while polling, so
      * it never stacks timers and is a no-op (beyond reconfiguring intervalMs)
-     * when the service is stopped or was never started.
+     * when the service is stopped or was never started. When checks are
+     * disabled, clears nextCheckAt and does not arm.
      */
     public restartPolling(): void {
         this.scheduleGeneration++;
@@ -485,11 +498,63 @@ export class ImageUpdateService {
             this.timer = null;
         }
         this.configureFromSettings();
-        if (this.polling) {
+        if (this.polling && ImageUpdateService.isChecksEnabled()) {
             this.armNext(this.nextDelayMs());
         } else {
             this.nextCheckAt = null;
         }
+    }
+
+    /**
+     * Whether background image-update detection is enabled. Missing or blank
+     * keys default to enabled so upgrades and pre-seed races keep polling.
+     */
+    public static isChecksEnabled(): boolean {
+        try {
+            const raw = DatabaseService.getInstance().getGlobalSettings()[ImageUpdateService.ENABLED_SETTING_KEY];
+            if (raw == null || String(raw).trim() === '') return true;
+            return raw === '1';
+        } catch (e) {
+            console.warn('[ImageUpdateService] Could not read checks-enabled setting; treating as enabled:', getErrorMessage(e, String(e)));
+            return true;
+        }
+    }
+
+    /**
+     * Persist the checks-enabled setting and apply the live transition: stop
+     * + clear findings when turning off; start (or re-arm) when turning on.
+     * Safe under repeated toggles (scheduleGeneration bump via stop/start).
+     */
+    public applyChecksEnabled(enabled: boolean): ImageUpdateStatus {
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting(ImageUpdateService.ENABLED_SETTING_KEY, enabled ? '1' : '0');
+
+        if (!enabled) {
+            this.stop();
+            // Scanner only writes rows for local nodes. Use the local default
+            // node ID, not req.nodeId (which may be a remote active node).
+            const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+            db.clearAllStackUpdateStatus(localNodeId);
+            invalidateFleetUpdateCache();
+            NotificationService.getInstance().broadcastEvent({
+                type: 'state-invalidate',
+                scope: 'image-updates',
+                nodeId: localNodeId,
+                action: 'checks-disabled',
+                ts: Date.now(),
+            });
+            return this.getStatus();
+        }
+
+        // Re-enable: arm a fresh schedule. start() is a no-op if a timer already
+        // exists; when we were fully stopped, start() arms. When somehow still
+        // marked polling without a timer, restartPolling re-arms.
+        if (!this.timer) {
+            this.start();
+        } else {
+            this.restartPolling();
+        }
+        return this.getStatus();
     }
 
     /**
@@ -600,11 +665,16 @@ export class ImageUpdateService {
     }
 
     /**
-     * Triggers a check immediately, unless one is already running or the
-     * manual cooldown (MANUAL_COOLDOWN_MS) has not elapsed.
-     * Returns false if rate-limited, true if a check was started.
+     * Triggers a check immediately, unless detection is disabled, one is already
+     * running, or the manual cooldown (MANUAL_COOLDOWN_MS) has not elapsed.
+     * Returns false if rate-limited or disabled, true if a check was started.
+     * Callers that need to distinguish disabled from rate-limited must check
+     * isChecksEnabled() first.
      */
     public triggerManualRefresh(): boolean {
+        if (!ImageUpdateService.isChecksEnabled()) {
+            return false;
+        }
         const now = Date.now();
         if (now - this.lastManualRefreshAt < ImageUpdateService.MANUAL_COOLDOWN_MS) {
             return false;
@@ -624,6 +694,7 @@ export class ImageUpdateService {
     }
 
     public getStatus(): ImageUpdateStatus {
+        const enabled = ImageUpdateService.isChecksEnabled();
         let sidebarIndicators = false;
         try {
             const settings = DatabaseService.getInstance().getGlobalSettings();
@@ -632,21 +703,28 @@ export class ImageUpdateService {
             console.warn('[ImageUpdateService] Failed to read sidebar indicator setting:', e);
         }
         return {
-            checking: this.isRunning,
+            checking: enabled ? this.isRunning : false,
             intervalMinutes: Math.round(this.intervalMs / (60 * 1000)),
             lastCheckedAt: this.lastCheckedAt,
-            nextCheckAt: this.nextCheckAt,
+            nextCheckAt: enabled ? this.nextCheckAt : null,
             manualCooldownMinutes: ImageUpdateService.manualCooldownMinutes,
             manualCooldownRemainingMs: this.getManualCooldownRemainingMs(),
             mode: this.mode,
             cronExpression: this.cronExpression,
             sidebarIndicators,
+            enabled,
         };
     }
 
     // ─── Core check ──────────────────────────────────────────────────────────
 
     private async check() {
+        if (!ImageUpdateService.isChecksEnabled()) {
+            if (isDebugEnabled()) {
+                console.log('[ImageUpdateService:debug] Checks disabled; skipping scan.');
+            }
+            return;
+        }
         // The finally block is the sole owner of isRunning, so a scan that
         // overruns can never have its lock released out from under it. A
         // previous fixed timer cleared the lock after CHECK_TIMEOUT_MS, which

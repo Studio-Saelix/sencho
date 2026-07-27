@@ -9,9 +9,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const {
   mockGetAuthForRegistry,
   mockGetStackUpdateStatus, mockUpsertStackUpdateStatus, mockClearStackUpdateStatus,
+  mockClearAllStackUpdateStatus, mockUpdateGlobalSetting,
   mockRecordStackCheckFailure, mockGetStackServicesJson,
   mockGetSystemState, mockSetSystemState, mockAddNotificationHistory,
-  mockDispatchAlert,
+  mockDispatchAlert, mockBroadcastEvent,
   mockGetStacks, mockGetStackContent, mockGetEnvContent, mockEnvExists,
   mockGetAllContainers, mockGetGlobalSettings, mockInspect,
   mockBuildEffectiveServiceModel,
@@ -20,12 +21,15 @@ const {
   mockGetStackUpdateStatus: vi.fn().mockReturnValue({}),
   mockUpsertStackUpdateStatus: vi.fn(),
   mockClearStackUpdateStatus: vi.fn(),
+  mockClearAllStackUpdateStatus: vi.fn().mockReturnValue(0),
+  mockUpdateGlobalSetting: vi.fn(),
   mockRecordStackCheckFailure: vi.fn(),
   mockGetStackServicesJson: vi.fn().mockReturnValue([]),
   mockGetSystemState: vi.fn().mockReturnValue('1'), // default: backfilled
   mockSetSystemState: vi.fn(),
   mockAddNotificationHistory: vi.fn(),
   mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
+  mockBroadcastEvent: vi.fn(),
   mockGetStacks: vi.fn().mockResolvedValue([]),
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockRejectedValue(new Error('no env')),
@@ -53,12 +57,14 @@ vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
     getInstance: () => ({
       getGlobalSettings: mockGetGlobalSettings,
+      updateGlobalSetting: mockUpdateGlobalSetting,
       getNodes: () => [],
       getGitSource: () => undefined,
       getStackProjectEnvFiles: () => [],
       upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
       getStackUpdateStatus: mockGetStackUpdateStatus,
       clearStackUpdateStatus: mockClearStackUpdateStatus,
+      clearAllStackUpdateStatus: mockClearAllStackUpdateStatus,
       recordStackCheckFailure: mockRecordStackCheckFailure,
       getStackServicesJson: mockGetStackServicesJson,
       getSystemState: mockGetSystemState,
@@ -76,8 +82,13 @@ vi.mock('../services/NotificationService', () => ({
   NotificationService: {
     getInstance: () => ({
       dispatchAlert: mockDispatchAlert,
+      broadcastEvent: mockBroadcastEvent,
     }),
   },
+}));
+
+vi.mock('../helpers/fleetUpdateCache', () => ({
+  invalidateFleetUpdateCache: vi.fn(),
 }));
 
 vi.mock('../services/FileSystemService', () => ({
@@ -1208,6 +1219,62 @@ describe('ImageUpdateService - configurable interval & status', () => {
 
     service.stop();
     checkSpy.mockRestore();
+  });
+
+  it('start() while checks disabled arms no timer and reports enabled false', () => {
+    vi.useFakeTimers();
+    mockGetGlobalSettings.mockReturnValue({ image_update_checks_enabled: '0', image_update_check_interval_minutes: '60' });
+    const service = ImageUpdateService.getInstance();
+    const checkSpy = vi.spyOn(service as any, 'check').mockResolvedValue(undefined);
+    service.start();
+    const status = service.getStatus();
+    expect(status.enabled).toBe(false);
+    expect(status.nextCheckAt).toBeNull();
+    expect(status.checking).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(10 * 60 * 1000);
+    expect(checkSpy).not.toHaveBeenCalled();
+    checkSpy.mockRestore();
+  });
+
+  it('treats a missing checks-enabled key as enabled', () => {
+    mockGetGlobalSettings.mockReturnValue({});
+    const service = ImageUpdateService.getInstance();
+    expect(ImageUpdateService.isChecksEnabled()).toBe(true);
+    expect(service.getStatus().enabled).toBe(true);
+  });
+
+  it('applyChecksEnabled(false) stops polling, clears local findings, and broadcasts invalidate', () => {
+    vi.useFakeTimers();
+    mockGetGlobalSettings.mockReturnValue({ image_update_check_interval_minutes: '60' });
+    const service = ImageUpdateService.getInstance();
+    service.start();
+    expect(service.getStatus().nextCheckAt).not.toBeNull();
+
+    mockGetGlobalSettings.mockReturnValue({ image_update_checks_enabled: '0', image_update_check_interval_minutes: '60' });
+    mockUpdateGlobalSetting.mockImplementation((key: string, value: string) => {
+      if (key === 'image_update_checks_enabled') {
+        mockGetGlobalSettings.mockReturnValue({ image_update_checks_enabled: value, image_update_check_interval_minutes: '60' });
+      }
+    });
+
+    const status = service.applyChecksEnabled(false);
+    expect(status.enabled).toBe(false);
+    expect(status.nextCheckAt).toBeNull();
+    expect(mockUpdateGlobalSetting).toHaveBeenCalledWith('image_update_checks_enabled', '0');
+    expect(mockClearAllStackUpdateStatus).toHaveBeenCalledWith(1);
+    expect(mockBroadcastEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'state-invalidate',
+      scope: 'image-updates',
+      nodeId: 1,
+    }));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('triggerManualRefresh returns false when checks are disabled', () => {
+    mockGetGlobalSettings.mockReturnValue({ image_update_checks_enabled: '0' });
+    const service = ImageUpdateService.getInstance();
+    expect(service.triggerManualRefresh()).toBe(false);
   });
 });
 

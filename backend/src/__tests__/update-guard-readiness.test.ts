@@ -160,6 +160,13 @@ describe('updatePreviewSignal', () => {
   it('degrades a preview failure to a non-verdict-affecting unknown', () => {
     expect(updatePreviewSignal('error')).toMatchObject({ status: 'unknown', affectsVerdict: false });
   });
+
+  it('reports detection disabled without treating it as up to date', () => {
+    const signal = updatePreviewSignal(summary({ detection_disabled: true, has_update: false }));
+    expect(signal.status).toBe('unknown');
+    expect(signal.affectsVerdict).toBe(false);
+    expect(signal.detail).toMatch(/disabled/i);
+  });
 });
 
 describe('buildServicesSignal', () => {

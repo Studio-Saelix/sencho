@@ -32,6 +32,8 @@ const STATUS = {
     manualCooldownRemainingMs: 0,
     mode: 'interval' as const,
     cronExpression: null,
+    sidebarIndicators: true,
+    enabled: true,
 };
 
 beforeEach(() => {
@@ -46,6 +48,7 @@ describe('UpdatesSection', () => {
         await waitFor(() => expect(screen.getByText(/Last checked 5m ago/)).toBeInTheDocument());
         expect(mockedFetch).toHaveBeenCalledWith('/image-updates/status');
         expect(screen.getByRole('combobox', { name: /interval/i })).toBeEnabled();
+        expect(screen.getByLabelText(/Enable image update checks/i)).toBeChecked();
     });
 
     it('shows the section read-only (control disabled) for non-admins', async () => {
@@ -60,5 +63,25 @@ describe('UpdatesSection', () => {
         render(<UpdatesSection />);
         await waitFor(() => expect(toast.error).toHaveBeenCalled());
         expect(screen.getByRole('combobox', { name: /interval/i })).toBeDisabled();
+    });
+
+    it('greys out cadence and shows Next check disabled when checks are off', async () => {
+        mockedFetch.mockResolvedValue({
+            ok: true,
+            json: async () => ({ ...STATUS, enabled: false, nextCheckAt: null }),
+        });
+        render(<UpdatesSection />);
+        await waitFor(() => expect(screen.getByText(/Next check disabled/)).toBeInTheDocument());
+        expect(screen.getByRole('combobox', { name: /interval/i })).toBeDisabled();
+        expect(screen.queryByText(/Show update status in sidebar/i)).not.toBeInTheDocument();
+    });
+
+    it('disables the enable toggle with upgrade copy when enabled is absent', async () => {
+        const { enabled: _omit, ...older } = STATUS;
+        mockedFetch.mockResolvedValue({ ok: true, json: async () => older });
+        render(<UpdatesSection />);
+        await waitFor(() => expect(screen.getByText(/older version of Sencho/i)).toBeInTheDocument());
+        expect(screen.getByLabelText(/Enable image update checks/i)).toBeDisabled();
+        expect(screen.getByRole('combobox', { name: /interval/i })).toBeEnabled();
     });
 });
