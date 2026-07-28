@@ -43,6 +43,7 @@ ssoRouter.get('/providers', (_req: Request, res: Response): void => {
 ssoRouter.post('/ldap', authRateLimiter, async (req: Request, res: Response): Promise<void> => {
   try {
     const { username, password } = req.body;
+    const remember = req.body.remember === true;
     if (!username || !password) {
       res.status(400).json({ error: 'Username and password are required' });
       return;
@@ -71,13 +72,13 @@ ssoRouter.post('/ldap', authRateLimiter, async (req: Request, res: Response): Pr
       console.log('[MFA:diag] login: path=ldap user=', user.username, 'mfaEnabled=', !!mfa?.enabled, 'ssoEnforce=', mfa?.sso_enforce_mfa === 1);
     }
     if (mfa?.enabled && mfa.sso_enforce_mfa) {
-      issueMfaPendingCookie(res, req, user, settings.auth_jwt_secret, { sso: true });
+      issueMfaPendingCookie(res, req, user, settings.auth_jwt_secret, { sso: true, remember });
       console.log(`[SSO] LDAP login password OK, MFA challenge pending: ${user.username}`);
       res.json({ success: true, mfaRequired: true });
       return;
     }
 
-    issueSessionCookie(res, req, user, settings.auth_jwt_secret);
+    issueSessionCookie(res, req, user, settings.auth_jwt_secret, remember);
     console.log(`[SSO] LDAP login successful: ${user.username}`);
     res.json({ success: true, message: 'Login successful' });
   } catch (error) {

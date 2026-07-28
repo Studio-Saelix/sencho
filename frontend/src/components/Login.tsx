@@ -3,6 +3,7 @@ import { useAuth } from '@/context/AuthContext';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Checkbox } from '@/components/ui/checkbox';
 import { ArrowRight, KeyRound, Loader2 } from 'lucide-react';
 import { AuthCanvas } from '@/components/auth/AuthCanvas';
 import { AuthStepHeader } from '@/components/auth/AuthStepHeader';
@@ -63,6 +64,7 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
   const [loginMode, setLoginMode] = useState<'local' | 'ldap'>('local');
   const [ssoProviders, setSsoProviders] = useState<SSOProvider[]>([]);
   const [capsLock, setCapsLock] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
 
   useEffect(() => {
     fetch('/api/auth/sso/providers', { credentials: 'include' })
@@ -82,8 +84,8 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
     setIsLoading(true);
     const result =
       loginMode === 'ldap' && ssoLdapLogin
-        ? await ssoLdapLogin(username, password)
-        : await login(username, password);
+        ? await ssoLdapLogin(username, password, rememberMe)
+        : await login(username, password, rememberMe);
     if (!result.success) setError(result.error || 'Login failed');
     setIsLoading(false);
   };
@@ -176,6 +178,20 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
                 onKeyUp={handlePasswordKey}
                 className={INPUT_CLASS}
               />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="remember-me"
+                checked={rememberMe}
+                onCheckedChange={(c) => setRememberMe(c === true)}
+              />
+              <label
+                htmlFor="remember-me"
+                className="text-sm text-stat-subtitle cursor-pointer select-none"
+              >
+                Stay signed in
+              </label>
             </div>
 
             {error && <ErrorRail>{error}</ErrorRail>}
