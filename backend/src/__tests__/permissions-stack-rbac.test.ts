@@ -118,6 +118,52 @@ describe('checkPermission with node-scoped stack grants', () => {
 
     db.deleteRoleAssignmentsByStack(defaultNodeId, 'deploy-me');
   });
+
+  it('node-scoped Node Admin authorizes stack actions on that node only', () => {
+    const db = DatabaseService.getInstance();
+    db.addRoleAssignment({
+      user_id: viewerId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: String(defaultNodeId),
+    });
+
+    const sameNode = mockReq({ userId: viewerId, role: 'viewer', nodeId: defaultNodeId });
+    expect(checkPermission(sameNode, 'stack:edit', 'stack', 'any-stack')).toBe(true);
+    expect(checkPermission(sameNode, 'stack:deploy', 'stack', 'other-stack')).toBe(true);
+    expect(checkPermission(sameNode, 'node:manage', 'node', String(defaultNodeId))).toBe(true);
+
+    const wrongNode = mockReq({ userId: viewerId, role: 'viewer', nodeId: otherNodeId });
+    expect(checkPermission(wrongNode, 'stack:edit', 'stack', 'any-stack')).toBe(false);
+
+    const assignments = db.getAllRoleAssignments(viewerId).filter(
+      (a) => a.resource_type === 'node' && a.resource_id === String(defaultNodeId),
+    );
+    for (const a of assignments) db.deleteRoleAssignment(a.id!);
+  });
+});
+
+describe('scopedActionsForStack with node-scoped grants', () => {
+  it('includes stack:* actions from a node-wide grant on the same node', () => {
+    const db = DatabaseService.getInstance();
+    db.addRoleAssignment({
+      user_id: viewerId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: String(defaultNodeId),
+    });
+
+    const actions = scopedActionsForStack(viewerId, defaultNodeId, 'fleet-wide');
+    expect(actions).toContain('stack:edit');
+    expect(actions).toContain('stack:deploy');
+    expect(actions).not.toContain('node:manage');
+    expect(scopedActionsForStack(viewerId, otherNodeId, 'fleet-wide')).toEqual([]);
+
+    const assignments = db.getAllRoleAssignments(viewerId).filter(
+      (a) => a.resource_type === 'node' && a.resource_id === String(defaultNodeId),
+    );
+    for (const a of assignments) db.deleteRoleAssignment(a.id!);
+  });
 });
 
 describe('checkPermission scopedStackEvidence', () => {

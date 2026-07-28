@@ -38,6 +38,12 @@ declare global {
        * the caller's global role alone would not grant the primary action.
        */
       proxyScopedStackEvidence?: { stackName: string; actions: readonly PermissionAction[] };
+      /**
+       * Named-stack classification from the hub gate. Stashed because
+       * http-proxy pathRewrite mutates req.url before proxyRes, so
+       * re-classifying req.path there would miss DELETE cleanup.
+       */
+      proxyNamedStackRoute?: { stackName: string; action: PermissionAction };
     }
   }
 }

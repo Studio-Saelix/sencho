@@ -117,13 +117,9 @@ Scoped permissions let you grant a user a higher role on a specific stack or nod
 
 **Stack scopes are node-specific.** The same stack name on two different nodes is two independent grants. Assigning a stack scope means choosing the node first, then picking a stack that exists on that node. Display form conceptually: stack name @ node name (for example `frontend @ prod`).
 
-**Node scopes are node-wide.** The resource is the node itself. There is no separate node qualifier on a node assignment row; granting Node Admin on `staging-server` covers that whole node.
+**Node scopes are node-wide.** The resource is the node itself. There is no separate node qualifier on a node assignment row. Granting Node Admin (or Deployer, or Admin) on `staging-server` authorizes that role's stack and node operations for every stack on that node, without a separate per-stack grant.
 
 The box appears below the user form whenever you are editing a user on Admiral.
-
-<Frame>
-  <img src="/images/rbac/scoped-permissions.png" alt="Edit User form for the viewer account with a Scoped Permissions box below. The box contains an existing assignment row (a Deployer badge with the text on Stack: bazarr @ prod and a destructive trash icon on the right) and an add-scope row underneath with Role, Resource Type, Node, and Stack controls (Role set to Deployer, Resource Type set to Stack, Node selected, Stack showing Select..., and a disabled Add button)." />
-</Frame>
 
 The add-scope form has these controls and an **Add** button:
 

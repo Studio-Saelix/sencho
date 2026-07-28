@@ -61,6 +61,18 @@ describe('resolveCan', () => {
     expect(resolveCan(perms, 'node:manage', 'node', '8')).toBe(false);
   });
 
+  it('node-scoped grants authorize stack actions on that node only', () => {
+    const perms: PermissionsSnapshot = {
+      ...viewerBase,
+      scopedPermissions: {
+        'node:7': ['node:read', 'node:manage', 'stack:read', 'stack:edit', 'stack:deploy', 'stack:create', 'stack:delete'],
+      },
+    };
+    expect(resolveCan(perms, 'stack:edit', 'stack', 'frontend', 7)).toBe(true);
+    expect(resolveCan(perms, 'stack:deploy', 'stack', 'other', 7)).toBe(true);
+    expect(resolveCan(perms, 'stack:edit', 'stack', 'frontend', 8)).toBe(false);
+  });
+
   it('returns false when permissions are null', () => {
     expect(resolveCan(null, 'stack:read')).toBe(false);
   });

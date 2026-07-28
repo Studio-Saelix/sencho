@@ -779,8 +779,8 @@ describe('Atomic last-admin guard', () => {
 // ---- Orphaned Role Assignment Cleanup ----
 // Proxied remote stack DELETE clears hub grants only on 2xx in
 // remoteNodeProxy (deleteRoleAssignmentsByStack). Non-2xx preserves rows.
-// That proxyRes branch is not exercised here; these cases lock the DB helper
-// isolation that the proxy calls.
+// Orchestrated proxyRes coverage lives in proxy-scoped-stack-evidence.test.ts;
+// these cases lock the DB helper isolation that the proxy calls.
 
 describe('Orphaned role assignment cleanup', () => {
   it('deleting a node removes its node and stack role assignments', async () => {

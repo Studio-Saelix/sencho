@@ -221,12 +221,14 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           invalidateFleetUpdateCache();
         }
         // Successful remote stack DELETE: clear hub grants for this (node, stack)
-        // only. Failed / non-2xx responses must preserve assignments.
+        // only. Failed / non-2xx responses must preserve assignments. Use the
+        // gate-stashed classification: pathRewrite mutates req.url before this
+        // callback, so re-running classifyStackApiPath(req.path) would miss.
         if (req.method === 'DELETE' && status >= 200 && status < 300) {
-          const classified = classifyStackApiPath('DELETE', req.path);
-          if (classified.kind === 'named-stack' && classified.action === 'stack:delete') {
+          const route = req.proxyNamedStackRoute;
+          if (route?.action === 'stack:delete') {
             try {
-              DatabaseService.getInstance().deleteRoleAssignmentsByStack(req.nodeId, classified.stackName);
+              DatabaseService.getInstance().deleteRoleAssignmentsByStack(req.nodeId, route.stackName);
             } catch (cleanupErr) {
               console.warn(
                 '[Proxy] Failed to clear role assignments after remote stack delete:',
@@ -340,6 +342,11 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
           return;
         }
+        // Stash before pathRewrite so proxyRes DELETE cleanup can see the route.
+        req.proxyNamedStackRoute = {
+          stackName: classified.stackName,
+          action: classified.action,
+        };
         const globalRole = req.user?.role;
         const globalGrantsPrimary =
           globalRole === 'admin'

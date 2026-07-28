@@ -42,30 +42,38 @@ export function isPermissionAction(value: string): value is PermissionAction {
 }
 
 /**
- * Union of PermissionAction values conferred by the user's stack-scoped
- * assignments for one (nodeId, stackName) tuple. Used when the hub builds
- * bound evidence for a remote hop.
+ * Collect stack:* actions from role matrices. Used for remote evidence so
+ * node:/system: never leave the hub on a machine-auth hop.
+ */
+function addStackActionsFromRole(
+  actions: Set<PermissionAction>,
+  role: UserRole,
+): void {
+  for (const action of ROLE_PERMISSIONS[role] ?? []) {
+    if (action.startsWith('stack:')) {
+      actions.add(action);
+    }
+  }
+}
+
+/**
+ * Union of PermissionAction values conferred by the user's exact stack
+ * grant for (nodeId, stackName), plus any node-scoped grant on that node
+ * (node-wide roles cover every stack on the node). Used when the hub
+ * builds bound evidence for a remote hop.
  */
 export function scopedActionsForStack(
   userId: number,
   nodeId: number,
   stackName: string,
 ): PermissionAction[] {
-  const assignments = DatabaseService.getInstance().getRoleAssignments(
-    userId,
-    'stack',
-    stackName,
-    nodeId,
-  );
+  const db = DatabaseService.getInstance();
   const actions = new Set<PermissionAction>();
-  for (const assignment of assignments) {
-    for (const action of ROLE_PERMISSIONS[assignment.role] ?? []) {
-      // Evidence is stack-bound only. Never forward node:/system: from a
-      // scoped Admin or Node Admin matrix onto the machine-auth hop.
-      if (action.startsWith('stack:')) {
-        actions.add(action);
-      }
-    }
+  for (const assignment of db.getRoleAssignments(userId, 'stack', stackName, nodeId)) {
+    addStackActionsFromRole(actions, assignment.role);
+  }
+  for (const assignment of db.getRoleAssignments(userId, 'node', String(nodeId))) {
+    addStackActionsFromRole(actions, assignment.role);
   }
   return [...actions];
 }
@@ -104,8 +112,9 @@ export function checkPermission(
 
   if (effectiveTier(req) !== 'paid') return false;
 
+  const db = DatabaseService.getInstance();
   const nodeId = resourceType === 'stack' ? req.nodeId : null;
-  const assignments = DatabaseService.getInstance().getRoleAssignments(
+  const assignments = db.getRoleAssignments(
     req.user.userId,
     resourceType,
     resourceId,
@@ -114,6 +123,19 @@ export function checkPermission(
   if (isDebugEnabled()) console.log('[RBAC:diag] Scoped assignments found:', assignments.length, 'for user:', req.user.userId);
   for (const assignment of assignments) {
     if (ROLE_PERMISSIONS[assignment.role]?.includes(action)) return true;
+  }
+
+  // Node-scoped grants are node-wide: a Node Admin / Deployer / Admin on
+  // node N authorizes that role's stack actions for every stack on N.
+  if (resourceType === 'stack' && req.nodeId != null) {
+    const nodeAssignments = db.getRoleAssignments(
+      req.user.userId,
+      'node',
+      String(req.nodeId),
+    );
+    for (const assignment of nodeAssignments) {
+      if (ROLE_PERMISSIONS[assignment.role]?.includes(action)) return true;
+    }
   }
 
   return false;
