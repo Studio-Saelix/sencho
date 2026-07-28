@@ -13,10 +13,8 @@ import { StackAlertSheet } from '../StackAlertSheet';
 import { GitSourcePanel } from '../stack/GitSourcePanel';
 import { LogViewer } from '../LogViewer';
 import { VulnerabilityScanSheet } from '../VulnerabilityScanSheet';
-import {
-  ComposeDiffPreviewDialog,
-  resolveComposeDiffActionLabel,
-} from '@/components/ComposeDiffPreviewDialog';
+import { ComposeDiffPreviewDialog } from '@/components/ComposeDiffPreviewDialog';
+import { resolveComposeDiffActionLabel } from '@/components/resolveComposeDiffActionLabel';
 import type { OverlayState } from './hooks/useOverlayState';
 import type { StackActionsHook } from './hooks/useStackActions';
 import type { PermissionAction } from '@/context/AuthContext';

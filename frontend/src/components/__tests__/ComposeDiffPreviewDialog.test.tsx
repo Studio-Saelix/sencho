@@ -1,9 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import {
-  ComposeDiffPreviewDialog,
-  resolveComposeDiffActionLabel,
-} from '../ComposeDiffPreviewDialog';
+import { ComposeDiffPreviewDialog } from '../ComposeDiffPreviewDialog';
+import { resolveComposeDiffActionLabel } from '../resolveComposeDiffActionLabel';
 
 vi.mock('@/lib/monacoLoader', () => ({
   DiffEditor: () => <div data-testid="diff-editor" />,
