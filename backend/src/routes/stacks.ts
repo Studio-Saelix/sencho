@@ -27,7 +27,7 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
-import { RULE_IDS } from '../services/preflight/rules';
+import { RULE_IDS, isPreflightNoteFinding } from '../services/preflight/rules';
 import { parseServiceImages, isPreflightAckActive } from '../utils/preflight-ack-filter';
 import type { PreflightAckExpiryMode } from '../services/DatabaseService';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
@@ -1415,6 +1415,10 @@ stacksRouter.post('/:stackName/preflight/acknowledgements', async (req: Request,
   const ruleId = typeof body.ruleId === 'string' ? body.ruleId.trim() : '';
   if (!PREFLIGHT_RULE_ID_SET.has(ruleId)) {
     res.status(400).json({ error: 'ruleId must be a known Compose Doctor rule id' });
+    return;
+  }
+  if (isPreflightNoteFinding(ruleId)) {
+    res.status(400).json({ error: 'Informational notes cannot be acknowledged' });
     return;
   }
   const serviceRaw = body.service == null || body.service === ''

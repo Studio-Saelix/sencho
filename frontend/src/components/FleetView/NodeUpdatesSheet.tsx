@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { MarkdownContent } from '@/components/ui/MarkdownContent';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { formatVersion, isValidVersion } from '@/lib/version';
@@ -29,6 +30,7 @@ interface NodeUpdatesSheetProps {
     initialTab?: 'nodes' | 'changelog';
     fetchUpdateStatus: () => Promise<void>;
     triggerNodeUpdate: (nodeId: number) => void;
+    triggerNodeReapply: (nodeId: number) => void;
     retryNodeUpdate: (nodeId: number) => void;
     dismissNodeUpdate: (nodeId: number) => void;
     triggerUpdateAll: () => Promise<void>;
@@ -37,7 +39,7 @@ interface NodeUpdatesSheetProps {
 export function NodeUpdatesSheet({
     open, onOpenChange, checkingUpdates, updateStatuses, updatingNodeId, isAdmin,
     initialTab = 'nodes',
-    fetchUpdateStatus, triggerNodeUpdate, retryNodeUpdate, dismissNodeUpdate, triggerUpdateAll,
+    fetchUpdateStatus, triggerNodeUpdate, triggerNodeReapply, retryNodeUpdate, dismissNodeUpdate, triggerUpdateAll,
 }: NodeUpdatesSheetProps) {
     const [search, setSearch] = useState('');
     const [recheckingUpdates, setRecheckingUpdates] = useState(false);
@@ -410,12 +412,17 @@ export function NodeUpdatesSheet({
                                             <UpdateStatusBadge
                                                 status={s.updateStatus}
                                                 error={s.error}
-                                                onRetry={isAdmin ? () => retryNodeUpdate(s.nodeId) : undefined}
+                                                operationKind={s.operationKind}
+                                                onRetry={isAdmin ? () => (
+                                                    s.operationKind === 'reapply_configuration'
+                                                        ? triggerNodeReapply(s.nodeId)
+                                                        : retryNodeUpdate(s.nodeId)
+                                                ) : undefined}
                                                 onDismiss={isAdmin ? () => dismissNodeUpdate(s.nodeId) : undefined}
                                             />
                                         )}
                                         {!s.updateStatus && !s.updateAvailable && !s.skipActive && (
-                                            <Badge className="text-[10px] px-1.5 py-0 h-5 bg-success-muted text-success border-success/30">
+                                            <Badge className="text-[10px] px-1.5 py-0 h-5 shrink-0 whitespace-nowrap bg-success-muted text-success border-success/30">
                                                 <Check className="w-2.5 h-2.5 mr-0.5" /> Up to date
                                             </Badge>
                                         )}
@@ -455,6 +462,41 @@ export function NodeUpdatesSheet({
                                                     <><Download className="w-3 h-3 mr-1" strokeWidth={1.5} />Update</>
                                                 )}
                                             </Button>
+                                        )}
+                                        {isAdmin && !s.updateStatus && s.canReapplyCompose && (
+                                            <TooltipProvider delayDuration={300}>
+                                                <Tooltip>
+                                                    <TooltipTrigger asChild>
+                                                        <Button
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            className="h-6 w-6 p-0 shrink-0 text-muted-foreground hover:text-stat-value"
+                                                            onClick={() => triggerNodeReapply(s.nodeId)}
+                                                            disabled={updatingNodeId === s.nodeId}
+                                                            aria-label={updatingNodeId === s.nodeId ? 'Reapplying configuration' : 'Reapply configuration'}
+                                                        >
+                                                            {updatingNodeId === s.nodeId ? (
+                                                                <Loader2 className="w-3 h-3 animate-spin" />
+                                                            ) : (
+                                                                <RefreshCw className="w-3 h-3" strokeWidth={1.5} />
+                                                            )}
+                                                        </Button>
+                                                    </TooltipTrigger>
+                                                    <TooltipContent side="bottom">
+                                                        {updatingNodeId === s.nodeId ? 'Reapplying…' : 'Reapply configuration'}
+                                                    </TooltipContent>
+                                                </Tooltip>
+                                            </TooltipProvider>
+                                        )}
+                                        {isAdmin && !s.updateStatus && s.canReapplyCompose === false && (
+                                            <span
+                                                className="text-[10px] text-muted-foreground/70 max-w-[9rem] text-right leading-tight"
+                                                title={s.type === 'local'
+                                                    ? 'This node is not Compose-managed, so configuration reapply is unavailable.'
+                                                    : 'This node does not advertise Compose self-management, or is unreachable.'}
+                                            >
+                                                Reapply unavailable
+                                            </span>
                                         )}
                                         {showSkip(s) && (
                                             <Button

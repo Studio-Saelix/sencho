@@ -173,6 +173,54 @@ describe('useFleetUpdateStatus', () => {
     expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
+  it('triggerNodeReapply on a remote node opens confirm and does not POST until confirmed', async () => {
+    apiFetchMock.mockResolvedValue(okJson({ nodes: STATUSES }));
+    const { result } = renderHook(() => useFleetUpdateStatus());
+    await act(async () => { await result.current.fetchUpdateStatus(); });
+    apiFetchMock.mockClear();
+
+    await act(async () => { await result.current.triggerNodeReapply(2); });
+
+    expect(result.current.reapplyConfirm).toBe(2);
+    expect(apiFetchMock).not.toHaveBeenCalled();
+
+    apiFetchMock.mockResolvedValue(okJson({ message: 'ok' }));
+    await act(async () => { await result.current.confirmReapply(); });
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/fleet/nodes/2/reapply-compose',
+      expect.objectContaining({ method: 'POST', localOnly: true }),
+    );
+    expect(toastSuccess).toHaveBeenCalledWith(expect.stringContaining('Edge'));
+    expect(result.current.reapplyConfirm).toBeNull();
+  });
+
+  it('triggerNodeReapply on a local node opens confirm then starts local reconnect flow', async () => {
+    apiFetchMock.mockResolvedValue(okJson({ nodes: STATUSES }));
+    const { result } = renderHook(() => useFleetUpdateStatus());
+    await act(async () => { await result.current.fetchUpdateStatus(); });
+    apiFetchMock.mockClear();
+
+    await act(async () => { await result.current.triggerNodeReapply(1); });
+    expect(result.current.reapplyConfirm).toBe(1);
+    expect(apiFetchMock).not.toHaveBeenCalled();
+
+    apiFetchMock.mockResolvedValue(okJson({ message: 'ok' }));
+    vi.stubGlobal('fetch', vi.fn(() => Promise.resolve(
+      new Response(JSON.stringify({ startedAt: 1000 }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    )));
+
+    await act(async () => { await result.current.confirmReapply(); });
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/fleet/nodes/1/reapply-compose',
+      expect.objectContaining({ method: 'POST', localOnly: true }),
+    );
+    expect(result.current.reconnecting).toBe(true);
+    expect(result.current.reconnectMode).toBe('reapply');
+    vi.unstubAllGlobals();
+  });
+
   it('confirmLocalUpdate forwards targetVersion when latestVersion is valid', async () => {
     apiFetchMock.mockResolvedValue(okJson({ nodes: STATUSES }));
     const { result } = renderHook(() => useFleetUpdateStatus());

@@ -11,6 +11,7 @@ import jwt from 'jsonwebtoken';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import DockerController from '../services/DockerController';
 import { ComposeService } from '../services/ComposeService';
+import { isPreflightNoteFinding } from '../services/preflight/rules';
 
 let tmpDir: string;
 let app: import('express').Express;
@@ -111,7 +112,10 @@ describe('preflight acknowledgement routes', () => {
     const acked = get.body.findings.find((f: { ruleId: string; service?: string }) =>
       f.ruleId === target.ruleId && f.service === target.service);
     expect(acked?.acknowledged).toBe(true);
-    expect(get.body.activeCount).toBe(get.body.findings.length - get.body.acknowledgedCount);
+    expect(get.body.activeCount).toBe(
+      get.body.findings.filter((f: { ruleId: string; acknowledged?: boolean }) =>
+        !f.acknowledged && !isPreflightNoteFinding(f.ruleId)).length,
+    );
   });
 
   it('DELETE clears an acknowledgement', async () => {
@@ -139,5 +143,15 @@ describe('preflight acknowledgement routes', () => {
       .set('Authorization', authHeader)
       .send({ ruleId: 'port-exposed-all-interfaces', expiryMode: 'until_image_change' });
     expect(res.status).toBe(400);
+  });
+
+  it('rejects acknowledging informational note findings', async () => {
+    await request(app).post(`/api/stacks/${STACK}/preflight/run`).set('Authorization', authHeader);
+    const res = await request(app)
+      .post(`/api/stacks/${STACK}/preflight/acknowledgements`)
+      .set('Authorization', authHeader)
+      .send({ ruleId: 'healthcheck-inherited', service: 'web', expiryMode: 'forever' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/notes cannot be acknowledged/i);
   });
 });
