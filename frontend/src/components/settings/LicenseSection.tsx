@@ -163,11 +163,10 @@ export function LicenseSection() {
         }
     };
 
-    // Pricing link covers two cases: Community-tier operators evaluating
-    // a paid plan, and expired paid licensees who need a path back. Active
-    // and trial paid licensees already manage their plan through the
-    // billing portal in the Plan section above.
-    const showPricingLink = !isPaid || license?.status === 'expired';
+    // Pricing link is only for expired paid licensees who need a path back
+    // to renew. Community tier gets no upsell; active and trial paid
+    // licensees already manage their plan through the billing portal above.
+    const showPricingLink = license?.status === 'expired';
 
     const renewsValue = useMemo(() => {
         if (!license) return null;

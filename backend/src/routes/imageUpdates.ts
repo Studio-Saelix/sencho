@@ -5,7 +5,13 @@ import DockerController from '../services/DockerController';
 import { DatabaseService } from '../services/DatabaseService';
 import { NodeRegistry } from '../services/NodeRegistry';
 import { CacheService } from '../services/CacheService';
-import { ImageUpdateService } from '../services/ImageUpdateService';
+import {
+  createAutoUpdateDigestGateState,
+  messageWhenDigestApplyBlockedByCheckErrors,
+  messageWhenNoDigestUpdate,
+  recordAutoUpdateImageCheck,
+} from '../helpers/autoUpdateDigestGate';
+import { ImageUpdateService, UPDATE_VERIFICATION_INCOMPLETE_WARNING } from '../services/ImageUpdateService';
 import { FileSystemService } from '../services/FileSystemService';
 import { StackUpdateOrchestrator } from '../services/StackUpdateOrchestrator';
 import { StackOpLockService, stackOpSkipMessage } from '../services/StackOpLockService';
@@ -15,6 +21,8 @@ import { HealthGateService } from '../services/HealthGateService';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
+import { FLEET_UPDATE_CACHE_KEY, invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
+import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { summarizeBlockReasons } from '../utils/policy-risk';
 import { isValidStackName } from '../utils/validation';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -22,7 +30,6 @@ import { logDebugTiming } from '../utils/requestTiming';
 import { getErrorMessage } from '../utils/errors';
 
 // Fleet aggregation cache: 2-minute TTL, shared across dashboard tabs.
-const FLEET_UPDATE_CACHE_KEY = 'fleet-updates';
 const FLEET_CACHE_TTL = 120_000;
 const REMOTE_NODE_FETCH_TIMEOUT_MS = 5000;
 
@@ -30,7 +37,9 @@ export const imageUpdatesRouter = Router();
 
 imageUpdatesRouter.get('/', authMiddleware, (req: Request, res: Response): void => {
   try {
-    const updates = DatabaseService.getInstance().getStackUpdateStatus(req.nodeId);
+    // Confirmed-only: partial/failed retained has_update rows stay out of the
+    // boolean map so Fleet and node cards do not treat uncertainty as pending.
+    const updates = DatabaseService.getInstance().getConfirmedStackUpdateStatus(req.nodeId);
     res.json(updates);
   } catch (error) {
     console.error('Failed to fetch image update status:', error);
@@ -68,6 +77,13 @@ imageUpdatesRouter.get('/detail', authMiddleware, (req: Request, res: Response):
 imageUpdatesRouter.post('/refresh', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
   try {
+    if (!ImageUpdateService.isChecksEnabled()) {
+      res.status(409).json({
+        enabled: false,
+        error: 'Image update detection is disabled for this node.',
+      });
+      return;
+    }
     const triggered = ImageUpdateService.getInstance().triggerManualRefresh();
     if (!triggered) {
       const mins = ImageUpdateService.manualCooldownMinutes;
@@ -172,6 +188,26 @@ imageUpdatesRouter.put('/interval', authMiddleware, (req: Request, res: Response
   }
 });
 
+const EnabledPatchSchema = z.object({
+  enabled: z.boolean(),
+});
+
+imageUpdatesRouter.put('/enabled', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  const parsed = EnabledPatchSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'enabled must be a boolean' });
+    return;
+  }
+  try {
+    const status = ImageUpdateService.getInstance().applyChecksEnabled(parsed.data.enabled);
+    res.json(status);
+  } catch (error) {
+    console.error('Failed to update image-update checks enabled:', error);
+    res.status(500).json({ error: 'Failed to update image update checks setting' });
+  }
+});
+
 imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
@@ -184,10 +220,10 @@ imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Respo
         const nr = NodeRegistry.getInstance();
         const data: Record<number, Record<string, boolean>> = {};
 
-        // Local nodes: synchronous DB reads.
+        // Local nodes: synchronous DB reads (confirmed-only projection).
         for (const node of nodes) {
           if (node.type === 'local') {
-            data[node.id] = db.getStackUpdateStatus(node.id);
+            data[node.id] = db.getConfirmedStackUpdateStatus(node.id);
           }
         }
 
@@ -245,6 +281,7 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
   const triggered: number[] = [];
   const rateLimited: number[] = [];
   const failed: number[] = [];
+  const disabled: number[] = [];
 
   // ImageUpdateService is a per-instance singleton, so the local node's manual
   // refresh fires at most once per request regardless of how many local rows
@@ -252,7 +289,9 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
   const localNode = nodes.find(n => n.type === 'local');
   if (localNode) {
     try {
-      if (ImageUpdateService.getInstance().triggerManualRefresh()) {
+      if (!ImageUpdateService.isChecksEnabled()) {
+        disabled.push(localNode.id);
+      } else if (ImageUpdateService.getInstance().triggerManualRefresh()) {
         triggered.push(localNode.id);
       } else {
         rateLimited.push(localNode.id);
@@ -297,6 +336,8 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
     const { nodeId, status } = entry.value;
     if (status >= 200 && status < 300) {
       triggered.push(nodeId);
+    } else if (status === 409) {
+      disabled.push(nodeId);
     } else if (status === 429) {
       rateLimited.push(nodeId);
     } else {
@@ -304,8 +345,8 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
     }
   }
 
-  CacheService.getInstance().invalidate(FLEET_UPDATE_CACHE_KEY);
-  res.json({ triggered, rateLimited, failed });
+  invalidateFleetUpdateCache();
+  res.json({ triggered, rateLimited, failed, disabled });
 });
 
 /**
@@ -318,31 +359,58 @@ export const autoUpdateRouter = Router();
 autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
-    const { target } = req.body as { target?: string };
-    console.log(`[AutoUpdate] Execute requested: target="${sanitizeForLog(target || '')}"`);
-    if (!target || typeof target !== 'string') {
-      res.status(400).json({ error: 'Missing "target" (stack name or "*" for all)' });
+    // Honor the node-scoped image-update detection opt-out before any work.
+    if (!ImageUpdateService.isChecksEnabled()) {
+      res.json({ result: 'Image update detection is disabled for this node; skipped.' });
       return;
     }
+    const { target, targets } = req.body as { target?: string; targets?: unknown };
 
     let stackNames: string[];
-    if (target === '*') {
-      stackNames = await FileSystemService.getInstance(req.nodeId).getStacks();
-      if (stackNames.length === 0) {
-        res.json({ result: 'No stacks found on node; skipped.' });
+    if (Array.isArray(targets)) {
+      if (targets.length === 0) {
+        res.status(400).json({ error: '"targets" must be a non-empty array of stack names' });
         return;
+      }
+      if (targets.length > 500) {
+        res.status(400).json({ error: '"targets" accepts at most 500 stack names' });
+        return;
+      }
+      if (!targets.every((t): t is string => typeof t === 'string' && isValidStackName(t))) {
+        res.status(400).json({ error: 'Invalid stack name in targets' });
+        return;
+      }
+      // Deduplicate while preserving order.
+      const seen = new Set<string>();
+      stackNames = [];
+      for (const name of targets) {
+        if (seen.has(name)) continue;
+        seen.add(name);
+        stackNames.push(name);
+      }
+      console.log(`[AutoUpdate] Execute requested: targets=${stackNames.length}`);
+    } else if (typeof target === 'string' && target.length > 0) {
+      console.log(`[AutoUpdate] Execute requested: target="${sanitizeForLog(target)}"`);
+      if (target === '*') {
+        stackNames = await FileSystemService.getInstance(req.nodeId).getStacks();
+        if (stackNames.length === 0) {
+          res.json({ result: 'No stacks found on node; skipped.' });
+          return;
+        }
+      } else {
+        if (!isValidStackName(target)) {
+          res.status(400).json({ error: 'Invalid stack name' });
+          return;
+        }
+        stackNames = [target];
       }
     } else {
-      if (!isValidStackName(target)) {
-        res.status(400).json({ error: 'Invalid stack name' });
-        return;
-      }
-      stackNames = [target];
+      res.status(400).json({ error: 'Missing "target" (stack name or "*") or "targets" (stack name array)' });
+      return;
     }
 
     const docker = DockerController.getInstance(req.nodeId);
     const imageUpdateService = ImageUpdateService.getInstance();
-    const db = DatabaseService.getInstance();
     const atomic = true;
     const results: string[] = [];
 
@@ -365,35 +433,29 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           continue;
         }
 
-        let hasUpdate = false;
-        const updatedImages: string[] = [];
-        const checkErrors: string[] = [];
+        const gate = createAutoUpdateDigestGateState();
         for (const imageRef of imageRefs) {
           try {
             const result = await imageUpdateService.checkImage(docker, imageRef);
-            if (result.error) {
-              checkErrors.push(result.error);
-            } else if (result.hasUpdate) {
-              hasUpdate = true;
-              updatedImages.push(imageRef);
-            }
+            recordAutoUpdateImageCheck(gate, imageRef, result);
           } catch (e) {
             const errMsg = getErrorMessage(e, String(e));
-            checkErrors.push(errMsg);
+            gate.checkErrors.push(errMsg);
             console.warn('[AutoUpdate] Failed to check image %s:', sanitizeForLog(imageRef), sanitizeForLog((e as Error)?.message ?? String(e)));
           }
         }
 
-        if (!hasUpdate) {
-          if (checkErrors.length > 0 && checkErrors.length === imageRefs.length) {
-            results.push(`Stack "${stackName}": WARNING - all image checks failed (${checkErrors.join('; ')}). Unable to determine update status.`);
-          } else if (checkErrors.length > 0) {
-            results.push(`Stack "${stackName}": all reachable images up to date (${checkErrors.length} check(s) failed).`);
-          } else {
-            results.push(`Stack "${stackName}": all images up to date.`);
-          }
+        if (!gate.hasDigestUpdate) {
+          results.push(messageWhenNoDigestUpdate(stackName, gate, imageRefs.length));
           continue;
         }
+        const checkErrorBlock = messageWhenDigestApplyBlockedByCheckErrors(stackName, gate);
+        if (checkErrorBlock) {
+          results.push(checkErrorBlock);
+          continue;
+        }
+
+        const { updatedImages } = gate;
 
         // Auto-update runs from the scheduler: a policy bypass is never
         // appropriate. If updated images fail the gate, skip the stack and
@@ -425,7 +487,9 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           results.push(stackOpSkipMessage(stackName, lock.existing.action));
           continue;
         }
-        db.clearStackUpdateStatus(req.nodeId, stackName);
+
+        // Health observation starts immediately after Compose; registry recheck is
+        // isolated so a verification failure cannot turn Compose success into a failure.
         const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', `auto-update:${req.user?.username ?? 'scheduler'}`);
         const orchResult = lock.result;
         const recoveryId = orchResult && orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
@@ -434,6 +498,21 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           StackUpdateRecoveryService.getInstance().linkGateOrRetain(recoveryId, healthGateId);
         }
 
+        // Recheck persists digest-cleared / tag-advisory state. Do not blind-clear.
+        let recheckWarning: string | undefined;
+        try {
+          const recheck = await imageUpdateService.recheckStack(req.nodeId, stackName);
+          if (recheck.warning) recheckWarning = recheck.warning;
+        } catch (recheckErr) {
+          console.warn(
+            '[AutoUpdate] Post-update recheck failed for %s: %s',
+            sanitizeForLog(stackName),
+            sanitizeForLog(getErrorMessage(recheckErr, 'unknown')),
+          );
+          recheckWarning = UPDATE_VERIFICATION_INCOMPLETE_WARNING;
+        }
+
+        invalidateNodeCaches(req.nodeId);
         NotificationService.getInstance().broadcastEvent({
           type: 'state-invalidate',
           scope: 'image-updates',
@@ -450,15 +529,20 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
           { stackName, actor: 'system:image-update' },
         );
 
-        results.push(`Stack "${stackName}": updated (${updatedImages.join(', ')}).`);
+        const base = `Stack "${stackName}": updated (${updatedImages.join(', ')}).`;
+        results.push(recheckWarning ? `${base} ${recheckWarning}` : base);
       } catch (e) {
         const msg = getErrorMessage(e, String(e));
         results.push(`Stack "${stackName}" failed: ${msg}`);
-        console.error(`[AutoUpdate] Failed for stack "${stackName}":`, e);
+        console.error(
+          '[AutoUpdate] Failed for stack %s: %s',
+          sanitizeForLog(stackName),
+          sanitizeForLog(msg),
+        );
       }
     }
 
-    CacheService.getInstance().invalidate(FLEET_UPDATE_CACHE_KEY);
+    invalidateFleetUpdateCache();
     res.json({ result: results.join('\n') });
   } catch (error) {
     const msg = getErrorMessage(error, 'Auto-update execution failed');

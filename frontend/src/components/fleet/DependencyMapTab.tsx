@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -23,6 +23,8 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { SegmentedControl } from '@/components/ui/segmented-control';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { MultiSelectCombobox, type MultiSelectOption } from '@/components/ui/multi-select-combobox';
 import {
   layoutDependencyGraph,
   DEP_NODE_DIMS,
@@ -61,6 +63,15 @@ const FLAG_META: { kind: DepFlagKind; label: string; severity: 'warning' | 'dest
 ];
 
 const DESTRUCTIVE_FLAGS = new Set<DepFlagKind>(['missing-dependency', 'port-conflict']);
+
+function renderNodeOption(option: MultiSelectOption) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <Server className="h-3 w-3 text-muted-foreground" strokeWidth={2} />
+      {option.label}
+    </span>
+  );
+}
 
 function worstSeverity(flags: DepFlagKind[]): 'destructive' | 'warning' | null {
   if (flags.length === 0) return null;
@@ -168,6 +179,17 @@ export function DependencyMapTab() {
   const [nodeFilter, setNodeFilter] = useState<Set<number>>(new Set());
   const [flagFilter, setFlagFilter] = useState<Set<DepFlagKind>>(new Set());
   const [expandedStacks, setExpandedStacks] = useState<Set<string>>(new Set());
+
+  // Collapsed by default to a single icon button; expands to the full input on
+  // click and collapses again on blur once the query is cleared. An active
+  // query keeps it open so the filter stays visible and editable.
+  const [searchExpanded, setSearchExpanded] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchOpen = searchExpanded || search !== '';
+
+  useEffect(() => {
+    if (searchExpanded) searchInputRef.current?.focus();
+  }, [searchExpanded]);
 
   const fetchMap = useCallback(async () => {
     setLoading(true);
@@ -329,11 +351,15 @@ export function DependencyMapTab() {
     if (next.has(kind)) next.delete(kind); else next.add(kind);
     return next;
   });
-  const toggleNode = (id: number) => setNodeFilter((prev) => {
-    const next = new Set(prev);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
+
+  const nodeOptions = useMemo(
+    () => presentNodeIds.map((id) => ({ value: String(id), label: nodeNameById.get(id) ?? `Node ${id}` })),
+    [presentNodeIds, nodeNameById],
+  );
+  const selectedNodeValues = useMemo(() => new Set([...nodeFilter].map(String)), [nodeFilter]);
+  const handleNodeSelectionChange = useCallback((selected: Set<string>) => {
+    setNodeFilter(new Set([...selected].map(Number)));
+  }, []);
 
   const listRows = useMemo(() => {
     if (!data) return [];
@@ -362,15 +388,36 @@ export function DependencyMapTab() {
     <div className="space-y-3">
       {/* Toolbar */}
       <div className="flex items-center gap-2 flex-wrap">
-        <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search stacks, services, resources…"
-            className="h-8 w-64 pl-8 text-sm"
-          />
-        </div>
+        {searchOpen ? (
+          <div className="relative flex-1 min-w-[200px] max-w-sm">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+            <Input
+              ref={searchInputRef}
+              placeholder="Search stacks, services, resources…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              onBlur={() => { if (search === '') setSearchExpanded(false); }}
+              className="pl-9 h-9"
+            />
+          </div>
+        ) : (
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-9 w-9 p-0 shrink-0"
+                  onClick={() => setSearchExpanded(true)}
+                  aria-label="Search stacks, services, resources"
+                >
+                  <Search className="w-4 h-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Search stacks, services, resources</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        )}
         <SegmentedControl
           value={view}
           onChange={setView}
@@ -380,13 +427,6 @@ export function DependencyMapTab() {
             { value: 'list', label: 'List', icon: Layers },
           ]}
         />
-        <Button variant="outline" size="sm" onClick={() => void fetchMap()} disabled={loading} className="gap-2 ml-auto">
-          <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />Refresh
-        </Button>
-      </div>
-
-      {/* Flag summary strip */}
-      <div className="flex items-center gap-2 flex-wrap">
         {FLAG_META.map((f) => {
           const count = flagCounts.get(f.kind) ?? 0;
           const active = flagFilter.has(f.kind);
@@ -409,32 +449,20 @@ export function DependencyMapTab() {
             </button>
           );
         })}
+        {presentNodeIds.length > 1 && (
+          <MultiSelectCombobox
+            options={nodeOptions}
+            selected={selectedNodeValues}
+            onSelectionChange={handleNodeSelectionChange}
+            placeholder="Nodes"
+            selectedLabel="node"
+            renderOption={renderNodeOption}
+          />
+        )}
+        <Button variant="outline" size="sm" onClick={() => void fetchMap()} disabled={loading} className="gap-2 ml-auto">
+          <RefreshCw className={cn('w-4 h-4', loading && 'animate-spin')} />Refresh
+        </Button>
       </div>
-
-      {/* Node filter chips (only with more than one node present) */}
-      {presentNodeIds.length > 1 && (
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="font-mono text-[9px] uppercase tracking-[0.22em] text-muted-foreground">Node</span>
-          {presentNodeIds.map((id) => {
-            const active = nodeFilter.has(id);
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => toggleNode(id)}
-                aria-pressed={active}
-                className={cn(
-                  'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] transition-colors',
-                  active ? 'border-brand/60 bg-brand/15 text-brand' : 'border-card-border text-muted-foreground hover:text-foreground hover:bg-muted/40',
-                )}
-              >
-                <Server className="h-3 w-3" strokeWidth={2} />
-                {nodeNameById.get(id) ?? `Node ${id}`}
-              </button>
-            );
-          })}
-        </div>
-      )}
 
       {/* Unreachable-node banner */}
       {data.nodeErrors.length > 0 && (

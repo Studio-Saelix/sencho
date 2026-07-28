@@ -487,59 +487,57 @@ export function CreateStackDialog({ open, onOpenChange, onStackCreated, onStacks
 
             {createMode === 'docker-run' && (
                 <div role="tabpanel" id={panelId('docker-run')} aria-labelledby={tabId('docker-run')}>
-                    <ScrollArea block className="max-h-[60vh]">
-                        <ModalBody>
-                            <div className="space-y-2">
-                                <Label htmlFor="create-dr-stack-name">Stack Name</Label>
-                                <Input
-                                    id="create-dr-stack-name"
-                                    placeholder="Stack name (e.g., myapp)"
-                                    value={newStackName}
-                                    onChange={(e) => setNewStackName(e.target.value)}
-                                    disabled={creatingFromDockerRun}
-                                />
+                    <ModalBody>
+                        <div className="space-y-2">
+                            <Label htmlFor="create-dr-stack-name">Stack Name</Label>
+                            <Input
+                                id="create-dr-stack-name"
+                                placeholder="Stack name (e.g., myapp)"
+                                value={newStackName}
+                                onChange={(e) => setNewStackName(e.target.value)}
+                                disabled={creatingFromDockerRun}
+                            />
+                        </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="create-dr-command">Paste your docker run command</Label>
+                            <textarea
+                                id="create-dr-command"
+                                spellCheck={false}
+                                className="flex w-full rounded-md border border-glass-border bg-input px-3 py-2 text-sm font-mono shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 min-h-[120px] resize-y"
+                                placeholder="docker run -d --name nginx -p 8080:80 nginx:latest"
+                                value={dockerRunInput}
+                                onChange={(e) => {
+                                    setDockerRunInput(e.target.value);
+                                    if (convertedYaml !== null) setConvertedYaml(null);
+                                }}
+                                disabled={creatingFromDockerRun}
+                            />
+                            <div className="flex justify-end">
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={handleConvertDockerRun}
+                                    disabled={isConverting || creatingFromDockerRun || !dockerRunInput.trim()}
+                                >
+                                    {isConverting ? (
+                                        <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} />Converting</>
+                                    ) : (
+                                        <><FileCode2 className="w-3.5 h-3.5 mr-1.5" strokeWidth={1.5} />Convert</>
+                                    )}
+                                </Button>
                             </div>
+                        </div>
+                        {convertedYaml !== null && (
                             <div className="space-y-2">
-                                <Label htmlFor="create-dr-command">Paste your docker run command</Label>
-                                <textarea
-                                    id="create-dr-command"
-                                    spellCheck={false}
-                                    className="flex w-full rounded-md border border-glass-border bg-input px-3 py-2 text-sm font-mono shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 min-h-[120px] resize-y"
-                                    placeholder="docker run -d --name nginx -p 8080:80 nginx:latest"
-                                    value={dockerRunInput}
-                                    onChange={(e) => {
-                                        setDockerRunInput(e.target.value);
-                                        if (convertedYaml !== null) setConvertedYaml(null);
-                                    }}
-                                    disabled={creatingFromDockerRun}
-                                />
-                                <div className="flex justify-end">
-                                    <Button
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={handleConvertDockerRun}
-                                        disabled={isConverting || creatingFromDockerRun || !dockerRunInput.trim()}
-                                    >
-                                        {isConverting ? (
-                                            <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" strokeWidth={1.5} />Converting</>
-                                        ) : (
-                                            <><FileCode2 className="w-3.5 h-3.5 mr-1.5" strokeWidth={1.5} />Convert</>
-                                        )}
-                                    </Button>
-                                </div>
+                                <Label>compose.yaml preview</Label>
+                                <ScrollArea block className="h-[240px] rounded-md border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
+                                    <pre className="px-3 py-2 text-xs font-mono whitespace-pre leading-relaxed">
+                                        {convertedYaml}
+                                    </pre>
+                                </ScrollArea>
                             </div>
-                            {convertedYaml !== null && (
-                                <div className="space-y-2">
-                                    <Label>compose.yaml preview</Label>
-                                    <ScrollArea block className="max-h-[240px] rounded-md border border-card-border border-t-card-border-top bg-card shadow-card-bevel">
-                                        <pre className="px-3 py-2 text-xs font-mono whitespace-pre leading-relaxed">
-                                            {convertedYaml}
-                                        </pre>
-                                    </ScrollArea>
-                                </div>
-                            )}
-                        </ModalBody>
-                    </ScrollArea>
+                        )}
+                    </ModalBody>
                     <ModalFooter
                         hint={convertedYaml ? 'YAML READY' : 'CONVERT FIRST'}
                         hintAccent={convertedYaml ? `${convertedYaml.split('\n').length} LINES` : undefined}

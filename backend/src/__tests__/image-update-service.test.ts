@@ -9,9 +9,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const {
   mockGetAuthForRegistry,
   mockGetStackUpdateStatus, mockUpsertStackUpdateStatus, mockClearStackUpdateStatus,
+  mockClearAllStackUpdateStatus, mockUpdateGlobalSetting,
   mockRecordStackCheckFailure, mockGetStackServicesJson,
   mockGetSystemState, mockSetSystemState, mockAddNotificationHistory,
-  mockDispatchAlert,
+  mockDispatchAlert, mockBroadcastEvent,
   mockGetStacks, mockGetStackContent, mockGetEnvContent, mockEnvExists,
   mockGetAllContainers, mockGetGlobalSettings, mockInspect,
   mockBuildEffectiveServiceModel,
@@ -20,12 +21,15 @@ const {
   mockGetStackUpdateStatus: vi.fn().mockReturnValue({}),
   mockUpsertStackUpdateStatus: vi.fn(),
   mockClearStackUpdateStatus: vi.fn(),
+  mockClearAllStackUpdateStatus: vi.fn().mockReturnValue(0),
+  mockUpdateGlobalSetting: vi.fn(),
   mockRecordStackCheckFailure: vi.fn(),
   mockGetStackServicesJson: vi.fn().mockReturnValue([]),
   mockGetSystemState: vi.fn().mockReturnValue('1'), // default: backfilled
   mockSetSystemState: vi.fn(),
   mockAddNotificationHistory: vi.fn(),
   mockDispatchAlert: vi.fn().mockResolvedValue({ persisted: true }),
+  mockBroadcastEvent: vi.fn(),
   mockGetStacks: vi.fn().mockResolvedValue([]),
   mockGetStackContent: vi.fn().mockResolvedValue(''),
   mockGetEnvContent: vi.fn().mockRejectedValue(new Error('no env')),
@@ -53,12 +57,14 @@ vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
     getInstance: () => ({
       getGlobalSettings: mockGetGlobalSettings,
+      updateGlobalSetting: mockUpdateGlobalSetting,
       getNodes: () => [],
       getGitSource: () => undefined,
       getStackProjectEnvFiles: () => [],
       upsertStackUpdateStatus: mockUpsertStackUpdateStatus,
       getStackUpdateStatus: mockGetStackUpdateStatus,
       clearStackUpdateStatus: mockClearStackUpdateStatus,
+      clearAllStackUpdateStatus: mockClearAllStackUpdateStatus,
       recordStackCheckFailure: mockRecordStackCheckFailure,
       getStackServicesJson: mockGetStackServicesJson,
       getSystemState: mockGetSystemState,
@@ -76,8 +82,13 @@ vi.mock('../services/NotificationService', () => ({
   NotificationService: {
     getInstance: () => ({
       dispatchAlert: mockDispatchAlert,
+      broadcastEvent: mockBroadcastEvent,
     }),
   },
+}));
+
+vi.mock('../helpers/fleetUpdateCache', () => ({
+  invalidateFleetUpdateCache: vi.fn(),
 }));
 
 vi.mock('../services/FileSystemService', () => ({
@@ -110,11 +121,21 @@ vi.mock('../services/NodeRegistry', () => ({
 }));
 
 // compareLocalToRemoteTag is module-scoped inside checkImage; mock it to drive the
-// comparison outcome while keeping the real parseImageRef / selectLocalRepoDigest.
-const { mockCompareLocalToRemoteTag } = vi.hoisted(() => ({ mockCompareLocalToRemoteTag: vi.fn() }));
+// comparison outcome while keeping the real parseImageRef / selectLocalRepoDigests.
+const { mockCompareLocalToRemoteTag, mockListRegistryTagsResult } = vi.hoisted(() => ({
+  mockCompareLocalToRemoteTag: vi.fn(),
+  // Detection now checks tags alongside digests; default to an empty, successful
+  // list so digest-focused tests are not accidentally driven by a real network
+  // call finding a genuine newer tag for whatever image ref they pass.
+  mockListRegistryTagsResult: vi.fn().mockResolvedValue({ ok: true, tags: [] }),
+}));
 vi.mock('../services/registry-api', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/registry-api')>();
-  return { ...actual, compareLocalToRemoteTag: mockCompareLocalToRemoteTag };
+  return {
+    ...actual,
+    compareLocalToRemoteTag: mockCompareLocalToRemoteTag,
+    listRegistryTagsResult: mockListRegistryTagsResult,
+  };
 });
 
 // ── Re-export internal helpers via the module ─────────────────────────
@@ -158,7 +179,7 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
   it('marks sha256-only refs not-checkable (no tag to track)', async () => {
     const docker = makeMockDocker();
     const result = await service.checkImage(docker, 'sha256:abc123');
-    expect(result).toEqual({ hasUpdate: false, notCheckable: true });
+    expect(result).toEqual({ hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true });
   });
 
   it('returns error when local image inspect fails', async () => {
@@ -195,13 +216,24 @@ describe('ImageUpdateService - image ref parsing (via checkImage)', () => {
     // Empty RepoDigests means locally built / not registry-backed.
     const docker = makeMockDocker([]);
     const result = await service.checkImage(docker, 'nginx:latest');
-    expect(result).toEqual({ hasUpdate: false, notCheckable: true });
+    expect(result).toEqual({ hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true });
   });
 
   it('errors when RepoDigests are present but none resolves a digest', async () => {
     // A non-empty set with no usable sha256 digest is ambiguous: surface it as an
     // error rather than a silent "up to date".
     const docker = makeMockDocker(['library/nginx:latest']);
+    const result = await service.checkImage(docker, 'nginx:latest');
+    expect(result.hasUpdate).toBe(false);
+    expect(result.notCheckable).toBeUndefined();
+    expect(result.error).toContain('Could not resolve a local registry digest');
+  });
+
+  it('errors (not a comparison) when the sole valid RepoDigest belongs to an unrelated repository', async () => {
+    // A well-formed digest is present, but it names a different repo (e.g.
+    // left over from a retag): comparing it against this ref's registry state
+    // would risk a false update against unrelated content.
+    const docker = makeMockDocker([`ghcr.io/other/image@sha256:${'b'.repeat(64)}`]);
     const result = await service.checkImage(docker, 'nginx:latest');
     expect(result.hasUpdate).toBe(false);
     expect(result.notCheckable).toBeUndefined();
@@ -218,6 +250,7 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockListRegistryTagsResult.mockResolvedValue({ ok: true, tags: [] });
     (ImageUpdateService as any).instance = undefined;
     service = ImageUpdateService.getInstance();
   });
@@ -234,32 +267,86 @@ describe('ImageUpdateService - checkImage surfaces the comparison resolver outco
     }),
   } as any);
 
+  const dockerWithNginxSemver = (repoDigests: string[] = [`registry-1.docker.io/library/nginx@${LOCAL_DIGEST}`]) => ({
+    getDocker: () => ({
+      getImage: () => ({ inspect: vi.fn().mockResolvedValue({
+        RepoDigests: repoDigests,
+        Os: 'linux',
+        Architecture: 'amd64',
+      }) }),
+    }),
+  } as any);
+
   it('surfaces the specific failure reason (not a generic "unreachable") as the check error', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'error', reason: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
     const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
-    expect(result).toEqual({ hasUpdate: false, error: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
+    expect(result).toMatchObject({ hasUpdate: false, checkStatus: 'failed', error: 'Authentication failed for ghcr.io/linuxserver/radarr:latest' });
   });
 
   it('reports an update when the comparison resolver classifies the remote as an update', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'update' });
     const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
-    expect(result).toEqual({ hasUpdate: true });
+    expect(result).toMatchObject({ hasUpdate: true, digestUpdate: true, checkStatus: 'ok' });
   });
 
   it('reports no update when the comparison resolver classifies the remote as a match', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
     const result = await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
-    expect(result).toEqual({ hasUpdate: false });
+    expect(result).toMatchObject({ hasUpdate: false, digestUpdate: false, checkStatus: 'ok' });
   });
 
   it('passes the local digest, platform, and parsed ref through to the comparison resolver', async () => {
     mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
     await service.checkImage(dockerWithLocalDigest(LOCAL_DIGEST), 'ghcr.io/linuxserver/radarr:latest');
     expect(mockCompareLocalToRemoteTag).toHaveBeenCalledWith(
-      LOCAL_DIGEST,
+      [LOCAL_DIGEST],
       'ghcr.io',
       'linuxserver/radarr',
       'latest',
+      { os: 'linux', architecture: 'amd64' },
+      null,
+    );
+  });
+
+  it('reports an update when the declared tag digest matches but a higher semver tag exists', async () => {
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
+    mockListRegistryTagsResult.mockResolvedValue({ ok: true, tags: ['1.2.3', '1.2.4'] });
+    const result = await service.checkImage(dockerWithNginxSemver(), 'nginx:1.2.3');
+    expect(result).toMatchObject({ hasUpdate: true, digestUpdate: false, tagUpdate: true, checkStatus: 'ok' });
+  });
+
+  it('reports an update when digest comparison errors but a higher semver tag exists', async () => {
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'error', reason: 'Registry unreachable' });
+    mockListRegistryTagsResult.mockResolvedValue({ ok: true, tags: ['1.2.3', '1.2.4'] });
+    const result = await service.checkImage(dockerWithNginxSemver(), 'nginx:1.2.3');
+    expect(result).toMatchObject({ hasUpdate: true, digestUpdate: false, tagUpdate: true, checkStatus: 'ok' });
+  });
+
+  it('forwards every matching RepoDigest (stale index ahead of current) to the comparison resolver', async () => {
+    const STALE = `sha256:${'f'.repeat(64)}`;
+    const CURRENT = `sha256:${'e'.repeat(64)}`;
+    const docker = {
+      getDocker: () => ({
+        getImage: () => ({
+          inspect: vi.fn().mockResolvedValue({
+            RepoDigests: [
+              `redis@${STALE}`,
+              `redis@${CURRENT}`,
+            ],
+            Os: 'linux',
+            Architecture: 'amd64',
+          }),
+        }),
+      }),
+    } as any;
+    mockCompareLocalToRemoteTag.mockResolvedValue({ kind: 'match' });
+    const result = await service.checkImage(docker, 'redis:8.8.0');
+    expect(result).toEqual({ hasUpdate: false, digestUpdate: false, tagUpdate: false, checkStatus: 'ok' });
+    expect(mockCompareLocalToRemoteTag).toHaveBeenCalledWith(
+      [STALE, CURRENT],
+      'registry-1.docker.io',
+      'library/redis',
+      '8.8.0',
       { os: 'linux', architecture: 'amd64' },
       null,
     );
@@ -288,6 +375,7 @@ services:
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockListRegistryTagsResult.mockResolvedValue({ ok: true, tags: [] });
     (ImageUpdateService as any).instance = undefined;
     mockGetSystemState.mockReturnValue('1');
     mockGetStacks.mockResolvedValue(['stackA']);
@@ -1132,6 +1220,62 @@ describe('ImageUpdateService - configurable interval & status', () => {
     service.stop();
     checkSpy.mockRestore();
   });
+
+  it('start() while checks disabled arms no timer and reports enabled false', () => {
+    vi.useFakeTimers();
+    mockGetGlobalSettings.mockReturnValue({ image_update_checks_enabled: '0', image_update_check_interval_minutes: '60' });
+    const service = ImageUpdateService.getInstance();
+    const checkSpy = vi.spyOn(service as any, 'check').mockResolvedValue(undefined);
+    service.start();
+    const status = service.getStatus();
+    expect(status.enabled).toBe(false);
+    expect(status.nextCheckAt).toBeNull();
+    expect(status.checking).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(10 * 60 * 1000);
+    expect(checkSpy).not.toHaveBeenCalled();
+    checkSpy.mockRestore();
+  });
+
+  it('treats a missing checks-enabled key as enabled', () => {
+    mockGetGlobalSettings.mockReturnValue({});
+    const service = ImageUpdateService.getInstance();
+    expect(ImageUpdateService.isChecksEnabled()).toBe(true);
+    expect(service.getStatus().enabled).toBe(true);
+  });
+
+  it('applyChecksEnabled(false) stops polling, clears local findings, and broadcasts invalidate', () => {
+    vi.useFakeTimers();
+    mockGetGlobalSettings.mockReturnValue({ image_update_check_interval_minutes: '60' });
+    const service = ImageUpdateService.getInstance();
+    service.start();
+    expect(service.getStatus().nextCheckAt).not.toBeNull();
+
+    mockGetGlobalSettings.mockReturnValue({ image_update_checks_enabled: '0', image_update_check_interval_minutes: '60' });
+    mockUpdateGlobalSetting.mockImplementation((key: string, value: string) => {
+      if (key === 'image_update_checks_enabled') {
+        mockGetGlobalSettings.mockReturnValue({ image_update_checks_enabled: value, image_update_check_interval_minutes: '60' });
+      }
+    });
+
+    const status = service.applyChecksEnabled(false);
+    expect(status.enabled).toBe(false);
+    expect(status.nextCheckAt).toBeNull();
+    expect(mockUpdateGlobalSetting).toHaveBeenCalledWith('image_update_checks_enabled', '0');
+    expect(mockClearAllStackUpdateStatus).toHaveBeenCalledWith(1);
+    expect(mockBroadcastEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'state-invalidate',
+      scope: 'image-updates',
+      nodeId: 1,
+    }));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('triggerManualRefresh returns false when checks are disabled', () => {
+    mockGetGlobalSettings.mockReturnValue({ image_update_checks_enabled: '0' });
+    const service = ImageUpdateService.getInstance();
+    expect(service.triggerManualRefresh()).toBe(false);
+  });
 });
 
 // ── Stale stack pruning ─────────────────────────────────────────────────
@@ -1495,6 +1639,7 @@ services:
     mockGetSystemState.mockReturnValue('1');
     mockGetAllContainers.mockResolvedValue([]);
     mockEnvExists.mockResolvedValue(false);
+    mockGetGlobalSettings.mockReturnValue({ developer_mode: '0' });
   });
 
   it('reduces per-service status through the effective model and persists services_json with a generation', async () => {
@@ -1616,7 +1761,26 @@ services:
   });
 
   describe('recheckStack', () => {
-    it('persists a fresh per-service reduction and returns no warning on success', async () => {
+    it('skips registry probes and DB writes when checks are disabled', async () => {
+      mockGetGlobalSettings.mockReturnValueOnce({ image_update_checks_enabled: '0' });
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({ hasUpdate: true });
+      const genBefore = service.peekStackWriteGeneration(1, 'stackA');
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({ outcome: 'cleared', warning: null });
+      expect(service.peekStackWriteGeneration(1, 'stackA')).toBe(genBefore);
+      expect(mockBuildEffectiveServiceModel).not.toHaveBeenCalled();
+      expect(mockGetAllContainers).not.toHaveBeenCalled();
+      expect((service as any).checkImage).not.toHaveBeenCalled();
+      expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+      expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+      expect(mockClearStackUpdateStatus).not.toHaveBeenCalled();
+      expect(mockClearAllStackUpdateStatus).not.toHaveBeenCalled();
+    });
+
+    it('returns still_present when a checkable service still has an update', async () => {
       mockBuildEffectiveServiceModel.mockResolvedValueOnce({
         renderable: true,
         services: [specFor('web', 'web:latest'), specFor('worker', 'worker:latest')],
@@ -1629,7 +1793,10 @@ services:
 
       const result = await service.recheckStack(1, 'stackA');
 
-      expect(result).toEqual({ warning: null });
+      expect(result).toEqual({
+        outcome: 'still_present',
+        warning: 'The update command completed, but Sencho still detects an available image update.',
+      });
       expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
         1, 'stackA', true, expect.any(Number), 'ok', null,
         [
@@ -1640,13 +1807,103 @@ services:
       );
     });
 
-    it('returns a warning and leaves the prior row untouched when the model cannot render', async () => {
+    it('returns cleared when every checkable service is up to date', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({ hasUpdate: false });
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({ outcome: 'cleared', warning: null });
+      expect(mockUpsertStackUpdateStatus).toHaveBeenCalledWith(
+        1, 'stackA', false, expect.any(Number), 'ok', null,
+        expect.any(Array),
+        expect.any(Number),
+      );
+    });
+
+    it('returns verification_failed and leaves the prior row untouched when the model cannot render', async () => {
       mockBuildEffectiveServiceModel.mockResolvedValueOnce({ renderable: false, code: 'effective_model_render_failed', error: 'no model in test' });
       const service = ImageUpdateService.getInstance();
 
       const result = await service.recheckStack(1, 'stackA');
 
-      expect(result).toEqual({ warning: 'no model in test' });
+      expect(result).toEqual({ outcome: 'verification_failed', warning: 'no model in test' });
+      expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+      expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+    });
+
+    it('returns verification_incomplete and preserves prior hasUpdate on a fully failed check', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      mockGetStackServicesJson.mockReturnValueOnce([
+        { service: 'web', image: 'web:latest', hasUpdate: true, checkStatus: 'ok', lastError: null },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({
+        hasUpdate: false,
+        error: 'registry timeout',
+      });
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({
+        outcome: 'verification_incomplete',
+        warning: 'The update command completed, but Sencho could not fully verify whether an image update remains.',
+      });
+      expect(mockRecordStackCheckFailure).toHaveBeenCalled();
+      expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+    });
+
+    it('returns verification_incomplete when the write lock discards a stale commit', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockGetAllContainers.mockResolvedValue([
+        { Id: 'c1', Image: 'web:latest', Labels: { 'com.docker.compose.project': 'stackA', 'com.docker.compose.service': 'web' } },
+      ]);
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({ hasUpdate: false });
+      (service as any).withStackWriteLock = vi.fn().mockResolvedValue(false);
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({
+        outcome: 'verification_incomplete',
+        warning: 'The update command completed, but Sencho could not fully verify whether an image update remains.',
+      });
+      expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
+      expect(mockRecordStackCheckFailure).not.toHaveBeenCalled();
+    });
+
+    it('returns verification_incomplete when container listing fails', async () => {
+      mockBuildEffectiveServiceModel.mockResolvedValueOnce({
+        renderable: true,
+        services: [specFor('web', 'web:latest')],
+      });
+      mockGetAllContainers.mockRejectedValueOnce(new Error('docker socket down'));
+      const service = ImageUpdateService.getInstance();
+      (service as any).checkImage = vi.fn().mockResolvedValue({ hasUpdate: false });
+
+      const result = await service.recheckStack(1, 'stackA');
+
+      expect(result).toEqual({
+        outcome: 'verification_incomplete',
+        warning: 'The update command completed, but Sencho could not fully verify whether an image update remains.',
+      });
+      expect((service as any).checkImage).not.toHaveBeenCalled();
       expect(mockUpsertStackUpdateStatus).not.toHaveBeenCalled();
     });
   });

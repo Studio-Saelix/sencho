@@ -1,5 +1,6 @@
 /**
- * Fleet sync for suppression rules: node_id normalize, capability gate, stale DELETE.
+ * Fleet sync for suppression rules: node_id normalize, capability gate, stale DELETE,
+ * durable pending retractions, permanent fan-out to all remotes.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
@@ -8,12 +9,18 @@ const mockGetProxyTarget = vi.fn();
 const mockGetNodes = vi.fn();
 const mockGetNode = vi.fn();
 const mockRemoteAdvertises = vi.fn();
+const mockUpsertPending = vi.fn();
+const mockDeletePending = vi.fn();
+const mockListPending = vi.fn();
 
 vi.mock('../services/DatabaseService', () => ({
   DatabaseService: {
     getInstance: () => ({
       getNodes: mockGetNodes,
       getNode: mockGetNode,
+      upsertNotificationSuppressionPendingRetraction: mockUpsertPending,
+      deleteNotificationSuppressionPendingRetraction: mockDeletePending,
+      listNotificationSuppressionPendingRetractions: mockListPending,
     }),
   },
 }));
@@ -46,6 +53,7 @@ import {
   syncSuppressionRuleToFleet,
   syncSuppressionRuleUpdateToFleet,
   replicationTargetIds,
+  flushPendingSuppressionRetractions,
 } from '../helpers/notificationSuppressionSync';
 import type { NotificationSuppressionRule } from '../services/DatabaseService';
 
@@ -72,6 +80,21 @@ function makeRule(overrides: Partial<NotificationSuppressionRule> = {}): Notific
 const remoteA = { id: 10, name: 'remote-a', type: 'remote' as const };
 const remoteB = { id: 11, name: 'remote-b', type: 'remote' as const };
 
+const RETRACTION_CAP = 'notification-suppression-replica-retraction';
+
+function metaWith(...caps: string[]) {
+  return { capabilities: caps, online: true };
+}
+
+function okDeleteResponse(outcome = 'applied') {
+  return {
+    ok: true,
+    status: 200,
+    text: async () => '',
+    json: async () => ({ success: true, outcome }),
+  };
+}
+
 describe('notificationSuppressionSync', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -83,8 +106,10 @@ describe('notificationSuppressionSync', () => {
       apiUrl: `http://node-${id}.example:1852`,
       apiToken: 'tok',
     }));
-    mockFetch.mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+    mockFetch.mockResolvedValue(okDeleteResponse());
     mockRemoteAdvertises.mockResolvedValue(true);
+    mockFetchMeta.mockResolvedValue(metaWith(RETRACTION_CAP, 'notification-suppression-schedule'));
+    mockListPending.mockReturnValue([]);
   });
 
   afterEach(() => {
@@ -100,6 +125,7 @@ describe('notificationSuppressionSync', () => {
     syncSuppressionRuleToFleet(makeRule({ schedule: null, node_id: 10 }));
     await vi.waitFor(() => expect(mockFetch).toHaveBeenCalled());
     expect(mockRemoteAdvertises).not.toHaveBeenCalled();
+    expect(mockFetchMeta).not.toHaveBeenCalled();
     const body = JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body);
     expect(body.rule.node_id).toBeNull();
     expect(body.rule.schedule).toBeNull();
@@ -121,44 +147,99 @@ describe('notificationSuppressionSync', () => {
     expect(body.rule.schedule.days).toEqual([6]);
   });
 
-  it('probe false + DELETE success: no POST; cleanup logged as removed', async () => {
+  it('schedule unsupported + retraction supported: recoverable DELETE, no POST', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockRemoteAdvertises.mockResolvedValue(false);
-    mockFetch.mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+    mockFetchMeta.mockResolvedValue(metaWith(RETRACTION_CAP));
 
     syncSuppressionRuleToFleet(makeRule({
       node_id: 10,
+      updated_at: 555,
       schedule: { days: [1], start_minute: 0, end_minute: 60, tz: 'UTC' },
     }));
     await vi.waitFor(() => expect(mockFetch).toHaveBeenCalled());
 
     expect(mockFetch.mock.calls.every((c) => (c[1] as { method: string }).method === 'DELETE')).toBe(true);
-    expect(warn.mock.calls.some((c) => String(c[0]).includes('replica was removed'))).toBe(true);
+    expect(JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)).toEqual({
+      kind: 'recoverable',
+      source_updated_at: 555,
+    });
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('recoverable DELETE applied'))).toBe(true);
     expect(error.mock.calls.some((c) => String(c[0]).includes('cleanup pending'))).toBe(false);
+    expect(mockUpsertPending).not.toHaveBeenCalled();
+    expect(mockDeletePending).toHaveBeenCalledWith(42, 10);
   });
 
-  it('probe false + no proxy target: no successful-cleanup claim', async () => {
+  it('schedule unsupported + retraction unsupported: no DELETE; queues pending', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mockRemoteAdvertises.mockResolvedValue(false);
+    mockFetchMeta.mockResolvedValue(metaWith('notification-suppression'));
+
+    syncSuppressionRuleToFleet(makeRule({
+      node_id: 10,
+      updated_at: 555,
+      schedule: { days: [1], start_minute: 0, end_minute: 60, tz: 'UTC' },
+    }));
+    await vi.waitFor(() => expect(mockUpsertPending).toHaveBeenCalled());
+
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('queued pending retraction'))).toBe(true);
+    expect(mockUpsertPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rule_id: 42,
+        node_id: 10,
+        kind: 'recoverable',
+        source_updated_at: 555,
+      }),
+    );
+  });
+
+  it('schedule unsupported + probe unreachable (offline meta): no DELETE; queues pending', async () => {
+    mockRemoteAdvertises.mockResolvedValue(false);
+    mockFetchMeta.mockResolvedValue({ capabilities: [], online: false });
+
+    syncSuppressionRuleToFleet(makeRule({
+      node_id: 10,
+      schedule: { days: [1], start_minute: 0, end_minute: 60, tz: 'UTC' },
+    }));
+    await vi.waitFor(() => expect(mockUpsertPending).toHaveBeenCalled());
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockUpsertPending.mock.calls[0][0].last_error).toMatch(/unreachable/);
+  });
+
+  it('schedule unsupported + probe unreachable (throw): no DELETE; queues pending', async () => {
+    mockRemoteAdvertises.mockResolvedValue(false);
+    mockFetchMeta.mockRejectedValue(new Error('timeout'));
+
+    syncSuppressionRuleToFleet(makeRule({
+      node_id: 10,
+      schedule: { days: [1], start_minute: 0, end_minute: 60, tz: 'UTC' },
+    }));
+    await vi.waitFor(() => expect(mockUpsertPending).toHaveBeenCalled());
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('schedule unsupported + no proxy after supported probe: queues pending, no POST', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockRemoteAdvertises.mockResolvedValue(false);
+    mockFetchMeta.mockResolvedValue(metaWith(RETRACTION_CAP));
     mockGetProxyTarget.mockReturnValue(null);
 
     syncSuppressionRuleToFleet(makeRule({
       node_id: 10,
       schedule: { days: [1], start_minute: 0, end_minute: 60, tz: 'UTC' },
     }));
-    await vi.waitFor(() => expect(error).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mockUpsertPending).toHaveBeenCalled());
 
     expect(mockFetch).not.toHaveBeenCalled();
-    expect(warn.mock.calls.some((c) => String(c[0]).includes('replica was removed'))).toBe(false);
     expect(error.mock.calls.some((c) => String(c[0]).includes('cleanup pending'))).toBe(true);
   });
 
-  it('scheduleInvalid: DELETE success, no POST', async () => {
+  it('scheduleInvalid: DELETE success when retraction supported, no POST', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    mockFetch.mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+    mockFetchMeta.mockResolvedValue(metaWith(RETRACTION_CAP));
 
     syncSuppressionRuleToFleet(makeRule({
       node_id: 10,
@@ -166,31 +247,44 @@ describe('notificationSuppressionSync', () => {
       scheduleInvalid: true,
     }));
     await vi.waitFor(() => {
-      expect(warn.mock.calls.some((c) => String(c[0]).includes('replica removed'))).toBe(true);
+      expect(warn.mock.calls.some((c) => String(c[0]).includes('recoverable DELETE applied'))).toBe(true);
     });
 
     expect(mockFetch.mock.calls.every((c) => (c[1] as { method: string }).method === 'DELETE')).toBe(true);
     expect(error.mock.calls.some((c) => String(c[0]).includes('cleanup pending'))).toBe(false);
   });
 
-  it('scheduleInvalid: DELETE 404 counts as cleanup success, no POST', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    mockFetch.mockResolvedValue({ ok: false, status: 404, text: async () => 'gone' });
-
-    syncSuppressionRuleToFleet(makeRule({
-      node_id: 10,
-      schedule: null,
-      scheduleInvalid: true,
-    }));
-    await vi.waitFor(() => {
-      expect(warn.mock.calls.some((c) => String(c[0]).includes('replica removed'))).toBe(true);
+  it('scheduleInvalid: opaque DELETE 404 queues pending (not treated as success)', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockFetchMeta.mockResolvedValue(metaWith(RETRACTION_CAP));
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: async () => 'Not Found',
+      json: async () => {
+        throw new Error('no json');
+      },
     });
-    expect(mockFetch.mock.calls.every((c) => (c[1] as { method: string }).method === 'DELETE')).toBe(true);
+
+    syncSuppressionRuleToFleet(makeRule({
+      node_id: 10,
+      schedule: null,
+      scheduleInvalid: true,
+    }));
+    await vi.waitFor(() => expect(mockUpsertPending).toHaveBeenCalled());
+    expect(error.mock.calls.some((c) => String(c[0]).includes('cleanup pending'))).toBe(true);
+    expect(mockDeletePending).not.toHaveBeenCalled();
   });
 
-  it('scheduleInvalid: DELETE failure logs pending cleanup, no POST', async () => {
+  it('scheduleInvalid: DELETE failure queues pending, no POST', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    mockFetch.mockResolvedValue({ ok: false, status: 503, text: async () => 'down' });
+    mockFetchMeta.mockResolvedValue(metaWith(RETRACTION_CAP));
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: async () => 'down',
+      json: async () => ({}),
+    });
 
     syncSuppressionRuleToFleet(makeRule({
       node_id: 10,
@@ -199,28 +293,32 @@ describe('notificationSuppressionSync', () => {
     }));
     await vi.waitFor(() => expect(error).toHaveBeenCalled());
     expect(mockFetch.mock.calls.every((c) => (c[1] as { method: string }).method === 'DELETE')).toBe(true);
+    expect(mockUpsertPending).toHaveBeenCalled();
     expect(error.mock.calls.some((c) => String(c[0]).includes('cleanup pending'))).toBe(true);
   });
 
-  it('scheduleInvalid: no proxy target logs pending, no POST', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    mockGetProxyTarget.mockReturnValue(null);
+  it('scheduleInvalid without retraction capability: no DELETE; queues pending', async () => {
+    mockFetchMeta.mockResolvedValue(metaWith());
 
     syncSuppressionRuleToFleet(makeRule({
       node_id: 10,
+      updated_at: 777,
       schedule: null,
       scheduleInvalid: true,
     }));
-    await vi.waitFor(() => expect(error).toHaveBeenCalled());
+    await vi.waitFor(() => expect(mockUpsertPending).toHaveBeenCalled());
     expect(mockFetch).not.toHaveBeenCalled();
-    expect(warn.mock.calls.some((c) => String(c[0]).includes('replica removed'))).toBe(false);
-    expect(error.mock.calls.some((c) => String(c[0]).includes('cleanup pending'))).toBe(true);
+    expect(mockUpsertPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'recoverable',
+        source_updated_at: 777,
+      }),
+    );
   });
 
-  it('unscheduled-to-scheduled on unsupported target attempts DELETE', async () => {
+  it('unscheduled-to-scheduled on unsupported schedule target attempts recoverable path', async () => {
     mockRemoteAdvertises.mockResolvedValue(false);
-    mockFetch.mockResolvedValue({ ok: true, status: 200, text: async () => '' });
+    mockFetchMeta.mockResolvedValue(metaWith(RETRACTION_CAP));
     const previous = makeRule({ node_id: 10, schedule: null });
     const updated = makeRule({
       node_id: 10,
@@ -229,22 +327,6 @@ describe('notificationSuppressionSync', () => {
     syncSuppressionRuleUpdateToFleet(previous, updated);
     await vi.waitFor(() => expect(mockFetch).toHaveBeenCalled());
     expect(mockFetch.mock.calls.every((c) => (c[1] as { method: string }).method === 'DELETE')).toBe(true);
-  });
-
-  it('probe false + DELETE failure: no POST; logs cleanup pending', async () => {
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    mockRemoteAdvertises.mockResolvedValue(false);
-    mockFetch.mockResolvedValue({ ok: false, status: 503, text: async () => 'down' });
-
-    syncSuppressionRuleToFleet(makeRule({
-      node_id: 10,
-      schedule: { days: [1], start_minute: 0, end_minute: 60, tz: 'UTC' },
-    }));
-    await vi.waitFor(() => expect(error).toHaveBeenCalled());
-
-    expect(mockFetch.mock.calls.every((c) => (c[1] as { method: string }).method === 'DELETE')).toBe(true);
-    expect(error.mock.calls.some((c) => String(c[0]).includes('cleanup pending'))).toBe(true);
-    expect(error.mock.calls.some((c) => String(c[0]).includes('rule 42'))).toBe(true);
   });
 
   it('scheduled-to-unscheduled POST refresh does not require capability', async () => {
@@ -261,7 +343,8 @@ describe('notificationSuppressionSync', () => {
     expect(body.rule.schedule).toBeNull();
   });
 
-  it('stale targets receive DELETE on scope change', async () => {
+  it('stale targets receive recoverable DELETE when retraction supported', async () => {
+    mockFetchMeta.mockResolvedValue(metaWith(RETRACTION_CAP));
     const previous = makeRule({ node_id: null, schedule: null });
     const updated = makeRule({ node_id: 10, schedule: null });
     syncSuppressionRuleUpdateToFleet(previous, updated);
@@ -271,5 +354,148 @@ describe('notificationSuppressionSync', () => {
     expect(deletes.some((c) => String(c[0]).includes('node-11'))).toBe(true);
     const posts = mockFetch.mock.calls.filter((c) => (c[1] as { method: string }).method === 'POST');
     expect(posts.some((c) => String(c[0]).includes('node-10'))).toBe(true);
+  });
+
+  it('stale-target without retraction capability: no DELETE; queues pending', async () => {
+    mockFetchMeta.mockResolvedValue(metaWith());
+    const previous = makeRule({ id: 42, node_id: null, schedule: null, updated_at: 10 });
+    const updated = makeRule({ id: 42, node_id: 10, schedule: null, updated_at: 99 });
+    syncSuppressionRuleUpdateToFleet(previous, updated);
+    await vi.waitFor(() => expect(mockUpsertPending).toHaveBeenCalled());
+
+    const deletes = mockFetch.mock.calls.filter((c) => (c[1] as { method: string }).method === 'DELETE');
+    expect(deletes).toHaveLength(0);
+    expect(mockUpsertPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rule_id: 42,
+        node_id: 11,
+        kind: 'recoverable',
+        source_updated_at: 99,
+      }),
+    );
+  });
+
+  it('stale-target DELETE sends recoverable watermark from updated rule', async () => {
+    mockFetchMeta.mockResolvedValue(metaWith(RETRACTION_CAP));
+    const previous = makeRule({ id: 42, node_id: null, schedule: null, updated_at: 10 });
+    const updated = makeRule({ id: 42, node_id: 10, schedule: null, updated_at: 99 });
+    syncSuppressionRuleUpdateToFleet(previous, updated);
+    await vi.waitFor(() => expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(2));
+    const deletes = mockFetch.mock.calls.filter((c) => (c[1] as { method: string }).method === 'DELETE');
+    const stale = deletes.find((c) => String(c[0]).includes('node-11'));
+    expect(stale).toBeTruthy();
+    expect(JSON.parse((stale![1] as { body: string }).body)).toEqual({
+      kind: 'recoverable',
+      source_updated_at: 99,
+    });
+  });
+
+  it('authoritative fleet delete fans permanent retraction to all remotes', async () => {
+    const { deleteSuppressionRuleFromFleet } = await import('../helpers/notificationSuppressionSync');
+    deleteSuppressionRuleFromFleet(makeRule({ node_id: 10, updated_at: 321 }));
+    await vi.waitFor(() => expect(mockFetch.mock.calls.length).toBe(2));
+
+    for (const call of mockFetch.mock.calls) {
+      const [, init] = call as [string, { method: string; body: string }];
+      expect(init.method).toBe('DELETE');
+      expect(JSON.parse(init.body)).toEqual({ kind: 'permanent', source_updated_at: 321 });
+    }
+    expect(mockFetch.mock.calls.some((c) => String(c[0]).includes('node-10'))).toBe(true);
+    expect(mockFetch.mock.calls.some((c) => String(c[0]).includes('node-11'))).toBe(true);
+  });
+
+  it('authoritative delete transport failure queues pending permanent row', async () => {
+    const { deleteSuppressionRuleFromFleet } = await import('../helpers/notificationSuppressionSync');
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 503,
+      text: async () => 'down',
+      json: async () => ({}),
+    });
+    deleteSuppressionRuleFromFleet(makeRule({ node_id: 10, updated_at: 321 }));
+    await vi.waitFor(() => expect(mockUpsertPending).toHaveBeenCalled());
+    expect(mockUpsertPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'permanent',
+        source_updated_at: 321,
+      }),
+    );
+  });
+
+  it('ignored_stale DELETE keeps pending and does not clear', async () => {
+    mockFetchMeta.mockResolvedValue(metaWith(RETRACTION_CAP));
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({ success: true, outcome: 'ignored_stale' }),
+    });
+
+    syncSuppressionRuleToFleet(makeRule({
+      node_id: 10,
+      schedule: null,
+      scheduleInvalid: true,
+    }));
+    await vi.waitFor(() => expect(mockUpsertPending).toHaveBeenCalled());
+    expect(mockDeletePending).not.toHaveBeenCalled();
+    expect(mockUpsertPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        last_error: expect.stringMatching(/ignored_stale/),
+      }),
+    );
+  });
+
+  it('flushPendingSuppressionRetractions retries recoverable only when supported', async () => {
+    mockListPending.mockReturnValue([
+      {
+        rule_id: 7,
+        node_id: 10,
+        kind: 'recoverable',
+        source_updated_at: 50,
+        created_at: 1,
+        updated_at: 2,
+        attempts: 1,
+        last_error: 'earlier',
+      },
+    ]);
+    mockFetchMeta.mockResolvedValue(metaWith());
+
+    await flushPendingSuppressionRetractions(10);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockUpsertPending).toHaveBeenCalled();
+
+    mockUpsertPending.mockClear();
+    mockFetchMeta.mockResolvedValue(metaWith(RETRACTION_CAP));
+    await flushPendingSuppressionRetractions(10);
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalled());
+    expect(JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)).toEqual({
+      kind: 'recoverable',
+      source_updated_at: 50,
+    });
+    expect(mockDeletePending).toHaveBeenCalledWith(7, 10);
+  });
+
+  it('flushPendingSuppressionRetractions sends permanent without retraction capability', async () => {
+    mockListPending.mockReturnValue([
+      {
+        rule_id: 8,
+        node_id: 11,
+        kind: 'permanent',
+        source_updated_at: 90,
+        created_at: 1,
+        updated_at: 2,
+        attempts: 2,
+        last_error: 'offline',
+      },
+    ]);
+    mockFetchMeta.mockResolvedValue(metaWith());
+
+    await flushPendingSuppressionRetractions(11);
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalled());
+    expect(JSON.parse((mockFetch.mock.calls[0][1] as { body: string }).body)).toEqual({
+      kind: 'permanent',
+      source_updated_at: 90,
+    });
+    expect(mockDeletePending).toHaveBeenCalledWith(8, 11);
   });
 });

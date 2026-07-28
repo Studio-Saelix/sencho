@@ -96,6 +96,7 @@ describe('deploy provenance trust boundary', () => {
       const res = {
         status: vi.fn().mockReturnThis(),
         json: vi.fn(() => resolve()),
+        cookie: vi.fn(),
       } as unknown as import('express').Response;
       void Promise.resolve(authMiddleware(req, res, () => {
         nextCalled = true;

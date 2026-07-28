@@ -343,7 +343,7 @@ export function GitSourcePanel({
           description="Link this stack to a Git repository so compose updates can be pulled on demand or via webhook."
         />
 
-          <ScrollArea className="max-h-[70vh]">
+          <ScrollArea className="h-[70vh] max-md:h-auto">
             <div className="px-6 py-5 space-y-5">
               {loading ? (
                 <div className="space-y-3">

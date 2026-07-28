@@ -79,6 +79,15 @@ describe('buildEffectiveServiceModel', () => {
     expect(result.services[0].hasHealthcheck).toBe(false);
   });
 
+  it('treats test NONE as a disabled healthcheck', async () => {
+    stubRender(JSON.stringify({
+      services: { web: { image: 'a', healthcheck: { test: ['NONE'] } } },
+    }));
+    const result = await buildEffectiveServiceModel(1, 'mystack');
+    if (!result.renderable) throw new Error('expected renderable');
+    expect(result.services[0].hasHealthcheck).toBe(false);
+  });
+
   it('parses depends_on given in the short list form', async () => {
     stubRender(JSON.stringify({
       services: { web: { image: 'a', depends_on: ['db', 'cache'] } },

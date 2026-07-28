@@ -157,7 +157,7 @@ export function GitComposeFilePicker({
 
       {repoFiles && (
         <div className="rounded-md border border-glass-border">
-          <ScrollArea className="max-h-48">
+          <ScrollArea className="h-48 max-md:h-auto">
             <div className="p-2 space-y-1">
               {repoFiles.length === 0 && <p className="text-[11px] text-stat-subtitle px-1 py-2">No files found in the repository.</p>}
               {repoFiles.map((file) => {

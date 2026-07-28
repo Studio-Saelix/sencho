@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { updateAvailableBadge, updateAvailableLabel } from '@/lib/updateAvailableLabel';
+import { updateAvailableLabel } from '@/lib/updateAvailableLabel';
 
 describe('updateAvailableLabel', () => {
   it('uses the generic label when no services are named', () => {
@@ -14,12 +14,5 @@ describe('updateAvailableLabel', () => {
 
   it('summarizes larger service sets by count', () => {
     expect(updateAvailableLabel(['a', 'b', 'c', 'd'])).toBe('Update available: 4 services');
-  });
-});
-
-describe('updateAvailableBadge', () => {
-  it('stays compact for the Stack Health column', () => {
-    expect(updateAvailableBadge(['api'])).toBe('Update: api');
-    expect(updateAvailableBadge(['api', 'db'])).toBe('2 updates');
   });
 });

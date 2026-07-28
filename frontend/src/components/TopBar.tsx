@@ -89,13 +89,13 @@ function PanelMenuContent({
   title,
   children,
 }: {
-  title: string;
+  title?: string;
   children: ReactNode;
 }) {
   return (
     <DropdownMenuContent align="start" sideOffset={8} className="w-56 overflow-hidden rounded-md p-0">
-      <TopBarMenuMasthead title={title} />
-      <div className="border-t border-card-border/60 p-1">{children}</div>
+      {title ? <TopBarMenuMasthead title={title} /> : null}
+      <div className={cn(title && 'border-t border-card-border/60', 'p-1')}>{children}</div>
     </DropdownMenuContent>
   );
 }
@@ -274,7 +274,7 @@ function SmartStrip({
               <ActiveUnderline active={moreActive} />
             </button>
           </DropdownMenuTrigger>
-          <PanelMenuContent title="More">
+          <PanelMenuContent>
             <GroupedMenuItems
               groups={overflowGroups}
               activeView={activeView}

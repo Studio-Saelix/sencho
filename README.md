@@ -39,7 +39,7 @@
 
 ## What Sencho is
 
-Sencho is a Docker Compose control plane for DevOps engineers, platform teams, and system administrators who run services on Compose and need a real operational surface: a graphical interface that does not give up file-on-disk workflows, and the ability to manage more than one machine without SSH gymnastics or a VPN.
+Sencho is a Docker Compose control plane for DevOps engineers, platform teams, system administrators and homelab users who run services on Compose and need a real operational surface: a graphical interface that does not give up file-on-disk workflows, and the ability to manage more than one machine without SSH gymnastics or a VPN.
 
 It runs as a single container on your hardware and provides a UI for common Compose operations: deploying, editing files, watching logs, restarting containers, browsing volumes, and recovering from failures. Your compose files stay on the host filesystem and remain the source of truth.
 

@@ -11,7 +11,7 @@ import {
   buildServicesSignal,
 } from '../services/updateGuard/readiness';
 import type { ContainerProbe, ReadinessSignal } from '../services/updateGuard/types';
-import type { UpdatePreviewSummary } from '../services/UpdatePreviewService';
+import type { UpdatePreviewImage, UpdatePreviewSummary } from '../services/UpdatePreviewService';
 
 const NOW = 1_750_000_000_000;
 
@@ -37,6 +37,9 @@ const summary = (over: Partial<UpdatePreviewSummary> = {}): UpdatePreviewSummary
   blocked_reason: null,
   has_build_services: false,
   rebuild_available: false,
+  check_status: 'ok',
+  verification_failed: false,
+  verification_error: null,
   ...over,
 });
 
@@ -157,6 +160,13 @@ describe('updatePreviewSignal', () => {
   it('degrades a preview failure to a non-verdict-affecting unknown', () => {
     expect(updatePreviewSignal('error')).toMatchObject({ status: 'unknown', affectsVerdict: false });
   });
+
+  it('reports detection disabled without treating it as up to date', () => {
+    const signal = updatePreviewSignal(summary({ detection_disabled: true, has_update: false }));
+    expect(signal.status).toBe('unknown');
+    expect(signal.affectsVerdict).toBe(false);
+    expect(signal.detail).toMatch(/disabled/i);
+  });
 });
 
 describe('buildServicesSignal', () => {
@@ -223,5 +233,79 @@ describe('aggregateVerdict', () => {
     expect(aggregateVerdict([containersSignal('error'), driftSignal(0)])).toBe('unknown');
     expect(aggregateVerdict([driftSignal(1), preflightSignal({ activeStatus: 'pass' })])).toBe('ready_with_warnings');
     expect(aggregateVerdict([driftSignal(0), preflightSignal({ activeStatus: 'pass' }), healthchecksSignal([probe()])])).toBe('ready');
+  });
+});
+
+describe('updatePreviewSignal verification failure', () => {
+  it('does not claim no pending update when digest verification failed', () => {
+    const signal = updatePreviewSignal(summary({
+      verification_failed: true,
+      verification_error: 'Registry unreachable',
+    }));
+    expect(signal.status).toBe('unknown');
+    expect(signal.detail).toMatch(/Digest verification failed/);
+    expect(signal.detail).toMatch(/Registry unreachable/);
+    expect(signal.detail).not.toMatch(/No pending image update detected/);
+  });
+
+  it('holds a confirmed update for review, not ok, when another image failed digest verification', () => {
+    const signal = updatePreviewSignal(summary({
+      has_update: true,
+      semver_bump: 'patch',
+      update_kind: 'digest',
+      verification_failed: true,
+      verification_error: 'Registry unreachable',
+    }));
+    expect(signal.status).toBe('attention');
+    expect(signal.detail).toMatch(/Registry unreachable/);
+  });
+
+  it('holds a pending rebuild for review, not verification-only, when another image failed digest verification', () => {
+    const signal = updatePreviewSignal(summary({
+      rebuild_available: true,
+      has_build_services: true,
+      verification_failed: true,
+      verification_error: 'Registry unreachable',
+    }));
+    expect(signal.status).toBe('attention');
+    expect(signal.detail).toMatch(/rebuild/);
+    expect(signal.detail).toMatch(/Registry unreachable/);
+  });
+
+  const image = (over: Partial<UpdatePreviewImage> = {}): UpdatePreviewImage => ({
+    service: 'web',
+    image: 'nginx:1',
+    current_tag: '1',
+    next_tag: null,
+    has_update: false,
+    digest_update: false,
+    tag_update: false,
+    semver_bump: 'none',
+    check_status: 'ok',
+    check_error: null,
+    digest_error: null,
+    ...over,
+  });
+
+  it('keeps a single image with its own confirmed update ok even though that same image also failed its own digest check', () => {
+    // has_update and check_error are independent per image; there is no
+    // "other image" here, so per-image detail must clear the review hold
+    // that the aggregate-only fallback would otherwise apply.
+    const signal = updatePreviewSignal(
+      summary({ has_update: true, semver_bump: 'patch', update_kind: 'tag', verification_failed: true, verification_error: 'Registry unreachable' }),
+      [image({ has_update: true, check_error: 'Registry unreachable' })],
+    );
+    expect(signal.status).toBe('ok');
+  });
+
+  it('holds a confirmed update for review when per-image detail proves a genuinely different image failed verification', () => {
+    const signal = updatePreviewSignal(
+      summary({ has_update: true, semver_bump: 'patch', update_kind: 'tag', verification_failed: true, verification_error: 'Registry unreachable' }),
+      [
+        image({ service: 'confirmed', has_update: true, check_error: null }),
+        image({ service: 'failing', has_update: false, check_error: 'Registry unreachable' }),
+      ],
+    );
+    expect(signal.status).toBe('attention');
   });
 });

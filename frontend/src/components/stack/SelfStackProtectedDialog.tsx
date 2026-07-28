@@ -40,8 +40,11 @@ export function SelfStackProtectedDialog({
       }}
     >
       <p className="text-sm text-stat-subtitle">
-        This stack is the running Sencho instance. Use Fleet -&gt; Node Update to update Sencho.
-        To manage it as a normal stack, move Sencho&apos;s compose project outside COMPOSE_DIR.
+        This stack is the running Sencho instance. Destructive lifecycle actions
+        stay protected. Eligible admins can use Save &amp; Reapply in the Compose
+        editor, or Fleet -&gt; Node Updates, to recreate Sencho from its current
+        Compose configuration. To manage it as a normal stack, move Sencho&apos;s
+        compose project outside COMPOSE_DIR.
       </p>
     </ConfirmModal>
   );

@@ -7,6 +7,18 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { formatTimeAgo } from '@/lib/relativeTime';
 import type { ImageUpdateStatus, StackUpdateInfo } from '@/types/imageUpdates';
+import { isAuthoritativeNegativePreview } from '@/types/imageUpdates';
+import { fetchUpdatePreview } from '@/lib/fetchUpdatePreview';
+import {
+  isActionableUpdatePreview,
+  isClearedUpdatePreview,
+  isLegacyPreview,
+  isPreviewUncertain,
+  isReviewRequiredUpdatePreview,
+  isServiceApplyActionable,
+  isTagOnlyAdvisory,
+  isVerificationOnlyPreview,
+} from '@/lib/updatePreviewActionability';
 import { useNodes } from '@/context/NodeContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, Kicker } from '@/components/mobile/mobile-ui';
@@ -24,7 +36,14 @@ interface UpdatePreviewImage {
   current_tag: string;
   next_tag: string | null;
   has_update: boolean;
+  digest_update?: boolean;
+  tag_update?: boolean;
   semver_bump: SemverBump;
+  /** Absent on older remotes; backend uses !== 'not_checkable' for checkability. */
+  check_status?: 'ok' | 'partial' | 'failed' | 'not_checkable';
+  check_error?: string | null;
+  /** This image's own digest-comparison failure; not masked by a confirmed tag update. */
+  digest_error?: string | null;
 }
 
 type UpdateKind = 'tag' | 'digest' | 'none';
@@ -43,6 +62,10 @@ interface UpdatePreview {
     blocked_reason: string | null;
     has_build_services?: boolean;
     rebuild_available?: boolean;
+    /** Absent on older remotes; treat missing as non-authoritative. */
+    check_status?: 'ok' | 'partial' | 'failed';
+    verification_failed?: boolean;
+    verification_error?: string | null;
   };
   build_services?: string[];
   rollback_target: string | null;
@@ -55,6 +78,11 @@ function declaredServiceCount(preview: UpdatePreview | null | undefined): number
   for (const img of preview.images) names.add(img.service);
   for (const name of preview.build_services ?? []) names.add(name);
   return names.size;
+}
+
+/** Append `: reason` when present, otherwise end the lead-in with a period. */
+function withErrorDetail(lead: string, error: string | null | undefined): string {
+  return error ? `${lead}: ${error}` : `${lead}.`;
 }
 
 export interface StackCard {
@@ -72,6 +100,9 @@ export interface StackCard {
   // Name of the service currently applying a per-service update on this card,
   // or null when none is in flight. Distinct from `applying` (full-stack).
   applyingService: string | null;
+  // Post-Apply verification note when Compose succeeded but clearance could
+  // not be confirmed (distinct from a failed preview fetch).
+  verificationNote: string | null;
 }
 
 interface NodeGroup {
@@ -104,15 +135,20 @@ export function CadenceStrip({ cadence, className }: { cadence: ImageUpdateStatu
 
   if (!cadence) return null;
 
+  const checksOff = cadence.enabled === false;
   const lastChecked = cadence.lastCheckedAt != null ? formatTimeAgo(cadence.lastCheckedAt) : 'never';
-  const nextCheck = cadence.checking
-    ? 'checking now'
-    : cadence.nextCheckAt != null
-      ? formatRelative(cadence.nextCheckAt)
-      : 'not scheduled';
-  const cooldown = cooling
-    ? `Recheck available in ${Math.ceil(remainingMs / 1000)}s`
-    : 'Recheck ready';
+  const nextCheck = checksOff
+    ? 'disabled'
+    : cadence.checking
+      ? 'checking now'
+      : cadence.nextCheckAt != null
+        ? formatRelative(cadence.nextCheckAt)
+        : 'not scheduled';
+  const cooldown = checksOff
+    ? 'Detection off'
+    : cooling
+      ? `Recheck available in ${Math.ceil(remainingMs / 1000)}s`
+      : 'Recheck ready';
 
   return (
     <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-stat-subtitle/90 ${className ?? ''}`}>
@@ -148,12 +184,47 @@ function formatClock(ts: number | null): string {
   });
 }
 
-function RiskBadge({ bump, blocked }: { bump: SemverBump; blocked: boolean }) {
+function RiskBadge({
+  bump,
+  blocked,
+  reviewRequired,
+  uncertain,
+  tagOnly,
+}: {
+  bump: SemverBump;
+  blocked: boolean;
+  reviewRequired?: boolean;
+  uncertain?: boolean;
+  tagOnly?: boolean;
+}) {
   if (blocked || bump === 'major') {
     return (
       <span className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-destructive">
         <ShieldAlert className="h-3 w-3" strokeWidth={1.5} />
         Blocked · major
+      </span>
+    );
+  }
+  if (reviewRequired) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-warning">
+        <AlertTriangle className="h-3 w-3" strokeWidth={1.5} />
+        Review · unverified
+      </span>
+    );
+  }
+  if (uncertain) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-warning">
+        <AlertTriangle className="h-3 w-3" strokeWidth={1.5} />
+        Check uncertain
+      </span>
+    );
+  }
+  if (tagOnly) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-card-border bg-muted/30 px-2.5 py-0.5 font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">
+        Newer tag · edit Compose
       </span>
     );
   }
@@ -212,9 +283,10 @@ function StackReadinessCard({
   onApply: (stack: string, nodeId: number) => void;
   onApplyService?: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled } = card;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote } = card;
   const loading = !previewLoaded;
-  const failed = previewLoaded && preview === null;
+  const uncertain = previewLoaded && !!verificationNote;
+  const failed = previewLoaded && preview === null && !verificationNote;
   const blocked = preview?.summary.blocked ?? false;
   const bump = preview?.summary.semver_bump ?? 'none';
   const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
@@ -223,6 +295,15 @@ function StackReadinessCard({
   // build-only), not preview.images.length (shared tags collapse that list).
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImageCount > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
+  const verificationOnly = isVerificationOnlyPreview(preview);
+  const reviewRequired = isReviewRequiredUpdatePreview(preview);
+  // Full-stack apply is held for review when another image in the same stack
+  // failed digest verification: applying would pull/recreate that image as
+  // collateral. Per-service apply targets only images with their own confirmed
+  // update, so it is not gated by a different image's verification failure.
+  const applyDisabled = !isActionableUpdatePreview(preview)
+    || applying
+    || applyingService !== null;
 
   return (
     <Card className="flex flex-col gap-4 p-5">
@@ -242,12 +323,24 @@ function StackReadinessCard({
               Auto: Off
             </span>
           )}
-          {previewLoaded && preview && <RiskBadge bump={bump} blocked={blocked} />}
+          {previewLoaded && preview && (
+            <RiskBadge
+              bump={bump}
+              blocked={blocked}
+              reviewRequired={reviewRequired}
+              uncertain={isPreviewUncertain(preview)}
+              tagOnly={isTagOnlyAdvisory(preview)}
+            />
+          )}
         </div>
       </div>
 
       {loading ? (
         <div className="font-mono text-xs text-stat-subtitle/80">Checking registry...</div>
+      ) : uncertain ? (
+        <div className="font-mono text-xs text-warning">
+          {verificationNote}
+        </div>
       ) : failed ? (
         <div className="font-mono text-xs text-destructive/80">
           Preview failed. Registry may be unreachable.
@@ -256,20 +349,45 @@ function StackReadinessCard({
         (() => {
           const p = preview!;
           const blockedReason = p.summary.blocked_reason;
+          const verificationFailed = Boolean(p.summary.verification_failed);
+          const verificationError = p.summary.verification_error;
+          let applyTitle: string | undefined;
+          if (blocked) applyTitle = blockedReason ?? undefined;
+          else if (verificationOnly) applyTitle = 'Digest verification failed';
+          else if (reviewRequired) applyTitle = 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.';
+
+          let headline: ReactNode;
+          if (verificationFailed && !p.summary.has_update) {
+            headline = (
+              <div className="font-mono text-xs text-warning" data-testid="readiness-verification-failed">
+                {withErrorDetail('Digest verification failed', verificationError)}
+              </div>
+            );
+          } else if (p.summary.update_kind === 'digest') {
+            headline = (
+              <div className="flex items-baseline gap-2 font-mono text-sm">
+                <span className="text-stat-subtitle">{p.summary.current_tag}</span>
+                <span className="text-brand text-[10px] leading-3 uppercase tracking-[0.18em]">
+                  Rebuild available
+                </span>
+              </div>
+            );
+          } else {
+            headline = (
+              <VersionDiff
+                current={p.summary.current_tag}
+                next={p.summary.next_tag}
+              />
+            );
+          }
+
           return (
             <>
-              {p.summary.update_kind === 'digest' ? (
-                <div className="flex items-baseline gap-2 font-mono text-sm">
-                  <span className="text-stat-subtitle">{p.summary.current_tag}</span>
-                  <span className="text-brand text-[10px] leading-3 uppercase tracking-[0.18em]">
-                    Rebuild available
-                  </span>
+              {headline}
+              {verificationFailed && p.summary.has_update && (
+                <div className="font-mono text-[11px] text-warning" data-testid="readiness-verification-warning">
+                  {withErrorDetail('Digest check could not be verified', verificationError)}
                 </div>
-              ) : (
-                <VersionDiff
-                  current={p.summary.current_tag}
-                  next={p.summary.next_tag}
-                />
               )}
 
               <div className="flex items-center gap-1.5 font-mono text-[11px] text-stat-subtitle/80">
@@ -302,7 +420,7 @@ function StackReadinessCard({
                         variant="outline"
                         className="h-6 gap-1 rounded-md px-2 text-[11px]"
                         onClick={() => onApplyService?.(stack, nodeId, img.service)}
-                        disabled={blocked || applying || applyingService !== null}
+                        disabled={blocked || applying || applyingService !== null || !isServiceApplyActionable(preview, img.service)}
                       >
                         {applyingService === img.service ? 'Applying...' : 'Apply'}
                       </Button>
@@ -329,8 +447,8 @@ function StackReadinessCard({
                 <Button
                   size="sm"
                   onClick={() => onApply(stack, nodeId)}
-                  disabled={blocked || applying || applyingService !== null}
-                  title={blocked ? (blockedReason ?? undefined) : undefined}
+                  disabled={applyDisabled}
+                  title={applyTitle}
                   className="gap-1.5"
                 >
                   <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
@@ -351,18 +469,24 @@ function ReadinessHero({
   nodeCount,
   refreshing,
   onRefresh,
+  unresolvedChecks = false,
+  detectionDisabled = false,
 }: {
   total: number;
   ready: number;
   nodeCount: number;
   refreshing: boolean;
   onRefresh: () => void;
+  unresolvedChecks?: boolean;
+  detectionDisabled?: boolean;
 }) {
-  const headline = total === 0
-    ? 'Everything is up to date'
-    : total === 1
-      ? '1 update pending'
-      : `${total} updates pending`;
+  const headline = detectionDisabled
+    ? 'Image update detection disabled'
+    : total === 0
+      ? (unresolvedChecks ? 'No verified updates' : 'Everything is up to date')
+      : total === 1
+        ? '1 update pending'
+        : `${total} updates pending`;
   const acrossNodes = nodeCount > 1
     ? ` across ${nodeCount} nodes`
     : nodeCount === 1
@@ -477,13 +601,19 @@ export function MobileReadinessCard({
   onApply: (stack: string, nodeId: number) => void;
   onApplyService?: (stack: string, nodeId: number, serviceName: string) => void;
 }) {
-  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled } = card;
-  const failed = previewLoaded && preview === null;
+  const { stack, nodeId, preview, previewLoaded, scheduledTask, applying, applyingService, autoUpdateEnabled, verificationNote } = card;
+  const uncertain = previewLoaded && !!verificationNote;
+  const failed = previewLoaded && preview === null && !verificationNote;
   const blocked = preview?.summary.blocked ?? false;
   const bump = preview?.summary.semver_bump ?? 'none';
   const updatingImages = preview?.images.filter(i => i.has_update) ?? [];
   const showServiceApply = canServiceUpdate && declaredServiceCount(preview) > 1 && updatingImages.length > 0;
   const nextRun = scheduledTask?.next_run_at ?? null;
+  const verificationOnly = isVerificationOnlyPreview(preview);
+  const reviewRequired = isReviewRequiredUpdatePreview(preview);
+  const applyDisabled = !isActionableUpdatePreview(preview)
+    || applying
+    || applyingService !== null;
   const changelog = preview?.changelog ?? 'No changelog available from the registry yet.';
   const dot = changelog.indexOf('.');
   const lead = dot > 0 ? changelog.slice(0, dot + 1) : '';
@@ -502,63 +632,96 @@ export function MobileReadinessCard({
               <CircleSlash className="h-3 w-3" strokeWidth={1.5} />Auto: Off
             </span>
           )}
-          {previewLoaded && preview && <RiskBadge bump={bump} blocked={blocked} />}
+          {previewLoaded && preview && (
+            <RiskBadge
+              bump={bump}
+              blocked={blocked}
+              reviewRequired={reviewRequired}
+              uncertain={isPreviewUncertain(preview)}
+              tagOnly={isTagOnlyAdvisory(preview)}
+            />
+          )}
         </div>
       </div>
 
       {!previewLoaded ? (
         <div className="font-mono text-xs text-stat-subtitle/80">Checking registry...</div>
+      ) : uncertain ? (
+        <div className="font-mono text-xs text-warning">{verificationNote}</div>
       ) : failed ? (
         <div className="font-mono text-xs text-destructive/80">Preview failed. Registry may be unreachable.</div>
-      ) : (
-        <>
-          {preview!.summary.update_kind === 'digest' ? (
+      ) : (() => {
+        const p = preview!;
+        const verificationFailed = Boolean(p.summary.verification_failed);
+        const verificationError = p.summary.verification_error;
+
+        let headline: ReactNode;
+        if (verificationFailed && !p.summary.has_update) {
+          headline = (
+            <div className="font-mono text-xs text-warning" data-testid="readiness-verification-failed">
+              {withErrorDetail('Digest verification failed', verificationError)}
+            </div>
+          );
+        } else if (p.summary.update_kind === 'digest') {
+          headline = (
             <div className="flex items-baseline gap-2 font-mono text-[13px]">
-              <span className="text-stat-subtitle">{preview!.summary.current_tag}</span>
+              <span className="text-stat-subtitle">{p.summary.current_tag}</span>
               <span className="text-[10px] uppercase tracking-[0.12em] text-brand">Rebuild available</span>
             </div>
-          ) : (
-            <VersionDiff current={preview!.summary.current_tag} next={preview!.summary.next_tag} />
-          )}
-          <div className="truncate font-mono text-[11px] text-stat-subtitle">{preview!.summary.primary_image ?? '-'}</div>
-          <div className="border-t border-dashed border-card-border pt-[9px] text-[12.5px] leading-[18px] text-stat-subtitle">
-            {lead && <b className="text-stat-title">{lead}</b>}{rest}
-          </div>
-          {showServiceApply && (
-            <div className="flex flex-col gap-1.5 rounded-md border border-card-border bg-muted/20 p-2">
-              {updatingImages.map(img => (
-                <div key={img.service} className="flex items-center justify-between gap-2">
-                  <span className="truncate font-mono text-[11px] text-stat-subtitle">{img.service}</span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 gap-1 rounded-md px-2 text-[11px]"
-                    onClick={() => onApplyService?.(stack, nodeId, img.service)}
-                    disabled={blocked || applying || applyingService !== null}
-                  >
-                    {applyingService === img.service ? 'Applying...' : 'Apply'}
-                  </Button>
-                </div>
-              ))}
+          );
+        } else {
+          headline = <VersionDiff current={p.summary.current_tag} next={p.summary.next_tag} />;
+        }
+
+        return (
+          <>
+            {headline}
+            {verificationFailed && p.summary.has_update && (
+              <div className="font-mono text-[11px] text-warning" data-testid="readiness-verification-warning">
+                {withErrorDetail('Digest check could not be verified', verificationError)}
+              </div>
+            )}
+            <div className="truncate font-mono text-[11px] text-stat-subtitle">{p.summary.primary_image ?? '-'}</div>
+            <div className="border-t border-dashed border-card-border pt-[9px] text-[12.5px] leading-[18px] text-stat-subtitle">
+              {lead && <b className="text-stat-title">{lead}</b>}{rest}
             </div>
-          )}
-          <div className="flex items-center justify-between gap-[10px] pt-0.5">
-            <span className={`font-mono text-[11px] ${blocked ? 'text-destructive' : 'text-stat-subtitle'}`}>
-              {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked ? 'Held for review' : 'No schedule')}
-            </span>
-            <Button
-              size="sm"
-              variant={blocked ? 'outline' : 'default'}
-              onClick={() => onApply(stack, nodeId)}
-              disabled={blocked || applying || applyingService !== null}
-              className="gap-1.5"
-            >
-              <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
-              {applying ? 'Applying...' : 'Apply now'}
-            </Button>
-          </div>
-        </>
-      )}
+            {showServiceApply && (
+              <div className="flex flex-col gap-1.5 rounded-md border border-card-border bg-muted/20 p-2">
+                {updatingImages.map(img => (
+                  <div key={img.service} className="flex items-center justify-between gap-2">
+                    <span className="truncate font-mono text-[11px] text-stat-subtitle">{img.service}</span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 gap-1 rounded-md px-2 text-[11px]"
+                      onClick={() => onApplyService?.(stack, nodeId, img.service)}
+                      disabled={blocked || applying || applyingService !== null || !isServiceApplyActionable(preview, img.service)}
+                    >
+                      {applyingService === img.service ? 'Applying...' : 'Apply'}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex items-center justify-between gap-[10px] pt-0.5">
+              <span className={`font-mono text-[11px] ${blocked || reviewRequired ? 'text-destructive' : 'text-stat-subtitle'}`}>
+                {nextRun ? <>{formatClock(nextRun)} · {formatRelative(nextRun)}</> : (blocked || reviewRequired ? 'Held for review' : 'No schedule')}
+              </span>
+              <Button
+                size="sm"
+                variant={blocked || verificationOnly || reviewRequired ? 'outline' : 'default'}
+                onClick={() => onApply(stack, nodeId)}
+                disabled={applyDisabled}
+                title={reviewRequired ? 'Another image in this stack failed digest verification; apply the confirmed service individually or resolve verification first.' : undefined}
+                className="gap-1.5"
+              >
+                <Play className="h-3.5 w-3.5" strokeWidth={1.5} aria-hidden="true" />
+                {applying ? 'Applying...' : 'Apply now'}
+              </Button>
+            </div>
+          </>
+        );
+      })()}
     </div>
   );
 }
@@ -679,14 +842,17 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
 
       // Local-node check failures: surfaced separately because the fleet map is
       // boolean and the card grid only lists stacks with a confirmed update.
+      // Sticky has_update during a failed check is not a verified rebuild, so those
+      // stacks stay in the advisory only.
+      let failedLocalStacks = new Set<string>();
       if (detailRes.ok) {
         const detail = await detailRes.json() as Record<string, StackUpdateInfo>;
-        setCheckFailures(
-          Object.entries(detail)
-            .filter(([, info]) => info.checkStatus === 'failed')
-            .map(([stack, info]) => ({ stack, reason: info.lastError }))
-            .sort((a, b) => a.stack.localeCompare(b.stack)),
-        );
+        const failures = Object.entries(detail)
+          .filter(([, info]) => info.checkStatus === 'failed')
+          .map(([stack, info]) => ({ stack, reason: info.lastError }))
+          .sort((a, b) => a.stack.localeCompare(b.stack));
+        failedLocalStacks = new Set(failures.map(f => f.stack));
+        setCheckFailures(failures);
       } else {
         // Clear stale failures rather than persist them across a load, but log:
         // an empty advisory must not silently stand in for "detail unavailable".
@@ -730,7 +896,9 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         const node = currentNodes.find(n => n.id === nodeId);
         if (!node) continue;
         const stacks = Object.entries(stackMap)
-          .filter(([, hasUpdate]) => hasUpdate)
+          .filter(([stack, hasUpdate]) =>
+            hasUpdate && !(node.type === 'local' && failedLocalStacks.has(stack)),
+          )
           .map(([stack]) => stack)
           .sort();
         if (stacks.length === 0) continue;
@@ -753,6 +921,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             applying: false,
             applyingService: null,
             autoUpdateEnabled: scheduledTask !== null,
+            verificationNote: null,
           };
         });
         initialGroups.push({
@@ -779,9 +948,11 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       const previews = await Promise.all(
         flatPairs.map(async ({ nodeId, stack }) => {
           try {
-            const res = await fetchForNode(`/stacks/${encodeURIComponent(stack)}/update-preview`, nodeId);
-            if (!res.ok) return null;
-            return await res.json() as UpdatePreview;
+            const result = await fetchUpdatePreview(stack, {
+              fetchImpl: (path, init) => fetchForNode(path, nodeId, init),
+            });
+            if (!result.ok || !result.preview) return null;
+            return result.preview as UpdatePreview;
           } catch {
             return null;
           }
@@ -794,14 +965,52 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         previewByKey.set(`${pair.nodeId}::${pair.stack}`, previews[idx]);
       });
 
-      setGroups(initialGroups.map(g => ({
-        ...g,
-        cards: g.cards.map(c => ({
-          ...c,
-          preview: previewByKey.get(`${c.nodeId}::${c.stack}`) ?? null,
-          previewLoaded: true,
-        })),
-      })));
+      const previewAdvisory: { stack: string; reason: string | null }[] = [];
+      const groupsWithPreview = initialGroups
+        .map(g => {
+          const cards: StackCard[] = [];
+          for (const c of g.cards) {
+            const preview = previewByKey.get(`${c.nodeId}::${c.stack}`) ?? null;
+            if (isVerificationOnlyPreview(preview)) {
+              previewAdvisory.push({
+                stack: g.nodeType === 'remote' ? `${c.stack} (${g.nodeName})` : c.stack,
+                reason: preview?.summary.verification_error ?? 'Digest verification failed',
+              });
+              continue;
+            }
+            // Sticky fleet booleans can outlive a successful no-update preview.
+            // Drop those cards without treating them as check failures.
+            if (isClearedUpdatePreview(preview)) continue;
+            // A legacy preview (missing verification_failed entirely) is kept
+            // rather than cleared, but that alone renders as a pending card
+            // with nothing to explain it; flag why in the advisory too. Skip
+            // this when the preview is already actionable on its own terms
+            // (the remote's own has_update/rebuild_available): the card
+            // already speaks for itself, and pairing it with "could not be
+            // checked" would contradict the Apply affordance right next to it.
+            if (isLegacyPreview(preview) && !isActionableUpdatePreview(preview)) {
+              previewAdvisory.push({
+                stack: g.nodeType === 'remote' ? `${c.stack} (${g.nodeName})` : c.stack,
+                reason: 'This node\'s preview predates digest verification reporting',
+              });
+            }
+            cards.push({ ...c, preview, previewLoaded: true });
+          }
+          return { ...g, cards };
+        })
+        .filter(g => g.cards.length > 0);
+
+      if (previewAdvisory.length > 0) {
+        setCheckFailures(prev => {
+          const byStack = new Map(prev.map(f => [f.stack, f]));
+          for (const entry of previewAdvisory) {
+            if (!byStack.has(entry.stack)) byStack.set(entry.stack, entry);
+          }
+          return [...byStack.values()].sort((a, b) => a.stack.localeCompare(b.stack));
+        });
+      }
+
+      setGroups(groupsWithPreview);
     } catch (err) {
       if (token !== loadTokenRef.current) return;
       toast.error((err as Error)?.message || 'Failed to load readiness');
@@ -920,13 +1129,25 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         }
         // Reload authoritative preview so summary / Apply affordances stay accurate.
         try {
-          const res = await fetchForNode(`/stacks/${encodeURIComponent(stack)}/update-preview`, nodeId);
-          if (res.ok) {
-            const next = await res.json() as UpdatePreview;
-            setCardField(c => c.stack === stack && c.nodeId === nodeId, { preview: next, previewLoaded: true });
+          const result = await fetchUpdatePreview(stack, {
+            fetchImpl: (path, init) => fetchForNode(path, nodeId, init),
+          });
+          if (result.ok && result.preview) {
+            const next = result.preview as UpdatePreview;
+            if (isAuthoritativeNegativePreview(next)) {
+              setGroups(prev => prev
+                .map(g => g.nodeId === nodeId
+                  ? { ...g, cards: g.cards.filter(c => c.stack !== stack) }
+                  : g)
+                .filter(g => g.cards.length > 0));
+            } else {
+              setCardField(c => c.stack === stack && c.nodeId === nodeId, { preview: next, previewLoaded: true });
+            }
+          } else {
+            console.error(`[AutoUpdateReadinessView] post-apply update-preview failed (${result.status})`);
           }
-        } catch {
-          // Preview refresh is best-effort; the update itself already succeeded.
+        } catch (err) {
+          console.error('[AutoUpdateReadinessView] post-apply update-preview refresh failed', err);
         }
         return {
           ok: true as const,
@@ -948,8 +1169,26 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         ...g,
         cards: g.cards.map(c => predicate(c) ? { ...c, ...patch } : c),
       })));
+    const matchCard = (c: StackCard) => c.stack === stack && c.nodeId === nodeId;
+    const removeCard = () => setGroups(prev => prev
+      .map(g => g.nodeId === nodeId
+        ? { ...g, cards: g.cards.filter(c => c.stack !== stack) }
+        : g)
+      .filter(g => g.cards.length > 0));
+    const retainPreviewFailed = () => setCardField(matchCard, {
+      applying: false,
+      preview: null,
+      previewLoaded: true,
+      verificationNote: null,
+    });
+    const retainUncertain = (note: string) => setCardField(matchCard, {
+      applying: false,
+      preview: null,
+      previewLoaded: true,
+      verificationNote: note,
+    });
 
-    setCardField(c => c.stack === stack && c.nodeId === nodeId, { applying: true });
+    setCardField(matchCard, { applying: true, verificationNote: null });
     const loadingId = toast.loading(`Applying update to ${stack}...`);
     try {
       const res = await fetchForNode(
@@ -961,15 +1200,57 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         const data = await res.json().catch(() => ({ error: 'Update failed' }));
         throw new Error(data.error ?? 'Update failed');
       }
-      toast.success(`${stack} updated successfully`);
-      setGroups(prev => prev
-        .map(g => g.nodeId === nodeId
-          ? { ...g, cards: g.cards.filter(c => c.stack !== stack) }
-          : g)
-        .filter(g => g.cards.length > 0));
+      const body = await res.json().catch(() => ({})) as { recheckWarning?: unknown };
+      const recheckWarning = typeof body.recheckWarning === 'string' ? body.recheckWarning : undefined;
+      if (recheckWarning) toast.info(recheckWarning);
+      else toast.success(`${stack} updated successfully`);
+
+      // Authoritative live preview decides card removal. When it disagrees with
+      // a backend recheckWarning (preview cleared, persisted check uncertain),
+      // keep an uncertain card so Fleet does not diverge from the sidebar.
+      try {
+        const previewRes = await fetchForNode(
+          `/stacks/${encodeURIComponent(stack)}/update-preview`,
+          nodeId,
+        );
+        if (!previewRes.ok) {
+          retainPreviewFailed();
+          return;
+        }
+        const next = await previewRes.json() as UpdatePreview;
+        if (typeof next?.summary?.has_update !== 'boolean') {
+          retainPreviewFailed();
+          return;
+        }
+        // Drop only when the live preview proves nothing remains (tag-only
+        // advisories stay pending via isClearedUpdatePreview).
+        const cleared = isAuthoritativeNegativePreview(next) || isClearedUpdatePreview(next);
+        if (!cleared) {
+          if (next.summary.has_update && !recheckWarning) {
+            toast.info(
+              'The update command completed, but Sencho still detects an available image update.',
+            );
+          }
+          setCardField(matchCard, {
+            applying: false,
+            preview: next,
+            previewLoaded: true,
+            verificationNote: recheckWarning ?? null,
+          });
+          return;
+        }
+        if (recheckWarning) {
+          retainUncertain(recheckWarning);
+          return;
+        }
+        removeCard();
+      } catch (previewErr) {
+        console.error('[AutoUpdate] post-Apply preview reconciliation failed', previewErr);
+        retainPreviewFailed();
+      }
     } catch (err) {
       toast.error((err as Error)?.message || 'Update failed');
-      setCardField(c => c.stack === stack && c.nodeId === nodeId, { applying: false });
+      setCardField(matchCard, { applying: false });
     } finally {
       toast.dismiss(loadingId);
     }
@@ -978,14 +1259,12 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
   const flatCards = useMemo(() => groups.flatMap(g => g.cards), [groups]);
   const { total, ready } = useMemo(() => {
     const t = flatCards.length;
-    // "Ready" means a schedule covers the stack, the preview loaded without
-    // error, and no major-bump blocked it. Without a covering schedule the
-    // stack cannot apply automatically regardless of preview state.
+    // Schedule-covered and actionable (confirmed update/rebuild, not blocked).
     const r = flatCards.filter(c =>
       c.autoUpdateEnabled
       && c.previewLoaded
       && c.preview !== null
-      && !c.preview.summary.blocked,
+      && isActionableUpdatePreview(c.preview),
     ).length;
     return { total: t, ready: r };
   }, [flatCards]);
@@ -999,15 +1278,25 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       <div className="flex h-full min-h-0 flex-col">
         <Masthead
           kicker="fleet · updates"
-          state={total === 0 ? 'Up to date' : `${total} pending`}
-          stateTone={total === 0 ? 'success' : 'warning'}
-          live={total > 0}
-          meta={total > 0 ? `${ready} ready · ${total - ready} in review` : 'all stacks current'}
+          state={cadence?.enabled === false
+            ? 'Disabled'
+            : total === 0
+              ? (checkFailures.length > 0 ? 'No verified updates' : 'Up to date')
+              : `${total} pending`}
+          stateTone={cadence?.enabled === false
+            ? 'brand'
+            : total === 0 && checkFailures.length === 0 ? 'success' : 'warning'}
+          live={total > 0 && cadence?.enabled !== false}
+          meta={cadence?.enabled === false
+            ? 'image update detection off'
+            : total > 0
+              ? `${ready} ready · ${total - ready} in review`
+              : (checkFailures.length > 0 ? 'some checks unresolved' : 'all stacks current')}
           right={headerActions}
         />
         <div className="flex-1 min-h-0 overflow-y-auto p-4 [&>*+*]:mt-4">
           <div className="flex justify-end">
-            <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing} aria-label="Recheck registries" className="gap-1.5">
+            <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing || cadence?.enabled === false} aria-label="Recheck registries" className="gap-1.5">
               <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={1.5} aria-hidden="true" />
               Recheck
             </Button>
@@ -1024,9 +1313,19 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             <div className="flex items-center justify-center py-16 font-mono text-xs text-stat-subtitle">Loading readiness...</div>
           ) : groups.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16 text-center">
-              <Shield className="h-8 w-8 text-success/70" strokeWidth={1.5} aria-hidden="true" />
-              <div className="font-display italic text-xl text-stat-value">All stacks on current builds</div>
-              <div className="font-mono text-[11px] text-stat-subtitle">Sencho rechecks registries on the configured interval.</div>
+              <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
+              <div className="font-display italic text-xl text-stat-value">
+                {cadence?.enabled === false
+                  ? 'Detection disabled'
+                  : checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
+              </div>
+              <div className="font-mono text-[11px] text-stat-subtitle">
+                {cadence?.enabled === false
+                  ? 'Turn image update checks back on in Settings when Sencho should monitor registries again.'
+                  : checkFailures.length > 0
+                    ? 'Review the unresolved checks above, then recheck.'
+                    : 'Sencho rechecks registries on the configured interval.'}
+              </div>
             </div>
           ) : (
             groups.map(group => (
@@ -1052,6 +1351,8 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         nodeCount={groups.length}
         refreshing={refreshing}
         onRefresh={handleRefresh}
+        unresolvedChecks={checkFailures.length > 0}
+        detectionDisabled={cadence?.enabled === false}
       />
 
       <CadenceStrip cadence={cadence} className="-mt-3 pl-7" />
@@ -1070,10 +1371,18 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         </div>
       ) : groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16">
-          <Shield className="h-8 w-8 text-success/70" strokeWidth={1.5} aria-hidden="true" />
-          <div className="font-display italic text-xl text-stat-value">All stacks on current builds</div>
+          <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
+          <div className="font-display italic text-xl text-stat-value">
+            {cadence?.enabled === false
+              ? 'Detection disabled'
+              : checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
+          </div>
           <div className="font-mono text-[11px] text-stat-subtitle">
-            Sencho rechecks registries on the configured interval.
+            {cadence?.enabled === false
+              ? 'Turn image update checks back on in Settings when Sencho should monitor registries again.'
+              : checkFailures.length > 0
+                ? 'Review the unresolved checks above, then recheck.'
+                : 'Sencho rechecks registries on the configured interval.'}
           </div>
         </div>
       ) : (

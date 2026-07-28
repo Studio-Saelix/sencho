@@ -157,6 +157,24 @@ describe('parseEffectiveModel', () => {
   it('treats a disabled healthcheck as none', () => {
     const m = parseEffectiveModel({ services: { web: { healthcheck: { disable: true } } } }, 'fallback');
     expect(m.services[0].hasHealthcheck).toBe(false);
+    expect(m.services[0].composeHealthcheck).toBe('disabled');
+  });
+
+  it('treats test NONE as a disabled healthcheck', () => {
+    const m = parseEffectiveModel({ services: { web: { healthcheck: { test: ['NONE'] } } } }, 'fallback');
+    expect(m.services[0].hasHealthcheck).toBe(false);
+    expect(m.services[0].composeHealthcheck).toBe('disabled');
+  });
+
+  it('treats empty or disable:false healthcheck objects as absent', () => {
+    expect(parseEffectiveModel({ services: { web: { healthcheck: {} } } }, 'fallback').services[0]).toMatchObject({
+      hasHealthcheck: false,
+      composeHealthcheck: 'absent',
+    });
+    expect(parseEffectiveModel({ services: { web: { healthcheck: { disable: false } } } }, 'fallback').services[0]).toMatchObject({
+      hasHealthcheck: false,
+      composeHealthcheck: 'absent',
+    });
   });
 
   it('falls back to the provided project name and yields an empty model for garbage', () => {

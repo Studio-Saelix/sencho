@@ -84,6 +84,34 @@ export interface BindCheck {
   ownerUid: number | null;
 }
 
+/** Effective healthcheck coverage state for one Compose service. */
+export type HealthcheckEvidenceState =
+  | 'compose-declared'
+  | 'explicitly-disabled'
+  | 'runtime-inherited'
+  | 'local-image-inherited'
+  | 'absent'
+  | 'unverifiable'
+  | 'inconsistent-replicas';
+
+/** Which layer produced the decisive healthcheck evidence. */
+export type HealthcheckEvidenceOrigin =
+  | 'compose'
+  | 'runtime'
+  | 'local-image'
+  | 'none';
+
+/**
+ * Structural healthcheck evidence for one service. Never carries Test command
+ * text (commands can include credentials or interpolated secrets).
+ */
+export interface ServiceHealthcheckEvidence {
+  state: HealthcheckEvidenceState;
+  origin: HealthcheckEvidenceOrigin;
+  /** null when replica consistency does not apply (no runtime replicas inspected). */
+  consistentReplicas: boolean | null;
+}
+
 /**
  * Everything the pure rule functions need, computed once by the service so the
  * rules stay synchronous and individually testable. No field ever holds an
@@ -131,4 +159,9 @@ export interface PreflightContext {
   exposureAvailable: boolean;
   /** True when this stack is the running Sencho instance on the node. */
   isSelfStack: boolean;
+  /**
+   * Per-service effective healthcheck evidence (Compose, runtime, local image).
+   * Empty when the model is null. Structural facts only; never Test command text.
+   */
+  healthchecks: Record<string, ServiceHealthcheckEvidence>;
 }

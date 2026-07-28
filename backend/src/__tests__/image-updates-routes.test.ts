@@ -44,6 +44,18 @@ describe('GET /api/image-updates', () => {
     expect(res.status).toBe(200);
     expect(res.body).toBeInstanceOf(Object);
   });
+
+  it('excludes partial and failed retained rows from the confirmed boolean map', async () => {
+    const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+    DatabaseService.getInstance().upsertStackUpdateStatus(nodeId, 'ok-stack', true, 1000, 'ok', null);
+    DatabaseService.getInstance().upsertStackUpdateStatus(nodeId, 'partial-stack', true, 1000, 'partial', 'half');
+    DatabaseService.getInstance().upsertStackUpdateStatus(nodeId, 'failed-stack', true, 1000, 'failed', 'boom');
+    const res = await request(app).get('/api/image-updates').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body['ok-stack']).toBe(true);
+    expect(res.body['partial-stack']).toBe(false);
+    expect(res.body['failed-stack']).toBe(false);
+  });
 });
 
 describe('GET /api/image-updates/detail', () => {
@@ -103,6 +115,65 @@ describe('GET /api/image-updates/status', () => {
     expect(typeof res.body.manualCooldownRemainingMs).toBe('number');
     expect('lastCheckedAt' in res.body).toBe(true);
     expect('nextCheckAt' in res.body).toBe(true);
+    expect(res.body.enabled).toBe(true);
+  });
+});
+
+describe('PUT /api/image-updates/enabled', () => {
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).put('/api/image-updates/enabled').send({ enabled: false });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects non-admin users with 403', async () => {
+    const res = await request(app).put('/api/image-updates/enabled').set('Cookie', viewerCookie).send({ enabled: false });
+    expect(res.status).toBe(403);
+  });
+
+  it('disables checks, clears local findings, and returns enabled false', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'pending-stack', true, Date.now(), 'ok', null);
+    expect(Object.keys(db.getStackUpdateDetail(nodeId)).length).toBeGreaterThan(0);
+
+    const res = await request(app).put('/api/image-updates/enabled').set('Cookie', adminCookie).send({ enabled: false });
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(false);
+    expect(res.body.nextCheckAt).toBeNull();
+    expect(db.getGlobalSettings().image_update_checks_enabled).toBe('0');
+    expect(db.getStackUpdateDetail(nodeId)).toEqual({});
+  });
+
+  it('re-enables checks and returns enabled true', async () => {
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '0');
+    const res = await request(app).put('/api/image-updates/enabled').set('Cookie', adminCookie).send({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(true);
+    expect(DatabaseService.getInstance().getGlobalSettings().image_update_checks_enabled).toBe('1');
+  });
+});
+
+describe('POST /api/image-updates/refresh when disabled', () => {
+  it('returns 409 with enabled false instead of rate-limit 429', async () => {
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '0');
+    const res = await request(app).post('/api/image-updates/refresh').set('Cookie', adminCookie);
+    expect(res.status).toBe(409);
+    expect(res.body.enabled).toBe(false);
+    expect(res.body.error).toMatch(/disabled/i);
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '1');
+  });
+});
+
+describe('POST /api/image-updates/fleet/refresh when disabled', () => {
+  it('lists the local node in disabled rather than triggered or rateLimited', async () => {
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '0');
+    const localId = DatabaseService.getInstance().getDefaultNode()!.id!;
+    const res = await request(app).post('/api/image-updates/fleet/refresh').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.disabled).toContain(localId);
+    expect(res.body.triggered).not.toContain(localId);
+    expect(res.body.rateLimited).not.toContain(localId);
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '1');
   });
 });
 
@@ -341,6 +412,35 @@ describe('POST /api/auto-update/execute', () => {
     expect(res.body.error).toMatch(/Missing "target"/);
   });
 
+  it('rejects an empty targets array with 400', async () => {
+    const res = await request(app)
+      .post('/api/auto-update/execute')
+      .set('Cookie', adminCookie)
+      .send({ targets: [] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/non-empty array/);
+  });
+
+  it('rejects invalid names in targets with 400', async () => {
+    const res = await request(app)
+      .post('/api/auto-update/execute')
+      .set('Cookie', adminCookie)
+      .send({ targets: ['ok-stack', '../bad'] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid stack name/);
+  });
+
+  it('accepts targets[] and returns a per-stack summary string', async () => {
+    const res = await request(app)
+      .post('/api/auto-update/execute')
+      .set('Cookie', adminCookie)
+      .send({ targets: ['missing-a', 'missing-b'] });
+    expect(res.status).toBe(200);
+    expect(typeof res.body.result).toBe('string');
+    expect(res.body.result).toMatch(/missing-a/);
+    expect(res.body.result).toMatch(/missing-b/);
+  });
+
   it('rejects invalid stack name with 400', async () => {
     const res = await request(app)
       .post('/api/auto-update/execute')
@@ -374,7 +474,7 @@ describe('POST /api/auto-update/execute', () => {
     const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
-      .mockResolvedValue({ hasUpdate: true } as never);
+      .mockResolvedValue({ hasUpdate: true, digestUpdate: true } as never);
     const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
     const gateSpy = vi.spyOn(PolicyEnforcement, 'enforcePolicyPreDeploy').mockResolvedValue({
       ok: false,
@@ -416,13 +516,22 @@ describe('POST /api/auto-update/execute', () => {
     const { ComposeService } = await import('../services/ComposeService');
     const { HealthGateService } = await import('../services/HealthGateService');
     const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+    const callOrder: string[] = [];
 
     const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
       .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
     const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
-      .mockResolvedValue({ hasUpdate: true } as never);
+      .mockResolvedValue({ hasUpdate: true, digestUpdate: true } as never);
     const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
-    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockReturnValue('gate-au');
+    const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack')
+      .mockImplementation(async () => {
+        callOrder.push('recheckStack');
+        return { outcome: 'cleared', warning: null } as never;
+      });
+    const beginSpy = vi.spyOn(HealthGateService.getInstance(), 'beginStack').mockImplementation(() => {
+      callOrder.push('beginStack');
+      return 'gate-au';
+    });
     try {
       const res = await request(app)
         .post('/api/auto-update/execute')
@@ -430,12 +539,113 @@ describe('POST /api/auto-update/execute', () => {
         .send({ target: 'auto-upd-gate' });
       expect(res.status).toBe(200);
       expect(updateSpy).toHaveBeenCalledWith('auto-upd-gate', undefined, true);
+      expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate');
       expect(beginSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-gate', 'update', `auto-update:${TEST_USERNAME}`);
+      expect(callOrder.indexOf('beginStack')).toBeLessThan(callOrder.indexOf('recheckStack'));
     } finally {
       containersSpy.mockRestore();
       checkSpy.mockRestore();
       updateSpy.mockRestore();
+      recheckSpy.mockRestore();
       beginSpy.mockRestore();
+    }
+  });
+
+  it('skips Compose apply for tag-only availability without clearing status', async () => {
+    const DockerController = (await import('../services/DockerController')).default;
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    const { ComposeService } = await import('../services/ComposeService');
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+
+    const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
+      .mockResolvedValue([{ Id: 'c1', Image: 'nginx:1.2.3' }] as never);
+    const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
+      .mockResolvedValue({ hasUpdate: true, digestUpdate: false, tagUpdate: true } as never);
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
+    const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack');
+    const clearSpy = vi.spyOn(DatabaseService.getInstance(), 'clearStackUpdateStatus');
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Cookie', adminCookie)
+        .send({ target: 'auto-upd-tag-only' });
+      expect(res.status).toBe(200);
+      expect(res.body.result).toContain('Compose pin unchanged');
+      expect(updateSpy).not.toHaveBeenCalled();
+      expect(recheckSpy).not.toHaveBeenCalled();
+      expect(clearSpy).not.toHaveBeenCalledWith(nodeId, 'auto-upd-tag-only');
+    } finally {
+      containersSpy.mockRestore();
+      checkSpy.mockRestore();
+      updateSpy.mockRestore();
+      recheckSpy.mockRestore();
+      clearSpy.mockRestore();
+    }
+  });
+
+  it('skips digest apply when a sibling image check failed', async () => {
+    const DockerController = (await import('../services/DockerController')).default;
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    const { ComposeService } = await import('../services/ComposeService');
+
+    const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
+      .mockResolvedValue([
+        { Id: 'c1', Image: 'nginx:latest' },
+        { Id: 'c2', Image: 'redis:latest' },
+      ] as never);
+    const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
+      .mockResolvedValueOnce({ hasUpdate: true, digestUpdate: true, tagUpdate: false } as never)
+      .mockResolvedValueOnce({ hasUpdate: false, error: 'registry timeout', checkStatus: 'failed' } as never);
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
+    const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack');
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Cookie', adminCookie)
+        .send({ target: 'auto-upd-check-err' });
+      expect(res.status).toBe(200);
+      expect(res.body.result).toContain('image check(s) failed');
+      expect(updateSpy).not.toHaveBeenCalled();
+      expect(recheckSpy).not.toHaveBeenCalled();
+    } finally {
+      containersSpy.mockRestore();
+      checkSpy.mockRestore();
+      updateSpy.mockRestore();
+      recheckSpy.mockRestore();
+    }
+  });
+
+  it('still applies when checkImage reports same-tag digestUpdate', async () => {
+    const DockerController = (await import('../services/DockerController')).default;
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    const { ComposeService } = await import('../services/ComposeService');
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+
+    const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack')
+      .mockResolvedValue([{ Id: 'c1', Image: 'nginx:latest' }] as never);
+    const checkSpy = vi.spyOn(ImageUpdateService.getInstance(), 'checkImage')
+      .mockResolvedValue({ hasUpdate: true, digestUpdate: true, tagUpdate: false } as never);
+    const updateSpy = vi.spyOn(ComposeService.prototype, 'updateStack').mockResolvedValue({ recoveryId: null });
+    const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack')
+      .mockResolvedValue({ outcome: 'still_present', warning: null } as never);
+    const clearSpy = vi.spyOn(DatabaseService.getInstance(), 'clearStackUpdateStatus');
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Cookie', adminCookie)
+        .send({ target: 'auto-upd-digest' });
+      expect(res.status).toBe(200);
+      expect(updateSpy).toHaveBeenCalledWith('auto-upd-digest', undefined, true);
+      expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'auto-upd-digest');
+      expect(clearSpy).not.toHaveBeenCalledWith(nodeId, 'auto-upd-digest');
+    } finally {
+      containersSpy.mockRestore();
+      checkSpy.mockRestore();
+      updateSpy.mockRestore();
+      recheckSpy.mockRestore();
+      clearSpy.mockRestore();
     }
   });
 });

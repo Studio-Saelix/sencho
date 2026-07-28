@@ -268,6 +268,7 @@ describe('ResourcesView', () => {
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
       return Promise.resolve(jsonResponse({}));
     });
 
@@ -298,6 +299,7 @@ describe('ResourcesView', () => {
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
       return Promise.resolve(jsonResponse({}));
     });
 
@@ -322,6 +324,7 @@ describe('ResourcesView', () => {
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
       return Promise.resolve(jsonResponse({}));
     });
 
@@ -348,6 +351,7 @@ describe('ResourcesView', () => {
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
       return Promise.resolve(jsonResponse({}));
     });
 
@@ -367,6 +371,7 @@ describe('ResourcesView', () => {
     mockedFetch.mockImplementation((url: string) => {
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(usage));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
       return Promise.resolve(jsonResponse({}));
     });
 
@@ -391,6 +396,7 @@ describe('ResourcesView', () => {
     mockedFetch.mockImplementation((url: string) => {
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
       if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [], volumes: [], networks: [] }));
+      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '1' }));
       return Promise.resolve(jsonResponse({}));
     });
 
@@ -411,29 +417,52 @@ describe('ResourcesView', () => {
     expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
   });
 
-  it('shows the banner on a node switch when /settings fails, instead of inheriting the previous node opt-out', async () => {
-    let settingsOk = true;
+  it('hides the banner on a node switch when /settings fails, instead of inheriting the previous node opt-in', async () => {
+    // Both responses key off the active node, so the switch cannot desync them:
+    // node A opts in and serves its own image, node B fails /settings.
     mockedFetch.mockImplementation((url: string) => {
+      const isNodeA = nodesState.activeNode?.id === 1;
       if (url === '/settings') {
-        return settingsOk
-          ? Promise.resolve(jsonResponse({ reclaim_hero: '0' }))
+        return isNodeA
+          ? Promise.resolve(jsonResponse({ reclaim_hero: '1' }))
           : Promise.resolve(jsonResponse({}, { ok: false, status: 500 }));
       }
       if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
-      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [image('node-a-img:latest')], volumes: [], networks: [] }));
+      if (url === '/system/resources') {
+        return Promise.resolve(jsonResponse({
+          images: [image(isNodeA ? 'node-a-img:latest' : 'node-b-img:latest')],
+          volumes: [],
+          networks: [],
+        }));
+      }
       return Promise.resolve(jsonResponse({}));
     });
 
-    // Node A has the banner turned off; once loaded it stays hidden.
+    // Node A has the banner turned on; once loaded it is visible.
     const { rerender } = render(<ResourcesView />);
     await screen.findByText('node-a-img:latest');
-    expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
+    await screen.findByTestId('reclaim-hero');
 
-    // Switch to node B with a failing /settings: the banner must show (fail
-    // open), not carry over node A's disabled state.
-    settingsOk = false;
+    // Switch to node B with a failing /settings: the banner must hide (fail
+    // closed), not carry over node A's enabled state.
     nodesState.activeNode = { id: 2 };
     rerender(<ResourcesView />);
-    await screen.findByTestId('reclaim-hero');
+    await screen.findByText('node-b-img:latest');
+    expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
+  });
+
+  it('keeps the banner hidden when the setting is explicitly off, even with reclaimable space', async () => {
+    mockedFetch.mockImplementation((url: string) => {
+      if (url === '/system/docker-df') return Promise.resolve(jsonResponse(reclaimableUsage(1000, 500)));
+      if (url === '/system/resources') return Promise.resolve(jsonResponse({ images: [image('off-img:latest')], volumes: [], networks: [] }));
+      if (url === '/settings') return Promise.resolve(jsonResponse({ reclaim_hero: '0' }));
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    // Wait on rendered data, not the request: /settings lands in the same batch,
+    // so a visible image proves the setting was applied before this assertion.
+    render(<ResourcesView />);
+    await screen.findByText('off-img:latest');
+    expect(screen.queryByTestId('reclaim-hero')).not.toBeInTheDocument();
   });
 });

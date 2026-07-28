@@ -459,6 +459,14 @@ export function AppearanceSection({
             </SettingsSection>
 
             <SettingsSection title="Navigation" kicker="this browser">
+                {topNavMode === 'classic' ? (
+                    <SettingsCallout
+                        tone="warn"
+                        icon={<Info className="h-4 w-4" strokeWidth={1.5} />}
+                        title="Classic bar retiring"
+                        subtitle="Classic bar will be removed soon. Your preference is kept until then."
+                    />
+                ) : null}
                 <SettingsField
                     label="Navigation style"
                     helper="Smart bar is the recommended default: primary destinations stay visible, and the rest live under More. Classic keeps the full horizontal strip. Compact launcher puts destinations in a menu with optional quick links."
@@ -497,7 +505,7 @@ export function AppearanceSection({
                 {topNavMode === 'compact' && (
                     <SettingsField
                         label="Quick links"
-                        helper="Up to five pinned destinations on the top bar. Defaults are a starting set; add reachable destinations here or with the trailing + on the Compact bar."
+                        helper="Up to seven pinned destinations on the top bar. Defaults are a starting set; add reachable destinations here or with the trailing + on the Compact bar."
                     >
                         <div className="flex w-full flex-col gap-2">
                             {quickLinkIds.length === 0 ? (

@@ -4,6 +4,8 @@ import { PreDeployScanDialog } from '../stack/PreDeployScanDialog';
 import { MissingExternalNetworksDialog } from '../stack/MissingExternalNetworksDialog';
 import { UpdateReadinessDialog } from '../stack/UpdateReadinessDialog';
 import { SelfStackProtectedDialog } from '../stack/SelfStackProtectedDialog';
+import { LocalUpdateConfirmDialog } from '../FleetView/LocalUpdateConfirmDialog';
+import { ReconnectingOverlay } from '../FleetView/ReconnectingOverlay';
 import { DeleteStackDialog } from './DeleteStackDialog';
 import { TakeDownStackDialog } from './TakeDownStackDialog';
 import { UnsavedChangesDialog } from './UnsavedChangesDialog';
@@ -12,9 +14,11 @@ import { GitSourcePanel } from '../stack/GitSourcePanel';
 import { LogViewer } from '../LogViewer';
 import { VulnerabilityScanSheet } from '../VulnerabilityScanSheet';
 import { ComposeDiffPreviewDialog } from '@/components/ComposeDiffPreviewDialog';
+import { resolveComposeDiffActionLabel } from '@/components/resolveComposeDiffActionLabel';
 import type { OverlayState } from './hooks/useOverlayState';
 import type { StackActionsHook } from './hooks/useStackActions';
 import type { PermissionAction } from '@/context/AuthContext';
+import type { useComposeReapplyAction } from '../FleetView/hooks/useComposeReapplyAction';
 
 interface ShellOverlaysProps {
   overlayState: OverlayState;
@@ -27,6 +31,8 @@ interface ShellOverlaysProps {
   gitSourceOpen: boolean;
   setGitSourceOpen: (open: boolean) => void;
   canSelfUpdate: boolean;
+  composeReapply: ReturnType<typeof useComposeReapplyAction>;
+  canSaveAndReapply: boolean;
   canOfferVolumeRemoval: boolean;
   onOpenFleetNodeUpdates: () => void;
 }
@@ -42,6 +48,8 @@ export function ShellOverlays({
   gitSourceOpen,
   setGitSourceOpen,
   canSelfUpdate,
+  composeReapply,
+  canSaveAndReapply,
   canOfferVolumeRemoval,
   onOpenFleetNodeUpdates,
 }: ShellOverlaysProps) {
@@ -57,6 +65,7 @@ export function ShellOverlays({
     preDeployAdvisory,
     missingExternalNetworks, setMissingExternalNetworks,
     selfStackProtectedOpen, setSelfStackProtectedOpen,
+    composeReapplyCapture, setComposeReapplyCapture,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } = overlayState;
@@ -84,6 +93,32 @@ export function ShellOverlays({
         canOpenFleetUpdates={canSelfUpdate}
         onOpenFleetUpdates={onOpenFleetNodeUpdates}
       />
+
+      <LocalUpdateConfirmDialog
+        open={composeReapplyCapture !== null}
+        mode="reapply"
+        nodeType={composeReapplyCapture?.nodeType ?? 'local'}
+        onOpenChange={(open) => {
+          if (!open) setComposeReapplyCapture(null);
+        }}
+        onConfirm={() => {
+          const capture = composeReapplyCapture;
+          setComposeReapplyCapture(null);
+          if (!capture || composeReapply.dispatching) return;
+          void composeReapply.runReapply({
+            nodeId: capture.nodeId,
+            type: capture.nodeType,
+            name: capture.nodeName,
+          });
+        }}
+      />
+
+      {composeReapply.reconnecting && (
+        <ReconnectingOverlay
+          preUpdateStartedAt={composeReapply.preUpdateStartedAt}
+          mode="reapply"
+        />
+      )}
 
       <UnsavedChangesDialog
         open={!!pendingUnsavedLoad || !!pendingLeaveAction}
@@ -197,7 +232,7 @@ export function ShellOverlays({
         language={diffPreview?.language ?? 'yaml'}
         original={diffPreview?.original ?? ''}
         modified={diffPreview?.modified ?? ''}
-        actionLabel={diffPreview?.mode === 'save-and-deploy' ? 'Save & deploy' : 'Save'}
+        actionLabel={resolveComposeDiffActionLabel(diffPreview?.mode, canSaveAndReapply)}
         confirming={diffPreviewConfirming}
         isDarkMode={isDarkMode}
         onConfirm={async () => {

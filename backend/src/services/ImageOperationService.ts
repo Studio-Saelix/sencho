@@ -8,7 +8,7 @@ import type { ImagePinKind } from '../helpers/selfUpdateCompose';
 import type { LocalRegistryAccess } from './hardenedEntitlementTypes';
 import { getAuthToken, httpRequest } from './registry-api';
 
-export type ImageOperationKind = 'switch' | 'update' | 'community_update';
+export type ImageOperationKind = 'switch' | 'update' | 'community_update' | 'compose_reapply';
 export type ImageOperationState = 'pending_pull' | 'pulling' | 'patching' | 'recreating' | 'succeeded' | 'failed';
 type FailureCode = 'self_update_unavailable' | 'entitlement_denied' | 'preflight_mismatch' | 'compose_unavailable' | 'registry_access_unavailable' | 'update_failed' | 'interrupted_by_restart';
 
@@ -146,32 +146,12 @@ export class ImageOperationService {
   public async claimCommunityUpdate(options?: { targetVersion?: string }): Promise<
     { ok: true } | { ok: false; failureCode: 'IMAGE_OPERATION_IN_FLIGHT' }
   > {
-    const selfUpdate = SelfUpdateService.getInstance();
-    const resolved = await selfUpdate.getResolvedComposeImageForUpdate();
-    const operation = this.newOperation(
-      'community_update',
-      resolved?.imageRef ?? null,
-      options?.targetVersion ?? null,
-      resolved?.filePath ?? null,
-      selfUpdate.getComposeServiceName(),
-    );
-    if (!await this.tryClaim(operation)) {
-      return { ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT' };
-    }
-    // Disk non-terminal state is the concurrency lock; clear the in-memory mutex
-    // so a later claim can observe the persisted pending operation.
-    this.claimed = false;
-    return { ok: true };
+    return this.claimComposeOperation('community_update', options?.targetVersion ?? null);
   }
 
   public async executeClaimedCommunityUpdate(options?: { targetVersion?: string }): Promise<{ ok: boolean; failureCode?: string }> {
-    const operation = await this.getCurrentOperation();
-    if (!operation || operation.kind !== 'community_update') {
-      return { ok: false, failureCode: 'update_failed' };
-    }
-    if (!['pending_pull', 'pulling', 'patching', 'recreating'].includes(operation.state)) {
-      return { ok: false, failureCode: 'update_failed' };
-    }
+    const operation = await this.getActiveClaimedOperation('community_update');
+    if (!operation) return { ok: false, failureCode: 'update_failed' };
     const selfUpdate = SelfUpdateService.getInstance();
     try {
       operation.state = 'pulling';
@@ -205,6 +185,37 @@ export class ImageOperationService {
     const claim = await this.claimCommunityUpdate(options);
     if (!claim.ok) return claim;
     return this.executeClaimedCommunityUpdate(options);
+  }
+
+  public async claimComposeReapply(): Promise<
+    { ok: true } | { ok: false; failureCode: 'IMAGE_OPERATION_IN_FLIGHT' }
+  > {
+    return this.claimComposeOperation('compose_reapply', null);
+  }
+
+  public async executeClaimedComposeReapply(): Promise<{ ok: boolean; failureCode?: string }> {
+    const operation = await this.getActiveClaimedOperation('compose_reapply');
+    if (!operation) return { ok: false, failureCode: 'update_failed' };
+    const selfUpdate = SelfUpdateService.getInstance();
+    try {
+      // No pull/patch for reapply: jump straight to recreating.
+      operation.state = 'recreating';
+      await this.persist(operation);
+      this.watchHelperExit(operation);
+      await selfUpdate.triggerComposeReapply({
+        successMarkerFile: this.successMarkerFile(operation),
+        successMarkerContent: JSON.stringify({ ok: true, operationId: operation.operationId }),
+      });
+      if (selfUpdate.getLastError()) {
+        await this.fail(operation, 'update_failed');
+        return { ok: false, failureCode: 'update_failed' };
+      }
+      return { ok: true };
+    } catch (error) {
+      console.error('[ImageOperation] Compose reapply failed:', error);
+      await this.fail(operation, 'update_failed');
+      return { ok: false, failureCode: 'update_failed' };
+    }
   }
 
   public async getOperation(operationId: string): Promise<ImageOperation | null> {
@@ -243,8 +254,9 @@ export class ImageOperationService {
     const markerPath = this.successMarkerFile(operation);
     for (let elapsed = 0; elapsed < 30_000; elapsed += 1_000) {
       const markerOk = await this.isSuccessMarkerForOperation(markerPath, operation.operationId);
-      if (operation.kind === 'community_update') {
-        // Community success is the marker alone; floating tags may not equal targetImageRef.
+      if (operation.kind === 'community_update' || operation.kind === 'compose_reapply') {
+        // Marker-only success: community updates may leave floating tags that do
+        // not equal targetImageRef, and reapply never sets a target image at all.
         if (markerOk) {
           operation.state = 'succeeded';
           operation.resolvedAt = new Date().toISOString();
@@ -282,6 +294,35 @@ export class ImageOperationService {
         console.error('[ImageOperation] Helper exit terminalization failed:', listenerError);
       });
     });
+  }
+
+  private async claimComposeOperation(
+    kind: 'community_update' | 'compose_reapply',
+    targetImageRef: string | null,
+  ): Promise<{ ok: true } | { ok: false; failureCode: 'IMAGE_OPERATION_IN_FLIGHT' }> {
+    const selfUpdate = SelfUpdateService.getInstance();
+    const resolved = await selfUpdate.getResolvedComposeImageForUpdate();
+    const operation = this.newOperation(
+      kind,
+      resolved?.imageRef ?? null,
+      targetImageRef,
+      resolved?.filePath ?? null,
+      selfUpdate.getComposeServiceName(),
+    );
+    if (!await this.tryClaim(operation)) {
+      return { ok: false, failureCode: 'IMAGE_OPERATION_IN_FLIGHT' };
+    }
+    // Disk non-terminal state is the concurrency lock; clear the in-memory mutex
+    // so a later claim can observe the persisted pending operation.
+    this.claimed = false;
+    return { ok: true };
+  }
+
+  private async getActiveClaimedOperation(kind: ImageOperationKind): Promise<ImageOperation | null> {
+    const operation = await this.getCurrentOperation();
+    if (!operation || operation.kind !== kind) return null;
+    if (!['pending_pull', 'pulling', 'patching', 'recreating'].includes(operation.state)) return null;
+    return operation;
   }
 
   private newOperation(kind: ImageOperationKind, previousImageRef: string | null, targetImageRef: string | null, composeFilePath: string | null, serviceName: string | null, preflightFingerprint?: string): ImageOperation {

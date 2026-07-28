@@ -138,6 +138,9 @@ export interface EditorViewProps {
     containersLoadStatus?: 'idle' | 'loading' | 'success' | 'error';
     containersLoadError?: string | null;
     onRetryContainersLoad?: () => void;
+    /** Live-refresh soft failures exhausted; advisory when container cards are shown. */
+    containersSyncStale?: boolean;
+    onRetrySync?: () => void;
     backupInfo: { exists: boolean; timestamp: number | null };
     gitSourcePendingMap: Record<string, boolean>;
     notifications: NotificationItem[];
@@ -204,6 +207,8 @@ export interface EditorViewProps {
     showTakeDown: boolean;
     /** True when this stack is the running Sencho instance on the active node. */
     isSelfStack?: boolean;
+    /** Admin + node reapply eligibility + self-stack: show Save & Reapply instead of Save & Deploy. */
+    canSaveAndReapply?: boolean;
 
     // Recovery surface for a failed/stalled operation on this stack (undefined
     // when the last op succeeded or none has run). onRefreshState re-syncs
@@ -252,6 +257,8 @@ export function EditorView(props: EditorViewProps) {
         containersLoadStatus = 'success',
         containersLoadError = null,
         onRetryContainersLoad,
+        containersSyncStale = false,
+        onRetrySync,
         backupInfo,
         gitSourcePendingMap,
         notifications,
@@ -295,6 +302,7 @@ export function EditorView(props: EditorViewProps) {
         requestTakeDownStack,
         showTakeDown,
         isSelfStack,
+        canSaveAndReapply = false,
         recoveryResult,
         onRefreshState,
         onDismissRecovery,
@@ -500,6 +508,8 @@ export function EditorView(props: EditorViewProps) {
                                     containersLoadStatus={containersLoadStatus}
                                     containersLoadError={containersLoadError}
                                     onRetryContainersLoad={onRetryContainersLoad}
+                                    syncStale={containersSyncStale}
+                                    onRetrySync={onRetrySync}
                                     key={`${activeNode?.id ?? 'local'}:${stackName}`}
                                 />
                             </ScrollArea>
@@ -523,6 +533,8 @@ export function EditorView(props: EditorViewProps) {
                                 containersLoadStatus={containersLoadStatus}
                                 containersLoadError={containersLoadError}
                                 onRetryContainersLoad={onRetryContainersLoad}
+                                syncStale={containersSyncStale}
+                                onRetrySync={onRetrySync}
                                 key={`${activeNode?.id ?? 'local'}:${stackName}`}
                             />
                         </CardContent>
@@ -600,7 +612,7 @@ export function EditorView(props: EditorViewProps) {
                                         <div className="flex items-center">
                                             <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={loadingAction === 'deploy'}>
                                                 <Rocket className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                                Save & Deploy
+                                                {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
                                             </Button>
                                             <DropdownMenu modal={false}>
                                                 <DropdownMenuTrigger asChild>

@@ -41,6 +41,8 @@ const SCHEMA = `
     prune_targets TEXT,
     target_services TEXT,
     prune_label_filter TEXT,
+    selector_type TEXT,
+    selector_value TEXT,
     FOREIGN KEY(node_id) REFERENCES nodes(id)
   );
 

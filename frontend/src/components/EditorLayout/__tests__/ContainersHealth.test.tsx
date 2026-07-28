@@ -7,7 +7,7 @@ vi.mock('../../Terminal', () => ({ default: () => null }));
 vi.mock('../../StructuredLogViewer', () => ({ default: () => null }));
 vi.mock('../../ImageSourceMenu', () => ({ ImageSourceMenu: () => null }));
 
-import { ContainersHealth } from '../editor-view-blocks';
+import { ContainersHealth, type ContainersHealthProps } from '../editor-view-blocks';
 import { copyToClipboard } from '@/lib/clipboard';
 import type { ContainerInfo } from '../EditorView';
 import type { Node } from '@/context/NodeContext';
@@ -96,11 +96,14 @@ describe('density toggle and summary strip', () => {
     } as unknown as ContainerInfo;
   }
 
-  function renderMany(containers: ContainerInfo[]) {
+  function renderMany(
+    containers: ContainerInfo[],
+    containerStats: ContainersHealthProps['containerStats'] = {},
+  ) {
     return render(
       <ContainersHealth
         safeContainers={containers}
-        containerStats={{}}
+        containerStats={containerStats}
         containerStatsError={null}
         isAdmin
         activeNode={LOCAL_NODE}
@@ -169,6 +172,24 @@ describe('density toggle and summary strip', () => {
     expect(screen.queryByText('cpu')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Detailed view' }));
     expect(screen.getAllByText('cpu')).toHaveLength(2);
+  });
+
+  it('gives NET I/O more column share and keeps the value on one line', () => {
+    renderMany([makeContainer({ Id: 'abc123def456' })], {
+      abc123def456: {
+        cpu: '0.12%',
+        ram: '12.3 MB',
+        net: '132 B/s ↓ / 168 B/s ↑',
+        history: { cpu: [], mem: [], netIn: [], netOut: [] },
+      },
+    });
+
+    const netValue = screen.getByText('132 B/s ↓ / 168 B/s ↑');
+    expect(netValue).toHaveClass('truncate');
+    expect(netValue).toHaveAttribute('title', '132 B/s ↓ / 168 B/s ↑');
+    const metricsGrid = netValue.closest('.grid');
+    expect(metricsGrid?.className).toContain('0.85fr');
+    expect(metricsGrid?.className).toContain('1.3fr');
   });
 
   it('keeps header row actions visible in compact mode', () => {
@@ -547,5 +568,112 @@ describe('containers load states', () => {
       />,
     );
     expect(screen.queryByRole('button', { name: /Monitor / })).toBeNull();
+  });
+});
+
+describe('ContainersHealth Docker health status labels', () => {
+  const OLD_PHRASES = ['healthcheck passing', 'healthcheck failing', 'healthcheck starting'] as const;
+  const HEALTH_TOKENS = ['healthy', 'unhealthy', 'starting'] as const;
+
+  function metaLine(): HTMLElement {
+    const parent = screen.getByText('up 2 hours').parentElement;
+    if (!parent) throw new Error('expected meta line parent');
+    return parent;
+  }
+
+  function metaSpanTexts(meta: HTMLElement = metaLine()): Array<string | null> {
+    return Array.from(meta.querySelectorAll('span')).map((el) => el.textContent);
+  }
+
+  function renderWithHealth(healthStatus?: ContainerInfo['healthStatus']) {
+    const base = container([{ PrivatePort: 80, PublicPort: 8080 }]);
+    return renderHealth(
+      healthStatus === undefined ? base : ({ ...base, healthStatus } as ContainerInfo),
+    );
+  }
+
+  function expectNoLegacyPhrases(meta: HTMLElement) {
+    for (const phrase of OLD_PHRASES) {
+      expect(meta.textContent).not.toContain(phrase);
+    }
+  }
+
+  it.each(HEALTH_TOKENS)('renders exact meta-line token for healthStatus %s', (token) => {
+    renderWithHealth(token);
+    const meta = metaLine();
+    const labels = metaSpanTexts(meta);
+    expect(labels[0]).toBe('up 2 hours');
+    expect(labels).toContain(token);
+    expect(labels.filter((t) => t === token)).toHaveLength(1);
+    expectNoLegacyPhrases(meta);
+    expect(screen.getByRole('link', { name: /8080/ })).toBeInTheDocument();
+  });
+
+  it.each([
+    ['none', 'none'],
+    ['omitted', undefined],
+  ] as const)('omits a health token when healthStatus is %s', (_case, healthStatus) => {
+    renderWithHealth(healthStatus);
+    const meta = metaLine();
+    const labels = metaSpanTexts(meta);
+    expect(labels).toContain('up 2 hours');
+    for (const token of HEALTH_TOKENS) {
+      expect(labels).not.toContain(token);
+    }
+    expect(labels.filter((t) => t === '·')).toHaveLength(1);
+    expectNoLegacyPhrases(meta);
+    expect(screen.getByRole('link', { name: /8080/ })).toBeInTheDocument();
+  });
+});
+
+describe('live-refresh stale chip', () => {
+  it('shows stale chip with Retry when syncStale and cards are visible', () => {
+    const onRetrySync = vi.fn();
+    render(
+      <ContainersHealth
+        safeContainers={[{
+          Id: 'a',
+          Names: ['/web'],
+          State: 'running',
+          Status: 'Up 1 hour',
+          healthStatus: 'healthy',
+        }]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        containersLoadStatus="success"
+        syncStale
+        onRetrySync={onRetrySync}
+      />,
+    );
+    expect(screen.getByText(/Container state may be stale/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Retry/i }));
+    expect(onRetrySync).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses stale chip when containersLoadStatus is error', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        containersLoadStatus="error"
+        containersLoadError="Could not load containers."
+        onRetryContainersLoad={vi.fn()}
+        syncStale
+        onRetrySync={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText(/Container state may be stale/i)).toBeNull();
+    expect(screen.getByText(/Could not load containers/i)).toBeInTheDocument();
   });
 });

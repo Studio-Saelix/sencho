@@ -23,6 +23,7 @@ export interface PatchableSettings {
     auto_create_missing_external_networks?: '0' | '1';
     image_update_sidebar_indicators?: '0' | '1';
     notification_dispatch_retries?: string;
+    session_sliding_refresh?: '0' | '1';
 }
 
 export const DEFAULT_SETTINGS: PatchableSettings = {
@@ -42,7 +43,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     scan_history_per_image_limit: '50',
     prune_orphaned_scans: '1',
     prune_on_update: '1',
-    reclaim_hero: '1',
+    reclaim_hero: '0',
     snapshot_documentation: '0',
     health_gate_enabled: '1',
     health_gate_window_seconds: '90',
@@ -50,6 +51,7 @@ export const DEFAULT_SETTINGS: PatchableSettings = {
     auto_create_missing_external_networks: '0',
     image_update_sidebar_indicators: '1',
     notification_dispatch_retries: '0',
+    session_sliding_refresh: '1',
 };
 
 export type SectionId =

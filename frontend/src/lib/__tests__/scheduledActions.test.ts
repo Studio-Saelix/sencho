@@ -79,6 +79,21 @@ describe('scheduledActions registry', () => {
   });
 
   describe('resolveTaskAction', () => {
+    it('maps update + fleet + stack-label selector to update-by-label', () => {
+      const def = resolveTaskAction({
+        action: 'update',
+        target_type: 'fleet',
+        selector_type: 'stack-label',
+      });
+      expect(def?.id).toBe('update-by-label');
+      expect(def?.backendAction).toBe('update');
+    });
+
+    it('maps update + fleet without selector to update-fleet', () => {
+      const def = resolveTaskAction({ action: 'update', target_type: 'fleet', selector_type: null });
+      expect(def?.id).toBe('update-fleet');
+    });
+
     it('maps update + fleet to the update-fleet UI entry', () => {
       const def = resolveTaskAction({ action: 'update', target_type: 'fleet' });
       expect(def?.id).toBe('update-fleet');
@@ -116,7 +131,7 @@ describe('scheduledActions registry', () => {
     expect(ids).toEqual([
       'auto_backup', 'auto_start', 'restart', 'auto_stop', 'auto_down',
       'container-restart', 'container-stop', 'container-start',
-      'update', 'update-fleet',
+      'update', 'update-fleet', 'update-by-label',
       'scan',
       'prune',
       'snapshot',
@@ -128,6 +143,14 @@ describe('scheduledActions registry', () => {
     expect(fleetUpdate).toBeDefined();
     expect(fleetUpdate!.backendAction).toBe('update');
     expect(fleetUpdate!.targetType).toBe('fleet');
+  });
+
+  it('preserves the update-by-label alias', () => {
+    const byLabel = SCHEDULED_ACTIONS.find(a => a.id === 'update-by-label');
+    expect(byLabel).toBeDefined();
+    expect(byLabel!.backendAction).toBe('update');
+    expect(byLabel!.targetType).toBe('fleet');
+    expect(byLabel!.requiresNode).toBe(false);
   });
 
   describe('helperText', () => {
@@ -142,6 +165,7 @@ describe('scheduledActions registry', () => {
       'container-start': 'Starts a stopped container by name on the selected node.',
       'update': "Checks this stack's images and recreates the stack only when newer images are available.",
       'update-fleet': 'Checks every stack on the selected node and updates stacks with newer images.',
+      'update-by-label': 'Resolves stacks that currently carry a Stack Label at each run, across the entire fleet or one node, and updates those with newer images.',
       'scan': 'Runs Trivy against images on the selected local node and records the findings.',
       'prune': 'Removes unused Docker resources on the selected node. Be careful when pruning volumes.',
       'snapshot': 'Creates a versioned snapshot of compose and env files across the fleet.',
@@ -166,6 +190,7 @@ describe('scheduledActions registry', () => {
       'container-start': 'runtime-change',
       'update': 'runtime-change',
       'update-fleet': 'runtime-change',
+      'update-by-label': 'runtime-change',
       'scan': 'read-only',
       'prune': 'destructive',
       'snapshot': 'safe',
@@ -236,6 +261,22 @@ describe('scheduledActions registry', () => {
       const task: TargetTask = { action: 'update', target_type: 'fleet', target_id: null, name: 'Fleet update' };
       expect(scheduleTargetDescriptor(task, 'edge-1')).toBe('All stacks · edge-1');
       expect(scheduleTargetDescriptor(task)).toBe('All stacks');
+    });
+
+    it('shows Label: name · Entire fleet or node for stack-label selectors', () => {
+      const fleet = {
+        action: 'update' as const,
+        target_type: 'fleet' as const,
+        target_id: null,
+        name: 'Label update',
+        selector_type: 'stack-label',
+        selector_value: 'Production',
+        node_id: null as number | null,
+      };
+      expect(scheduleTargetDescriptor(fleet)).toBe('Label: Production · Entire fleet');
+      const scoped = { ...fleet, node_id: 7 };
+      expect(scheduleTargetDescriptor(scoped, 'Node A')).toBe('Label: Production · Node A');
+      expect(scheduleTargetDescriptor(scoped)).toBe('Label: Production · node 7');
     });
 
     it('shows Entire fleet for a fleet snapshot regardless of node', () => {

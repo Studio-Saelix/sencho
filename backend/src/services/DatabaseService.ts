@@ -94,6 +94,20 @@ function parseServicesJson(raw: string | null | undefined): StackServiceStatus[]
     }
 }
 
+/** Write generation embedded in services_json; 0 when missing or unreadable. */
+function parseServicesJsonGeneration(raw: string | null | undefined): number {
+    if (!raw) return 0;
+    try {
+        const parsed = JSON.parse(raw) as { version?: unknown; generation?: unknown };
+        if (parsed?.version !== SERVICES_JSON_VERSION) return 0;
+        return typeof parsed.generation === 'number' && Number.isFinite(parsed.generation)
+            ? parsed.generation
+            : 0;
+    } catch {
+        return 0;
+    }
+}
+
 function stringifyServicesJson(services: StackServiceStatus[], generation: number): string {
     return JSON.stringify({ version: SERVICES_JSON_VERSION, generation, services });
 }
@@ -700,6 +714,10 @@ export interface ScheduledTask {
     prune_targets: string | null;
     target_services: string | null;
     prune_label_filter: string | null;
+    /** Optional dynamic target selector; currently only 'stack-label'. */
+    selector_type: string | null;
+    /** Selector payload (e.g. Stack Label name when selector_type is stack-label). */
+    selector_value: string | null;
     delete_after_run?: number;
     // Absolute epoch-ms fire time for a one-time ('once') schedule. A 5-field
     // cron has no year field, so the chosen instant (including year) is persisted
@@ -751,6 +769,52 @@ export interface NotificationRoute {
 }
 
 export type NotificationSuppressionAppliesTo = 'bell' | 'external' | 'both';
+
+/** Hub-authored replica retraction: permanent never clears; recoverable is LWW-ordered. */
+export type NotificationSuppressionRetractionKind = 'permanent' | 'recoverable';
+
+export interface NotificationSuppressionRetraction {
+    kind: NotificationSuppressionRetractionKind;
+    /** Hub rule.updated_at at retraction time; compared only to hub versions, never receiver clocks. */
+    source_updated_at: number;
+}
+
+export interface NotificationSuppressionRuleTombstone {
+    id: number;
+    deleted_at: number;
+    kind: NotificationSuppressionRetractionKind;
+    source_updated_at: number;
+}
+
+export type SuppressionReplicaWriteOutcome =
+    | 'applied'
+    | 'ignored_stale'
+    | 'ignored_permanent_tombstone'
+    | 'ignored_recoverable_watermark';
+
+export type SuppressionReplicaDeleteOutcome = 'applied' | 'ignored_stale';
+
+export interface NotificationSuppressionPendingRetraction {
+    rule_id: number;
+    node_id: number;
+    kind: NotificationSuppressionRetractionKind;
+    source_updated_at: number;
+    created_at: number;
+    updated_at: number;
+    attempts: number;
+    last_error: string | null;
+}
+
+/** Fail closed: anything other than recoverable is permanent. */
+function normalizeSuppressionRetractionKind(kind: unknown): NotificationSuppressionRetractionKind {
+    return kind === 'recoverable' ? 'recoverable' : 'permanent';
+}
+
+/** Coerce tombstone watermarks for merge/read; invalid values become 0. */
+function safeTombstoneSourceUpdatedAt(value: unknown): number {
+    const n = Number(value);
+    return Number.isSafeInteger(n) ? n : 0;
+}
 
 export interface NotificationSuppressionRule {
     id: number;
@@ -1876,6 +1940,8 @@ export class DatabaseService {
         maybeAddCol('scheduled_tasks', 'prune_targets', 'TEXT DEFAULT NULL');
         maybeAddCol('scheduled_tasks', 'target_services', 'TEXT DEFAULT NULL');
         maybeAddCol('scheduled_tasks', 'prune_label_filter', 'TEXT DEFAULT NULL');
+        maybeAddCol('scheduled_tasks', 'selector_type', 'TEXT DEFAULT NULL');
+        maybeAddCol('scheduled_tasks', 'selector_value', 'TEXT DEFAULT NULL');
         maybeAddCol('scheduled_tasks', 'delete_after_run', 'INTEGER DEFAULT 0');
         maybeAddCol('scheduled_tasks', 'run_at', 'INTEGER DEFAULT NULL');
 
@@ -1952,16 +2018,27 @@ export class DatabaseService {
         stmt.run('cve_intel_enabled', '1');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
-        stmt.run('reclaim_hero', '1');
+        // Managed by /api/sso/auth-mode, not the generic /api/settings route
+        // (activation needs safety validation).
+        stmt.run('authentication_mode', 'local_and_sso');
+        stmt.run('reclaim_hero', '0');
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
         stmt.run('image_update_check_interval_minutes', '120');
         stmt.run('image_update_check_mode', 'interval');
         stmt.run('image_update_check_cron', '');
         stmt.run('image_update_sidebar_indicators', '1');
+        // Opt-out for background registry polling. Default on so upgrades keep
+        // current behavior; missing key is also treated as enabled at read time.
+        stmt.run('image_update_checks_enabled', '1');
         stmt.run('notification_dispatch_retries', '0');
         stmt.run('env_block_deploy_on_missing_required', '0');
         stmt.run('auto_create_missing_external_networks', '0');
+        // Silently extend an actively-used session's cookie instead of hard
+        // expiring it. On by default (matches how most session-based web apps
+        // behave); admins who want a strict absolute session ceiling can turn
+        // it off in Settings > Users.
+        stmt.run('session_sliding_refresh', '1');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;
@@ -2252,6 +2329,39 @@ export class DatabaseService {
             );
         `);
         this.tryAddColumn('notification_suppression_rules', 'schedule', 'TEXT NULL');
+        // kind + source_updated_at: hub-authored retract ordering. Legacy rows stay
+        // permanent (fail closed); source_updated_at backfills from deleted_at for
+        // audit continuity but is never compared to receiver wall clocks on write paths.
+        this.tryAddColumn(
+            'notification_suppression_rule_tombstones',
+            'kind',
+            "TEXT NOT NULL DEFAULT 'permanent'",
+        );
+        this.tryAddColumn(
+            'notification_suppression_rule_tombstones',
+            'source_updated_at',
+            'INTEGER',
+        );
+        this.db.prepare(
+            `UPDATE notification_suppression_rule_tombstones
+             SET source_updated_at = deleted_at
+             WHERE source_updated_at IS NULL`,
+        ).run();
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS notification_suppression_pending_retractions (
+                rule_id INTEGER NOT NULL,
+                node_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                source_updated_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                PRIMARY KEY (rule_id, node_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_supp_pending_retract_node
+                ON notification_suppression_pending_retractions(node_id);
+        `);
     }
 
     private migrateNotificationHistoryContext(): void {
@@ -2926,7 +3036,32 @@ export class DatabaseService {
         return this.getNotificationSuppressionRule(result.lastInsertRowid as number)!;
     }
 
-    public upsertNotificationSuppressionRuleReplica(rule: NotificationSuppressionRule): void {
+    private insertNotificationSuppressionRuleReplicaRow(
+        rule: NotificationSuppressionRule,
+        scheduleJson: string | null,
+    ): void {
+        this.db.prepare(
+            `INSERT INTO notification_suppression_rules
+                (id, name, node_id, stack_patterns, label_ids, categories, levels, applies_to, enabled, expires_at, schedule, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+            rule.id,
+            rule.name,
+            rule.node_id ?? null,
+            JSON.stringify(rule.stack_patterns),
+            rule.label_ids ? JSON.stringify(rule.label_ids) : null,
+            rule.categories ? JSON.stringify(rule.categories) : null,
+            rule.levels ? JSON.stringify(rule.levels) : null,
+            rule.applies_to,
+            rule.enabled ? 1 : 0,
+            rule.expires_at ?? null,
+            scheduleJson,
+            rule.created_at,
+            rule.updated_at,
+        );
+    }
+
+    public upsertNotificationSuppressionRuleReplica(rule: NotificationSuppressionRule): SuppressionReplicaWriteOutcome {
         const scheduleJson = rule.schedule ? JSON.stringify(rule.schedule) : null;
         const existing = this.getNotificationSuppressionRule(rule.id);
         if (existing) {
@@ -2937,7 +3072,7 @@ export class DatabaseService {
                     `[DatabaseService] Ignoring stale suppression replica write for rule id=${sanitizeForLog(rule.id)} ` +
                         `(incoming updated_at=${sanitizeForLog(rule.updated_at)} <= stored updated_at=${sanitizeForLog(existing.updated_at)})`,
                 );
-                return;
+                return 'ignored_stale';
             }
             this.db.prepare(
                 `UPDATE notification_suppression_rules SET
@@ -2958,37 +3093,46 @@ export class DatabaseService {
                 rule.updated_at,
                 rule.id,
             );
-            return;
+            return 'applied';
         }
-        const tombstone = this.db.prepare(
-            'SELECT deleted_at FROM notification_suppression_rule_tombstones WHERE id = ?',
-        ).get(rule.id) as { deleted_at: number } | undefined;
-        if (tombstone) {
-            console.warn(
-                `[DatabaseService] Ignoring suppression replica write for rule id=${sanitizeForLog(rule.id)}: ` +
-                    `this id was deleted at ${sanitizeForLog(tombstone.deleted_at)} and must not be recreated`,
-            );
-            return;
-        }
-        this.db.prepare(
-            `INSERT INTO notification_suppression_rules
-                (id, name, node_id, stack_patterns, label_ids, categories, levels, applies_to, enabled, expires_at, schedule, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-            rule.id,
-            rule.name,
-            rule.node_id ?? null,
-            JSON.stringify(rule.stack_patterns),
-            rule.label_ids ? JSON.stringify(rule.label_ids) : null,
-            rule.categories ? JSON.stringify(rule.categories) : null,
-            rule.levels ? JSON.stringify(rule.levels) : null,
-            rule.applies_to,
-            rule.enabled ? 1 : 0,
-            rule.expires_at ?? null,
-            scheduleJson,
-            rule.created_at,
-            rule.updated_at,
-        );
+        // Re-read tombstone inside the transaction so a concurrent permanent
+        // retract cannot be cleared after an outer eligibility check.
+        let outcome: SuppressionReplicaWriteOutcome = 'applied';
+        this.transaction(() => {
+            const tombstone = this.db.prepare(
+                `SELECT id, deleted_at, kind, source_updated_at
+                 FROM notification_suppression_rule_tombstones WHERE id = ?`,
+            ).get(rule.id) as NotificationSuppressionRuleTombstone | undefined;
+            if (tombstone) {
+                const kind = normalizeSuppressionRetractionKind(tombstone.kind);
+                // Keep raw Number here: invalid watermarks must fail closed (block recreate),
+                // not coerce to 0 the way safeTombstoneSourceUpdatedAt does for merges/reads.
+                const sourceUpdatedAt = Number(tombstone.source_updated_at);
+                if (kind === 'permanent') {
+                    console.warn(
+                        `[DatabaseService] Ignoring suppression replica write for rule id=${sanitizeForLog(rule.id)}: ` +
+                            `permanent tombstone (source_updated_at=${sanitizeForLog(sourceUpdatedAt)})`,
+                    );
+                    outcome = 'ignored_permanent_tombstone';
+                    return;
+                }
+                if (!Number.isSafeInteger(sourceUpdatedAt) || rule.updated_at <= sourceUpdatedAt) {
+                    console.warn(
+                        `[DatabaseService] Ignoring suppression replica write for rule id=${sanitizeForLog(rule.id)}: ` +
+                            `recoverable tombstone source_updated_at=${sanitizeForLog(sourceUpdatedAt)}; ` +
+                            `incoming updated_at=${sanitizeForLog(rule.updated_at)} is not newer`,
+                    );
+                    outcome = 'ignored_recoverable_watermark';
+                    return;
+                }
+                this.db.prepare(
+                    'DELETE FROM notification_suppression_rule_tombstones WHERE id = ?',
+                ).run(rule.id);
+            }
+            this.insertNotificationSuppressionRuleReplicaRow(rule, scheduleJson);
+            outcome = 'applied';
+        });
+        return outcome;
     }
 
     public updateNotificationSuppressionRule(
@@ -3018,19 +3162,164 @@ export class DatabaseService {
         this.db.prepare(`UPDATE notification_suppression_rules SET ${fields.join(', ')} WHERE id = ?`).run(...values);
     }
 
-    public deleteNotificationSuppressionRule(id: number): number {
-        const changes = this.db.prepare('DELETE FROM notification_suppression_rules WHERE id = ?').run(id).changes;
-        // Fleet sync has no delivery ordering guarantee: a replica POST for this id can
-        // still be in flight. Record the delete permanently (ids are AUTOINCREMENT and
-        // never reused) so upsertNotificationSuppressionRuleReplica refuses to resurrect it.
-        // Tombstone unconditionally, even when changes is 0: deleteRuleOnNode issues this
-        // same DELETE for capability/invalid-schedule cleanup against remotes that may never
-        // have received the rule yet, and a reordered POST behind that DELETE must not create it.
+    /**
+     * Delete a suppression rule and record a hub-authored retraction tombstone.
+     * Optional retraction defaults to permanent/0 (fail closed) for one-arg callers.
+     * Recoverable DELETEs that are strictly older than a stored row are ignored
+     * (no durable mutation). Permanent always applies. Row delete + tombstone
+     * upsert are one transaction.
+     */
+    public deleteNotificationSuppressionRule(
+        id: number,
+        retraction: NotificationSuppressionRetraction = { kind: 'permanent', source_updated_at: 0 },
+    ): { changes: number; outcome: SuppressionReplicaDeleteOutcome } {
+        const kind = normalizeSuppressionRetractionKind(retraction.kind);
+        const sourceUpdatedAt = retraction.source_updated_at;
+
+        return this.transaction(() => {
+            const existing = this.getNotificationSuppressionRule(id);
+            if (
+                kind === 'recoverable' &&
+                existing &&
+                existing.updated_at > sourceUpdatedAt
+            ) {
+                console.warn(
+                    `[DatabaseService] Ignoring stale recoverable suppression DELETE for rule id=${sanitizeForLog(id)}: ` +
+                        `source_updated_at=${sanitizeForLog(sourceUpdatedAt)} < stored updated_at=${sanitizeForLog(existing.updated_at)}`,
+                );
+                return { changes: 0, outcome: 'ignored_stale' };
+            }
+
+            const changes = this.db.prepare(
+                'DELETE FROM notification_suppression_rules WHERE id = ?',
+            ).run(id).changes;
+
+            const prior = this.db.prepare(
+                `SELECT kind, source_updated_at FROM notification_suppression_rule_tombstones WHERE id = ?`,
+            ).get(id) as { kind: string; source_updated_at: number } | undefined;
+
+            let mergedKind = kind;
+            let mergedSource = sourceUpdatedAt;
+            if (prior) {
+                const priorKind = normalizeSuppressionRetractionKind(prior.kind);
+                // Permanent wins over recoverable; watermark always takes the max.
+                mergedKind =
+                    priorKind === 'permanent' || kind === 'permanent' ? 'permanent' : 'recoverable';
+                mergedSource = Math.max(
+                    safeTombstoneSourceUpdatedAt(prior.source_updated_at),
+                    sourceUpdatedAt,
+                );
+            }
+
+            this.db.prepare(
+                `INSERT INTO notification_suppression_rule_tombstones (id, deleted_at, kind, source_updated_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                    deleted_at = excluded.deleted_at,
+                    kind = excluded.kind,
+                    source_updated_at = excluded.source_updated_at`,
+            ).run(id, Date.now(), mergedKind, mergedSource);
+
+            return { changes, outcome: 'applied' };
+        });
+    }
+
+    public getNotificationSuppressionRuleTombstone(
+        id: number,
+    ): NotificationSuppressionRuleTombstone | undefined {
+        const row = this.db.prepare(
+            `SELECT id, deleted_at, kind, source_updated_at
+             FROM notification_suppression_rule_tombstones WHERE id = ?`,
+        ).get(id) as NotificationSuppressionRuleTombstone | undefined;
+        if (!row) return undefined;
+        return {
+            id: row.id,
+            deleted_at: row.deleted_at,
+            kind: normalizeSuppressionRetractionKind(row.kind),
+            // Keep || 0 (not safeTombstoneSourceUpdatedAt): public reads historically
+            // surface any truthy Number() result; merge/write paths coerce separately.
+            source_updated_at: Number(row.source_updated_at) || 0,
+        };
+    }
+
+
+    public upsertNotificationSuppressionPendingRetraction(row: {
+        rule_id: number;
+        node_id: number;
+        kind: NotificationSuppressionRetractionKind;
+        source_updated_at: number;
+        last_error?: string;
+    }): void {
+        const now = Date.now();
+        const kind = normalizeSuppressionRetractionKind(row.kind);
+        const prior = this.db.prepare(
+            `SELECT kind, source_updated_at, attempts FROM notification_suppression_pending_retractions
+             WHERE rule_id = ? AND node_id = ?`,
+        ).get(row.rule_id, row.node_id) as { kind: string; source_updated_at: number; attempts: number } | undefined;
+        let mergedKind = kind;
+        let mergedSource = row.source_updated_at;
+        let attempts = 1;
+        if (prior) {
+            const priorKind = normalizeSuppressionRetractionKind(prior.kind);
+            mergedKind =
+                priorKind === 'permanent' || kind === 'permanent' ? 'permanent' : 'recoverable';
+            mergedSource = Math.max(
+                safeTombstoneSourceUpdatedAt(prior.source_updated_at),
+                row.source_updated_at,
+            );
+            attempts = (prior.attempts || 0) + 1;
+        }
         this.db.prepare(
-            `INSERT INTO notification_suppression_rule_tombstones (id, deleted_at) VALUES (?, ?)
-             ON CONFLICT(id) DO UPDATE SET deleted_at = excluded.deleted_at`,
-        ).run(id, Date.now());
-        return changes;
+            `INSERT INTO notification_suppression_pending_retractions
+                (rule_id, node_id, kind, source_updated_at, created_at, updated_at, attempts, last_error)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(rule_id, node_id) DO UPDATE SET
+                kind = excluded.kind,
+                source_updated_at = excluded.source_updated_at,
+                updated_at = excluded.updated_at,
+                attempts = excluded.attempts,
+                last_error = excluded.last_error`,
+        ).run(
+            row.rule_id,
+            row.node_id,
+            mergedKind,
+            mergedSource,
+            now,
+            now,
+            attempts,
+            row.last_error ?? null,
+        );
+    }
+
+    public deleteNotificationSuppressionPendingRetraction(ruleId: number, nodeId: number): void {
+        this.db.prepare(
+            'DELETE FROM notification_suppression_pending_retractions WHERE rule_id = ? AND node_id = ?',
+        ).run(ruleId, nodeId);
+    }
+
+    public listNotificationSuppressionPendingRetractions(
+        nodeId?: number,
+    ): NotificationSuppressionPendingRetraction[] {
+        const rows = (
+            nodeId == null
+                ? this.db.prepare(
+                    `SELECT * FROM notification_suppression_pending_retractions ORDER BY updated_at ASC`,
+                ).all()
+                : this.db.prepare(
+                    `SELECT * FROM notification_suppression_pending_retractions
+                     WHERE node_id = ? ORDER BY updated_at ASC`,
+                ).all(nodeId)
+        ) as Array<Record<string, unknown>>;
+        return rows.map((r) => ({
+            rule_id: r.rule_id as number,
+            node_id: r.node_id as number,
+            kind: normalizeSuppressionRetractionKind(r.kind),
+            source_updated_at: Number(r.source_updated_at) || 0,
+            created_at: r.created_at as number,
+            updated_at: r.updated_at as number,
+            attempts: (r.attempts as number) || 0,
+            last_error: (r.last_error as string | null) ?? null,
+        }));
     }
 
     // --- Global Settings ---
@@ -4436,6 +4725,9 @@ export class DatabaseService {
             this.deleteRoleAssignmentsByResource('node', String(id));
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM node_update_skips WHERE node_id = ?').run(id);
+            this.db.prepare(
+                'DELETE FROM notification_suppression_pending_retractions WHERE node_id = ?',
+            ).run(id);
             this.db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
         })();
     }
@@ -4628,6 +4920,13 @@ export class DatabaseService {
         ).run(nodeId, stackName, lastError, checkedAt, servicesJson);
     }
 
+    /**
+     * Raw has_update map for scanner retention and notification transitions.
+     * Ignores check_status: a partial/failed row with has_update=1 stays true
+     * so ImageUpdateService can preserve sticky state across incomplete runs.
+     * API/Fleet consumers that need "confirmed update" must use
+     * getConfirmedStackUpdateStatus instead.
+     */
     public getStackUpdateStatus(nodeId?: number): Record<string, boolean> {
         const rows = nodeId !== undefined
             ? this.db.prepare('SELECT stack_name, has_update FROM stack_update_status WHERE node_id = ?').all(nodeId) as Array<{ stack_name: string; has_update: number }>
@@ -4640,9 +4939,31 @@ export class DatabaseService {
     }
 
     /**
+     * Confirmed-update projection for GET /api/image-updates and Fleet local
+     * aggregation. True only when has_update=1 and the latest check completed
+     * successfully (check_status='ok'). Partial/failed retained rows are false.
+     */
+    public getConfirmedStackUpdateStatus(nodeId?: number): Record<string, boolean> {
+        const rows = nodeId !== undefined
+            ? this.db.prepare(
+                `SELECT stack_name, has_update, check_status FROM stack_update_status WHERE node_id = ?`
+            ).all(nodeId) as Array<{ stack_name: string; has_update: number; check_status: string | null }>
+            : this.db.prepare(
+                `SELECT stack_name, has_update, check_status FROM stack_update_status`
+            ).all() as Array<{ stack_name: string; has_update: number; check_status: string | null }>;
+        const result: Record<string, boolean> = {};
+        for (const row of rows) {
+            // Match getNodeUpdateSummary / frontend isConfirmedImageUpdate:
+            // null check_status is treated as ok (legacy rows).
+            result[row.stack_name] = row.has_update === 1 && (row.check_status ?? 'ok') === 'ok';
+        }
+        return result;
+    }
+
+    /**
      * Rich per-stack update status (hasUpdate + check outcome + reason) for the
-     * sidebar/readiness UI. GET /api/image-updates stays the boolean map so the
-     * cross-version fleet aggregation contract is unaffected.
+     * sidebar/readiness UI. Confirmed boolean maps use getConfirmedStackUpdateStatus;
+     * raw prior state for the scanner stays on getStackUpdateStatus.
      */
     public getStackUpdateDetail(nodeId: number): Record<string, StackUpdateDetail> {
         const rows = this.db.prepare(
@@ -4675,8 +4996,28 @@ export class DatabaseService {
         return parseServicesJson(row?.services_json);
     }
 
-    public clearStackUpdateStatus(nodeId: number, stackName: string): void {
-        this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+    /**
+     * Scanner write generation stored with services_json for this stack.
+     * Used by preview reconcile to skip clearing a row written after the
+     * preview observation watermark. Returns 0 when missing or unreadable.
+     */
+    public getStackUpdateWriteGeneration(nodeId: number, stackName: string): number {
+        const row = this.db.prepare(
+            'SELECT services_json FROM stack_update_status WHERE node_id = ? AND stack_name = ?'
+        ).get(nodeId, stackName) as { services_json: string | null } | undefined;
+        return parseServicesJsonGeneration(row?.services_json);
+    }
+
+    /** Deletes the full update row (aggregate + services_json). Returns deleted row count. */
+    public clearStackUpdateStatus(nodeId: number, stackName: string): number {
+        const result = this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+        return result.changes;
+    }
+
+    /** Deletes every update row for a node. Returns deleted row count. */
+    public clearAllStackUpdateStatus(nodeId: number): number {
+        const result = this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ?').run(nodeId);
+        return result.changes;
     }
 
     // --- Stack Scan Attempts ---
@@ -4718,7 +5059,10 @@ export class DatabaseService {
 
     public getNodeUpdateSummary(): Array<{ node_id: number; stacks_with_updates: number }> {
         return this.db.prepare(
-            'SELECT node_id, SUM(has_update) as stacks_with_updates FROM stack_update_status WHERE has_update = 1 GROUP BY node_id'
+            `SELECT node_id, SUM(has_update) as stacks_with_updates
+             FROM stack_update_status
+             WHERE has_update = 1 AND COALESCE(check_status, 'ok') = 'ok'
+             GROUP BY node_id`
         ).all() as Array<{ node_id: number; stacks_with_updates: number }>;
     }
 
@@ -5703,13 +6047,14 @@ export class DatabaseService {
 
     public createScheduledTask(task: Omit<ScheduledTask, 'id'>): number {
         const result = this.db.prepare(
-            'INSERT INTO scheduled_tasks (name, target_type, target_id, node_id, action, cron_expression, enabled, created_by, created_at, updated_at, last_run_at, next_run_at, last_status, last_error, prune_targets, target_services, prune_label_filter, delete_after_run, run_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO scheduled_tasks (name, target_type, target_id, node_id, action, cron_expression, enabled, created_by, created_at, updated_at, last_run_at, next_run_at, last_status, last_error, prune_targets, target_services, prune_label_filter, selector_type, selector_value, delete_after_run, run_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         ).run(
             task.name, task.target_type, task.target_id, task.node_id,
             task.action, task.cron_expression, task.enabled, task.created_by,
             task.created_at, task.updated_at, task.last_run_at, task.next_run_at,
             task.last_status, task.last_error, task.prune_targets, task.target_services,
-            task.prune_label_filter, task.delete_after_run ?? 0, task.run_at ?? null
+            task.prune_label_filter, task.selector_type ?? null, task.selector_value ?? null,
+            task.delete_after_run ?? 0, task.run_at ?? null
         );
         return result.lastInsertRowid as number;
     }
@@ -5726,6 +6071,8 @@ export class DatabaseService {
             last_status: updates.last_status, last_error: updates.last_error,
             prune_targets: updates.prune_targets, target_services: updates.target_services,
             prune_label_filter: updates.prune_label_filter,
+            selector_type: updates.selector_type,
+            selector_value: updates.selector_value,
             delete_after_run: updates.delete_after_run,
             run_at: updates.run_at,
         };

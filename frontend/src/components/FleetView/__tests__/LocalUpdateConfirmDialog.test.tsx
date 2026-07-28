@@ -46,4 +46,38 @@ describe('LocalUpdateConfirmDialog', () => {
     expect(screen.getByText(/Pulls Sencho v0\.94\.0/i)).toBeInTheDocument();
     expect(screen.queryByText(/rewrites it to/i)).not.toBeInTheDocument();
   });
+
+  it('explains local reapply without a version change or image rewrite', () => {
+    render(
+      <LocalUpdateConfirmDialog
+        open
+        onOpenChange={vi.fn()}
+        onConfirm={vi.fn()}
+        mode="reapply"
+        nodeType="local"
+      />,
+    );
+    expect(screen.getByRole('heading', { name: /Reapply configuration/i })).toBeInTheDocument();
+    expect(screen.getByText(/current Compose configuration/i)).toBeInTheDocument();
+    expect(screen.getByText(/No newer Sencho version is selected/i)).toBeInTheDocument();
+    expect(screen.getByText(/will not rewrite the configured image reference/i)).toBeInTheDocument();
+    expect(screen.getByText(/briefly disconnect/i)).toBeInTheDocument();
+  });
+
+  it('explains remote reapply with REMOTE kicker and restart acknowledgement', () => {
+    render(
+      <LocalUpdateConfirmDialog
+        open
+        onOpenChange={vi.fn()}
+        onConfirm={vi.fn()}
+        mode="reapply"
+        nodeType="remote"
+      />,
+    );
+    expect(screen.getByRole('heading', { name: /Reapply configuration/i })).toBeInTheDocument();
+    expect(screen.getByText(/Recreates this remote Sencho service/i)).toBeInTheDocument();
+    expect(screen.getByText(/No newer Sencho version is selected/i)).toBeInTheDocument();
+    expect(screen.getByText(/will not rewrite the configured image reference/i)).toBeInTheDocument();
+    expect(screen.getByText(/The node will restart/i)).toBeInTheDocument();
+  });
 });

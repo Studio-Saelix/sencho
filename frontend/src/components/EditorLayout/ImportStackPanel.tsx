@@ -11,7 +11,6 @@ import {
 import { ModalBody, ModalFooter } from '../ui/modal';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
-import { ScrollArea } from '../ui/scroll-area';
 import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useAuth } from '@/context/AuthContext';
@@ -142,66 +141,64 @@ export function ImportStackPanel({ onClose, onImported }: ImportStackPanelProps)
 
   return (
     <>
-      <ScrollArea block className="max-h-[60vh]">
-        <ModalBody>
-          <div className="rounded-md border border-card-border border-t-card-border-top bg-card/60 px-3 py-2.5 shadow-card-bevel">
-            <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
-              Sencho looks for stacks in
-            </div>
-            <div className="mt-1 break-all font-mono text-xs text-stat-value">{composeDir || '—'}</div>
-            <p className="mt-2 text-xs leading-relaxed text-stat-subtitle">
-              Each stack lives in its own subfolder here. Keep the host mount path the same as the
-              path inside the container so relative volumes resolve (the 1:1 path rule).{' '}
-              <a
-                href="https://docs.sencho.io/getting-started/configuration"
-                target="_blank"
-                rel="noreferrer"
-                className="text-brand hover:underline"
-              >
-                Learn more
-              </a>
+      <ModalBody>
+        <div className="rounded-md border border-card-border border-t-card-border-top bg-card/60 px-3 py-2.5 shadow-card-bevel">
+          <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
+            Sencho looks for stacks in
+          </div>
+          <div className="mt-1 break-all font-mono text-xs text-stat-value">{composeDir || '—'}</div>
+          <p className="mt-2 text-xs leading-relaxed text-stat-subtitle">
+            Each stack lives in its own subfolder here. Keep the host mount path the same as the
+            path inside the container so relative volumes resolve (the 1:1 path rule).{' '}
+            <a
+              href="https://docs.sencho.io/getting-started/configuration"
+              target="_blank"
+              rel="noreferrer"
+              className="text-brand hover:underline"
+            >
+              Learn more
+            </a>
+          </p>
+        </div>
+
+        {loading && !data ? (
+          <div className="flex items-center justify-center gap-2 py-10 text-sm text-stat-subtitle">
+            <Loader2 className="h-4 w-4 animate-spin" strokeWidth={1.5} />
+            Scanning…
+          </div>
+        ) : candidates.length === 0 ? (
+          <div className="py-10 text-center">
+            <FolderSearch className="mx-auto h-6 w-6 text-stat-icon" strokeWidth={1.5} />
+            <p className="mt-3 text-sm text-stat-title">No compose files to import.</p>
+            <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-stat-subtitle">
+              Stacks already in their own subfolder show up in the sidebar. Drop a loose compose
+              file in the compose directory and rescan, or pick another source above to create one.
             </p>
           </div>
-
-          {loading && !data ? (
-            <div className="flex items-center justify-center gap-2 py-10 text-sm text-stat-subtitle">
-              <Loader2 className="h-4 w-4 animate-spin" strokeWidth={1.5} />
-              Scanning…
-            </div>
-          ) : candidates.length === 0 ? (
-            <div className="py-10 text-center">
-              <FolderSearch className="mx-auto h-6 w-6 text-stat-icon" strokeWidth={1.5} />
-              <p className="mt-3 text-sm text-stat-title">No compose files to import.</p>
-              <p className="mx-auto mt-1 max-w-sm text-xs leading-relaxed text-stat-subtitle">
-                Stacks already in their own subfolder show up in the sidebar. Drop a loose compose
-                file in the compose directory and rescan, or pick another source above to create one.
-              </p>
-            </div>
-          ) : (
-            // Keep the list mounted during a rescan (only the Rescan button
-            // animates) so the modal does not change height. aria-busy + the
-            // dimmed, click-blocked cue (opacity + pointer-events-none) signal
-            // the in-flight scan without a layout swap.
-            <div
-              className={`space-y-2${loading ? ' pointer-events-none opacity-60' : ''}`}
-              aria-busy={loading}
-            >
-              {candidates.map((c) => (
-                <CandidateCard
-                  key={c.location}
-                  candidate={c}
-                  composeDir={composeDir}
-                  expanded={expanded.has(c.location)}
-                  canCreate={canCreate}
-                  moving={movingLocation === c.location}
-                  onToggle={() => toggle(c.location)}
-                  onMove={(name) => move(c.location, name)}
-                />
-              ))}
-            </div>
-          )}
-        </ModalBody>
-      </ScrollArea>
+        ) : (
+          // Keep the list mounted during a rescan (only the Rescan button
+          // animates) so the modal does not change height. aria-busy + the
+          // dimmed, click-blocked cue (opacity + pointer-events-none) signal
+          // the in-flight scan without a layout swap.
+          <div
+            className={`space-y-2${loading ? ' pointer-events-none opacity-60' : ''}`}
+            aria-busy={loading}
+          >
+            {candidates.map((c) => (
+              <CandidateCard
+                key={c.location}
+                candidate={c}
+                composeDir={composeDir}
+                expanded={expanded.has(c.location)}
+                canCreate={canCreate}
+                moving={movingLocation === c.location}
+                onToggle={() => toggle(c.location)}
+                onMove={(name) => move(c.location, name)}
+              />
+            ))}
+          </div>
+        )}
+      </ModalBody>
       <ModalFooter
         hint="SCAN IS READ ONLY · MOVING ASKS FIRST"
         secondary={

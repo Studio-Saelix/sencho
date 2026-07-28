@@ -28,7 +28,7 @@ The top card on the left holds the stack's identity and primary controls.
 The action bar runs every state transition for the whole stack. The primary buttons (**Start**, **Restart**, **Stop**, **Take down** when running, **Update**) require the `stack:deploy` permission; the **Delete** entry in the kebab dropdown requires the `stack:delete` permission. The bar still appears when only **Delete** is authorised so the operator has a way to remove the stack.
 
 <Note>
-  If a stack is the Sencho instance you are currently signed into, its deploy/delete actions are protected: clicking any of them opens a **Sencho instance protected** dialog instead of running the action. Update Sencho from **Fleet → Node Update**, or move Sencho's own compose project outside `COMPOSE_DIR` to manage it as a normal stack.
+  If a stack is the Sencho instance you are currently signed into, stop, take down, delete, update, and rollback stay protected: clicking them opens a **Sencho instance protected** dialog. Eligible admins can apply on-disk Compose changes with **Save &amp; Reapply** in this editor (same recreate procedure as Fleet Node Updates), or open **Fleet → Node Updates**. To manage the stack as a normal stack, move Sencho's compose project outside `COMPOSE_DIR`.
 </Note>
 
 | Button | Behavior |
@@ -58,7 +58,7 @@ Below the action bar, the **CONTAINERS** section lists every container the stack
 | **Status badge** | `✓` (green, healthy or running), `✗` (red, exited or unhealthy), `…` (yellow, starting). |
 | **Name** | The Docker container name; falls back to the first 12 characters of the container ID. |
 | **Uptime / state** | `up 2h 15m` for running containers, the raw state for everything else. |
-| **Healthcheck label** | `healthcheck passing`, `healthcheck failing`, or `healthcheck starting`, only when a healthcheck is defined. |
+| **Healthcheck label** | `healthy`, `unhealthy`, or `starting`, only when a healthcheck is defined. |
 | **Port mapping** | The first detected web-UI port, formatted `host → container/proto`. The mapping itself is a link that opens the service in a new tab, with a **Copy URL** button beside it. The address uses the active node's host and switches to `https` for port 443. |
 | **Action buttons** | **Image source links**, **View logs**, **Open bash shell** (admin only), **Service actions**. Per-container image references and registry links live here, not in the header. |
 | **Live stats** | CPU, memory, and net I/O with rolling sparklines. Only rendered while the container is running. Stats refresh on the same 1500 ms cadence as the dashboard. |
@@ -79,21 +79,21 @@ Stacks with more than one container gain a summary strip above the container lis
 The right column shows the **Anatomy panel** by default: a read-only summary of the compose file alongside a scrollable tab row for other stack views.
 
 <Frame>
-  <img src="/images/editor/anatomy-tabs.png" alt="Anatomy panel header strip showing the Anatomy, Activity, Dossier, Drift, Environment, Networking, Doctor, and Storage tab row with Files and Edit compose shortcuts on the right" />
+  <img src="/images/editor/anatomy-tabs.png" alt="Anatomy panel header strip showing the Anatomy, Activity, Doctor, Drift, Dossier, Environment, Networking, and Storage tab row with Files and Edit compose shortcuts on the right" />
 </Frame>
 
-The tab row always shows four tabs: **Anatomy**, **Activity**, **Dossier**, and **Drift**. Four more tabs appear when the active node advertises the matching capability.
+The tab row always shows four tabs: **Anatomy**, **Activity**, **Drift**, and **Dossier**. When Compose Doctor is available on the node, **Doctor** sits between Activity and Drift. Four more capability-gated tabs appear when the active node advertises them.
 
 | Tab | Always present? | What it shows |
 |-----|----------------|--------------|
 | **Anatomy** | Yes | Read-only compose file summary. |
 | **Activity** | Yes | Operational event timeline for this stack. See [Stack Activity](/features/stack-activity). |
-| **Dossier** | Yes | Exportable Markdown of the anatomy combined with operator notes. See [Stack Dossier](/features/stack-dossier). |
+| **Doctor** | When `compose-doctor` capability is present | Preflight check results grouped by severity. The tab gains a red dot for blocker findings and an amber dot for high-risk findings. See [Compose Doctor](/features/compose-doctor). |
 | **Drift** | Yes | Live comparison of the declared compose against the running containers. See [Stack Drift](/features/stack-drift). |
+| **Dossier** | Yes | Exportable Markdown of the anatomy combined with operator notes. See [Stack Dossier](/features/stack-dossier). |
 | **Environment** | When `env-inventory` capability is present | Variable inventory across all env files, with status for each variable. See [Environment Guardrails](/features/environment-guardrails). |
 | **Compose Labels** | When `container-label-inventory` capability is present | Declared Compose labels vs runtime container labels per service. See [Docker Label Audit](/features/docker-label-audit). |
 | **Networking** | When `compose-networking` capability is present | Port exposure summary per service with intent classification. See [Compose Networking](/features/compose-networking). |
-| **Doctor** | When `compose-doctor` capability is present | Preflight check results grouped by severity. The tab gains a red dot for blocker findings and an amber dot for high-risk findings. See [Compose Doctor](/features/compose-doctor). |
 | **Storage** | When `compose-storage` capability is present | Mount inventory with portability assessment and snapshot coverage. See [Compose Storage](/features/compose-storage). |
 
 The **Files** shortcut and the **Edit compose** button sit at the right end of the strip and stay available regardless of which tab is active.
@@ -144,19 +144,20 @@ The `.env` editor renders a teal banner above the textarea reminding you that va
 
 ### Save options
 
-As soon as the compose editor opens, the toolbar shows a split button. The primary action is **Save & Deploy**; the dropdown chevron reveals two more.
+As soon as the compose editor opens, the toolbar shows a split button. The primary action is **Save & Deploy** for ordinary stacks. On Sencho's own Compose-managed stack, eligible admins see **Save & Reapply** instead. The dropdown chevron reveals two more actions.
 
 | Action | Effect |
 |--------|--------|
 | **Save & Deploy** | Writes the file to disk, then runs `docker compose up -d` to apply changes. |
-| **Save Only** | Writes the file to disk without restarting any containers. Changes take effect on the next deploy. |
+| **Save & Reapply** | Shown only for admins on the Compose-managed Sencho self-stack when reapply is available. Writes the file, then confirms and recreates Sencho from the current on-disk Compose project without selecting a newer image. Same procedure as Fleet **Reapply configuration**. |
+| **Save Only** | Writes the file to disk without restarting any containers. Changes take effect on the next deploy or reapply. |
 | **Discard Changes** | Reverts the active file (compose or env) to the last saved version. Unsaved edits in that file are lost. |
 
 The same controls apply to the `compose.yaml` and `.env` editors.
 
 ## Diff preview before save
 
-When **Diff preview before save** is enabled in **Settings → Infrastructure → Stacks**, clicking **Save & Deploy** or **Save Only** opens a side-by-side diff modal before anything is written to disk. The left pane is the on-disk content; the right pane is your unsaved edits with additions highlighted in green. The footer reads `ON DISK → UNSAVED` so the panes are unambiguous.
+When **Diff preview before save** is enabled in **Settings → Infrastructure → Stacks**, clicking **Save & Deploy**, **Save & Reapply**, or **Save Only** opens a side-by-side diff modal before anything is written to disk. The left pane is the on-disk content; the right pane is your unsaved edits with additions highlighted in green. The footer reads `ON DISK → UNSAVED` so the panes are unambiguous.
 
 <Frame>
   <img src="/images/compose-diff-preview/diff-modal.png" alt="Diff preview modal showing side-by-side YAML diff with the unsaved version on the right and an ON DISK to UNSAVED legend in the footer" />
@@ -164,7 +165,7 @@ When **Diff preview before save** is enabled in **Settings → Infrastructure �
 
 Review the diff, then:
 
-- Click the primary button (**Save & deploy** when triggered from **Save & Deploy**, or **Save** when triggered from **Save Only**) to confirm and write the changes.
+- Click the primary button (**Save & deploy** or **Save & reapply** when triggered from that primary action, or **Save** when triggered from **Save Only**) to confirm and write the changes.
 - Click **Cancel** to return to the editor without saving.
 
 If there are no unsaved changes the modal is skipped and the save proceeds directly. The toggle is off by default and stored per browser, so each device remembers its own setting.
@@ -177,7 +178,7 @@ On a narrow screen the stack opens as a full-screen detail with **Health**, **Lo
   <img src="/images/editor/editor-mobile.png" alt="Mobile compose editor with a Cancel button, the compose.yaml label, a monospace text field showing the compose file, a small-edits note, and Save and Save and Deploy buttons" />
 </Frame>
 
-The mobile editor is a lightweight monospace text field rather than Monaco. Tap **compose** or **.env** at the top to choose the file. The **.env** toggle appears only when the stack has an env file, and the file picker is locked while you have unsaved edits so switching files cannot drop them. The footer carries the same **Save** and **Save & Deploy** actions, and every protection is shared with desktop: the diff preview, save-conflict handling, and the unsaved-changes prompt all behave the same way. **Cancel** leaves the editor and asks before discarding unsaved edits.
+The mobile editor is a lightweight monospace text field rather than Monaco. Tap **compose** or **.env** at the top to choose the file. The **.env** toggle appears only when the stack has an env file, and the file picker is locked while you have unsaved edits so switching files cannot drop them. The footer carries the same **Save** and **Save & Deploy** (or **Save & Reapply** when eligible) actions, and every protection is shared with desktop: the diff preview, save-conflict handling, and the unsaved-changes prompt all behave the same way. **Cancel** leaves the editor and asks before discarding unsaved edits.
 
 A note at the bottom of the editor is a reminder that mobile editing is meant for small corrections such as bumping an image tag or fixing a value. For large compose rewrites, open the stack on a desktop. Editing requires the `stack:edit` permission.
 
@@ -252,7 +253,7 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
     The editor blocks a silent loss of in-progress edits. Click **Cancel** to return to the original node with your edits intact; click **Discard** to abandon them and proceed to the other node.
   </Accordion>
   <Accordion title='"Sencho instance protected" dialog when I try to stop, update, or delete a stack'>
-    That stack is running the Sencho instance you are signed into, and its deploy/delete actions are blocked to prevent locking yourself out. Update Sencho from **Fleet → Node Update** instead. To manage the stack normally, move its compose project to a directory outside `COMPOSE_DIR`.
+    That stack is running the Sencho instance you are signed into. Stop, take down, delete, update, and rollback stay blocked. Eligible admins can apply Compose edits with **Save &amp; Reapply** in the editor, or use **Fleet → Node Updates**. To manage the stack normally, move its compose project to a directory outside `COMPOSE_DIR`.
   </Accordion>
   <Accordion title='"Stats unavailable" chip on the container list'>
     The stats WebSocket failed to open, or closed unexpectedly. This usually means the Docker daemon on the node is unreachable. Container status, action buttons, and logs continue to work; only live CPU / memory / network rates pause.

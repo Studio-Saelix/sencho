@@ -231,7 +231,7 @@ export function MisconfigAckPanel({ isReplica }: MisconfigAckPanelProps) {
       )}
 
       {!loading && rows.length > 0 && (
-        <ScrollArea className="max-h-[420px] pr-2">
+        <ScrollArea className="h-[420px] max-md:h-auto pr-2">
           <ul className="divide-y divide-glass-border">
             {pageItems.map((row) => (
               <li key={row.id} className="py-2.5 flex items-start justify-between gap-3">

@@ -8,16 +8,43 @@ import { RegistryService } from './RegistryService';
 import { NodeRegistry } from './NodeRegistry';
 import { NotificationService } from './NotificationService';
 import { sanitizeNotificationMessage } from '../utils/notificationMessage';
-import { parseImageRef, selectLocalRepoDigest, compareLocalToRemoteTag } from './registry-api';
+import { parseImageRef, selectLocalRepoDigests } from './registry-api';
+import { detectImageUpdate, type PreviewImageCheckStatus } from './imageUpdateDetect';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
 import { buildEffectiveServiceModel } from './effectiveServiceModel';
+import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 
 const BACKFILL_KEY = 'image_update_notifications_backfilled';
 
+/** Post-update scanner reconciliation outcome for a single stack. */
+export type StackRecheckOutcome =
+    | 'cleared'
+    | 'still_present'
+    | 'verification_incomplete'
+    | 'verification_failed';
+
+export interface StackRecheckResult {
+    outcome: StackRecheckOutcome;
+    /** Present when the update condition remains or could not be verified. */
+    warning: string | null;
+}
+
+export const UPDATE_STILL_PRESENT_WARNING =
+    'The update command completed, but Sencho still detects an available image update.';
+
+export const UPDATE_VERIFICATION_INCOMPLETE_WARNING =
+    'The update command completed, but Sencho could not fully verify whether an image update remains.';
+
 export interface ImageCheckResult {
     hasUpdate: boolean;
+    /** Same-tag registry digest drift; Compose pull can apply without pin change. */
+    digestUpdate?: boolean;
+    /** Higher semver tag exists; UI may show it but Compose auto-apply cannot pin it. */
+    tagUpdate?: boolean;
+    /** Detector authority; consumed by reduceServiceStatus / writeStackUpdateStatus. */
+    checkStatus?: PreviewImageCheckStatus;
     error?: string;
     /**
      * The image is not registry-backed (locally built, or a bare digest ref
@@ -26,6 +53,17 @@ export interface ImageCheckResult {
      * tally rather than counted as a failed or up-to-date check.
      */
     notCheckable?: boolean;
+}
+
+/**
+ * Normalize check authority for reduction. Test stubs / older callers may omit
+ * checkStatus: error means failed, else ok.
+ */
+export function normalizeImageCheckStatus(r: ImageCheckResult): PreviewImageCheckStatus {
+    if (r.notCheckable) return 'not_checkable';
+    if (r.checkStatus) return r.checkStatus;
+    if (r.error) return 'failed';
+    return 'ok';
 }
 
 /**
@@ -38,6 +76,8 @@ export interface ImageCheckResult {
  * `nextCheckAt` is meaningless while `checking` is true.
  * `mode` is the active scheduling mode; `cronExpression` is the 5-field
  * expression when mode is 'cron', null otherwise or when unconfigured.
+ * `enabled` is whether background image-update detection is armed; always
+ * present on current nodes, optional on the wire for older remotes.
  */
 export interface ImageUpdateStatus {
     checking: boolean;
@@ -49,6 +89,7 @@ export interface ImageUpdateStatus {
     mode: 'interval' | 'cron';
     cronExpression: string | null;
     sidebarIndicators: boolean;
+    enabled: boolean;
 }
 
 // ─── Compose file helpers ────────────────────────────────────────────────────
@@ -273,7 +314,8 @@ export function reduceServiceStatus(
     const checkableResults: ImageCheckResult[] = [];
     for (const ref of refs) {
         const result = imageUpdateMap.get(ref);
-        if (!result || result.notCheckable) continue;
+        if (!result) continue;
+        if (normalizeImageCheckStatus(result) === 'not_checkable') continue;
         checkableResults.push(result);
     }
 
@@ -284,12 +326,14 @@ export function reduceServiceStatus(
         };
     }
 
-    const errored = checkableResults.filter((r) => r.error !== undefined);
+    const statuses = checkableResults.map(normalizeImageCheckStatus);
+    const failed = checkableResults.filter((_, i) => statuses[i] === 'failed');
+    const partial = checkableResults.filter((_, i) => statuses[i] === 'partial');
     const confirmedUpdateThisRun = checkableResults.some(
-        (r) => r.error === undefined && r.hasUpdate === true,
+        (r, i) => statuses[i] === 'ok' && r.hasUpdate === true,
     );
 
-    if (errored.length === checkableResults.length) {
+    if (failed.length === checkableResults.length) {
         const priorHasUpdate = prior?.hasUpdate ?? false;
         return {
             status: {
@@ -298,14 +342,16 @@ export function reduceServiceStatus(
                 ...(dedupedRuntime.length > 0 ? { runtimeImages: dedupedRuntime } : {}),
                 hasUpdate: priorHasUpdate,
                 checkStatus: 'failed',
-                lastError: errored[0].error ?? 'Update check failed',
+                lastError: failed[0].error ?? 'Update check failed',
             },
             confirmedUpdateThisRun: false,
         };
     }
 
-    const checkStatus: StackServiceStatus['checkStatus'] = errored.length > 0 ? 'partial' : 'ok';
-    const lastError = errored.length > 0 ? (errored[0].error ?? null) : null;
+    const checkStatus: StackServiceStatus['checkStatus'] =
+        failed.length > 0 || partial.length > 0 ? 'partial' : 'ok';
+    const uncertain = [...partial, ...failed];
+    const lastError = uncertain.length > 0 ? (uncertain[0].error ?? null) : null;
     const hasUpdate = checkStatus === 'partial'
         ? (confirmedUpdateThisRun || (prior?.hasUpdate ?? false))
         : confirmedUpdateThisRun;
@@ -368,6 +414,7 @@ export class ImageUpdateService {
     private static readonly INTERVAL_SETTING_KEY = 'image_update_check_interval_minutes';
     private static readonly MODE_SETTING_KEY = 'image_update_check_mode';
     private static readonly CRON_SETTING_KEY = 'image_update_check_cron';
+    private static readonly ENABLED_SETTING_KEY = 'image_update_checks_enabled';
     private static readonly JITTER_FRACTION = 0.1;                // ±10% so a fleet does not poll in lockstep
     private static readonly STARTUP_DELAY_MS = 2 * 60 * 1000;    // 2 min after boot
 
@@ -410,8 +457,15 @@ export class ImageUpdateService {
 
     public start() {
         if (this.timer) return;
-        this.polling = true;
         this.configureFromSettings();
+        if (!ImageUpdateService.isChecksEnabled()) {
+            // Detection opted out: stay stopped across restarts so a boot does
+            // not re-arm registry polling until the setting is turned back on.
+            this.polling = false;
+            this.nextCheckAt = null;
+            return;
+        }
+        this.polling = true;
         // Interval mode keeps the 2-minute post-boot delay before the first check.
         // Cron mode honors its schedule: arm at the next cron fire time so a restart
         // never triggers an out-of-cadence check (e.g. a weekly cron must not run on
@@ -434,7 +488,8 @@ export class ImageUpdateService {
      * cadence without restarting Sencho. Safe to call repeatedly: it always
      * clears the existing timer first and only arms a new one while polling, so
      * it never stacks timers and is a no-op (beyond reconfiguring intervalMs)
-     * when the service is stopped or was never started.
+     * when the service is stopped or was never started. When checks are
+     * disabled, clears nextCheckAt and does not arm.
      */
     public restartPolling(): void {
         this.scheduleGeneration++;
@@ -443,11 +498,63 @@ export class ImageUpdateService {
             this.timer = null;
         }
         this.configureFromSettings();
-        if (this.polling) {
+        if (this.polling && ImageUpdateService.isChecksEnabled()) {
             this.armNext(this.nextDelayMs());
         } else {
             this.nextCheckAt = null;
         }
+    }
+
+    /**
+     * Whether background image-update detection is enabled. Missing or blank
+     * keys default to enabled so upgrades and pre-seed races keep polling.
+     */
+    public static isChecksEnabled(): boolean {
+        try {
+            const raw = DatabaseService.getInstance().getGlobalSettings()[ImageUpdateService.ENABLED_SETTING_KEY];
+            if (raw == null || String(raw).trim() === '') return true;
+            return raw === '1';
+        } catch (e) {
+            console.warn('[ImageUpdateService] Could not read checks-enabled setting; treating as enabled:', getErrorMessage(e, String(e)));
+            return true;
+        }
+    }
+
+    /**
+     * Persist the checks-enabled setting and apply the live transition: stop
+     * + clear findings when turning off; start (or re-arm) when turning on.
+     * Safe under repeated toggles (scheduleGeneration bump via stop/start).
+     */
+    public applyChecksEnabled(enabled: boolean): ImageUpdateStatus {
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting(ImageUpdateService.ENABLED_SETTING_KEY, enabled ? '1' : '0');
+
+        if (!enabled) {
+            this.stop();
+            // Scanner only writes rows for local nodes. Use the local default
+            // node ID, not req.nodeId (which may be a remote active node).
+            const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+            db.clearAllStackUpdateStatus(localNodeId);
+            invalidateFleetUpdateCache();
+            NotificationService.getInstance().broadcastEvent({
+                type: 'state-invalidate',
+                scope: 'image-updates',
+                nodeId: localNodeId,
+                action: 'checks-disabled',
+                ts: Date.now(),
+            });
+            return this.getStatus();
+        }
+
+        // Re-enable: arm a fresh schedule. start() is a no-op if a timer already
+        // exists; when we were fully stopped, start() arms. When somehow still
+        // marked polling without a timer, restartPolling re-arms.
+        if (!this.timer) {
+            this.start();
+        } else {
+            this.restartPolling();
+        }
+        return this.getStatus();
     }
 
     /**
@@ -558,11 +665,16 @@ export class ImageUpdateService {
     }
 
     /**
-     * Triggers a check immediately, unless one is already running or the
-     * manual cooldown (MANUAL_COOLDOWN_MS) has not elapsed.
-     * Returns false if rate-limited, true if a check was started.
+     * Triggers a check immediately, unless detection is disabled, one is already
+     * running, or the manual cooldown (MANUAL_COOLDOWN_MS) has not elapsed.
+     * Returns false if rate-limited or disabled, true if a check was started.
+     * Callers that need to distinguish disabled from rate-limited must check
+     * isChecksEnabled() first.
      */
     public triggerManualRefresh(): boolean {
+        if (!ImageUpdateService.isChecksEnabled()) {
+            return false;
+        }
         const now = Date.now();
         if (now - this.lastManualRefreshAt < ImageUpdateService.MANUAL_COOLDOWN_MS) {
             return false;
@@ -582,6 +694,7 @@ export class ImageUpdateService {
     }
 
     public getStatus(): ImageUpdateStatus {
+        const enabled = ImageUpdateService.isChecksEnabled();
         let sidebarIndicators = false;
         try {
             const settings = DatabaseService.getInstance().getGlobalSettings();
@@ -590,21 +703,28 @@ export class ImageUpdateService {
             console.warn('[ImageUpdateService] Failed to read sidebar indicator setting:', e);
         }
         return {
-            checking: this.isRunning,
+            checking: enabled ? this.isRunning : false,
             intervalMinutes: Math.round(this.intervalMs / (60 * 1000)),
             lastCheckedAt: this.lastCheckedAt,
-            nextCheckAt: this.nextCheckAt,
+            nextCheckAt: enabled ? this.nextCheckAt : null,
             manualCooldownMinutes: ImageUpdateService.manualCooldownMinutes,
             manualCooldownRemainingMs: this.getManualCooldownRemainingMs(),
             mode: this.mode,
             cronExpression: this.cronExpression,
             sidebarIndicators,
+            enabled,
         };
     }
 
     // ─── Core check ──────────────────────────────────────────────────────────
 
     private async check() {
+        if (!ImageUpdateService.isChecksEnabled()) {
+            if (isDebugEnabled()) {
+                console.log('[ImageUpdateService:debug] Checks disabled; skipping scan.');
+            }
+            return;
+        }
         // The finally block is the sole owner of isRunning, so a scan that
         // overruns can never have its lock released out from under it. A
         // previous fixed timer cleared the lock after CHECK_TIMEOUT_MS, which
@@ -770,7 +890,11 @@ export class ImageUpdateService {
                 console.error(`[ImageUpdateService] Error checking ${sanitizeForLog(imageRef)}:`, sanitizeForLog((e as Error)?.message ?? String(e)));
                 // getErrorMessage (not raw String(e)) because this value can surface
                 // verbatim in the sidebar tooltip / readiness advisory as lastError.
-                imageUpdateMap.set(imageRef, { hasUpdate: false, error: getErrorMessage(e, 'Update check failed') });
+                imageUpdateMap.set(imageRef, {
+                    hasUpdate: false,
+                    checkStatus: 'failed',
+                    error: getErrorMessage(e, 'Update check failed'),
+                });
             }
             await sleep(ImageUpdateService.INTER_IMAGE_DELAY_MS);
         }
@@ -857,19 +981,28 @@ export class ImageUpdateService {
     }
 
     /**
-     * Re-check a single stack after a service-scoped update or restore. On a
-     * render failure the prior row is left untouched and a warning is returned.
+     * Re-check a single stack after a service-scoped update or restore, or
+     * after a manual full-stack update. On a render failure the prior row is
+     * left untouched and a verification_failed result is returned.
      */
-    public async recheckStack(nodeId: number, stackName: string): Promise<{ warning: string | null }> {
+    public async recheckStack(nodeId: number, stackName: string): Promise<StackRecheckResult> {
+        // While detection is off, skip registry probes and do not write
+        // stack_update_status (avoids stale findings after re-enable).
+        if (!ImageUpdateService.isChecksEnabled()) {
+            return { outcome: 'cleared', warning: null };
+        }
         const generation = this.reserveStackWriteGeneration(nodeId, stackName);
         const db = DatabaseService.getInstance();
         const docker = DockerController.getInstance(nodeId);
         const model = await buildEffectiveServiceModel(nodeId, stackName);
         if (!model.renderable) {
-            return { warning: model.error };
+            return {
+                outcome: 'verification_failed',
+                warning: model.error || UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+            };
         }
 
-        let containers: Array<{ Image?: string; Labels?: Record<string, string> }> = [];
+        let containers: Array<{ Image?: string; Labels?: Record<string, string> }>;
         try {
             containers = await withTimeout(docker.getAllContainers(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'getAllContainers');
         } catch (e) {
@@ -878,6 +1011,12 @@ export class ImageUpdateService {
                 sanitizeForLog(stackName),
                 sanitizeForLog(getErrorMessage(e, 'unknown')),
             );
+            // Do not clear or upsert from declared-image-only checks: runtime
+            // digests were never observed, so "cleared" would be a false negative.
+            return {
+                outcome: 'verification_incomplete',
+                warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+            };
         }
 
         const refs = new Set<string>();
@@ -892,7 +1031,11 @@ export class ImageUpdateService {
             try {
                 imageUpdateMap.set(imageRef, await this.checkImage(docker, imageRef));
             } catch (e) {
-                imageUpdateMap.set(imageRef, { hasUpdate: false, error: getErrorMessage(e, 'Update check failed') });
+                imageUpdateMap.set(imageRef, {
+                    hasUpdate: false,
+                    checkStatus: 'failed',
+                    error: getErrorMessage(e, 'Update check failed'),
+                });
             }
             await sleep(ImageUpdateService.INTER_IMAGE_DELAY_MS);
         }
@@ -911,15 +1054,34 @@ export class ImageUpdateService {
         const lastError = stackStatusLastError(services);
         const now = Date.now();
 
-        await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
+        const committed = await this.withStackWriteLock(nodeId, stackName, generation, async (gen) => {
             if (checkStatus === 'failed') {
                 db.recordStackCheckFailure(nodeId, stackName, lastError ?? 'Update check failed', now, services, gen);
             } else {
                 db.upsertStackUpdateStatus(nodeId, stackName, hasUpdate, now, checkStatus, lastError, services, gen);
             }
         });
+        // A newer scanner reservation dropped this write; do not report cleared.
+        if (!committed) {
+            return {
+                outcome: 'verification_incomplete',
+                warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+            };
+        }
 
-        return { warning: null };
+        if (checkStatus === 'partial' || checkStatus === 'failed') {
+            return {
+                outcome: 'verification_incomplete',
+                warning: UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+            };
+        }
+        if (hasUpdate) {
+            return {
+                outcome: 'still_present',
+                warning: UPDATE_STILL_PRESENT_WARNING,
+            };
+        }
+        return { outcome: 'cleared', warning: null };
     }
 
     private stackWriteKey(nodeId: number, stackName: string): string {
@@ -961,6 +1123,70 @@ export class ImageUpdateService {
         });
         await state.chain;
         return committed;
+    }
+
+    /**
+     * Current per-stack write-generation high-water mark (0 if never reserved).
+     * Snapshot before a read-only update-preview so commitPreviewClear can
+     * compare against writes that reserved or committed after observation.
+     */
+    public peekStackWriteGeneration(nodeId: number, stackName: string): number {
+        return this.stackWriteState.get(this.stackWriteKey(nodeId, stackName))?.generation ?? 0;
+    }
+
+    /**
+     * Clear persisted scanner update state after an authoritative-negative
+     * update preview. `observedMemoryGeneration` and `observedRowGeneration`
+     * are snapshotted before the preview.
+     *
+     * Ordering:
+     * - If memory generation advanced after observation, abort (stale).
+     * - If memory generation still equals the observation watermark, advance
+     *   (tombstone) so an equal-generation writer reserved before observation
+     *   cannot commit after the clear (SF-4).
+     * - If the persisted row generation advanced after observation, keep the row.
+     * - Otherwise delete partial, failed, and confirmed ok+true rows.
+     *
+     * Returns cleared | stale | absent.
+     */
+    public async commitPreviewClear(
+        nodeId: number,
+        stackName: string,
+        observedMemoryGeneration: number,
+        observedRowGeneration: number,
+    ): Promise<'cleared' | 'stale' | 'absent'> {
+        const key = this.stackWriteKey(nodeId, stackName);
+        let state = this.stackWriteState.get(key);
+        if (!state) {
+            state = { chain: Promise.resolve(), generation: observedMemoryGeneration };
+            this.stackWriteState.set(key, state);
+        }
+
+        // A reservation after observation already owns a higher generation.
+        if (state.generation > observedMemoryGeneration) {
+            return 'stale';
+        }
+
+        // Tombstone the equal watermark so pre-observation writers reserved at
+        // this generation become stale when they later try to commit.
+        if (state.generation === observedMemoryGeneration) {
+            state.generation += 1;
+        }
+        const clearGeneration = state.generation;
+
+        let deleted = 0;
+        const committed = await this.withStackWriteLock(nodeId, stackName, clearGeneration, () => {
+            const db = DatabaseService.getInstance();
+            const detail = db.getStackUpdateDetail(nodeId)[stackName];
+            if (!detail) return;
+            // Compare DB-embedded generations only (same dimension as the
+            // pre-preview snapshot). Memory peek resets on restart; SQLite does not.
+            const rowGeneration = db.getStackUpdateWriteGeneration(nodeId, stackName);
+            if (rowGeneration > observedRowGeneration) return;
+            deleted = db.clearStackUpdateStatus(nodeId, stackName);
+        });
+        if (!committed) return 'stale';
+        return deleted > 0 ? 'cleared' : 'absent';
     }
 
     private runtimeImagesByService(
@@ -1028,14 +1254,16 @@ export class ImageUpdateService {
 
         const checkable = Array.from(images)
             .map((img) => imageUpdateMap.get(img))
-            .filter((r): r is ImageCheckResult => !!r && !r.notCheckable);
-        const errored = checkable.filter((r) => r.error !== undefined);
-        const confirmedHasUpdate = checkable.some((r) => r.error === undefined && r.hasUpdate === true);
+            .filter((r): r is ImageCheckResult => !!r && normalizeImageCheckStatus(r) !== 'not_checkable');
+        const statuses = checkable.map(normalizeImageCheckStatus);
+        const failed = checkable.filter((_, i) => statuses[i] === 'failed');
+        const partial = checkable.filter((_, i) => statuses[i] === 'partial');
+        const confirmedHasUpdate = checkable.some((r, i) => statuses[i] === 'ok' && r.hasUpdate === true);
 
-        if (checkable.length > 0 && errored.length === checkable.length) {
+        if (checkable.length > 0 && failed.length === checkable.length) {
             const committed = await this.withStackWriteLock(nodeId, stackName, generation, async () => {
                 db.recordStackCheckFailure(
-                    nodeId, stackName, errored[0].error ?? 'Update check failed', checkedAt,
+                    nodeId, stackName, failed[0].error ?? 'Update check failed', checkedAt,
                 );
             });
             return {
@@ -1045,8 +1273,10 @@ export class ImageUpdateService {
             };
         }
 
-        const checkStatus: StackCheckStatus = errored.length > 0 ? 'partial' : 'ok';
-        const lastError = errored.length > 0 ? (errored[0].error ?? null) : null;
+        const checkStatus: StackCheckStatus =
+            failed.length > 0 || partial.length > 0 ? 'partial' : 'ok';
+        const uncertain = [...partial, ...failed];
+        const lastError = uncertain.length > 0 ? (uncertain[0].error ?? null) : null;
         const hasUpdate = checkStatus === 'partial'
             ? (confirmedHasUpdate || previousState[stackName] === true)
             : confirmedHasUpdate;
@@ -1065,20 +1295,21 @@ export class ImageUpdateService {
     public async checkImage(docker: DockerController, imageRef: string): Promise<ImageCheckResult> {
         const parsed = parseImageRef(imageRef);
         // A bare digest ref (sha256:...) has no tag to track upstream; not applicable.
-        if (!parsed) return { hasUpdate: false, notCheckable: true };
+        if (!parsed) {
+            return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
+        }
 
         if (isDebugEnabled()) {
             console.log(`[ImageUpdateService] Checking ${imageRef}: registry=${parsed.registry} repo=${parsed.repo} tag=${parsed.tag}`);
         }
 
-        // Look up stored credentials for this registry
         const credentials = await RegistryService.getInstance().getAuthForRegistry(parsed.registry);
         if (isDebugEnabled()) {
             console.log(`[ImageUpdateService] ${imageRef}: credentials ${credentials ? 'found' : 'none'}`);
         }
 
-        // Get local digest and platform from RepoDigests / Os+Architecture
-        let localDigest: string | null;
+        // Get local digests and platform from RepoDigests / Os+Architecture
+        let localDigests: string[];
         let platform: { os: string; architecture: string };
         try {
             const inspect = await withTimeout(docker.getDocker().getImage(imageRef).inspect(), ImageUpdateService.SOCKET_TIMEOUT_MS, 'inspect');
@@ -1086,28 +1317,58 @@ export class ImageUpdateService {
 
             // No RepoDigests at all: locally built / not registry-backed, so update
             // status does not apply.
-            if (repoDigests.length === 0) return { hasUpdate: false, notCheckable: true };
+            if (repoDigests.length === 0) {
+                return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
+            }
 
-            localDigest = selectLocalRepoDigest(repoDigests, parsed);
+            localDigests = selectLocalRepoDigests(repoDigests, parsed);
             platform = { os: inspect.Os, architecture: inspect.Architecture };
         } catch {
-            return { hasUpdate: false, error: `Failed to inspect local image "${imageRef}"` };
+            return {
+                hasUpdate: false,
+                checkStatus: 'failed',
+                error: `Failed to inspect local image "${imageRef}"`,
+            };
         }
 
         // RepoDigests were present but none resolved a usable digest: genuinely
         // ambiguous, so surface it rather than silently call the image up to date.
-        if (!localDigest) {
-            return { hasUpdate: false, error: `Could not resolve a local registry digest for "${imageRef}"` };
+        if (localDigests.length === 0) {
+            return {
+                hasUpdate: false,
+                checkStatus: 'failed',
+                error: `Could not resolve a local registry digest for "${imageRef}"`,
+            };
         }
 
-        const comparison = await compareLocalToRemoteTag(localDigest, parsed.registry, parsed.repo, parsed.tag, platform, credentials);
-        if (comparison.kind === 'error') {
-            return { hasUpdate: false, error: comparison.reason };
+        const detection = await detectImageUpdate({
+            localDigests,
+            platform,
+            registry: parsed.registry,
+            repo: parsed.repo,
+            tag: parsed.tag,
+            credentials,
+        });
+
+        const digestLabel = localDigests[0] ? `${localDigests[0].slice(0, 27)}...` : 'none';
+        const nextSuffix = detection.nextTag ? ` next=${detection.nextTag}` : '';
+        console.log(
+            `[ImageUpdateService] ${imageRef}: local=${digestLabel} update=${detection.hasUpdate}`
+            + ` digest=${detection.digestUpdate} tag=${detection.tagUpdate}`
+            + ` status=${detection.checkStatus}${nextSuffix}`,
+        );
+
+        if (detection.checkStatus === 'not_checkable') {
+            return { hasUpdate: false, checkStatus: 'not_checkable', notCheckable: true };
         }
 
-        const hasUpdate = comparison.kind === 'update';
-        console.log(`[ImageUpdateService] ${imageRef}: local=${localDigest.slice(0, 27)}... update=${hasUpdate}`);
-        return { hasUpdate };
+        return {
+            hasUpdate: detection.hasUpdate,
+            digestUpdate: detection.digestUpdate,
+            tagUpdate: detection.tagUpdate,
+            checkStatus: detection.checkStatus,
+            ...(detection.reason ? { error: detection.reason } : {}),
+        };
     }
 }
 

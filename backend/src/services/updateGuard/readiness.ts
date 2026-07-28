@@ -1,5 +1,5 @@
 import type { PreflightStatus } from '../preflight/types';
-import type { UpdatePreviewSummary } from '../UpdatePreviewService';
+import type { UpdatePreviewImage, UpdatePreviewSummary } from '../UpdatePreviewService';
 import type {
   ContainerProbe,
   ReadinessSignal,
@@ -109,10 +109,38 @@ export function healthchecksSignal(input: ContainerProbe[] | Errored): Readiness
   return { ...base, detail: parts.join(' ') };
 }
 
-export function updatePreviewSignal(input: UpdatePreviewSummary | Errored): ReadinessSignal {
+/**
+ * True when a full-stack apply would pull/recreate an image whose digest
+ * verification failed as collateral of applying a DIFFERENT image's confirmed
+ * update or a local rebuild. `has_update` and `check_error` are independent
+ * per image (a tag-based update can be confirmed via the registry's tag list
+ * even when that same image's own digest comparison errored), so this
+ * excludes the case where the only verification failure belongs to the very
+ * image whose update is confirmed: that image's own stale-digest check does
+ * not block moving it to a newer tag. Falls back to the aggregate summary
+ * flags when per-image detail is unavailable.
+ */
+function hasUnverifiedOtherImage(summary: UpdatePreviewSummary, images: UpdatePreviewImage[] | undefined): boolean {
+  if (!images || images.length === 0) {
+    return summary.verification_failed && (summary.has_update || summary.rebuild_available);
+  }
+  const hasPureFailureImage = images.some((i) => Boolean(i.check_error) && !i.has_update);
+  if (!hasPureFailureImage) return false;
+  return images.some((i) => i.has_update) || summary.rebuild_available;
+}
+
+export function updatePreviewSignal(input: UpdatePreviewSummary | Errored, images?: UpdatePreviewImage[]): ReadinessSignal {
   const base = { id: 'update_preview' as const, title: 'Pending update' };
   if (input === 'error') {
     return { ...base, status: 'unknown', affectsVerdict: false, detail: 'The update preview is unavailable.' };
+  }
+  if (input.detection_disabled) {
+    return {
+      ...base,
+      status: 'unknown',
+      affectsVerdict: false,
+      detail: 'Image update detection is disabled for this node.',
+    };
   }
   if (input.blocked) {
     return {
@@ -129,20 +157,50 @@ export function updatePreviewSignal(input: UpdatePreviewSummary | Errored): Read
   if (input.has_update && input.semver_bump === 'unknown') {
     return { ...base, status: 'warning', affectsVerdict: true, detail: 'An image update is pending but the version change could not be classified.' };
   }
+  // A DIFFERENT image in the stack failing digest verification holds any
+  // pending action (a tag/digest update or a local-build rebuild) for review,
+  // since a full-stack apply would pull/recreate the unverified image as
+  // collateral. has_update and rebuild_available are handled symmetrically
+  // here to match isReviewRequiredUpdatePreview on the frontend.
+  const reviewRequired = hasUnverifiedOtherImage(input, images);
   if (input.has_update) {
     const kind = input.update_kind === 'digest' ? 'a same-tag image refresh' : `a ${input.semver_bump} update`;
     const buildNote = input.has_build_services
       ? ' Local build services will also be rebuilt from source.'
       : '';
+    if (reviewRequired) {
+      const verifyNote = input.verification_error ? `: ${input.verification_error}` : '.';
+      return {
+        ...base,
+        status: 'attention',
+        affectsVerdict: true,
+        detail: `Pending: ${kind}.${buildNote} Another image failed digest verification${verifyNote} Review before a full-stack update.`,
+      };
+    }
     return { ...base, status: 'ok', affectsVerdict: true, detail: `Pending: ${kind}.${buildNote}` };
   }
   if (input.rebuild_available) {
     const n = input.has_build_services ? 'Local build service(s)' : 'Build';
+    const rebuildNote = `${n} require a rebuild from source; the update rebuilds images and recreates containers.`;
+    if (reviewRequired) {
+      const verifyNote = input.verification_error ? `: ${input.verification_error}` : '.';
+      return {
+        ...base,
+        status: 'attention',
+        affectsVerdict: true,
+        detail: `${rebuildNote} Another image failed digest verification${verifyNote} Review before a full-stack update.`,
+      };
+    }
+    return { ...base, status: 'warning', affectsVerdict: true, detail: rebuildNote };
+  }
+  if (input.verification_failed) {
     return {
       ...base,
-      status: 'warning',
+      status: 'unknown',
       affectsVerdict: true,
-      detail: `${n} require a rebuild from source; the update rebuilds images and recreates containers.`,
+      detail: input.verification_error
+        ? `Digest verification failed: ${input.verification_error}`
+        : 'Digest verification failed; Sencho is not claiming a rebuild.',
     };
   }
   return { ...base, status: 'ok', affectsVerdict: true, detail: 'No pending image update detected; the update re-pulls and recreates with current tags.' };

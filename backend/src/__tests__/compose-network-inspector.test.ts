@@ -14,10 +14,15 @@ import {
 import { assembleStackNetworkFacts } from '../services/network/composeNetworkInspector';
 
 function effSvc(over: Partial<EffService> = {}): EffService {
+  const hasHealthcheck = over.hasHealthcheck ?? true;
+  const composeHealthcheck = over.composeHealthcheck ?? (hasHealthcheck ? 'active' : 'absent');
   return {
     name: 'web', image: 'nginx:1.27', ports: [], binds: [], namedVolumes: [], storageMounts: [],
-    privileged: false, hasHealthcheck: true, restart: 'unless-stopped', envKeys: [],
-    networks: [], extraHosts: [], labelKeys: [], ...over,
+    privileged: false, restart: 'unless-stopped', envKeys: [],
+    networks: [], extraHosts: [], labelKeys: [],
+    ...over,
+    hasHealthcheck,
+    composeHealthcheck,
   };
 }
 

@@ -7,6 +7,18 @@ import { classifyMissingExternalNetworks } from '../network/missingExternalNetwo
 /** Higher number = more severe. Used to derive a run's overall status. */
 export const SEVERITY_RANK: Record<PreflightSeverity, number> = { info: 0, warning: 1, high: 2, blocker: 3 };
 
+/**
+ * Rule IDs that are informational notes, not issue findings. They appear in the
+ * report for context but do not affect All Clear, active severity, or Update Guard.
+ */
+export const PREFLIGHT_NOTE_RULE_IDS: ReadonlySet<string> = new Set([
+  'healthcheck-inherited',
+]);
+
+export function isPreflightNoteFinding(ruleId: string): boolean {
+  return PREFLIGHT_NOTE_RULE_IDS.has(ruleId);
+}
+
 /** The one rule whose message doubles as the report's render error. Shared so the
  *  service that reconstructs renderError from it cannot drift from the rule id. */
 export const RENDER_FAILED_RULE_ID = 'render-failed';
@@ -373,15 +385,102 @@ const noHealthcheck: PreflightRule = {
   run(ctx) {
     if (!ctx.model) return [];
     return ctx.model.services
-      .filter(s => !s.hasHealthcheck)
+      .filter(s => ctx.healthchecks[s.name]?.state === 'absent')
+      .map(s => {
+        const origin = ctx.healthchecks[s.name]?.origin;
+        let from = 'available evidence';
+        if (origin === 'runtime') from = 'currently running containers';
+        else if (origin === 'local-image') from = 'the locally available image';
+        return {
+          ruleId: 'no-healthcheck',
+          severity: 'warning' as const,
+          title: 'No effective healthcheck detected',
+          message: `Service "${s.name}" has no effective healthcheck in ${from}, so Docker and Sencho cannot tell when it is actually ready.`,
+          sourcePath: s.name,
+          service: s.name,
+          remediation: 'Add a healthcheck to the Compose service, or use an image that defines one.',
+        };
+      });
+  },
+};
+
+const healthcheckDisabled: PreflightRule = {
+  id: 'healthcheck-disabled',
+  run(ctx) {
+    if (!ctx.model) return [];
+    return ctx.model.services
+      .filter(s => ctx.healthchecks[s.name]?.state === 'explicitly-disabled')
       .map(s => ({
-        ruleId: 'no-healthcheck',
+        ruleId: 'healthcheck-disabled',
         severity: 'warning' as const,
-        title: 'No healthcheck',
-        message: `Service "${s.name}" declares no healthcheck, so Docker and Sencho cannot tell when it is actually ready (the image may still define one).`,
+        title: 'Healthcheck explicitly disabled',
+        message: `Service "${s.name}" disables its healthcheck in the Compose model (disable: true or test: NONE), so Docker will not report readiness for this service.`,
         sourcePath: s.name,
         service: s.name,
-        remediation: 'Add a healthcheck, or confirm the image provides one.',
+        remediation: 'Remove the disablement, or replace it with an active healthcheck if the service should report readiness.',
+      }));
+  },
+};
+
+const healthcheckInherited: PreflightRule = {
+  id: 'healthcheck-inherited',
+  run(ctx) {
+    if (!ctx.model) return [];
+    return ctx.model.services
+      .filter(s => {
+        const state = ctx.healthchecks[s.name]?.state;
+        return state === 'runtime-inherited' || state === 'local-image-inherited';
+      })
+      .map(s => {
+        const origin = ctx.healthchecks[s.name]?.origin;
+        const from = origin === 'runtime'
+          ? 'Docker is using the healthcheck from the currently running container image'
+          : 'Docker is using the healthcheck defined by the locally available container image';
+        return {
+          ruleId: 'healthcheck-inherited',
+          severity: 'info' as const,
+          title: 'Healthcheck inherited from image',
+          message: `Service "${s.name}" does not declare a healthcheck in Compose. ${from}.`,
+          sourcePath: s.name,
+          service: s.name,
+          remediation: 'Optionally declare the healthcheck in Compose so its configuration remains explicit and independently controlled.',
+        };
+      });
+  },
+};
+
+const healthcheckUnverifiable: PreflightRule = {
+  id: 'healthcheck-unverifiable',
+  run(ctx) {
+    if (!ctx.model) return [];
+    return ctx.model.services
+      .filter(s => ctx.healthchecks[s.name]?.state === 'unverifiable')
+      .map(s => ({
+        ruleId: 'healthcheck-unverifiable',
+        severity: 'info' as const,
+        title: 'Healthcheck inheritance could not be verified',
+        message: `Service "${s.name}" has no Compose healthcheck, and Sencho could not verify whether the running container or a local image provides one (Docker unreachable, image missing locally, or incomplete inspection).`,
+        sourcePath: s.name,
+        service: s.name,
+        remediation: 'Ensure the declared image is present locally, or add an explicit Compose healthcheck. Sencho does not pull images during Doctor runs.',
+      }));
+  },
+};
+
+const healthcheckInconsistent: PreflightRule = {
+  id: 'healthcheck-inconsistent',
+  run(ctx) {
+    if (!ctx.model) return [];
+    return ctx.model.services
+      .filter(s => ctx.healthchecks[s.name]?.state === 'inconsistent-replicas')
+      .map(s => ({
+        ruleId: 'healthcheck-inconsistent',
+        severity: 'warning' as const,
+        title: 'Replica healthcheck coverage is inconsistent',
+        message: `Service "${s.name}" has running replicas with mixed effective healthcheck coverage, so readiness is not uniform across replicas.`,
+        sourcePath: s.name,
+        service: s.name,
+        remediation: 'Recreate the service so every replica uses the same image and healthcheck configuration.',
       }));
   },
 };
@@ -803,6 +902,10 @@ export const PREFLIGHT_RULES: PreflightRule[] = [
   imageLatest,
   noRestartPolicy,
   noHealthcheck,
+  healthcheckDisabled,
+  healthcheckInherited,
+  healthcheckUnverifiable,
+  healthcheckInconsistent,
   deploySwarmOnly,
   nodeStateUnavailable,
   externalNetworkMissing,

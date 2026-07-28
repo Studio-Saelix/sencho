@@ -75,6 +75,7 @@ export function MobileStackDetail(props: EditorViewProps) {
         requestTakeDownStack,
         showTakeDown,
         isSelfStack = false,
+        canSaveAndReapply = false,
         onMobileBack,
         onCloseEditor,
         hasUnsavedChanges,
@@ -115,6 +116,7 @@ export function MobileStackDetail(props: EditorViewProps) {
                     canEdit={canEditStack}
                     requestSave={requestSave}
                     requestSaveAndDeploy={requestSaveAndDeploy}
+                    canSaveAndReapply={canSaveAndReapply}
                     onClose={onCloseEditor}
                     hasUnsavedChanges={hasUnsavedChanges}
                 />
@@ -241,6 +243,8 @@ export function MobileStackDetail(props: EditorViewProps) {
                                 containersLoadStatus={props.containersLoadStatus}
                                 containersLoadError={props.containersLoadError}
                                 onRetryContainersLoad={props.onRetryContainersLoad}
+                                syncStale={props.containersSyncStale}
+                                onRetrySync={props.onRetrySync}
                                 key={`${activeNode?.id ?? 'local'}:${stackName}`}
                             />
                         </div>

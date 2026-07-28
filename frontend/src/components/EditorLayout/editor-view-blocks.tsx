@@ -52,6 +52,7 @@ import type { useAuth } from '@/context/AuthContext';
 import type { ContainerInfo, ContainerStatsEntry, StackAction } from './EditorView';
 import type { EffectiveServiceSpec } from '@/types/effectiveServices';
 import type { StackServiceUpdateStatus } from '@/types/imageUpdates';
+import { isConfirmedServiceUpdate } from '@/types/imageUpdates';
 
 const extractUptime = (status: string | undefined): string | null => {
     if (!status) return null;
@@ -64,9 +65,7 @@ const healthcheckLabel = (
     health?: 'healthy' | 'unhealthy' | 'starting' | 'none',
 ): string | null => {
     if (!health || health === 'none') return null;
-    if (health === 'healthy') return 'healthcheck passing';
-    if (health === 'unhealthy') return 'healthcheck failing';
-    return 'healthcheck starting';
+    return health;
 };
 
 type StackPill = {
@@ -335,6 +334,13 @@ export interface ContainersHealthProps {
     containersLoadStatus?: 'idle' | 'loading' | 'success' | 'error';
     containersLoadError?: string | null;
     onRetryContainersLoad?: () => void;
+    /**
+     * Soft live-refresh failures exhausted. Shown only when container cards are
+     * visible (containersLoadStatus === 'success'). When status is 'error', the
+     * existing error card Retry is sufficient and this chip is suppressed.
+     */
+    syncStale?: boolean;
+    onRetrySync?: () => void;
 }
 
 // Per-container health strip: status badge, uptime, ports, and CPU/Mem/Net
@@ -358,6 +364,8 @@ export function ContainersHealth({
     containersLoadStatus = 'success',
     containersLoadError = null,
     onRetryContainersLoad,
+    syncStale = false,
+    onRetrySync,
 }: ContainersHealthProps) {
     // Multi-service only: a single-service stack keeps the existing flat layout
     // untouched, including its per-container Start/Stop/Restart kebab.
@@ -649,34 +657,30 @@ export function ContainersHealth({
                                     </div>
                                 </div>
                                 {isActive && density === 'detailed' ? (
-                                    <div className="mt-2 grid grid-cols-3 gap-2">
-                                        <div className="flex items-center gap-2 rounded-md bg-background/60 px-2 py-1.5">
-                                            <div className="flex flex-col">
-                                                <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">cpu</span>
-                                                <span className="font-mono text-xs tabular-nums text-foreground">{stats?.cpu ?? '-'}</span>
+                                    <div className="mt-2 grid grid-cols-[minmax(0,0.85fr)_minmax(0,0.85fr)_minmax(0,1.3fr)] gap-2">
+                                        {[
+                                            { label: 'cpu', value: stats?.cpu ?? '-', points: history?.cpu ?? [] },
+                                            { label: 'mem', value: stats?.ram ?? '-', points: history?.mem ?? [] },
+                                            { label: 'net i/o', value: stats?.net ?? '-', points: history?.netIn ?? [] },
+                                        ].map(({ label, value, points }) => (
+                                            <div
+                                                key={label}
+                                                className="flex min-w-0 items-center gap-2 rounded-md bg-background/60 px-2 py-1.5"
+                                            >
+                                                <div className="min-w-0 flex flex-col">
+                                                    <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">{label}</span>
+                                                    <span
+                                                        className="font-mono text-xs tabular-nums truncate text-foreground"
+                                                        title={value === '-' ? undefined : value}
+                                                    >
+                                                        {value}
+                                                    </span>
+                                                </div>
+                                                <div className="ml-auto h-5 w-16 shrink min-w-8">
+                                                    <Sparkline points={points} stroke={sparkStroke} fill={sparkStroke} showPeak={false} />
+                                                </div>
                                             </div>
-                                            <div className="ml-auto h-5 w-16">
-                                                <Sparkline points={history?.cpu ?? []} stroke={sparkStroke} fill={sparkStroke} showPeak={false} />
-                                            </div>
-                                        </div>
-                                        <div className="flex items-center gap-2 rounded-md bg-background/60 px-2 py-1.5">
-                                            <div className="flex flex-col">
-                                                <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">mem</span>
-                                                <span className="font-mono text-xs tabular-nums text-foreground">{stats?.ram ?? '-'}</span>
-                                            </div>
-                                            <div className="ml-auto h-5 w-16">
-                                                <Sparkline points={history?.mem ?? []} stroke={sparkStroke} fill={sparkStroke} showPeak={false} />
-                                            </div>
-                                        </div>
-                                        <div className="flex items-center gap-2 rounded-md bg-background/60 px-2 py-1.5">
-                                            <div className="flex flex-col">
-                                                <span className="font-mono text-[10px] leading-3 uppercase tracking-[0.18em] text-stat-subtitle">net i/o</span>
-                                                <span className="font-mono text-xs tabular-nums text-foreground">{stats?.net ?? '-'}</span>
-                                            </div>
-                                            <div className="ml-auto h-5 w-16">
-                                                <Sparkline points={history?.netIn ?? []} stroke={sparkStroke} fill={sparkStroke} showPeak={false} />
-                                            </div>
-                                        </div>
+                                        ))}
                                     </div>
                                 ) : null}
                             </div>
@@ -728,6 +732,17 @@ export function ContainersHealth({
                     </TooltipProvider>
                 </div>
             )}
+            {syncStale && onRetrySync && (
+                <div className="mb-3 flex items-center justify-between gap-2 rounded-md border border-warning/30 bg-warning/10 px-2 py-1.5">
+                    <span className="text-[10px] uppercase tracking-wider font-mono text-warning-foreground">
+                        Container state may be stale
+                    </span>
+                    <Button type="button" variant="outline" size="sm" className="h-7" onClick={onRetrySync}>
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Retry
+                    </Button>
+                </div>
+            )}
             {densityToolbar}
             {isMultiService ? (
                 <div className="flex flex-col gap-3">
@@ -735,7 +750,7 @@ export function ContainersHealth({
                         const group = safeContainers.filter(c => c.Service === spec.name);
                         const status = serviceUpdateStatuses.find(s => s.service === spec.name);
                         const busy = serviceUpdateInProgress?.service === spec.name;
-                        const hasUpdate = status?.hasUpdate === true;
+                        const hasUpdate = status ? isConfirmedServiceUpdate(status) : false;
                         const mode: 'update' | 'rebuild' = !hasUpdate && spec.hasBuild ? 'rebuild' : 'update';
                         const showUpdateAction = spec.declaredImage !== null || spec.hasBuild;
                         const isServiceActive = group.some(c => c.State === 'running' || c.State === 'paused');

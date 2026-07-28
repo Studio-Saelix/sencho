@@ -1,14 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Sparkline } from '@/components/ui/sparkline';
-import { AlertCircle, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, Layers, RefreshCw } from 'lucide-react';
+import { AlertCircle, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, CircleArrowUp, Layers, RefreshCw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Skeleton } from '@/components/ui/skeleton';
 import type { StackStatusEntry, MetricPoint, StackCpuSeries, StackStatusesLoadStatus } from './types';
 import type { StackUpdateInfo } from '@/types/imageUpdates';
+import { isConfirmedImageUpdate, isConfirmedServiceUpdate } from '@/types/imageUpdates';
 import { aggregateCurrentUsage } from './aggregateCurrentUsage';
 import { classifyRow, type RowState } from './classifyRow';
-import { updateAvailableBadge, updateAvailableLabel } from '@/lib/updateAvailableLabel';
+import { updateAvailableLabel } from '@/lib/updateAvailableLabel';
 
 interface StackHealthTableProps {
   stackStatuses: Record<string, StackStatusEntry>;
@@ -119,6 +120,7 @@ export function StackHealthTable({
       const series = stackCpuSeries[name];
       const peakCpu = series?.peakValue ?? agg?.cpu ?? 0;
       const state = classifyRow(entry.status, peakCpu);
+      const updateInfo = stackUpdates[file];
       return {
         file,
         name,
@@ -132,9 +134,9 @@ export function StackHealthTable({
         runningSince: entry.runningSince ?? null,
         source: entry.source ?? 'local',
         mainPort: entry.mainPort ?? null,
-        hasUpdate: stackUpdates[file]?.hasUpdate ?? false,
-        outdatedServices: (stackUpdates[file]?.services ?? [])
-          .filter((s) => s.hasUpdate)
+        hasUpdate: updateInfo != null && isConfirmedImageUpdate(updateInfo),
+        outdatedServices: (updateInfo?.services ?? [])
+          .filter((s) => isConfirmedServiceUpdate(s))
           .map((s) => s.service),
       };
     });
@@ -269,7 +271,9 @@ export function StackHealthTable({
         <span />
       </div>
       <ul className="divide-y divide-border/40">
-        {pagedRows.map((row) => (
+        {pagedRows.map((row) => {
+          const updateLabel = row.hasUpdate ? updateAvailableLabel(row.outdatedServices) : null;
+          return (
           <li
             key={row.file}
             role="button"
@@ -285,12 +289,13 @@ export function StackHealthTable({
           >
             <span className="flex items-center gap-1.5 min-w-0">
               <span className="min-w-0 truncate font-mono text-sm text-stat-value">{row.name}</span>
-              {row.hasUpdate && (
-                <span
-                  className="shrink-0 rounded-full bg-brand/15 px-2 py-0.5 font-mono text-[10px] leading-none text-brand tracking-wide"
-                  title={updateAvailableLabel(row.outdatedServices)}
-                >
-                  {updateAvailableBadge(row.outdatedServices)}
+              {updateLabel && (
+                <span className="shrink-0" title={updateLabel}>
+                  <CircleArrowUp
+                    className="h-3.5 w-3.5 text-brand"
+                    strokeWidth={2}
+                    aria-label={updateLabel}
+                  />
                 </span>
               )}
             </span>
@@ -327,7 +332,8 @@ export function StackHealthTable({
             </span>
             <ChevronRight className="h-3.5 w-3.5 text-stat-icon" strokeWidth={1.5} />
           </li>
-        ))}
+          );
+        })}
       </ul>
     </div>
   );

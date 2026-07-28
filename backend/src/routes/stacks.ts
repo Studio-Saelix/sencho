@@ -17,13 +17,17 @@ import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '
 import DockerController, { type BulkStackInfo } from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { CacheService, type CacheFetchOutcome } from '../services/CacheService';
-import { UpdatePreviewService } from '../services/UpdatePreviewService';
+import {
+  UpdatePreviewService,
+  isAuthoritativeNegativePreview,
+  buildDetectionDisabledPreview,
+} from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
-import { RULE_IDS } from '../services/preflight/rules';
+import { RULE_IDS, isPreflightNoteFinding } from '../services/preflight/rules';
 import { parseServiceImages, isPreflightAckActive } from '../utils/preflight-ack-filter';
 import type { PreflightAckExpiryMode } from '../services/DatabaseService';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
@@ -56,6 +60,11 @@ import { buildPolicyGateOptions, runPolicyGate, triggerPostDeployScan, describeP
 import { parseComposePreview, type ComposePreview } from '../helpers/composePreview';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
+import {
+  ImageUpdateService,
+  UPDATE_VERIFICATION_INCOMPLETE_WARNING,
+} from '../services/ImageUpdateService';
 import { parseComposeSelection, defaultEnvPath } from '../helpers/gitSourceSelection';
 import { resolveStackEnvSources, discoverStackLocalEnvFiles } from '../helpers/envFileResolution';
 import { STACK_STATUSES_CACHE_TTL_MS } from '../helpers/constants';
@@ -1408,6 +1417,10 @@ stacksRouter.post('/:stackName/preflight/acknowledgements', async (req: Request,
     res.status(400).json({ error: 'ruleId must be a known Compose Doctor rule id' });
     return;
   }
+  if (isPreflightNoteFinding(ruleId)) {
+    res.status(400).json({ error: 'Informational notes cannot be acknowledged' });
+    return;
+  }
   const serviceRaw = body.service == null || body.service === ''
     ? null
     : String(body.service).trim();
@@ -2243,10 +2256,62 @@ stacksRouter.post('/:stackName/services/:serviceName/restore', async (req: Reque
 stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   try {
+    // Anatomy and other GET consumers must not contact registries while
+    // node-scoped detection is off.
+    if (!ImageUpdateService.isChecksEnabled()) {
+      res.json(buildDetectionDisabledPreview(stackName));
+      return;
+    }
+    // Read-only: sticky reconciliation lives on POST so UpdateGuard and other
+    // GET consumers never mutate persisted scanner state.
     const preview = await UpdatePreviewService.getInstance().getPreview(req.nodeId, stackName);
     res.json(preview);
   } catch (error) {
     console.error('[Stacks] Update preview failed: %s', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
+    res.status(500).json({ error: 'Failed to compute update preview' });
+  }
+});
+
+stacksRouter.post('/:stackName/update-preview', async (req: Request, res: Response) => {
+  const stackName = req.params.stackName as string;
+  try {
+    if (!ImageUpdateService.isChecksEnabled()) {
+      // No registry I/O and no sticky reconcile on a synthetic disabled preview.
+      res.json({ ...buildDetectionDisabledPreview(stackName), reconciled: false });
+      return;
+    }
+    // Snapshot write-generation watermarks before the read-only preview so a
+    // later clear can erase older confirmed/sticky rows without racing a
+    // scanner that reserved or rewrote the row after this observation.
+    const imageUpdates = ImageUpdateService.getInstance();
+    const db = DatabaseService.getInstance();
+    const observedMemoryGeneration = imageUpdates.peekStackWriteGeneration(req.nodeId, stackName);
+    const observedRowGeneration = db.getStackUpdateWriteGeneration(req.nodeId, stackName);
+    const preview = await UpdatePreviewService.getInstance().getPreview(req.nodeId, stackName);
+    let reconciled = false;
+    if (isAuthoritativeNegativePreview(preview)) {
+      const clearResult = await imageUpdates.commitPreviewClear(
+        req.nodeId,
+        stackName,
+        observedMemoryGeneration,
+        observedRowGeneration,
+      );
+      if (clearResult === 'cleared') {
+        reconciled = true;
+        invalidateFleetUpdateCache();
+        NotificationService.getInstance().broadcastEvent({
+          type: 'state-invalidate',
+          scope: 'image-updates',
+          nodeId: req.nodeId,
+          stackName,
+          action: 'update-status-reconciled',
+          ts: Date.now(),
+        });
+      }
+    }
+    res.json({ ...preview, reconciled });
+  } catch (error) {
+    console.error('[Stacks] Update preview reconcile failed: %s', sanitizeForLog(stackName), sanitizeForLog(getErrorMessage(error, 'unknown')));
     res.status(500).json({ error: 'Failed to compute update preview' });
   }
 });
@@ -2270,7 +2335,27 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
       { nodeId: req.nodeId, stackName, target: { scope: 'stack' }, trigger: 'manual', actor: req.user?.username ?? null },
       { atomic, terminalWs: getTerminalWs(req.get(DEPLOY_SESSION_HEADER)) },
     );
-    DatabaseService.getInstance().clearStackUpdateStatus(req.nodeId, stackName);
+    // Health observation starts immediately after Compose; registry recheck is
+    // isolated so a verification failure cannot turn Compose success into 500.
+    ok = true;
+    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null);
+    const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
+    linkStackUpdateRecoveryGate(recoveryId, healthGateId);
+
+    let recheckWarning: string | undefined;
+    try {
+      const recheck = await ImageUpdateService.getInstance().recheckStack(req.nodeId, stackName);
+      if (recheck.warning) recheckWarning = recheck.warning;
+    } catch (recheckErr) {
+      console.warn(
+        '[Stacks] Post-update recheck failed for %s: %s',
+        sanitizeForLog(stackName),
+        sanitizeForLog(getErrorMessage(recheckErr, 'unknown')),
+      );
+      recheckWarning = UPDATE_VERIFICATION_INCOMPLETE_WARNING;
+    }
+
+    invalidateFleetUpdateCache();
     invalidateNodeCaches(req.nodeId);
     NotificationService.getInstance().broadcastEvent({
       type: 'state-invalidate',
@@ -2282,11 +2367,11 @@ stacksRouter.post('/:stackName/update', async (req: Request, res: Response) => {
     });
     dlog(`[Stacks] Update completed: ${sanitizeForLog(stackName)}`);
     if (debug) console.debug(`[Stacks:debug] Update finished in ${Date.now() - t0}ms`);
-    ok = true;
-    const healthGateId = HealthGateService.getInstance().beginStack(req.nodeId, stackName, 'update', req.user?.username ?? null);
-    const recoveryId = orchResult.kind === 'stack_compose_done' ? orchResult.recoveryId : null;
-    linkStackUpdateRecoveryGate(recoveryId, healthGateId);
-    res.json({ status: 'Update completed', healthGateId });
+    res.json({
+      status: 'Update completed',
+      healthGateId,
+      ...(recheckWarning ? { recheckWarning } : {}),
+    });
     notifyActionSuccess('image_update_applied', `${stackName} updated`, stackName, req.user?.username ?? 'system');
     if (!skipScan) {
       triggerPostDeployScan(stackName, req.nodeId).catch(err =>

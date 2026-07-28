@@ -1,5 +1,10 @@
 import { Router, type Request, type Response } from 'express';
-import { DatabaseService, type NotificationSuppressionAppliesTo, type NotificationSuppressionRule } from '../services/DatabaseService';
+import {
+  DatabaseService,
+  type NotificationSuppressionAppliesTo,
+  type NotificationSuppressionRetraction,
+  type NotificationSuppressionRule,
+} from '../services/DatabaseService';
 import { NotificationService, ALL_NOTIFICATION_CATEGORIES, ALL_SUPPRESSIBLE_CATEGORIES } from '../services/NotificationService';
 import type { NotificationCategory } from '../services/NotificationService';
 import { NodeRegistry } from '../services/NodeRegistry';
@@ -36,6 +41,42 @@ const VALID_CATEGORIES: ReadonlySet<NotificationCategory> = new Set(ALL_NOTIFICA
 const VALID_SUPPRESSION_CATEGORIES: ReadonlySet<NotificationCategory> = new Set(ALL_SUPPRESSIBLE_CATEGORIES);
 const VALID_LEVELS = new Set(['info', 'warning', 'error']);
 const VALID_APPLIES_TO = new Set<NotificationSuppressionAppliesTo>(['bell', 'external', 'both']);
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Omitted / empty body (old hub) -> permanent watermark 0.
+ * Present body with any keys must be a complete valid retraction or 400.
+ */
+function parseReplicaRetractionBody(
+  body: unknown,
+  res: Response,
+): NotificationSuppressionRetraction | false {
+  if (
+    body == null ||
+    (typeof body === 'object' && !Array.isArray(body) && Object.keys(body as object).length === 0)
+  ) {
+    return { kind: 'permanent', source_updated_at: 0 };
+  }
+  if (typeof body !== 'object' || Array.isArray(body)) {
+    res.status(400).json({ error: 'retraction body must be an object' });
+    return false;
+  }
+  const raw = body as Record<string, unknown>;
+  const kind = raw.kind;
+  const source = raw.source_updated_at;
+  if (kind !== 'permanent' && kind !== 'recoverable') {
+    res.status(400).json({ error: 'kind must be permanent or recoverable' });
+    return false;
+  }
+  if (!isNonNegativeSafeInteger(source)) {
+    res.status(400).json({ error: 'source_updated_at must be a non-negative safe integer' });
+    return false;
+  }
+  return { kind, source_updated_at: source };
+}
 
 function validateNodeId(nodeId: unknown, res: Response): number | null | false {
   if (nodeId === undefined || nodeId === null) return null;
@@ -550,8 +591,16 @@ notificationSuppressionRouter.post('/replica', authMiddleware, (req: Request, re
       isCreate: true,
     }, res);
     if (scheduleResult === false) return;
+    if (!isNonNegativeSafeInteger(rule.created_at)) {
+      res.status(400).json({ error: 'created_at must be a non-negative safe integer' });
+      return;
+    }
+    if (!isNonNegativeSafeInteger(rule.updated_at)) {
+      res.status(400).json({ error: 'updated_at must be a non-negative safe integer' });
+      return;
+    }
 
-    DatabaseService.getInstance().upsertNotificationSuppressionRuleReplica({
+    const outcome = DatabaseService.getInstance().upsertNotificationSuppressionRuleReplica({
       ...rule,
       stack_patterns: patterns.patterns,
       label_ids: Array.isArray(rule.label_ids) && rule.label_ids.length > 0 ? rule.label_ids : null,
@@ -561,11 +610,13 @@ notificationSuppressionRouter.post('/replica', authMiddleware, (req: Request, re
       scheduleInvalid: false,
       enabled: rule.enabled !== false,
       expires_at: rule.expires_at ?? null,
+      created_at: rule.created_at,
+      updated_at: rule.updated_at,
       // Replicas are always node-agnostic on the receiving node: the hub's node_id
       // is a hub-local scoping concept and never trustworthy as a foreign key here.
       node_id: null,
     });
-    res.json({ success: true });
+    res.json({ success: true, outcome });
   } catch (error) {
     console.error('Failed to apply suppression rule replica:', error);
     res.status(500).json({ error: 'Failed to apply suppression rule replica' });
@@ -577,8 +628,10 @@ notificationSuppressionRouter.delete('/replica/:id', authMiddleware, (req: Reque
   try {
     const id = parseIntParam(req, res, 'id', 'suppression rule ID');
     if (id === null) return;
-    DatabaseService.getInstance().deleteNotificationSuppressionRule(id);
-    res.json({ success: true });
+    const retraction = parseReplicaRetractionBody(req.body, res);
+    if (retraction === false) return;
+    const { outcome } = DatabaseService.getInstance().deleteNotificationSuppressionRule(id, retraction);
+    res.json({ success: true, outcome });
   } catch (error) {
     console.error('Failed to delete suppression rule replica:', error);
     res.status(500).json({ error: 'Failed to delete suppression rule replica' });
@@ -727,7 +780,10 @@ notificationSuppressionRouter.delete('/:id', authMiddleware, (req: Request, res:
     const existing = DatabaseService.getInstance().getNotificationSuppressionRule(id);
     if (!existing) { res.status(404).json({ error: 'Suppression rule not found' }); return; }
 
-    DatabaseService.getInstance().deleteNotificationSuppressionRule(id);
+    DatabaseService.getInstance().deleteNotificationSuppressionRule(id, {
+      kind: 'permanent',
+      source_updated_at: existing.updated_at,
+    });
     deleteSuppressionRuleFromFleet(existing);
     console.log(`[Suppression] Rule ${id} deleted`);
     res.json({ success: true });

@@ -4,6 +4,13 @@ import { Button } from './ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { ScrollableTabRow } from './ui/ScrollableTabRow';
 import { apiFetch } from '@/lib/api';
+import { fetchUpdatePreview } from '@/lib/fetchUpdatePreview';
+import {
+  isActionableUpdatePreview,
+  isPreviewUncertain,
+  isReviewRequiredUpdatePreview,
+  isTagOnlyAdvisory,
+} from '@/lib/updatePreviewActionability';
 import { cn } from '@/lib/utils';
 import { type AnatomyMarkdownInput, type PortRow, type VolumeRow } from '@/lib/anatomyMarkdown';
 import { usePreflightDismiss } from '@/hooks/usePreflightDismiss';
@@ -19,6 +26,7 @@ import EnvironmentPanel from './stack/EnvironmentPanel';
 import ComposeLabelsPanel from './stack/ComposeLabelsPanel';
 import StackNetworkingPanel from './stack/StackNetworkingPanel';
 import { useNodes } from '@/context/NodeContext';
+import { isPreflightNoteFinding } from '@/lib/preflightNotes';
 import type { NotificationItem } from '@/components/dashboard/types';
 
 interface StackAnatomyPanelProps {
@@ -46,7 +54,13 @@ interface UpdatePreviewImage {
   current_tag: string;
   next_tag: string | null;
   has_update: boolean;
+  digest_update?: boolean;
+  tag_update?: boolean;
   semver_bump: SemverBump;
+  check_status?: 'ok' | 'partial' | 'failed' | 'not_checkable';
+  check_error?: string | null;
+  /** This image's own digest-comparison failure; not masked by a confirmed tag update. */
+  digest_error?: string | null;
 }
 
 interface UpdatePreviewSummary {
@@ -60,6 +74,9 @@ interface UpdatePreviewSummary {
   blocked_reason: string | null;
   has_build_services: boolean;
   rebuild_available: boolean;
+  check_status?: 'ok' | 'partial' | 'failed';
+  verification_failed?: boolean;
+  verification_error?: string | null;
 }
 
 interface UpdatePreview {
@@ -168,7 +185,9 @@ export default function StackAnatomyPanel({
         if (!cancelled) {
           setPreflightSeverity(typeof data?.activeHighestSeverity === 'string' ? data.activeHighestSeverity : null);
           const findings = Array.isArray(data?.findings) ? data.findings : undefined;
-          setPreflightFindings(findings?.filter((f: { acknowledged?: boolean }) => !f.acknowledged));
+          // Notes do not drive the Doctor tab dismiss fingerprint.
+          setPreflightFindings(findings?.filter((f: { acknowledged?: boolean; ruleId?: string }) =>
+            !f.acknowledged && !isPreflightNoteFinding(f.ruleId)));
         }
       } catch {
         if (!cancelled) { setPreflightSeverity(null); setPreflightFindings(undefined); }
@@ -249,15 +268,15 @@ export default function StackAnatomyPanel({
     let cancelled = false;
     const run = async () => {
       try {
-        const res = await apiFetch(`/stacks/${stackName}/update-preview`);
+        const result = await fetchUpdatePreview(stackName);
         if (cancelled) return;
-        if (res.ok) {
-          const data = await res.json();
-          setUpdatePreview(data);
+        if (result.ok && result.preview) {
+          setUpdatePreview(result.preview as UpdatePreview);
         } else {
           setUpdatePreview(null);
         }
-      } catch {
+      } catch (err) {
+        console.error('[StackAnatomyPanel] update-preview load failed', err);
         if (!cancelled) setUpdatePreview(null);
       }
     };
@@ -279,16 +298,15 @@ export default function StackAnatomyPanel({
     let cancelled = false;
     const run = async () => {
       try {
-        const res = await apiFetch(`/stacks/${stackName}/update-preview`);
+        const result = await fetchUpdatePreview(stackName);
         if (cancelled) return;
-        if (!res.ok) {
+        if (!result.ok) {
           // Re-check failed: keep the banner already shown rather than hiding a
           // possibly-still-pending update. The apply action reports its own outcome.
-          console.error(`[StackAnatomyPanel] update-preview re-check returned ${res.status}; keeping the existing banner`);
+          console.error(`[StackAnatomyPanel] update-preview re-check returned ${result.status}; keeping the existing banner`);
           return;
         }
-        const data = await res.json();
-        if (!cancelled) setUpdatePreview(data);
+        if (!cancelled && result.preview) setUpdatePreview(result.preview as UpdatePreview);
       } catch (err) {
         console.error('[StackAnatomyPanel] update-preview re-check failed:', err);
       }
@@ -363,13 +381,26 @@ export default function StackAnatomyPanel({
   const hasUpdate = Boolean(updatePreview?.summary.has_update);
   const hasBuildServices = Boolean(updatePreview?.summary.has_build_services);
   const rebuildAvailable = Boolean(updatePreview?.summary.rebuild_available);
+  const verificationError = updatePreview?.summary.verification_error ?? null;
+  const previewCheckStatus = updatePreview?.summary.check_status;
+  const previewUncertain = isPreviewUncertain(updatePreview);
+  // Failed digest verification is never a verified rebuild claim, but a confirmed
+  // tag update or intentional local rebuild affordance still shows.
   const showUpdateBanner = hasUpdate || rebuildAvailable;
+  const showCheckStatusBanner = previewUncertain && !showUpdateBanner;
   const updateKind = updatePreview?.summary.update_kind ?? 'none';
   const blocked = Boolean(updatePreview?.summary.blocked);
+  // Another image in the stack failed digest verification: applying the
+  // full-stack update would pull/recreate that image as collateral, so the
+  // banner must not claim "safe to apply" and the Apply button is withheld
+  // (per-service update actions elsewhere are unaffected). Uses the same
+  // per-image logic as Fleet so the two surfaces never disagree; a stack
+  // whose only unverified image is the one being updated is unaffected.
+  const reviewRequired = isReviewRequiredUpdatePreview(updatePreview);
   const updatedImages = (updatePreview?.images ?? []).filter((img) => img.has_update);
   const bannerSeverity: 'danger' | 'warn' | 'ok' = bump === 'major' || blocked
     ? 'danger'
-    : bump === 'minor' ? 'warn' : 'ok';
+    : bump === 'minor' || reviewRequired ? 'warn' : 'ok';
   const bannerTone = bannerSeverity === 'danger'
     ? 'border-destructive/40 bg-destructive/[0.06] text-destructive'
     : bannerSeverity === 'warn'
@@ -381,21 +412,27 @@ export default function StackAnatomyPanel({
       ? 'border-warning/40 text-warning hover:bg-warning/10'
       : 'border-success/40 text-success hover:bg-success/10';
   const bumpLabel = bump === 'none' || bump === 'unknown' ? '' : `${bump}`;
-  const bannerLeadIn = blocked
-    ? 'review required'
-    : hasUpdate && updateKind === 'digest'
-      ? 'same-tag digest rebuild'
-      : hasUpdate && hasBuildServices
-        ? 'registry update + local rebuild'
-        : rebuildAvailable && !hasUpdate
-          ? 'local build / rebuild required'
-          : bump === 'patch'
-            ? 'safe to apply'
-            : bump === 'minor'
-              ? 'review recommended'
-              : bump === 'major'
-                ? 'breaking changes possible'
-                : '';
+  const tagOnlyAdvisory = isTagOnlyAdvisory(updatePreview);
+  const canApplyPreview = isActionableUpdatePreview(updatePreview);
+
+  let bannerLeadIn = '';
+  if (blocked || reviewRequired) {
+    bannerLeadIn = 'review required';
+  } else if (tagOnlyAdvisory) {
+    bannerLeadIn = 'newer tag · edit Compose pin';
+  } else if (hasUpdate && updateKind === 'digest') {
+    bannerLeadIn = 'same-tag digest rebuild';
+  } else if (hasUpdate && hasBuildServices) {
+    bannerLeadIn = 'registry update + local rebuild';
+  } else if (rebuildAvailable && !hasUpdate) {
+    bannerLeadIn = 'local build / rebuild required';
+  } else if (bump === 'patch') {
+    bannerLeadIn = 'safe to apply';
+  } else if (bump === 'minor') {
+    bannerLeadIn = 'review recommended';
+  } else if (bump === 'major') {
+    bannerLeadIn = 'breaking changes possible';
+  }
   const buildServiceNames = updatePreview?.build_services ?? [];
   const buildHint = hasBuildServices
     ? `Rebuilds ${buildServiceNames.length} local build service${buildServiceNames.length === 1 ? '' : 's'} from Dockerfile context; may take longer and needs network access for base images.`
@@ -415,17 +452,6 @@ export default function StackAnatomyPanel({
           <TabsList className="h-7 w-max gap-0.5 bg-transparent border-none p-0">
             <TabsTrigger value="anatomy" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Anatomy</TabsTrigger>
             <TabsTrigger value="activity" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Activity</TabsTrigger>
-            <TabsTrigger value="dossier" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
-            <TabsTrigger value="drift" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
-            {envInventoryEnabled && (
-              <TabsTrigger value="environment" data-testid="environment-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Environment</TabsTrigger>
-            )}
-            {composeLabelsEnabled && (
-              <TabsTrigger value="compose-labels" data-testid="compose-labels-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Compose Labels</TabsTrigger>
-            )}
-            {networkingEnabled && (
-              <TabsTrigger value="networking" data-testid="networking-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Networking</TabsTrigger>
-            )}
             {doctorEnabled && (
               <TabsTrigger value="doctor" data-testid="doctor-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">
                 <span className="inline-flex items-center gap-1">
@@ -438,6 +464,17 @@ export default function StackAnatomyPanel({
                   )}
                 </span>
               </TabsTrigger>
+            )}
+            <TabsTrigger value="drift" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Drift</TabsTrigger>
+            <TabsTrigger value="dossier" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Dossier</TabsTrigger>
+            {envInventoryEnabled && (
+              <TabsTrigger value="environment" data-testid="environment-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Environment</TabsTrigger>
+            )}
+            {composeLabelsEnabled && (
+              <TabsTrigger value="compose-labels" data-testid="compose-labels-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Compose Labels</TabsTrigger>
+            )}
+            {networkingEnabled && (
+              <TabsTrigger value="networking" data-testid="networking-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Networking</TabsTrigger>
             )}
             {storageEnabled && (
               <TabsTrigger value="storage" data-testid="storage-tab" className="py-1 px-2.5 font-mono text-[11px] uppercase tracking-[0.18em]">Storage</TabsTrigger>
@@ -576,6 +613,23 @@ export default function StackAnatomyPanel({
             </Row>
           </>
         )}
+        {showCheckStatusBanner && updatePreview && (
+          <div
+            data-testid="update-check-status-banner"
+            className="mt-3 mb-3 rounded-lg border border-warning/40 bg-warning/[0.06] p-3 text-warning"
+            role="status"
+          >
+            <div className="font-mono text-xs uppercase tracking-wide">
+              {previewCheckStatus === 'failed' ? 'Update check failed' : 'Update check incomplete'}
+            </div>
+            <div className="mt-1 font-mono text-xs text-foreground/80 leading-relaxed">
+              {verificationError
+                ?? (previewCheckStatus === 'failed'
+                  ? 'Registry checks could not verify image status. Retained update indicators may be stale.'
+                  : 'Some image checks did not complete. Status is uncertain until a full check succeeds.')}
+            </div>
+          </div>
+        )}
         {showUpdateBanner && updatePreview && (
           <div data-testid="update-available-banner" className={cn('mt-3 mb-3 rounded-lg border p-3', bannerTone)}>
             <div className="flex items-start justify-between gap-2">
@@ -616,7 +670,7 @@ export default function StackAnatomyPanel({
                   <div className="mt-1 font-mono text-[10px] text-destructive">{updatePreview.summary.blocked_reason}</div>
                 )}
               </div>
-              {canEdit && !blocked && (
+              {canEdit && !blocked && canApplyPreview && (
                 <Button
                   type="button"
                   size="sm"
@@ -682,12 +736,17 @@ export default function StackAnatomyPanel({
         </div>
       )}
       </TabsContent>
-      <TabsContent value="dossier" className="flex flex-col flex-1 min-h-0 mt-0">
-        <StackDossierPanel stackName={stackName} anatomy={anatomyInput} canEdit={canEdit} />
-      </TabsContent>
       <TabsContent value="drift" className="flex flex-col flex-1 min-h-0 mt-0">
         <DriftPanel stackName={stackName} />
       </TabsContent>
+      <TabsContent value="dossier" className="flex flex-col flex-1 min-h-0 mt-0">
+        <StackDossierPanel stackName={stackName} anatomy={anatomyInput} canEdit={canEdit} />
+      </TabsContent>
+      {doctorEnabled && (
+        <TabsContent value="doctor" className="flex flex-col flex-1 min-h-0 mt-0">
+          <PreflightPanel stackName={stackName} canEdit={canEdit} />
+        </TabsContent>
+      )}
       {networkingEnabled && (
         <TabsContent value="networking" className="flex flex-col flex-1 min-h-0 mt-0">
           <StackNetworkingPanel stackName={stackName} canEdit={canEdit} doctorEnabled={doctorEnabled} />
@@ -701,11 +760,6 @@ export default function StackAnatomyPanel({
       {composeLabelsEnabled && (
         <TabsContent value="compose-labels" className="flex flex-col flex-1 min-h-0 mt-0">
           <ComposeLabelsPanel stackName={stackName} />
-        </TabsContent>
-      )}
-      {doctorEnabled && (
-        <TabsContent value="doctor" className="flex flex-col flex-1 min-h-0 mt-0">
-          <PreflightPanel stackName={stackName} canEdit={canEdit} />
         </TabsContent>
       )}
       {storageEnabled && (

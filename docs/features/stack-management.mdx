@@ -144,8 +144,9 @@ Each row leads with a two-character status indicator that summarizes the stack's
 
 Additional indicators appear to the right of the stack name:
 
-- A pulsing fuchsia dot flags that an image update is available.
-- A muted alert icon replaces the dot when the update check ran but failed to reach the registry or errored.
+- A pulsing fuchsia dot flags that an image update is available and the latest check completed successfully. That signal covers Compose-actionable digest drift (same tag, new registry content) as well as a newer tag that requires editing the Compose pin.
+- A muted warning icon appears when the last check was incomplete. When an update was also detected or previously recorded, the tooltip notes that the full stack could not be verified. When no update is recorded, the tooltip notes that update status could not be fully verified. Incomplete results are not counted under **Updates**.
+- A muted alert icon appears when the update check failed (and, when an earlier update was recorded, notes that the previous status was retained).
 - A branch icon signals that the Git source's upstream branch has moved ahead of the working copy.
 
 ### Search and filter chips
@@ -159,7 +160,7 @@ The search box above the list filters stacks by name. The chip row below it filt
 - **All**: every stack discovered in `COMPOSE_DIR`.
 - **Up**: stacks where every container is running.
 - **Down**: stacks with at least one stopped or exited container.
-- **Updates**: stacks with a pending image update.
+- **Updates**: stacks with a confirmed pending image update (latest check completed successfully). Incomplete or failed checks are excluded from this chip.
 
 Each chip carries a live count. Click **Hide filters** in the top-right of the row to collapse the chips when you want a denser list. Search and chips combine: filtering by **Updates** and typing a few characters returns the intersection.
 
@@ -185,8 +186,8 @@ The header answers two questions at a glance:
 
 - **What is this?** A breadcrumb (`LOCAL · STACKS · NAME`) and the stack name as the title.
 - **Is it healthy?** A state pill to the right of the title reports the live state:
-  - `running · healthy` (green) when at least one container reports a passing healthcheck.
-  - `running · unhealthy` (red) when any container reports a failing healthcheck.
+  - `running · healthy` (green) when at least one container reports Docker health status `healthy`.
+  - `running · unhealthy` (red) when any container reports Docker health status `unhealthy`.
   - `running · starting` (amber) during the Docker healthcheck start period.
   - `running` (green) when no healthcheck is defined.
   - `exited` (red) when no containers are up.
@@ -209,15 +210,17 @@ The same links button appears on update cards in [Auto-Update Policies](/feature
 
 Below the header, each container in the stack gets a single row that answers "is this piece working, and how do I reach it?" When the stack has multiple containers, a summary strip appears above the list showing total, running, paused, and unhealthy counts, along with a **Compact / Detailed** toggle. Compact mode shows status, name, uptime, port, and action buttons; detailed mode (the default) adds CPU, memory, and network I/O sparklines.
 
+While the stack detail stays open, Sencho keeps those rows aligned with Docker: health transitions and container lifecycle changes update the cards without reloading the compose file, environment files, or logs. If automatic refresh cannot reach the node for a stretch, a small stale notice appears with a Retry action so you can pull state manually.
+
 <Frame>
   <img src="/images/stack-view/containers.png" alt="Container card for the plex service showing health badge, uptime, port mapping, open link, action icons, and CPU, memory, and network stat tiles" />
 </Frame>
 
 Each row includes:
 
-- **Health badge.** A colored glyph reports the Docker healthcheck state: `✓` green for passing, `✗` red for failing, `…` amber while the healthcheck start period is in flight. Containers without a `healthcheck:` block show a neutral `✓`.
+- **Health badge.** A colored glyph reports the Docker healthcheck state: `✓` green for `healthy`, `✗` red for `unhealthy`, `…` amber while the healthcheck start period is in flight. Containers without a `healthcheck:` block show a neutral `✓`.
 - **Container name** in mono.
-- **Meta line.** Uptime (`up 12 hours`) and the primary port mapping (`8989 → 8989/tcp`).
+- **Meta line.** Uptime (`up 12 hours`), the Docker health status when defined (`healthy`, `unhealthy`, or `starting`), and the primary port mapping (`8989 → 8989/tcp`).
 - **Open link.** When the container publishes a port, the mapping itself is a link (`8989 → 8989/tcp ↗`) that opens the service in a new tab, with a **Copy URL** button beside it. The address uses the active node's host and switches to `https` for port 443. Recognised multi-port apps open their web path automatically (for example, Plex opens `/web`).
 - **Live stat tiles.** Three tiles show CPU, memory, and network I/O with a rolling sparkline. The sparkline uses the cyan data color and refreshes roughly every 1.5 seconds.
 - **Action icons.** The image source links button (see above), plus shortcuts to **View logs**, open a bash shell, and (on single-service stacks) the per-container Start / Stop / Restart kebab.
@@ -256,7 +259,7 @@ The structured viewer holds up to 10,000 lines; older entries are dropped from t
 
 ## Anatomy panel
 
-The right column of the stack view is a tabbed panel: Anatomy, Activity, Dossier, Drift, Environment, Compose Labels, Networking, Doctor, and Storage. Tabs appear only when the data they need is available, and the row scrolls horizontally (with a chevron button) when there are more tabs than fit.
+The right column of the stack view is a tabbed panel: Anatomy, Activity, Doctor, Drift, Dossier, Environment, Compose Labels, Networking, and Storage. Tabs appear only when the data they need is available, and the row scrolls horizontally (with a chevron button) when there are more tabs than fit.
 
 <Frame>
   <img src="/images/stack-view/anatomy-panel.png" alt="Anatomy panel with the Anatomy tab active, showing services, ports, volumes, restart, env_file, network, and source rows plus the tab row" />
@@ -281,7 +284,13 @@ Each row maps one compose concept to the value it resolves to right now:
 
 A footer card under the rows surfaces the first published port as a clickable **EXPOSED** link, so you can jump straight to the running app.
 
-If an image update is available, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows. Registry updates name each image with a pending update and show its version transition (for example `27.1.4 -> 27.1.5`); the detail line below reads `patch · safe to apply` (green), `minor · review recommended` (amber), or `major · breaking changes possible` (rose), followed by an **apply** button. Build-only stacks show **Rebuild available** instead of a version bump, with a **Rebuild & Update** button. A stack that mixes registry images and local builds still shows a single banner, with the rebuild note folded into the same detail line. Major bumps use the rose styling and are worth reviewing before applying.
+If an image update is available, or the stack declares one or more services with a local `build:` section, an inline banner appears below the rows.
+
+- **Digest rebuild / rebuild**: same-tag registry content changed, or a local `build:` service needs rebuilding. The banner shows the version context and an **apply** (or **Rebuild & Update**) button when the check completed successfully.
+- **Newer tag**: a higher semver tag exists than the pin in Compose. The detail line reads `newer tag · edit Compose pin`. There is no **apply** button; Compose pull does not rewrite image pins. Edit the Compose file (or use your usual pin-change workflow), then deploy.
+- **Incomplete or failed check** with no confirmed update: a separate amber banner explains that status is uncertain until a full check succeeds.
+
+For actionable registry updates, the detail line also reads `patch · safe to apply` (green), `minor · review recommended` (amber), or `major · breaking changes possible` (rose). Build-only stacks show **Rebuild available** instead of a version bump, with a **Rebuild & Update** button. A stack that mixes registry images and local builds still shows a single banner, with the rebuild note folded into the same detail line. Major bumps use the rose styling and are worth reviewing before applying.
 
 Rebuilds can take longer than a registry pull and depend on the local Dockerfile context, network access, and base-image availability. Atomic rollback restores compose and env files only; previously built image layers are not rolled back automatically.
 

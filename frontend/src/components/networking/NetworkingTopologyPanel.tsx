@@ -111,8 +111,6 @@ export function NetworkingTopologyPanel({
             ariaLabel="Network ownership"
             options={OWNERSHIP_OPTIONS.map(({ key, label }) => ({ value: key, label }))}
           />
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
           <FilterChip active={includeSystem} onClick={() => setIncludeSystem(!includeSystem)}>
             Include system
           </FilterChip>

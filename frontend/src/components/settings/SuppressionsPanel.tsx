@@ -286,7 +286,7 @@ export function SuppressionsPanel({ isReplica }: SuppressionsPanelProps) {
       )}
 
       {!loading && rows.length > 0 && (
-        <ScrollArea className="max-h-[420px] pr-2">
+        <ScrollArea className="h-[420px] max-md:h-auto pr-2">
           <ul className="divide-y divide-glass-border">
             {pageItems.map((row) => {
               const justLabel = triageJustificationLabel(row.justification);

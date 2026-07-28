@@ -15,6 +15,7 @@ import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryS
 import { DeployedStackDeletionService } from '../services/DeployedStackDeletionService';
 import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
 import { FleetSyncRetryService } from '../services/FleetSyncRetryService';
+import { SuppressionRetractionRetryService } from '../services/SuppressionRetractionRetryService';
 import { DockerEventManager } from '../services/DockerEventManager';
 import TrivyService, { sweepStaleTrivyTempDirs } from '../services/TrivyService';
 import { ImageUpdateService } from '../services/ImageUpdateService';
@@ -154,6 +155,7 @@ export async function startServer(server: Server): Promise<void> {
   HealthGateService.getInstance().start();
   ServiceUpdateRecoveryService.getInstance().start();
   FleetSyncRetryService.getInstance().start();
+  SuppressionRetractionRetryService.getInstance().start();
   ImageUpdateService.getInstance().start();
   SchedulerService.getInstance().start();
   MfaService.getInstance().start();
@@ -166,7 +168,11 @@ export async function startServer(server: Server): Promise<void> {
   // Drop the cached /api/meta entry on tunnel reconnect so the next
   // /api/nodes/:id/meta refetches fresh capabilities and version through
   // the live loopback bridge instead of waiting for the 3-minute TTL.
-  PilotTunnelManager.getInstance().on('tunnel-up', invalidateRemoteMetaCache);
+  // Also flush durable mute-replica retractions that waited for this node.
+  PilotTunnelManager.getInstance().on('tunnel-up', (nodeId: number) => {
+    invalidateRemoteMetaCache(nodeId);
+    void SuppressionRetractionRetryService.getInstance().flushNode(nodeId);
+  });
 
   // Most async initializers still run in parallel. Docker event monitoring
   // is sequenced after self identity so it never classifies Sencho's own

@@ -58,9 +58,11 @@ import {
   getRemoteDigest,
   getRemoteDigestResult,
   getAuthToken,
+  listRegistryTags,
   listRegistryTagsResult,
   parseImageRef,
   selectLocalRepoDigest,
+  selectLocalRepoDigests,
   compareLocalToRemoteTag,
   MANIFEST_CLASSIFICATION_CACHE_TTL_MS,
   MANIFEST_INDEX_DESCRIPTOR_CAP,
@@ -110,6 +112,34 @@ describe('repoDigestMatchesRef', () => {
 
   it('returns false for an entry without a digest', () => {
     expect(repoDigestMatchesRef('nginx:latest', parsed('nginx:latest'))).toBe(false);
+  });
+});
+
+describe('parseImageRef', () => {
+  // docker.io / index.docker.io / registry-1.docker.io are the same registry, but only
+  // the literal 'registry-1.docker.io' is recognized elsewhere (getAuthToken, the
+  // library/ auto-prefix in parseImageRef). An unnormalized 'docker.io' or 'index.docker.io'
+  // leaks through into request URLs and hits the marketing domain instead of the registry API.
+  // Each alias is listed with and without an explicit library/ namespace to pin both paths.
+  it.each([
+    'docker.io/library/traefik:latest',
+    'docker.io/traefik:latest',
+    'index.docker.io/library/traefik:latest',
+    'index.docker.io/traefik:latest',
+  ])('normalizes %s to the registry API host and the library/ namespace', (ref) => {
+    expect(parseImageRef(ref)).toEqual({
+      registry: 'registry-1.docker.io',
+      repo: 'library/traefik',
+      tag: 'latest',
+    });
+  });
+
+  it('leaves a bare official image name unchanged (regression guard)', () => {
+    expect(parseImageRef('traefik:latest')).toEqual({
+      registry: 'registry-1.docker.io',
+      repo: 'library/traefik',
+      tag: 'latest',
+    });
   });
 });
 
@@ -358,6 +388,31 @@ describe('listRegistryTagsResult', () => {
   });
 });
 
+describe('listRegistryTags (compatibility wrapper)', () => {
+  beforeEach(() => {
+    calls.length = 0;
+  });
+
+  it('lists tags for a public Docker Hub repository with no credentials configured', async () => {
+    route = (url) => tokenOk(url) ?? (
+      url.includes('/tags/list')
+        ? { statusCode: 200, headers: {}, body: JSON.stringify({ tags: ['8.7.0', '8.8.0'] }) }
+        : { statusCode: 500, headers: {} }
+    );
+    await expect(listRegistryTags('registry-1.docker.io', 'library/redis', null)).resolves.toEqual(['8.7.0', '8.8.0']);
+  });
+
+  it('still returns empty for a registry that actually requires credentials the caller does not have', async () => {
+    const CHALLENGE = 'Bearer realm="https://ghcr.io/token",service="ghcr.io",scope="repository:user/image:pull"';
+    route = (url): FakeResp => {
+      if (url === 'https://ghcr.io/v2/') return { statusCode: 401, headers: { 'www-authenticate': CHALLENGE } };
+      if (url.startsWith('https://ghcr.io/token')) return { statusCode: 401, headers: {} };
+      return { statusCode: 500, headers: {} };
+    };
+    await expect(listRegistryTags('ghcr.io', 'private/app', undefined)).resolves.toEqual([]);
+  });
+});
+
 // ─── selectLocalRepoDigest ───────────────────────────────────────────────
 
 describe('selectLocalRepoDigest', () => {
@@ -374,9 +429,9 @@ describe('selectLocalRepoDigest', () => {
     expect(selectLocalRepoDigest(repoDigests, parsed('nginx:latest'))).toBe(DIGEST_A);
   });
 
-  it('falls back to the sole valid entry when nothing matches the ref', () => {
+  it('returns null when the sole valid entry belongs to an unrelated repository, rather than guessing', () => {
     const repoDigests = [`ghcr.io/other/image@${DIGEST_A}`];
-    expect(selectLocalRepoDigest(repoDigests, parsed('nginx:latest'))).toBe(DIGEST_A);
+    expect(selectLocalRepoDigest(repoDigests, parsed('nginx:latest'))).toBeNull();
   });
 
   it('returns null when multiple valid entries exist and none matches the ref', () => {
@@ -404,6 +459,64 @@ describe('selectLocalRepoDigest', () => {
   it('is case-insensitive for hex digit casing', () => {
     const upper = `sha256:${'A'.repeat(64)}`;
     expect(selectLocalRepoDigest([`nginx@${upper}`], parsed('nginx:latest'))).toBe(upper);
+  });
+});
+
+// ─── selectLocalRepoDigests ──────────────────────────────────────────────
+
+describe('selectLocalRepoDigests', () => {
+  const parsed = (ref: string) => {
+    const p = parseImageRef(ref);
+    if (!p) throw new Error(`unparseable ${ref}`);
+    return p;
+  };
+  const DIGEST_A = `sha256:${'a'.repeat(64)}`;
+  const DIGEST_B = `sha256:${'b'.repeat(64)}`;
+  const DIGEST_C = `sha256:${'c'.repeat(64)}`;
+
+  it('returns every matching entry in first-seen order', () => {
+    const repoDigests = [`redis@${DIGEST_A}`, `nginx@${DIGEST_B}`, `redis@${DIGEST_C}`];
+    expect(selectLocalRepoDigests(repoDigests, parsed('redis:8.8.0'))).toEqual([DIGEST_A, DIGEST_C]);
+  });
+
+  it('deduplicates matching digests while preserving first-seen order', () => {
+    const repoDigests = [`redis@${DIGEST_A}`, `redis@${DIGEST_B}`, `redis@${DIGEST_A}`];
+    expect(selectLocalRepoDigests(repoDigests, parsed('redis:latest'))).toEqual([DIGEST_A, DIGEST_B]);
+  });
+
+  it('deduplicates case-insensitively on hex digits', () => {
+    const upper = `sha256:${'A'.repeat(64)}`;
+    const lower = `sha256:${'a'.repeat(64)}`;
+    expect(selectLocalRepoDigests([`nginx@${upper}`, `nginx@${lower}`], parsed('nginx:latest'))).toEqual([upper]);
+  });
+
+  it('filters malformed entries and keeps valid matches', () => {
+    const repoDigests = ['redis@sha256:tooshort', `redis@${DIGEST_A}`, 'redis:latest', `redis@${DIGEST_B}`];
+    expect(selectLocalRepoDigests(repoDigests, parsed('redis:latest'))).toEqual([DIGEST_A, DIGEST_B]);
+  });
+
+  it('returns empty when the sole valid entry belongs to an unrelated repository, rather than guessing', () => {
+    // A legitimate retag can leave a lone RepoDigest from a different repo, but
+    // comparing it against this ref's registry state risks a false update
+    // against a registry that has nothing to do with the declared image.
+    expect(selectLocalRepoDigests([`ghcr.io/other/image@${DIGEST_A}`], parsed('nginx:latest'))).toEqual([]);
+  });
+
+  it('returns empty when multiple valid entries exist and none matches the ref', () => {
+    expect(selectLocalRepoDigests([`redis@${DIGEST_A}`, `postgres@${DIGEST_B}`], parsed('nginx:latest'))).toEqual([]);
+  });
+
+  it('returns empty for an empty list', () => {
+    expect(selectLocalRepoDigests([], parsed('nginx:latest'))).toEqual([]);
+  });
+
+  it('returns every matching RepoDigest for the image ref', () => {
+    const digests = selectLocalRepoDigests([
+      `nginx@${DIGEST_A}`,
+      `nginx@${DIGEST_B}`,
+      `redis@sha256:${'c'.repeat(64)}`,
+    ], parsed('nginx:latest'));
+    expect(digests).toEqual([DIGEST_A, DIGEST_B]);
   });
 });
 
@@ -499,7 +612,7 @@ describe('compareLocalToRemoteTag', () => {
         ? { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } }
         : { statusCode: 500, headers: {} }
     );
-    const result = await compareLocalToRemoteTag(INDEX_DIGEST, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([INDEX_DIGEST], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'match' });
     expect(calls.filter((c) => c.url.includes('/manifests/'))).toHaveLength(1);
   });
@@ -516,12 +629,221 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'match' });
     expect(calls.filter((c) => c.url.includes('/manifests/'))).toEqual([
       { url: MANIFEST_URL_TAG, method: 'HEAD' },
       { url: manifestDigestUrl(INDEX_DIGEST), method: 'GET' },
     ]);
+  });
+
+  // #1684: Docker can list a stale index digest ahead of the current one.
+  const STALE_INDEX = `sha256:${'f'.repeat(64)}`;
+
+  it('matches when a later candidate equals the primary even if the first candidate is a stale index', async () => {
+    route = (url, method) => tokenOk(url) ?? (
+      method === 'HEAD'
+        ? { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } }
+        : { statusCode: 500, headers: {} }
+    );
+    const result = await compareLocalToRemoteTag([STALE_INDEX, INDEX_DIGEST], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+    expect(calls.filter((c) => c.url.includes('/manifests/'))).toHaveLength(1);
+  });
+
+  it('matches when the current primary is first among multiple candidates', async () => {
+    route = (url, method) => tokenOk(url) ?? (
+      method === 'HEAD'
+        ? { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } }
+        : { statusCode: 500, headers: {} }
+    );
+    const result = await compareLocalToRemoteTag([INDEX_DIGEST, STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+  });
+
+  it('expands the index once when a later candidate matches a platform child', async () => {
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag([STALE_INDEX, CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+    expect(calls.filter((c) => c.url.includes('/manifests/'))).toEqual([
+      { url: MANIFEST_URL_TAG, method: 'HEAD' },
+      { url: manifestDigestUrl(INDEX_DIGEST), method: 'GET' },
+    ]);
+  });
+
+  it('reports update when every candidate is stale after a complete index classification', async () => {
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'update' });
+  });
+
+  it('errors (not update) when the remote index has no descriptor at all for the local platform', async () => {
+    // STANDARD_INDEX_BODY only carries linux/amd64 and linux/arm64 children.
+    // A windows/amd64 node cannot pull anything from this index; that is not
+    // the same fact as "a newer build is available".
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, { os: 'windows', architecture: 'amd64' });
+    expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('no windows/amd64 variant') });
+  });
+
+  it('errors (not update) for an empty index with no manifests, rather than a speculative update', async () => {
+    const emptyIndexBody = indexBody([]);
+    const emptyIndexDigest = contentDigest(emptyIndexBody);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': emptyIndexDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(emptyIndexDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': emptyIndexDigest }, body: emptyIndexBody };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+    expect(result.kind).toBe('error');
+  });
+
+  it('errors (not update) for an index whose only entries are filtered out (attestation-only), not just a literally empty one', async () => {
+    // Exercises the filtering path (parseIndexBody's attestation-manifest and
+    // unknown/unknown continues), distinct from manifests:[] never entering
+    // the per-entry loop at all.
+    const filteredIndexBody = indexBody([
+      {
+        digest: CHILD_AMD64, os: 'unknown', architecture: 'unknown',
+        annotations: { 'vnd.docker.reference.type': 'attestation-manifest', 'vnd.docker.reference.digest': CHILD_ARM64 },
+      },
+    ]);
+    const filteredIndexDigest = contentDigest(filteredIndexBody);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': filteredIndexDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(filteredIndexDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': filteredIndexDigest }, body: filteredIndexBody };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('no linux/amd64 variant') });
+  });
+
+  it('matches (not errors) a platform-less runnable descriptor even though no platform-labeled descriptor exists', async () => {
+    // OCI allows a runnable descriptor to omit platform; parseIndexBody routes
+    // it to exactDigests. The index has real, pullable content, so this must
+    // not be confused with the "nothing to pull" case.
+    const platformlessDigest = `sha256:${'7'.repeat(64)}`;
+    const noPlatformBody = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [{ digest: platformlessDigest, mediaType: 'application/vnd.oci.image.manifest.v1+json' }],
+    });
+    const noPlatformDigest = contentDigest(noPlatformBody);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': noPlatformDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(noPlatformDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': noPlatformDigest }, body: noPlatformBody };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag([platformlessDigest], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'match' });
+  });
+
+  it('errors (not update) for a mixed index: a platform-less leaf cannot be attributed when another descriptor is explicitly labeled for a different platform', async () => {
+    // Regression: an index with one arm64-labeled descriptor and one
+    // unlabeled leaf must not let the unlabeled leaf stand in as amd64
+    // content just because SOME descriptor in the index is unlabeled.
+    const unrelatedLeaf = `sha256:${'6'.repeat(64)}`;
+    const mixedIndexBody = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [
+        { digest: CHILD_ARM64, mediaType: 'application/vnd.oci.image.manifest.v1+json', platform: { os: 'linux', architecture: 'arm64' } },
+        { digest: unrelatedLeaf, mediaType: 'application/vnd.oci.image.manifest.v1+json' },
+      ],
+    });
+    const mixedIndexDigest = contentDigest(mixedIndexBody);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': mixedIndexDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(mixedIndexDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': mixedIndexDigest }, body: mixedIndexBody };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    // A local candidate that matches neither the arm64 descriptor nor the
+    // unlabeled leaf: with no confirmed amd64 variant, this must fail closed.
+    const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('no confirmed linux/amd64 variant') });
+  });
+
+  it('errors (not update) when a nested index also has no descriptor for the local platform after full expansion', async () => {
+    const nestedIndexBody = indexBody([{ digest: CHILD_ARM64, os: 'linux', architecture: 'arm64' }]);
+    const nestedIndexDigest = contentDigest(nestedIndexBody);
+    const outerIndexBody = JSON.stringify({
+      schemaVersion: 2,
+      mediaType: INDEX_CONTENT_TYPE,
+      manifests: [{ digest: nestedIndexDigest, mediaType: INDEX_CONTENT_TYPE }],
+    });
+    const outerIndexDigest = contentDigest(outerIndexBody);
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': outerIndexDigest, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(outerIndexDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': outerIndexDigest }, body: outerIndexBody };
+      }
+      if (url === manifestDigestUrl(nestedIndexDigest) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': nestedIndexDigest }, body: nestedIndexBody };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    // The outer index only nests an arm64-only child index; an amd64 node has
+    // no descriptor anywhere in the fully-expanded tree.
+    const result = await compareLocalToRemoteTag([STALE_INDEX], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('no linux/amd64 variant') });
   });
 
   it('never re-fetches the mutable tag: the expansion GET targets the primary digest from HEAD, not a second tag lookup', async () => {
@@ -544,7 +866,7 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'match' });
     expect(tagCallCount).toBe(1);
   });
@@ -555,7 +877,7 @@ describe('compareLocalToRemoteTag', () => {
         ? { statusCode: 200, headers: { 'docker-content-digest': SINGLE_DIGEST, 'content-type': 'application/vnd.docker.distribution.manifest.v2+json' } }
         : { statusCode: 500, headers: {} }
     );
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'update' });
     expect(calls.filter((c) => c.url.includes('/manifests/'))).toHaveLength(1);
   });
@@ -570,7 +892,7 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const result = await compareLocalToRemoteTag(CHILD_ARM64, REGISTRY, REPO, TAG, ARM64);
+    const result = await compareLocalToRemoteTag([CHILD_ARM64], REGISTRY, REPO, TAG, ARM64);
     expect(result).toEqual({ kind: 'match' });
     expect(calls.filter((c) => c.url.includes('/manifests/'))).toEqual([
       { url: MANIFEST_URL_TAG, method: 'HEAD' },
@@ -590,7 +912,7 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result.kind).toBe('error');
     expect(calls.filter((c) => c.url === MANIFEST_URL_TAG)).toHaveLength(1);
   });
@@ -609,9 +931,9 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const first = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const first = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(first.kind).toBe('error');
-    const second = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const second = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(second.kind).toBe('error');
     expect(digestGetCount).toBe(2);
   });
@@ -635,12 +957,12 @@ describe('compareLocalToRemoteTag', () => {
       return { statusCode: 500, headers: {} };
     };
 
-    const first = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const first = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(first).toEqual({ kind: 'match' });
 
     await vi.advanceTimersByTimeAsync(MANIFEST_CLASSIFICATION_CACHE_TTL_MS + 1000);
 
-    const second = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const second = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(second).toEqual({ kind: 'match' });
     expect(digestGetCount).toBe(2);
   });
@@ -659,8 +981,8 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
-    await compareLocalToRemoteTag(CHILD_ARM64, REGISTRY, REPO, TAG, ARM64);
+    await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
+    await compareLocalToRemoteTag([CHILD_ARM64], REGISTRY, REPO, TAG, ARM64);
     expect(digestGetCount).toBe(1);
   });
 
@@ -679,8 +1001,8 @@ describe('compareLocalToRemoteTag', () => {
       return { statusCode: 500, headers: {} };
     };
     const [a, b] = await Promise.all([
-      compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64),
-      compareLocalToRemoteTag(CHILD_ARM64, REGISTRY, REPO, TAG, ARM64),
+      compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64),
+      compareLocalToRemoteTag([CHILD_ARM64], REGISTRY, REPO, TAG, ARM64),
     ]);
     expect(a).toEqual({ kind: 'match' });
     expect(b).toEqual({ kind: 'match' });
@@ -688,7 +1010,13 @@ describe('compareLocalToRemoteTag', () => {
   });
 
   it('misses the cache when the primary digest changes (new manifest, new immutable key)', async () => {
-    const INDEX_BODY_2 = indexBody([{ digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' }]);
+    // Carries a genuinely different arm64 child (not CHILD_ARM64) so the second
+    // lookup is a real same-platform mismatch, not an absent-platform index.
+    const NEW_CHILD_ARM64 = `sha256:${'9'.repeat(64)}`;
+    const INDEX_BODY_2 = indexBody([
+      { digest: CHILD_AMD64, os: 'linux', architecture: 'amd64' },
+      { digest: NEW_CHILD_ARM64, os: 'linux', architecture: 'arm64' },
+    ]);
     const INDEX_DIGEST_2 = contentDigest(INDEX_BODY_2);
     let headDigest = INDEX_DIGEST;
     let digestGetCount = 0;
@@ -708,11 +1036,11 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const first = await compareLocalToRemoteTag(CHILD_ARM64, REGISTRY, REPO, TAG, ARM64);
+    const first = await compareLocalToRemoteTag([CHILD_ARM64], REGISTRY, REPO, TAG, ARM64);
     expect(first).toEqual({ kind: 'match' });
 
     headDigest = INDEX_DIGEST_2;
-    const second = await compareLocalToRemoteTag(CHILD_ARM64, REGISTRY, REPO, TAG, ARM64);
+    const second = await compareLocalToRemoteTag([CHILD_ARM64], REGISTRY, REPO, TAG, ARM64);
     expect(second).toEqual({ kind: 'update' });
     expect(digestGetCount).toBe(2);
   });
@@ -734,11 +1062,11 @@ describe('compareLocalToRemoteTag', () => {
     };
 
     route = routeFor(REPO);
-    await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(digestGetCount).toBe(1);
 
     route = routeFor('otherorg/otherapp');
-    await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, 'otherorg/otherapp', TAG, AMD64);
+    await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, 'otherorg/otherapp', TAG, AMD64);
     expect(digestGetCount).toBe(2);
   });
 
@@ -761,7 +1089,7 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const result = await compareLocalToRemoteTag(VARIANT_V7, REGISTRY, REPO, TAG, { os: 'linux', architecture: 'arm' });
+    const result = await compareLocalToRemoteTag([VARIANT_V7], REGISTRY, REPO, TAG, { os: 'linux', architecture: 'arm' });
     expect(result).toEqual({ kind: 'match' });
   });
 
@@ -797,12 +1125,12 @@ describe('compareLocalToRemoteTag', () => {
 
     // A local digest equal to the filtered-out annotated-attestation entry must
     // never match, since that descriptor is dropped before the membership check.
-    const filtered = await compareLocalToRemoteTag(ATTESTATION_ANNOTATED, REGISTRY, REPO, TAG, AMD64);
+    const filtered = await compareLocalToRemoteTag([ATTESTATION_ANNOTATED], REGISTRY, REPO, TAG, AMD64);
     expect(filtered).toEqual({ kind: 'update' });
 
     // The real platform descriptor still matches normally (cache hit reuses the
     // same parsed classification from the previous call).
-    const realMatch = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const realMatch = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(realMatch).toEqual({ kind: 'match' });
   });
 
@@ -825,7 +1153,7 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result.kind).toBe('error');
   });
 
@@ -843,7 +1171,7 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result.kind).toBe('error');
   });
 
@@ -860,7 +1188,7 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('mismatched digest') });
   });
 
@@ -879,7 +1207,7 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'error', reason: expect.stringContaining('does not match the requested digest') });
   });
 
@@ -895,15 +1223,51 @@ describe('compareLocalToRemoteTag', () => {
       }
       return { statusCode: 500, headers: {} };
     };
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, { os: '', architecture: '' });
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, { os: '', architecture: '' });
     expect(result.kind).toBe('error');
   });
 
   it('rejects a truncated local digest as an error, never as a speculative update', async () => {
     route = () => ({ statusCode: 500, headers: {} }); // must never be reached
-    const result = await compareLocalToRemoteTag('sha256:tooshort', REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag(['sha256:tooshort'], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'error', reason: 'Local digest is malformed or truncated' });
     expect(calls).toHaveLength(0);
+  });
+
+  it('rejects an empty candidate list as an error without contacting the registry', async () => {
+    route = () => ({ statusCode: 500, headers: {} });
+    const result = await compareLocalToRemoteTag([], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'error', reason: 'Local digest is malformed or truncated' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects an all-malformed candidate list as an error without contacting the registry', async () => {
+    route = () => ({ statusCode: 500, headers: {} });
+    const result = await compareLocalToRemoteTag(['sha256:short', 'not-a-digest'], REGISTRY, REPO, TAG, AMD64);
+    expect(result).toEqual({ kind: 'error', reason: 'Local digest is malformed or truncated' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('errors on unknown platform for a multi-candidate index mismatch (fail closed)', async () => {
+    route = (url, method) => {
+      const token = tokenOk(url);
+      if (token) return token;
+      if (url === MANIFEST_URL_TAG && method === 'HEAD') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST, 'content-type': INDEX_CONTENT_TYPE } };
+      }
+      if (url === manifestDigestUrl(INDEX_DIGEST) && method === 'GET') {
+        return { statusCode: 200, headers: { 'docker-content-digest': INDEX_DIGEST }, body: STANDARD_INDEX_BODY };
+      }
+      return { statusCode: 500, headers: {} };
+    };
+    const result = await compareLocalToRemoteTag(
+      [STALE_INDEX, `sha256:${'e'.repeat(64)}`],
+      REGISTRY,
+      REPO,
+      TAG,
+      { os: '', architecture: '' },
+    );
+    expect(result.kind).toBe('error');
   });
 
   it('degrades to an uncached comparison (not an error) when the classification cache is at capacity', async () => {
@@ -925,8 +1289,8 @@ describe('compareLocalToRemoteTag', () => {
       return { statusCode: 500, headers: {} };
     };
 
-    const first = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
-    const second = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const first = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
+    const second = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
 
     expect(first).toEqual({ kind: 'match' });
     expect(second).toEqual({ kind: 'match' });
@@ -964,7 +1328,7 @@ describe('compareLocalToRemoteTag', () => {
       },
     });
 
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'match' });
   });
 
@@ -992,7 +1356,7 @@ describe('compareLocalToRemoteTag', () => {
       [nestedDigest]: nestedBody,
     });
 
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'match' });
     expect(calls.filter((c) => c.method === 'GET' && c.url.includes('/manifests/'))).toHaveLength(2);
   });
@@ -1018,7 +1382,7 @@ describe('compareLocalToRemoteTag', () => {
       [nestedDigest]: { statusCode: 404, headers: {} },
     });
 
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result.kind).toBe('error');
   });
 
@@ -1038,7 +1402,7 @@ describe('compareLocalToRemoteTag', () => {
     const primary = contentDigest(body);
     route = routePrimaryDigest(primary, { [primary]: body });
 
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'match' });
   });
 
@@ -1065,7 +1429,7 @@ describe('compareLocalToRemoteTag', () => {
 
     route = routePrimaryDigest(outerDigest, digests);
 
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result.kind).toBe('error');
     if (result.kind === 'error') {
       expect(result.reason).toMatch(/depth/i);
@@ -1087,7 +1451,7 @@ describe('compareLocalToRemoteTag', () => {
     const primary = contentDigest(body);
     route = routePrimaryDigest(primary, { [primary]: body });
 
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result.kind).toBe('error');
   });
 
@@ -1111,7 +1475,7 @@ describe('compareLocalToRemoteTag', () => {
       [nestedDigest]: nestedBody,
     });
 
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result).toEqual({ kind: 'match' });
   });
 
@@ -1131,7 +1495,7 @@ describe('compareLocalToRemoteTag', () => {
     const outerDigest = contentDigest(outerBody);
     route = routePrimaryDigest(outerDigest, { [outerDigest]: outerBody });
 
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result.kind).toBe('error');
     expect(calls.some((c) => c.url.includes('../') || c.url.includes('/evil'))).toBe(false);
   });
@@ -1147,7 +1511,7 @@ describe('compareLocalToRemoteTag', () => {
     const primary = contentDigest(body);
     route = routePrimaryDigest(primary, { [primary]: body });
 
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result.kind).toBe('error');
   });
 
@@ -1161,7 +1525,7 @@ describe('compareLocalToRemoteTag', () => {
     const primary = contentDigest(body);
     route = routePrimaryDigest(primary, { [primary]: body });
 
-    const result = await compareLocalToRemoteTag(CHILD_AMD64, REGISTRY, REPO, TAG, AMD64);
+    const result = await compareLocalToRemoteTag([CHILD_AMD64], REGISTRY, REPO, TAG, AMD64);
     expect(result.kind).toBe('error');
   });
 });
