@@ -166,6 +166,14 @@ export function useOverlayState() {
   const openSelfStackProtected = useCallback(() => setSelfStackProtectedOpen(true), []);
   const closeSelfStackProtected = useCallback(() => setSelfStackProtectedOpen(false), []);
 
+  /** Captured when Save & Reapply opens confirm; cleared on cancel, confirm, or ownership drift. */
+  const [composeReapplyCapture, setComposeReapplyCapture] = useState<{
+    nodeId: number;
+    nodeType: 'local' | 'remote';
+    nodeName: string;
+    stackFile: string;
+  } | null>(null);
+
   const [stackMisconfigScanId, setStackMisconfigScanId] = useState<number | null>(null);
 
   const [diffPreview, setDiffPreview] = useState<DiffPreview | null>(null);
@@ -187,6 +195,7 @@ export function useOverlayState() {
     preDeployAdvisory, setPreDeployAdvisory,
     missingExternalNetworks, setMissingExternalNetworks,
     selfStackProtectedOpen, setSelfStackProtectedOpen, openSelfStackProtected, closeSelfStackProtected,
+    composeReapplyCapture, setComposeReapplyCapture,
     stackMisconfigScanId, setStackMisconfigScanId,
     diffPreview, setDiffPreview, diffPreviewConfirming, setDiffPreviewConfirming,
   } as const;

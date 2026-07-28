@@ -65,6 +65,8 @@ Reapply:
 
 Confirming a local reapply opens a dialog that states the node will recreate from its current Compose configuration, the dashboard may briefly disconnect, no newer version is selected, and the configured image reference is not rewritten. Confirming a remote reapply uses the same required acknowledgement (recreate from current Compose, no newer version, no image rewrite) before the request is sent; Fleet then shows a **Reapplying** badge until the node restarts or the operation fails.
 
+Eligible admins can also run the same procedure from the Compose editor: on Sencho's own stack the primary save action becomes **Save & Reapply**, which saves the file first, then opens the same confirmation and fleet reapply path.
+
 ## Updating the local (gateway) node
 
 Updating the gateway is special because the dashboard is hosted by the very container that is about to restart. Clicking **Update** on the local row, or **Update to vX.Y.Z** on the Local card, opens a confirmation dialog (kicker **LOCAL · UPDATE**, title **Update local node**, with **Cancel** and **Update & restart** buttons) before anything happens on disk. The body text depends on how the compose file pins the image: for a semver pin it names the exact rewrite (for example, "This install pins `saelix/sencho:0.94.1`. Updating rewrites it to `saelix/sencho:0.95.0`..."); for a floating tag it reads more generally ("Pulls Sencho v0.95.0 and restarts the server..."). Both variants end with the same note that the dashboard briefly disconnects and reconnects automatically.

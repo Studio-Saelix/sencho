@@ -204,6 +204,8 @@ export interface EditorViewProps {
     showTakeDown: boolean;
     /** True when this stack is the running Sencho instance on the active node. */
     isSelfStack?: boolean;
+    /** Admin + node reapply eligibility + self-stack: show Save & Reapply instead of Save & Deploy. */
+    canSaveAndReapply?: boolean;
 
     // Recovery surface for a failed/stalled operation on this stack (undefined
     // when the last op succeeded or none has run). onRefreshState re-syncs
@@ -295,6 +297,7 @@ export function EditorView(props: EditorViewProps) {
         requestTakeDownStack,
         showTakeDown,
         isSelfStack,
+        canSaveAndReapply = false,
         recoveryResult,
         onRefreshState,
         onDismissRecovery,
@@ -600,7 +603,7 @@ export function EditorView(props: EditorViewProps) {
                                         <div className="flex items-center">
                                             <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={loadingAction === 'deploy'}>
                                                 <Rocket className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                                Save & Deploy
+                                                {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
                                             </Button>
                                             <DropdownMenu modal={false}>
                                                 <DropdownMenuTrigger asChild>
