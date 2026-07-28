@@ -1,3 +1,5 @@
+export type FleetOperationKind = 'update' | 'reapply_configuration';
+
 export interface UpdateTracker {
   status: 'updating' | 'completed' | 'timeout' | 'failed';
   startedAt: number;
@@ -11,6 +13,8 @@ export interface UpdateTracker {
   wasOffline: boolean;
   /** Timestamp when the tracker transitioned to a terminal state (completed/failed/timeout). */
   resolvedAt?: number;
+  /** Distinguishes version updates from compose reapply so poll heuristics stay correct. */
+  operationKind: FleetOperationKind;
 }
 
 export type TerminalStatus = 'completed' | 'failed' | 'timeout';
@@ -61,13 +65,15 @@ export class FleetUpdateTrackerService {
     return this.trackers.size;
   }
 
-  /** Create a new tracker with `startedAt=now` and resolvedAt set if terminal. */
+  /** Create a new tracker with `startedAt=now` and resolvedAt set if terminal.
+   *  `operationKind` defaults to `'update'` so existing call sites stay unchanged. */
   public create(
     status: UpdateTracker['status'],
     previousVersion: string | null,
     previousProcessStart: number | null,
     error?: string,
     code?: string,
+    operationKind: FleetOperationKind = 'update',
   ): UpdateTracker {
     const now = Date.now();
     return {
@@ -78,6 +84,7 @@ export class FleetUpdateTrackerService {
       wasOffline: false,
       error,
       code,
+      operationKind,
       resolvedAt: status !== 'updating' ? now : undefined,
     };
   }

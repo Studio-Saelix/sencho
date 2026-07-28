@@ -74,9 +74,13 @@ export function FleetView({
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
     const overview = useFleetOverview({ prefs, updatePrefs, updateStatuses: updateStatus.updateStatuses });
-    // The local node's status backs the confirm dialog copy (pin + target ref).
-    const localUpdateConfirmStatus = updateStatus.localUpdateConfirm !== null
-        ? updateStatus.updateStatuses.find(s => s.nodeId === updateStatus.localUpdateConfirm)
+    // Confirm dialogs: local update uses pin/target copy; reapply covers local
+    // and remote nodes with mode-specific wording. Prefer reapply when both set.
+    const confirmMode = updateStatus.reapplyConfirm !== null ? 'reapply' as const : 'update' as const;
+    const confirmNodeId = updateStatus.reapplyConfirm ?? updateStatus.localUpdateConfirm;
+    const confirmOpen = confirmNodeId !== null;
+    const confirmStatus = confirmNodeId !== null
+        ? updateStatus.updateStatuses.find(s => s.nodeId === confirmNodeId)
         : undefined;
     const topology = useTopologyPreferences();
     const { exporting, exportDossier } = useFleetDossierExport();
@@ -340,7 +344,10 @@ export function FleetView({
             </Tabs>
 
             {updateStatus.reconnecting && (
-                <ReconnectingOverlay preUpdateStartedAt={updateStatus.preUpdateStartedAt} />
+                <ReconnectingOverlay
+                    preUpdateStartedAt={updateStatus.preUpdateStartedAt}
+                    mode={updateStatus.reconnectMode}
+                />
             )}
 
             <NodeUpdatesSheet
@@ -353,19 +360,33 @@ export function FleetView({
                 initialTab={initialUpdatesTab}
                 fetchUpdateStatus={updateStatus.fetchUpdateStatus}
                 triggerNodeUpdate={updateStatus.triggerNodeUpdate}
+                triggerNodeReapply={updateStatus.triggerNodeReapply}
                 retryNodeUpdate={updateStatus.retryNodeUpdate}
                 dismissNodeUpdate={updateStatus.dismissNodeUpdate}
                 triggerUpdateAll={updateStatus.triggerUpdateAll}
             />
 
             <LocalUpdateConfirmDialog
-                open={updateStatus.localUpdateConfirm !== null}
-                onOpenChange={(open) => { if (!open) updateStatus.setLocalUpdateConfirm(null); }}
-                onConfirm={updateStatus.confirmLocalUpdate}
-                imagePinKind={localUpdateConfirmStatus?.imagePinKind}
-                composeImageRef={localUpdateConfirmStatus?.composeImageRef}
-                targetImageRef={localUpdateConfirmStatus?.targetImageRef}
-                targetVersion={localUpdateConfirmStatus?.latestVersion}
+                open={confirmOpen}
+                mode={confirmMode}
+                nodeType={
+                    confirmMode === 'reapply'
+                        ? (updateStatus.reapplyConfirmTarget?.type ?? 'local')
+                        : (confirmStatus?.type ?? 'local')
+                }
+                onOpenChange={(open) => {
+                    if (!open) {
+                        updateStatus.setLocalUpdateConfirm(null);
+                        updateStatus.setReapplyConfirm(null);
+                    }
+                }}
+                onConfirm={confirmMode === 'reapply'
+                    ? updateStatus.confirmReapply
+                    : updateStatus.confirmLocalUpdate}
+                imagePinKind={confirmStatus?.imagePinKind}
+                composeImageRef={confirmStatus?.composeImageRef}
+                targetImageRef={confirmStatus?.targetImageRef}
+                targetVersion={confirmStatus?.latestVersion}
             />
 
             {NodeActionModals}

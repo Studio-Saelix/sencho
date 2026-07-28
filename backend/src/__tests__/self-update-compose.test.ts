@@ -21,6 +21,7 @@ import {
 } from '../helpers/selfUpdateCompose';
 import {
   buildComposeReadArgs,
+  buildComposeConfigValidateArgs,
   buildSelfUpdateComposeCmd,
   buildSelfUpdateRunArgs,
   shQuote,
@@ -300,5 +301,24 @@ describe('buildSelfUpdateRunArgs (repinWritable branch)', () => {
     );
     expect(args).toContain('/opt/sencho:/opt/sencho:ro');
     expect(args).not.toContain('/opt/sencho:/opt/sencho:rw');
+  });
+});
+
+describe('buildComposeConfigValidateArgs', () => {
+  it('runs compose config in a throwaway helper with the working dir mounted read-only', () => {
+    const args = buildComposeConfigValidateArgs({
+      workingDir: '/opt/sencho',
+      imageName: 'saelix/sencho:1.0.0',
+      configFiles: 'docker-compose.yml,/opt/sencho/override.yml',
+      hostBindMounts: [{ source: '/etc/sencho', destination: '/etc/sencho' }],
+    });
+    expect(args).toContain('/opt/sencho:/opt/sencho:ro');
+    expect(args).toContain('/var/run/docker.sock:/var/run/docker.sock');
+    expect(args).toContain('/etc/sencho:/etc/sencho:ro');
+    const cmd = args[args.length - 1];
+    expect(cmd).toContain('docker compose');
+    expect(cmd).toContain('config');
+    expect(cmd).toContain(shQuote('docker-compose.yml'));
+    expect(cmd).toContain(shQuote('/opt/sencho/override.yml'));
   });
 });
