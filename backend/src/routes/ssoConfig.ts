@@ -4,6 +4,7 @@ import { SSOService, type SSOProviderConfig } from '../services/SSOService';
 import { requireAdmin, requireTierForSsoProvider } from '../middleware/tierGates';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { sanitizeForLog } from '../utils/safeLog';
+import { wouldRemoveLastProvider } from '../helpers/authenticationMode';
 
 const VALID_SSO_PROVIDERS = ['ldap', 'oidc_google', 'oidc_github', 'oidc_okta', 'oidc_custom'] as const;
 const SSO_SCOPE_MESSAGE = 'API tokens cannot access SSO configuration.';
@@ -85,6 +86,15 @@ ssoConfigRouter.put('/:provider', (req: Request, res: Response): void => {
       }
     }
 
+    const existing = DatabaseService.getInstance().getSSOConfig(provider);
+    const wasEnabled = existing?.enabled === 1;
+    if (!config.enabled && wouldRemoveLastProvider(provider, wasEnabled)) {
+      res.status(400).json({
+        error: 'Cannot disable the last SSO provider while SSO-only mode is active. Switch to Local and SSO first, or use the emergency CLI.',
+      });
+      return;
+    }
+
     SSOService.getInstance().saveProviderConfig(config);
     console.log(`[SSO] Config updated: ${sanitizeForLog(provider)} ${config.enabled ? 'enabled' : 'disabled'}`);
     res.json({ success: true, message: 'SSO configuration saved' });
@@ -101,6 +111,15 @@ ssoConfigRouter.delete('/:provider', (req: Request, res: Response): void => {
   if (rejectInvalidProvider(provider, res)) return;
   if (!requireTierForSsoProvider(provider, req, res)) return;
   try {
+    const existing = DatabaseService.getInstance().getSSOConfig(provider);
+    const wasEnabled = existing?.enabled === 1;
+    if (wouldRemoveLastProvider(provider, wasEnabled)) {
+      res.status(400).json({
+        error: 'Cannot delete the last SSO provider while SSO-only mode is active. Switch to Local and SSO first, or use the emergency CLI.',
+      });
+      return;
+    }
+
     SSOService.getInstance().deleteProviderConfig(provider);
     console.log(`[SSO] Config deleted: ${sanitizeForLog(provider)}`);
     res.json({ success: true, message: 'SSO configuration deleted' });

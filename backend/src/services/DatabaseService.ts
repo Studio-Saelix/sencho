@@ -2012,6 +2012,9 @@ export class DatabaseService {
         stmt.run('cve_intel_enabled', '1');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
+        // Managed by /api/sso/auth-mode, not the generic /api/settings route
+        // (activation needs safety validation).
+        stmt.run('authentication_mode', 'local_and_sso');
         stmt.run('reclaim_hero', '0');
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');

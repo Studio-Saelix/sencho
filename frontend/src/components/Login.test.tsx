@@ -10,13 +10,34 @@ vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ login: loginMock, ssoLdapLogin: ssoLdapLoginMock }),
 }));
 
+function mockAuthDiscovery(providers: Array<{ provider: string; displayName: string; type: string }> = []) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/auth/status')) {
+        return { ok: true, json: async () => ({ localLoginEnabled: true }) };
+      }
+      if (url.includes('/api/auth/sso/providers')) {
+        return { ok: true, json: async () => providers };
+      }
+      return { ok: false, json: async () => ({}) };
+    }),
+  );
+}
+
 beforeEach(() => {
   loginMock.mockClear();
   ssoLdapLoginMock.mockClear();
-  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => [] }));
+  mockAuthDiscovery();
 });
 
+async function waitForPasswordForm() {
+  await waitFor(() => expect(screen.getByLabelText('Username')).toBeInTheDocument());
+}
+
 async function fillCredentials() {
+  await waitForPasswordForm();
   await userEvent.type(screen.getByLabelText('Username'), 'admin');
   await userEvent.type(screen.getByLabelText('Password'), 'password123');
 }
@@ -40,10 +61,7 @@ describe('Login "Stay signed in"', () => {
   });
 
   it('threads remember=true through the LDAP form too', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => [{ provider: 'ldap', displayName: 'Directory', type: 'ldap' }],
-    }));
+    mockAuthDiscovery([{ provider: 'ldap', displayName: 'Directory', type: 'ldap' }]);
     render(<Login />);
     await waitFor(() => expect(screen.getByText('LDAP')).toBeInTheDocument());
     await userEvent.click(screen.getByText('LDAP'));

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { cn } from '@/lib/utils';
+import { oidcAutoRedirectUrl } from '@/lib/oidcAutoRedirect';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -60,26 +61,90 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
     }
     return '';
   });
+  // Capture once: returning from a failed OIDC attempt must stay on Login, not bounce again.
+  const hadSsoErrorRef = useRef(error.length > 0);
   const [isLoading, setIsLoading] = useState(false);
   const [loginMode, setLoginMode] = useState<'local' | 'ldap'>('local');
   const [ssoProviders, setSsoProviders] = useState<SSOProvider[]>([]);
+  const [localLoginEnabled, setLocalLoginEnabled] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState('');
+  const [discoveryReady, setDiscoveryReady] = useState(false);
+  const [oidcRedirecting, setOidcRedirecting] = useState(false);
   const [capsLock, setCapsLock] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
 
   useEffect(() => {
-    fetch('/api/auth/sso/providers', { credentials: 'include' })
-      .then((r) => (r.ok ? r.json() : []))
-      .then((providers: SSOProvider[]) => setSsoProviders(providers))
-      .catch((e) => {
-        console.warn('[Login] SSO provider discovery failed:', e);
-      });
+    let cancelled = false;
+    (async () => {
+      try {
+        const [statusRes, providersRes] = await Promise.all([
+          fetch('/api/auth/status', { credentials: 'include' }),
+          fetch('/api/auth/sso/providers', { credentials: 'include' }),
+        ]);
+        if (cancelled) return;
+
+        if (!statusRes.ok) {
+          // Fail closed: keep localLoginEnabled false so a status outage never
+          // reveals the password form under SSO-only.
+          setDiscoveryError('Could not load authentication status. Refresh the page and try again.');
+          setDiscoveryReady(true);
+          return;
+        }
+        const status = await statusRes.json() as { localLoginEnabled?: boolean };
+        const enabled = status.localLoginEnabled !== false;
+        setLocalLoginEnabled(enabled);
+
+        if (!providersRes.ok) {
+          if (!enabled) {
+            setDiscoveryError('Could not load identity providers. Refresh the page and try again.');
+          }
+          setSsoProviders([]);
+          setDiscoveryReady(true);
+          return;
+        }
+        const providers = await providersRes.json() as SSOProvider[];
+        const list = Array.isArray(providers) ? providers : [];
+        const autoUrl = oidcAutoRedirectUrl({
+          localLoginEnabled: enabled,
+          providers: list,
+          hadSsoError: hadSsoErrorRef.current,
+        });
+        if (autoUrl) {
+          if (cancelled) return;
+          setOidcRedirecting(true);
+          setDiscoveryReady(true);
+          window.location.replace(autoUrl);
+          return;
+        }
+        setSsoProviders(list);
+        if (!enabled && list.some((p) => p.type === 'ldap')) {
+          setLoginMode('ldap');
+        }
+        if (!enabled && list.length === 0) {
+          setDiscoveryError('No identity providers are available. Contact your administrator.');
+        }
+        setDiscoveryReady(true);
+      } catch (e) {
+        console.warn('[Login] Auth discovery failed:', e);
+        if (!cancelled) {
+          setDiscoveryError('Could not load authentication options. Refresh the page and try again.');
+          setDiscoveryReady(true);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   const hasLdap = ssoProviders.some((p) => p.type === 'ldap');
   const oidcProviders = ssoProviders.filter((p) => p.type === 'oidc');
+  const showPasswordForm = localLoginEnabled || (hasLdap && loginMode === 'ldap');
+  const showLocalLdapToggle = localLoginEnabled && hasLdap;
+  // Fail closed: under SSO-only, never show the local form after a discovery error.
+  const blockLocalFallback = !localLoginEnabled && !!discoveryError;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!localLoginEnabled && loginMode !== 'ldap') return;
     setError('');
     setIsLoading(true);
     const result =
@@ -96,12 +161,20 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
     }
   };
 
+  const footerLabel = !discoveryReady
+    ? 'Console'
+    : !localLoginEnabled
+      ? 'Console · SSO'
+      : loginMode === 'ldap'
+        ? 'Console · LDAP'
+        : 'Console · Local';
+
   return (
     <div className={cn('relative', className)} {...props}>
       <AuthCanvas
         footer={
           <div className="flex items-center justify-between">
-            <span>Console · Local</span>
+            <span>{footerLabel}</span>
             <span className="text-stat-subtitle/70">Secure by default</span>
           </div>
         }
@@ -112,12 +185,14 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
               kicker="AUTHENTICATE"
               hero="Sign in"
               caption={
-                loginMode === 'ldap'
-                  ? 'Federated via your directory service.'
-                  : 'Self-hosted fleet console.'
+                !localLoginEnabled
+                  ? 'Sign in with your identity provider.'
+                  : loginMode === 'ldap'
+                    ? 'Federated via your directory service.'
+                    : 'Self-hosted fleet console.'
               }
             />
-            {hasLdap && (
+            {showLocalLdapToggle && (
               <div className="mt-1 flex overflow-hidden rounded-md border border-card-border">
                 <ModePill
                   active={loginMode === 'local'}
@@ -133,104 +208,131 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
             )}
           </div>
 
-          <form onSubmit={handleSubmit} className="flex flex-col gap-5">
-            <div className="flex flex-col gap-1.5">
-              <label
-                htmlFor="username"
-                className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle"
-              >
-                Username
-              </label>
-              <Input
-                id="username"
-                type="text"
-                placeholder="admin"
-                required
-                autoComplete="username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                className={INPUT_CLASS}
-              />
-            </div>
+          {discoveryReady && blockLocalFallback && (
+            <ErrorRail>{discoveryError}</ErrorRail>
+          )}
 
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between">
+          {discoveryReady && oidcRedirecting && (
+            <div className="flex items-center justify-center gap-2 text-stat-subtitle">
+              <Loader2 className="h-4 w-4 animate-spin" strokeWidth={1.5} aria-hidden />
+              <span className="font-sans text-sm">Redirecting to your identity provider...</span>
+            </div>
+          )}
+
+          {discoveryReady && !blockLocalFallback && !oidcRedirecting && error && !showPasswordForm && (
+            <ErrorRail>{error}</ErrorRail>
+          )}
+
+          {discoveryReady && !blockLocalFallback && !oidcRedirecting && showPasswordForm && (
+            <form onSubmit={handleSubmit} className="flex flex-col gap-5">
+              <div className="flex flex-col gap-1.5">
                 <label
-                  htmlFor="password"
+                  htmlFor="username"
                   className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle"
                 >
-                  Password
+                  Username
                 </label>
-                {capsLock && (
-                  <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-warning">
-                    Caps Lock On
-                  </span>
-                )}
+                <Input
+                  id="username"
+                  type="text"
+                  placeholder="admin"
+                  required
+                  autoComplete="username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  className={INPUT_CLASS}
+                />
               </div>
-              <Input
-                id="password"
-                type="password"
-                required
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                onKeyDown={handlePasswordKey}
-                onKeyUp={handlePasswordKey}
-                className={INPUT_CLASS}
-              />
-            </div>
 
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="remember-me"
-                checked={rememberMe}
-                onCheckedChange={(c) => setRememberMe(c === true)}
-              />
-              <label
-                htmlFor="remember-me"
-                className="text-sm text-stat-subtitle cursor-pointer select-none"
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center justify-between">
+                  <label
+                    htmlFor="password"
+                    className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle"
+                  >
+                    Password
+                  </label>
+                  {capsLock && (
+                    <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-warning">
+                      Caps Lock On
+                    </span>
+                  )}
+                </div>
+                <Input
+                  id="password"
+                  type="password"
+                  required
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  onKeyDown={handlePasswordKey}
+                  onKeyUp={handlePasswordKey}
+                  className={INPUT_CLASS}
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="remember-me"
+                  checked={rememberMe}
+                  onCheckedChange={(c) => setRememberMe(c === true)}
+                />
+                <label
+                  htmlFor="remember-me"
+                  className="text-sm text-stat-subtitle cursor-pointer select-none"
+                >
+                  Stay signed in
+                </label>
+              </div>
+
+              {error && <ErrorRail>{error}</ErrorRail>}
+
+              <Button
+                type="submit"
+                disabled={isLoading}
+                className="h-11 w-full bg-brand text-brand-foreground shadow-btn-glow hover:bg-brand/90"
               >
-                Stay signed in
-              </label>
-            </div>
+                {isLoading ? (
+                  <>
+                    <Loader2 className="animate-spin" strokeWidth={1.5} />
+                    Signing in
+                  </>
+                ) : (
+                  <>
+                    {loginMode === 'ldap' ? 'Sign in with LDAP' : 'Sign in'}
+                    <ArrowRight strokeWidth={1.5} />
+                  </>
+                )}
+              </Button>
+            </form>
+          )}
 
-            {error && <ErrorRail>{error}</ErrorRail>}
-
-            <Button
-              type="submit"
-              disabled={isLoading}
-              className="h-11 w-full bg-brand text-brand-foreground shadow-btn-glow hover:bg-brand/90"
-            >
-              {isLoading ? (
-                <>
-                  <Loader2 className="animate-spin" strokeWidth={1.5} />
-                  Signing in
-                </>
-              ) : (
-                <>
-                  {loginMode === 'ldap' ? 'Sign in with LDAP' : 'Sign in'}
-                  <ArrowRight strokeWidth={1.5} />
-                </>
-              )}
-            </Button>
-          </form>
-
-          {oidcProviders.length > 0 && (
+          {discoveryReady && !blockLocalFallback && !oidcRedirecting && oidcProviders.length > 0 && (
             <div className="flex flex-col gap-3">
-              <div className="flex items-center gap-3">
-                <div className="h-px flex-1 bg-card-border" />
-                <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
-                  Or continue with
-                </span>
-                <div className="h-px flex-1 bg-card-border" />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
+              {showPasswordForm && (
+                <div className="flex items-center gap-3">
+                  <div className="h-px flex-1 bg-card-border" />
+                  <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-stat-subtitle">
+                    Or continue with
+                  </span>
+                  <div className="h-px flex-1 bg-card-border" />
+                </div>
+              )}
+              <div
+                className={cn(
+                  'grid gap-2',
+                  oidcProviders.length === 1 ? 'grid-cols-1 justify-items-center' : 'grid-cols-2',
+                )}
+              >
                 {oidcProviders.map((p) => (
                   <Button
                     key={p.provider}
                     type="button"
                     variant="outline"
-                    className="h-10 justify-center gap-2 font-sans"
+                    className={cn(
+                      'h-10 justify-center gap-2 font-sans',
+                      oidcProviders.length === 1 && 'w-full max-w-[14rem]',
+                    )}
                     onClick={() => {
                       window.location.href = `/api/auth/sso/oidc/${p.provider}/authorize`;
                     }}
@@ -241,6 +343,10 @@ export function Login({ className, ...props }: React.ComponentPropsWithoutRef<'d
                 ))}
               </div>
             </div>
+          )}
+
+          {discoveryReady && !blockLocalFallback && !oidcRedirecting && !showPasswordForm && oidcProviders.length === 0 && !discoveryError && (
+            <ErrorRail>No identity providers are available. Contact your administrator.</ErrorRail>
           )}
         </div>
       </AuthCanvas>
@@ -263,4 +369,3 @@ function ModePill({ active, label, onClick }: { active: boolean; label: string; 
     </button>
   );
 }
-
