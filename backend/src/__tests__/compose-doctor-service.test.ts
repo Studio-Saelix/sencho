@@ -28,6 +28,9 @@ function stubDocker(
   rendered: object | null,
   stderr = '',
   snapshot: { containers: unknown[]; networks: unknown[]; volumes: unknown[] } | 'reject' = { containers: [], networks: [], volumes: [] },
+  inspectImage: ReturnType<typeof vi.fn> = vi.fn().mockRejectedValue(
+    Object.assign(new Error('No such image'), { statusCode: 404 }),
+  ),
 ) {
   vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
     renderConfig: vi.fn().mockResolvedValue({
@@ -41,6 +44,13 @@ function stubDocker(
     getDependencySnapshot: snapshot === 'reject'
       ? vi.fn().mockRejectedValue(new Error('docker down'))
       : vi.fn().mockResolvedValue(snapshot),
+    getDocker: vi.fn(() => ({
+      listContainers: vi.fn().mockResolvedValue([]),
+      getContainer: vi.fn(() => ({
+        inspect: vi.fn().mockResolvedValue({ Config: {} }),
+      })),
+    })),
+    inspectImage,
   } as unknown as DockerController);
 }
 
@@ -85,7 +95,7 @@ describe('runPreflight', () => {
     expect(report.renderable).toBe(true);
     expect(report.status).toBe('high'); // env-unset + 0.0.0.0 exposure are high
     expect(report.highestSeverity).toBe('high');
-    expect(report.findings.map(f => f.ruleId)).toEqual(expect.arrayContaining(['env-literal-dollar', 'port-exposed-all-interfaces', 'image-latest', 'no-healthcheck']));
+    expect(report.findings.map(f => f.ruleId)).toEqual(expect.arrayContaining(['env-literal-dollar', 'port-exposed-all-interfaces', 'image-latest', 'healthcheck-unverifiable']));
     expect(report.ranBy).toBe('tester');
     expect(report.sourceHash).toBeTruthy();
 
@@ -171,6 +181,30 @@ describe('runPreflight', () => {
     const allRuns = db().getDb().prepare('SELECT * FROM preflight_runs WHERE node_id = ? AND stack_name = ?').all(nodeId, STACK);
     expect(allRuns).toHaveLength(1);
     expect(doctor().getLatest(nodeId, STACK).status).toBe('pass');
+  });
+
+  it('treats inherited healthcheck as a note that does not block All Clear', async () => {
+    const model = {
+      name: STACK,
+      services: { web: { image: 'nginx:1.27', restart: 'always' } },
+      networks: {},
+      volumes: {},
+    };
+    stubDocker(
+      model,
+      '',
+      { containers: [], networks: [], volumes: [] },
+      vi.fn().mockResolvedValue({
+        inspect: { Config: { Healthcheck: { Test: ['CMD', 'true'] } } },
+        history: [],
+      }),
+    );
+
+    const report = await doctor().runPreflight(nodeId, STACK, 'tester');
+    expect(report.findings.some(f => f.ruleId === 'healthcheck-inherited')).toBe(true);
+    expect(report.activeCount).toBe(0);
+    expect(report.activeStatus).toBe('pass');
+    expect(report.status).toBe('pass');
   });
 
   it('returns an unrenderable report and never stores raw stderr', async () => {

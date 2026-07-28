@@ -26,6 +26,7 @@ import EnvironmentPanel from './stack/EnvironmentPanel';
 import ComposeLabelsPanel from './stack/ComposeLabelsPanel';
 import StackNetworkingPanel from './stack/StackNetworkingPanel';
 import { useNodes } from '@/context/NodeContext';
+import { isPreflightNoteFinding } from '@/lib/preflightNotes';
 import type { NotificationItem } from '@/components/dashboard/types';
 
 interface StackAnatomyPanelProps {
@@ -184,7 +185,9 @@ export default function StackAnatomyPanel({
         if (!cancelled) {
           setPreflightSeverity(typeof data?.activeHighestSeverity === 'string' ? data.activeHighestSeverity : null);
           const findings = Array.isArray(data?.findings) ? data.findings : undefined;
-          setPreflightFindings(findings?.filter((f: { acknowledged?: boolean }) => !f.acknowledged));
+          // Notes do not drive the Doctor tab dismiss fingerprint.
+          setPreflightFindings(findings?.filter((f: { acknowledged?: boolean; ruleId?: string }) =>
+            !f.acknowledged && !isPreflightNoteFinding(f.ruleId)));
         }
       } catch {
         if (!cancelled) { setPreflightSeverity(null); setPreflightFindings(undefined); }

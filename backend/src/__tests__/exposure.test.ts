@@ -14,6 +14,7 @@ function svc(overrides: Record<string, unknown>) {
     networkMode: undefined as string | undefined,
     restart: undefined as string | undefined,
     hasHealthcheck: false,
+    composeHealthcheck: 'absent' as const,
     envKeys: [],
     networks: [],
     extraHosts: [],
