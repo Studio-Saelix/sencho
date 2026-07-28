@@ -287,7 +287,7 @@ export default function EditorLayout() {
     hasServiceScopedUpdate: hasCapability('service-scoped-update'),
     canEditStack: (stackNameOrFilename) => {
       const stackName = stackNameOrFilename.replace(/\.(ya?ml)$/, '');
-      return can('stack:edit', 'stack', stackName);
+      return can('stack:edit', 'stack', stackName, activeNode?.id);
     },
     canOfferVolumeRemoval,
     onDeletedOpenStack: () => onDeletedOpenStackRef.current(),
@@ -1047,6 +1047,7 @@ export default function EditorLayout() {
           can={can}
           selectedFile={selectedFile}
           stackName={stackName}
+          activeNodeId={activeNode?.id ?? null}
           gitSourceOpen={gitSourceOpen}
           setGitSourceOpen={setGitSourceOpen}
           canSelfUpdate={hasCapability('self-update')}

@@ -508,6 +508,8 @@ export interface RoleAssignment {
     role: UserRole;
     resource_type: ResourceType;
     resource_id: string;
+    /** Required for stack scopes; null for node scopes. */
+    node_id: number | null;
     created_at: number;
 }
 
@@ -2245,11 +2247,99 @@ export class DatabaseService {
             CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments(user_id);
             CREATE INDEX IF NOT EXISTS idx_role_assignments_resource ON role_assignments(resource_type, resource_id);
         `);
-        try {
-            this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_role_assignments_unique ON role_assignments(user_id, role, resource_type, resource_id)');
-        } catch (e) {
-            console.warn('[DatabaseService] Could not create role_assignments unique index:', (e as Error).message);
-        }
+        this.migrateRoleAssignmentsNodeQualified();
+    }
+
+    /**
+     * Rebuild role_assignments with Mesh-style stack identity (node_id, resource_id).
+     * Idempotent: probes sqlite_master for the final CHECK and both partial unique indexes.
+     */
+    private migrateRoleAssignmentsNodeQualified(): void {
+        const tableSql = (this.db.prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'role_assignments'"
+        ).get() as { sql: string } | undefined)?.sql ?? '';
+        const indexRows = this.db.prepare(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'role_assignments'"
+        ).all() as Array<{ name: string; sql: string | null }>;
+        const indexSqlByName = new Map(indexRows.map((r) => [r.name, r.sql ?? '']));
+        const checkOk =
+            tableSql.includes("resource_type = 'stack' AND node_id IS NOT NULL") &&
+            tableSql.includes("resource_type = 'node' AND node_id IS NULL");
+        const stackUniqueSql = indexSqlByName.get('idx_role_assignments_stack_unique') ?? '';
+        const nodeUniqueSql = indexSqlByName.get('idx_role_assignments_node_unique') ?? '';
+        const stackUniqueOk =
+            stackUniqueSql.includes('user_id') &&
+            stackUniqueSql.includes('role') &&
+            stackUniqueSql.includes('resource_type') &&
+            stackUniqueSql.includes('resource_id') &&
+            stackUniqueSql.includes('node_id') &&
+            /WHERE\s+resource_type\s*=\s*'stack'/i.test(stackUniqueSql);
+        const nodeUniqueOk =
+            nodeUniqueSql.includes('user_id') &&
+            nodeUniqueSql.includes('role') &&
+            nodeUniqueSql.includes('resource_type') &&
+            nodeUniqueSql.includes('resource_id') &&
+            /WHERE\s+resource_type\s*=\s*'node'/i.test(nodeUniqueSql) &&
+            !/node_id/.test(nodeUniqueSql.replace(/WHERE[\s\S]*/i, ''));
+        if (checkOk && stackUniqueOk && nodeUniqueOk) return;
+
+        this.db.exec('DROP TABLE IF EXISTS role_assignments_new');
+
+        // Do not call getDefaultNode(): NODE_COLUMNS may include columns not
+        // yet added when this migration runs early in the constructor chain.
+        const defaultNodeId = (
+            this.db.prepare('SELECT id FROM nodes WHERE is_default = 1 LIMIT 1').get() as { id: number } | undefined
+        )?.id ?? null;
+
+        this.db.transaction(() => {
+            this.db.exec(`
+                CREATE TABLE role_assignments_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    resource_type TEXT NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    node_id INTEGER,
+                    created_at INTEGER NOT NULL,
+                    CHECK (
+                        (resource_type = 'stack' AND node_id IS NOT NULL)
+                        OR (resource_type = 'node' AND node_id IS NULL)
+                    ),
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY(node_id) REFERENCES nodes(id) ON DELETE CASCADE
+                );
+            `);
+
+            this.db.exec(`
+                INSERT INTO role_assignments_new (id, user_id, role, resource_type, resource_id, node_id, created_at)
+                SELECT id, user_id, role, resource_type, resource_id, NULL, created_at
+                FROM role_assignments
+                WHERE resource_type = 'node';
+            `);
+
+            if (defaultNodeId !== null) {
+                this.db.prepare(`
+                    INSERT INTO role_assignments_new (id, user_id, role, resource_type, resource_id, node_id, created_at)
+                    SELECT id, user_id, role, resource_type, resource_id, ?, created_at
+                    FROM role_assignments
+                    WHERE resource_type = 'stack'
+                `).run(defaultNodeId);
+            }
+            // No default node: legacy stack rows are intentionally omitted (fail closed).
+
+            this.db.exec(`
+                DROP TABLE role_assignments;
+                ALTER TABLE role_assignments_new RENAME TO role_assignments;
+                CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments(user_id);
+                CREATE INDEX IF NOT EXISTS idx_role_assignments_resource ON role_assignments(resource_type, resource_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_role_assignments_stack_unique
+                    ON role_assignments(user_id, role, resource_type, resource_id, node_id)
+                    WHERE resource_type = 'stack';
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_role_assignments_node_unique
+                    ON role_assignments(user_id, role, resource_type, resource_id)
+                    WHERE resource_type = 'node';
+            `);
+        })();
     }
 
     private migrateNotificationRoutes(): void {
@@ -4723,6 +4813,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM service_update_recovery WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
+            this.deleteRoleAssignmentsByStackNode(id);
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM node_update_skips WHERE node_id = ?').run(id);
             this.db.prepare(
@@ -5405,23 +5496,44 @@ export class DatabaseService {
 
     // --- Role Assignments ---
 
-    public getRoleAssignments(userId: number, resourceType: ResourceType, resourceId: string): RoleAssignment[] {
+    public getRoleAssignments(
+        userId: number,
+        resourceType: ResourceType,
+        resourceId: string,
+        nodeId?: number | null,
+    ): RoleAssignment[] {
+        if (resourceType === 'stack') {
+            if (nodeId === undefined || nodeId === null) return [];
+            return this.db.prepare(
+                'SELECT * FROM role_assignments WHERE user_id = ? AND resource_type = ? AND resource_id = ? AND node_id = ?'
+            ).all(userId, resourceType, resourceId, nodeId) as RoleAssignment[];
+        }
         return this.db.prepare(
-            'SELECT * FROM role_assignments WHERE user_id = ? AND resource_type = ? AND resource_id = ?'
+            'SELECT * FROM role_assignments WHERE user_id = ? AND resource_type = ? AND resource_id = ? AND node_id IS NULL'
         ).all(userId, resourceType, resourceId) as RoleAssignment[];
     }
 
     public getAllRoleAssignments(userId: number): RoleAssignment[] {
         return this.db.prepare(
-            'SELECT * FROM role_assignments WHERE user_id = ? ORDER BY resource_type, resource_id'
+            'SELECT * FROM role_assignments WHERE user_id = ? ORDER BY resource_type, resource_id, node_id'
         ).all(userId) as RoleAssignment[];
     }
 
-    public addRoleAssignment(assignment: { user_id: number; role: UserRole; resource_type: ResourceType; resource_id: string }): number {
+    public addRoleAssignment(assignment: {
+        user_id: number;
+        role: UserRole;
+        resource_type: ResourceType;
+        resource_id: string;
+        node_id?: number | null;
+    }): number {
         const now = Date.now();
+        const nodeId = assignment.resource_type === 'stack' ? assignment.node_id ?? null : null;
+        if (assignment.resource_type === 'stack' && (nodeId === null || nodeId === undefined)) {
+            throw new Error('node_id is required for stack role assignments');
+        }
         const result = this.db.prepare(
-            'INSERT INTO role_assignments (user_id, role, resource_type, resource_id, created_at) VALUES (?, ?, ?, ?, ?)'
-        ).run(assignment.user_id, assignment.role, assignment.resource_type, assignment.resource_id, now);
+            'INSERT INTO role_assignments (user_id, role, resource_type, resource_id, node_id, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+        ).run(assignment.user_id, assignment.role, assignment.resource_type, assignment.resource_id, nodeId, now);
         return result.lastInsertRowid as number;
     }
 
@@ -5439,6 +5551,20 @@ export class DatabaseService {
 
     public deleteRoleAssignmentsByResource(resourceType: ResourceType, resourceId: string): void {
         this.db.prepare('DELETE FROM role_assignments WHERE resource_type = ? AND resource_id = ?').run(resourceType, resourceId);
+    }
+
+    /** Clear stack-scoped grants for one (nodeId, stackName) tuple. */
+    public deleteRoleAssignmentsByStack(nodeId: number, stackName: string): void {
+        this.db.prepare(
+            "DELETE FROM role_assignments WHERE resource_type = 'stack' AND node_id = ? AND resource_id = ?"
+        ).run(nodeId, stackName);
+    }
+
+    /** Clear all stack-scoped grants for a node (explicit cleanup; FK CASCADE is not enforced). */
+    public deleteRoleAssignmentsByStackNode(nodeId: number): void {
+        this.db.prepare(
+            "DELETE FROM role_assignments WHERE resource_type = 'stack' AND node_id = ?"
+        ).run(nodeId);
     }
 
     // --- SSO Config ---

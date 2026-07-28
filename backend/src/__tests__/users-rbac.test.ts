@@ -9,10 +9,21 @@ import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_PASSWORD, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import { generateApiToken } from '../utils/apiTokenFormat';
+import { assertStackExistsOnNode } from '../helpers/assertStackExistsOnNode';
+
+vi.mock('../helpers/assertStackExistsOnNode', () => ({
+  assertStackExistsOnNode: vi.fn(async () => ({ ok: true as const })),
+}));
 
 let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
+
+function defaultNodeId(): number {
+  const node = DatabaseService.getInstance().getDefaultNode();
+  if (!node) throw new Error('test default node missing');
+  return node.id;
+}
 
 /** Sign a JWT for a given user with optional token_version (tv). */
 function authToken(username: string, role: string = 'admin', tv?: number): string {
@@ -383,20 +394,90 @@ describe('Scoped Role Assignments', () => {
   });
 
   it('POST /api/users/:id/roles creates assignment (201)', async () => {
+    const nodeId = defaultNodeId();
     const res = await request(app)
       .post(`/api/users/${targetUserId}/roles`)
       .set('Authorization', `Bearer ${adminToken()}`)
-      .send({ role: 'deployer', resource_type: 'stack', resource_id: 'test-stack' });
+      .send({ role: 'deployer', resource_type: 'stack', resource_id: 'test-stack', node_id: nodeId });
     expect(res.status).toBe(201);
     expect(res.body.role).toBe('deployer');
     expect(res.body.resource_type).toBe('stack');
+    expect(res.body.node_id).toBe(nodeId);
+  });
+
+  it('POST /api/users/:id/roles rejects stack assignment without node_id (400)', async () => {
+    const res = await request(app)
+      .post(`/api/users/${targetUserId}/roles`)
+      .set('Authorization', `Bearer ${adminToken()}`)
+      .send({ role: 'deployer', resource_type: 'stack', resource_id: 'no-node-stack' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/node_id/i);
+  });
+
+  it('POST /api/users/:id/roles rejects when stack does not exist on node (400)', async () => {
+    vi.mocked(assertStackExistsOnNode).mockResolvedValueOnce({
+      ok: false,
+      error: 'Stack not found on node',
+    });
+    const res = await request(app)
+      .post(`/api/users/${targetUserId}/roles`)
+      .set('Authorization', `Bearer ${adminToken()}`)
+      .send({
+        role: 'deployer',
+        resource_type: 'stack',
+        resource_id: 'missing-stack',
+        node_id: defaultNodeId(),
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/not found/i);
+  });
+
+  it('POST /api/users/:id/roles rejects node_id qualifier on node assignments (400)', async () => {
+    const res = await request(app)
+      .post(`/api/users/${targetUserId}/roles`)
+      .set('Authorization', `Bearer ${adminToken()}`)
+      .send({
+        role: 'deployer',
+        resource_type: 'node',
+        resource_id: String(defaultNodeId()),
+        node_id: defaultNodeId(),
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/must not be set/i);
+  });
+
+  it('POST /api/users/:id/roles rejects nonexistent numeric node resource_id (400)', async () => {
+    const res = await request(app)
+      .post(`/api/users/${targetUserId}/roles`)
+      .set('Authorization', `Bearer ${adminToken()}`)
+      .send({
+        role: 'deployer',
+        resource_type: 'node',
+        resource_id: '999999',
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Node not found/i);
+  });
+
+  it('POST /api/users/:id/roles creates node assignment without node_id (201)', async () => {
+    const res = await request(app)
+      .post(`/api/users/${targetUserId}/roles`)
+      .set('Authorization', `Bearer ${adminToken()}`)
+      .send({
+        role: 'deployer',
+        resource_type: 'node',
+        resource_id: String(defaultNodeId()),
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.resource_type).toBe('node');
+    expect(res.body.node_id).toBeNull();
   });
 
   it('POST /api/users/:id/roles rejects duplicate (409)', async () => {
     const res = await request(app)
       .post(`/api/users/${targetUserId}/roles`)
       .set('Authorization', `Bearer ${adminToken()}`)
-      .send({ role: 'deployer', resource_type: 'stack', resource_id: 'test-stack' });
+      .send({ role: 'deployer', resource_type: 'stack', resource_id: 'test-stack', node_id: defaultNodeId() });
     expect(res.status).toBe(409);
   });
 
@@ -420,7 +501,7 @@ describe('Scoped Role Assignments', () => {
       const res = await request(app)
         .post(`/api/users/${targetUserId}/roles`)
         .set('Authorization', `Bearer ${adminToken()}`)
-        .send({ role: 'deployer', resource_type: 'stack', resource_id: 'community-stack' });
+        .send({ role: 'deployer', resource_type: 'stack', resource_id: 'community-stack', node_id: defaultNodeId() });
       expect(res.status).toBe(403);
       expect(res.body.code).toBe('PAID_REQUIRED');
     } finally {
@@ -452,7 +533,8 @@ describe('GET /api/permissions/me', () => {
     const db = DatabaseService.getInstance();
     const hash = await bcrypt.hash('password123', 1);
     const id = db.addUser({ username: 'permcheck', password_hash: hash, role: 'viewer' });
-    db.addRoleAssignment({ user_id: id, role: 'deployer', resource_type: 'stack', resource_id: 'my-stack' });
+    const nodeId = defaultNodeId();
+    db.addRoleAssignment({ user_id: id, role: 'deployer', resource_type: 'stack', resource_id: 'my-stack', node_id: nodeId });
 
     const user = db.getUserById(id)!;
     const token = authToken('permcheck', 'viewer', user.token_version);
@@ -461,7 +543,7 @@ describe('GET /api/permissions/me', () => {
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(200);
     expect(res.body.globalRole).toBe('viewer');
-    expect(res.body.scopedPermissions['stack:my-stack']).toBeDefined();
+    expect(res.body.scopedPermissions[`stack:${nodeId}:my-stack`]).toBeDefined();
 
     // Cleanup
     db.deleteRoleAssignmentsByUser(id);
@@ -474,7 +556,13 @@ describe('GET /api/permissions/me', () => {
     const svc = LicenseService.getInstance();
     const hash = await bcrypt.hash('password123', 1);
     const id = db.addUser({ username: 'permcheck-community', password_hash: hash, role: 'viewer' });
-    db.addRoleAssignment({ user_id: id, role: 'deployer', resource_type: 'stack', resource_id: 'my-stack' });
+    db.addRoleAssignment({
+      user_id: id,
+      role: 'deployer',
+      resource_type: 'stack',
+      resource_id: 'my-stack',
+      node_id: defaultNodeId(),
+    });
     const user = db.getUserById(id)!;
     const token = authToken('permcheck-community', 'viewer', user.token_version);
 
@@ -689,53 +777,64 @@ describe('Atomic last-admin guard', () => {
 });
 
 // ---- Orphaned Role Assignment Cleanup ----
+// Proxied remote stack DELETE clears hub grants only on 2xx in
+// remoteNodeProxy (deleteRoleAssignmentsByStack). Non-2xx preserves rows.
+// That proxyRes branch is not exercised here; these cases lock the DB helper
+// isolation that the proxy calls.
 
 describe('Orphaned role assignment cleanup', () => {
-  it('deleting a node removes its role assignments', async () => {
+  it('deleting a node removes its node and stack role assignments', async () => {
     const db = DatabaseService.getInstance();
-    // Create a test node
-    const nodeId = db.addNode({ name: 'test-cleanup-node', type: 'remote', api_url: 'http://test:1852', api_token: '', compose_dir: '/tmp', is_default: false });
-    // Create a role assignment for this node
+    const nodeId = db.addNode({
+      name: 'test-cleanup-node', type: 'remote', api_url: 'http://test:1852',
+      api_token: '', compose_dir: '/tmp', is_default: false,
+    });
     const hash = await bcrypt.hash('password123', 1);
     const userId = db.addUser({ username: 'nodeorphan', password_hash: hash, role: 'viewer' });
-    db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'node', resource_id: String(nodeId) });
+    db.addRoleAssignment({
+      user_id: userId, role: 'deployer', resource_type: 'node', resource_id: String(nodeId),
+    });
+    db.addRoleAssignment({
+      user_id: userId, role: 'deployer', resource_type: 'stack',
+      resource_id: 'on-doomed', node_id: nodeId,
+    });
 
-    // Verify assignment exists
-    const before = db.getAllRoleAssignments(userId);
-    expect(before.length).toBe(1);
+    expect(db.getAllRoleAssignments(userId)).toHaveLength(2);
 
-    // Delete the node
     db.deleteNode(nodeId);
 
-    // Assignments should be gone
-    const after = db.getAllRoleAssignments(userId);
-    expect(after.length).toBe(0);
-
-    // Cleanup
+    expect(db.getAllRoleAssignments(userId)).toHaveLength(0);
     db.deleteUser(userId);
   });
 
-  it('deleteRoleAssignmentsByResource removes only the matching resource tuple', async () => {
+  it('deleteRoleAssignmentsByStack clears only that node+stack tuple', async () => {
     const db = DatabaseService.getInstance();
     const hash = await bcrypt.hash('password123', 1);
     const userId = db.addUser({ username: 'tupleorphan', password_hash: hash, role: 'viewer' });
-    const nodeId = db.addNode({
-      name: 'tuple-cleanup-node', type: 'remote', api_url: 'http://test:1852',
+    const nodeA = db.addNode({
+      name: 'tuple-cleanup-node-a', type: 'remote', api_url: 'http://test-a:1852',
       api_token: '', compose_dir: '/tmp', is_default: false,
     });
-    db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'target-stack' });
-    db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'keep-stack' });
-    db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'node', resource_id: String(nodeId) });
+    const nodeB = db.addNode({
+      name: 'tuple-cleanup-node-b', type: 'remote', api_url: 'http://test-b:1852',
+      api_token: '', compose_dir: '/tmp', is_default: false,
+    });
+    db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'shared-name', node_id: nodeA });
+    db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'shared-name', node_id: nodeB });
+    db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'stack', resource_id: 'keep-stack', node_id: nodeA });
+    db.addRoleAssignment({ user_id: userId, role: 'deployer', resource_type: 'node', resource_id: String(nodeA) });
 
-    db.deleteRoleAssignmentsByResource('stack', 'target-stack');
+    db.deleteRoleAssignmentsByStack(nodeA, 'shared-name');
 
     const after = db.getAllRoleAssignments(userId);
-    expect(after.some((a) => a.resource_type === 'stack' && a.resource_id === 'target-stack')).toBe(false);
-    expect(after.some((a) => a.resource_type === 'stack' && a.resource_id === 'keep-stack')).toBe(true);
-    expect(after.some((a) => a.resource_type === 'node' && a.resource_id === String(nodeId))).toBe(true);
+    expect(after.some((a) => a.resource_type === 'stack' && a.resource_id === 'shared-name' && a.node_id === nodeA)).toBe(false);
+    expect(after.some((a) => a.resource_type === 'stack' && a.resource_id === 'shared-name' && a.node_id === nodeB)).toBe(true);
+    expect(after.some((a) => a.resource_type === 'stack' && a.resource_id === 'keep-stack' && a.node_id === nodeA)).toBe(true);
+    expect(after.some((a) => a.resource_type === 'node' && a.resource_id === String(nodeA))).toBe(true);
 
     db.deleteUser(userId);
-    db.deleteNode(nodeId);
+    db.deleteNode(nodeA);
+    db.deleteNode(nodeB);
   });
 });
 

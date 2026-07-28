@@ -62,6 +62,7 @@ export const CAPABILITIES = [
   'guided-external-network-preflight',
   'service-scoped-update',
   'service-scoped-stack-alert',
+  'scoped-stack-auth-evidence',
 ] as const;
 
 /**
@@ -102,6 +103,15 @@ export const SERVICE_SCOPED_UPDATE_CAPABILITY = 'service-scoped-update' as const
 /** Capability for nullable `service_name` on stack alert rules and per-service cooldown evaluation. */
 export const SERVICE_SCOPED_STACK_ALERT_CAPABILITY =
   'service-scoped-stack-alert' as const satisfies Capability;
+
+/**
+ * Remotes that consume hub-bound scoped stack auth evidence headers
+ * (`x-sencho-scoped-stack-name` / `x-sencho-scoped-stack-actions`) under
+ * machine auth. Hubs fail closed when scoped elevation is needed and the
+ * remote lacks this flag.
+ */
+export const SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY =
+  'scoped-stack-auth-evidence' as const satisfies Capability;
 
 /** Returns true when the string is a usable semver version. */
 export function isValidVersion(v: string | null | undefined): v is string {

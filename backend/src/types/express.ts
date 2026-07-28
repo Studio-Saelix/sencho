@@ -1,5 +1,6 @@
 import type { UserRole, ApiTokenScope, ApiToken } from '../services/DatabaseService';
 import type { LicenseTier } from '../services/license-types';
+import type { PermissionAction } from '../middleware/permissions';
 
 // Extend Express Request type for user and node context.
 // This file is imported for its side effects only (ambient declaration).
@@ -27,6 +28,16 @@ declare global {
       deployContext?: import('../services/network/missingExternalNetworksError').DeployInvocationContext;
       /** Verified JWT scope for machine credentials (`node_proxy` / `pilot_tunnel`). */
       machineAuthScope?: 'node_proxy' | 'pilot_tunnel';
+      /**
+       * Hub-bound stack-scoped action evidence, trusted only when set under
+       * machine auth (`node_proxy` / `pilot_tunnel`). Never set from browser sessions.
+       */
+      scopedStackEvidence?: { stackName: string; actions: ReadonlySet<PermissionAction> };
+      /**
+       * Hub-side pending evidence to attach on the outbound proxy hop when
+       * the caller's global role alone would not grant the primary action.
+       */
+      proxyScopedStackEvidence?: { stackName: string; actions: readonly PermissionAction[] };
     }
   }
 }

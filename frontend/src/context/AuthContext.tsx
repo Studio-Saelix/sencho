@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
 import { markMilestone } from '@/lib/hydrationTiming';
+import { resolveCan } from '@/lib/resolveCan';
 
 type AppStatus = 'loading' | 'needsSetup' | 'notAuthenticated' | 'mfaChallenge' | 'authenticated';
 
@@ -33,7 +34,7 @@ interface AuthContextType {
   permissions: PermissionsData | null;
   permissionsStatus: PermissionsStatus;
   permissionsReady: boolean;
-  can: (action: PermissionAction, resourceType?: string, resourceId?: string) => boolean;
+  can: (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean;
   login: (username: string, password: string, remember?: boolean) => Promise<{ success: boolean; error?: string; mfaRequired?: boolean }>;
   ssoLdapLogin: (username: string, password: string, remember?: boolean) => Promise<{ success: boolean; error?: string; mfaRequired?: boolean }>;
   submitMfa: (code: string, opts?: { isBackupCode?: boolean }) => Promise<{ success: boolean; error?: string; retryAfter?: number }>;
@@ -128,20 +129,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('sencho-unauthorized', handleUnauthorized);
   }, []);
 
-  const can = useCallback((action: PermissionAction, resourceType?: string, resourceId?: string): boolean => {
-    if (!permissions) return false;
-
-    if (permissions.globalRole === 'admin') return true;
-
-    if (permissions.globalPermissions.includes(action)) return true;
-
-    if (resourceType && resourceId) {
-      const key = `${resourceType}:${resourceId}`;
-      return permissions.scopedPermissions[key]?.includes(action) ?? false;
-    }
-
-    return false;
-  }, [permissions]);
+  const can = useCallback((
+    action: PermissionAction,
+    resourceType?: string,
+    resourceId?: string,
+    nodeId?: number | null,
+  ): boolean => resolveCan(permissions, action, resourceType, resourceId, nodeId), [permissions]);
 
   const login = async (username: string, password: string, remember = false): Promise<{ success: boolean; error?: string; mfaRequired?: boolean }> => {
     try {

@@ -27,6 +27,16 @@ export const PROXY_ROLE_HEADER = 'x-sencho-actor-role';
 export const PROXY_DEPLOY_SOURCE_HEADER = 'x-sencho-deploy-source';
 export const PROXY_DEPLOY_ACTOR_HEADER = 'x-sencho-deploy-actor';
 
+/**
+ * Bound stack-scoped RBAC evidence for Proxy/Pilot hops. The hub strips any
+ * client-supplied values and, when scoped elevation is required, sets the
+ * exact stack name plus a comma-separated PermissionAction set conferred by
+ * that tuple's hub assignments. Remotes trust these only under node_proxy /
+ * pilot_tunnel machine auth.
+ */
+export const PROXY_SCOPED_STACK_NAME_HEADER = 'x-sencho-scoped-stack-name';
+export const PROXY_SCOPED_STACK_ACTIONS_HEADER = 'x-sencho-scoped-stack-actions';
+
 export const DEPLOY_SOURCES = [
   'manual',
   'rollback',

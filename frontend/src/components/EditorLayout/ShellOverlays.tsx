@@ -21,9 +21,10 @@ interface ShellOverlaysProps {
   stackActions: StackActionsHook;
   isDarkMode: boolean;
   isAdmin: boolean;
-  can: (action: PermissionAction, resourceType?: string, resourceId?: string) => boolean;
+  can: (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean;
   selectedFile: string | null;
   stackName: string;
+  activeNodeId: number | null;
   gitSourceOpen: boolean;
   setGitSourceOpen: (open: boolean) => void;
   canSelfUpdate: boolean;
@@ -39,6 +40,7 @@ export function ShellOverlays({
   can,
   selectedFile,
   stackName,
+  activeNodeId,
   gitSourceOpen,
   setGitSourceOpen,
   canSelfUpdate,
@@ -175,7 +177,7 @@ export function ShellOverlays({
           open={gitSourceOpen}
           onOpenChange={setGitSourceOpen}
           stackName={stackName}
-          canEdit={can('stack:edit', 'stack', stackName)}
+          canEdit={can('stack:edit', 'stack', stackName, activeNodeId)}
           isDarkMode={isDarkMode}
           onSourceChanged={stackActions.refreshGitSourcePending}
         />
