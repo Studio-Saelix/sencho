@@ -1087,22 +1087,20 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
                     placeholder="Select or type a label name..."
                   />
                 </div>
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-3">
-                    <Label>Scope</Label>
-                    <SegmentedControl<'fleet' | 'node'>
-                      value={formLabelScope}
-                      options={[
-                        { value: 'fleet', label: 'Entire fleet' },
-                        { value: 'node', label: 'Selected node' },
-                      ]}
-                      onChange={(v) => {
-                        setFormLabelScope(v);
-                        if (v === 'fleet') setFormNodeId('');
-                      }}
-                      ariaLabel="Label update scope"
-                    />
-                  </div>
+                <div className="flex items-center justify-between gap-3">
+                  <Label>Scope</Label>
+                  <SegmentedControl<'fleet' | 'node'>
+                    value={formLabelScope}
+                    options={[
+                      { value: 'fleet', label: 'Entire fleet' },
+                      { value: 'node', label: 'Selected node' },
+                    ]}
+                    onChange={(v) => {
+                      setFormLabelScope(v);
+                      if (v === 'fleet') setFormNodeId('');
+                    }}
+                    ariaLabel="Label update scope"
+                  />
                 </div>
                 {formLabelScope === 'node' && (
                   <div className="space-y-2">
