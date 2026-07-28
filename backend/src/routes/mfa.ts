@@ -72,7 +72,7 @@ mfaRouter.post('/login/mfa', authRateLimiter, async (req: Request, res: Response
       return;
     }
 
-    let decoded: { scope?: string; user_id?: number; username?: string; sso?: boolean };
+    let decoded: { scope?: string; user_id?: number; username?: string; sso?: boolean; remember?: boolean };
     try {
       decoded = jwt.verify(pendingCookie, jwtSecret) as typeof decoded;
     } catch {
@@ -173,7 +173,7 @@ mfaRouter.post('/login/mfa', authRateLimiter, async (req: Request, res: Response
 
     db.clearMfaFailures(decoded.user_id);
     clearMfaPendingCookie(res, req);
-    issueSessionCookie(res, req, user, jwtSecret);
+    issueSessionCookie(res, req, user, jwtSecret, decoded.remember === true);
     console.log('[Auth] MFA challenge cleared:', user.username);
     if (isDebugEnabled()) console.log('[MFA:diag] login/mfa: success user=', user.username, 'durationMs=', Date.now() - startedAt);
     res.json({ success: true });

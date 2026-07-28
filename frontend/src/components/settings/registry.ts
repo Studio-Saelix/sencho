@@ -82,7 +82,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         group: 'access',
         label: 'Users',
         description: 'Operators, role assignments, and access scopes.',
-        keywords: ['operators', 'team', 'rbac', 'roles', 'permissions'],
+        keywords: ['operators', 'team', 'rbac', 'roles', 'permissions', 'session', 'sliding refresh', 'stay signed in', 'sign out', 'logout'],
         tier: null,
         scope: 'global',
         adminOnly: true,

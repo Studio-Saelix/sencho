@@ -109,6 +109,7 @@ authRouter.post('/setup', authRateLimiter, async (req: Request, res: Response): 
 // Login endpoint
 authRouter.post('/login', authRateLimiter, async (req: Request, res: Response): Promise<void> => {
   const { username, password } = req.body;
+  const remember = req.body.remember === true;
 
   if (!username || !password) {
     res.status(400).json({ error: 'Username and password are required' });
@@ -141,13 +142,13 @@ authRouter.post('/login', authRateLimiter, async (req: Request, res: Response): 
           console.log('[MFA:diag] login: path=local user=', user.username, 'mfaEnabled=', !!mfa?.enabled, 'failedAttempts=', mfa?.failed_attempts ?? 0, 'lockedUntil=', mfa?.locked_until ?? null);
         }
         if (mfa?.enabled) {
-          issueMfaPendingCookie(res, req, user, jwtSecret);
+          issueMfaPendingCookie(res, req, user, jwtSecret, { remember });
           console.log('[Auth] Login password OK, MFA challenge pending:', user.username);
           res.json({ success: true, mfaRequired: true });
           return;
         }
 
-        issueSessionCookie(res, req, user, jwtSecret);
+        issueSessionCookie(res, req, user, jwtSecret, remember);
         console.log('[Auth] Login successful:', user.username);
         res.json({ success: true, message: 'Login successful' });
         return;
