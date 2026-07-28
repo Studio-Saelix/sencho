@@ -81,7 +81,65 @@ describe('PreflightPanel', () => {
     render(<PreflightPanel stackName="web" />);
     const status = await screen.findByTestId('preflight-status');
     expect(status).toHaveAttribute('data-status', 'pass');
-    expect(status).toHaveTextContent(/all clear/i);
+    expect(status).toHaveTextContent('all clear');
+    expect(status).not.toHaveTextContent(/findings acknowledged/i);
+    expect(status).toHaveTextContent('No issues found in the effective model.');
+  });
+
+  it('renders all-clear · findings acknowledged when every finding is acknowledged', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'pass',
+      acknowledgedCount: 1,
+      findings: [{
+        ruleId: 'privileged',
+        severity: 'high',
+        title: 'Privileged container',
+        message: 'runs privileged',
+        service: 'web',
+        acknowledged: true,
+      }],
+    })));
+    render(<PreflightPanel stackName="web" />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveAttribute('data-status', 'pass');
+    expect(status).toHaveTextContent('all clear · findings acknowledged');
+    expect(status).toHaveTextContent(
+      'No active findings remain. One or more detected issues were reviewed and acknowledged by an authorized operator.',
+    );
+    expect(status.className).toContain('border-success/40');
+    expect(status.className).toContain('bg-success/[0.06]');
+    expect(status.className).toContain('text-success');
+    expect(status.querySelector('svg.lucide-check')).not.toBeNull();
+    expect(status.querySelector('svg.lucide-shield-check')).toBeNull();
+    expect(screen.getByTestId('preflight-acknowledged-section')).toBeInTheDocument();
+  });
+
+  it('keeps the severity summary when active findings remain alongside acknowledgements', async () => {
+    vi.mocked(apiFetch).mockResolvedValue(jsonRes(report({
+      status: 'high',
+      highestSeverity: 'high',
+      acknowledgedCount: 1,
+      findings: [
+        { ruleId: 'privileged', severity: 'high', title: 'Privileged container', message: 'runs privileged', service: 'web' },
+        {
+          ruleId: 'image-latest',
+          severity: 'warning',
+          title: 'Image uses a moving tag',
+          message: 'latest tag',
+          service: 'web',
+          acknowledged: true,
+        },
+      ],
+    })));
+    render(<PreflightPanel stackName="web" />);
+    const status = await screen.findByTestId('preflight-status');
+    expect(status).toHaveAttribute('data-status', 'high');
+    expect(status).toHaveTextContent('high risk');
+    expect(status).not.toHaveTextContent(/all clear/i);
+    expect(status).toHaveTextContent('1 active');
+    expect(status).toHaveTextContent('1 acknowledged');
+    expect(screen.getByText('Privileged container')).toBeInTheDocument();
+    expect(screen.getByTestId('preflight-acknowledged-section')).toBeInTheDocument();
   });
 
   it('keeps All Clear when only inherited-healthcheck notes remain', async () => {
