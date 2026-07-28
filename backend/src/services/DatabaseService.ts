@@ -2022,6 +2022,9 @@ export class DatabaseService {
         stmt.run('image_update_check_mode', 'interval');
         stmt.run('image_update_check_cron', '');
         stmt.run('image_update_sidebar_indicators', '1');
+        // Opt-out for background registry polling. Default on so upgrades keep
+        // current behavior; missing key is also treated as enabled at read time.
+        stmt.run('image_update_checks_enabled', '1');
         stmt.run('notification_dispatch_retries', '0');
         stmt.run('env_block_deploy_on_missing_required', '0');
         stmt.run('auto_create_missing_external_networks', '0');
@@ -5002,6 +5005,12 @@ export class DatabaseService {
     /** Deletes the full update row (aggregate + services_json). Returns deleted row count. */
     public clearStackUpdateStatus(nodeId: number, stackName: string): number {
         const result = this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+        return result.changes;
+    }
+
+    /** Deletes every update row for a node. Returns deleted row count. */
+    public clearAllStackUpdateStatus(nodeId: number): number {
+        const result = this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ?').run(nodeId);
         return result.changes;
     }
 

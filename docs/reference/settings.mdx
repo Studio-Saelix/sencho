@@ -489,11 +489,16 @@ Configure how often this node polls container registries to detect available ima
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| **Scheduling mode** | Interval | **Interval**: check every fixed period. **Cron**: check on a precise cron schedule (runs in the node's local timezone). |
+| **Enable image update checks** | On | When on, this node polls registries on schedule, raises update notifications, and feeds Home, sidebar, Anatomy, and Fleet Readiness. Turn off when another tool is the update authority for this node. Explicit stack Update, pull, and redeploy remain available. |
+| **Scheduling mode** | Interval | **Interval**: check every fixed period. **Cron**: check on a precise cron schedule (runs in the node's local timezone). Greyed out while image update checks are off. |
 | **Check interval** | 2 hours | How often to poll registries when in Interval mode. Presets: 15 min, 30 min, 1 h, 2 h, 6 h, 12 h, 24 h. Selecting a new preset saves immediately. |
 | **Cron expression** | - | A standard five-field cron expression (for example, `0 3 * * 1` for every Monday at 03:00). A human-readable description appears below the field as you type. Click **Save schedule** to apply. |
 
-The section footer shows the last-checked timestamp and when the next check is scheduled.
+The section footer shows the last-checked timestamp and when the next check is scheduled. When checks are off, the footer reads **Next check: disabled** and retains the last-checked time from before detection was turned off.
+
+<Note>
+  Nodes running older versions of Sencho do not expose the enable toggle. Upgrade the node to turn detection off.
+</Note>
 
 ### Sidebar
 

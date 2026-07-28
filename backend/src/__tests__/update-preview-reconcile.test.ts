@@ -182,6 +182,53 @@ describe('ImageUpdateService.commitPreviewClear', () => {
 });
 
 describe('GET/POST /api/stacks/:stackName/update-preview reconcile', () => {
+  it('GET returns detection_disabled preview without calling getPreview when checks are off', async () => {
+    const db = DatabaseService.getInstance();
+    db.updateGlobalSetting('image_update_checks_enabled', '0');
+    const getPreview = vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview');
+
+    try {
+      const res = await request(app)
+        .get('/api/stacks/web/update-preview')
+        .set('Cookie', adminCookie);
+
+      expect(res.status).toBe(200);
+      expect(res.body.summary?.detection_disabled).toBe(true);
+      expect(res.body.summary?.has_update).toBe(false);
+      expect(res.body.images).toEqual([]);
+      expect(getPreview).not.toHaveBeenCalled();
+    } finally {
+      db.updateGlobalSetting('image_update_checks_enabled', '1');
+    }
+  });
+
+  it('POST returns detection_disabled without registry I/O or sticky reconcile when checks are off', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'web', true, 1000, 'partial', 'half');
+    db.updateGlobalSetting('image_update_checks_enabled', '0');
+    const getPreview = vi.spyOn(UpdatePreviewService.getInstance(), 'getPreview');
+    const broadcast = vi.spyOn(NotificationService.getInstance(), 'broadcastEvent').mockImplementation(() => undefined);
+    const invalidate = vi.spyOn(CacheService.getInstance(), 'invalidate').mockImplementation(() => undefined);
+
+    try {
+      const res = await request(app)
+        .post('/api/stacks/web/update-preview')
+        .set('Cookie', adminCookie);
+
+      expect(res.status).toBe(200);
+      expect(res.body.summary?.detection_disabled).toBe(true);
+      expect(res.body.summary?.has_update).toBe(false);
+      expect(res.body.reconciled).toBe(false);
+      expect(getPreview).not.toHaveBeenCalled();
+      expect(db.getStackUpdateDetail(nodeId).web?.hasUpdate).toBe(true);
+      expect(broadcast).not.toHaveBeenCalled();
+      expect(invalidate).not.toHaveBeenCalled();
+    } finally {
+      db.updateGlobalSetting('image_update_checks_enabled', '1');
+    }
+  });
+
   it('GET does not mutate sticky state even for authoritative-negative preview', async () => {
     const db = DatabaseService.getInstance();
     const nodeId = db.getDefaultNode()!.id!;

@@ -167,6 +167,8 @@ vi.mock('../services/FileSystemService', () => ({
 
 vi.mock('../services/ImageUpdateService', () => ({
   ImageUpdateService: {
+    // Default on so existing executeUpdate tests keep prior behavior.
+    isChecksEnabled: () => true,
     getInstance: () => ({
       checkImage: mockCheckImage,
       recheckStack: mockRecheckStack,

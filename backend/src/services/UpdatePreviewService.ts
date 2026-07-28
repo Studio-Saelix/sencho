@@ -111,6 +111,11 @@ export interface UpdatePreviewSummary {
     verification_failed: boolean;
     /** First image check_error when verification_failed; otherwise null. */
     verification_error: string | null;
+    /**
+     * When true, background detection is disabled on this node and the preview
+     * was not fetched from registries. Optional for older remotes.
+     */
+    detection_disabled?: boolean;
 }
 
 export interface UpdatePreview {
@@ -360,6 +365,33 @@ export function filterPreviewForService(preview: UpdatePreview, serviceName: str
     const images = preview.images.filter(i => i.service === serviceName);
     const buildServices = preview.build_services.filter(s => s === serviceName);
     return buildSummary(preview.stack_name, images, buildServices);
+}
+
+/** Minimal preview when node-scoped image update detection is disabled. */
+export function buildDetectionDisabledPreview(stackName: string): UpdatePreview {
+    return {
+        stack_name: stackName,
+        images: [],
+        build_services: [],
+        summary: {
+            has_update: false,
+            primary_image: null,
+            current_tag: null,
+            next_tag: null,
+            semver_bump: 'none',
+            update_kind: 'none',
+            blocked: false,
+            blocked_reason: null,
+            has_build_services: false,
+            rebuild_available: false,
+            check_status: 'ok',
+            verification_failed: false,
+            verification_error: null,
+            detection_disabled: true,
+        },
+        rollback_target: null,
+        changelog: null,
+    };
 }
 
 export class UpdatePreviewService {

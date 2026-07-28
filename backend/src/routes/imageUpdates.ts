@@ -77,6 +77,13 @@ imageUpdatesRouter.get('/detail', authMiddleware, (req: Request, res: Response):
 imageUpdatesRouter.post('/refresh', authMiddleware, (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
   try {
+    if (!ImageUpdateService.isChecksEnabled()) {
+      res.status(409).json({
+        enabled: false,
+        error: 'Image update detection is disabled for this node.',
+      });
+      return;
+    }
     const triggered = ImageUpdateService.getInstance().triggerManualRefresh();
     if (!triggered) {
       const mins = ImageUpdateService.manualCooldownMinutes;
@@ -181,6 +188,26 @@ imageUpdatesRouter.put('/interval', authMiddleware, (req: Request, res: Response
   }
 });
 
+const EnabledPatchSchema = z.object({
+  enabled: z.boolean(),
+});
+
+imageUpdatesRouter.put('/enabled', authMiddleware, (req: Request, res: Response): void => {
+  if (!requireAdmin(req, res)) return;
+  const parsed = EnabledPatchSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'enabled must be a boolean' });
+    return;
+  }
+  try {
+    const status = ImageUpdateService.getInstance().applyChecksEnabled(parsed.data.enabled);
+    res.json(status);
+  } catch (error) {
+    console.error('Failed to update image-update checks enabled:', error);
+    res.status(500).json({ error: 'Failed to update image update checks setting' });
+  }
+});
+
 imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
@@ -254,6 +281,7 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
   const triggered: number[] = [];
   const rateLimited: number[] = [];
   const failed: number[] = [];
+  const disabled: number[] = [];
 
   // ImageUpdateService is a per-instance singleton, so the local node's manual
   // refresh fires at most once per request regardless of how many local rows
@@ -261,7 +289,9 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
   const localNode = nodes.find(n => n.type === 'local');
   if (localNode) {
     try {
-      if (ImageUpdateService.getInstance().triggerManualRefresh()) {
+      if (!ImageUpdateService.isChecksEnabled()) {
+        disabled.push(localNode.id);
+      } else if (ImageUpdateService.getInstance().triggerManualRefresh()) {
         triggered.push(localNode.id);
       } else {
         rateLimited.push(localNode.id);
@@ -306,6 +336,8 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
     const { nodeId, status } = entry.value;
     if (status >= 200 && status < 300) {
       triggered.push(nodeId);
+    } else if (status === 409) {
+      disabled.push(nodeId);
     } else if (status === 429) {
       rateLimited.push(nodeId);
     } else {
@@ -314,7 +346,7 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
   }
 
   invalidateFleetUpdateCache();
-  res.json({ triggered, rateLimited, failed });
+  res.json({ triggered, rateLimited, failed, disabled });
 });
 
 /**
@@ -327,6 +359,10 @@ export const autoUpdateRouter = Router();
 autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
+    if (!ImageUpdateService.isChecksEnabled()) {
+      res.json({ result: 'Image update detection is disabled for this node; skipped.' });
+      return;
+    }
     const { target } = req.body as { target?: string };
     console.log(`[AutoUpdate] Execute requested: target="${sanitizeForLog(target || '')}"`);
     if (!target || typeof target !== 'string') {
