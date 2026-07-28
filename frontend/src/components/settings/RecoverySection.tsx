@@ -41,6 +41,7 @@ const CLI_COMMANDS: Array<{ cmd: string; purpose: string }> = [
     { cmd: 'node dist/cli/createEmergencyAdmin.js <username> <password>', purpose: 'Create a new admin account' },
     { cmd: 'node dist/cli/clearSessions.js', purpose: 'Sign every user out' },
     { cmd: 'node dist/cli/disableSso.js [provider]', purpose: 'Disable a broken SSO provider' },
+    { cmd: 'node dist/cli/enableLocalLogin.js', purpose: 'Re-enable local password login after SSO-only mode' },
     { cmd: 'node dist/cli/diagnostics.js', purpose: 'Print this report as JSON' },
     { cmd: 'node dist/cli/validateDb.js', purpose: 'Check database and encryption-key integrity' },
     { cmd: 'node dist/cli/backupData.js [dir]', purpose: 'Back up the data directory' },

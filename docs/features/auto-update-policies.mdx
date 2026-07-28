@@ -34,7 +34,7 @@ When nothing is pending, the board renders a single Shield-icon panel with the h
 
 ## Detection cadence
 
-Sencho polls your registries on a configurable schedule to detect available image updates and raise notifications. This detection cadence is configurable under **Settings > Automation > Image update checks**: choose a fixed interval (every 15 minutes to once a day) or set a cron expression for precise scheduling (e.g. "every Monday at 03:00"). The default is every 2 hours on an interval schedule, and changing it takes effect immediately, with no restart.
+Sencho polls your registries on a configurable schedule to detect available image updates and raise notifications. This detection cadence is configurable under **Settings > Automation > Image update checks**: choose a fixed interval (every 15 minutes to once a day) or set a cron expression for precise scheduling (e.g. "every Monday at 03:00"). The default is every 2 hours on an interval schedule, and changing it takes effect immediately, with no restart. You can also turn image update checks off for a node when another tool is the update authority; explicit stack Update and redeploy actions stay available.
 
 Detection is separate from applying updates:
 

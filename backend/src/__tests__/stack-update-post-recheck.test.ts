@@ -37,6 +37,7 @@ vi.mock('../services/ImageUpdateService', async () => {
   return {
     ...actual,
     ImageUpdateService: {
+      isChecksEnabled: () => true,
       getInstance: () => ({ recheckStack: mockRecheckStack }),
     },
   };

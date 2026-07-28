@@ -17,6 +17,7 @@ import { useUrlSync } from './EditorLayout/hooks/useUrlSync';
 import { shouldClearPendingDetailStack } from './EditorLayout/mobile-pending-detail';
 import { useOverlayState } from './EditorLayout/hooks/useOverlayState';
 import { useStackActions, NODE_SWITCH_PENDING_TOKEN } from './EditorLayout/hooks/useStackActions';
+import { useSelectedStackLiveRefresh } from './EditorLayout/hooks/useSelectedStackLiveRefresh';
 import { useTheme } from '@/hooks/use-theme';
 import { ThemeQuickSwitch } from './theme/ThemeQuickSwitch';
 import { useNotifications } from './EditorLayout/hooks/useNotifications';
@@ -295,6 +296,16 @@ export default function EditorLayout() {
 
   // Wire the ref now that stackActions is available
   resetEditorStateRef.current = stackActions.resetEditorState;
+
+  const { syncStale: containersSyncStale, retrySync: retryContainersSync } = useSelectedStackLiveRefresh({
+    selectedFile,
+    activeNodeId: activeNode?.id,
+    isDetailVisible: activeView === 'editor',
+    containers,
+    composeContent: content,
+    containersLoadStatus,
+    refreshSelectedContainers: stackActions.refreshSelectedContainers,
+  });
 
   // A failed health gate routes into the existing recovery affordance: record
   // a failure for the stack so RecoveryChip/RecoveryPanel offer the same
@@ -623,6 +634,8 @@ export default function EditorLayout() {
       containersLoadStatus={containersLoadStatus}
       containersLoadError={containersLoadError}
       onRetryContainersLoad={() => { void stackActions.retryContainersLoad(); }}
+      containersSyncStale={containersSyncStale}
+      onRetrySync={retryContainersSync}
       containerStats={containerStats}
       containerStatsError={containerStatsError}
       content={content}
@@ -684,10 +697,10 @@ export default function EditorLayout() {
       onRefreshState={async () => {
         if (!selectedFile) return;
         const name = selectedFile.replace(/\.(yml|yaml)$/, '');
-        const ok = await stackActions.refreshSelectedContainers(name, selectedFile);
+        const outcome = await stackActions.refreshSelectedContainers(name, selectedFile);
         await refreshStacks(true);
-        if (ok) toast.success('Refreshed container state.');
-        else toast.error('Could not refresh container state.');
+        if (outcome === 'ok') toast.success('Refreshed container state.');
+        else if (outcome === 'failed') toast.error('Could not refresh container state.');
       }}
       onDismissRecovery={() => { if (selectedFile) dismissActionResult(selectedFile); }}
       panelStartedAt={panelStartedAt}

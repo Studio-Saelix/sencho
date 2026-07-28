@@ -2018,6 +2018,9 @@ export class DatabaseService {
         stmt.run('cve_intel_enabled', '1');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
+        // Managed by /api/sso/auth-mode, not the generic /api/settings route
+        // (activation needs safety validation).
+        stmt.run('authentication_mode', 'local_and_sso');
         stmt.run('reclaim_hero', '0');
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
@@ -2025,9 +2028,17 @@ export class DatabaseService {
         stmt.run('image_update_check_mode', 'interval');
         stmt.run('image_update_check_cron', '');
         stmt.run('image_update_sidebar_indicators', '1');
+        // Opt-out for background registry polling. Default on so upgrades keep
+        // current behavior; missing key is also treated as enabled at read time.
+        stmt.run('image_update_checks_enabled', '1');
         stmt.run('notification_dispatch_retries', '0');
         stmt.run('env_block_deploy_on_missing_required', '0');
         stmt.run('auto_create_missing_external_networks', '0');
+        // Silently extend an actively-used session's cookie instead of hard
+        // expiring it. On by default (matches how most session-based web apps
+        // behave); admins who want a strict absolute session ceiling can turn
+        // it off in Settings > Users.
+        stmt.run('session_sliding_refresh', '1');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;
@@ -5000,6 +5011,12 @@ export class DatabaseService {
     /** Deletes the full update row (aggregate + services_json). Returns deleted row count. */
     public clearStackUpdateStatus(nodeId: number, stackName: string): number {
         const result = this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+        return result.changes;
+    }
+
+    /** Deletes every update row for a node. Returns deleted row count. */
+    public clearAllStackUpdateStatus(nodeId: number): number {
+        const result = this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ?').run(nodeId);
         return result.changes;
     }
 

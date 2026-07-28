@@ -68,10 +68,44 @@ export function UpdatesSection() {
     const activeNodeIdRef = useRef(activeNode?.id ?? null);
     activeNodeIdRef.current = activeNode?.id ?? null;
 
+    const checksEnabled = status?.enabled ?? true;
+    const nodeSupportsEnabledSetting = status !== null && status.enabled !== undefined;
+    const cadenceLocked = !checksEnabled || readOnly || isSaving;
+
     // Derive toggle state from the current status. When the field is missing
     // (older remote node) the toggle is disabled with a helpful message.
     const sidebarIndicators = status?.sidebarIndicators ?? false;
     const nodeSupportsSidebarSetting = status !== null && status.sidebarIndicators !== undefined;
+
+    const handleChecksEnabledChange = useCallback(async (next: boolean) => {
+        const targetNodeId = activeNodeIdRef.current;
+        setIsSaving(true);
+        try {
+            const res = await apiFetch('/image-updates/enabled', {
+                method: 'PUT',
+                nodeId: targetNodeId ?? null,
+                body: JSON.stringify({ enabled: next }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err?.error || 'Failed to update setting');
+            }
+            const data = await res.json() as ImageUpdateStatus;
+            if (activeNodeIdRef.current === targetNodeId) {
+                setStatus(data);
+                setUiMode(data.mode);
+                window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED, {
+                    detail: { changedKeys: ['image_update_checks_enabled'] },
+                }));
+            }
+        } catch (e) {
+            if (activeNodeIdRef.current === targetNodeId) {
+                toast.error((e as Error)?.message || 'Failed to update image update checks setting.');
+            }
+        } finally {
+            setIsSaving(false);
+        }
+    }, []);
 
     const handleSidebarIndicatorsChange = useCallback(async (next: boolean) => {
         const targetNodeId = activeNodeIdRef.current;
@@ -87,7 +121,7 @@ export function UpdatesSection() {
                 throw new Error(err?.error || 'Failed to update setting');
             }
             // Guard: if the active node changed while the PATCH was in flight,
-            // discard the response — it belongs to a different node.
+            // discard the response; it belongs to a different node.
             if (activeNodeIdRef.current === targetNodeId) {
                 setStatus(prev => prev ? { ...prev, sidebarIndicators: next } : prev);
                 window.dispatchEvent(new CustomEvent(SENCHO_SETTINGS_CHANGED, {
@@ -109,7 +143,11 @@ export function UpdatesSection() {
     useMastheadStats(
         isLoading || intervalMinutes == null
             ? null
-            : [{ label: 'INTERVAL', value: formatIntervalLabel(intervalMinutes), tone: 'value' }],
+            : [{
+                label: checksEnabled ? 'INTERVAL' : 'CHECKS',
+                value: checksEnabled ? formatIntervalLabel(intervalMinutes) : 'Off',
+                tone: 'value',
+            }],
     );
 
     useEffect(() => {
@@ -208,7 +246,7 @@ export function UpdatesSection() {
     const cronFieldError = getCronFieldError(draftCron);
     const cronDescription = cronTrimmed.length > 0 ? getCronDescription(draftCron) : '';
     const hasDescriptionError = cronTrimmed.length > 0 && cronDescription === 'Invalid expression';
-    const canSaveCron = cronTrimmed.length > 0 && !cronFieldError && !hasDescriptionError && !isSaving;
+    const canSaveCron = cronTrimmed.length > 0 && !cronFieldError && !hasDescriptionError && !isSaving && checksEnabled;
 
     const handleSaveCron = useCallback(async () => {
         if (!canSaveCron || intervalMinutes == null) return;
@@ -251,15 +289,36 @@ export function UpdatesSection() {
         : INTERVAL_PRESETS;
 
     const lastChecked = status?.lastCheckedAt != null ? formatTimeAgo(status.lastCheckedAt) : 'never';
-    const nextCheck = status?.checking
-        ? 'checking now'
-        : status?.nextCheckAt != null
-            ? `in ${formatTimeUntil(status.nextCheckAt)}`
-            : 'not scheduled';
+    const nextCheck = status?.enabled === false
+        ? 'disabled'
+        : status?.checking
+            ? 'checking now'
+            : status?.nextCheckAt != null
+                ? `in ${formatTimeUntil(status.nextCheckAt)}`
+                : 'not scheduled';
+
+    const enableHelper = status !== null && status.enabled === undefined
+        ? 'This node is running an older version of Sencho that does not support this setting. Upgrade the node to enable it.'
+        : checksEnabled
+            ? 'When on, Sencho polls registries on a schedule, raises update notifications, and feeds Home, sidebar, Anatomy, and Fleet Readiness. Turn off when another tool is the update authority for this node.'
+            : 'Image update detection is off for this node. Scheduled registry checks and update notifications are stopped. Explicit stack Update, pull, and redeploy actions remain available.';
 
     return (
         <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-10 border-0 p-0">
             <SettingsSection title="Registry checks" kicker="node-scoped">
+                <SettingsField
+                    label="Enable image update checks"
+                    helper={enableHelper}
+                    htmlFor="image-checks-enabled-toggle"
+                >
+                    <TogglePill
+                        id="image-checks-enabled-toggle"
+                        checked={checksEnabled && nodeSupportsEnabledSetting}
+                        onChange={handleChecksEnabledChange}
+                        disabled={status === null || !nodeSupportsEnabledSetting || readOnly || isSaving}
+                    />
+                </SettingsField>
+
                 <SettingsField
                     label="Check registries for image updates every"
                     helper="Sencho checks registries to detect available image updates and raise notifications. Choose a fixed interval, or set a cron expression for precise scheduling. Cron expressions run in the node's local timezone. Each node checks on its own schedule."
@@ -270,6 +329,7 @@ export function UpdatesSection() {
                             onChange={handleModeChange}
                             ariaLabel="Image check scheduling mode"
                             className="self-start"
+                            disabled={cadenceLocked || intervalMinutes == null}
                             options={[
                                 { value: 'interval', label: 'Interval' },
                                 { value: 'cron', label: 'Cron' },
@@ -280,7 +340,7 @@ export function UpdatesSection() {
                             <Select
                                 value={intervalMinutes != null ? String(intervalMinutes) : undefined}
                                 onValueChange={handleIntervalChange}
-                                disabled={readOnly || isSaving || intervalMinutes == null}
+                                disabled={cadenceLocked || intervalMinutes == null}
                             >
                                 <SelectTrigger className="w-44" aria-label="Image update check interval">
                                     <SelectValue placeholder="Select interval" />
@@ -301,7 +361,7 @@ export function UpdatesSection() {
                                         placeholder="0 3 * * 1"
                                         value={draftCron}
                                         onChange={e => { setDraftCron(e.target.value); setSaveError(null); }}
-                                        disabled={readOnly || isSaving}
+                                        disabled={cadenceLocked}
                                     />
                                     <SettingsPrimaryButton
                                         disabled={!canSaveCron}
@@ -327,24 +387,26 @@ export function UpdatesSection() {
                 </SettingsField>
             </SettingsSection>
 
-            <SettingsSection title="Sidebar" kicker="node-scoped">
-                <SettingsField
-                    label="Show update status in sidebar"
-                    helper={
-                        status !== null && status.sidebarIndicators === undefined
-                            ? "This node is running an older version of Sencho that does not support this setting. Upgrade the node to enable it."
-                            : "Show a pulsing dot when a stack has an available update and a warning icon when the check fails. The Stack Health table on the home page always shows update status regardless of this setting. Notifications are unaffected."
-                    }
-                    htmlFor="sidebar-indicators-toggle"
-                >
-                    <TogglePill
-                        id="sidebar-indicators-toggle"
-                        checked={sidebarIndicators}
-                        onChange={handleSidebarIndicatorsChange}
-                        disabled={status === null || !nodeSupportsSidebarSetting || readOnly || isSaving}
-                    />
-                </SettingsField>
-            </SettingsSection>
+            {checksEnabled && (
+                <SettingsSection title="Sidebar" kicker="node-scoped">
+                    <SettingsField
+                        label="Show update status in sidebar"
+                        helper={
+                            status !== null && status.sidebarIndicators === undefined
+                                ? "This node is running an older version of Sencho that does not support this setting. Upgrade the node to enable it."
+                                : "Show a pulsing dot when a stack has an available update and a warning icon when the check fails. The Stack Health table on the home page always shows update status regardless of this setting. Notifications are unaffected."
+                        }
+                        htmlFor="sidebar-indicators-toggle"
+                    >
+                        <TogglePill
+                            id="sidebar-indicators-toggle"
+                            checked={sidebarIndicators}
+                            onChange={handleSidebarIndicatorsChange}
+                            disabled={status === null || !nodeSupportsSidebarSetting || readOnly || isSaving}
+                        />
+                    </SettingsField>
+                </SettingsSection>
+            )}
         </fieldset>
     );
 }

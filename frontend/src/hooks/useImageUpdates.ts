@@ -20,6 +20,7 @@ const IMAGE_UPDATE_POLL_MS = 5 * 60 * 1000;
 export function useImageUpdates(activeNodeId: number | undefined) {
   const [stackUpdates, setStackUpdates] = useState<Record<string, StackUpdateInfo>>({});
   const [sidebarIndicators, setSidebarIndicators] = useState(false);
+  const [checksEnabled, setChecksEnabled] = useState(true);
 
   // Track which node owns the current state. When activeNodeId changes
   // React renders once with the old owner before the passive effect clears
@@ -42,6 +43,7 @@ export function useImageUpdates(activeNodeId: number | undefined) {
 
     // Self-contained status helper: owns fetch, parse, and state write.
     // A failure here never blocks the detail path below.
+    let detectionOn = true;
     const fetchStatus = async (): Promise<void> => {
       try {
         const res = await apiFetch('/image-updates/status', { nodeId: targetNodeId });
@@ -50,6 +52,12 @@ export function useImageUpdates(activeNodeId: number | undefined) {
           const data = await res.json() as ImageUpdateStatus;
           if (genRef.current !== gen) return;
           setSidebarIndicators(data.sidebarIndicators ?? false);
+          // Older remotes omit enabled; treat absence as on for badge logic.
+          detectionOn = data.enabled !== false;
+          setChecksEnabled(detectionOn);
+          if (!detectionOn) {
+            setStackUpdates({});
+          }
         } else {
           console.error('[ImageUpdates] status fetch returned', res.status);
         }
@@ -64,9 +72,17 @@ export function useImageUpdates(activeNodeId: number | undefined) {
       try {
         const res = await apiFetch('/image-updates/detail', { nodeId: targetNodeId });
         if (genRef.current !== gen) return;
+        if (!detectionOn) {
+          setStackUpdates({});
+          return;
+        }
         if (res.ok) {
           const data = await res.json() as Record<string, StackUpdateInfo>;
           if (genRef.current !== gen) return;
+          if (!detectionOn) {
+            setStackUpdates({});
+            return;
+          }
           setStackUpdates(data);
           return;
         }
@@ -96,7 +112,10 @@ export function useImageUpdates(activeNodeId: number | undefined) {
       }
     };
 
-    await Promise.allSettled([fetchStatus(), fetchDetail()]);
+    // Status first so a disabled node clears findings before detail can repopulate.
+    await fetchStatus();
+    if (genRef.current !== gen) return;
+    await fetchDetail();
 
     // Background milestone: both image-update requests have settled for the
     // active node. Fire once per node session, and only if this refresh still
@@ -120,18 +139,23 @@ export function useImageUpdates(activeNodeId: number | undefined) {
     genRef.current += 1;
     setStackUpdates({});          // eslint-disable-line react-hooks/set-state-in-effect
     setSidebarIndicators(false);  // eslint-disable-line react-hooks/set-state-in-effect
+    setChecksEnabled(true);       // eslint-disable-line react-hooks/set-state-in-effect
     setOwnerNodeId(activeNodeId); // eslint-disable-line react-hooks/set-state-in-effect
     void refreshRef.current();
     const id = setInterval(() => { void refreshRef.current(); }, IMAGE_UPDATE_POLL_MS);
     return () => clearInterval(id);
   }, [activeNodeId]);
 
-  // React to settings changes so toggling the sidebar-indicator preference
+  // React to settings changes so toggling sidebar indicators or checks-enabled
   // propagates immediately without waiting for the 5-minute poll.
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{ changedKeys?: string[] }>).detail;
-      if (detail?.changedKeys?.includes('image_update_sidebar_indicators')) {
+      const keys = detail?.changedKeys ?? [];
+      if (
+        keys.includes('image_update_sidebar_indicators')
+        || keys.includes('image_update_checks_enabled')
+      ) {
         refreshRef.current();
       }
     };
@@ -147,5 +171,6 @@ export function useImageUpdates(activeNodeId: number | undefined) {
     stackUpdates: isOwner ? stackUpdates : {} as Record<string, StackUpdateInfo>,
     refresh,
     sidebarIndicators: isOwner ? sidebarIndicators : false,
+    checksEnabled: isOwner ? checksEnabled : true,
   };
 }

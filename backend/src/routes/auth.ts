@@ -24,6 +24,7 @@ import {
 import { isSecureRequest } from '../helpers/cookies';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
+import { getAuthenticationMode, isLocalLoginEnabled } from '../helpers/authenticationMode';
 
 export const authRouter = Router();
 
@@ -34,6 +35,8 @@ authRouter.get('/status', async (req: Request, res: Response): Promise<void> => 
   try {
     const settings = DatabaseService.getInstance().getGlobalSettings();
     const needsSetup = !settings.auth_username || !settings.auth_password_hash || !settings.auth_jwt_secret;
+    const authenticationMode = getAuthenticationMode();
+    const localLoginEnabled = authenticationMode !== 'sso_only';
 
     let mfaPending = false;
     const mfaCookie = req.cookies?.[MFA_PENDING_COOKIE_NAME];
@@ -46,10 +49,10 @@ authRouter.get('/status', async (req: Request, res: Response): Promise<void> => 
       }
     }
 
-    res.json({ needsSetup, mfaPending });
+    res.json({ needsSetup, mfaPending, localLoginEnabled, authenticationMode });
   } catch (error) {
     console.error('Error checking setup status:', error);
-    res.json({ needsSetup: true, mfaPending: false });
+    res.json({ needsSetup: true, mfaPending: false, localLoginEnabled: true, authenticationMode: 'local_and_sso' });
   }
 });
 
@@ -106,6 +109,7 @@ authRouter.post('/setup', authRateLimiter, async (req: Request, res: Response): 
 // Login endpoint
 authRouter.post('/login', authRateLimiter, async (req: Request, res: Response): Promise<void> => {
   const { username, password } = req.body;
+  const remember = req.body.remember === true;
 
   if (!username || !password) {
     res.status(400).json({ error: 'Username and password are required' });
@@ -113,6 +117,13 @@ authRouter.post('/login', authRateLimiter, async (req: Request, res: Response): 
   }
 
   try {
+    if (!isLocalLoginEnabled()) {
+      res.status(403).json({
+        error: 'Local password authentication is disabled. Sign in using SSO.',
+      });
+      return;
+    }
+
     const db = DatabaseService.getInstance();
     const user = db.getUserByUsername(username);
 
@@ -131,13 +142,13 @@ authRouter.post('/login', authRateLimiter, async (req: Request, res: Response): 
           console.log('[MFA:diag] login: path=local user=', user.username, 'mfaEnabled=', !!mfa?.enabled, 'failedAttempts=', mfa?.failed_attempts ?? 0, 'lockedUntil=', mfa?.locked_until ?? null);
         }
         if (mfa?.enabled) {
-          issueMfaPendingCookie(res, req, user, jwtSecret);
+          issueMfaPendingCookie(res, req, user, jwtSecret, { remember });
           console.log('[Auth] Login password OK, MFA challenge pending:', user.username);
           res.json({ success: true, mfaRequired: true });
           return;
         }
 
-        issueSessionCookie(res, req, user, jwtSecret);
+        issueSessionCookie(res, req, user, jwtSecret, remember);
         console.log('[Auth] Login successful:', user.username);
         res.json({ success: true, message: 'Login successful' });
         return;

@@ -106,6 +106,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'PUT /sso/config': 'Updated SSO configuration',
   'DELETE /sso/config': 'Deleted SSO configuration',
   'POST /sso/config/*/test': 'Tested SSO configuration',
+  'PUT /sso/auth-mode': 'Updated authentication mode',
 
   // API tokens
   'POST /api-tokens': 'Created API token',

@@ -1225,6 +1225,10 @@ export class SchedulerService {
         imageUpdateService: ImageUpdateService,
         isWildcard = false
     ): Promise<string> {
+        if (!ImageUpdateService.isChecksEnabled()) {
+            console.log(`[SchedulerService] Stack "${stackName}": image update detection is disabled; skipped.`);
+            return `Stack "${stackName}": image update detection is disabled; skipped.`;
+        }
         const containers = await docker.getContainersByStack(stackName);
         if (!containers || containers.length === 0) {
             if (!isWildcard) {

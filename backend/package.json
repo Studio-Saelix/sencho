@@ -18,6 +18,7 @@
     "create-emergency-admin": "node dist/cli/createEmergencyAdmin.js",
     "clear-sessions": "node dist/cli/clearSessions.js",
     "disable-sso": "node dist/cli/disableSso.js",
+    "enable-local-login": "node dist/cli/enableLocalLogin.js",
     "diagnostics": "node dist/cli/diagnostics.js",
     "validate-db": "node dist/cli/validateDb.js",
     "backup-data": "node dist/cli/backupData.js"
