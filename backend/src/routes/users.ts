@@ -324,7 +324,7 @@ usersRouter.post('/:id/roles', authMiddleware, async (req: Request, res: Respons
         'on',
         sanitizeForLog(resource_type),
         sanitizeForLog(resource_id),
-        nodeId != null ? `node ${nodeId}` : '',
+        sanitizeForLog(nodeId != null ? `node ${nodeId}` : ''),
         'to user',
         userId,
         'by:',
