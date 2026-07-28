@@ -36,6 +36,8 @@ export function visibilityInterval(fn: () => void, ms: number): () => void {
   const stop = () => { if (interval) { clearInterval(interval); interval = null; } };
   const onVisChange = () => { if (document.hidden) { stop(); } else { fn(); start(); } };
   document.addEventListener('visibilitychange', onVisChange);
-  start();
+  // Do not start a timer when the tab is already hidden (e.g. deep-link opened
+  // in a background tab). Resume via visibilitychange when the tab is shown.
+  if (!document.hidden) start();
   return () => { stop(); document.removeEventListener('visibilitychange', onVisChange); };
 }

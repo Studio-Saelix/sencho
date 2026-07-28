@@ -1246,11 +1246,11 @@ describe('container fetch contract', () => {
         setContainersLoadError,
       } as never,
     });
-    let ok = true;
+    let ok: 'ok' | 'skipped' | 'failed' = 'ok';
     await act(async () => {
       ok = await result.current.refreshSelectedContainers('web', 'web.yml');
     });
-    expect(ok).toBe(false);
+    expect(ok).toBe('failed');
     expect(setContainersLoadStatus).toHaveBeenCalledWith('error');
     expect(setContainersLoadError).toHaveBeenCalled();
   });
@@ -1320,8 +1320,8 @@ describe('container fetch contract', () => {
       } as never,
     });
 
-    let olderPromise!: Promise<boolean>;
-    let newerPromise!: Promise<boolean>;
+    let olderPromise!: Promise<'ok' | 'skipped' | 'failed'>;
+    let newerPromise!: Promise<'ok' | 'skipped' | 'failed'>;
     await act(async () => {
       olderPromise = result.current.refreshSelectedContainers('web', 'web.yml');
     });
@@ -1394,7 +1394,7 @@ describe('container fetch contract', () => {
       { initialProps: { selectedFile: 'web.yml' as string | null } },
     );
 
-    let refreshPromise!: Promise<boolean>;
+    let refreshPromise!: Promise<'ok' | 'skipped' | 'failed'>;
     await act(async () => {
       refreshPromise = result.current.refreshSelectedContainers('web', 'web.yml');
     });
@@ -1459,7 +1459,7 @@ describe('container fetch contract', () => {
       },
     );
 
-    let refreshPromise!: Promise<boolean>;
+    let refreshPromise!: Promise<'ok' | 'skipped' | 'failed'>;
     await act(async () => {
       refreshPromise = result.current.refreshSelectedContainers('web', 'web.yml');
     });
