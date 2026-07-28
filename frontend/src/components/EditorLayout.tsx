@@ -22,6 +22,8 @@ import { ThemeQuickSwitch } from './theme/ThemeQuickSwitch';
 import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
+import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveNodeReapplyEligibility';
+import { useComposeReapplyAction } from './FleetView/hooks/useComposeReapplyAction';
 import { NodeSwitcher } from './NodeSwitcher';
 import {
     GlobalCommandPalette,
@@ -185,6 +187,10 @@ export default function EditorLayout() {
     createDialogOpen, setCreateDialogOpen,
   } = overlayState;
 
+  const { canReapply: canReapplyCompose } = useActiveNodeReapplyEligibility(activeNode?.id);
+  const composeReapply = useComposeReapplyAction();
+  const canSaveAndReapply = isAdmin && canReapplyCompose;
+
   // Which mode the create dialog opens on (always empty after import tab removal).
   const [createDialogInitialMode, setCreateDialogInitialMode] = useState<CreateMode>('empty');
   const [adoptDialogOpen, setAdoptDialogOpen] = useState(false);
@@ -291,6 +297,8 @@ export default function EditorLayout() {
     canOfferVolumeRemoval,
     onDeletedOpenStack: () => onDeletedOpenStackRef.current(),
     removeNotificationsForStack,
+    isAdmin,
+    canReapplyCompose,
   });
 
   // Wire the ref now that stackActions is available
@@ -680,6 +688,7 @@ export default function EditorLayout() {
       requestTakeDownStack={stackActions.requestTakeDownStack}
       showTakeDown={selectedFile ? stackActions.getStackMenuVisibility(selectedFile).showTakeDown : false}
       isSelfStack={selectedFile ? stackSelfFlags[selectedFile] === true : false}
+      canSaveAndReapply={canSaveAndReapply}
       recoveryResult={selectedFile ? lastActionResult[selectedFile] : undefined}
       onRefreshState={async () => {
         if (!selectedFile) return;
@@ -1037,6 +1046,7 @@ export default function EditorLayout() {
           gitSourceOpen={gitSourceOpen}
           setGitSourceOpen={setGitSourceOpen}
           canSelfUpdate={hasCapability('self-update')}
+          composeReapply={composeReapply}
           canOfferVolumeRemoval={canOfferVolumeRemoval}
           onOpenFleetNodeUpdates={() => {
             if (isMobile) {

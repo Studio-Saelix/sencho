@@ -28,7 +28,7 @@ The top card on the left holds the stack's identity and primary controls.
 The action bar runs every state transition for the whole stack. The primary buttons (**Start**, **Restart**, **Stop**, **Take down** when running, **Update**) require the `stack:deploy` permission; the **Delete** entry in the kebab dropdown requires the `stack:delete` permission. The bar still appears when only **Delete** is authorised so the operator has a way to remove the stack.
 
 <Note>
-  If a stack is the Sencho instance you are currently signed into, its deploy/delete actions are protected: clicking any of them opens a **Sencho instance protected** dialog instead of running the action. Update Sencho from **Fleet → Node Update**, or move Sencho's own compose project outside `COMPOSE_DIR` to manage it as a normal stack.
+  If a stack is the Sencho instance you are currently signed into, stop, take down, delete, update, and rollback stay protected: clicking them opens a **Sencho instance protected** dialog. Eligible admins can apply on-disk Compose changes with **Save &amp; Reapply** in this editor (same recreate procedure as Fleet Node Updates), or open **Fleet → Node Updates**. To manage the stack as a normal stack, move Sencho's compose project outside `COMPOSE_DIR`.
 </Note>
 
 | Button | Behavior |
@@ -144,19 +144,20 @@ The `.env` editor renders a teal banner above the textarea reminding you that va
 
 ### Save options
 
-As soon as the compose editor opens, the toolbar shows a split button. The primary action is **Save & Deploy**; the dropdown chevron reveals two more.
+As soon as the compose editor opens, the toolbar shows a split button. The primary action is **Save & Deploy** for ordinary stacks. On Sencho's own Compose-managed stack, eligible admins see **Save & Reapply** instead. The dropdown chevron reveals two more actions.
 
 | Action | Effect |
 |--------|--------|
 | **Save & Deploy** | Writes the file to disk, then runs `docker compose up -d` to apply changes. |
-| **Save Only** | Writes the file to disk without restarting any containers. Changes take effect on the next deploy. |
+| **Save & Reapply** | Shown only for admins on the Compose-managed Sencho self-stack when reapply is available. Writes the file, then confirms and recreates Sencho from the current on-disk Compose project without selecting a newer image. Same procedure as Fleet **Reapply configuration**. |
+| **Save Only** | Writes the file to disk without restarting any containers. Changes take effect on the next deploy or reapply. |
 | **Discard Changes** | Reverts the active file (compose or env) to the last saved version. Unsaved edits in that file are lost. |
 
 The same controls apply to the `compose.yaml` and `.env` editors.
 
 ## Diff preview before save
 
-When **Diff preview before save** is enabled in **Settings → Infrastructure → Stacks**, clicking **Save & Deploy** or **Save Only** opens a side-by-side diff modal before anything is written to disk. The left pane is the on-disk content; the right pane is your unsaved edits with additions highlighted in green. The footer reads `ON DISK → UNSAVED` so the panes are unambiguous.
+When **Diff preview before save** is enabled in **Settings → Infrastructure → Stacks**, clicking **Save & Deploy**, **Save & Reapply**, or **Save Only** opens a side-by-side diff modal before anything is written to disk. The left pane is the on-disk content; the right pane is your unsaved edits with additions highlighted in green. The footer reads `ON DISK → UNSAVED` so the panes are unambiguous.
 
 <Frame>
   <img src="/images/compose-diff-preview/diff-modal.png" alt="Diff preview modal showing side-by-side YAML diff with the unsaved version on the right and an ON DISK to UNSAVED legend in the footer" />
@@ -164,7 +165,7 @@ When **Diff preview before save** is enabled in **Settings → Infrastructure �
 
 Review the diff, then:
 
-- Click the primary button (**Save & deploy** when triggered from **Save & Deploy**, or **Save** when triggered from **Save Only**) to confirm and write the changes.
+- Click the primary button (**Save & deploy** or **Save & reapply** when triggered from that primary action, or **Save** when triggered from **Save Only**) to confirm and write the changes.
 - Click **Cancel** to return to the editor without saving.
 
 If there are no unsaved changes the modal is skipped and the save proceeds directly. The toggle is off by default and stored per browser, so each device remembers its own setting.
@@ -177,7 +178,7 @@ On a narrow screen the stack opens as a full-screen detail with **Health**, **Lo
   <img src="/images/editor/editor-mobile.png" alt="Mobile compose editor with a Cancel button, the compose.yaml label, a monospace text field showing the compose file, a small-edits note, and Save and Save and Deploy buttons" />
 </Frame>
 
-The mobile editor is a lightweight monospace text field rather than Monaco. Tap **compose** or **.env** at the top to choose the file. The **.env** toggle appears only when the stack has an env file, and the file picker is locked while you have unsaved edits so switching files cannot drop them. The footer carries the same **Save** and **Save & Deploy** actions, and every protection is shared with desktop: the diff preview, save-conflict handling, and the unsaved-changes prompt all behave the same way. **Cancel** leaves the editor and asks before discarding unsaved edits.
+The mobile editor is a lightweight monospace text field rather than Monaco. Tap **compose** or **.env** at the top to choose the file. The **.env** toggle appears only when the stack has an env file, and the file picker is locked while you have unsaved edits so switching files cannot drop them. The footer carries the same **Save** and **Save & Deploy** (or **Save & Reapply** when eligible) actions, and every protection is shared with desktop: the diff preview, save-conflict handling, and the unsaved-changes prompt all behave the same way. **Cancel** leaves the editor and asks before discarding unsaved edits.
 
 A note at the bottom of the editor is a reminder that mobile editing is meant for small corrections such as bumping an image tag or fixing a value. For large compose rewrites, open the stack on a desktop. Editing requires the `stack:edit` permission.
 
@@ -252,7 +253,7 @@ Sencho tries `/bin/bash` first and transparently falls back to `/bin/sh` if bash
     The editor blocks a silent loss of in-progress edits. Click **Cancel** to return to the original node with your edits intact; click **Discard** to abandon them and proceed to the other node.
   </Accordion>
   <Accordion title='"Sencho instance protected" dialog when I try to stop, update, or delete a stack'>
-    That stack is running the Sencho instance you are signed into, and its deploy/delete actions are blocked to prevent locking yourself out. Update Sencho from **Fleet → Node Update** instead. To manage the stack normally, move its compose project to a directory outside `COMPOSE_DIR`.
+    That stack is running the Sencho instance you are signed into. Stop, take down, delete, update, and rollback stay blocked. Eligible admins can apply Compose edits with **Save &amp; Reapply** in the editor, or use **Fleet → Node Updates**. To manage the stack normally, move its compose project to a directory outside `COMPOSE_DIR`.
   </Accordion>
   <Accordion title='"Stats unavailable" chip on the container list'>
     The stats WebSocket failed to open, or closed unexpectedly. This usually means the Docker daemon on the node is unreachable. Container status, action buttons, and logs continue to work; only live CPU / memory / network rates pause.

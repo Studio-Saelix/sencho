@@ -3,6 +3,7 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { isValidVersion } from '@/lib/version';
 import { PINNED_UPDATE_BLOCKED_FALLBACK, type NodeUpdateStatus } from '../types';
+import { useComposeReapplyAction } from './useComposeReapplyAction';
 
 /** POST body for an update trigger: forward the target release when it is a
  *  valid version so the receiving node can repin a semver pin to it; omit
@@ -46,7 +47,6 @@ export function useFleetUpdateStatus() {
     const [reconnecting, setReconnecting] = useState(false);
     const [preUpdateStartedAt, setPreUpdateStartedAt] = useState<number | null>(null);
     const [localUpdateConfirm, setLocalUpdateConfirm] = useState<number | null>(null);
-    const [reapplyConfirm, setReapplyConfirm] = useState<number | null>(null);
     const [reconnectMode, setReconnectMode] = useState<'update' | 'reapply'>('update');
     const [showUpdateModal, setShowUpdateModal] = useState(false);
     const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -78,6 +78,17 @@ export function useFleetUpdateStatus() {
             console.warn('[Fleet] Failed to fetch update status:', error);
         }
     }, []);
+
+    const reapplyAction = useComposeReapplyAction({ onRemoteSuccess: fetchUpdateStatus });
+    const {
+        openConfirm: openReapplyConfirm,
+        cancelConfirm: cancelReapplyConfirm,
+        confirmReapply,
+        confirmTarget: reapplyConfirmTarget,
+        busyNodeId: reapplyBusyNodeId,
+        reconnecting: reapplyReconnecting,
+        preUpdateStartedAt: reapplyPreStartedAt,
+    } = reapplyAction;
 
     const postRemoteAction = useCallback(async (
         nodeId: number,
@@ -167,40 +178,17 @@ export function useFleetUpdateStatus() {
     }, [localUpdateConfirm, startLocalRestart]);
 
     const triggerNodeReapply = useCallback((nodeId: number) => {
-        // Confirm for both local and remote: the operator must acknowledge
-        // recreate, no version selection, and no image rewrite.
-        setReapplyConfirm(nodeId);
-    }, []);
-
-    const confirmReapply = useCallback(async () => {
-        const nodeId = reapplyConfirm;
-        setReapplyConfirm(null);
-        if (!nodeId) return;
         const status = updateStatusesRef.current.find(s => s.nodeId === nodeId);
         if (!status) {
             toast.error('Node status is unavailable. Recheck updates and try again.');
             return;
         }
-
-        if (status.type === 'local') {
-            await startLocalRestart(
-                nodeId,
-                `/fleet/nodes/${nodeId}/reapply-compose`,
-                { method: 'POST', localOnly: true },
-                'reapply',
-                'Failed to trigger local compose reapply.',
-            );
-            return;
-        }
-
-        await postRemoteAction(
+        openReapplyConfirm({
             nodeId,
-            `/fleet/nodes/${nodeId}/reapply-compose`,
-            { method: 'POST', localOnly: true },
-            `Compose reapply initiated on ${status.name}.`,
-            'Failed to trigger compose reapply.',
-        );
-    }, [reapplyConfirm, startLocalRestart, postRemoteAction]);
+            type: status.type === 'local' ? 'local' : 'remote',
+            name: status.name,
+        });
+    }, [openReapplyConfirm]);
 
     const triggerUpdateAll = useCallback(async () => {
         try {
@@ -249,13 +237,7 @@ export function useFleetUpdateStatus() {
         setCheckingUpdates(false);
     }, [fetchUpdateStatus]);
 
-    // While the reconnect overlay is up, poll the local node's update status.
-    // A pull/patch failure leaves the old gateway alive (no restart), so the
-    // overlay's health poll would sit for the full 5-minute timeout. Detecting
-    // the resolved `failed` status here dismisses the overlay fast and surfaces
-    // the error, instead of leaving the operator on the spinner. A genuine
-    // restart makes this endpoint unreachable (caught, keeps polling) and the
-    // overlay's own health poll reloads the page on success.
+    // Version-update reconnect failure poll (reapply uses useComposeReapplyAction).
     useEffect(() => {
         if (!reconnecting) return;
         const poll = setInterval(async () => {
@@ -269,28 +251,30 @@ export function useFleetUpdateStatus() {
                 if (local && (local.updateStatus === 'failed' || local.updateStatus === 'timeout')) {
                     setReconnecting(false);
                     setPreUpdateStartedAt(null);
-                    const failedReapply = local.operationKind === 'reapply_configuration';
-                    toast.error(local.error || (failedReapply
-                        ? 'Local compose reapply failed. The server did not restart.'
-                        : 'Local update failed. The server did not restart.'));
+                    toast.error(local.error || 'Local update failed. The server did not restart.');
                 }
             } catch (error) {
-                // Expected while the process restarts; the overlay's health poll
-                // drives the reload on success.
                 console.warn('[Fleet] Reconnect status poll failed:', error);
             }
         }, 3000);
         return () => clearInterval(poll);
     }, [reconnecting]);
 
+    const reapplyConfirm = reapplyConfirmTarget?.nodeId ?? null;
+    const setReapplyConfirm = useCallback((nodeId: number | null) => {
+        if (nodeId === null) cancelReapplyConfirm();
+    }, [cancelReapplyConfirm]);
+
     return {
         updateStatuses,
-        updatingNodeId,
-        reconnecting,
-        preUpdateStartedAt,
-        reconnectMode,
+        updatingNodeId: updatingNodeId ?? reapplyBusyNodeId,
+        // Prefer reapply reconnect when active so overlay mode stays correct.
+        reconnecting: reconnecting || reapplyReconnecting,
+        preUpdateStartedAt: reapplyReconnecting ? reapplyPreStartedAt : preUpdateStartedAt,
+        reconnectMode: reapplyReconnecting ? 'reapply' as const : reconnectMode,
         localUpdateConfirm,
         reapplyConfirm,
+        reapplyConfirmTarget,
         showUpdateModal,
         checkingUpdates,
         setShowUpdateModal,

@@ -27,6 +27,7 @@ interface MobileComposeEditorProps {
     canEdit: boolean;
     requestSave: () => void;
     requestSaveAndDeploy: (e: React.MouseEvent) => void;
+    canSaveAndReapply?: boolean;
     onClose: () => void;
     hasUnsavedChanges: () => boolean;
 }
@@ -54,6 +55,7 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
         canEdit,
         requestSave,
         requestSaveAndDeploy,
+        canSaveAndReapply = false,
         onClose,
         hasUnsavedChanges,
     } = props;
@@ -195,7 +197,7 @@ export function MobileComposeEditor(props: MobileComposeEditorProps) {
                             className="h-11 flex-1 rounded-lg"
                         >
                             <Rocket className="mr-2 h-4 w-4" strokeWidth={1.5} />
-                            Save &amp; Deploy
+                            {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
                         </Button>
                     </div>
                 )}

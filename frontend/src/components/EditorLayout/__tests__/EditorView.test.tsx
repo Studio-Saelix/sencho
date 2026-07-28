@@ -164,6 +164,17 @@ describe('EditorView single edit gate', () => {
     expect(lastReadOnly).toBe(false);
   });
 
+  it('shows Save & Reapply when the self-stack is eligible for compose reapply', () => {
+    render(<EditorView {...makeProps({
+      editingCompose: true,
+      activeTab: 'compose',
+      isSelfStack: true,
+      canSaveAndReapply: true,
+    })} />);
+    expect(screen.getByRole('button', { name: 'Save & Reapply' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save & Deploy' })).not.toBeInTheDocument();
+  });
+
   it('disables the env file selector when hasUnsavedChanges is true', () => {
     render(
       <EditorView

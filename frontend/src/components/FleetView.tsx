@@ -369,7 +369,11 @@ export function FleetView({
             <LocalUpdateConfirmDialog
                 open={confirmOpen}
                 mode={confirmMode}
-                nodeType={confirmStatus?.type ?? 'local'}
+                nodeType={
+                    confirmMode === 'reapply'
+                        ? (updateStatus.reapplyConfirmTarget?.type ?? 'local')
+                        : (confirmStatus?.type ?? 'local')
+                }
                 onOpenChange={(open) => {
                     if (!open) {
                         updateStatus.setLocalUpdateConfirm(null);
