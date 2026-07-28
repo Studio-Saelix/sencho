@@ -359,30 +359,54 @@ export const autoUpdateRouter = Router();
 autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (!requireAdmin(req, res)) return;
   try {
+    // Honor the node-scoped image-update detection opt-out before any work.
     if (!ImageUpdateService.isChecksEnabled()) {
       res.json({ result: 'Image update detection is disabled for this node; skipped.' });
       return;
     }
-    const { target } = req.body as { target?: string };
-    console.log(`[AutoUpdate] Execute requested: target="${sanitizeForLog(target || '')}"`);
-    if (!target || typeof target !== 'string') {
-      res.status(400).json({ error: 'Missing "target" (stack name or "*" for all)' });
-      return;
-    }
+    const { target, targets } = req.body as { target?: string; targets?: unknown };
 
     let stackNames: string[];
-    if (target === '*') {
-      stackNames = await FileSystemService.getInstance(req.nodeId).getStacks();
-      if (stackNames.length === 0) {
-        res.json({ result: 'No stacks found on node; skipped.' });
+    if (Array.isArray(targets)) {
+      if (targets.length === 0) {
+        res.status(400).json({ error: '"targets" must be a non-empty array of stack names' });
         return;
+      }
+      if (targets.length > 500) {
+        res.status(400).json({ error: '"targets" accepts at most 500 stack names' });
+        return;
+      }
+      if (!targets.every((t): t is string => typeof t === 'string' && isValidStackName(t))) {
+        res.status(400).json({ error: 'Invalid stack name in targets' });
+        return;
+      }
+      // Deduplicate while preserving order.
+      const seen = new Set<string>();
+      stackNames = [];
+      for (const name of targets) {
+        if (seen.has(name)) continue;
+        seen.add(name);
+        stackNames.push(name);
+      }
+      console.log(`[AutoUpdate] Execute requested: targets=${stackNames.length}`);
+    } else if (typeof target === 'string' && target.length > 0) {
+      console.log(`[AutoUpdate] Execute requested: target="${sanitizeForLog(target)}"`);
+      if (target === '*') {
+        stackNames = await FileSystemService.getInstance(req.nodeId).getStacks();
+        if (stackNames.length === 0) {
+          res.json({ result: 'No stacks found on node; skipped.' });
+          return;
+        }
+      } else {
+        if (!isValidStackName(target)) {
+          res.status(400).json({ error: 'Invalid stack name' });
+          return;
+        }
+        stackNames = [target];
       }
     } else {
-      if (!isValidStackName(target)) {
-        res.status(400).json({ error: 'Invalid stack name' });
-        return;
-      }
-      stackNames = [target];
+      res.status(400).json({ error: 'Missing "target" (stack name or "*") or "targets" (stack name array)' });
+      return;
     }
 
     const docker = DockerController.getInstance(req.nodeId);
@@ -510,7 +534,11 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
       } catch (e) {
         const msg = getErrorMessage(e, String(e));
         results.push(`Stack "${stackName}" failed: ${msg}`);
-        console.error(`[AutoUpdate] Failed for stack "${stackName}":`, e);
+        console.error(
+          '[AutoUpdate] Failed for stack %s: %s',
+          sanitizeForLog(stackName),
+          sanitizeForLog(msg),
+        );
       }
     }
 

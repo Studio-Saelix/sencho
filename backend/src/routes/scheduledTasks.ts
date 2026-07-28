@@ -35,6 +35,17 @@ function broadcastScheduledTasksChanged(): void {
 
 const VALID_PRUNE_TARGETS = ['containers', 'images', 'networks', 'volumes'] as const;
 const ERR_FLEET_NODE_REQUIRED = 'Fleet update requires node_id.';
+const STACK_LABEL_SELECTOR = 'stack-label';
+const LABEL_NAME_RE = /^[a-zA-Z0-9 -]+$/;
+
+function isStackLabelSelector(selectorType: unknown): boolean {
+  return selectorType === STACK_LABEL_SELECTOR;
+}
+
+/** True when this update+fleet task uses a stack-label selector (node_id may be null). */
+function usesStackLabelSelector(action: BackendScheduledAction, targetType: TargetType, selectorType: unknown): boolean {
+  return action === 'update' && targetType === 'fleet' && isStackLabelSelector(selectorType);
+}
 
 function parsePositiveNodeId(nodeId: unknown): number | null {
   if (typeof nodeId !== 'number' && typeof nodeId !== 'string') return null;
@@ -98,17 +109,26 @@ function validateContainerTarget(targetType: TargetType, targetId: unknown, node
 
 /**
  * Shared guard for non-stack actions that require a node. Stack actions use
- * validateStackTarget because they also require target_id.
+ * validateStackTarget because they also require target_id. Label-targeted
+ * fleet updates may omit node_id (entire fleet); pass selectorType so that
+ * path is allowed.
  */
-function validateActionNode(action: BackendScheduledAction, targetType: TargetType, nodeId: unknown): string | null {
+function validateActionNode(
+  action: BackendScheduledAction,
+  targetType: TargetType,
+  nodeId: unknown,
+  selectorType?: unknown,
+): string | null {
   if (targetType === 'stack' || targetType === 'container') return null;
   const def = getScheduledActionDefinition(action);
   if (!def?.requiresNode) return null;
 
   const labelSingular = nodeRequirementLabel(action, targetType);
   const labelPlural = localNodeRequirementLabel(action);
+  const labelFleetUpdate = usesStackLabelSelector(action, targetType, selectorType);
 
   if (nodeId == null) {
+    if (labelFleetUpdate) return null;
     return action === 'update' && targetType === 'fleet'
       ? ERR_FLEET_NODE_REQUIRED
       : `${labelSingular} action requires node_id.`;
@@ -124,13 +144,15 @@ function validateActionNode(action: BackendScheduledAction, targetType: TargetTy
   return null;
 }
 
-/** Shared validation for prune_targets, target_services, prune_label_filter. Returns an error string or null. */
+/** Shared validation for prune_targets, target_services, prune_label_filter, selector_*. Returns an error string or null. */
 function validateOptionalFields(
   action: BackendScheduledAction,
   targetType: TargetType,
   prune_targets: unknown,
   target_services: unknown,
   prune_label_filter: unknown,
+  selector_type?: unknown,
+  selector_value?: unknown,
 ): string | null {
   if (prune_targets !== undefined && prune_targets !== null) {
     if (!Array.isArray(prune_targets) || prune_targets.length === 0
@@ -155,7 +177,37 @@ function validateOptionalFields(
       return 'prune_label_filter can only be used with prune action';
     }
   }
+
+  const selectorPresent = (selector_type !== undefined && selector_type !== null)
+    || (selector_value !== undefined && selector_value !== null);
+  if (selectorPresent) {
+    if (action !== 'update' || targetType !== 'fleet') {
+      return 'selector fields can only be used with update action on fleet target';
+    }
+    if (selector_type !== STACK_LABEL_SELECTOR) {
+      return 'selector_type must be "stack-label"';
+    }
+    if (typeof selector_value !== 'string' || selector_value.trim().length === 0 || selector_value.trim().length > 30) {
+      return 'selector_value is required and must be 1-30 characters';
+    }
+    if (!LABEL_NAME_RE.test(selector_value.trim())) {
+      return 'selector_value may only contain letters, numbers, spaces, and hyphens';
+    }
+  }
   return null;
+}
+
+function normalizeSelectorFields(
+  action: BackendScheduledAction,
+  targetType: TargetType,
+  selector_type: unknown,
+  selector_value: unknown,
+): { selector_type: string | null; selector_value: string | null } {
+  if (action === 'update' && targetType === 'fleet' && isStackLabelSelector(selector_type)
+    && typeof selector_value === 'string' && selector_value.trim()) {
+    return { selector_type: STACK_LABEL_SELECTOR, selector_value: selector_value.trim() };
+  }
+  return { selector_type: null, selector_value: null };
 }
 
 /**
@@ -238,7 +290,11 @@ scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
 scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
   if (!requireAdmin(req, res)) return;
   try {
-    const { name, target_type, target_id, node_id, action, cron_expression, enabled, prune_targets, target_services, prune_label_filter, delete_after_run, run_at } = req.body;
+    const {
+      name, target_type, target_id, node_id, action, cron_expression, enabled,
+      prune_targets, target_services, prune_label_filter, selector_type, selector_value,
+      delete_after_run, run_at,
+    } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       res.status(400).json({ error: 'Name is required' }); return;
@@ -253,14 +309,16 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
     const targetErr = validateActionTarget(action, target_type);
     if (targetErr) { res.status(400).json({ error: targetErr }); return; }
 
-    const nodeErr = validateActionNode(action, target_type, node_id);
+    const nodeErr = validateActionNode(action, target_type, node_id, selector_type);
     if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
     const stackTargetErr = validateStackTarget(target_type, target_id, node_id);
     if (stackTargetErr) { res.status(400).json({ error: stackTargetErr }); return; }
     const containerTargetErr = validateContainerTarget(target_type, target_id, node_id);
     if (containerTargetErr) { res.status(400).json({ error: containerTargetErr }); return; }
 
-    const optionalErr = validateOptionalFields(action, target_type, prune_targets, target_services, prune_label_filter);
+    const optionalErr = validateOptionalFields(
+      action, target_type, prune_targets, target_services, prune_label_filter, selector_type, selector_value,
+    );
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }
 
     const cronErr = validateCronExpression(cron_expression);
@@ -282,7 +340,14 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
       : (pinnedRunAt ?? scheduler.calculateNextRun(cron_expression));
     const normalizedTargetId =
       target_type === 'stack' || target_type === 'container' ? target_id : null;
-    const normalizedNodeId = actionRequiresNode(action) ? parsePositiveNodeId(node_id) : null;
+    const labelSelector = usesStackLabelSelector(action, target_type, selector_type);
+    const normalizedNodeId = labelSelector
+      ? (node_id == null || node_id === '' ? null : parsePositiveNodeId(node_id))
+      : (actionRequiresNode(action) ? parsePositiveNodeId(node_id) : null);
+    if (labelSelector && node_id != null && node_id !== '' && normalizedNodeId === null) {
+      res.status(400).json({ error: 'Fleet update action requires a valid node_id.' }); return;
+    }
+    const selectors = normalizeSelectorFields(action, target_type, selector_type, selector_value);
 
     const id = DatabaseService.getInstance().createScheduledTask({
       name: name.trim(),
@@ -302,6 +367,8 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
       prune_targets: action === 'prune' && prune_targets ? JSON.stringify(prune_targets) : null,
       target_services: action === 'restart' && target_type === 'stack' && target_services ? JSON.stringify(target_services) : null,
       prune_label_filter: action === 'prune' && prune_label_filter ? prune_label_filter.trim() : null,
+      selector_type: selectors.selector_type,
+      selector_value: selectors.selector_value,
       delete_after_run: delete_after_run ? 1 : 0,
       run_at: pinnedRunAt,
     });
@@ -340,7 +407,11 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     const existing = db.getScheduledTask(id);
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
 
-    const { name, target_type, target_id, node_id, action, cron_expression, enabled, prune_targets, target_services, prune_label_filter, delete_after_run, run_at } = req.body;
+    const {
+      name, target_type, target_id, node_id, action, cron_expression, enabled,
+      prune_targets, target_services, prune_label_filter, selector_type, selector_value,
+      delete_after_run, run_at,
+    } = req.body;
 
     if (target_type !== undefined && !(VALID_TARGET_TYPES as readonly string[]).includes(target_type)) {
       res.status(400).json({ error: 'Invalid target_type' }); return;
@@ -354,13 +425,18 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     const finalTargetId = finalTargetType === 'stack' || finalTargetType === 'container'
       ? (target_id !== undefined ? target_id : existing.target_id)
       : null;
-    const finalNodeId = actionRequiresNode(finalAction)
+    const finalSelectorType = selector_type !== undefined ? selector_type : existing.selector_type;
+    const finalSelectorValue = selector_value !== undefined ? selector_value : existing.selector_value;
+    const labelSelector = usesStackLabelSelector(finalAction, finalTargetType, finalSelectorType);
+    const finalNodeId = labelSelector
       ? (node_id !== undefined ? node_id : existing.node_id)
-      : null;
+      : (actionRequiresNode(finalAction)
+        ? (node_id !== undefined ? node_id : existing.node_id)
+        : null);
     const targetErr = validateActionTarget(finalAction, finalTargetType);
     if (targetErr) { res.status(400).json({ error: targetErr }); return; }
 
-    const nodeErr = validateActionNode(finalAction, finalTargetType, finalNodeId);
+    const nodeErr = validateActionNode(finalAction, finalTargetType, finalNodeId, finalSelectorType);
     if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
 
     const stackTargetErr = validateStackTarget(finalTargetType, finalTargetId, finalNodeId);
@@ -369,7 +445,11 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     const containerTargetErr = validateContainerTarget(finalTargetType, finalTargetId, finalNodeId);
     if (containerTargetErr) { res.status(400).json({ error: containerTargetErr }); return; }
 
-    const optionalErr = validateOptionalFields(finalAction, finalTargetType, prune_targets, target_services, prune_label_filter);
+    const optionalErr = validateOptionalFields(
+      finalAction, finalTargetType, prune_targets, target_services, prune_label_filter,
+      selector_type !== undefined ? selector_type : finalSelectorType,
+      selector_value !== undefined ? selector_value : finalSelectorValue,
+    );
     if (optionalErr) { res.status(400).json({ error: optionalErr }); return; }
 
     if (cron_expression !== undefined) {
@@ -391,7 +471,17 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     if (target_id !== undefined || (finalTargetType !== 'stack' && finalTargetType !== 'container')) {
       updates.target_id = finalTargetId || null;
     }
-    if (node_id !== undefined || !actionRequiresNode(finalAction)) {
+    // Label-targeted fleet updates keep node_id when provided (or existing);
+    // clear only when the caller explicitly sends null/empty for fleet-wide, or
+    // when the action no longer requires a node and is not a label selector.
+    if (labelSelector) {
+      if (node_id !== undefined) {
+        updates.node_id = node_id == null || node_id === '' ? null : parsePositiveNodeId(node_id);
+        if (node_id != null && node_id !== '' && updates.node_id === null) {
+          res.status(400).json({ error: 'Fleet update action requires a valid node_id.' }); return;
+        }
+      }
+    } else if (node_id !== undefined || !actionRequiresNode(finalAction)) {
       updates.node_id = finalNodeId != null ? parsePositiveNodeId(finalNodeId) : null;
     }
     if (action !== undefined) updates.action = finalAction;
@@ -413,6 +503,12 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
       updates.prune_label_filter = finalAction === 'prune' && prune_label_filter ? prune_label_filter.trim() : null;
     } else if (finalAction !== 'prune') {
       updates.prune_label_filter = null;
+    }
+    if (selector_type !== undefined || selector_value !== undefined
+      || finalAction !== 'update' || finalTargetType !== 'fleet') {
+      const selectors = normalizeSelectorFields(finalAction, finalTargetType, finalSelectorType, finalSelectorValue);
+      updates.selector_type = selectors.selector_type;
+      updates.selector_value = selectors.selector_value;
     }
     if (delete_after_run !== undefined) updates.delete_after_run = delete_after_run ? 1 : 0;
 

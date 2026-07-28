@@ -714,6 +714,10 @@ export interface ScheduledTask {
     prune_targets: string | null;
     target_services: string | null;
     prune_label_filter: string | null;
+    /** Optional dynamic target selector; currently only 'stack-label'. */
+    selector_type: string | null;
+    /** Selector payload (e.g. Stack Label name when selector_type is stack-label). */
+    selector_value: string | null;
     delete_after_run?: number;
     // Absolute epoch-ms fire time for a one-time ('once') schedule. A 5-field
     // cron has no year field, so the chosen instant (including year) is persisted
@@ -1936,6 +1940,8 @@ export class DatabaseService {
         maybeAddCol('scheduled_tasks', 'prune_targets', 'TEXT DEFAULT NULL');
         maybeAddCol('scheduled_tasks', 'target_services', 'TEXT DEFAULT NULL');
         maybeAddCol('scheduled_tasks', 'prune_label_filter', 'TEXT DEFAULT NULL');
+        maybeAddCol('scheduled_tasks', 'selector_type', 'TEXT DEFAULT NULL');
+        maybeAddCol('scheduled_tasks', 'selector_value', 'TEXT DEFAULT NULL');
         maybeAddCol('scheduled_tasks', 'delete_after_run', 'INTEGER DEFAULT 0');
         maybeAddCol('scheduled_tasks', 'run_at', 'INTEGER DEFAULT NULL');
 
@@ -6041,13 +6047,14 @@ export class DatabaseService {
 
     public createScheduledTask(task: Omit<ScheduledTask, 'id'>): number {
         const result = this.db.prepare(
-            'INSERT INTO scheduled_tasks (name, target_type, target_id, node_id, action, cron_expression, enabled, created_by, created_at, updated_at, last_run_at, next_run_at, last_status, last_error, prune_targets, target_services, prune_label_filter, delete_after_run, run_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO scheduled_tasks (name, target_type, target_id, node_id, action, cron_expression, enabled, created_by, created_at, updated_at, last_run_at, next_run_at, last_status, last_error, prune_targets, target_services, prune_label_filter, selector_type, selector_value, delete_after_run, run_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         ).run(
             task.name, task.target_type, task.target_id, task.node_id,
             task.action, task.cron_expression, task.enabled, task.created_by,
             task.created_at, task.updated_at, task.last_run_at, task.next_run_at,
             task.last_status, task.last_error, task.prune_targets, task.target_services,
-            task.prune_label_filter, task.delete_after_run ?? 0, task.run_at ?? null
+            task.prune_label_filter, task.selector_type ?? null, task.selector_value ?? null,
+            task.delete_after_run ?? 0, task.run_at ?? null
         );
         return result.lastInsertRowid as number;
     }
@@ -6064,6 +6071,8 @@ export class DatabaseService {
             last_status: updates.last_status, last_error: updates.last_error,
             prune_targets: updates.prune_targets, target_services: updates.target_services,
             prune_label_filter: updates.prune_label_filter,
+            selector_type: updates.selector_type,
+            selector_value: updates.selector_value,
             delete_after_run: updates.delete_after_run,
             run_at: updates.run_at,
         };
