@@ -659,7 +659,7 @@ fleetRouter.get('/configuration', authMiddleware, async (req: Request, res: Resp
             name: node.name,
             type: 'local',
             status: 'online',
-            configuration: buildLocalConfigurationStatus(node.id, userId, localTier),
+            configuration: await buildLocalConfigurationStatus(node.id, userId, localTier),
           };
         }
 

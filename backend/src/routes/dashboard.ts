@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService, type StackRestartSummary } from '../services/DatabaseService';
 import { CloudBackupService } from '../services/CloudBackupService';
+import { FileSystemService } from '../services/FileSystemService';
 import TrivyService from '../services/TrivyService';
 import { effectiveTier } from '../middleware/tierGates';
 import { isDebugEnabled } from '../utils/debug';
@@ -49,11 +50,11 @@ export interface ConfigurationStatus {
   };
 }
 
-export function buildLocalConfigurationStatus(
+export async function buildLocalConfigurationStatus(
   nodeId: number,
   userId: number,
   tier: LicenseTier,
-): ConfigurationStatus {
+): Promise<ConfigurationStatus> {
   const db = DatabaseService.getInstance();
 
   const agents = db.getAgents(nodeId);
@@ -62,7 +63,10 @@ export function buildLocalConfigurationStatus(
     return { configured: !!a?.url, enabled: a?.enabled ?? false };
   };
 
-  const alertRules = db.getStackAlerts().length;
+  // Scope to stacks that exist on this node. stack_alerts has no node_id;
+  // intersecting with the node's compose directory is the per-node filter.
+  const stackNames = new Set(await FileSystemService.getInstance(nodeId).getStacks());
+  const alertRules = db.getStackAlerts().filter((a) => stackNames.has(a.stack_name)).length;
   const notifRoutes = db.getNotificationRoutes();
 
   const healPolicies = db.getAutoHealPolicies(undefined, nodeId);
@@ -165,7 +169,7 @@ export function buildLocalConfigurationStatus(
 }
 
 // All routes below are protected by the global authGate mounted at app.use('/api', authGate)
-dashboardRouter.get('/configuration', (req: Request, res: Response): void => {
+dashboardRouter.get('/configuration', async (req: Request, res: Response): Promise<void> => {
   try {
     const debug = isDebugEnabled();
     const startedAt = debug ? Date.now() : 0;
@@ -173,7 +177,7 @@ dashboardRouter.get('/configuration', (req: Request, res: Response): void => {
     const userId = req.user?.userId ?? 0;
     const tier = effectiveTier(req);
 
-    const payload = buildLocalConfigurationStatus(nodeId, userId, tier);
+    const payload = await buildLocalConfigurationStatus(nodeId, userId, tier);
     if (debug) {
       console.debug(
         `[Dashboard:debug] /configuration built in ${Date.now() - startedAt} ms (nodeId=${nodeId})`,
