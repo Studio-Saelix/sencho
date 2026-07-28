@@ -23,6 +23,7 @@ import { useNotifications } from './EditorLayout/hooks/useNotifications';
 import { useContainerStats } from './EditorLayout/hooks/useContainerStats';
 import { useSidebarContextMenu } from './EditorLayout/hooks/useSidebarContextMenu';
 import { useActiveNodeReapplyEligibility } from './EditorLayout/hooks/useActiveNodeReapplyEligibility';
+import { resolveCanSaveAndReapply } from './EditorLayout/resolveCanSaveAndReapply';
 import { useComposeReapplyAction } from './FleetView/hooks/useComposeReapplyAction';
 import { NodeSwitcher } from './NodeSwitcher';
 import {
@@ -189,7 +190,9 @@ export default function EditorLayout() {
 
   const { canReapply: canReapplyCompose } = useActiveNodeReapplyEligibility(activeNode?.id);
   const composeReapply = useComposeReapplyAction();
-  const canSaveAndReapply = isAdmin && canReapplyCompose;
+  const isSelfStackSelected = selectedFile ? stackSelfFlags[selectedFile] === true : false;
+  // Ordinary stacks keep Save & Deploy even when the node supports compose reapply.
+  const canSaveAndReapply = resolveCanSaveAndReapply(isAdmin, canReapplyCompose, isSelfStackSelected);
 
   // Which mode the create dialog opens on (always empty after import tab removal).
   const [createDialogInitialMode, setCreateDialogInitialMode] = useState<CreateMode>('empty');
@@ -687,7 +690,7 @@ export default function EditorLayout() {
       requestDeleteStack={stackActions.requestDeleteStack}
       requestTakeDownStack={stackActions.requestTakeDownStack}
       showTakeDown={selectedFile ? stackActions.getStackMenuVisibility(selectedFile).showTakeDown : false}
-      isSelfStack={selectedFile ? stackSelfFlags[selectedFile] === true : false}
+      isSelfStack={isSelfStackSelected}
       canSaveAndReapply={canSaveAndReapply}
       recoveryResult={selectedFile ? lastActionResult[selectedFile] : undefined}
       onRefreshState={async () => {
@@ -1047,6 +1050,7 @@ export default function EditorLayout() {
           setGitSourceOpen={setGitSourceOpen}
           canSelfUpdate={hasCapability('self-update')}
           composeReapply={composeReapply}
+          canSaveAndReapply={canSaveAndReapply}
           canOfferVolumeRemoval={canOfferVolumeRemoval}
           onOpenFleetNodeUpdates={() => {
             if (isMobile) {

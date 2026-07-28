@@ -4,6 +4,18 @@ import { Loader2 } from 'lucide-react';
 import { Modal, ModalHeader, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
 
+export type ComposeDiffActionLabel = 'Save' | 'Save & deploy' | 'Save & reapply';
+
+/** Maps diff preview mode + self-stack eligibility to the confirm CTA label. */
+export function resolveComposeDiffActionLabel(
+  mode: 'save' | 'save-and-deploy' | undefined,
+  canSaveAndReapply: boolean,
+): ComposeDiffActionLabel {
+  if (mode !== 'save-and-deploy') return 'Save';
+  if (canSaveAndReapply) return 'Save & reapply';
+  return 'Save & deploy';
+}
+
 export interface ComposeDiffPreviewDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -12,7 +24,7 @@ export interface ComposeDiffPreviewDialogProps {
   language: 'yaml' | 'ini';
   original: string;
   modified: string;
-  actionLabel: 'Save' | 'Save & deploy';
+  actionLabel: ComposeDiffActionLabel;
   confirming: boolean;
   isDarkMode: boolean;
   onConfirm: () => void | Promise<void>;

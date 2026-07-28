@@ -204,7 +204,7 @@ export interface EditorViewProps {
     showTakeDown: boolean;
     /** True when this stack is the running Sencho instance on the active node. */
     isSelfStack?: boolean;
-    /** Admin + authoritative canReapplyCompose: show Save & Reapply instead of Save & Deploy. */
+    /** Admin + node reapply eligibility + self-stack: show Save & Reapply instead of Save & Deploy. */
     canSaveAndReapply?: boolean;
 
     // Recovery surface for a failed/stalled operation on this stack (undefined

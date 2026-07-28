@@ -1155,6 +1155,27 @@ describe('useStackActions.getStackMenuVisibility', () => {
     expect(apiFetch).not.toHaveBeenCalled();
   });
 
+  it('does not open reapply capture for ordinary stacks when canReapplyCompose is true', async () => {
+    // Node eligibility alone must not retarget ordinary stacks; isSelfStackFile gates capture.
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({ hasIssues: false }), { status: 200 }));
+    const { result, overlayState, stackListState } = setup({
+      isAdmin: true,
+      canReapplyCompose: true,
+      activeNode: { id: 7, name: 'Gateway', type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'],
+      stackList: {
+        selectedFile: 'web.yml',
+        stackSelfFlags: { 'web.yml': false },
+      },
+    });
+    await act(async () => {
+      await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    });
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    expect(stackListState.setStackAction).toHaveBeenCalled();
+  });
+
   it('opens protected dialog for self-stack deploy when reapply is not eligible', async () => {
     const { result, overlayState } = setup({
       isAdmin: true,

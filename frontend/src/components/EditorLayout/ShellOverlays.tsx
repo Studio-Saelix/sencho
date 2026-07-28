@@ -13,7 +13,10 @@ import { StackAlertSheet } from '../StackAlertSheet';
 import { GitSourcePanel } from '../stack/GitSourcePanel';
 import { LogViewer } from '../LogViewer';
 import { VulnerabilityScanSheet } from '../VulnerabilityScanSheet';
-import { ComposeDiffPreviewDialog } from '@/components/ComposeDiffPreviewDialog';
+import {
+  ComposeDiffPreviewDialog,
+  resolveComposeDiffActionLabel,
+} from '@/components/ComposeDiffPreviewDialog';
 import type { OverlayState } from './hooks/useOverlayState';
 import type { StackActionsHook } from './hooks/useStackActions';
 import type { PermissionAction } from '@/context/AuthContext';
@@ -31,6 +34,7 @@ interface ShellOverlaysProps {
   setGitSourceOpen: (open: boolean) => void;
   canSelfUpdate: boolean;
   composeReapply: ReturnType<typeof useComposeReapplyAction>;
+  canSaveAndReapply: boolean;
   canOfferVolumeRemoval: boolean;
   onOpenFleetNodeUpdates: () => void;
 }
@@ -47,6 +51,7 @@ export function ShellOverlays({
   setGitSourceOpen,
   canSelfUpdate,
   composeReapply,
+  canSaveAndReapply,
   canOfferVolumeRemoval,
   onOpenFleetNodeUpdates,
 }: ShellOverlaysProps) {
@@ -229,7 +234,7 @@ export function ShellOverlays({
         language={diffPreview?.language ?? 'yaml'}
         original={diffPreview?.original ?? ''}
         modified={diffPreview?.modified ?? ''}
-        actionLabel={diffPreview?.mode === 'save-and-deploy' ? 'Save & deploy' : 'Save'}
+        actionLabel={resolveComposeDiffActionLabel(diffPreview?.mode, canSaveAndReapply)}
         confirming={diffPreviewConfirming}
         isDarkMode={isDarkMode}
         onConfirm={async () => {
