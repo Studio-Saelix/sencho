@@ -11,6 +11,8 @@ import { MfaChallenge } from './components/MfaChallenge';
 import { DeployFeedbackProvider } from './context/DeployFeedbackContext';
 import { DeployFeedbackPortal } from './components/DeployFeedbackPortal';
 import { ToastContainer } from './components/ui/toast';
+import { Button } from './components/ui/button';
+import { AlertCircle, RefreshCw } from 'lucide-react';
 
 /** Gates framer-motion animations on the "Reduced motion" appearance setting.
  *  'always' suppresses transform/layout motion app-wide; 'user' defers to the OS
@@ -27,7 +29,7 @@ function MotionProvider({ children }: { children: ReactNode }) {
 }
 
 function AppContent() {
-  const { appStatus, isAuthenticated, needsSetup, completeSetup } = useAuth();
+  const { appStatus, isAuthenticated, needsSetup, completeSetup, permissionsStatus, retryPermissions } = useAuth();
 
   if (appStatus === 'loading') {
     return (
@@ -53,6 +55,18 @@ function AppContent() {
     <MotionProvider>
       <NodeProvider>
         <LicenseProvider>
+          {permissionsStatus === 'error' && (
+            <div className="flex items-center justify-between gap-3 border-b border-destructive/30 bg-destructive/[0.06] px-[var(--density-row-x)] py-2 text-sm text-destructive" role="alert">
+              <div className="flex min-w-0 items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" aria-hidden />
+                <span>Permission controls are unavailable. Changes remain disabled until access is verified.</span>
+              </div>
+              <Button type="button" variant="outline" size="sm" onClick={() => void retryPermissions()}>
+                <RefreshCw aria-hidden />
+                Retry
+              </Button>
+            </div>
+          )}
           <EditorLayout />
           {/* Portal lives inside LicenseProvider so the editor surface and its
               portalled overlays can read license state via useLicense().

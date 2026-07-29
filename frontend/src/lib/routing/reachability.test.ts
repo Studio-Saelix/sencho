@@ -31,6 +31,13 @@ describe('reachability', () => {
     expect(isViewHidden('audit-log', loading)).toBe(false);
   });
 
+  it('keeps deep links stable when permission metadata fails', () => {
+    const failed = ctx({ permissionsStatus: 'error', can: () => false, isAdmin: false });
+    expect(authzReady(failed)).toBe(false);
+    expect(isViewHidden('fleet', failed)).toBe(false);
+    expect(normalizeHiddenView('fleet', failed)).toBe('fleet');
+  });
+
   it('hides hub-only views on remote nodes when ready', () => {
     const remote = ctx({ isRemote: true });
     expect(isViewHidden('audit-log', remote)).toBe(true);

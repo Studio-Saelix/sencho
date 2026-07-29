@@ -218,6 +218,9 @@ Entries include the acting user, IP address, HTTP method and path, response stat
 ## Troubleshooting
 
 <AccordionGroup>
+  <Accordion title="Permission controls are unavailable">
+    Sencho could not verify your current permissions. Existing pages stay open, but changes remain disabled until verification succeeds. Select **Retry** in the notification bar. If the notice returns, check that the Sencho instance is reachable and sign in again if your session has expired.
+  </Accordion>
   <Accordion title="The Users entry is missing from the Settings sidebar">
     The Users entry is hidden in two cases. **One,** you are signed in as a non-admin (Viewer, Deployer, Auditor): the entry is admin-only. **Two,** you have a remote node selected: the panel is hub-only and is hidden in the sidebar when any remote node is active. Switch back to the local node via the node switcher in the masthead.
   </Accordion>
