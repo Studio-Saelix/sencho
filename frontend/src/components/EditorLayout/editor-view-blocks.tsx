@@ -203,8 +203,8 @@ export function StackIdentityHeader({
                 backend permissions so a delete-only or deploy-only persona sees
                 exactly what they can act on. */}
             {(() => {
-                const canDeploy = can('stack:deploy', 'stack', stackName);
-                const canDelete = can('stack:delete', 'stack', stackName);
+                const canDeploy = can('stack:deploy', 'stack', stackName, activeNode?.id);
+                const canDelete = can('stack:delete', 'stack', stackName, activeNode?.id);
                 const canRollback = canDeploy && backupInfo.exists;
                 const canScan = trivy.available && isAdmin;
                 const canMute = stackMuteActions?.canMute ?? false;
