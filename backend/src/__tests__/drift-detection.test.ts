@@ -18,6 +18,7 @@ import { declaredFromEffectiveModel } from '../helpers/effectiveToDeclaredCompos
 import type { DeclaredCompose, DeclaredService, DeclaredPort } from '../helpers/composeDependencyParse';
 import type { EffectiveModel, EffService } from '../services/preflight/effectiveModel';
 import { fromDeclaredCompose, fromEffectiveModel } from '../services/network/normalize';
+import { DatabaseService } from '../services/DatabaseService';
 
 // ── builders ────────────────────────────────────────────────────────────
 
@@ -580,6 +581,32 @@ describe('assembleStackDrift - network drift', () => {
     expect(report.findings.filter(f => f.kind.startsWith('network-'))).toEqual([]);
     expect(report.status).toBe('in-sync');
   });
+
+  it('reports in-sync when a verified Mesh attachment is the only runtime difference', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'web' })]),
+      containers: [container({ id: 'c1', service: 'web', networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }] })],
+      networks: [depNet('sencho_mesh', { composeProject: null, stack: null })],
+      managedNetworkAttachment: (_runtimeContainer, networkName) => networkName === 'sencho_mesh',
+    });
+
+    expect(report.status).toBe('in-sync');
+    expect(report.findings.filter(f => f.kind === 'network-undeclared')).toEqual([]);
+  });
+
+  it('keeps an unverified manual Mesh attachment drifted', () => {
+    const report = assembleStackDrift({
+      stack: 'app',
+      declared: declared([service({ name: 'web' })]),
+      containers: [container({ id: 'c1', service: 'web', networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }] })],
+      networks: [depNet('sencho_mesh', { composeProject: null, stack: null })],
+      managedNetworkAttachment: () => false,
+    });
+
+    expect(report.status).toBe('drifted');
+    expect(report.findings.filter(f => f.kind === 'network-undeclared')).toHaveLength(1);
+  });
 });
 
 // ── declaredFromEffectiveModel ─────────────────────────────────────────────
@@ -813,6 +840,48 @@ describe('buildStackDriftReport - boundaries', () => {
 
     const report = await buildStackDriftReport(0, 'app');
     expect(findingKinds(report)).toContain('network-undeclared');
+    vi.restoreAllMocks();
+  });
+
+  it('keeps the report available and Mesh drift actionable when opt-in authority fails', async () => {
+    const snapshot: DependencySnapshot = {
+      containers: [container({ id: 'c1', service: 'web', stack: 'app', image: 'nginx:1.25', networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }] })],
+      networks: [depNet('sencho_mesh', { composeProject: null, stack: null })],
+      volumes: [],
+    };
+    stubDockerRender({ name: 'app', services: { web: { image: 'nginx:1.25' } } });
+    stubFsAndSnapshot(snapshot);
+    vi.spyOn(DatabaseService, 'getInstance').mockImplementation(() => {
+      throw new Error('database unavailable');
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    const report = await buildStackDriftReport(0, 'app');
+
+    expect(report.status).toBe('drifted');
+    expect(report.findings).toContainEqual(expect.objectContaining({
+      kind: 'network-undeclared',
+      actual: 'sencho_mesh',
+    }));
+    vi.restoreAllMocks();
+  });
+
+  it('reports in-sync through the public builder when DB authority opts the stack into Mesh', async () => {
+    const snapshot: DependencySnapshot = {
+      containers: [container({ id: 'c1', service: 'web', stack: 'app', image: 'nginx:1.25', networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }] })],
+      networks: [depNet('sencho_mesh', { composeProject: null, stack: null })],
+      volumes: [],
+    };
+    stubDockerRender({ name: 'app', services: { web: { image: 'nginx:1.25' } } });
+    stubFsAndSnapshot(snapshot);
+    vi.spyOn(DatabaseService, 'getInstance').mockReturnValue({
+      isMeshStackEnabled: vi.fn().mockReturnValue(true),
+    } as unknown as DatabaseService);
+
+    const report = await buildStackDriftReport(0, 'app');
+
+    expect(report.status).toBe('in-sync');
+    expect(report.findings.filter(f => f.kind === 'network-undeclared')).toEqual([]);
     vi.restoreAllMocks();
   });
 });

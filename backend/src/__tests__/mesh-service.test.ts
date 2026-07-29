@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import fsSync from 'fs';
+import fs from 'fs/promises';
 import path from 'path';
 import { setupTestDb, cleanupTestDb } from './helpers/setupTestDb';
 import { getSenchoIpFromSubnet, MeshError, type MeshTarget, type MeshTcpStreamLike } from '../services/MeshService';
@@ -20,6 +21,7 @@ afterAll(() => {
 });
 
 beforeEach(() => {
+    process.env.SENCHO_MODE = 'server';
     const db = DatabaseService.getInstance().getDb();
     db.prepare('DELETE FROM mesh_stacks').run();
     db.prepare('DELETE FROM nodes WHERE is_default = 0').run();
@@ -104,6 +106,84 @@ describe('MeshService.optInStack', () => {
         await svc.optInStack(localNodeId, 'api', 'tester');
         await svc.optOutStack(localNodeId, 'api', 'tester');
         expect(db.isMeshStackEnabled(localNodeId, 'api')).toBe(false);
+    });
+
+    it('restores opt-in authority when target override removal is rejected', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        db.insertMeshStack(localNodeId, 'busy-stack', 'setup');
+        vi.spyOn(svc, 'removeOverrideFromNode').mockRejectedValue(
+            new Error('HTTP 500: another operation is already in progress'),
+        );
+
+        await expect(svc.optOutStack(localNodeId, 'busy-stack', 'tester'))
+            .rejects.toThrow('another operation is already in progress');
+
+        expect(db.isMeshStackEnabled(localNodeId, 'busy-stack')).toBe(true);
+    });
+
+    it('serializes concurrent opt-out requests for the same node', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        db.insertMeshStack(localNodeId, 'queued-stack', 'setup');
+        let releaseRemoval!: () => void;
+        const removalPending = new Promise<void>((resolve) => {
+            releaseRemoval = resolve;
+        });
+        const removeSpy = vi.spyOn(svc, 'removeOverrideFromNode').mockReturnValue(removalPending);
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: () => Promise<void> }, 'regenerateOverridesAcrossFleet')
+            .mockResolvedValue(undefined);
+        vi.spyOn(svc as unknown as { cascadeRecomposeAcrossFleet: () => void }, 'cascadeRecomposeAcrossFleet')
+            .mockImplementation(() => { /* noop */ });
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation(() => { /* noop */ });
+
+        const first = svc.optOutStack(localNodeId, 'queued-stack', 'tester');
+        await vi.waitFor(() => expect(removeSpy).toHaveBeenCalledTimes(1));
+        const second = svc.optOutStack(localNodeId, 'queued-stack', 'tester');
+        await Promise.resolve();
+        expect(removeSpy).toHaveBeenCalledTimes(1);
+
+        releaseRemoval();
+        await Promise.all([first, second]);
+
+        expect(removeSpy).toHaveBeenCalledTimes(1);
+        expect(db.isMeshStackEnabled(localNodeId, 'queued-stack')).toBe(false);
+    });
+
+    it('serializes different Mesh mutations per node without blocking another node', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const remoteNodeId = db.addNode({
+            name: 'independent-node', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.setNodeMeshEnabled(localNodeId, true);
+        db.insertMeshStack(localNodeId, 'held-stack', 'setup');
+        let releaseRemoval!: () => void;
+        const removalPending = new Promise<void>((resolve) => {
+            releaseRemoval = resolve;
+        });
+        vi.spyOn(svc, 'removeOverrideFromNode').mockReturnValue(removalPending);
+        vi.spyOn(svc as unknown as { regenerateOverridesAcrossFleet: () => Promise<void> }, 'regenerateOverridesAcrossFleet')
+            .mockResolvedValue(undefined);
+        vi.spyOn(svc as unknown as { cascadeRecomposeAcrossFleet: () => void }, 'cascadeRecomposeAcrossFleet')
+            .mockImplementation(() => { /* noop */ });
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation(() => { /* noop */ });
+
+        const optOut = svc.optOutStack(localNodeId, 'held-stack', 'tester');
+        await vi.waitFor(() => expect(svc.removeOverrideFromNode).toHaveBeenCalledTimes(1));
+        const disable = svc.disableForNode(localNodeId, 'tester');
+        await svc.enableForNode(remoteNodeId);
+
+        expect(db.getNodeMeshEnabled(localNodeId)).toBe(true);
+        expect(db.getNodeMeshEnabled(remoteNodeId)).toBe(true);
+        releaseRemoval();
+        await Promise.all([optOut, disable]);
+        expect(db.getNodeMeshEnabled(localNodeId)).toBe(false);
+        db.deleteNode(remoteNodeId);
     });
 
     it('rejects an invalid stack name (path traversal attempt)', async () => {
@@ -427,6 +507,44 @@ describe('MeshService.disableForNode', () => {
         db.deleteNode(remoteNodeId);
     });
 
+    it('keeps failed remote stacks authoritative when node disable is incomplete', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'remote-partial-disable', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        db.setNodeMeshEnabled(remoteNodeId, true);
+        db.insertMeshStack(remoteNodeId, 'removed-stack', 'setup');
+        db.insertMeshStack(remoteNodeId, 'busy-stack', 'setup');
+        vi.spyOn(svc, 'removeOverrideFromNode').mockImplementation(async (_nodeId, stackName) => {
+            if (stackName === 'busy-stack') throw new Error('target busy');
+        });
+        vi.spyOn(
+            svc as unknown as { regenerateOverridesAcrossFleet: () => Promise<void> },
+            'regenerateOverridesAcrossFleet',
+        ).mockResolvedValue(undefined);
+        vi.spyOn(
+            svc as unknown as { cascadeRecomposeAcrossFleet: () => void },
+            'cascadeRecomposeAcrossFleet',
+        ).mockImplementation(() => { /* noop */ });
+        const redeployed: string[] = [];
+        vi.spyOn(svc, 'triggerRedeploy').mockImplementation((_nodeId, stackName) => {
+            redeployed.push(stackName);
+        });
+        vi.spyOn(svc as unknown as { refreshAliasCache: () => Promise<void> }, 'refreshAliasCache')
+            .mockRejectedValue(new Error('refresh failed'));
+        vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+
+        await expect(svc.disableForNode(remoteNodeId, 'tester')).rejects.toThrow('busy-stack');
+
+        expect(db.getNodeMeshEnabled(remoteNodeId)).toBe(true);
+        expect(db.isMeshStackEnabled(remoteNodeId, 'removed-stack')).toBe(false);
+        expect(db.isMeshStackEnabled(remoteNodeId, 'busy-stack')).toBe(true);
+        expect(redeployed).toContain('removed-stack');
+        db.deleteNode(remoteNodeId);
+    });
+
     it('defaults the actor when none is supplied so legacy callers still log a non-empty actor', async () => {
         const svc = MeshService.getInstance();
         const db = DatabaseService.getInstance();
@@ -672,6 +790,62 @@ describe('MeshService.optInStack rollback', () => {
         await expect(svc.optInStack(localNodeId, 'api', 'tester'))
             .rejects.toThrow(/simulated remote pilot offline/);
         expect(db.isMeshStackEnabled(localNodeId, 'api')).toBe(false);
+    });
+
+    it('retains remote authority when the push outcome is unknown', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'ambiguous-push', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        vi.spyOn(svc, 'pushOverrideToNode').mockRejectedValue(new Error('connection reset'));
+
+        await expect(svc.optInStack(remoteNodeId, 'ambiguous-stack', 'tester'))
+            .rejects.toThrow('connection reset');
+
+        expect(db.isMeshStackEnabled(remoteNodeId, 'ambiguous-stack')).toBe(true);
+        db.deleteNode(remoteNodeId);
+    });
+
+    it('treats a remote gateway error as an ambiguous push outcome', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'gateway-error-push', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        vi.spyOn(svc as unknown as { proxyFetch: () => Promise<Response> }, 'proxyFetch')
+            .mockResolvedValue(new Response('gateway timeout', { status: 502 }));
+
+        await expect(svc.optInStack(remoteNodeId, 'gateway-error-stack', 'tester'))
+            .rejects.toThrow('HTTP 502');
+
+        expect(db.isMeshStackEnabled(remoteNodeId, 'gateway-error-stack')).toBe(true);
+        db.deleteNode(remoteNodeId);
+    });
+
+    it('rolls back remote authority when the target explicitly rejects the push', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const remoteNodeId = db.addNode({
+            name: 'rejected-push', type: 'remote', mode: 'pilot_agent',
+            compose_dir: '/tmp', is_default: false, api_url: '', api_token: '',
+        });
+        vi.spyOn(svc as unknown as { inspectStackServices: (n: number, s: string) => Promise<unknown> }, 'inspectStackServices')
+            .mockResolvedValue([{ service: 'web', ports: [8080] }]);
+        vi.spyOn(svc, 'pushOverrideToNode')
+            .mockRejectedValue(new MeshError('push_failed', 'target rejected override'));
+
+        await expect(svc.optInStack(remoteNodeId, 'rejected-stack', 'tester'))
+            .rejects.toThrow('target rejected override');
+
+        expect(db.isMeshStackEnabled(remoteNodeId, 'rejected-stack')).toBe(false);
+        db.deleteNode(remoteNodeId);
     });
 });
 
@@ -984,6 +1158,7 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
 
+        process.env.SENCHO_MODE = 'pilot';
         // Simulate the pilot scenario: no mesh_stacks row (isMeshStackEnabled → false),
         // but the override file already exists on disk, pushed by central via D-1.
         const dataDir = process.env.DATA_DIR as string;
@@ -1008,6 +1183,184 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
 
         // Cleanup.
         fsSync.unlinkSync(overrideFile);
+        process.env.SENCHO_MODE = 'server';
+    });
+
+    it('persists and removes proxy-target opt-in state with a pushed local override', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+
+        const file = await svc.applyLocalOverride('proxy-stack', []);
+
+        expect(file).not.toBeNull();
+        const yaml = fsSync.readFileSync(file as string, 'utf8');
+        expect(yaml).toContain('web:');
+        expect(yaml).toContain('sencho_mesh');
+        expect(fsSync.readdirSync(path.dirname(file as string)).some((name) => name.includes('proxy-stack') && name.endsWith('.tmp'))).toBe(false);
+        expect(db.isMeshStackEnabled(localNodeId, 'proxy-stack')).toBe(true);
+
+        await svc.removeLocalOverride('proxy-stack');
+
+        expect(db.isMeshStackEnabled(localNodeId, 'proxy-stack')).toBe(false);
+    });
+
+    it('does not write a proxy override when DB authority cannot be recorded', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+        vi.spyOn(db, 'insertMeshStack').mockImplementation(() => {
+            throw new Error('database unavailable');
+        });
+
+        await expect(svc.applyLocalOverride('db-failure', [])).rejects.toThrow('database unavailable');
+
+        const overrideFile = path.join(
+            process.env.DATA_DIR as string,
+            'mesh',
+            'overrides',
+            String(localNodeId),
+            'db-failure.override.yml',
+        );
+        expect(fsSync.existsSync(overrideFile)).toBe(false);
+    });
+
+    it('restores an existing override when DB authority cannot be recorded', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const overrideDir = path.join(process.env.DATA_DIR as string, 'mesh', 'overrides', String(localNodeId));
+        fsSync.mkdirSync(overrideDir, { recursive: true });
+        const overrideFile = path.join(overrideDir, 'db-replacement-failure.override.yml');
+        const originalYaml = 'services:\n  prior:\n    networks:\n      - sencho_mesh\n';
+        fsSync.writeFileSync(overrideFile, originalYaml, 'utf8');
+        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+        vi.spyOn(db, 'insertMeshStack').mockImplementation(() => {
+            throw new Error('database unavailable');
+        });
+
+        await expect(svc.applyLocalOverride('db-replacement-failure', [])).rejects.toThrow('database unavailable');
+
+        expect(fsSync.readFileSync(overrideFile, 'utf8')).toBe(originalYaml);
+        expect(db.isMeshStackEnabled(localNodeId, 'db-replacement-failure')).toBe(false);
+        expect(fsSync.readdirSync(overrideDir).some((name) => name.includes('db-replacement-failure') && name.endsWith('.tmp'))).toBe(false);
+    });
+
+    it('does not publish DB authority or a final file when atomic override publication fails', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+        vi.spyOn(fs, 'rename').mockRejectedValue(new Error('rename failed'));
+
+        await expect(svc.applyLocalOverride('write-failure', [])).rejects.toThrow('rename failed');
+
+        const overrideDir = path.join(process.env.DATA_DIR as string, 'mesh', 'overrides', String(localNodeId));
+        expect(db.isMeshStackEnabled(localNodeId, 'write-failure')).toBe(false);
+        expect(fsSync.existsSync(path.join(overrideDir, 'write-failure.override.yml'))).toBe(false);
+        expect(fsSync.readdirSync(overrideDir).some((name) => name.includes('write-failure'))).toBe(false);
+    });
+
+    it('preserves the prior override and authority when atomic replacement fails', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const overrideDir = path.join(process.env.DATA_DIR as string, 'mesh', 'overrides', String(localNodeId));
+        fsSync.mkdirSync(overrideDir, { recursive: true });
+        const overrideFile = path.join(overrideDir, 'replacement-failure.override.yml');
+        const originalYaml = 'services:\n  prior:\n    networks:\n      - sencho_mesh\n';
+        fsSync.writeFileSync(overrideFile, originalYaml, 'utf8');
+        db.insertMeshStack(localNodeId, 'replacement-failure', 'tester');
+        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+        vi.spyOn(fs, 'rename').mockRejectedValue(new Error('rename failed'));
+
+        await expect(svc.applyLocalOverride('replacement-failure', [])).rejects.toThrow('rename failed');
+
+        expect(fsSync.readFileSync(overrideFile, 'utf8')).toBe(originalYaml);
+        expect(db.isMeshStackEnabled(localNodeId, 'replacement-failure')).toBe(true);
+    });
+
+    it('prevents overlapping override mutations for the same stack', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        let releaseServices!: (services: string[]) => void;
+        const servicesPending = new Promise<string[]>((resolve) => {
+            releaseServices = resolve;
+        });
+        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockReturnValue(servicesPending);
+
+        const first = svc.applyLocalOverride('concurrent-stack', []);
+        await vi.waitFor(() => expect(svc.getDeclaredStackServiceNames).toHaveBeenCalledTimes(1));
+
+        await expect(svc.applyLocalOverride('concurrent-stack', [])).rejects.toThrow('another operation');
+        releaseServices(['web']);
+        await first;
+
+        expect(db.isMeshStackEnabled(localNodeId, 'concurrent-stack')).toBe(true);
+    });
+
+    it('prevents removal from overlapping an in-flight override apply', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        let releaseServices!: (services: string[]) => void;
+        const servicesPending = new Promise<string[]>((resolve) => {
+            releaseServices = resolve;
+        });
+        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockReturnValue(servicesPending);
+
+        const apply = svc.applyLocalOverride('apply-remove-stack', []);
+        await vi.waitFor(() => expect(svc.getDeclaredStackServiceNames).toHaveBeenCalledTimes(1));
+
+        await expect(svc.removeLocalOverride('apply-remove-stack')).rejects.toThrow('another operation');
+        releaseServices(['web']);
+        const file = await apply;
+
+        expect(file).not.toBeNull();
+        expect(fsSync.existsSync(file as string)).toBe(true);
+        expect(db.isMeshStackEnabled(localNodeId, 'apply-remove-stack')).toBe(true);
+    });
+
+    it('does not report committed removal as failed when alias refresh fails', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const overrideDir = path.join(process.env.DATA_DIR as string, 'mesh', 'overrides', String(localNodeId));
+        fsSync.mkdirSync(overrideDir, { recursive: true });
+        const overrideFile = path.join(overrideDir, 'refresh-failure.override.yml');
+        fsSync.writeFileSync(overrideFile, 'services: {}\n', 'utf8');
+        db.insertMeshStack(localNodeId, 'refresh-failure', 'setup');
+        (svc as unknown as { pilotAliasOverlay: Map<string, unknown> }).pilotAliasOverlay.set('refresh-failure', []);
+        vi.spyOn(svc as unknown as { refreshAliasCache: () => Promise<void> }, 'refreshAliasCache')
+            .mockRejectedValue(new Error('refresh failed'));
+        vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+
+        await expect(svc.removeLocalOverride('refresh-failure')).resolves.toBeUndefined();
+
+        expect(fsSync.existsSync(overrideFile)).toBe(false);
+        expect(db.isMeshStackEnabled(localNodeId, 'refresh-failure')).toBe(false);
+    });
+
+    it('does not report committed apply as failed when alias refresh fails', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        vi.spyOn(svc, 'getDeclaredStackServiceNames').mockResolvedValue(['web']);
+        vi.spyOn(svc as unknown as { refreshAliasCache: () => Promise<void> }, 'refreshAliasCache')
+            .mockRejectedValue(new Error('refresh failed'));
+        vi.spyOn(console, 'warn').mockImplementation(() => { /* silence */ });
+
+        const file = await svc.applyLocalOverride('apply-refresh-failure', [], [{
+            host: 'web.example', nodeId: localNodeId, nodeName: 'local', stackName: 'apply-refresh-failure',
+            serviceName: 'web', port: 8080,
+        }]);
+
+        expect(file).not.toBeNull();
+        expect(fsSync.existsSync(file as string)).toBe(true);
+        expect(db.isMeshStackEnabled(localNodeId, 'apply-refresh-failure')).toBe(true);
     });
 
     it('returns null for pilot nodes when no pushed override file exists', async () => {
@@ -1015,9 +1368,38 @@ describe('MeshService.ensureStackOverride (BUG-1 fix)', () => {
         const db = DatabaseService.getInstance();
         const localNodeId = db.getNodes()[0].id;
 
+        process.env.SENCHO_MODE = 'pilot';
         // No mesh_stacks row, no file on disk.
         const result = await svc.ensureStackOverride(localNodeId, 'no-such-stack');
         expect(result).toBeNull();
+        process.env.SENCHO_MODE = 'server';
+    });
+
+    it('does not use stale override presence as authority on a server', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        const overrideDir = path.join(process.env.DATA_DIR as string, 'mesh', 'overrides', String(localNodeId));
+        fsSync.mkdirSync(overrideDir, { recursive: true });
+        const overrideFile = path.join(overrideDir, 'stale-server.override.yml');
+        fsSync.writeFileSync(overrideFile, 'services: {}\n', 'utf8');
+
+        const result = await svc.ensureStackOverride(localNodeId, 'stale-server');
+
+        expect(result).toBeNull();
+        fsSync.unlinkSync(overrideFile);
+    });
+
+    it('restores proxy-target DB authority when override removal fails', async () => {
+        const svc = MeshService.getInstance();
+        const db = DatabaseService.getInstance();
+        const localNodeId = db.getNodes()[0].id;
+        db.insertMeshStack(localNodeId, 'unlink-failure', 'tester');
+        vi.spyOn(fs, 'unlink').mockRejectedValue(Object.assign(new Error('permission denied'), { code: 'EACCES' }));
+
+        await expect(svc.removeLocalOverride('unlink-failure')).rejects.toThrow('permission denied');
+
+        expect(db.isMeshStackEnabled(localNodeId, 'unlink-failure')).toBe(true);
     });
 });
 

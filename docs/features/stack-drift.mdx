@@ -83,7 +83,7 @@ A Compose port range such as `8000-8002:8000-8002` is compared conservatively. B
 
 ### Network findings and the Networking tab
 
-The **network-undeclared** and **network-missing** findings reuse the same comparison the stack's [Networking](/features/compose-networking) tab uses, so the two surfaces never disagree about a network attachment. The difference is history: this tab persists findings in the drift ledger over time, while the Networking tab always shows the current live state with no history. A stack with an open network finding also counts toward the **Drift** chip in the Fleet Overview's Networking filter group, so a network-attachment mismatch is visible both per-stack here and across the fleet there.
+The **network-undeclared** and **network-missing** findings reuse the same comparison the stack's [Networking](/features/compose-networking) tab uses, so the two surfaces never disagree about a network attachment. Sencho-verified `sencho_mesh` attachments for its own container and Mesh-opted-in stacks are excluded, while a manual attachment from an opted-out stack remains actionable. The difference is history: this tab persists findings in the drift ledger over time, while the Networking tab always shows the current live state with no history. A stack with an open network finding also counts toward the **Drift** chip in the Fleet Overview's Networking filter group, so a network-attachment mismatch is visible both per-stack here and across the fleet there.
 
 ## When drift is recorded
 
@@ -92,6 +92,8 @@ The **network-undeclared** and **network-missing** findings reuse the same compa
 **Clicking re-check** runs the spatial engine and then reconciles the result into the ledger: new findings are recorded with a detection timestamp, cleared findings are marked resolved, and Activity timeline events are written for any change. The history and "checked" timestamp update after a re-check.
 
 **After every deploy or update**, Sencho automatically records a new baseline hash and runs a full reconciliation. You do not need to click re-check after deploying; the ledger is updated as part of the deploy pipeline.
+
+An open ledger entry for an attachment that is no longer reported clears during the next re-check or post-deploy reconciliation. Opening the tab refreshes the live report but does not change persisted history.
 
 <img
   src="/images/stack-drift/drift-history.png"

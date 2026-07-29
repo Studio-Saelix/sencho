@@ -23,6 +23,8 @@ import type {
   NetworkDriftFacts, NetworkFactNetwork, NetworkFactService, NetworkRuntimeState, StackNetworkFacts,
 } from './types';
 import { classifyMissingExternalNetworks, type MissingExternalNetwork } from './missingExternalNetworks';
+import { resolveManagedMeshAttachment } from './managedMeshAttachment';
+import type { ManagedNetworkAttachmentPredicate } from './normalize';
 
 import { getErrorMessage } from '../../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../../utils/safeLog';
@@ -43,6 +45,7 @@ export function assembleStackNetworkFacts(
   model: EffectiveModel | null,
   renderError: string | null,
   snapshot: DependencySnapshot | null,
+  managedNetworkAttachment?: ManagedNetworkAttachmentPredicate,
 ): StackNetworkFacts {
   const runtime: NetworkRuntimeState = snapshot ? 'available' : 'unavailable';
 
@@ -82,7 +85,9 @@ export function assembleStackNetworkFacts(
     extraHosts: s.extraHosts,
   }));
 
-  const drift = snapshot ? compareStackNetworks(fromEffectiveModel(model), snapshot, stackName) : EMPTY_DRIFT;
+  const drift = snapshot
+    ? compareStackNetworks(fromEffectiveModel(model), snapshot, stackName, managedNetworkAttachment)
+    : EMPTY_DRIFT;
   const missingExternalNetworks: MissingExternalNetwork[] = snapshot
     ? classifyMissingExternalNetworks(
       model,
@@ -147,5 +152,8 @@ export async function buildStackNetworkFacts(
     }
   }
 
-  return assembleStackNetworkFacts(stackName, model, renderError, snapshot);
+  const managedNetworkAttachment = snapshot && model
+    ? await resolveManagedMeshAttachment(nodeId, stackName)
+    : undefined;
+  return assembleStackNetworkFacts(stackName, model, renderError, snapshot, managedNetworkAttachment);
 }
