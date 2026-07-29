@@ -5,7 +5,12 @@ import { declaredFromEffectiveModel } from '../helpers/effectiveToDeclaredCompos
 import type { DeclaredCompose, DeclaredService } from '../helpers/composeDependencyParse';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
 import { parseEffectiveModel } from './preflight/effectiveModel';
-import { compareStackNetworks, fromDeclaredCompose } from './network/normalize';
+import {
+  compareStackNetworks,
+  fromDeclaredCompose,
+  type ManagedNetworkAttachmentPredicate,
+} from './network/normalize';
+import { resolveManagedMeshAttachment } from './network/managedMeshAttachment';
 import { sanitizeForLog, redactSensitiveText } from '../utils/safeLog';
 import { getErrorMessage } from '../utils/errors';
 import { isCleanOneShotCompletion } from '../utils/oneShotCompletion';
@@ -111,6 +116,8 @@ export interface AssembleStackDriftInput {
   containers: DependencyContainer[];
   /** Every network on the node (for resolving foreign vs stack-owned attachments). */
   networks?: DependencyNetwork[];
+  /** Authoritative runtime attachments that are intentionally absent from authored Compose. */
+  managedNetworkAttachment?: ManagedNetworkAttachmentPredicate;
   /** Set when the compose file could not be parsed. */
   parseError?: string;
 }
@@ -137,12 +144,18 @@ function networkDriftFindings(
   declared: DeclaredCompose,
   containers: DependencyContainer[],
   networks: DependencyNetwork[],
+  managedNetworkAttachment?: ManagedNetworkAttachmentPredicate,
 ): StackDriftFinding[] {
   // Runtime resource names use the Compose project (top-level `name:` when set),
   // not the stack directory, so a stack with `name:` resolves its networks the
   // same way Docker does. Containers are still attributed to the stack directory.
   const normalized = fromDeclaredCompose(declared, declared.projectName ?? stack);
-  const facts = compareStackNetworks(normalized, { containers, networks, volumes: [] }, stack);
+  const facts = compareStackNetworks(
+    normalized,
+    { containers, networks, volumes: [] },
+    stack,
+    managedNetworkAttachment,
+  );
   const findings: StackDriftFinding[] = [];
 
   const serviceByContainer = new Map(containers.map(c => [c.name, c.service ?? c.name]));
@@ -293,7 +306,13 @@ export function assembleStackDrift(input: AssembleStackDriftInput): StackDriftRe
     }
   }
 
-  findings.push(...networkDriftFindings(stack, declared, containers, networks));
+  findings.push(...networkDriftFindings(
+    stack,
+    declared,
+    containers,
+    networks,
+    input.managedNetworkAttachment,
+  ));
 
   const status: StackDriftStatus = findings.length > 0 ? 'drifted' : 'in-sync';
   return { stack, status, hasComposeFile: true, hasContainers, findings };
@@ -384,5 +403,12 @@ export async function buildStackDriftReport(nodeId: number, stackName: string): 
     };
   }
 
-  return assembleStackDrift({ stack: stackName, declared: render.declared, containers, networks });
+  const managedNetworkAttachment = await resolveManagedMeshAttachment(nodeId, stackName);
+  return assembleStackDrift({
+    stack: stackName,
+    declared: render.declared,
+    containers,
+    networks,
+    managedNetworkAttachment,
+  });
 }

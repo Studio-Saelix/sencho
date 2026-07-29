@@ -1,6 +1,7 @@
 import net from 'net';
 import path from 'path';
 import fs from 'fs/promises';
+import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
 import * as YAML from 'yaml';
 import { ComposeService } from './ComposeService';
@@ -20,6 +21,7 @@ import { STREAM_PENDING_DATA_MAX_BYTES } from '../pilot/protocol';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
 import { isPathWithinBase, isValidStackName, isValidRelativeStackPath } from '../utils/validation';
+import { getErrorMessage } from '../utils/errors';
 import { PORT as SENCHO_LISTEN_PORT } from '../helpers/constants';
 import { assertPolicyGateAllows, buildSystemPolicyGateOptions } from '../helpers/policyGate';
 
@@ -1497,6 +1499,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     // --- Opt-in / opt-out ---
 
     public async optInStack(nodeId: number, stackName: string, actor: string): Promise<void> {
+        return this.runMeshNodeMutation(nodeId, () => this.optInStackExclusive(nodeId, stackName, actor));
+    }
+
+    private async optInStackExclusive(nodeId: number, stackName: string, actor: string): Promise<void> {
         this.logDiag('opt-in start', { nodeId, stackName, actor });
         const t0 = Date.now();
         if (!isValidStackName(stackName)) {
@@ -1541,19 +1547,41 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
 
         db.insertMeshStack(nodeId, stackName, actor);
-        await this.refreshAliasCache();
-        await this.syncForwarderListeners();
+        try {
+            await this.refreshAliasCache();
+            await this.syncForwarderListeners();
+        } catch (error) {
+            db.deleteMeshStack(nodeId, stackName);
+            try {
+                await this.refreshAliasCache();
+                await this.syncForwarderListeners();
+            } catch (rollbackError) {
+                console.warn('[MeshService] Failed to refresh aliases after opt-in rollback:', sanitizeForLog(getErrorMessage(rollbackError, 'unknown')));
+            }
+            throw error;
+        }
 
-        // Push the just-opted-in stack's override loudly. If this fails the
-        // DB state is invalid (alias claimed but remote pilot has no
-        // override file) so roll back rather than leave a half-state that
-        // future opt-in calls would short-circuit on `isMeshStackEnabled`.
+        // Push the just-opted-in stack's override loudly. Explicit target
+        // rejection rolls back the row. A remote transport failure is
+        // ambiguous because the target may already have committed, so retain
+        // authority and let normal regeneration reconcile it.
         try {
             await this.pushOverrideToNode(nodeId, stackName);
         } catch (err) {
-            db.deleteMeshStack(nodeId, stackName);
-            await this.refreshAliasCache();
-            await this.syncForwarderListeners();
+            const node = db.getNode(nodeId);
+            const explicitlyRejected = node?.type !== 'remote' || err instanceof MeshError;
+            if (explicitlyRejected) {
+                db.deleteMeshStack(nodeId, stackName);
+                await this.refreshAliasCache();
+                await this.syncForwarderListeners();
+            } else {
+                this.logActivity({
+                    source: 'mesh', level: 'warn', type: 'forwarder.error',
+                    nodeId,
+                    message: `mesh override push outcome unknown for ${stackName}; retaining opt-in authority for reconciliation`,
+                    details: { stackName },
+                });
+            }
             throw err;
         }
         // Regenerate every other meshed stack's override across the fleet
@@ -1584,6 +1612,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     }
 
     public async optOutStack(nodeId: number, stackName: string, actor: string): Promise<void> {
+        return this.runMeshNodeMutation(nodeId, () => this.optOutStackExclusive(nodeId, stackName, actor));
+    }
+
+    private async optOutStackExclusive(nodeId: number, stackName: string, actor: string): Promise<void> {
         this.logDiag('opt-out start', { nodeId, stackName, actor });
         if (!isValidStackName(stackName)) {
             throw new MeshError('denied', `invalid stack name: ${stackName}`);
@@ -1591,9 +1623,18 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const db = DatabaseService.getInstance();
         if (!db.isMeshStackEnabled(nodeId, stackName)) return;
         db.deleteMeshStack(nodeId, stackName);
-        await this.removeOverrideFromNode(nodeId, stackName);
-        await this.refreshAliasCache();
-        await this.syncForwarderListeners();
+        try {
+            await this.removeOverrideFromNode(nodeId, stackName);
+        } catch (error) {
+            db.insertMeshStack(nodeId, stackName, actor);
+            throw error;
+        }
+        try {
+            await this.refreshAliasCache();
+            await this.syncForwarderListeners();
+        } catch (error) {
+            console.warn('[MeshService] Failed to refresh aliases after committed opt-out:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+        }
         // The opted-out row is already deleted, so listMeshStacks() will not
         // include it. Walk the remaining fleet-wide rows so every other
         // meshed stack regenerates its override without the dropped alias.
@@ -1620,6 +1661,10 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     }
 
     public async enableForNode(nodeId: number): Promise<void> {
+        return this.runMeshNodeMutation(nodeId, () => this.enableForNodeExclusive(nodeId));
+    }
+
+    private async enableForNodeExclusive(nodeId: number): Promise<void> {
         this.logDiag('enable-for-node', { nodeId });
         DatabaseService.getInstance().setNodeMeshEnabled(nodeId, true);
         this.logActivity({
@@ -1642,26 +1687,42 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         nodeId: number,
         actor: string = 'system:mesh.disable',
     ): Promise<void> {
+        return this.runMeshNodeMutation(nodeId, () => this.disableForNodeExclusive(nodeId, actor));
+    }
+
+    private async disableForNodeExclusive(nodeId: number, actor: string): Promise<void> {
         this.logDiag('disable-for-node start', { nodeId, actor });
         const t0 = Date.now();
-        DatabaseService.getInstance().setNodeMeshEnabled(nodeId, false);
-        const stacks = DatabaseService.getInstance().listMeshStacks(nodeId);
-        for (const s of stacks) {
-            DatabaseService.getInstance().deleteMeshStack(nodeId, s.stack_name);
-        }
+        const db = DatabaseService.getInstance();
+        const stacks = db.listMeshStacks(nodeId);
         // Dispatch DELETE /api/mesh/local-override/:stack for remote nodes
         // (pilot or proxy) so the override file pushed earlier via
         // applyLocalOverride is removed; falls back to local deletion for
         // local nodes. Parallelize per the regenerateOverridesForNode
         // rationale: each remote call is its own HTTP round-trip, so
         // awaiting sequentially turns N stacks into N serialised DELETEs.
-        // `allSettled` so a single failure does not abort the others
-        // (removeOverrideFromNode already swallows errors internally).
-        await Promise.allSettled(
+        // `allSettled` so a single failure does not abort the others.
+        const removals = await Promise.allSettled(
             stacks.map((s) => this.removeOverrideFromNode(nodeId, s.stack_name)),
         );
-        await this.refreshAliasCache();
-        await this.syncForwarderListeners();
+        const failed: string[] = [];
+        const removed: typeof stacks = [];
+        removals.forEach((result, index) => {
+            const stack = stacks[index];
+            if (result.status === 'fulfilled') {
+                db.deleteMeshStack(nodeId, stack.stack_name);
+                removed.push(stack);
+            } else {
+                failed.push(stack.stack_name);
+            }
+        });
+        if (failed.length === 0) db.setNodeMeshEnabled(nodeId, false);
+        try {
+            await this.refreshAliasCache();
+            await this.syncForwarderListeners();
+        } catch (error) {
+            console.warn('[MeshService] Failed to refresh aliases after committed node disable changes:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+        }
         // Mirror optOutStack: regenerate every remaining node's override
         // without the dropped aliases, recompose the rest of the fleet so
         // their containers shed the stale extra_hosts, and redeploy the
@@ -1669,14 +1730,38 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         // sencho_mesh network and lose the alias entries they owned.
         await this.regenerateOverridesAcrossFleet();
         this.cascadeRecomposeAcrossFleet(undefined, undefined, actor);
-        for (const s of stacks) {
+        for (const s of removed) {
             this.triggerRedeploy(nodeId, s.stack_name, actor);
+        }
+        if (failed.length > 0) {
+            throw new MeshError(
+                'push_failed',
+                `Could not disable Mesh on node ${nodeId}: override removal failed for ${failed.join(', ')}.`,
+            );
         }
         this.logDiag('disable-for-node complete', { nodeId, stacks: stacks.length, ms: Date.now() - t0 });
         this.logActivity({
             source: 'mesh', level: 'info', type: 'mesh.disable',
             nodeId, message: `mesh disabled on node ${nodeId}`,
         });
+    }
+
+    private readonly meshNodeMutations = new Map<number, Promise<void>>();
+
+    private async runMeshNodeMutation<T>(nodeId: number, operation: () => Promise<T>): Promise<T> {
+        const previous = this.meshNodeMutations.get(nodeId) ?? Promise.resolve();
+        let release!: () => void;
+        const pending = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        this.meshNodeMutations.set(nodeId, pending);
+        await previous;
+        try {
+            return await operation();
+        } finally {
+            release();
+            if (this.meshNodeMutations.get(nodeId) === pending) this.meshNodeMutations.delete(nodeId);
+        }
     }
 
     // --- Override file management ---
@@ -1690,6 +1775,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             // lives on central per the C-3 design). Use file-presence as the
             // fallback: if central pushed an override via applyLocalOverride, return
             // that path so ComposeService picks it up on the next deploy.
+            if (process.env.SENCHO_MODE !== 'pilot') return null;
             const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
             if (!isPathWithinBase(file, dir)) return null;
             try {
@@ -1754,13 +1840,37 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         portAliases?: MeshGlobalAlias[],
     ): Promise<string | null> {
         if (!isValidStackName(stackName)) return null;
-        if (!this.senchoIp) {
+        const senchoIp = this.senchoIp;
+        if (!senchoIp) {
             throw new MeshError(
                 'push_failed',
                 this.networkSetupError || 'mesh data plane unavailable on this node',
             );
         }
         const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            localNodeId,
+            stackName,
+            'deploy',
+            'system:mesh.override',
+            () => this.applyLocalOverrideExclusive(localNodeId, stackName, aliases, senchoIp, portAliases),
+        );
+        if (!lock.ran) {
+            throw new MeshError(
+                'push_failed',
+                `Cannot apply Mesh override for "${stackName}": another operation (${lock.existing.action}) is already in progress.`,
+            );
+        }
+        return lock.result;
+    }
+
+    private async applyLocalOverrideExclusive(
+        localNodeId: number,
+        stackName: string,
+        aliases: MeshAlias[],
+        senchoIp: string,
+        portAliases?: MeshGlobalAlias[],
+    ): Promise<string | null> {
         const serviceNames = await this.getDeclaredStackServiceNames(stackName, localNodeId);
 
         const dir = this.overrideDirFor(localNodeId);
@@ -1785,6 +1895,7 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
                     message: `mesh override preserved for ${stackName}: declared services unreadable, keeping ${existing.length} existing entries`,
                     details: { stackName, preservedServices: existing },
                 });
+                this.recordLocalOverrideIntent(localNodeId, stackName);
                 return file;
             }
         }
@@ -1792,13 +1903,24 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const yaml = generateOverrideYaml({
             services: serviceNames,
             aliases,
-            senchoIp: this.senchoIp,
+            senchoIp,
         });
-        await fs.writeFile(file, yaml, 'utf8');
+        const previousYaml = await this.readOverrideContent(file);
+        await this.writeOverrideAtomically(file, yaml);
+        try {
+            this.recordLocalOverrideIntent(localNodeId, stackName);
+        } catch (error) {
+            await this.restoreOverrideAfterAuthorityFailure(file, previousYaml);
+            throw error;
+        }
         if (portAliases && portAliases.length > 0) {
             this.pilotAliasOverlay.set(stackName, portAliases);
-            await this.refreshAliasCache();
-            await this.syncForwarderListeners();
+            try {
+                await this.refreshAliasCache();
+                await this.syncForwarderListeners();
+            } catch (error) {
+                console.warn('[MeshService] Failed to refresh aliases after committed override apply:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+            }
         }
         return file;
     }
@@ -1810,13 +1932,95 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
     public async removeLocalOverride(stackName: string): Promise<void> {
         if (!isValidStackName(stackName)) return;
         const localNodeId = NodeRegistry.getInstance().getDefaultNodeId();
+        const lock = await StackOpLockService.getInstance().runExclusive(
+            localNodeId,
+            stackName,
+            'deploy',
+            'system:mesh.override',
+            () => this.removeLocalOverrideExclusive(localNodeId, stackName),
+        );
+        if (!lock.ran) {
+            throw new MeshError(
+                'push_failed',
+                `Cannot remove Mesh override for "${stackName}": another operation (${lock.existing.action}) is already in progress.`,
+            );
+        }
+    }
+
+    private async removeLocalOverrideExclusive(localNodeId: number, stackName: string): Promise<void> {
         const dir = this.overrideDirFor(localNodeId);
         const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
         if (!isPathWithinBase(file, dir)) return;
-        try { await fs.unlink(file); } catch { /* ignore not-exist */ }
+        const db = DatabaseService.getInstance();
+        const hadIntent = db.isMeshStackEnabled(localNodeId, stackName);
+        if (hadIntent) db.deleteMeshStack(localNodeId, stackName);
+        try {
+            await fs.unlink(file);
+        } catch (error) {
+            if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+                if (hadIntent) db.insertMeshStack(localNodeId, stackName, null);
+                throw error;
+            }
+        }
         if (this.pilotAliasOverlay.delete(stackName)) {
-            await this.refreshAliasCache();
-            await this.syncForwarderListeners();
+            try {
+                await this.refreshAliasCache();
+                await this.syncForwarderListeners();
+            } catch (error) {
+                console.warn('[MeshService] Failed to refresh aliases after committed override removal:', sanitizeForLog(getErrorMessage(error, 'unknown')));
+            }
+        }
+    }
+
+    private async writeOverrideAtomically(file: string, yaml: string): Promise<void> {
+        const dir = path.dirname(file);
+        const tempFile = path.resolve(dir, `.${path.basename(file)}.${randomUUID()}.tmp`);
+        if (!isPathWithinBase(tempFile, dir)) throw new Error('Invalid Mesh override temporary path');
+
+        let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+        try {
+            handle = await fs.open(tempFile, 'wx');
+            await handle.writeFile(yaml, 'utf8');
+            await handle.sync();
+            await handle.close();
+            handle = null;
+            await fs.rename(tempFile, file);
+        } catch (error) {
+            if (handle) {
+                try { await handle.close(); } catch (closeError) {
+                    console.warn('[MeshService] Failed to close temporary override:', sanitizeForLog(getErrorMessage(closeError, 'unknown')));
+                }
+            }
+            try {
+                await fs.unlink(tempFile);
+            } catch (cleanupError) {
+                if (!(cleanupError instanceof Error && 'code' in cleanupError && cleanupError.code === 'ENOENT')) {
+                    console.warn('[MeshService] Failed to clean up temporary override:', sanitizeForLog(getErrorMessage(cleanupError, 'unknown')));
+                }
+            }
+            throw error;
+        }
+    }
+
+    private async readOverrideContent(file: string): Promise<string | null> {
+        try {
+            return await fs.readFile(file, 'utf8');
+        } catch (error) {
+            if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return null;
+            throw error;
+        }
+    }
+
+    private async restoreOverrideAfterAuthorityFailure(file: string, previousYaml: string | null): Promise<void> {
+        try {
+            if (previousYaml === null) {
+                await fs.unlink(file);
+            } else {
+                await this.writeOverrideAtomically(file, previousYaml);
+            }
+        } catch (error) {
+            if (previousYaml === null && error instanceof Error && 'code' in error && error.code === 'ENOENT') return;
+            console.warn('[MeshService] Failed to restore override after authority error:', sanitizeForLog(getErrorMessage(error, 'unknown')));
         }
     }
 
@@ -1825,12 +2029,23 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         const dir = this.overrideDirFor(nodeId);
         const file = path.resolve(dir, `${path.basename(stackName)}.override.yml`);
         if (!isPathWithinBase(file, dir)) return;
-        try { await fs.unlink(file); } catch { /* ignore not-exist */ }
+        try {
+            await fs.unlink(file);
+        } catch (error) {
+            if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error;
+        }
     }
 
     private overrideDirFor(nodeId: number): string {
         const dataDir = process.env.DATA_DIR || '/app/data';
         return path.join(dataDir, 'mesh', 'overrides', String(nodeId));
+    }
+
+    private recordLocalOverrideIntent(nodeId: number, stackName: string): void {
+        if (process.env.SENCHO_MODE === 'pilot') return;
+        const db = DatabaseService.getInstance();
+        if (db.isMeshStackEnabled(nodeId, stackName)) return;
+        db.insertMeshStack(nodeId, stackName, null);
     }
 
     private async regenerateOverridesForNode(nodeId: number, skipStack?: string): Promise<void> {
@@ -2331,7 +2546,11 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
             );
         }
         if (!res.ok) {
-            throw new MeshError('push_failed', `HTTP ${res.status} from node ${node.name}`);
+            const message = `HTTP ${res.status} from node ${node.name}`;
+            if (res.status >= 400 && res.status < 500) {
+                throw new MeshError('push_failed', message);
+            }
+            throw new Error(message);
         }
     }
 
@@ -2436,15 +2655,20 @@ export class MeshService extends EventEmitter implements MeshForwarderHost {
         }
 
         try {
-            await this.proxyFetch(
+            const response = await this.proxyFetch(
                 nodeId,
                 'DELETE',
                 `/api/mesh/local-override/${encodeURIComponent(stackName)}`,
                 undefined,
                 5_000,
             );
+            if (!response.ok) {
+                const body = await response.text().catch(() => '');
+                throw new Error(`HTTP ${response.status} from node ${node.name}: ${body.slice(0, 256)}`);
+            }
         } catch (err) {
             console.warn('[MeshService] removeOverrideFromNode failed:', sanitizeForLog((err as Error).message));
+            throw err;
         }
     }
 

@@ -4,14 +4,21 @@
  * runtime-vs-Compose drift comparison (system/default/external networks and
  * stopped containers are not flagged).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { EffectiveModel, EffService } from '../services/preflight/effectiveModel';
 import type { DeclaredCompose } from '../helpers/composeDependencyParse';
 import type { DependencySnapshot, DependencyContainer, DependencyNetwork } from '../services/DockerController';
 import {
   fromEffectiveModel, fromDeclaredCompose, compareStackNetworks, runtimeResourceName, parseAccessUrlPorts,
+  type ManagedNetworkAttachmentPredicate,
 } from '../services/network/normalize';
-import { assembleStackNetworkFacts } from '../services/network/composeNetworkInspector';
+import { assembleStackNetworkFacts, buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
+import { buildNodeNetworkingFindings } from '../services/network/networkingFindings';
+import type { NetworkingNetworkBase } from '../services/network/networkingTypes';
+import DockerController from '../services/DockerController';
+import { ComposeService } from '../services/ComposeService';
+import { DatabaseService } from '../services/DatabaseService';
+import { FileSystemService } from '../services/FileSystemService';
 
 function effSvc(over: Partial<EffService> = {}): EffService {
   const hasHealthcheck = over.hasHealthcheck ?? true;
@@ -262,6 +269,187 @@ describe('compareStackNetworks', () => {
     const drift = compareStackNetworks(declared, snap, 'myapp');
     expect(drift.runtimeOnlyAttachments).toEqual([]);
     expect(drift.foreignNetworkAttachments).toEqual([]);
+  });
+
+  it('removes managed Mesh drift before Networking findings while preserving advanced-driver info', () => {
+    const meshOnlyModel: EffectiveModel = {
+      projectName: 'myapp',
+      services: [],
+      networks: {},
+      volumes: {},
+    };
+    const snap = snapshot(
+      [container({ networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }] })],
+      [depNet({ id: 'm', name: 'sencho_mesh', driver: 'macvlan', composeProject: null, stack: null })],
+    );
+    const facts = assembleStackNetworkFacts(
+      'myapp',
+      meshOnlyModel,
+      null,
+      snap,
+      (_runtimeContainer, networkName) => networkName === 'sencho_mesh',
+    );
+    const baseNetworks: NetworkingNetworkBase[] = [{
+      id: 'm',
+      name: 'sencho_mesh',
+      driver: 'macvlan',
+      scope: 'local',
+      isSystem: false,
+      ingress: false,
+      composeProject: null,
+      stack: null,
+      connectedCount: 1,
+      isSencho: true,
+      ownership: 'sencho-managed',
+      declaredByStacks: [],
+      declaredExternalByStacks: [],
+      isExternalDependency: false,
+    }];
+
+    const findings = buildNodeNetworkingFindings(1, snap, [facts], baseNetworks);
+
+    expect(facts.drift.runtimeOnlyAttachments).toEqual([]);
+    expect(facts.drift.foreignNetworkAttachments).toEqual([]);
+    expect(findings.some(f => f.kind === 'network-undeclared' || f.kind === 'foreign-network-attachment')).toBe(false);
+    expect(findings).toContainEqual(expect.objectContaining({
+      kind: 'advanced-driver-caveat',
+      severity: 'info',
+      network: 'sencho_mesh',
+    }));
+  });
+
+  it('keeps Networking facts available and Mesh drift actionable when opt-in authority fails', async () => {
+    const snap = snapshot(
+      [container({ networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }] })],
+      [depNet({ name: 'sencho_mesh', composeProject: null, stack: null })],
+    );
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockResolvedValue({
+        rendered: JSON.stringify({ name: 'myapp', services: { web: { image: 'nginx:1.27' } } }),
+        stderr: '',
+        code: 0,
+        timedOut: false,
+      }),
+    } as unknown as ComposeService);
+    vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({
+      getStacks: vi.fn().mockResolvedValue(['myapp']),
+    } as unknown as FileSystemService);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue(snap),
+    } as unknown as DockerController);
+    vi.spyOn(DatabaseService, 'getInstance').mockImplementation(() => {
+      throw new Error('database unavailable');
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    try {
+      const facts = await buildStackNetworkFacts(1, 'myapp');
+
+      expect(facts.runtime).toBe('available');
+      expect(facts.drift.foreignNetworkAttachments).toEqual([{ container: 'web1', network: 'sencho_mesh' }]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('threads opted-in authority through Networking facts and preserves advanced-driver info', async () => {
+    const snap = snapshot(
+      [container({ networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }] })],
+      [depNet({ id: 'm', name: 'sencho_mesh', driver: 'macvlan', composeProject: null, stack: null })],
+    );
+    vi.spyOn(ComposeService, 'getInstance').mockReturnValue({
+      renderConfig: vi.fn().mockResolvedValue({
+        rendered: JSON.stringify({ name: 'myapp', services: { web: { image: 'nginx:1.27' } } }),
+        stderr: '',
+        code: 0,
+        timedOut: false,
+      }),
+    } as unknown as ComposeService);
+    vi.spyOn(FileSystemService, 'getInstance').mockReturnValue({
+      getStacks: vi.fn().mockResolvedValue(['myapp']),
+    } as unknown as FileSystemService);
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue(snap),
+    } as unknown as DockerController);
+    vi.spyOn(DatabaseService, 'getInstance').mockReturnValue({
+      isMeshStackEnabled: vi.fn().mockReturnValue(true),
+      getStackExposureIntents: vi.fn().mockReturnValue([]),
+      getStackDossier: vi.fn().mockReturnValue(null),
+    } as unknown as DatabaseService);
+
+    try {
+      const facts = await buildStackNetworkFacts(1, 'myapp');
+      const baseNetworks: NetworkingNetworkBase[] = [{
+        id: 'm', name: 'sencho_mesh', driver: 'macvlan', scope: 'local', isSystem: false,
+        ingress: false, composeProject: null, stack: null, connectedCount: 1, isSencho: true,
+        ownership: 'sencho-managed', declaredByStacks: [], declaredExternalByStacks: [],
+        isExternalDependency: false,
+      }];
+      const findings = buildNodeNetworkingFindings(1, snap, [facts], baseNetworks);
+
+      expect(facts.drift.runtimeOnlyAttachments).toEqual([]);
+      expect(facts.drift.foreignNetworkAttachments).toEqual([]);
+      expect(findings.filter(f => f.kind === 'network-undeclared' || f.kind === 'foreign-network-attachment')).toEqual([]);
+      expect(findings).toContainEqual(expect.objectContaining({
+        kind: 'advanced-driver-caveat',
+        severity: 'info',
+        network: 'sencho_mesh',
+      }));
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('ignores a verified Sencho Mesh attachment for the Sencho container', () => {
+    const snap = snapshot(
+      [container({ id: 'sencho-id', name: 'sencho', service: 'sencho', networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }] })],
+      [depNet({ name: 'sencho_mesh', composeProject: null, stack: null })],
+    );
+    const managed: ManagedNetworkAttachmentPredicate = (runtimeContainer, networkName) =>
+      runtimeContainer.id === 'sencho-id' && networkName === 'sencho_mesh';
+
+    const drift = compareStackNetworks(declared, snap, 'myapp', managed);
+
+    expect(drift.runtimeOnlyAttachments).toEqual([]);
+    expect(drift.foreignNetworkAttachments).toEqual([]);
+  });
+
+  it('ignores a verified Mesh attachment for an opted-in application stack', () => {
+    const snap = snapshot(
+      [container({ networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }] })],
+      [depNet({ name: 'sencho_mesh', composeProject: null, stack: null })],
+    );
+    const managed: ManagedNetworkAttachmentPredicate = (_runtimeContainer, networkName) =>
+      networkName === 'sencho_mesh';
+
+    const drift = compareStackNetworks(declared, snap, 'myapp', managed);
+
+    expect(drift.runtimeOnlyAttachments).toEqual([]);
+    expect(drift.foreignNetworkAttachments).toEqual([]);
+  });
+
+  it('keeps an unverified manual Mesh attachment actionable', () => {
+    const snap = snapshot(
+      [container({ networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }] })],
+      [depNet({ name: 'sencho_mesh', composeProject: null, stack: null })],
+    );
+
+    const drift = compareStackNetworks(declared, snap, 'myapp', () => false);
+
+    expect(drift.runtimeOnlyAttachments).toEqual([]);
+    expect(drift.foreignNetworkAttachments).toEqual([{ container: 'web1', network: 'sencho_mesh' }]);
+  });
+
+  it('keeps sencho_extra actionable even when the stack is Mesh-managed', () => {
+    const snap = snapshot(
+      [container({ networks: [{ name: 'sencho_extra', id: 'e', ip: '' }] })],
+      [depNet({ name: 'sencho_extra', composeProject: null, stack: null })],
+    );
+
+    const drift = compareStackNetworks(declared, snap, 'myapp', () => true);
+
+    expect(drift.runtimeOnlyAttachments).toEqual([]);
+    expect(drift.foreignNetworkAttachments).toEqual([{ container: 'web1', network: 'sencho_extra' }]);
   });
 
   it('does not flag attachments from stopped containers', () => {

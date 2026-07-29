@@ -45,6 +45,7 @@ describe('networking summary', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     DatabaseService.getInstance().deleteStackExposureIntents(1, STACK);
+    DatabaseService.getInstance().deleteMeshStack(1, STACK);
     fs.rmSync(stackDir, { recursive: true, force: true });
   });
 
@@ -70,6 +71,41 @@ describe('networking summary', () => {
     } as unknown as DockerController);
     const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
     expect(res.body.networkDrift.stacks).toContain(STACK);
+  });
+
+  it('does not count an opted-in Mesh attachment as network drift', async () => {
+    DatabaseService.getInstance().insertMeshStack(1, STACK, 'tester');
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({
+        containers: [{ id: 'c1', name: 'web1', service: 'web', composeProject: STACK, stack: STACK, state: 'running', exitCode: null, image: 'nginx', networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }], volumes: [], ports: [] }],
+        networks: [
+          { id: 'm', name: 'sencho_mesh', driver: 'bridge', scope: 'local', isSystem: false, composeProject: null, stack: null },
+        ],
+        volumes: [],
+      }),
+    } as unknown as DockerController);
+
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+
+    expect(res.status).toBe(200);
+    expect(res.body.networkDrift).toEqual({ count: 0, stacks: [] });
+  });
+
+  it('counts an opted-out manual Mesh attachment as network drift', async () => {
+    vi.spyOn(DockerController, 'getInstance').mockReturnValue({
+      getDependencySnapshot: vi.fn().mockResolvedValue({
+        containers: [{ id: 'c1', name: 'web1', service: 'web', composeProject: STACK, stack: STACK, state: 'running', exitCode: null, image: 'nginx', networks: [{ name: 'sencho_mesh', id: 'm', ip: '' }], volumes: [], ports: [] }],
+        networks: [
+          { id: 'm', name: 'sencho_mesh', driver: 'bridge', scope: 'local', isSystem: false, composeProject: null, stack: null },
+        ],
+        volumes: [],
+      }),
+    } as unknown as DockerController);
+
+    const res = await request(app).get('/api/networking/summary').set('Authorization', authHeader);
+
+    expect(res.status).toBe(200);
+    expect(res.body.networkDrift).toEqual({ count: 1, stacks: [STACK] });
   });
 
   it('still reports declared signals when the snapshot is unavailable (drift skipped)', async () => {
