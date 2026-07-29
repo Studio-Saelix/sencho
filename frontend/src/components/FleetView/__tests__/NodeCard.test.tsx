@@ -62,6 +62,20 @@ describe('NodeCard', () => {
     expect(can).toHaveBeenCalledWith('node:manage', 'node', '2');
   });
 
+  it('shows edit and delete controls to a scoped node manager who is not an admin', async () => {
+    const node = onlineNode();
+    const registryNode = { id: 2, name: 'Edge', type: 'remote', is_default: false };
+    const onEdit = vi.fn();
+    const onDelete = vi.fn();
+    useNodesMock.mockReturnValue({ nodes: [registryNode, { id: 1, type: 'local' }], hasCapability: vi.fn(() => false) });
+    useAuthMock.mockReturnValue({ isAdmin: false, can: vi.fn((action: string) => action === 'node:manage') });
+    render(<NodeCard {...baseProps(node)} onEdit={onEdit} onDelete={onDelete} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Node actions' }));
+    expect(await screen.findByText('Edit node')).toBeInTheDocument();
+    expect(screen.getByText('Delete node')).toBeInTheDocument();
+  });
+
   it('hides the cordon control from a user lacking node:manage', () => {
     useAuthMock.mockReturnValue({ isAdmin: false, can: vi.fn(() => false) });
     render(<NodeCard {...baseProps(onlineNode())} />);

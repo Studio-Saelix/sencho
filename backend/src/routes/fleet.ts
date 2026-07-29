@@ -18,7 +18,7 @@ import SelfUpdateService, { type PinInfo } from '../services/SelfUpdateService';
 import { getSenchoVersion, isValidVersion } from '../services/CapabilityRegistry';
 import { authMiddleware } from '../middleware/auth';
 import { requirePaid, requireAdmin, requireNodeProxy, requireUserSession } from '../middleware/tierGates';
-import { requirePermission } from '../middleware/permissions';
+import { checkPermission, requirePermission } from '../middleware/permissions';
 import { respondSelfUpdatePreflight } from './license';
 import { ImageOperationService } from '../services/ImageOperationService';
 import { classifyImageChannel } from '../helpers/imageChannel';
@@ -1888,9 +1888,9 @@ type FleetStopNodeResult = {
 // on its own Docker via its local-stop receiver. Remote label rows are never
 // mirrored to the control, so there is no central pre-check; unreachable nodes
 // are reported at the node level and never block the reachable ones.
-// Tier: requireAdmin (admin-only fleet plumbing; available on every license).
+// Permission: every confirmed stack requires stack:deploy. Discovery-only dry
+// runs require node:read.
 fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   const body = req.body as { labelName?: unknown; dryRun?: unknown; targets?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
     res.status(400).json({ error: 'Request body is required' });
@@ -1934,6 +1934,19 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
   }
   const trimmed = labelName.trim();
   const isDryRun = dryRun === true;
+  if (confirmedStacksByNode) {
+    const denied = [...confirmedStacksByNode].some(([nodeId, stackNames]) =>
+      [...stackNames].some(stackName =>
+        !checkPermission(req, 'stack:deploy', 'stack', stackName, nodeId)));
+    if (denied) {
+      res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+      return;
+    }
+  } else if (isDryRun) {
+    if (!requirePermission(req, res, 'node:read')) return;
+  } else if (!requirePermission(req, res, 'stack:deploy')) {
+    return;
+  }
   try {
     const db = DatabaseService.getInstance();
     const nodes = db.getNodes();
@@ -1967,7 +1980,7 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
         }
       }
 
-      // Remote node. Ask the remote authoritatively via its admin-only local-stop
+      // Remote node. Ask the remote authoritatively via its permission-checked local-stop
       // receiver, which name-matches under the remote's own bulk lock. There is no
       // control-side pre-check: remote label rows are never mirrored to the
       // control, so a mirror lookup would skip every remote. A node we cannot
@@ -2087,9 +2100,8 @@ fleetRouter.post('/labels/fleet-stop', authMiddleware, async (req: Request, res:
 // Per-node failures (unknown node, no proxy target, unreachable, mixed-version
 // remote, malformed response) degrade that node only and never discard the rest
 // of the fan-out.
-// Tier: requireAdmin (admin-only fleet plumbing; available on every license).
+// Permission: every target stack requires stack:edit.
 fleetRouter.post('/labels/bulk-assign', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   const body = req.body as { label?: unknown; targets?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
     res.status(400).json({ error: 'Request body is required' });
@@ -2134,6 +2146,12 @@ fleetRouter.post('/labels/bulk-assign', authMiddleware, async (req: Request, res
   }
   if (totalStacks > MAX_ASSIGNMENTS) {
     res.status(400).json({ error: `targets may not exceed ${MAX_ASSIGNMENTS} stack assignments` });
+    return;
+  }
+  const denied = targets.some(target => target.stackNames.some(stackName =>
+    !checkPermission(req, 'stack:edit', 'stack', stackName, target.nodeId)));
+  if (denied) {
+    res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
     return;
   }
   const { template } = validated;
@@ -2242,7 +2260,7 @@ fleetRouter.post('/labels/fleet-prune', authMiddleware, async (req: Request, res
 // uses these to distinguish "0 matching stacks" from "label exists but no
 // stacks assigned" from "remote unavailable".
 fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'node:read')) return;
   const body = req.body as { labelName?: unknown } | undefined;
   if (!body || typeof body !== 'object') {
     res.status(400).json({ error: 'Request body is required' });
@@ -2290,7 +2308,7 @@ fleetRouter.post('/labels/match-preview', authMiddleware, async (req: Request, r
 // them is a no-op). `unreachableNodes`/`partial` tell the card the counts cover
 // only the nodes it could reach.
 fleetRouter.get('/labels/suggestions', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const summaries = await collectFleetLabelSummaries();
     const agg = new Map<string, { nodeCount: number; stackCount: number; nodes: string[] }>();

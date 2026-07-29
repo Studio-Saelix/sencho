@@ -7,6 +7,7 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { cn } from '@/lib/utils';
 import { ResultsList, type ResultRow } from '../ResultsList';
+import { useAuth } from '@/context/AuthContext';
 
 interface NodeStackResult { stackName: string; success: boolean; error?: string; dryRun?: boolean }
 interface FleetStopNodeResult {
@@ -73,6 +74,7 @@ function isMatchPreviewResponse(value: unknown): value is MatchPreviewResponse {
 }
 
 export function LabelFleetStopCard() {
+  const { can } = useAuth();
   const [labelName, setLabelName] = useState('');
   const [suggestions, setSuggestions] = useState<FleetStopLabelSuggestion[]>([]);
   const [suggestUnreachable, setSuggestUnreachable] = useState(0);
@@ -193,6 +195,8 @@ export function LabelFleetStopCard() {
   async function run(opts: { dryRun: boolean; targets?: { nodeId: number; stackNames: string[] }[] }) {
     const trimmed = labelName.trim();
     if (!trimmed) return;
+    if (opts.targets?.some(target => target.stackNames.some(stackName =>
+      !can('stack:deploy', 'stack', stackName, target.nodeId)))) return;
     const verb = opts.dryRun ? 'Dry-running' : 'Stopping';
     const toastId = toast.loading(`${verb} stacks with the stack label "${trimmed}" across the fleet…`);
     setRunning(true);
@@ -303,7 +307,11 @@ export function LabelFleetStopCard() {
   // The real Stop is enabled only once the blast radius is resolved to at least
   // one stack, and never while a run is in flight. Loading/unavailable previews,
   // 0-match results, and an invalidated dry-run snapshot all leave it disabled.
-  const canStopFleet = !running && resolvedTargets !== null && resolvedTargets.some(t => t.stackNames.length > 0);
+  const canStopFleet = !running
+    && resolvedTargets !== null
+    && resolvedTargets.some(t => t.stackNames.length > 0)
+    && resolvedTargets.every(target => target.stackNames.every(stackName =>
+      can('stack:deploy', 'stack', stackName, target.nodeId)));
 
   const previewSection = renderPreviewSection(preview, trimmed);
 

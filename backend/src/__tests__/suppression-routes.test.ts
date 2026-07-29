@@ -114,13 +114,13 @@ describe('POST /api/security/suppressions', () => {
     expect(res.status).toBe(401);
   });
 
-  it('rejects non-admin users with 403', async () => {
+  it('rejects users without stack:edit with 403', async () => {
     const res = await request(app)
       .post('/api/security/suppressions')
       .set('Authorization', viewerAuthHeader)
       .send(validBody);
     expect(res.status).toBe(403);
-    expect(res.body.code).toBe('ADMIN_REQUIRED');
+    expect(res.body.code).toBe('PERMISSION_DENIED');
   });
 
   it('is accessible on community tier (admin still required)', async () => {

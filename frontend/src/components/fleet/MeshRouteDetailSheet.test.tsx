@@ -1,8 +1,8 @@
 /**
  * Render-gate coverage for the alias-detail Remove control and transport line.
  *
- * Removing a route opts its owning stack out of the mesh, an admin-only mutation
- * (POST /api/mesh/nodes/:id/stacks/:stack/opt-out requires admin). This locks the
+ * Removing a route opts its owning stack out of the mesh, an Admin-only cascade.
+ * This locks the
  * matching UI gate: a manager sees "Remove from mesh", a non-manager does not,
  * while the read-only route detail stays available to both. It also pins the
  * transport line to the node's actual transport so a proxy peer never reports a

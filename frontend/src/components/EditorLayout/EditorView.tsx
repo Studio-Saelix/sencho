@@ -443,7 +443,6 @@ export function EditorView(props: EditorViewProps) {
                                         safeContainers={safeContainers}
                                         isRunning={isRunning}
                                         can={can}
-                                        isAdmin={isAdmin}
                                         trivy={trivy}
                                         backupInfo={backupInfo}
                                         loadingAction={loadingAction}

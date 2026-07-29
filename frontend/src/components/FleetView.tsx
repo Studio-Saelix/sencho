@@ -63,7 +63,9 @@ export function FleetView({
     onFleetActiveTabChange,
 }: FleetViewProps) {
     const { isPaid, licenseStatus } = useLicense();
-    const { isAdmin } = useAuth();
+    const { isAdmin, can } = useAuth();
+    const canManageFleet = can('node:manage');
+    const canExportDossier = can('node:read') && can('stack:read');
     const { hasCapability } = useNodes();
     const { experimental, experimentalReady } = useExperimental();
     const containerLabelsEnabled = hasCapability('container-label-inventory');
@@ -240,7 +242,7 @@ export function FleetView({
                                 <TooltipContent>Refresh</TooltipContent>
                             </Tooltip>
                         </TooltipProvider>
-                        {isAdmin && (
+                        {canExportDossier && (
                             <TooltipProvider>
                                 <Tooltip>
                                     <TooltipTrigger asChild>
@@ -289,8 +291,8 @@ export function FleetView({
                         onRetryUpdate={updateStatus.retryNodeUpdate}
                         onDismissUpdate={updateStatus.dismissNodeUpdate}
                         onCordonChange={() => { void overview.fetchOverview(true); }}
-                        onEditNode={isAdmin ? openEdit : undefined}
-                        onDeleteNode={isAdmin ? openDelete : undefined}
+                        onEditNode={openEdit}
+                        onDeleteNode={openDelete}
                         onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
                         onAddNode={isAdmin && onOpenSettingsSection ? () => onOpenSettingsSection('nodes') : undefined}
                         onCheckUpdates={updateStatus.checkUpdates}
@@ -324,12 +326,18 @@ export function FleetView({
                 {canDiscoverRouting && (
                     <TabsContent value="routing">
                         <PaidGate>
-                            <RoutingTab canManage={isAdmin} />
+                            <RoutingTab
+                                canManageNode={(nodeId) => can('node:manage', 'node', String(nodeId))}
+                                canManageMembership={isAdmin}
+                            />
                         </PaidGate>
                     </TabsContent>
                 )}
                 <TabsContent value="federation">
-                    <FederationTab canManage={isAdmin} />
+                    <FederationTab
+                        canManage={canManageFleet}
+                        canManageNode={(nodeId) => can('node:manage', 'node', String(nodeId))}
+                    />
                 </TabsContent>
                 <TabsContent value="actions">
                     {/* Fleet Actions runs against the whole fleet, so it takes the

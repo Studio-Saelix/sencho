@@ -84,6 +84,7 @@ export function checkPermission(
   action: PermissionAction,
   resourceType?: ResourceType,
   resourceId?: string,
+  resourceNodeId?: number | null,
 ): boolean {
   if (!req.user) return false;
 
@@ -113,7 +114,9 @@ export function checkPermission(
   if (effectiveTier(req) !== 'paid') return false;
 
   const db = DatabaseService.getInstance();
-  const nodeId = resourceType === 'stack' ? req.nodeId : null;
+  const nodeId = resourceType === 'stack'
+    ? (resourceNodeId === undefined ? req.nodeId : resourceNodeId)
+    : null;
   const assignments = db.getRoleAssignments(
     req.user.userId,
     resourceType,
@@ -127,11 +130,11 @@ export function checkPermission(
 
   // Node-scoped grants are node-wide: a Node Admin / Deployer / Admin on
   // node N authorizes that role's stack actions for every stack on N.
-  if (resourceType === 'stack' && req.nodeId != null) {
+  if (resourceType === 'stack' && nodeId != null) {
     const nodeAssignments = db.getRoleAssignments(
       req.user.userId,
       'node',
-      String(req.nodeId),
+      String(nodeId),
     );
     for (const assignment of nodeAssignments) {
       if (ROLE_PERMISSIONS[assignment.role]?.includes(action)) return true;
@@ -148,8 +151,9 @@ export function requirePermission(
   action: PermissionAction,
   resourceType?: ResourceType,
   resourceId?: string,
+  resourceNodeId?: number | null,
 ): boolean {
-  if (checkPermission(req, action, resourceType, resourceId)) return true;
+  if (checkPermission(req, action, resourceType, resourceId, resourceNodeId)) return true;
   res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
   return false;
 }

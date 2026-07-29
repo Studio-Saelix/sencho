@@ -39,7 +39,10 @@ function readStoredEdgeMode(): MeshGraphEdgeMode {
     }
 }
 
-export function RoutingTab({ canManage }: { canManage: boolean }) {
+export function RoutingTab({ canManageNode, canManageMembership }: {
+    canManageNode: (nodeId: number) => boolean;
+    canManageMembership: boolean;
+}) {
     const [status, setStatus] = useState<MeshNodeStatus[]>([]);
     const [localDataPlane, setLocalDataPlane] = useState<MeshDataPlaneStatus | null>(null);
     const [aliases, setAliases] = useState<MeshAlias[]>([]);
@@ -177,13 +180,14 @@ export function RoutingTab({ canManage }: { canManage: boolean }) {
                                 onShowAlias={(alias) => setRouteDetailAlias(alias)}
                                 onTestUpstream={testUpstream}
                                 onChanged={() => { void refresh(); }}
-                                canManage={canManage}
+                                canManage={canManageNode(s.nodeId)}
+                                canManageMembership={canManageMembership}
                             />
                         ))}
                     </div>
                 </div>
                 <SheetsRoot
-                    canManage={canManage}
+                    canManageMembership={canManageMembership}
                     optInNode={optInNode} setOptInNode={setOptInNode}
                     diagnosticsNode={diagnosticsNode} setDiagnosticsNode={setDiagnosticsNode}
                     routeDetailAlias={routeDetailAlias} setRouteDetailAlias={setRouteDetailAlias}
@@ -234,7 +238,8 @@ export function RoutingTab({ canManage }: { canManage: boolean }) {
                             onShowAlias={(alias) => setRouteDetailAlias(alias)}
                             onTestUpstream={testUpstream}
                             onChanged={() => { void refresh(); }}
-                            canManage={canManage}
+                            canManage={canManageNode(s.nodeId)}
+                            canManageMembership={canManageMembership}
                         />
                     ))}
                 </div>
@@ -247,7 +252,7 @@ export function RoutingTab({ canManage }: { canManage: boolean }) {
                 />
             )}
             <SheetsRoot
-                canManage={canManage}
+                canManageMembership={canManageMembership}
                 optInNode={optInNode} setOptInNode={setOptInNode}
                 diagnosticsNode={diagnosticsNode} setDiagnosticsNode={setDiagnosticsNode}
                 routeDetailAlias={routeDetailAlias} setRouteDetailAlias={setRouteDetailAlias}
@@ -287,7 +292,7 @@ function RoutingMasthead({ meshedNodes, reachableNodes, totalAliases, onShowActi
 }
 
 function SheetsRoot(props: {
-    canManage: boolean;
+    canManageMembership: boolean;
     optInNode: { id: number; name: string } | null;
     setOptInNode: (v: { id: number; name: string } | null) => void;
     diagnosticsNode: { id: number; name: string } | null;
@@ -313,7 +318,7 @@ function SheetsRoot(props: {
                     onOpenChange={(open) => { if (!open) props.setOptInNode(null); }}
                     nodeId={optInNode.id}
                     nodeName={optInNode.name}
-                    canManage={props.canManage}
+                    canManage={props.canManageMembership}
                     onChanged={props.onChanged}
                 />
             )}
@@ -328,7 +333,7 @@ function SheetsRoot(props: {
                 open={!!props.routeDetailAlias}
                 onOpenChange={(open) => { if (!open) props.setRouteDetailAlias(null); }}
                 alias={props.routeDetailAlias}
-                canManage={props.canManage}
+                canManage={props.canManageMembership}
                 status={props.status}
                 aliases={props.aliases}
                 onChanged={props.onChanged}

@@ -313,14 +313,14 @@ describe('GET /api/fleet/labels/suggestions', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 403 for a non-admin (viewer) user', async () => {
+  it('allows a viewer with node:read to load suggestions', async () => {
     const viewerName = `viewer-sugg-${++labelCounter}`;
     db.addUser({ username: viewerName, password_hash: 'x', role: 'viewer' });
     const viewerAuth = `Bearer ${jwt.sign({ username: viewerName }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
     const res = await request(app)
       .get('/api/fleet/labels/suggestions')
       .set('Authorization', viewerAuth);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
   });
 
   it('is reachable on community tier for admins (no PAID_REQUIRED)', async () => {

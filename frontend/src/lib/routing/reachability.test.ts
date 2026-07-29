@@ -47,6 +47,7 @@ describe('reachability', () => {
   it('hides fleet without node:read when ready', () => {
     const noFleet = ctx({ can: () => false });
     expect(isViewHidden('fleet', noFleet)).toBe(true);
+    expect(isViewHidden('networking', noFleet)).toBe(true);
   });
 
   it('preserves host-console when authz is not ready', () => {

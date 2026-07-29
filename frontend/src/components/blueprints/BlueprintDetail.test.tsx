@@ -1,10 +1,8 @@
 /**
  * Render-gate coverage for BlueprintDetail's action bar.
  *
- * The Apply / Edit / Disable / Delete actions all hit admin-only routes
- * (e.g. POST /api/blueprints/:id/apply requires admin). This locks the UI gate:
- * an admin (canEdit) sees the action affordances; a non-admin viewer sees none
- * of them, so the sheet can never issue a request the API answers with 403.
+ * Blueprint actions use distinct stack permissions. These tests lock the UI
+ * gates so each role sees only actions accepted by the API.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
@@ -148,5 +146,25 @@ describe('BlueprintDetail action gating', () => {
         expect(screen.queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument();
         // The detail is still viewable: the compose source and deployment table render.
         expect(screen.getByTestId('deployment-table')).toBeInTheDocument();
+    });
+
+    it('lets a deployer apply without exposing edit or delete', async () => {
+        const can = vi.fn((action: string) => action === 'stack:create' || action === 'stack:deploy');
+        render(
+            <BlueprintDetail
+                blueprintId={1}
+                open
+                onOpenChange={noop}
+                onChanged={noop}
+                canEdit={false}
+                can={can}
+                distinctLabels={[]}
+            />,
+        );
+
+        expect(await screen.findByText('Show compose source')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /apply now/i })).toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /^edit$/i })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: /^delete$/i })).not.toBeInTheDocument();
     });
 });

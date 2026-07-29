@@ -17,6 +17,7 @@ vi.mock('@/lib/api', () => ({
   apiFetch: vi.fn(),
   fetchForNode: vi.fn(),
 }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => true }) }));
 
 const toastError = vi.fn();
 const toastSuccess = vi.fn();

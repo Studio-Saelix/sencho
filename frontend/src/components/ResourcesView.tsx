@@ -367,7 +367,10 @@ interface ResourcesViewProps {
 export default function ResourcesView({ headerActions }: ResourcesViewProps = {}) {
     const isMobile = useIsMobile();
     const [resourceTab, setResourceTab] = useState<'images' | 'volumes' | 'unmanaged'>('images');
-    const { isAdmin } = useAuth();
+    const { isAdmin, can } = useAuth();
+    const canReadResources = can('stack:read');
+    const canDeployResources = can('stack:deploy');
+    const canEditSecurityPolicy = can('stack:edit');
     const { activeNode } = useNodes();
     const [usage, setUsage] = useState<UsageData | null>(null);
     const [images, setImages] = useState<DockerImage[]>([]);
@@ -1076,7 +1079,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                                             <TooltipContent>Inspect image</TooltipContent>
                                                         </Tooltip>
                                                     </TooltipProvider>
-                                                    {trivy.available && isAdmin && img.RepoTags?.[0] && img.RepoTags[0] !== '<none>:<none>' && (
+                                                    {trivy.available && canDeployResources && img.RepoTags?.[0] && img.RepoTags[0] !== '<none>:<none>' && (
                                                         <DropdownMenu>
                                                             <TooltipProvider>
                                                                 <Tooltip>
@@ -1214,7 +1217,7 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
                                             </TableCell>
                                             <TableCell className="text-right">
                                                 <div className="flex items-center justify-end gap-1">
-                                                    {isAdmin && (
+                                                    {canReadResources && (
                                                         <TooltipProvider>
                                                             <Tooltip>
                                                                 <TooltipTrigger asChild>
@@ -1479,11 +1482,11 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             <VulnerabilityScanSheet
                 scanId={inspectScanId}
                 onClose={() => setInspectScanId(null)}
-                onRescan={isAdmin ? (imageRef) => { setInspectScanId(null); handleScanImage(imageRef, { force: true }); } : undefined}
-                canGenerateSbom={isAdmin}
-                canExportSarif={isAdmin}
+                onRescan={canDeployResources ? (imageRef) => { setInspectScanId(null); handleScanImage(imageRef, { force: true }); } : undefined}
+                canGenerateSbom={canReadResources}
+                canExportSarif={canReadResources}
                 canCompare
-                canManageSuppressions={isAdmin}
+                canManageSuppressions={canEditSecurityPolicy}
             />
         </>
     );

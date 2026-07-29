@@ -63,7 +63,7 @@ const MOBILE_MASTHEAD_TONE: Record<MastheadTone, { dot: Tone; word: StateWordCla
 };
 
 export function SecurityView({ activeTab, onTabChange, headerActions }: SecurityViewProps) {
-  const { isAdmin } = useAuth();
+  const { can } = useAuth();
   const { activeNode } = useNodes();
   const isMobile = useIsMobile();
   const isRemote = activeNode?.type === 'remote';
@@ -104,7 +104,10 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
 
   // Scanner readiness gates the Images Actions column; an admin on a node whose
   // scanner is available can trigger scans inline.
-  const canScan = isAdmin && !!overview?.scanner.available;
+  const canScanImages = can('stack:deploy') && !!overview?.scanner.available;
+  const canScanNode = can('node:manage') && !!overview?.scanner.available;
+  const canReadSecurityExports = can('stack:read');
+  const canEditSecurityPolicy = can('stack:edit');
   const { scanningRef, scanImage } = useImageScan({
     onComplete: (scanId) => onInspect(scanId, 'vulns'),
     onSummaries: setSummaries,
@@ -264,7 +267,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
             exploitTruncated={exploitTruncated}
             onNavigate={handleNavigate}
             onInspect={onInspect}
-            canScan={canScan}
+            canScan={canScanNode}
             onScanComplete={() => setReloadToken((t) => t + 1)}
           />
         </TabsContent>
@@ -276,7 +279,7 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
               loading={summariesLoading}
               error={summariesError}
               onInspect={onInspect}
-              canScan={canScan}
+              canScan={canScanImages}
               scanningRef={scanningRef}
               onScan={scanImage}
               initialFilter={imagesFilter ?? undefined}
@@ -336,10 +339,10 @@ export function SecurityView({ activeTab, onTabChange, headerActions }: Security
       scanId={inspectScanId}
       initialTab={inspectInitialTab}
       onClose={() => setInspectScanId(null)}
-      canGenerateSbom={isAdmin}
-      canExportSarif={isAdmin}
+      canGenerateSbom={canReadSecurityExports}
+      canExportSarif={canReadSecurityExports}
       canCompare
-      canManageSuppressions={isAdmin}
+      canManageSuppressions={canEditSecurityPolicy}
     />
   );
 

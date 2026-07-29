@@ -26,6 +26,9 @@ import { StateReviewDialog } from './StateReviewDialog';
 import { RolloutPreviewDialog } from './RolloutPreviewDialog';
 import { useNodes } from '@/context/NodeContext';
 import { formatTimeAgo } from '@/lib/relativeTime';
+import type { PermissionAction } from '@/context/AuthContext';
+
+type PermissionResolver = (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean;
 
 interface BlueprintDetailProps {
     blueprintId: number;
@@ -33,10 +36,11 @@ interface BlueprintDetailProps {
     onOpenChange: (open: boolean) => void;
     onChanged: () => void;
     canEdit: boolean;
+    can?: PermissionResolver;
     distinctLabels: string[];
 }
 
-export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, canEdit, distinctLabels }: BlueprintDetailProps) {
+export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, canEdit, can, distinctLabels }: BlueprintDetailProps) {
     const [summary, setSummary] = useState<BlueprintSummary | null>(null);
     const [loading, setLoading] = useState(false);
     const [editMode, setEditMode] = useState(false);
@@ -78,6 +82,12 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
     if (!open) return null;
 
     const blueprint = summary?.blueprint;
+    const canApply = !!blueprint && (can ? can('stack:create') && can('stack:deploy') : canEdit);
+    const canDeleteBlueprint = !!blueprint && (can ? can('stack:delete') : canEdit);
+    const canDeployOnNode = (nodeId: number) => !!blueprint
+        && (can ? can('stack:deploy', 'stack', blueprint.name, nodeId) : canEdit);
+    const canWithdrawFromNode = (nodeId: number) => !!blueprint
+        && (can ? can('stack:delete', 'stack', blueprint.name, nodeId) : canEdit);
 
     async function handleRolloutApplied() {
         await refresh();
@@ -236,14 +246,14 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                 crumb={['Blueprints', blueprint?.name ?? '…']}
                 name={blueprint?.name ?? <Skeleton className="h-7 w-40 inline-block" />}
                 meta={meta}
-                primaryAction={blueprint && canEdit ? {
+                primaryAction={canApply ? {
                     label: 'Apply now',
                     icon: Play,
                     onClick: () => setPreviewOpen(true),
                     disabled: submitting || !blueprint.enabled || editMode,
                 } : undefined}
                 secondaryActions={secondaryActions}
-                destructiveAction={blueprint && canEdit ? {
+                destructiveAction={canDeleteBlueprint ? {
                     label: 'Delete',
                     icon: Trash2,
                     onClick: () => setDeleteOpen(true),
@@ -294,7 +304,9 @@ export function BlueprintDetail({ blueprintId, open, onOpenChange, onChanged, ca
                             <BlueprintDeploymentTable
                                 deployments={summary.deployments}
                                 classification={blueprint.classification}
-                                canEdit={canEdit}
+                                canDeploy={canDeployOnNode}
+                                canWithdraw={canWithdrawFromNode}
+                                canRetry={canApply}
                                 busyNodeId={busyNodeId}
                                 onWithdraw={openWithdraw}
                                 onAcceptStateReview={openAcceptStateReview}

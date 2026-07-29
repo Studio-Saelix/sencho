@@ -48,6 +48,8 @@ export interface RoutingNodeCardProps {
      * management view it did not intend.
      */
     canManage: boolean;
+    /** Whether mesh membership actions may start their fleet-wide cascade. */
+    canManageMembership?: boolean;
 }
 
 const KICKER = 'font-mono text-[10px] uppercase tracking-[0.18em]';
@@ -89,6 +91,7 @@ export function RoutingNodeCard(props: RoutingNodeCardProps) {
         onAddStack, onRetry, footerContext, offlineReason,
         canManage,
     } = props;
+    const canManageMembership = props.canManageMembership ?? canManage;
     const [density] = useDensity();
     const compact = density === 'compact';
 
@@ -120,6 +123,7 @@ export function RoutingNodeCard(props: RoutingNodeCardProps) {
                     onToggleEnabled={onToggleEnabled}
                     onShowDiagnostics={onShowDiagnostics}
                     canManage={canManage}
+                    canManageMembership={canManageMembership}
                     footerContext={footerContext}
                     onAddStack={onAddStack}
                     onRetry={onRetry}
@@ -137,6 +141,7 @@ export function RoutingNodeCard(props: RoutingNodeCardProps) {
                     onToggleEnabled={onToggleEnabled}
                     onShowDiagnostics={onShowDiagnostics}
                     canManage={canManage}
+                    canManageMembership={canManageMembership}
                     aliases={aliases}
                     onShowAlias={onShowAlias}
                     onTestAlias={onTestAlias}
@@ -161,6 +166,7 @@ interface BodyChrome {
     onToggleEnabled: (next: boolean) => void;
     onShowDiagnostics: () => void;
     canManage: boolean;
+    canManageMembership: boolean;
     footerContext: string;
     onAddStack?: () => void;
     onRetry?: () => void;
@@ -179,7 +185,7 @@ function ComfortableBody(props: ComfortableProps) {
         crumb, name, isLocal, chip, meta, nodeState, isEnabled,
         toggleDisabled, diagnosticsDisabled, onToggleEnabled, onShowDiagnostics,
         aliases, onShowAlias, onTestAlias, onAddStack, onRetry, footerContext, offlineReason,
-        canManage,
+        canManage, canManageMembership,
     } = props;
     const published = aliases.filter((a) => a.kind === 'alias').length;
     const showAliases = aliases.length > 0;
@@ -228,7 +234,7 @@ function ComfortableBody(props: ComfortableProps) {
                         onShowAlias={onShowAlias}
                         onTestAlias={onTestAlias}
                         onAddStack={onAddStack}
-                        canManage={canManage}
+                        canManage={canManageMembership}
                     />
                     : <EmptyState
                         nodeState={nodeState}
@@ -238,6 +244,7 @@ function ComfortableBody(props: ComfortableProps) {
                         onRetry={onRetry}
                         onToggleEnabled={onToggleEnabled}
                         canManage={canManage}
+                        canManageMembership={canManageMembership}
                     />}
             </div>
 
@@ -250,7 +257,7 @@ function CompactBody(props: BodyChrome) {
     const {
         name, isLocal, chip, meta, nodeState, isEnabled,
         toggleDisabled, diagnosticsDisabled, onToggleEnabled, onShowDiagnostics,
-        footerContext, onAddStack, onRetry, canManage,
+        footerContext, onAddStack, onRetry, canManage, canManageMembership,
     } = props;
 
     return (
@@ -314,6 +321,7 @@ function CompactBody(props: BodyChrome) {
                 onRetry={onRetry}
                 onToggleEnabled={onToggleEnabled}
                 canManage={canManage}
+                canManageMembership={canManageMembership}
             />
         </>
     );
@@ -478,14 +486,15 @@ interface EmptyStateProps {
     onRetry?: () => void;
     onToggleEnabled: (next: boolean) => void;
     canManage: boolean;
+    canManageMembership: boolean;
 }
 
-function EmptyState({ nodeState, name, offlineReason, onAddStack, onRetry, onToggleEnabled, canManage }: EmptyStateProps) {
+function EmptyState({ nodeState, name, offlineReason, onAddStack, onRetry, onToggleEnabled, canManage, canManageMembership }: EmptyStateProps) {
     const { headline, sub, cta } = emptyStateCopy(nodeState, name, offlineReason);
-    // The idle and meshed CTAs (enable mesh, add stack) are management actions
-    // the backend gates on the admin role, so a non-admin viewer sees a hint
-    // instead. The degraded/offline retry is a read-only refresh and stays.
+    // Enabling a node uses node:manage. Adding a stack starts an Admin-only
+    // mesh membership cascade. The degraded/offline retry stays available.
     const isManagementState = nodeState === 'idle' || nodeState === 'meshed';
+    const canManageState = nodeState === 'meshed' ? canManageMembership : canManage;
     // `connecting` is transient while the mesh bridge dials; show the headline
     // only, with no retry button (it clears on its own once the bridge is up).
     const isConnecting = nodeState === 'connecting';
@@ -507,7 +516,7 @@ function EmptyState({ nodeState, name, offlineReason, onAddStack, onRetry, onTog
         </Button>
     );
     if (isConnecting) action = null;
-    else if (!canManage && isManagementState) {
+    else if (!canManageState && isManagementState) {
         action = (
             <div className="font-mono text-[11px] leading-snug text-stat-subtitle">
                 Managing the mesh requires an administrator.
@@ -546,13 +555,12 @@ function ctaToneFor(state: RoutingNodeState): string {
     return CTA_TONE[state];
 }
 
-// Management CTAs (enable mesh / add stack) need admin; the read-only retry on a
-// degraded/offline node stays available to everyone. `meshed` always offers "add
-// stack" to admins so a node with aliases is never a dead end, and the transient
-// `connecting` state shows no CTA.
-function shouldShowCta(state: RoutingNodeState, canManage: boolean): boolean {
+// Enabling mesh uses node management, while adding a stack starts an Admin-only
+// membership cascade. Read-only retry stays available to everyone.
+function shouldShowCta(state: RoutingNodeState, canManage: boolean, canManageMembership: boolean): boolean {
     if (state === 'connecting') return false;
-    if (state === 'idle' || state === 'meshed') return canManage;
+    if (state === 'idle') return canManage;
+    if (state === 'meshed') return canManageMembership;
     return true;
 }
 
@@ -615,10 +623,11 @@ interface CompactFooterProps {
     onRetry?: () => void;
     onToggleEnabled: (next: boolean) => void;
     canManage: boolean;
+    canManageMembership: boolean;
 }
 
-function CompactFooter({ context, nodeState, name, onAddStack, onRetry, onToggleEnabled, canManage }: CompactFooterProps) {
-    const showCta = shouldShowCta(nodeState, canManage);
+function CompactFooter({ context, nodeState, name, onAddStack, onRetry, onToggleEnabled, canManage, canManageMembership }: CompactFooterProps) {
+    const showCta = shouldShowCta(nodeState, canManage, canManageMembership);
     const { cta } = emptyStateCopy(nodeState, name);
     const handleClick = () => {
         if (nodeState === 'idle') onToggleEnabled(true);

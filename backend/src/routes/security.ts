@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { trivyInstallLimiter } from '../middleware/rateLimiters';
 import TrivyService, { SbomFormat } from '../services/TrivyService';
 import TrivyInstaller from '../services/TrivyInstaller';
@@ -391,6 +392,7 @@ securityRouter.get('/stacks/:stackName/pre-deploy-summary', authMiddleware, asyn
     res.status(400).json({ error: 'Invalid stack name' });
     return;
   }
+  if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
   const nodeId = req.nodeId;
   try {
     const db = DatabaseService.getInstance();
@@ -425,7 +427,7 @@ securityRouter.get('/stacks/:stackName/pre-deploy-summary', authMiddleware, asyn
 });
 
 securityRouter.post('/scan', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:deploy')) return;
   const svc = TrivyService.getInstance();
   if (!svc.isTrivyAvailable()) {
     res.status(503).json({ error: 'Trivy is not available on this host' });
@@ -462,7 +464,6 @@ securityRouter.post('/scan', authMiddleware, (req: Request, res: Response): void
 });
 
 securityRouter.post('/scan/stack', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   const svc = TrivyService.getInstance();
   if (!svc.isTrivyAvailable()) {
     res.status(503).json({ error: 'Trivy is not available on this host' }); return;
@@ -471,6 +472,7 @@ securityRouter.post('/scan/stack', authMiddleware, async (req: Request, res: Res
   if (!stackName || !/^[a-zA-Z0-9_-]+$/.test(stackName)) {
     res.status(400).json({ error: 'Invalid stack name' }); return;
   }
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
   if (svc.isScanningStack(req.nodeId, stackName)) {
     res.status(409).json({ error: 'Already scanning this stack' }); return;
   }
@@ -494,7 +496,7 @@ securityRouter.post('/scan/stack', authMiddleware, async (req: Request, res: Res
 // when requested, every stack's compose config for misconfigurations. Streams
 // sanitized progress to the deploy-feedback terminal when the client opened one.
 securityRouter.post('/scan-node', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'node:manage')) return;
   const svc = TrivyService.getInstance();
   if (!svc.isTrivyAvailable()) {
     res.status(503).json({ error: 'Trivy is not available on this host' });
@@ -1001,7 +1003,7 @@ securityRouter.get('/policy-packs', authMiddleware, (_req: Request, res: Respons
 });
 
 securityRouter.post('/sbom', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:read')) return;
   const svc = TrivyService.getInstance();
   if (!svc.isTrivyAvailable()) {
     res.status(503).json({ error: 'Trivy is not available on this host' }); return;
@@ -1034,7 +1036,7 @@ securityRouter.get(
   '/scans/:scanId/sarif',
   authMiddleware,
   (req: Request, res: Response): void => {
-    if (!requireAdmin(req, res)) return;
+    if (!requirePermission(req, res, 'stack:read')) return;
     const scanId = Number(req.params.scanId);
     if (!Number.isFinite(scanId)) {
       res.status(400).json({ error: 'Invalid scan id' }); return;
@@ -1095,10 +1097,10 @@ securityRouter.get(
   },
 );
 
-// Export the instance's CVE triage decisions as an OpenVEX document. Admin-only,
-// mirroring the SARIF export.
+// Export the instance's CVE triage decisions as an OpenVEX document. This is a
+// read operation, mirroring the SARIF export permission.
 securityRouter.get('/vex/export', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const suppressions = DatabaseService.getInstance().getCveSuppressions();
     const doc = generateOpenVex(suppressions, req.user?.username || 'sencho', new Date().toISOString());
@@ -1123,7 +1125,7 @@ securityRouter.get('/policies', authMiddleware, (req: Request, res: Response): v
 });
 
 securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:edit')) return;
   if (blockIfReplica(res, 'security policies')) return;
   const { name, node_id, stack_pattern, max_severity, block_on_deploy, enabled, block_on_severity, block_on_kev, block_on_fixable } = req.body ?? {};
   if (!name || typeof name !== 'string' || !name.trim()) {
@@ -1173,7 +1175,7 @@ securityRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
 });
 
 securityRouter.put('/policies/:id', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:edit')) return;
   if (blockIfReplica(res, 'security policies')) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
@@ -1231,7 +1233,7 @@ securityRouter.put('/policies/:id', authMiddleware, (req: Request, res: Response
 });
 
 securityRouter.delete('/policies/:id', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:edit')) return;
   if (blockIfReplica(res, 'security policies')) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
@@ -1252,7 +1254,7 @@ securityRouter.get('/suppressions', authMiddleware, (req: Request, res: Response
 });
 
 securityRouter.post('/suppressions', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:edit')) return;
   if (blockIfReplica(res, 'CVE suppressions')) return;
   const body = req.body ?? {};
   const cveId = typeof body.cve_id === 'string' ? body.cve_id.trim() : '';
@@ -1316,7 +1318,7 @@ securityRouter.post('/suppressions', authMiddleware, (req: Request, res: Respons
 });
 
 securityRouter.put('/suppressions/:id', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:edit')) return;
   if (blockIfReplica(res, 'CVE suppressions')) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
@@ -1371,7 +1373,7 @@ securityRouter.put('/suppressions/:id', authMiddleware, (req: Request, res: Resp
 });
 
 securityRouter.delete('/suppressions/:id', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:edit')) return;
   if (blockIfReplica(res, 'CVE suppressions')) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
@@ -1403,7 +1405,7 @@ securityRouter.get('/misconfig-acks', authMiddleware, (req: Request, res: Respon
 });
 
 securityRouter.post('/misconfig-acks', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:edit')) return;
   if (blockIfReplica(res, 'misconfig acknowledgements')) return;
   const body = req.body ?? {};
   const ruleId = typeof body.rule_id === 'string' ? body.rule_id.trim() : '';
@@ -1459,7 +1461,7 @@ securityRouter.post('/misconfig-acks', authMiddleware, (req: Request, res: Respo
 });
 
 securityRouter.put('/misconfig-acks/:id', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:edit')) return;
   if (blockIfReplica(res, 'misconfig acknowledgements')) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
@@ -1511,7 +1513,7 @@ securityRouter.put('/misconfig-acks/:id', authMiddleware, (req: Request, res: Re
 });
 
 securityRouter.delete('/misconfig-acks/:id', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'stack:edit')) return;
   if (blockIfReplica(res, 'misconfig acknowledgements')) return;
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {

@@ -42,6 +42,7 @@ export function isViewHidden(view: ActiveView, ctx: ReachabilityContext): boolea
   if (!ctx.isAdmin && view === 'global-observability') return true;
   if (!ctx.isAdmin && (view === 'auto-updates' || view === 'scheduled-ops')) return true;
   if (!ctx.can('node:read') && view === 'fleet') return true;
+  if (!ctx.can('node:read') && view === 'networking') return true;
   if (view === 'host-console') {
     return !ctx.can('system:console');
   }

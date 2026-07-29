@@ -1,9 +1,9 @@
 /**
  * Render-gate coverage for FederationTab's pin control.
  *
- * Pinning a blueprint to a node is admin-only on the backend
- * (PUT /api/blueprints/:id/pin requires admin). This test locks the matching UI
- * gate: an admin sees an editable Select, a non-admin sees the placement
+ * Pinning a blueprint to a node is permission-gated on the backend. This test
+ * locks the matching UI gate: a manager sees an editable Select, while a user
+ * without permission sees the placement
  * read-only with an explanatory hint. Without this the affordance can drift
  * back to rendering an enabled control that the API rejects with 403.
  */
@@ -67,7 +67,7 @@ describe('FederationTab pin gating', () => {
 
         expect(await screen.findByText('web-blueprint')).toBeInTheDocument();
         expect(screen.getByRole('combobox')).toBeInTheDocument();
-        expect(screen.queryByText(/Pin changes require an administrator/i)).not.toBeInTheDocument();
+        expect(screen.queryByText(/do not have permission to change pin placement/i)).not.toBeInTheDocument();
     });
 
     it('renders the pin placement read-only for a non-admin', async () => {
@@ -75,9 +75,9 @@ describe('FederationTab pin gating', () => {
 
         expect(await screen.findByText('web-blueprint')).toBeInTheDocument();
         expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
-        expect(screen.getByText(/Pin changes require an administrator/i)).toBeInTheDocument();
+        expect(screen.getByText(/do not have permission to change pin placement/i)).toBeInTheDocument();
         expect(screen.getByText('(unpinned)')).toBeInTheDocument();
-        // The read-only branch must never be able to issue the admin-only pin request.
+        // The read-only branch must never be able to issue the pin request.
         expect(vi.mocked(pinBlueprint)).not.toHaveBeenCalled();
     });
 
@@ -90,5 +90,13 @@ describe('FederationTab pin gating', () => {
         // The pinned node name renders in both the read-only "Pinned to" cell and the
         // "Effective" column, so getAllByText (not getByText) is required.
         expect(screen.getAllByText('node-alpha').length).toBeGreaterThan(0);
+    });
+
+    it('shows pin controls for a scoped node manager', async () => {
+        render(<FederationTab canManage={false} canManageNode={(nodeId) => nodeId === 1} />);
+
+        expect(await screen.findByText('web-blueprint')).toBeInTheDocument();
+        expect(screen.getByRole('combobox')).toBeInTheDocument();
+        expect(screen.queryByText(/do not have permission to change pin placement/i)).not.toBeInTheDocument();
     });
 });
