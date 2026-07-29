@@ -10,6 +10,8 @@ import { getErrorMessage, isSqliteUniqueViolation } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
 import { sanitizeForLog } from '../utils/safeLog';
 import { validateUsername } from '../helpers/validateUsername';
+import { assertStackExistsOnNode } from '../helpers/assertStackExistsOnNode';
+import { isValidStackName } from '../utils/validation';
 
 const USERS_SCOPE_MESSAGE = 'API tokens cannot access user management.';
 const VALID_USER_ROLES: UserRole[] = ['admin', 'viewer', 'deployer', 'node-admin', 'auditor'];
@@ -247,13 +249,13 @@ usersRouter.get('/:id/roles', authMiddleware, (req: Request, res: Response): voi
   }
 });
 
-usersRouter.post('/:id/roles', authMiddleware, (req: Request, res: Response): void => {
+usersRouter.post('/:id/roles', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
   if (!requireAdmin(req, res)) return;
   if (!requirePaid(req, res)) return;
   try {
     const userId = parseInt(req.params.id as string, 10);
-    const { role, resource_type, resource_id } = req.body;
+    const { role, resource_type, resource_id, node_id: rawNodeId } = req.body;
 
     if (!VALID_ASSIGNMENT_ROLES.includes(role)) {
       res.status(400).json({ error: 'Invalid role' });
@@ -274,10 +276,72 @@ usersRouter.post('/:id/roles', authMiddleware, (req: Request, res: Response): vo
       return;
     }
 
+    let nodeId: number | null = null;
+
+    if (resource_type === 'stack') {
+      if (typeof rawNodeId !== 'number' || !Number.isInteger(rawNodeId)) {
+        res.status(400).json({ error: 'node_id is required for stack role assignments' });
+        return;
+      }
+      if (!isValidStackName(resource_id)) {
+        res.status(400).json({ error: 'Invalid stack name' });
+        return;
+      }
+      const exists = await assertStackExistsOnNode(rawNodeId, resource_id);
+      if (!exists.ok) {
+        res.status(400).json({ error: exists.error });
+        return;
+      }
+      nodeId = rawNodeId;
+    } else {
+      // node resource: reject a stack-style node_id qualifier
+      if (rawNodeId !== undefined && rawNodeId !== null) {
+        res.status(400).json({ error: 'node_id must not be set for node role assignments' });
+        return;
+      }
+      if (!/^\d+$/.test(resource_id)) {
+        res.status(400).json({ error: 'resource_id must be a numeric node id' });
+        return;
+      }
+      const parsedNodeId = parseInt(resource_id, 10);
+      if (String(parsedNodeId) !== resource_id) {
+        res.status(400).json({ error: 'resource_id must be a canonical node id' });
+        return;
+      }
+      if (!db.getNode(parsedNodeId)) {
+        res.status(400).json({ error: 'Node not found' });
+        return;
+      }
+    }
+
     try {
-      const id = db.addRoleAssignment({ user_id: userId, role, resource_type, resource_id });
-      console.log('[Roles] Assigned', sanitizeForLog(role), 'on', sanitizeForLog(resource_type), sanitizeForLog(resource_id), 'to user', userId, 'by:', sanitizeForLog(req.user!.username));
-      res.status(201).json({ id, user_id: userId, role, resource_type, resource_id });
+      const id = db.addRoleAssignment({
+        user_id: userId,
+        role,
+        resource_type,
+        resource_id,
+        node_id: nodeId,
+      });
+      console.log(
+        '[Roles] Assigned',
+        sanitizeForLog(role),
+        'on',
+        sanitizeForLog(resource_type),
+        sanitizeForLog(resource_id),
+        sanitizeForLog(nodeId != null ? `node ${nodeId}` : ''),
+        'to user',
+        userId,
+        'by:',
+        sanitizeForLog(req.user!.username),
+      );
+      res.status(201).json({
+        id,
+        user_id: userId,
+        role,
+        resource_type,
+        resource_id,
+        node_id: nodeId,
+      });
     } catch (err: unknown) {
       if (isSqliteUniqueViolation(err)) {
         res.status(409).json({ error: 'This role assignment already exists' });

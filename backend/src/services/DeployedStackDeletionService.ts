@@ -359,7 +359,7 @@ export class DeployedStackDeletionService {
     try {
       db.clearStackUpdateStatus(nodeId, stackName);
       db.clearStackScanAttempts(nodeId, stackName);
-      db.deleteRoleAssignmentsByResource('stack', stackName);
+      db.deleteRoleAssignmentsByStack(nodeId, stackName);
       db.deleteGitSource(stackName);
       db.deleteStackDossier(nodeId, stackName);
       db.deleteStackDriftFindings(nodeId, stackName);

@@ -17,13 +17,17 @@ import { StackUpdateOrchestrator, shortImageId, type OrchestratorResult } from '
 import DockerController, { type BulkStackInfo } from '../services/DockerController';
 import { DatabaseService, type StackDossierFields } from '../services/DatabaseService';
 import { CacheService, type CacheFetchOutcome } from '../services/CacheService';
-import { UpdatePreviewService, isAuthoritativeNegativePreview } from '../services/UpdatePreviewService';
+import {
+  UpdatePreviewService,
+  isAuthoritativeNegativePreview,
+  buildDetectionDisabledPreview,
+} from '../services/UpdatePreviewService';
 import { GitSourceService, GitSourceError, repoHost as gitRepoHost } from '../services/GitSourceService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { buildStackDriftReport, type DriftFindingKind, type StackDriftReport } from '../services/DriftDetectionService';
 import { DriftLedgerService, type DriftTemporal } from '../services/DriftLedgerService';
 import { ComposeDoctorService } from '../services/ComposeDoctorService';
-import { RULE_IDS } from '../services/preflight/rules';
+import { RULE_IDS, isPreflightNoteFinding } from '../services/preflight/rules';
 import { parseServiceImages, isPreflightAckActive } from '../utils/preflight-ack-filter';
 import type { PreflightAckExpiryMode } from '../services/DatabaseService';
 import { buildStackNetworkFacts } from '../services/network/composeNetworkInspector';
@@ -1413,6 +1417,10 @@ stacksRouter.post('/:stackName/preflight/acknowledgements', async (req: Request,
     res.status(400).json({ error: 'ruleId must be a known Compose Doctor rule id' });
     return;
   }
+  if (isPreflightNoteFinding(ruleId)) {
+    res.status(400).json({ error: 'Informational notes cannot be acknowledged' });
+    return;
+  }
   const serviceRaw = body.service == null || body.service === ''
     ? null
     : String(body.service).trim();
@@ -2248,6 +2256,12 @@ stacksRouter.post('/:stackName/services/:serviceName/restore', async (req: Reque
 stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   try {
+    // Anatomy and other GET consumers must not contact registries while
+    // node-scoped detection is off.
+    if (!ImageUpdateService.isChecksEnabled()) {
+      res.json(buildDetectionDisabledPreview(stackName));
+      return;
+    }
     // Read-only: sticky reconciliation lives on POST so UpdateGuard and other
     // GET consumers never mutate persisted scanner state.
     const preview = await UpdatePreviewService.getInstance().getPreview(req.nodeId, stackName);
@@ -2261,6 +2275,11 @@ stacksRouter.get('/:stackName/update-preview', async (req: Request, res: Respons
 stacksRouter.post('/:stackName/update-preview', async (req: Request, res: Response) => {
   const stackName = req.params.stackName as string;
   try {
+    if (!ImageUpdateService.isChecksEnabled()) {
+      // No registry I/O and no sticky reconcile on a synthetic disabled preview.
+      res.json({ ...buildDetectionDisabledPreview(stackName), reconciled: false });
+      return;
+    }
     // Snapshot write-generation watermarks before the read-only preview so a
     // later clear can erase older confirmed/sticky rows without racing a
     // scanner that reserved or rewrote the row after this observation.

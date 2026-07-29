@@ -8,14 +8,18 @@ import { Combobox } from '@/components/ui/combobox';
 import { ConfirmModal } from '@/components/ui/modal';
 import { toast } from '@/components/ui/toast-store';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { TogglePill } from '@/components/ui/toggle-pill';
 import { apiFetch } from '@/lib/api';
 import { useAuth, type UserRole } from '@/context/AuthContext';
 import { useLicense } from '@/context/LicenseContext';
 import { CapabilityGate } from '@/components/CapabilityGate';
-import { RefreshCw, Trash2, Plus, Pencil, ShieldOff } from 'lucide-react';
+import { RefreshCw, Trash2, Plus, Pencil, ShieldOff, AlertTriangle } from 'lucide-react';
 import { SettingsCallout } from './SettingsCallout';
-import { SettingsPrimaryButton } from './SettingsActions';
+import { SettingsSection } from './SettingsSection';
+import { SettingsField } from './SettingsField';
+import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
+import { DEFAULT_SETTINGS } from './types';
 
 interface UserItem {
     id: number;
@@ -32,7 +36,135 @@ interface RoleAssignmentItem {
     role: UserRole;
     resource_type: 'stack' | 'node';
     resource_id: string;
+    node_id: number | null;
     created_at: number;
+}
+
+type SlidingRefresh = '0' | '1';
+
+const DEFAULT_SLIDING_REFRESH: SlidingRefresh = DEFAULT_SETTINGS.session_sliding_refresh ?? '1';
+
+function SessionPolicySkeleton() {
+    return (
+        <div className="space-y-3 rounded-lg border border-glass-border bg-glass p-4">
+            <Skeleton className="h-10 w-full" />
+        </div>
+    );
+}
+
+/**
+ * Instance-wide session behavior: whether an actively-used session silently
+ * renews itself instead of hard-expiring. Pinned to the local instance via
+ * `localOnly: true` on every fetch, like the rest of this page (a frontend
+ * convention, not a backend hub-only guard such as registries/secrets have),
+ * since it governs sign-in to this instance's own user table, not a remote
+ * node's.
+ */
+function SessionPolicySection() {
+    const { isAdmin } = useAuth();
+    const readOnly = !isAdmin;
+    const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
+    const [value, setValue] = useState<SlidingRefresh>(DEFAULT_SLIDING_REFRESH);
+    const [saved, setSaved] = useState<SlidingRefresh>(DEFAULT_SLIDING_REFRESH);
+    const [isSaving, setIsSaving] = useState(false);
+    const hasChanges = value !== saved;
+
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await apiFetch('/settings', { localOnly: true });
+                if (cancelled) return;
+                if (!res.ok) {
+                    setPhase('error');
+                    toast.error('Failed to load session policy.');
+                    return;
+                }
+                const raw = (await res.json())?.session_sliding_refresh;
+                if (cancelled) return;
+                const loaded: SlidingRefresh = raw === '0' || raw === '1' ? raw : DEFAULT_SLIDING_REFRESH;
+                setValue(loaded);
+                setSaved(loaded);
+                setPhase('ready');
+            } catch {
+                if (!cancelled) {
+                    setPhase('error');
+                    toast.error('Failed to load session policy.');
+                }
+            }
+        })();
+        return () => { cancelled = true; };
+    }, []);
+
+    const saveSettings = async () => {
+        // Snapshot the submitted value: the toggle stays live while the PATCH is
+        // in flight, so adopting `value` after the await could mark an edit made
+        // meanwhile as already saved.
+        const submitted = value;
+        setIsSaving(true);
+        try {
+            const res = await apiFetch('/settings', {
+                method: 'PATCH',
+                localOnly: true,
+                body: JSON.stringify({ session_sliding_refresh: submitted }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                toast.error(err?.error || err?.message || 'Failed to save settings.');
+                return;
+            }
+            setSaved(submitted);
+            toast.success('Session policy saved.');
+        } catch (e: unknown) {
+            toast.error((e as Error)?.message || 'Something went wrong.');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    if (phase === 'loading') return <SessionPolicySkeleton />;
+
+    if (phase === 'error') {
+        return (
+            <SettingsCallout
+                tone="error"
+                icon={<AlertTriangle className="h-4 w-4" />}
+                title="Could not load session policy"
+                subtitle="The current value could not be confirmed, so editing is unavailable. Reload the page to try again."
+            />
+        );
+    }
+
+    return (
+        <fieldset disabled={readOnly} className="m-0 flex min-w-0 flex-col gap-6 border-0 p-0">
+            <SettingsSection title="Session policy">
+                <SettingsField
+                    label="Keep active sessions alive"
+                    helper="Silently renew a signed-in session while it stays active, instead of hard-expiring it on a fixed schedule. On by default; turn off to enforce a strict session ceiling regardless of activity."
+                >
+                    <TogglePill
+                        checked={value === '1'}
+                        onChange={(next) => setValue(next ? '1' : '0')}
+                    />
+                </SettingsField>
+            </SettingsSection>
+
+            <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? '1 unsaved' : undefined)}>
+                {!readOnly && (
+                    <SettingsPrimaryButton size="sm" onClick={saveSettings} disabled={isSaving || !hasChanges}>
+                        {isSaving ? (
+                            <>
+                                <RefreshCw className="w-4 h-4 animate-spin" strokeWidth={1.5} />
+                                Saving
+                            </>
+                        ) : (
+                            'Save session policy'
+                        )}
+                    </SettingsPrimaryButton>
+                )}
+            </SettingsActions>
+        </fieldset>
+    );
 }
 
 export function UsersSection() {
@@ -78,6 +210,11 @@ export function UsersSection() {
         setFormRole('viewer');
         setEditingUser(null);
         setShowForm(false);
+        setRoleAssignments([]);
+        setScopeResourceType('stack');
+        setScopeNodeId('');
+        setScopeResourceId('');
+        setAvailableStacks([]);
     };
 
     const handleSave = async () => {
@@ -182,16 +319,18 @@ export function UsersSection() {
         setFormConfirmPassword('');
         setShowForm(true);
         fetchRoleAssignments(u.id);
-        fetchScopeResources();
+        void fetchAvailableNodes();
     };
 
     // --- Scoped Role Assignments ---
     const [roleAssignments, setRoleAssignments] = useState<RoleAssignmentItem[]>([]);
     const [scopeResourceType, setScopeResourceType] = useState<'stack' | 'node'>('stack');
+    const [scopeNodeId, setScopeNodeId] = useState<string>('');
     const [scopeResourceId, setScopeResourceId] = useState('');
     const [scopeRole, setScopeRole] = useState<UserRole>('deployer');
     const [availableStacks, setAvailableStacks] = useState<string[]>([]);
     const [availableNodes, setAvailableNodes] = useState<{ id: number; name: string }[]>([]);
+    const [loadingStacks, setLoadingStacks] = useState(false);
     const [addingScope, setAddingScope] = useState(false);
 
     const fetchRoleAssignments = async (userId: number) => {
@@ -202,16 +341,9 @@ export function UsersSection() {
         } catch { setRoleAssignments([]); }
     };
 
-    const fetchScopeResources = async () => {
+    const fetchAvailableNodes = async () => {
         try {
-            const [stacksRes, nodesRes] = await Promise.all([
-                apiFetch('/stacks', { localOnly: true }),
-                apiFetch('/nodes', { localOnly: true }),
-            ]);
-            if (stacksRes.ok) {
-                const data = await stacksRes.json();
-                setAvailableStacks(Array.isArray(data) ? data.filter((s: unknown): s is string => typeof s === 'string') : []);
-            }
+            const nodesRes = await apiFetch('/nodes', { localOnly: true });
             if (nodesRes.ok) {
                 const data = await nodesRes.json();
                 setAvailableNodes(Array.isArray(data) ? data.map((n: { id: number; name: string }) => ({ id: n.id, name: n.name })) : []);
@@ -219,14 +351,51 @@ export function UsersSection() {
         } catch { /* ignore */ }
     };
 
+    const fetchStacksForNode = async (nodeIdStr: string) => {
+        if (!nodeIdStr) {
+            setAvailableStacks([]);
+            return;
+        }
+        const nodeId = parseInt(nodeIdStr, 10);
+        if (!Number.isInteger(nodeId)) {
+            setAvailableStacks([]);
+            return;
+        }
+        setLoadingStacks(true);
+        try {
+            const stacksRes = await apiFetch('/stacks', { nodeId });
+            if (stacksRes.ok) {
+                const data = await stacksRes.json();
+                setAvailableStacks(Array.isArray(data) ? data.filter((s: unknown): s is string => typeof s === 'string') : []);
+            } else {
+                setAvailableStacks([]);
+                toast.error('Failed to load stacks for the selected node.');
+            }
+        } catch {
+            setAvailableStacks([]);
+            toast.error('Failed to load stacks for the selected node.');
+        } finally {
+            setLoadingStacks(false);
+        }
+    };
+
     const addRoleAssignment = async () => {
         if (!editingUser || !scopeResourceId) return;
+        if (scopeResourceType === 'stack' && !scopeNodeId) return;
         setAddingScope(true);
         try {
+            const body: Record<string, unknown> = {
+                role: scopeRole,
+                resource_type: scopeResourceType,
+                resource_id: scopeResourceId,
+            };
+            if (scopeResourceType === 'stack') {
+                body.node_id = parseInt(scopeNodeId, 10);
+            }
             const res = await apiFetch(`/users/${editingUser.id}/roles`, {
                 method: 'POST',
                 localOnly: true,
-                body: JSON.stringify({ role: scopeRole, resource_type: scopeResourceType, resource_id: scopeResourceId }),
+                body: JSON.stringify(body),
             });
             if (!res.ok) {
                 const err = await res.json();
@@ -261,7 +430,7 @@ export function UsersSection() {
 
     return (
         <CapabilityGate capability="users" featureName="User Management">
-            <div className="space-y-6">
+            <div className="flex flex-col gap-10">
                 {!showForm && (
                     <div className="flex justify-end">
                         <SettingsPrimaryButton size="sm" onClick={() => { resetForm(); setShowForm(true); }}>
@@ -345,21 +514,29 @@ export function UsersSection() {
 
                                 {roleAssignments.length > 0 && (
                                     <div className="space-y-1">
-                                        {roleAssignments.map((a) => (
+                                        {roleAssignments.map((a) => {
+                                            const nodeLabel = a.resource_type === 'stack' && a.node_id != null
+                                                ? (availableNodes.find((n) => n.id === a.node_id)?.name ?? `node ${a.node_id}`)
+                                                : null;
+                                            return (
                                             <div key={a.id} className="flex items-center justify-between text-sm bg-muted/50 rounded px-3 py-1.5">
                                                 <span>
                                                     <Badge variant="outline" className="text-xs mr-2 capitalize">{a.role}</Badge>
                                                     on <span className="font-medium capitalize">{a.resource_type}</span>: <span className="font-mono text-xs">{a.resource_id}</span>
+                                                    {nodeLabel != null && (
+                                                        <span className="text-muted-foreground"> @ {nodeLabel}</span>
+                                                    )}
                                                 </span>
                                                 <Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => removeRoleAssignment(a.id)}>
                                                     <Trash2 className="w-3 h-3 text-destructive" strokeWidth={1.5} />
                                                 </Button>
                                             </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
                                 )}
 
-                                <div className="flex items-end gap-2">
+                                <div className="flex items-end gap-2 flex-wrap">
                                     <div className="space-y-1">
                                         <Label className="text-xs">Role</Label>
                                         <Combobox
@@ -382,13 +559,35 @@ export function UsersSection() {
                                                 { value: 'node', label: 'Node' },
                                             ]}
                                             value={scopeResourceType}
-                                            onValueChange={(v) => { setScopeResourceType(v as 'stack' | 'node'); setScopeResourceId(''); fetchScopeResources(); }}
+                                            onValueChange={(v) => {
+                                                setScopeResourceType(v as 'stack' | 'node');
+                                                setScopeResourceId('');
+                                                setScopeNodeId('');
+                                                setAvailableStacks([]);
+                                                void fetchAvailableNodes();
+                                            }}
                                             placeholder="Type..."
                                             className="h-8 text-xs w-[100px]"
                                         />
                                     </div>
-                                    <div className="space-y-1 flex-1">
-                                        <Label className="text-xs">Resource</Label>
+                                    {scopeResourceType === 'stack' && (
+                                        <div className="space-y-1">
+                                            <Label className="text-xs">Node</Label>
+                                            <Combobox
+                                                options={availableNodes.map((n) => ({ value: String(n.id), label: n.name }))}
+                                                value={scopeNodeId}
+                                                onValueChange={(v) => {
+                                                    setScopeNodeId(v);
+                                                    setScopeResourceId('');
+                                                    void fetchStacksForNode(v);
+                                                }}
+                                                placeholder="Select node..."
+                                                className="h-8 text-xs w-[140px]"
+                                            />
+                                        </div>
+                                    )}
+                                    <div className="space-y-1 flex-1 min-w-[140px]">
+                                        <Label className="text-xs">{scopeResourceType === 'stack' ? 'Stack' : 'Node'}</Label>
                                         <Combobox
                                             options={scopeResourceType === 'stack'
                                                 ? availableStacks.map((s) => ({ value: s, label: s }))
@@ -396,11 +595,25 @@ export function UsersSection() {
                                             }
                                             value={scopeResourceId}
                                             onValueChange={setScopeResourceId}
-                                            placeholder="Select..."
+                                            placeholder={
+                                                scopeResourceType === 'stack'
+                                                    ? (loadingStacks ? 'Loading stacks...' : (!scopeNodeId ? 'Select a node first...' : 'Select stack...'))
+                                                    : 'Select...'
+                                            }
                                             className="h-8 text-xs"
+                                            disabled={scopeResourceType === 'stack' && (!scopeNodeId || loadingStacks)}
                                         />
                                     </div>
-                                    <Button size="sm" className="h-8" onClick={addRoleAssignment} disabled={addingScope || !scopeResourceId}>
+                                    <Button
+                                        size="sm"
+                                        className="h-8"
+                                        onClick={addRoleAssignment}
+                                        disabled={
+                                            addingScope
+                                            || !scopeResourceId
+                                            || (scopeResourceType === 'stack' && !scopeNodeId)
+                                        }
+                                    >
                                         <Plus className="w-3 h-3 mr-1" strokeWidth={1.5} />
                                         Add
                                     </Button>
@@ -422,71 +635,75 @@ export function UsersSection() {
                         subtitle="Add an operator to give someone else access to this control plane."
                     />
                 ) : (
-                    <div className="border border-glass-border rounded-lg overflow-hidden">
-                        <table className="w-full text-sm">
-                            <thead>
-                                <tr className="bg-muted/30 border-b border-glass-border">
-                                    <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Username</th>
-                                    <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Role</th>
-                                    <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Created</th>
-                                    <th className="text-right px-4 py-2.5 font-medium text-muted-foreground">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {users.map((u) => {
-                                    const isSelf = u.username === currentUser?.username;
-                                    return (
-                                        <tr key={u.id} className="border-b border-glass-border last:border-0 hover:bg-muted/10">
-                                            <td className="px-4 py-2.5 font-medium">
-                                                {u.username}
-                                                {isSelf && <span className="ml-2 text-xs text-muted-foreground">(you)</span>}
-                                            </td>
-                                            <td className="px-4 py-2.5">
-                                                <Badge variant={u.role === 'admin' ? 'default' : u.role === 'viewer' ? 'secondary' : 'outline'} className="text-xs capitalize">
-                                                    {u.role}
-                                                </Badge>
-                                            </td>
-                                            <td className="px-4 py-2.5 text-muted-foreground">
-                                                {new Date(u.created_at).toLocaleDateString()}
-                                            </td>
-                                            <td className="px-4 py-2.5 text-right">
-                                                <div className="flex gap-1 justify-end">
-                                                    <Button variant="ghost" size="sm" onClick={() => startEdit(u)}>
-                                                        <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
-                                                    </Button>
-                                                    {u.mfaEnabled && (
-                                                        <TooltipProvider>
-                                                            <Tooltip>
-                                                                <TooltipTrigger asChild>
-                                                                    <Button
-                                                                        variant="ghost"
-                                                                        size="sm"
-                                                                        onClick={() => setResetMfaTarget(u)}
-                                                                    >
-                                                                        <ShieldOff className="w-3.5 h-3.5 text-warning" strokeWidth={1.5} />
-                                                                    </Button>
-                                                                </TooltipTrigger>
-                                                                <TooltipContent>Reset 2FA</TooltipContent>
-                                                            </Tooltip>
-                                                        </TooltipProvider>
-                                                    )}
-                                                    <Button
-                                                        variant="ghost"
-                                                        size="sm"
-                                                        disabled={isSelf}
-                                                        onClick={() => setDeleteTarget(u)}
-                                                    >
-                                                        <Trash2 className="w-3.5 h-3.5 text-destructive" strokeWidth={1.5} />
-                                                    </Button>
-                                                </div>
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
-                            </tbody>
-                        </table>
-                    </div>
+                    <SettingsSection title="Users" kicker={`${users.length} total`}>
+                        <div className="mt-3 border border-glass-border rounded-lg overflow-hidden">
+                            <table className="w-full text-sm">
+                                <thead>
+                                    <tr className="bg-muted/30 border-b border-glass-border">
+                                        <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Username</th>
+                                        <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Role</th>
+                                        <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Created</th>
+                                        <th className="text-right px-4 py-2.5 font-medium text-muted-foreground">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {users.map((u) => {
+                                        const isSelf = u.username === currentUser?.username;
+                                        return (
+                                            <tr key={u.id} className="border-b border-glass-border last:border-0 hover:bg-muted/10">
+                                                <td className="px-4 py-2.5 font-medium">
+                                                    {u.username}
+                                                    {isSelf && <span className="ml-2 text-xs text-muted-foreground">(you)</span>}
+                                                </td>
+                                                <td className="px-4 py-2.5">
+                                                    <Badge variant={u.role === 'admin' ? 'default' : u.role === 'viewer' ? 'secondary' : 'outline'} className="text-xs capitalize">
+                                                        {u.role}
+                                                    </Badge>
+                                                </td>
+                                                <td className="px-4 py-2.5 text-muted-foreground">
+                                                    {new Date(u.created_at).toLocaleDateString()}
+                                                </td>
+                                                <td className="px-4 py-2.5 text-right">
+                                                    <div className="flex gap-1 justify-end">
+                                                        <Button variant="ghost" size="sm" onClick={() => startEdit(u)}>
+                                                            <Pencil className="w-3.5 h-3.5" strokeWidth={1.5} />
+                                                        </Button>
+                                                        {u.mfaEnabled && (
+                                                            <TooltipProvider>
+                                                                <Tooltip>
+                                                                    <TooltipTrigger asChild>
+                                                                        <Button
+                                                                            variant="ghost"
+                                                                            size="sm"
+                                                                            onClick={() => setResetMfaTarget(u)}
+                                                                        >
+                                                                            <ShieldOff className="w-3.5 h-3.5 text-warning" strokeWidth={1.5} />
+                                                                        </Button>
+                                                                    </TooltipTrigger>
+                                                                    <TooltipContent>Reset 2FA</TooltipContent>
+                                                                </Tooltip>
+                                                            </TooltipProvider>
+                                                        )}
+                                                        <Button
+                                                            variant="ghost"
+                                                            size="sm"
+                                                            disabled={isSelf}
+                                                            onClick={() => setDeleteTarget(u)}
+                                                        >
+                                                            <Trash2 className="w-3.5 h-3.5 text-destructive" strokeWidth={1.5} />
+                                                        </Button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </SettingsSection>
                 )}
+
+                <SessionPolicySection />
 
                 <ConfirmModal
                     open={resetMfaTarget !== null}

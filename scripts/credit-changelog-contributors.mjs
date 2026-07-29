@@ -4,9 +4,13 @@
  * Post-processes CHANGELOG.md on a release-please PR branch, appending an
  * inline ", thanks @login" suffix to each logical top-level changelog bullet
  * whose same-repo issue or PR references were opened by external, non-bot
- * contributors. The managed suffix is written on the last line of the logical
- * entry (the top-level bullet when single-line, otherwise the last indented
- * non-list continuation).
+ * contributors. A bullet's PR number is also checked via the GitHub GraphQL
+ * API for issues it closes (`closingIssuesReferences`): those openers are
+ * credited under the same bullet even when the issue number never appears
+ * as text anywhere (e.g. issues linked through the PR's "Development"
+ * sidebar instead of a typed "closes #N"). The managed suffix is written on
+ * the last line of the logical entry (the top-level bullet when
+ * single-line, otherwise the last indented non-list continuation).
  *
  * Logical entries: a top-level "* " / "- " bullet plus immediately following
  * indented non-list continuation lines. Indented nested list items are copied
@@ -58,6 +62,7 @@ const MAX_RETRIES = 3 // 1 initial + 2 retries
 const RETRY_WAITS_MS = [1000, 2000]
 const MAX_WAIT_PER_RETRY_MS = 15_000
 const TOTAL_RETRY_CAP_MS = 40_000
+const CLOSING_ISSUES_PAGE_SIZE = 25
 
 /** Exact trailing generated suffix: ", thanks @a" or ", thanks @a, @b" */
 const INLINE_THANKS_RE = /, thanks @[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:, @[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)*\s*$/
@@ -72,30 +77,44 @@ const VERSION_HEADING_RE = /^##\s+\[[\d.]+]/
 // GitHub API
 // ---------------------------------------------------------------------------
 
+/** fetch() a GitHub API URL with the shared auth headers and request timeout. */
+function githubFetch(url, token, init = {}) {
+  return fetch(url, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      ...init.headers,
+    },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  })
+}
+
+/**
+ * Build the error thrown for a non-2xx GitHub response, capturing the body so
+ * the failure is diagnosable from CI logs. `api` and `label` compose the
+ * message, e.g. ("GitHub API", "#12") reads "GitHub API 500 for #12".
+ */
+async function githubResponseError(res, api, label) {
+  const err = new Error(`${api} ${res.status} for ${label}`)
+  err.status = res.status
+  err.headers = res.headers
+  err.body = await res.text().catch((readErr) => {
+    console.warn(`Could not read error body for ${label}: ${readErr.message}`)
+    return undefined
+  })
+  return err
+}
+
 /**
  * Call GET /repos/{owner}/{repo}/issues/{number}.
  * Returns the JSON body or throws on non-2xx.
  */
 async function fetchIssue(repo, number, token) {
-  const url = `${GITHUB_API}/repos/${repo}/issues/${number}`
-  const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-    },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  const res = await githubFetch(`${GITHUB_API}/repos/${repo}/issues/${number}`, token, {
+    headers: { 'X-GitHub-Api-Version': '2022-11-28' },
   })
-  if (!res.ok) {
-    const err = new Error(`GitHub API ${res.status} for #${number}`)
-    err.status = res.status
-    err.headers = res.headers
-    err.body = await res.text().catch((readErr) => {
-      console.warn(`Could not read error body for #${number}: ${readErr.message}`)
-      return undefined
-    })
-    throw err
-  }
+  if (!res.ok) throw await githubResponseError(res, 'GitHub API', `#${number}`)
   return res.json()
 }
 
@@ -119,17 +138,17 @@ function retryAfterSeconds(headers) {
 }
 
 /**
- * Fetch with bounded retry. Returns the JSON body.
+ * Run `operation` with bounded retry. Returns whatever `operation` resolves to.
  * Only retries on network errors + shouldRetry() statuses.
  * Non-retryable errors (401, 403 w/o rate-limit, 422, etc.) throw immediately.
  */
-async function fetchWithRetry(repo, number, token) {
+async function withRetry(operation) {
   let lastError
   const start = Date.now()
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
-      return await fetchIssue(repo, number, token)
+      return await operation()
     } catch (err) {
       lastError = err
 
@@ -162,6 +181,92 @@ async function fetchWithRetry(repo, number, token) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+const CLOSING_ISSUES_QUERY = `
+  query($owner: String!, $repoName: String!, $number: Int!, $pageSize: Int!) {
+    repository(owner: $owner, name: $repoName) {
+      pullRequest(number: $number) {
+        closingIssuesReferences(first: $pageSize) {
+          nodes {
+            number
+            repository { nameWithOwner }
+          }
+        }
+      }
+    }
+  }
+`
+
+/**
+ * Map closing-issue nodes to their numbers, dropping any from another
+ * repository. Mirrors extractReferences' same-repo rule, so a cross-repo
+ * reference can never be looked up (and credited) against the wrong repo's
+ * issue of the same number.
+ */
+function sameRepoIssueNumbers(nodes, owner, repoName, prNumber) {
+  const expectedNameWithOwner = `${owner}/${repoName}`.toLowerCase()
+  const numbers = []
+  for (const node of nodes) {
+    if (node.repository.nameWithOwner.toLowerCase() !== expectedNameWithOwner) {
+      console.warn(
+        `Skipping cross-repo closing reference #${node.number} (${node.repository.nameWithOwner}) on PR #${prNumber}`,
+      )
+      continue
+    }
+    numbers.push(node.number)
+  }
+  return numbers
+}
+
+/**
+ * Call the GitHub GraphQL API for the same-repo issue numbers a pull request
+ * closes. GitHub tracks this link (e.g. via the PR's "Development" sidebar)
+ * even when no "closes #N" text ever appears in the PR body or any commit, so
+ * a text-only scan of CHANGELOG.md can never discover it.
+ * Returns [] when `number` is not a pull request (a plain issue number) or
+ * closes nothing.
+ * Throws on transport/GraphQL errors (retryable ones are retried by the
+ * caller via withRetry).
+ */
+export async function fetchClosingIssueNumbers(owner, repoName, number, token) {
+  const res = await githubFetch(`${GITHUB_API}/graphql`, token, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      query: CLOSING_ISSUES_QUERY,
+      variables: { owner, repoName, number, pageSize: CLOSING_ISSUES_PAGE_SIZE },
+    }),
+  })
+  if (!res.ok) throw await githubResponseError(res, 'GitHub GraphQL API', `PR #${number}`)
+
+  const body = await res.json()
+  if (body.errors) {
+    // A structural GraphQL error (bad query, missing scope) will not be
+    // fixed by retrying it, so mark it non-retryable: withRetry() treats
+    // any err.status === undefined as a retryable network error.
+    const err = new Error(
+      `GraphQL error looking up closing issues for PR #${number}: ${body.errors.map((e) => e.message).join('; ')}`,
+    )
+    err.status = 'graphql-error'
+    throw err
+  }
+
+  const pr = body.data?.repository?.pullRequest
+  if (!pr) {
+    console.warn(
+      `GraphQL returned no pull request for #${number} despite REST confirming it is one; skipping closing-issue lookup`,
+    )
+    return []
+  }
+
+  const nodes = pr.closingIssuesReferences?.nodes ?? []
+  if (nodes.length === CLOSING_ISSUES_PAGE_SIZE) {
+    console.warn(
+      `PR #${number} closes ${CLOSING_ISSUES_PAGE_SIZE}+ issues; only the first ${CLOSING_ISSUES_PAGE_SIZE} were checked for credit`,
+    )
+  }
+  return sameRepoIssueNumbers(nodes, owner, repoName, number)
 }
 
 // ---------------------------------------------------------------------------
@@ -394,11 +499,14 @@ export function removeThanksSection(text, start, end) {
  * Strips any managed suffix from every line of the entry, then writes the
  * regenerated suffix on the last line of the logical entry only.
  * @param {string} sectionText latest version section only
- * @param {Map<number, string>} loginByNumber external login per issue/PR number
+ * @param {Map<number, string[]>} loginsByNumber external logins per issue/PR
+ *   number. A PR number's list also includes the openers of any issues it
+ *   closes (see `fetchClosingIssueNumbers`), even when those issue numbers
+ *   never appear in the changelog text.
  * @param {string} owner
  * @param {string} repo
  */
-export function creditChangelogEntries(sectionText, loginByNumber, owner, repo) {
+export function creditChangelogEntries(sectionText, loginsByNumber, owner, repo) {
   const lines = splitLines(sectionText)
   const out = []
   let i = 0
@@ -440,8 +548,7 @@ export function creditChangelogEntries(sectionText, loginByNumber, owner, repo) 
     const numbers = extractReferences(blockText, owner, repo)
     const logins = []
     for (const num of numbers) {
-      const login = loginByNumber.get(num)
-      if (login) logins.push(login)
+      logins.push(...(loginsByNumber.get(num) ?? []))
     }
 
     const lastIdx = entryLines.length - 1
@@ -459,6 +566,86 @@ export function creditChangelogEntries(sectionText, loginByNumber, owner, repo) 
 // ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
+
+/**
+ * Look up one issue/PR, reusing `cache` so a number is fetched once even when
+ * reached both directly (in the changelog text) and indirectly (as another
+ * PR's closed issue). Returns null for a 404; exits nonzero on any other
+ * failure so a partial credit pass never reaches the file.
+ */
+async function fetchIssueOnce(cache, num) {
+  if (cache.has(num)) return cache.get(num)
+
+  let response
+  try {
+    response = await withRetry(() => fetchIssue(REPO, num, TOKEN))
+  } catch (err) {
+    if (err.status === 404) {
+      console.warn(`Skipping #${num}: not found (404)`)
+      cache.set(num, null)
+      return null
+    }
+    if (err.status !== undefined && !shouldRetry(err.status, err.headers)) {
+      console.error(`Fatal error looking up #${num}: HTTP ${err.status}`)
+      process.exit(1)
+    }
+    console.error(`Failed to look up #${num} after ${MAX_RETRIES} attempts: ${err.message}`)
+    process.exit(1)
+  }
+
+  cache.set(num, response)
+  return response
+}
+
+/** Look up the issues a PR closes, exiting nonzero if the lookup fails. */
+async function fetchClosingIssueNumbersOrExit(owner, repoName, prNumber) {
+  try {
+    return await withRetry(() => fetchClosingIssueNumbers(owner, repoName, prNumber, TOKEN))
+  } catch (err) {
+    console.error(`Failed to look up closing issues for PR #${prNumber}: ${err.message}`)
+    process.exit(1)
+  }
+}
+
+/** Credit `login` under `visibleNumber`, the changelog's own text anchor. */
+function addLogin(loginsByNumber, visibleNumber, login) {
+  const existing = loginsByNumber.get(visibleNumber)
+  if (existing) existing.push(login)
+  else loginsByNumber.set(visibleNumber, [login])
+}
+
+/**
+ * Resolve every changelog-referenced number to the external logins to credit
+ * under it.
+ * @returns {Promise<Map<number, string[]>>}
+ */
+async function collectExternalLogins(numbers, owner, repoName) {
+  const issueCache = new Map()
+  const loginsByNumber = new Map()
+
+  for (const num of numbers) {
+    const response = await fetchIssueOnce(issueCache, num)
+    if (!response) continue
+
+    if (classifyAuthor(response) === 'external') {
+      addLogin(loginsByNumber, num, response.user.login)
+    }
+    if (!response.pull_request) continue
+
+    // A pull request may close issues that are never mentioned as text
+    // anywhere (see fetchClosingIssueNumbers). Credit their external openers
+    // under the PR's own number, since that's the only anchor visible in
+    // the rendered changelog.
+    for (const closedNum of await fetchClosingIssueNumbersOrExit(owner, repoName, num)) {
+      const closedResponse = await fetchIssueOnce(issueCache, closedNum)
+      if (closedResponse && classifyAuthor(closedResponse) === 'external') {
+        addLogin(loginsByNumber, num, closedResponse.user.login)
+      }
+    }
+  }
+
+  return loginsByNumber
+}
 
 export async function main() {
   if (!TOKEN) {
@@ -501,32 +688,9 @@ export async function main() {
   const sectionText = text.slice(sectionAfterThanks.start, sectionAfterThanks.end)
   const numbers = extractReferences(sectionText, owner, repoName)
 
-  const loginByNumber = new Map()
-  for (const num of numbers) {
-    let response
-    try {
-      response = await fetchWithRetry(REPO, num, TOKEN)
-    } catch (err) {
-      const status = err.status ?? 'network'
-      if (status === 404) {
-        console.warn(`Skipping #${num}: not found (404)`)
-        continue
-      }
-      if (err.status !== undefined && !shouldRetry(err.status, err.headers)) {
-        console.error(`Fatal error looking up #${num}: HTTP ${err.status}`)
-        process.exit(1)
-      }
-      console.error(`Failed to look up #${num} after ${MAX_RETRIES} attempts: ${err.message}`)
-      process.exit(1)
-    }
+  const loginsByNumber = await collectExternalLogins(numbers, owner, repoName)
 
-    const classification = classifyAuthor(response)
-    if (classification === 'external') {
-      loginByNumber.set(num, response.user.login)
-    }
-  }
-
-  const credited = creditChangelogEntries(sectionText, loginByNumber, owner, repoName)
+  const credited = creditChangelogEntries(sectionText, loginsByNumber, owner, repoName)
   const newText =
     text.slice(0, sectionAfterThanks.start) + credited + text.slice(sectionAfterThanks.end)
 

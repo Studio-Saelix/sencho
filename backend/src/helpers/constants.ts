@@ -23,6 +23,11 @@ export const MAX_ASSIGNMENTS = 1000;
 // Session cookies
 export const COOKIE_NAME = 'sencho_token';
 export const SESSION_COOKIE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+export const REMEMBER_SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, "stay signed in"
+// Sliding-refresh window: a user-session token with less than this much life
+// left gets silently reissued with a fresh full TTL, so continued activity
+// never runs into the hard expiry. See middleware/auth.ts::authMiddleware.
+export const SESSION_REFRESH_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
 export const MFA_PENDING_COOKIE_NAME = 'sencho_mfa_pending';
 export const MFA_PENDING_SCOPE = 'mfa_pending';
 export const MFA_PENDING_TTL_MS = 5 * 60 * 1000; // 5 minutes to complete the challenge

@@ -18,6 +18,7 @@
  */
 import { ComposeService } from './ComposeService';
 import { parseMissingRequiredVars } from '../helpers/envVarParse';
+import { isComposeHealthcheckActive } from '../helpers/healthcheckPresence';
 import { getErrorMessage } from '../utils/errors';
 import { redactSensitiveText, sanitizeForLog } from '../utils/safeLog';
 
@@ -75,9 +76,7 @@ function parseServiceSpec(name: string, raw: unknown): EffectiveServiceSpec {
   const svc = (raw ?? {}) as Record<string, unknown>;
   const deploy = (svc.deploy && typeof svc.deploy === 'object') ? svc.deploy as Record<string, unknown> : undefined;
   const healthcheck = svc.healthcheck;
-  const hasHealthcheck = !!healthcheck
-    && typeof healthcheck === 'object'
-    && (healthcheck as Record<string, unknown>).disable !== true;
+  const hasHealthcheck = isComposeHealthcheckActive(healthcheck);
   return {
     name,
     declaredImage: asString(svc.image) ?? null,

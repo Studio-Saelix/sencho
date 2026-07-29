@@ -1,17 +1,38 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { createProxyMiddleware } from 'http-proxy-middleware';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER, PROXY_DEPLOY_SOURCE_HEADER, PROXY_DEPLOY_ACTOR_HEADER } from '../services/license-headers';
+import {
+  PROXY_TIER_HEADER,
+  PROXY_ROLE_HEADER,
+  PROXY_DEPLOY_SOURCE_HEADER,
+  PROXY_DEPLOY_ACTOR_HEADER,
+  PROXY_SCOPED_STACK_NAME_HEADER,
+  PROXY_SCOPED_STACK_ACTIONS_HEADER,
+} from '../services/license-headers';
 import { LicenseService } from '../services/LicenseService';
 import { isProxyExemptPath } from '../helpers/proxyExemptPaths';
 import { remoteSupportsCrossNodeRbac, remoteAdvertisesCapability } from '../helpers/remoteCapabilities';
-import { STACK_DOWN_REMOVE_VOLUMES_CAPABILITY, SERVICE_SCOPED_UPDATE_CAPABILITY, SERVICE_SCOPED_STACK_ALERT_CAPABILITY } from '../services/CapabilityRegistry';
+import {
+  STACK_DOWN_REMOVE_VOLUMES_CAPABILITY,
+  SERVICE_SCOPED_UPDATE_CAPABILITY,
+  SERVICE_SCOPED_STACK_ALERT_CAPABILITY,
+  SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
+} from '../services/CapabilityRegistry';
 import { getErrorMessage } from '../utils/errors';
 import { DatabaseService } from '../services/DatabaseService';
 import { redactSensitiveText } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
 import { logDebugTiming, templatizeHydrationPath } from '../utils/requestTiming';
 import { invalidateFleetUpdateCache, isFullStackUpdatePath, isUpdatePreviewPath } from '../helpers/fleetUpdateCache';
+import {
+  classifyStackApiPath,
+  formatScopedStackActionsHeader,
+} from '../helpers/stackRouteAuth';
+import {
+  checkPermission,
+  ROLE_PERMISSIONS,
+  scopedActionsForStack,
+} from '../middleware/permissions';
 
 /**
  * Per-request hop timing for the critical hydration GETs, kept off the Request
@@ -132,6 +153,17 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         if (req.user?.username) {
           proxyReq.setHeader(PROXY_DEPLOY_ACTOR_HEADER, req.user.username);
         }
+        // Scoped stack evidence: always strip client-supplied values, then
+        // attach hub-built evidence when the gate stashed elevation for this hop.
+        proxyReq.removeHeader(PROXY_SCOPED_STACK_NAME_HEADER);
+        proxyReq.removeHeader(PROXY_SCOPED_STACK_ACTIONS_HEADER);
+        if (req.proxyScopedStackEvidence) {
+          proxyReq.setHeader(PROXY_SCOPED_STACK_NAME_HEADER, req.proxyScopedStackEvidence.stackName);
+          proxyReq.setHeader(
+            PROXY_SCOPED_STACK_ACTIONS_HEADER,
+            formatScopedStackActionsHeader(req.proxyScopedStackEvidence.actions),
+          );
+        }
         // Strip the ?nodeId= query param so the remote's nodeContextMiddleware
         // doesn't reject the request with 404 ("Node X not found") - the remote
         // has no record of the gateway's node IDs and should treat the request
@@ -187,6 +219,23 @@ export function createRemoteProxyMiddleware(): RequestHandler {
           && (isFullStackUpdatePath(req.path) || isUpdatePreviewPath(req.path))
         ) {
           invalidateFleetUpdateCache();
+        }
+        // Successful remote stack DELETE: clear hub grants for this (node, stack)
+        // only. Failed / non-2xx responses must preserve assignments. Use the
+        // gate-stashed classification: pathRewrite mutates req.url before this
+        // callback, so re-running classifyStackApiPath(req.path) would miss.
+        if (req.method === 'DELETE' && status >= 200 && status < 300) {
+          const route = req.proxyNamedStackRoute;
+          if (route?.action === 'stack:delete') {
+            try {
+              DatabaseService.getInstance().deleteRoleAssignmentsByStack(req.nodeId, route.stackName);
+            } catch (cleanupErr) {
+              console.warn(
+                '[Proxy] Failed to clear role assignments after remote stack delete:',
+                getErrorMessage(cleanupErr, 'unknown'),
+              );
+            }
+          }
         }
       },
       error: (err, req, proxyRes) => {
@@ -279,6 +328,49 @@ export function createRemoteProxyMiddleware(): RequestHandler {
             error: `Remote node "${node.name}" is running a version that does not enforce per-user permissions. Upgrade it before non-admin users can act on it.`,
           });
           return;
+        }
+      }
+
+      // Named-stack hub pre-check + optional scoped-evidence elevation.
+      const classified = classifyStackApiPath(req.method, req.path);
+      if (classified.kind === 'unknown-named') {
+        res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+        return;
+      }
+      if (classified.kind === 'named-stack') {
+        if (!checkPermission(req, classified.action, 'stack', classified.stackName)) {
+          res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+          return;
+        }
+        // Stash before pathRewrite so proxyRes DELETE cleanup can see the route.
+        req.proxyNamedStackRoute = {
+          stackName: classified.stackName,
+          action: classified.action,
+        };
+        const globalRole = req.user?.role;
+        const globalGrantsPrimary =
+          globalRole === 'admin'
+          || (globalRole != null && (ROLE_PERMISSIONS[globalRole]?.includes(classified.action) ?? false));
+        if (!globalGrantsPrimary) {
+          const evidenceSupported = await remoteAdvertisesCapability(
+            req.nodeId,
+            SCOPED_STACK_AUTH_EVIDENCE_CAPABILITY,
+          );
+          if (!evidenceSupported) {
+            res.status(403).json({
+              error: `Remote node "${node.name}" does not support scoped stack authorization. Upgrade it before scoped users can act on it.`,
+            });
+            return;
+          }
+          if (!req.user) {
+            res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+            return;
+          }
+          const actions = scopedActionsForStack(req.user.userId, req.nodeId, classified.stackName);
+          req.proxyScopedStackEvidence = {
+            stackName: classified.stackName,
+            actions,
+          };
         }
       }
 

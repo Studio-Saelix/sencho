@@ -625,3 +625,55 @@ describe('ContainersHealth Docker health status labels', () => {
     expect(screen.getByRole('link', { name: /8080/ })).toBeInTheDocument();
   });
 });
+
+describe('live-refresh stale chip', () => {
+  it('shows stale chip with Retry when syncStale and cards are visible', () => {
+    const onRetrySync = vi.fn();
+    render(
+      <ContainersHealth
+        safeContainers={[{
+          Id: 'a',
+          Names: ['/web'],
+          State: 'running',
+          Status: 'Up 1 hour',
+          healthStatus: 'healthy',
+        }]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        containersLoadStatus="success"
+        syncStale
+        onRetrySync={onRetrySync}
+      />,
+    );
+    expect(screen.getByText(/Container state may be stale/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Retry/i }));
+    expect(onRetrySync).toHaveBeenCalledTimes(1);
+  });
+
+  it('suppresses stale chip when containersLoadStatus is error', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        containersLoadStatus="error"
+        containersLoadError="Could not load containers."
+        onRetryContainersLoad={vi.fn()}
+        syncStale
+        onRetrySync={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText(/Container state may be stale/i)).toBeNull();
+    expect(screen.getByText(/Could not load containers/i)).toBeInTheDocument();
+  });
+});

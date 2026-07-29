@@ -36,6 +36,7 @@ const ALLOWED_SETTING_KEYS = new Set([
   'auto_create_missing_external_networks',
   'image_update_sidebar_indicators',
   'notification_dispatch_retries',
+  'session_sliding_refresh',
 ]);
 
 // Keys whose write requires a paid license, not just an admin role.
@@ -77,6 +78,7 @@ const SettingsPatchSchema = z.object({
       });
     }
   }).transform((v) => String(parseNotificationDispatchRetries(v)!)),
+  session_sliding_refresh: z.enum(['0', '1']),
 }).partial();
 
 export const settingsRouter = Router();

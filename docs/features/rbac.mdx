@@ -115,27 +115,28 @@ Click **Update user** to save. Changing the role takes effect on the next API re
 
 Scoped permissions let you grant a user a higher role on a specific stack or node without elevating them globally. A Viewer can be granted Deployer on one stack; a Deployer can be granted Node Admin on one server.
 
+**Stack scopes are node-specific.** The same stack name on two different nodes is two independent grants. Assigning a stack scope means choosing the node first, then picking a stack that exists on that node. Display form conceptually: stack name @ node name (for example `frontend @ prod`).
+
+**Node scopes are node-wide.** The resource is the node itself. There is no separate node qualifier on a node assignment row. Granting Node Admin (or Deployer, or Admin) on `staging-server` authorizes that role's stack and node operations for every stack on that node, without a separate per-stack grant.
+
 The box appears below the user form whenever you are editing a user on Admiral.
 
-<Frame>
-  <img src="/images/rbac/scoped-permissions.png" alt="Edit User form for the viewer account with a Scoped Permissions box below. The box contains an existing assignment row (a Deployer badge with the text on Stack: bazarr and a destructive trash icon on the right) and a three-column add-scope row underneath (Role combobox set to Deployer, Resource Type combobox set to Stack, Resource combobox showing Select..., and a disabled Add button)." />
-</Frame>
-
-The add-scope form has three controls and an **Add** button:
+The add-scope form has these controls and an **Add** button:
 
 | Control | Options |
 |---------|---------|
 | **Role** | Deployer, Node Admin, or Admin. The scoped role picker is narrower than the global role picker. Viewer and Auditor cannot be scoped (they are floor-only roles). |
 | **Resource Type** | `Stack` or `Node`. |
-| **Resource** | The picker shows stacks (when type is `Stack`) or remote nodes (when type is `Node`) the gateway knows about. Resource names match what you see in the sidebar. |
+| **Node** | Shown when Resource Type is `Stack`. Choose the node that hosts the stack before the stack picker unlocks. |
+| **Stack** or **Node** | When type is `Stack`, the picker lists stacks on the selected node. When type is `Node`, the picker lists nodes the gateway knows about. Names match what you see in the sidebar. |
 
-Click **Add** to save the assignment. Existing scopes render as a row with the role badge, the line `on <type>: <resource>`, and a trash icon for removal. Removing an assignment is instant; the user's effective permissions are recomputed on their next request.
+Click **Add** to save the assignment. Existing scopes render as a row with the role badge, the line `on <type>: <resource>`, and for stacks the node name after an `@`, plus a trash icon for removal. Removing an assignment is instant; the user's effective permissions are recomputed on their next request.
 
-Scoped assignments are **additive only**. A Viewer with a scoped Deployer on `frontend` can deploy `frontend` but stays read-only on every other resource. Scopes never reduce the global role.
+Scoped assignments are **additive only**. A Viewer with a scoped Deployer on `frontend` at a given node can deploy that stack on that node but stays read-only on every other resource. Scopes never reduce the global role.
 
 ### Example scenarios
 
-- A **Viewer** with a scoped **Deployer** assignment on the `frontend` stack can deploy, restart, and stop only that stack. They cannot edit compose or delete it.
+- A **Viewer** with a scoped **Deployer** assignment on the `frontend` stack at node `prod` can deploy, restart, and stop only that stack on `prod`. The same name on another node needs its own grant. They cannot edit compose or delete it.
 - A **Deployer** with a scoped **Node Admin** assignment on node `staging-server` can manage every stack and node operation on that server, while keeping plain Deployer rights on the rest of the fleet.
 - A **Node Admin** without any scoped assignments has full stack and node management across every node, but still cannot reach system settings, the user list, or the audit log.
 
@@ -184,6 +185,12 @@ Sencho enforces user changes immediately by versioning JWT tokens at the user re
 
 Cookies and Bearer tokens go through the same auth middleware, so the same rules apply to API-token-based sessions where a token is bound to a user.
 
+### Session lifetime
+
+A signed-in session lasts 24 hours by default, or 30 days if **Stay signed in** was checked at sign-in. Either way, an actively-used session renews itself: any request made within an hour of expiry silently reissues the cookie for a fresh full lifetime, so you are never signed out mid-session just for staying active. Only real inactivity, or one of the events in the table above, ends a session.
+
+Admins can turn this renewal off from **Settings > Users > Session policy** (**Keep active sessions alive**) to enforce a strict, fixed ceiling on every session regardless of activity. It is on by default.
+
 ## SSO auto-provisioning
 
 With SSO configured on Admiral, users authenticate through an identity provider (LDAP, Custom OIDC, Google, GitHub, Okta). On their first successful sign-in, Sencho auto-creates a user record. SSO accounts appear in the Users list alongside local accounts and can be edited the same way; only the password and (optionally) the role differ.
@@ -230,8 +237,11 @@ Entries include the acting user, IP address, HTTP method and path, response stat
   <Accordion title="A user complains they were signed out unexpectedly">
     Token-version bumps invalidate sessions. Two events do this: an admin changed the user's password, or an admin reset their 2FA. Both rotate the user's token version, so every JWT issued before the rotation is rejected on the next request. The user can sign in again with their (possibly new) password. Role changes do **not** sign the user out; they take effect on the next request without rotating the token version.
   </Accordion>
+  <Accordion title="A user keeps getting signed out even while actively using Sencho">
+    Check whether **Session policy > Keep active sessions alive** was turned off in **Settings > Users**. With it off, every session hits a strict, fixed 24-hour (or 30-day, with **Stay signed in**) ceiling regardless of activity. Turn it back on so an active session renews itself instead of hard-expiring, or have the user check **Stay signed in** at their next sign-in for a longer session between visits.
+  </Accordion>
   <Accordion title="A scoped Deployer cannot deploy a stack they were granted">
-    Two causes. **One,** the assignment was created on Admiral but the license has since dropped to Community. The permission resolver only consults scoped assignments when the effective tier is Admiral; on Community the scope is ignored and the user falls back to their global role. **Two,** the resource type or name on the assignment does not match the request's resource. Re-open the user in the edit form and check the existing-scope row matches the stack name (case-sensitive) exactly.
+    Three causes. **One,** the assignment was created on Admiral but the license has since dropped to Community. The permission resolver only consults scoped assignments when the effective tier is Admiral; on Community the scope is ignored and the user falls back to their global role. **Two,** the resource type or stack name on the assignment does not match the request's resource (names are case-sensitive). **Three,** the stack grant is tied to a different node than the one the user is acting on: the same stack name on another node is a separate grant. Re-open the user in the edit form and confirm the existing-scope row shows the expected stack name at the expected node.
   </Accordion>
   <Accordion title="The shield (Reset 2FA) icon is missing on a user I expected to see it on">
     The icon only appears for users with a finished TOTP enrollment. If the user started enrollment but never confirmed their first code, the enrollment is incomplete and the icon stays hidden. Ask the user to finish enrollment from their account settings, or, if they cannot, leave the row alone: there is nothing to reset.

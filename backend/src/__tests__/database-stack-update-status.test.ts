@@ -75,6 +75,16 @@ describe('stack_update_status tri-state accessors', () => {
     expect(db().clearStackUpdateStatus(NODE, 'web')).toBe(0);
   });
 
+  it('clearAllStackUpdateStatus deletes only the given node rows', () => {
+    const other = NODE + 1;
+    db().upsertStackUpdateStatus(NODE, 'web', true, 1000, 'ok', null);
+    db().upsertStackUpdateStatus(NODE, 'api', true, 1000, 'ok', null);
+    db().upsertStackUpdateStatus(other, 'web', true, 1000, 'ok', null);
+    expect(db().clearAllStackUpdateStatus(NODE)).toBe(2);
+    expect(db().getStackUpdateDetail(NODE)).toEqual({});
+    expect(db().getStackUpdateDetail(other).web).toBeDefined();
+  });
+
   it('getNodeUpdateSummary counts only confirmed updates', () => {
     db().upsertStackUpdateStatus(NODE, 'web', true, 1000, 'ok', null);
     db().upsertStackUpdateStatus(NODE, 'sticky', true, 1000, 'partial', 'half');

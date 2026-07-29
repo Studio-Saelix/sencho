@@ -14,6 +14,7 @@ function mk(over: Partial<UpdateTracker>): UpdateTracker {
     previousVersion: null,
     previousProcessStart: null,
     wasOffline: false,
+    operationKind: 'update',
     ...over,
   };
 }

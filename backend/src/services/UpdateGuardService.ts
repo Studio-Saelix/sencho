@@ -3,9 +3,11 @@ import DockerController from './DockerController';
 import { DatabaseService } from './DatabaseService';
 import { FileSystemService } from './FileSystemService';
 import { ComposeDoctorService } from './ComposeDoctorService';
-import { UpdatePreviewService, isMovingTag, filterPreviewForService } from './UpdatePreviewService';
+import { UpdatePreviewService, isMovingTag, filterPreviewForService, buildDetectionDisabledPreview } from './UpdatePreviewService';
+import { ImageUpdateService } from './ImageUpdateService';
 import { buildEffectiveServiceModel, type EffectiveServiceModelResult } from './effectiveServiceModel';
 import { filterContainersByComposeService } from '../helpers/composeServiceMatch';
+import { isDockerHealthcheckActive } from '../helpers/healthcheckPresence';
 import { withTimeout } from '../utils/withTimeout';
 import { getErrorMessage } from '../utils/errors';
 import { sanitizeForLog } from '../utils/safeLog';
@@ -97,7 +99,7 @@ export class UpdateGuardService {
           state: inspect.State?.Status ?? info.State ?? 'unknown',
           health: inspect.State?.Health?.Status ?? null,
           exitCode: typeof inspect.State?.ExitCode === 'number' ? inspect.State.ExitCode : null,
-          hasHealthcheck: !!inspect.Config?.Healthcheck?.Test?.length,
+          hasHealthcheck: isDockerHealthcheckActive(inspect.Config?.Healthcheck?.Test),
           restartPolicy: inspect.HostConfig?.RestartPolicy?.Name || null,
           mounts,
         };
@@ -137,6 +139,12 @@ export class UpdateGuardService {
             withTimeout(this.probeContainers(nodeId, stackName), INPUT_TIMEOUT_MS, 'readiness sibling probe'))
         : Promise.resolve<ContainerProbe[] | Errored>([]),
       this.collect('update preview', stackName, async () => {
+        // Check inside the thunk so the read stays with the getPreview call.
+        // Stack GET/POST update-preview use the same isChecksEnabled gate.
+        if (!ImageUpdateService.isChecksEnabled()) {
+          const disabled = buildDetectionDisabledPreview(stackName);
+          return serviceName ? filterPreviewForService(disabled, serviceName) : disabled;
+        }
         const full = await withTimeout(UpdatePreviewService.getInstance().getPreview(nodeId, stackName), INPUT_TIMEOUT_MS, 'readiness update preview');
         return serviceName ? filterPreviewForService(full, serviceName) : full;
       }),
@@ -218,8 +226,12 @@ export class UpdateGuardService {
       this.collect('backup info', stackName, () => fsSvc.getBackupInfo(stackName)),
       this.collect('backup env summary', stackName, () => fsSvc.getBackupEnvSummary(stackName)),
       this.collect('stack env presence', stackName, () => fsSvc.envExists(stackName)),
-      this.collect('update preview', stackName, () =>
-        withTimeout(UpdatePreviewService.getInstance().getPreview(nodeId, stackName), INPUT_TIMEOUT_MS, 'rollback readiness update preview')),
+      this.collect('update preview', stackName, async () => {
+        if (!ImageUpdateService.isChecksEnabled()) {
+          return buildDetectionDisabledPreview(stackName);
+        }
+        return withTimeout(UpdatePreviewService.getInstance().getPreview(nodeId, stackName), INPUT_TIMEOUT_MS, 'rollback readiness update preview');
+      }),
       this.collect('activity history', stackName, async () => {
         const events = db.getStackActivity(nodeId, stackName, { limit: 50 });
         // A successful update is as good a known-good marker as a deploy.

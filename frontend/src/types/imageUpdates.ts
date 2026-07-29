@@ -24,6 +24,11 @@ export interface ImageUpdateStatus {
     cronExpression: string | null;
     /** Whether sidebar update-status indicators are enabled. Optional for older-node compatibility. */
     sidebarIndicators?: boolean;
+    /**
+     * Whether background image-update detection is armed. Optional for older
+     * remotes; absence means the node does not support the opt-out yet.
+     */
+    enabled?: boolean;
 }
 
 /**

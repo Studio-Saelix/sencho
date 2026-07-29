@@ -51,6 +51,54 @@ describe('POST /api/auth/login', () => {
     const res = await request(app).post('/api/auth/login').send({});
     expect(res.status).toBe(400);
   });
+
+  it('returns 403 when authentication_mode is sso_only', async () => {
+    const { setAuthenticationMode } = await import('../helpers/authenticationMode');
+    setAuthenticationMode('sso_only');
+    try {
+      const res = await request(app)
+        .post('/api/auth/login')
+        .send({ username: TEST_USERNAME, password: TEST_PASSWORD });
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/Local password authentication is disabled/i);
+    } finally {
+      setAuthenticationMode('local_and_sso');
+    }
+  });
+});
+
+describe('GET /api/auth/status', () => {
+  it('reports localLoginEnabled true by default', async () => {
+    const res = await request(app).get('/api/auth/status');
+    expect(res.status).toBe(200);
+    expect(res.body.localLoginEnabled).toBe(true);
+    expect(res.body.authenticationMode).toBe('local_and_sso');
+  });
+
+  it('reports localLoginEnabled false when sso_only', async () => {
+    const { setAuthenticationMode } = await import('../helpers/authenticationMode');
+    setAuthenticationMode('sso_only');
+    try {
+      const res = await request(app).get('/api/auth/status');
+      expect(res.status).toBe(200);
+      expect(res.body.localLoginEnabled).toBe(false);
+      expect(res.body.authenticationMode).toBe('sso_only');
+    } finally {
+      setAuthenticationMode('local_and_sso');
+    }
+  });
+
+  it('defaults localLoginEnabled to true when the setting key is missing', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    db.getDb().prepare('DELETE FROM global_settings WHERE key = ?').run('authentication_mode');
+    // Bust the settings cache so the next read rebuilds without the deleted key.
+    const cpu = db.getDb().prepare('SELECT value FROM global_settings WHERE key = ?').get('host_cpu_limit') as { value: string };
+    db.updateGlobalSetting('host_cpu_limit', cpu.value);
+    const res = await request(app).get('/api/auth/status');
+    expect(res.status).toBe(200);
+    expect(res.body.localLoginEnabled).toBe(true);
+  });
 });
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────

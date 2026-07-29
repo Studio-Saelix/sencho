@@ -8,15 +8,28 @@ import {
   type ApiTokenScope,
 } from '../services/DatabaseService';
 import { getErrorMessage } from '../utils/errors';
-import { PROXY_TIER_HEADER, PROXY_ROLE_HEADER, PROXY_DEPLOY_SOURCE_HEADER, PROXY_DEPLOY_ACTOR_HEADER, isDeploySourceHeader } from '../services/license-headers';
+import {
+  PROXY_TIER_HEADER,
+  PROXY_ROLE_HEADER,
+  PROXY_DEPLOY_SOURCE_HEADER,
+  PROXY_DEPLOY_ACTOR_HEADER,
+  PROXY_SCOPED_STACK_NAME_HEADER,
+  PROXY_SCOPED_STACK_ACTIONS_HEADER,
+  isDeploySourceHeader,
+} from '../services/license-headers';
 import type { DeployInvocationContext } from '../services/network/missingExternalNetworksError';
 import { isLicenseTier, normalizeTier } from '../services/license-normalize';
 import { isDebugEnabled } from '../utils/debug';
+import { parseScopedStackActionsHeader } from '../helpers/stackRouteAuth';
+import { isValidStackName } from '../utils/validation';
 import {
   COOKIE_NAME,
   MFA_PENDING_COOKIE_NAME,
   MFA_PENDING_SCOPE,
   MFA_PENDING_TTL_MS,
+  SESSION_COOKIE_MAX_AGE_MS,
+  REMEMBER_SESSION_MAX_AGE_MS,
+  SESSION_REFRESH_THRESHOLD_MS,
 } from '../helpers/constants';
 import { getCookieOptions } from '../helpers/cookies';
 import { looksLikeApiToken } from '../utils/apiTokenFormat';
@@ -79,7 +92,7 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
     const settings = DatabaseService.getInstance().getGlobalSettings();
     const jwtSecret = settings.auth_jwt_secret;
     if (!jwtSecret) throw new Error('No JWT secret');
-    const decoded = jwt.verify(token, jwtSecret) as { username?: string; role?: string; scope?: string; tv?: number; user_id?: number; sso?: boolean };
+    const decoded = jwt.verify(token, jwtSecret) as { username?: string; role?: string; scope?: string; tv?: number; user_id?: number; sso?: boolean; remember?: boolean; exp?: number };
 
     if (isDebugEnabled()) console.log('[Auth:diag] Token type:', bearerToken ? 'bearer' : 'cookie', 'scope:', decoded.scope || 'user-session');
 
@@ -147,6 +160,19 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
         req.deployContext = ctx;
       }
 
+      // Scoped stack auth evidence: only trust on this machine-auth path.
+      // Malformed or incomplete pairs are treated as absent (never as auth).
+      const scopedNameRaw = req.headers[PROXY_SCOPED_STACK_NAME_HEADER];
+      const scopedActionsRaw = req.headers[PROXY_SCOPED_STACK_ACTIONS_HEADER];
+      const scopedName = typeof scopedNameRaw === 'string' ? scopedNameRaw.trim() : '';
+      const scopedActionsStr = typeof scopedActionsRaw === 'string' ? scopedActionsRaw : '';
+      if (scopedName && isValidStackName(scopedName) && scopedActionsStr) {
+        const actions = parseScopedStackActionsHeader(scopedActionsStr);
+        if (actions && actions.length > 0) {
+          req.scopedStackEvidence = { stackName: scopedName, actions: new Set(actions) };
+        }
+      }
+
       next();
       return;
     }
@@ -161,8 +187,11 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
     }
 
     // Token version check: rejects sessions after password change, role change, or admin reset.
-    // Pre-migration tokens (no tv claim) are accepted for backward compat and expire within 24h.
-    if (decoded.tv !== undefined && dbUser.token_version !== decoded.tv) {
+    // A token without a tv claim is a pre-migration legacy token minted when
+    // token_version was 1. Default to 1 on decode so the token is rejected only
+    // when a security event (password change, MFA reset, role change, admin
+    // invalidation) has actually bumped the version since it was issued.
+    if (dbUser.token_version !== (decoded.tv ?? 1)) {
       if (isDebugEnabled()) console.log('[Auth:diag] Token version mismatch for:', decoded.username, 'jwt:', decoded.tv, 'db:', dbUser.token_version);
       console.log('[Auth] Session rejected: token version mismatch for:', decoded.username);
       res.status(401).json({ error: 'Session invalidated. Please log in again.' });
@@ -173,6 +202,28 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
 
     // Use the DB role (not the JWT role) so role changes take effect immediately
     req.user = { username: dbUser.username, role: dbUser.role as UserRole, userId: dbUser.id };
+    const remember = decoded.remember === true;
+    req.sessionRemember = remember;
+
+    // Sliding refresh: a session nearing its expiry gets silently reissued with
+    // a fresh full TTL (matching whichever TTL, 24h or "stay signed in" 30d, the
+    // original login chose), so an actively-used tab never runs into the hard
+    // cutoff. Disabled via the session_sliding_refresh setting (default on) for
+    // admins who want a strict absolute session ceiling. This is a best-effort
+    // optimization on an already-authenticated request, so its own try/catch
+    // keeps a reissue failure from being reported as an invalid token.
+    if (settings.session_sliding_refresh !== '0' && typeof decoded.exp === 'number') {
+      const remainingMs = decoded.exp * 1000 - Date.now();
+      const shouldRefresh = remainingMs < SESSION_REFRESH_THRESHOLD_MS;
+      if (isDebugEnabled()) console.log('[Auth:diag] Sliding refresh check:', decoded.username, 'remainingMs:', remainingMs, 'refreshed:', shouldRefresh);
+      if (shouldRefresh) {
+        try {
+          issueSessionCookie(res, req, dbUser, jwtSecret, remember);
+        } catch (refreshErr) {
+          console.error('[Auth] Sliding session refresh failed for', dbUser.username, getErrorMessage(refreshErr, 'unknown'));
+        }
+      }
+    }
 
     next();
   } catch (err) {
@@ -182,19 +233,48 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
   }
 };
 
-/** Sign a session JWT and set it as an httpOnly cookie. */
+/**
+ * Drop any already-queued `Set-Cookie` entry for `name` on this response
+ * before a caller appends a new one. `res.cookie()` appends rather than
+ * replaces, so a request path that issues the same cookie twice (the
+ * sliding refresh in `authMiddleware` followed by a token-bump reissue in
+ * the same response, e.g. a password change inside the refresh window)
+ * would otherwise send two `Set-Cookie` headers for one name: the first
+ * carrying an already-superseded `token_version`. Browsers apply the last
+ * one, but any other client taking the first would treat itself as
+ * signed out on its very next request. Deduping keeps exactly one, correct
+ * cookie in the response regardless of call order.
+ */
+function dropQueuedCookie(res: Response, name: string): void {
+  const existing = res.getHeader('Set-Cookie');
+  if (!existing) return;
+  const entries = Array.isArray(existing) ? existing : [String(existing)];
+  const filtered = entries.filter((entry) => !entry.startsWith(`${name}=`));
+  if (filtered.length !== entries.length) res.setHeader('Set-Cookie', filtered);
+}
+
+/**
+ * Sign a session JWT and set it as an httpOnly cookie. `remember` extends the
+ * session to `REMEMBER_SESSION_MAX_AGE_MS` (30 days, "stay signed in") instead
+ * of the default `SESSION_COOKIE_MAX_AGE_MS` (24h); the choice is carried in
+ * the token's `remember` claim so a later sliding refresh (authMiddleware) or
+ * post-token-bump reissue (reissueSessionAfterTokenBump) reapplies the same TTL.
+ */
 export function issueSessionCookie(
   res: Response,
   req: Request,
   user: { username: string; role: string; token_version: number },
   jwtSecret: string,
+  remember = false,
 ): void {
+  const maxAgeMs = remember ? REMEMBER_SESSION_MAX_AGE_MS : SESSION_COOKIE_MAX_AGE_MS;
   const token = jwt.sign(
-    { username: user.username, role: user.role, tv: user.token_version },
+    { username: user.username, role: user.role, tv: user.token_version, remember },
     jwtSecret,
-    { expiresIn: '24h' },
+    { expiresIn: Math.floor(maxAgeMs / 1000) },
   );
-  res.cookie(COOKIE_NAME, token, getCookieOptions(req));
+  dropQueuedCookie(res, COOKIE_NAME);
+  res.cookie(COOKIE_NAME, token, { ...getCookieOptions(req), maxAge: maxAgeMs });
 }
 
 /**
@@ -209,10 +289,10 @@ export function issueMfaPendingCookie(
   req: Request,
   user: { id: number; username: string },
   jwtSecret: string,
-  opts: { sso?: boolean } = {},
+  opts: { sso?: boolean; remember?: boolean } = {},
 ): void {
   const token = jwt.sign(
-    { scope: MFA_PENDING_SCOPE, user_id: user.id, username: user.username, sso: opts.sso === true },
+    { scope: MFA_PENDING_SCOPE, user_id: user.id, username: user.username, sso: opts.sso === true, remember: opts.remember === true },
     jwtSecret,
     { expiresIn: Math.floor(MFA_PENDING_TTL_MS / 1000) },
   );
@@ -239,6 +319,6 @@ export function reissueSessionAfterTokenBump(req: Request, res: Response, userId
   const refreshed = db.getUserById(userId);
   const settings = db.getGlobalSettings();
   if (refreshed && settings.auth_jwt_secret) {
-    issueSessionCookie(res, req, refreshed, settings.auth_jwt_secret);
+    issueSessionCookie(res, req, refreshed, settings.auth_jwt_secret, req.sessionRemember === true);
   }
 }

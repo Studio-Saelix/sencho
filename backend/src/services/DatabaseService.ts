@@ -508,6 +508,8 @@ export interface RoleAssignment {
     role: UserRole;
     resource_type: ResourceType;
     resource_id: string;
+    /** Required for stack scopes; null for node scopes. */
+    node_id: number | null;
     created_at: number;
 }
 
@@ -714,6 +716,10 @@ export interface ScheduledTask {
     prune_targets: string | null;
     target_services: string | null;
     prune_label_filter: string | null;
+    /** Optional dynamic target selector; currently only 'stack-label'. */
+    selector_type: string | null;
+    /** Selector payload (e.g. Stack Label name when selector_type is stack-label). */
+    selector_value: string | null;
     delete_after_run?: number;
     // Absolute epoch-ms fire time for a one-time ('once') schedule. A 5-field
     // cron has no year field, so the chosen instant (including year) is persisted
@@ -1936,6 +1942,8 @@ export class DatabaseService {
         maybeAddCol('scheduled_tasks', 'prune_targets', 'TEXT DEFAULT NULL');
         maybeAddCol('scheduled_tasks', 'target_services', 'TEXT DEFAULT NULL');
         maybeAddCol('scheduled_tasks', 'prune_label_filter', 'TEXT DEFAULT NULL');
+        maybeAddCol('scheduled_tasks', 'selector_type', 'TEXT DEFAULT NULL');
+        maybeAddCol('scheduled_tasks', 'selector_value', 'TEXT DEFAULT NULL');
         maybeAddCol('scheduled_tasks', 'delete_after_run', 'INTEGER DEFAULT 0');
         maybeAddCol('scheduled_tasks', 'run_at', 'INTEGER DEFAULT NULL');
 
@@ -2012,6 +2020,9 @@ export class DatabaseService {
         stmt.run('cve_intel_enabled', '1');
         stmt.run('mesh_auto_recreate', '0');
         stmt.run('prune_on_update', '1');
+        // Managed by /api/sso/auth-mode, not the generic /api/settings route
+        // (activation needs safety validation).
+        stmt.run('authentication_mode', 'local_and_sso');
         stmt.run('reclaim_hero', '0');
         stmt.run('health_gate_enabled', '1');
         stmt.run('health_gate_window_seconds', '90');
@@ -2019,9 +2030,17 @@ export class DatabaseService {
         stmt.run('image_update_check_mode', 'interval');
         stmt.run('image_update_check_cron', '');
         stmt.run('image_update_sidebar_indicators', '1');
+        // Opt-out for background registry polling. Default on so upgrades keep
+        // current behavior; missing key is also treated as enabled at read time.
+        stmt.run('image_update_checks_enabled', '1');
         stmt.run('notification_dispatch_retries', '0');
         stmt.run('env_block_deploy_on_missing_required', '0');
         stmt.run('auto_create_missing_external_networks', '0');
+        // Silently extend an actively-used session's cookie instead of hard
+        // expiring it. On by default (matches how most session-based web apps
+        // behave); admins who want a strict absolute session ceiling can turn
+        // it off in Settings > Users.
+        stmt.run('session_sliding_refresh', '1');
 
         // Seed the default local node if none exists
         const nodeCount = (this.db.prepare('SELECT COUNT(*) as count FROM nodes').get() as any)?.count || 0;
@@ -2228,11 +2247,109 @@ export class DatabaseService {
             CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments(user_id);
             CREATE INDEX IF NOT EXISTS idx_role_assignments_resource ON role_assignments(resource_type, resource_id);
         `);
-        try {
-            this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_role_assignments_unique ON role_assignments(user_id, role, resource_type, resource_id)');
-        } catch (e) {
-            console.warn('[DatabaseService] Could not create role_assignments unique index:', (e as Error).message);
-        }
+        this.migrateRoleAssignmentsNodeQualified();
+    }
+
+    /**
+     * Rebuild role_assignments with Mesh-style stack identity (node_id, resource_id).
+     * Idempotent: probes sqlite_master for the final CHECK and both partial unique indexes.
+     */
+    private migrateRoleAssignmentsNodeQualified(): void {
+        const tableSql = (this.db.prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'role_assignments'"
+        ).get() as { sql: string } | undefined)?.sql ?? '';
+        const indexRows = this.db.prepare(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'role_assignments'"
+        ).all() as Array<{ name: string; sql: string | null }>;
+        const hasNodeIdColumn = (this.db.prepare(
+            'PRAGMA table_info(role_assignments)'
+        ).all() as Array<{ name: string }>).some((column) => column.name === 'node_id');
+        const indexSqlByName = new Map(indexRows.map((r) => [r.name, r.sql ?? '']));
+        const checkOk =
+            tableSql.includes("resource_type = 'stack' AND node_id IS NOT NULL") &&
+            tableSql.includes("resource_type = 'node' AND node_id IS NULL");
+        const stackUniqueSql = indexSqlByName.get('idx_role_assignments_stack_unique') ?? '';
+        const nodeUniqueSql = indexSqlByName.get('idx_role_assignments_node_unique') ?? '';
+        const stackUniqueOk =
+            stackUniqueSql.includes('user_id') &&
+            stackUniqueSql.includes('role') &&
+            stackUniqueSql.includes('resource_type') &&
+            stackUniqueSql.includes('resource_id') &&
+            stackUniqueSql.includes('node_id') &&
+            /WHERE\s+resource_type\s*=\s*'stack'/i.test(stackUniqueSql);
+        const nodeUniqueOk =
+            nodeUniqueSql.includes('user_id') &&
+            nodeUniqueSql.includes('role') &&
+            nodeUniqueSql.includes('resource_type') &&
+            nodeUniqueSql.includes('resource_id') &&
+            /WHERE\s+resource_type\s*=\s*'node'/i.test(nodeUniqueSql) &&
+            !/node_id/.test(nodeUniqueSql.replace(/WHERE[\s\S]*/i, ''));
+        if (checkOk && stackUniqueOk && nodeUniqueOk) return;
+
+        this.db.exec('DROP TABLE IF EXISTS role_assignments_new');
+
+        // Do not call getDefaultNode(): NODE_COLUMNS may include columns not
+        // yet added when this migration runs early in the constructor chain.
+        const defaultNodeId = (
+            this.db.prepare('SELECT id FROM nodes WHERE is_default = 1 LIMIT 1').get() as { id: number } | undefined
+        )?.id ?? null;
+
+        this.db.transaction(() => {
+            this.db.exec(`
+                CREATE TABLE role_assignments_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    resource_type TEXT NOT NULL,
+                    resource_id TEXT NOT NULL,
+                    node_id INTEGER,
+                    created_at INTEGER NOT NULL,
+                    CHECK (
+                        (resource_type = 'stack' AND node_id IS NOT NULL)
+                        OR (resource_type = 'node' AND node_id IS NULL)
+                    ),
+                    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY(node_id) REFERENCES nodes(id) ON DELETE CASCADE
+                );
+            `);
+
+            this.db.exec(`
+                INSERT INTO role_assignments_new (id, user_id, role, resource_type, resource_id, node_id, created_at)
+                SELECT id, user_id, role, resource_type, resource_id, NULL, created_at
+                FROM role_assignments
+                WHERE resource_type = 'node';
+            `);
+
+            if (hasNodeIdColumn) {
+                this.db.exec(`
+                    INSERT INTO role_assignments_new (id, user_id, role, resource_type, resource_id, node_id, created_at)
+                    SELECT id, user_id, role, resource_type, resource_id, node_id, created_at
+                    FROM role_assignments
+                    WHERE resource_type = 'stack' AND node_id IS NOT NULL
+                `);
+            } else if (defaultNodeId !== null) {
+                this.db.prepare(`
+                    INSERT INTO role_assignments_new (id, user_id, role, resource_type, resource_id, node_id, created_at)
+                    SELECT id, user_id, role, resource_type, resource_id, ?, created_at
+                    FROM role_assignments
+                    WHERE resource_type = 'stack'
+                `).run(defaultNodeId);
+            }
+            // No default node: legacy stack rows are intentionally omitted (fail closed).
+
+            this.db.exec(`
+                DROP TABLE role_assignments;
+                ALTER TABLE role_assignments_new RENAME TO role_assignments;
+                CREATE INDEX IF NOT EXISTS idx_role_assignments_user ON role_assignments(user_id);
+                CREATE INDEX IF NOT EXISTS idx_role_assignments_resource ON role_assignments(resource_type, resource_id);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_role_assignments_stack_unique
+                    ON role_assignments(user_id, role, resource_type, resource_id, node_id)
+                    WHERE resource_type = 'stack';
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_role_assignments_node_unique
+                    ON role_assignments(user_id, role, resource_type, resource_id)
+                    WHERE resource_type = 'node';
+            `);
+        })();
     }
 
     private migrateNotificationRoutes(): void {
@@ -4706,6 +4823,7 @@ export class DatabaseService {
             this.db.prepare('DELETE FROM service_update_recovery WHERE node_id = ?').run(id);
             this.db.prepare('UPDATE blueprints SET pinned_node_id = NULL WHERE pinned_node_id = ?').run(id);
             this.deleteRoleAssignmentsByResource('node', String(id));
+            this.deleteRoleAssignmentsByStackNode(id);
             this.db.prepare('DELETE FROM fleet_sync_status WHERE node_id = ?').run(id);
             this.db.prepare('DELETE FROM node_update_skips WHERE node_id = ?').run(id);
             this.db.prepare(
@@ -4994,6 +5112,12 @@ export class DatabaseService {
     /** Deletes the full update row (aggregate + services_json). Returns deleted row count. */
     public clearStackUpdateStatus(nodeId: number, stackName: string): number {
         const result = this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ? AND stack_name = ?').run(nodeId, stackName);
+        return result.changes;
+    }
+
+    /** Deletes every update row for a node. Returns deleted row count. */
+    public clearAllStackUpdateStatus(nodeId: number): number {
+        const result = this.db.prepare('DELETE FROM stack_update_status WHERE node_id = ?').run(nodeId);
         return result.changes;
     }
 
@@ -5382,23 +5506,44 @@ export class DatabaseService {
 
     // --- Role Assignments ---
 
-    public getRoleAssignments(userId: number, resourceType: ResourceType, resourceId: string): RoleAssignment[] {
+    public getRoleAssignments(
+        userId: number,
+        resourceType: ResourceType,
+        resourceId: string,
+        nodeId?: number | null,
+    ): RoleAssignment[] {
+        if (resourceType === 'stack') {
+            if (nodeId === undefined || nodeId === null) return [];
+            return this.db.prepare(
+                'SELECT * FROM role_assignments WHERE user_id = ? AND resource_type = ? AND resource_id = ? AND node_id = ?'
+            ).all(userId, resourceType, resourceId, nodeId) as RoleAssignment[];
+        }
         return this.db.prepare(
-            'SELECT * FROM role_assignments WHERE user_id = ? AND resource_type = ? AND resource_id = ?'
+            'SELECT * FROM role_assignments WHERE user_id = ? AND resource_type = ? AND resource_id = ? AND node_id IS NULL'
         ).all(userId, resourceType, resourceId) as RoleAssignment[];
     }
 
     public getAllRoleAssignments(userId: number): RoleAssignment[] {
         return this.db.prepare(
-            'SELECT * FROM role_assignments WHERE user_id = ? ORDER BY resource_type, resource_id'
+            'SELECT * FROM role_assignments WHERE user_id = ? ORDER BY resource_type, resource_id, node_id'
         ).all(userId) as RoleAssignment[];
     }
 
-    public addRoleAssignment(assignment: { user_id: number; role: UserRole; resource_type: ResourceType; resource_id: string }): number {
+    public addRoleAssignment(assignment: {
+        user_id: number;
+        role: UserRole;
+        resource_type: ResourceType;
+        resource_id: string;
+        node_id?: number | null;
+    }): number {
         const now = Date.now();
+        const nodeId = assignment.resource_type === 'stack' ? assignment.node_id ?? null : null;
+        if (assignment.resource_type === 'stack' && (nodeId === null || nodeId === undefined)) {
+            throw new Error('node_id is required for stack role assignments');
+        }
         const result = this.db.prepare(
-            'INSERT INTO role_assignments (user_id, role, resource_type, resource_id, created_at) VALUES (?, ?, ?, ?, ?)'
-        ).run(assignment.user_id, assignment.role, assignment.resource_type, assignment.resource_id, now);
+            'INSERT INTO role_assignments (user_id, role, resource_type, resource_id, node_id, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+        ).run(assignment.user_id, assignment.role, assignment.resource_type, assignment.resource_id, nodeId, now);
         return result.lastInsertRowid as number;
     }
 
@@ -5416,6 +5561,20 @@ export class DatabaseService {
 
     public deleteRoleAssignmentsByResource(resourceType: ResourceType, resourceId: string): void {
         this.db.prepare('DELETE FROM role_assignments WHERE resource_type = ? AND resource_id = ?').run(resourceType, resourceId);
+    }
+
+    /** Clear stack-scoped grants for one (nodeId, stackName) tuple. */
+    public deleteRoleAssignmentsByStack(nodeId: number, stackName: string): void {
+        this.db.prepare(
+            "DELETE FROM role_assignments WHERE resource_type = 'stack' AND node_id = ? AND resource_id = ?"
+        ).run(nodeId, stackName);
+    }
+
+    /** Clear all stack-scoped grants for a node (explicit cleanup; FK CASCADE is not enforced). */
+    public deleteRoleAssignmentsByStackNode(nodeId: number): void {
+        this.db.prepare(
+            "DELETE FROM role_assignments WHERE resource_type = 'stack' AND node_id = ?"
+        ).run(nodeId);
     }
 
     // --- SSO Config ---
@@ -6024,13 +6183,14 @@ export class DatabaseService {
 
     public createScheduledTask(task: Omit<ScheduledTask, 'id'>): number {
         const result = this.db.prepare(
-            'INSERT INTO scheduled_tasks (name, target_type, target_id, node_id, action, cron_expression, enabled, created_by, created_at, updated_at, last_run_at, next_run_at, last_status, last_error, prune_targets, target_services, prune_label_filter, delete_after_run, run_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO scheduled_tasks (name, target_type, target_id, node_id, action, cron_expression, enabled, created_by, created_at, updated_at, last_run_at, next_run_at, last_status, last_error, prune_targets, target_services, prune_label_filter, selector_type, selector_value, delete_after_run, run_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         ).run(
             task.name, task.target_type, task.target_id, task.node_id,
             task.action, task.cron_expression, task.enabled, task.created_by,
             task.created_at, task.updated_at, task.last_run_at, task.next_run_at,
             task.last_status, task.last_error, task.prune_targets, task.target_services,
-            task.prune_label_filter, task.delete_after_run ?? 0, task.run_at ?? null
+            task.prune_label_filter, task.selector_type ?? null, task.selector_value ?? null,
+            task.delete_after_run ?? 0, task.run_at ?? null
         );
         return result.lastInsertRowid as number;
     }
@@ -6047,6 +6207,8 @@ export class DatabaseService {
             last_status: updates.last_status, last_error: updates.last_error,
             prune_targets: updates.prune_targets, target_services: updates.target_services,
             prune_label_filter: updates.prune_label_filter,
+            selector_type: updates.selector_type,
+            selector_value: updates.selector_value,
             delete_after_run: updates.delete_after_run,
             run_at: updates.run_at,
         };

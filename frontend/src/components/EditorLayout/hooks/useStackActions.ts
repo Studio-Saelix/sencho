@@ -182,6 +182,10 @@ interface UseStackActionsOptions {
    * Optional so unit tests that do not exercise delete can omit it.
    */
   removeNotificationsForStack?: (nodeId: number, stackName: string) => void;
+  /** Admin role: required together with canReapplyCompose for Save & Reapply. */
+  isAdmin?: boolean;
+  /** Authoritative canReapplyCompose === true for the active node. */
+  canReapplyCompose?: boolean;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -406,6 +410,8 @@ export function useStackActions(options: UseStackActionsOptions) {
     canOfferVolumeRemoval = false,
     onDeletedOpenStack,
     removeNotificationsForStack,
+    isAdmin = false,
+    canReapplyCompose = false,
   } = options;
 
   const pendingStackLoadRef = useRef<string | null>(null);
@@ -444,6 +450,24 @@ export function useStackActions(options: UseStackActionsOptions) {
     activeNodeIdRef.current = activeNode?.id;
     containersRef.current = editorState.containers;
   });
+
+  // Cancel an open Save & Reapply confirmation if the active node or selected
+  // stack diverges from the capture (never retarget a pending confirm).
+  useEffect(() => {
+    const capture = overlayState.composeReapplyCapture;
+    if (!capture) return;
+    if (
+      activeNode?.id !== capture.nodeId
+      || stackListState.selectedFile !== capture.stackFile
+    ) {
+      overlayState.setComposeReapplyCapture(null);
+    }
+  }, [
+    activeNode?.id,
+    stackListState.selectedFile,
+    overlayState.composeReapplyCapture,
+    overlayState.setComposeReapplyCapture,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -671,17 +695,23 @@ export function useStackActions(options: UseStackActionsOptions) {
 
   // Re-sync the open stack's container list. Used after both successful and
   // failed/stalled operations so the detail never shows containers that no
-  // longer reflect reality. Returns true only when the live list was fetched;
-  // false on a non-applicable stack, a non-ok response, or a network error, so
-  // callers (e.g. the recovery panel's Refresh) can report the real outcome.
+  // longer reflect reality. Returns 'ok' when the live list was applied,
+  // 'skipped' when ownership arbitration dropped the result (stale/aborted or
+  // wrong selection), and 'failed' on a real soft fetch error. Callers that
+  // only care about a successful apply should check for 'ok'.
   // stackName is kept for call-site clarity; the fetch derives the name from stackFile.
-  const refreshSelectedContainers = async (_stackName: string, stackFile: string): Promise<boolean> => {
-    if (selectedFileRef.current !== stackFile) return false;
+  const refreshSelectedContainers = async (
+    _stackName: string,
+    stackFile: string,
+  ): Promise<'ok' | 'skipped' | 'failed'> => {
+    if (selectedFileRef.current !== stackFile) return 'skipped';
     const result = await fetchStackContainers(stackFile, 'soft', {
       expectedFile: stackFile,
       expectedNodeId: activeNodeIdRef.current,
     });
-    return result.ok;
+    if (result.ok) return 'ok';
+    if (result.reason === 'stale' || result.reason === 'aborted') return 'skipped';
+    return 'failed';
   };
 
   const retryContainersLoad = async () => {
@@ -1365,8 +1395,22 @@ export function useStackActions(options: UseStackActionsOptions) {
       deployPendingRef.current
     )
       return;
-    if (openSelfStackProtectedIfNeeded(stackListState.selectedFile)) return;
+
     const stackFile = stackListState.selectedFile;
+    if (isSelfStackFile(stackFile)) {
+      if (isAdmin && canReapplyCompose && activeNode) {
+        overlayState.setComposeReapplyCapture({
+          nodeId: activeNode.id,
+          nodeType: activeNode.type === 'local' ? 'local' : 'remote',
+          nodeName: activeNode.name,
+          stackFile,
+        });
+        return;
+      }
+      overlayState.openSelfStackProtected();
+      return;
+    }
+
     const stackName = stackFile.replace(/\.(yml|yaml)$/, '');
     // Snapshot the node once so the advisory fetch and the deploy stay bound to
     // it even if the active node changes while the advisory dialog is open.

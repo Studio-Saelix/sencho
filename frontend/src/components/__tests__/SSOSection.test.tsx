@@ -25,6 +25,10 @@ vi.mock('@/components/ui/toast-store', () => ({
   },
 }));
 
+vi.mock('@/context/LicenseContext', () => ({
+  useLicense: () => ({ isPaid: true }),
+}));
+
 // Render the gated cards directly; tier/capability gating is exercised in the
 // backend suite and is not what this test is about.
 vi.mock('../CapabilityGate', () => ({
@@ -101,16 +105,49 @@ describe('SSOSection error surfacing', () => {
       if (path === '/sso/config') {
         return Promise.resolve(res(true, [{ provider: 'oidc_custom', enabled: true, displayName: 'Custom OIDC' }]));
       }
+      if (path === '/sso/auth-mode') {
+        return Promise.resolve(res(true, { authenticationMode: 'local_and_sso', localLoginEnabled: true }));
+      }
       if (opts?.method === 'DELETE') return Promise.resolve(res(false, { error: 'delete rejected' }));
       return Promise.resolve(res(true, {}));
     });
     render(<SSOSection />);
 
-    await user.click(await screen.findByText('Custom OIDC'));
+    await waitFor(() => {
+      expect(screen.getByText('Active')).toBeInTheDocument();
+    });
+    await user.click(screen.getByText('Custom OIDC'));
     await user.click(screen.getByRole('button', { name: /Remove/i }));
 
     await waitFor(() => {
       expect(mockedToast.error).toHaveBeenCalledWith('delete rejected');
     });
+  });
+
+  it('keeps the Active badge and ON toggle in sync after an enabled config loads', async () => {
+    mockedFetch.mockImplementation((path: string) => {
+      if (path === '/sso/config') {
+        return Promise.resolve(res(true, [{
+          provider: 'oidc_github',
+          enabled: true,
+          displayName: 'GitHub',
+          oidcClientId: 'client',
+        }]));
+      }
+      if (path === '/sso/auth-mode') {
+        return Promise.resolve(res(true, { authenticationMode: 'local_and_sso', localLoginEnabled: true }));
+      }
+      return Promise.resolve(res(true, {}));
+    });
+    render(<SSOSection />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Active')).toBeInTheDocument();
+    });
+    const onSwitches = screen.getAllByRole('switch').filter(
+      (el) => el.getAttribute('aria-checked') === 'true',
+    );
+    expect(onSwitches).toHaveLength(1);
+    expect(onSwitches[0]).toHaveTextContent('ON');
   });
 });

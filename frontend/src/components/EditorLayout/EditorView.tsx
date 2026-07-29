@@ -138,6 +138,9 @@ export interface EditorViewProps {
     containersLoadStatus?: 'idle' | 'loading' | 'success' | 'error';
     containersLoadError?: string | null;
     onRetryContainersLoad?: () => void;
+    /** Live-refresh soft failures exhausted; advisory when container cards are shown. */
+    containersSyncStale?: boolean;
+    onRetrySync?: () => void;
     backupInfo: { exists: boolean; timestamp: number | null };
     gitSourcePendingMap: Record<string, boolean>;
     notifications: NotificationItem[];
@@ -204,6 +207,8 @@ export interface EditorViewProps {
     showTakeDown: boolean;
     /** True when this stack is the running Sencho instance on the active node. */
     isSelfStack?: boolean;
+    /** Admin + node reapply eligibility + self-stack: show Save & Reapply instead of Save & Deploy. */
+    canSaveAndReapply?: boolean;
 
     // Recovery surface for a failed/stalled operation on this stack (undefined
     // when the last op succeeded or none has run). onRefreshState re-syncs
@@ -252,6 +257,8 @@ export function EditorView(props: EditorViewProps) {
         containersLoadStatus = 'success',
         containersLoadError = null,
         onRetryContainersLoad,
+        containersSyncStale = false,
+        onRetrySync,
         backupInfo,
         gitSourcePendingMap,
         notifications,
@@ -295,6 +302,7 @@ export function EditorView(props: EditorViewProps) {
         requestTakeDownStack,
         showTakeDown,
         isSelfStack,
+        canSaveAndReapply = false,
         recoveryResult,
         onRefreshState,
         onDismissRecovery,
@@ -303,7 +311,7 @@ export function EditorView(props: EditorViewProps) {
         hasUnsavedChanges,
     } = props;
     const monacoEditorRef = useRef<import('monaco-editor').editor.IStandaloneCodeEditor | null>(null);
-    const canEditCompose = can('stack:edit', 'stack', stackName);
+    const canEditCompose = can('stack:edit', 'stack', stackName, activeNode?.id);
 
     // Dispose the underlying Monaco model when EditorView unmounts. The
     // @monaco-editor/react wrapper reuses a single model per editor instance
@@ -350,7 +358,7 @@ export function EditorView(props: EditorViewProps) {
     const safeContent = content || '';
     const safeEnvContent = envContent || '';
     const isRunning = safeContainers.some(c => c.State === 'running');
-    const canRead = can('stack:read', 'stack', stackName);
+    const canRead = can('stack:read', 'stack', stackName, activeNode?.id);
 
     useEffect(() => {
         if (activeTab === 'files' && !canRead) {
@@ -461,7 +469,7 @@ export function EditorView(props: EditorViewProps) {
                                             result={recoveryResult}
                                             activeNode={activeNode}
                                             backupInfo={backupInfo}
-                                            canDeploy={can('stack:deploy', 'stack', stackName)}
+                                            canDeploy={can('stack:deploy', 'stack', stackName, activeNode?.id)}
                                             onRetry={retryHandlerFor(recoveryResult.action, { deployStack, restartStack, updateStack, rollbackStack })}
                                             onRestart={restartStack}
                                             onRollback={rollbackStack}
@@ -500,6 +508,8 @@ export function EditorView(props: EditorViewProps) {
                                     containersLoadStatus={containersLoadStatus}
                                     containersLoadError={containersLoadError}
                                     onRetryContainersLoad={onRetryContainersLoad}
+                                    syncStale={containersSyncStale}
+                                    onRetrySync={onRetrySync}
                                     key={`${activeNode?.id ?? 'local'}:${stackName}`}
                                 />
                             </ScrollArea>
@@ -523,6 +533,8 @@ export function EditorView(props: EditorViewProps) {
                                 containersLoadStatus={containersLoadStatus}
                                 containersLoadError={containersLoadError}
                                 onRetryContainersLoad={onRetryContainersLoad}
+                                syncStale={containersSyncStale}
+                                onRetrySync={onRetrySync}
                                 key={`${activeNode?.id ?? 'local'}:${stackName}`}
                             />
                         </CardContent>
@@ -600,7 +612,7 @@ export function EditorView(props: EditorViewProps) {
                                         <div className="flex items-center">
                                             <Button size="sm" variant="default" className="rounded-l-lg rounded-r-none" onClick={requestSaveAndDeploy} disabled={loadingAction === 'deploy'}>
                                                 <Rocket className="w-4 h-4 mr-2" strokeWidth={1.5} />
-                                                Save & Deploy
+                                                {canSaveAndReapply ? 'Save & Reapply' : 'Save & Deploy'}
                                             </Button>
                                             <DropdownMenu modal={false}>
                                                 <DropdownMenuTrigger asChild>
@@ -651,7 +663,7 @@ export function EditorView(props: EditorViewProps) {
                             {activeTab === 'files' && canRead ? (
                                 <StackFileExplorer
                                     stackName={stackName}
-                                    canEdit={can('stack:edit', 'stack', stackName)}
+                                    canEdit={can('stack:edit', 'stack', stackName, activeNode?.id)}
                                     isDarkMode={isDarkMode}
                                     onNavigateToCompose={() => setActiveTab('compose')}
                                     onNavigateToEnv={() => setActiveTab('env')}
@@ -720,7 +732,7 @@ export function EditorView(props: EditorViewProps) {
                         onOpenGitSource={() => setGitSourceOpen(true)}
                         onApplyUpdate={() => { void updateStack(); }}
                         applying={loadingAction === 'update'}
-                        canEdit={can('stack:edit', 'stack', stackName)}
+                        canEdit={can('stack:edit', 'stack', stackName, activeNode?.id)}
                         notifications={notifications}
                         requestedTab={props.requestedAnatomyTab}
                     />

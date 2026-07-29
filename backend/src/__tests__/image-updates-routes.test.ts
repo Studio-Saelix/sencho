@@ -115,6 +115,65 @@ describe('GET /api/image-updates/status', () => {
     expect(typeof res.body.manualCooldownRemainingMs).toBe('number');
     expect('lastCheckedAt' in res.body).toBe(true);
     expect('nextCheckAt' in res.body).toBe(true);
+    expect(res.body.enabled).toBe(true);
+  });
+});
+
+describe('PUT /api/image-updates/enabled', () => {
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).put('/api/image-updates/enabled').send({ enabled: false });
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects non-admin users with 403', async () => {
+    const res = await request(app).put('/api/image-updates/enabled').set('Cookie', viewerCookie).send({ enabled: false });
+    expect(res.status).toBe(403);
+  });
+
+  it('disables checks, clears local findings, and returns enabled false', async () => {
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    db.upsertStackUpdateStatus(nodeId, 'pending-stack', true, Date.now(), 'ok', null);
+    expect(Object.keys(db.getStackUpdateDetail(nodeId)).length).toBeGreaterThan(0);
+
+    const res = await request(app).put('/api/image-updates/enabled').set('Cookie', adminCookie).send({ enabled: false });
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(false);
+    expect(res.body.nextCheckAt).toBeNull();
+    expect(db.getGlobalSettings().image_update_checks_enabled).toBe('0');
+    expect(db.getStackUpdateDetail(nodeId)).toEqual({});
+  });
+
+  it('re-enables checks and returns enabled true', async () => {
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '0');
+    const res = await request(app).put('/api/image-updates/enabled').set('Cookie', adminCookie).send({ enabled: true });
+    expect(res.status).toBe(200);
+    expect(res.body.enabled).toBe(true);
+    expect(DatabaseService.getInstance().getGlobalSettings().image_update_checks_enabled).toBe('1');
+  });
+});
+
+describe('POST /api/image-updates/refresh when disabled', () => {
+  it('returns 409 with enabled false instead of rate-limit 429', async () => {
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '0');
+    const res = await request(app).post('/api/image-updates/refresh').set('Cookie', adminCookie);
+    expect(res.status).toBe(409);
+    expect(res.body.enabled).toBe(false);
+    expect(res.body.error).toMatch(/disabled/i);
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '1');
+  });
+});
+
+describe('POST /api/image-updates/fleet/refresh when disabled', () => {
+  it('lists the local node in disabled rather than triggered or rateLimited', async () => {
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '0');
+    const localId = DatabaseService.getInstance().getDefaultNode()!.id!;
+    const res = await request(app).post('/api/image-updates/fleet/refresh').set('Cookie', adminCookie);
+    expect(res.status).toBe(200);
+    expect(res.body.disabled).toContain(localId);
+    expect(res.body.triggered).not.toContain(localId);
+    expect(res.body.rateLimited).not.toContain(localId);
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '1');
   });
 });
 
@@ -351,6 +410,35 @@ describe('POST /api/auto-update/execute', () => {
       .send({});
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/Missing "target"/);
+  });
+
+  it('rejects an empty targets array with 400', async () => {
+    const res = await request(app)
+      .post('/api/auto-update/execute')
+      .set('Cookie', adminCookie)
+      .send({ targets: [] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/non-empty array/);
+  });
+
+  it('rejects invalid names in targets with 400', async () => {
+    const res = await request(app)
+      .post('/api/auto-update/execute')
+      .set('Cookie', adminCookie)
+      .send({ targets: ['ok-stack', '../bad'] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid stack name/);
+  });
+
+  it('accepts targets[] and returns a per-stack summary string', async () => {
+    const res = await request(app)
+      .post('/api/auto-update/execute')
+      .set('Cookie', adminCookie)
+      .send({ targets: ['missing-a', 'missing-b'] });
+    expect(res.status).toBe(200);
+    expect(typeof res.body.result).toBe('string');
+    expect(res.body.result).toMatch(/missing-a/);
+    expect(res.body.result).toMatch(/missing-b/);
   });
 
   it('rejects invalid stack name with 400', async () => {

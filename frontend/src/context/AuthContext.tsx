@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import { markMilestone } from '@/lib/hydrationTiming';
+import { resolveCan } from '@/lib/resolveCan';
 
 type AppStatus = 'loading' | 'needsSetup' | 'notAuthenticated' | 'mfaChallenge' | 'authenticated';
 
@@ -33,10 +34,10 @@ interface AuthContextType {
   permissions: PermissionsData | null;
   permissionsStatus: PermissionsStatus;
   permissionsReady: boolean;
-  can: (action: PermissionAction, resourceType?: string, resourceId?: string) => boolean;
+  can: (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean;
   retryPermissions: () => Promise<void>;
-  login: (username: string, password: string) => Promise<{ success: boolean; error?: string; mfaRequired?: boolean }>;
-  ssoLdapLogin: (username: string, password: string) => Promise<{ success: boolean; error?: string; mfaRequired?: boolean }>;
+  login: (username: string, password: string, remember?: boolean) => Promise<{ success: boolean; error?: string; mfaRequired?: boolean }>;
+  ssoLdapLogin: (username: string, password: string, remember?: boolean) => Promise<{ success: boolean; error?: string; mfaRequired?: boolean }>;
   submitMfa: (code: string, opts?: { isBackupCode?: boolean }) => Promise<{ success: boolean; error?: string; retryAfter?: number }>;
   cancelMfa: () => Promise<void>;
   logout: () => Promise<void>;
@@ -139,22 +140,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('sencho-unauthorized', handleUnauthorized);
   }, []);
 
-  const can = useCallback((action: PermissionAction, resourceType?: string, resourceId?: string): boolean => {
+  const can = useCallback((
+    action: PermissionAction,
+    resourceType?: string,
+    resourceId?: string,
+    nodeId?: number | null,
+  ): boolean => {
     if (permissionsStatus !== 'ready' || !permissions) return false;
-
-    if (permissions.globalRole === 'admin') return true;
-
-    if (permissions.globalPermissions.includes(action)) return true;
-
-    if (resourceType && resourceId) {
-      const key = `${resourceType}:${resourceId}`;
-      return permissions.scopedPermissions[key]?.includes(action) ?? false;
-    }
-
-    return false;
+    return resolveCan(permissions, action, resourceType, resourceId, nodeId);
   }, [permissions, permissionsStatus]);
 
-  const login = async (username: string, password: string): Promise<{ success: boolean; error?: string; mfaRequired?: boolean }> => {
+  const login = async (username: string, password: string, remember = false): Promise<{ success: boolean; error?: string; mfaRequired?: boolean }> => {
     try {
       const response = await fetch('/api/auth/login', {
         method: 'POST',
@@ -162,7 +158,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           'Content-Type': 'application/json',
         },
         credentials: 'include',
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, remember }),
       });
 
       const data = await response.json();
@@ -183,13 +179,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const ssoLdapLogin = async (username: string, password: string): Promise<{ success: boolean; error?: string; mfaRequired?: boolean }> => {
+  const ssoLdapLogin = async (username: string, password: string, remember = false): Promise<{ success: boolean; error?: string; mfaRequired?: boolean }> => {
     try {
       const response = await fetch('/api/auth/sso/ldap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, remember }),
       });
 
       const data = await response.json();

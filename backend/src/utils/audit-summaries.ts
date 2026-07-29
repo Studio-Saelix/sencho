@@ -42,6 +42,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'POST /system/networks/delete': 'Deleted networks',
   'POST /system/networks': 'Created network',
   'POST /system/console-token': 'Generated console token',
+  'POST /system/reapply-compose': 'Triggered compose reapply',
 
   // Node management
   'POST /nodes': 'Added node',
@@ -91,6 +92,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'DELETE /fleet/snapshots': 'Deleted fleet backup',
   'POST /fleet/snapshots/*/restore': 'Restored fleet backup',
   'POST /fleet/nodes/*/update': 'Triggered fleet node update',
+  'POST /fleet/nodes/*/reapply-compose': 'Triggered fleet node compose reapply',
   'POST /fleet/update-all': 'Triggered fleet-wide update',
   'POST /fleet/role/reanchor': 'Re-anchored fleet replica',
   'POST /fleet/role/demote': 'Demoted fleet replica to control',
@@ -106,6 +108,7 @@ export const AUDIT_ROUTE_SUMMARIES: Record<string, string> = {
   'PUT /sso/config': 'Updated SSO configuration',
   'DELETE /sso/config': 'Deleted SSO configuration',
   'POST /sso/config/*/test': 'Tested SSO configuration',
+  'PUT /sso/auth-mode': 'Updated authentication mode',
 
   // API tokens
   'POST /api-tokens': 'Created API token',

@@ -106,6 +106,8 @@ function makeOverlay(over: Partial<OverlayState> = {}): OverlayState {
     preDeployAdvisory: null,
     setPreDeployAdvisory: vi.fn(),
     openSelfStackProtected: vi.fn(),
+    setComposeReapplyCapture: vi.fn(),
+    composeReapplyCapture: null,
     setDiffPreview: vi.fn(),
     stackToDelete: null,
     closeDeleteDialog: vi.fn(),
@@ -131,6 +133,8 @@ function setup(over: {
   setActiveNode?: Parameters<typeof useStackActions>[0]['setActiveNode'];
   onDeletedOpenStack?: () => void;
   removeNotificationsForStack?: (nodeId: number, stackName: string) => void;
+  isAdmin?: boolean;
+  canReapplyCompose?: boolean;
 } = {}) {
   const editorState = makeEditorState(over.editorState);
   const stackListState = makeStackListState(over.stackList);
@@ -150,7 +154,7 @@ function setup(over: {
       stackListState,
       navState,
       overlayState,
-      activeNode: over.activeNode ?? ({ id: 1, type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode']),
+      activeNode: over.activeNode ?? ({ id: 1, name: 'Local', type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode']),
       setActiveNode,
       nodes: [],
       runWithLog,
@@ -160,6 +164,8 @@ function setup(over: {
       canEditStack: over.canEditStack ?? (() => true),
       onDeletedOpenStack,
       removeNotificationsForStack,
+      isAdmin: over.isAdmin ?? false,
+      canReapplyCompose: over.canReapplyCompose ?? false,
     }),
   );
   return { result, editorState, stackListState, overlayState, navState, setActiveNode, onDeletedOpenStack, removeNotificationsForStack };
@@ -1127,6 +1133,152 @@ describe('useStackActions.getStackMenuVisibility', () => {
     expect(stackListState.setStackAction).not.toHaveBeenCalled();
   });
 
+  it('opens reapply capture for eligible admin Save & Deploy on self-stack without posting deploy', async () => {
+    vi.mocked(apiFetch).mockReset();
+    const { result, overlayState } = setup({
+      isAdmin: true,
+      canReapplyCompose: true,
+      activeNode: { id: 7, name: 'Gateway', type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'],
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
+    expect(overlayState.setComposeReapplyCapture).toHaveBeenCalledWith({
+      nodeId: 7,
+      nodeType: 'local',
+      nodeName: 'Gateway',
+      stackFile: 'sencho.yml',
+    });
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('does not open reapply capture for ordinary stacks when canReapplyCompose is true', async () => {
+    // Node eligibility alone must not retarget ordinary stacks; isSelfStackFile gates capture.
+    vi.mocked(apiFetch).mockReset();
+    vi.mocked(apiFetch).mockResolvedValue(new Response(JSON.stringify({ hasIssues: false }), { status: 200 }));
+    const { result, overlayState, stackListState } = setup({
+      isAdmin: true,
+      canReapplyCompose: true,
+      activeNode: { id: 7, name: 'Gateway', type: 'local' } as Parameters<typeof useStackActions>[0]['activeNode'],
+      stackList: {
+        selectedFile: 'web.yml',
+        stackSelfFlags: { 'web.yml': false },
+      },
+    });
+    await act(async () => {
+      await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent);
+    });
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+    expect(overlayState.openSelfStackProtected).not.toHaveBeenCalled();
+    expect(stackListState.setStackAction).toHaveBeenCalled();
+  });
+
+  it('opens protected dialog for self-stack deploy when reapply is not eligible', async () => {
+    const { result, overlayState } = setup({
+      isAdmin: true,
+      canReapplyCompose: false,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+  });
+
+  it('opens protected dialog for non-admin even when canReapplyCompose is true', async () => {
+    const { result, overlayState } = setup({
+      isAdmin: false,
+      canReapplyCompose: true,
+      stackList: {
+        selectedFile: 'sencho.yml',
+        stackSelfFlags: { 'sencho.yml': true },
+      },
+    });
+    await act(async () => { await result.current.deployStack({ preventDefault: vi.fn(), stopPropagation: vi.fn() } as unknown as React.MouseEvent); });
+    expect(overlayState.openSelfStackProtected).toHaveBeenCalled();
+    expect(overlayState.setComposeReapplyCapture).not.toHaveBeenCalled();
+  });
+
+  it('cancels open reapply capture when the active node changes', async () => {
+    const setComposeReapplyCapture = vi.fn();
+    const activeNodeA = { id: 1, name: 'A', type: 'local' as const };
+    const { rerender } = renderHook(
+      ({ activeNode }: { activeNode: typeof activeNodeA }) =>
+        useStackActions({
+          editorState: makeEditorState(),
+          stackListState: makeStackListState({
+            selectedFile: 'sencho.yml',
+            stackSelfFlags: { 'sencho.yml': true },
+          }),
+          navState: { activeView: 'editor', setActiveView: vi.fn() } as unknown as NavState,
+          overlayState: makeOverlay({
+            composeReapplyCapture: {
+              nodeId: 1,
+              nodeType: 'local',
+              nodeName: 'A',
+              stackFile: 'sencho.yml',
+            },
+            setComposeReapplyCapture,
+          }),
+          activeNode: activeNode as unknown as Parameters<typeof useStackActions>[0]['activeNode'],
+          setActiveNode: vi.fn(),
+          nodes: [],
+          runWithLog,
+          getLastDeployOutputLine: () => undefined,
+          diffPreviewEnabled: false,
+          canEditStack: () => true,
+          onDeletedOpenStack: vi.fn(),
+          isAdmin: true,
+          canReapplyCompose: true,
+        }),
+      { initialProps: { activeNode: activeNodeA } },
+    );
+    rerender({ activeNode: { id: 2, name: 'B', type: 'local' as const } });
+    expect(setComposeReapplyCapture).toHaveBeenCalledWith(null);
+  });
+
+  it('cancels open reapply capture when the selected stack changes', async () => {
+    const setComposeReapplyCapture = vi.fn();
+    const { rerender } = renderHook(
+      ({ selectedFile }: { selectedFile: string }) =>
+        useStackActions({
+          editorState: makeEditorState(),
+          stackListState: makeStackListState({
+            selectedFile,
+            stackSelfFlags: { 'sencho.yml': true, 'other.yml': true },
+          }),
+          navState: { activeView: 'editor', setActiveView: vi.fn() } as unknown as NavState,
+          overlayState: makeOverlay({
+            composeReapplyCapture: {
+              nodeId: 1,
+              nodeType: 'local',
+              nodeName: 'A',
+              stackFile: 'sencho.yml',
+            },
+            setComposeReapplyCapture,
+          }),
+          activeNode: { id: 1, name: 'A', type: 'local' } as unknown as Parameters<typeof useStackActions>[0]['activeNode'],
+          setActiveNode: vi.fn(),
+          nodes: [],
+          runWithLog,
+          getLastDeployOutputLine: () => undefined,
+          diffPreviewEnabled: false,
+          canEditStack: () => true,
+          onDeletedOpenStack: vi.fn(),
+          isAdmin: true,
+          canReapplyCompose: true,
+        }),
+      { initialProps: { selectedFile: 'sencho.yml' } },
+    );
+    rerender({ selectedFile: 'other.yml' });
+    expect(setComposeReapplyCapture).toHaveBeenCalledWith(null);
+  });
+
   it('opens the self-stack modal instead of calling rollback on a protected stack', async () => {
     vi.mocked(apiFetch).mockReset();
     const { result, overlayState, stackListState } = setup({
@@ -1246,11 +1398,11 @@ describe('container fetch contract', () => {
         setContainersLoadError,
       } as never,
     });
-    let ok = true;
+    let ok: 'ok' | 'skipped' | 'failed' = 'ok';
     await act(async () => {
       ok = await result.current.refreshSelectedContainers('web', 'web.yml');
     });
-    expect(ok).toBe(false);
+    expect(ok).toBe('failed');
     expect(setContainersLoadStatus).toHaveBeenCalledWith('error');
     expect(setContainersLoadError).toHaveBeenCalled();
   });
@@ -1320,8 +1472,8 @@ describe('container fetch contract', () => {
       } as never,
     });
 
-    let olderPromise!: Promise<boolean>;
-    let newerPromise!: Promise<boolean>;
+    let olderPromise!: Promise<'ok' | 'skipped' | 'failed'>;
+    let newerPromise!: Promise<'ok' | 'skipped' | 'failed'>;
     await act(async () => {
       olderPromise = result.current.refreshSelectedContainers('web', 'web.yml');
     });
@@ -1394,7 +1546,7 @@ describe('container fetch contract', () => {
       { initialProps: { selectedFile: 'web.yml' as string | null } },
     );
 
-    let refreshPromise!: Promise<boolean>;
+    let refreshPromise!: Promise<'ok' | 'skipped' | 'failed'>;
     await act(async () => {
       refreshPromise = result.current.refreshSelectedContainers('web', 'web.yml');
     });
@@ -1459,7 +1611,7 @@ describe('container fetch contract', () => {
       },
     );
 
-    let refreshPromise!: Promise<boolean>;
+    let refreshPromise!: Promise<'ok' | 'skipped' | 'failed'>;
     await act(async () => {
       refreshPromise = result.current.refreshSelectedContainers('web', 'web.yml');
     });

@@ -135,15 +135,20 @@ export function CadenceStrip({ cadence, className }: { cadence: ImageUpdateStatu
 
   if (!cadence) return null;
 
+  const checksOff = cadence.enabled === false;
   const lastChecked = cadence.lastCheckedAt != null ? formatTimeAgo(cadence.lastCheckedAt) : 'never';
-  const nextCheck = cadence.checking
-    ? 'checking now'
-    : cadence.nextCheckAt != null
-      ? formatRelative(cadence.nextCheckAt)
-      : 'not scheduled';
-  const cooldown = cooling
-    ? `Recheck available in ${Math.ceil(remainingMs / 1000)}s`
-    : 'Recheck ready';
+  const nextCheck = checksOff
+    ? 'disabled'
+    : cadence.checking
+      ? 'checking now'
+      : cadence.nextCheckAt != null
+        ? formatRelative(cadence.nextCheckAt)
+        : 'not scheduled';
+  const cooldown = checksOff
+    ? 'Detection off'
+    : cooling
+      ? `Recheck available in ${Math.ceil(remainingMs / 1000)}s`
+      : 'Recheck ready';
 
   return (
     <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-stat-subtitle/90 ${className ?? ''}`}>
@@ -465,6 +470,7 @@ function ReadinessHero({
   refreshing,
   onRefresh,
   unresolvedChecks = false,
+  detectionDisabled = false,
 }: {
   total: number;
   ready: number;
@@ -472,12 +478,15 @@ function ReadinessHero({
   refreshing: boolean;
   onRefresh: () => void;
   unresolvedChecks?: boolean;
+  detectionDisabled?: boolean;
 }) {
-  const headline = total === 0
-    ? (unresolvedChecks ? 'No verified updates' : 'Everything is up to date')
-    : total === 1
-      ? '1 update pending'
-      : `${total} updates pending`;
+  const headline = detectionDisabled
+    ? 'Image update detection disabled'
+    : total === 0
+      ? (unresolvedChecks ? 'No verified updates' : 'Everything is up to date')
+      : total === 1
+        ? '1 update pending'
+        : `${total} updates pending`;
   const acrossNodes = nodeCount > 1
     ? ` across ${nodeCount} nodes`
     : nodeCount === 1
@@ -1269,19 +1278,25 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
       <div className="flex h-full min-h-0 flex-col">
         <Masthead
           kicker="fleet · updates"
-          state={total === 0
-            ? (checkFailures.length > 0 ? 'No verified updates' : 'Up to date')
-            : `${total} pending`}
-          stateTone={total === 0 && checkFailures.length === 0 ? 'success' : 'warning'}
-          live={total > 0}
-          meta={total > 0
-            ? `${ready} ready · ${total - ready} in review`
-            : (checkFailures.length > 0 ? 'some checks unresolved' : 'all stacks current')}
+          state={cadence?.enabled === false
+            ? 'Disabled'
+            : total === 0
+              ? (checkFailures.length > 0 ? 'No verified updates' : 'Up to date')
+              : `${total} pending`}
+          stateTone={cadence?.enabled === false
+            ? 'brand'
+            : total === 0 && checkFailures.length === 0 ? 'success' : 'warning'}
+          live={total > 0 && cadence?.enabled !== false}
+          meta={cadence?.enabled === false
+            ? 'image update detection off'
+            : total > 0
+              ? `${ready} ready · ${total - ready} in review`
+              : (checkFailures.length > 0 ? 'some checks unresolved' : 'all stacks current')}
           right={headerActions}
         />
         <div className="flex-1 min-h-0 overflow-y-auto p-4 [&>*+*]:mt-4">
           <div className="flex justify-end">
-            <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing} aria-label="Recheck registries" className="gap-1.5">
+            <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing || cadence?.enabled === false} aria-label="Recheck registries" className="gap-1.5">
               <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={1.5} aria-hidden="true" />
               Recheck
             </Button>
@@ -1300,12 +1315,16 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
             <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16 text-center">
               <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
               <div className="font-display italic text-xl text-stat-value">
-                {checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
+                {cadence?.enabled === false
+                  ? 'Detection disabled'
+                  : checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
               </div>
               <div className="font-mono text-[11px] text-stat-subtitle">
-                {checkFailures.length > 0
-                  ? 'Review the unresolved checks above, then recheck.'
-                  : 'Sencho rechecks registries on the configured interval.'}
+                {cadence?.enabled === false
+                  ? 'Turn image update checks back on in Settings when Sencho should monitor registries again.'
+                  : checkFailures.length > 0
+                    ? 'Review the unresolved checks above, then recheck.'
+                    : 'Sencho rechecks registries on the configured interval.'}
               </div>
             </div>
           ) : (
@@ -1333,6 +1352,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         refreshing={refreshing}
         onRefresh={handleRefresh}
         unresolvedChecks={checkFailures.length > 0}
+        detectionDisabled={cadence?.enabled === false}
       />
 
       <CadenceStrip cadence={cadence} className="-mt-3 pl-7" />
@@ -1353,12 +1373,16 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         <div className="flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-card-border bg-card/40 py-16">
           <Shield className={`h-8 w-8 ${checkFailures.length > 0 ? 'text-warning/70' : 'text-success/70'}`} strokeWidth={1.5} aria-hidden="true" />
           <div className="font-display italic text-xl text-stat-value">
-            {checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
+            {cadence?.enabled === false
+              ? 'Detection disabled'
+              : checkFailures.length > 0 ? 'No verified updates pending' : 'All stacks on current builds'}
           </div>
           <div className="font-mono text-[11px] text-stat-subtitle">
-            {checkFailures.length > 0
-              ? 'Review the unresolved checks above, then recheck.'
-              : 'Sencho rechecks registries on the configured interval.'}
+            {cadence?.enabled === false
+              ? 'Turn image update checks back on in Settings when Sencho should monitor registries again.'
+              : checkFailures.length > 0
+                ? 'Review the unresolved checks above, then recheck.'
+                : 'Sencho rechecks registries on the configured interval.'}
           </div>
         </div>
       ) : (

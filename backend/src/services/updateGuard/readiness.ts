@@ -134,6 +134,14 @@ export function updatePreviewSignal(input: UpdatePreviewSummary | Errored, image
   if (input === 'error') {
     return { ...base, status: 'unknown', affectsVerdict: false, detail: 'The update preview is unavailable.' };
   }
+  if (input.detection_disabled) {
+    return {
+      ...base,
+      status: 'unknown',
+      affectsVerdict: false,
+      detail: 'Image update detection is disabled for this node.',
+    };
+  }
   if (input.blocked) {
     return {
       ...base,

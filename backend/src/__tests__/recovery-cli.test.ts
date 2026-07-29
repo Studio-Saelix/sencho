@@ -15,6 +15,7 @@ let resetPassword: typeof import('../cli/resetPassword').resetPassword;
 let createEmergencyAdmin: typeof import('../cli/createEmergencyAdmin').createEmergencyAdmin;
 let clearSessions: typeof import('../cli/clearSessions').clearSessions;
 let disableSso: typeof import('../cli/disableSso').disableSso;
+let enableLocalLogin: typeof import('../cli/enableLocalLogin').enableLocalLogin;
 let validateDb: typeof import('../cli/validateDb').validateDb;
 let backupData: typeof import('../cli/backupData').backupData;
 
@@ -25,6 +26,7 @@ beforeAll(async () => {
     ({ createEmergencyAdmin } = await import('../cli/createEmergencyAdmin'));
     ({ clearSessions } = await import('../cli/clearSessions'));
     ({ disableSso } = await import('../cli/disableSso'));
+    ({ enableLocalLogin } = await import('../cli/enableLocalLogin'));
     ({ validateDb } = await import('../cli/validateDb'));
     ({ backupData } = await import('../cli/backupData'));
 });
@@ -125,6 +127,59 @@ describe('disableSso', () => {
         const result = disableSso();
         expect(result.ok).toBe(true);
         expect(db.getEnabledSSOConfigs()).toHaveLength(0);
+    });
+
+    it('rejects disabling the last provider while sso_only', () => {
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('authentication_mode', 'sso_only');
+        db.upsertSSOConfig('oidc_custom', true, '{"clientId":"abc"}');
+        for (const cfg of db.getEnabledSSOConfigs()) {
+            if (cfg.provider !== 'oidc_custom') {
+                db.upsertSSOConfig(cfg.provider, false, cfg.config_json);
+            }
+        }
+        const result = disableSso('oidc_custom');
+        expect(result.ok).toBe(false);
+        expect(result.message).toMatch(/last SSO provider/i);
+        expect(db.getEnabledSSOConfigs()).toHaveLength(1);
+        expect(db.getGlobalSettings().authentication_mode).toBe('sso_only');
+    });
+
+    it('preserves sso_only when disabling one of several providers', () => {
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('authentication_mode', 'sso_only');
+        for (const cfg of db.getEnabledSSOConfigs()) {
+            db.upsertSSOConfig(cfg.provider, false, cfg.config_json);
+        }
+        db.upsertSSOConfig('oidc_google', true, '{"clientId":"g"}');
+        db.upsertSSOConfig('oidc_github', true, '{"clientId":"h"}');
+        const result = disableSso('oidc_google');
+        expect(result.ok).toBe(true);
+        expect(result.message).toMatch(/remains SSO only/i);
+        expect(db.getGlobalSettings().authentication_mode).toBe('sso_only');
+        const remaining = db.getEnabledSSOConfigs().map(c => c.provider).sort();
+        expect(remaining).toEqual(['oidc_github']);
+    });
+
+    it('restores local_and_sso before disabling all providers under sso_only', () => {
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('authentication_mode', 'sso_only');
+        db.upsertSSOConfig('oidc_custom', true, '{"clientId":"abc"}');
+        const result = disableSso();
+        expect(result.ok).toBe(true);
+        expect(db.getGlobalSettings().authentication_mode).toBe('local_and_sso');
+        expect(db.getEnabledSSOConfigs()).toHaveLength(0);
+    });
+});
+
+describe('enableLocalLogin', () => {
+    it('sets authentication_mode to local_and_sso', () => {
+        const db = DatabaseService.getInstance();
+        db.updateGlobalSetting('authentication_mode', 'sso_only');
+        const result = enableLocalLogin();
+        expect(result.ok).toBe(true);
+        expect(result.message).toMatch(/Restart Sencho/i);
+        expect(db.getGlobalSettings().authentication_mode).toBe('local_and_sso');
     });
 });
 

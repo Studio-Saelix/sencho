@@ -34,7 +34,7 @@ When nothing is pending, the board renders a single Shield-icon panel with the h
 
 ## Detection cadence
 
-Sencho polls your registries on a configurable schedule to detect available image updates and raise notifications. This detection cadence is configurable under **Settings > Automation > Image update checks**: choose a fixed interval (every 15 minutes to once a day) or set a cron expression for precise scheduling (e.g. "every Monday at 03:00"). The default is every 2 hours on an interval schedule, and changing it takes effect immediately, with no restart.
+Sencho polls your registries on a configurable schedule to detect available image updates and raise notifications. This detection cadence is configurable under **Settings > Automation > Image update checks**: choose a fixed interval (every 15 minutes to once a day) or set a cron expression for precise scheduling (e.g. "every Monday at 03:00"). The default is every 2 hours on an interval schedule, and changing it takes effect immediately, with no restart. You can also turn image update checks off for a node when another tool is the update authority; explicit stack Update and redeploy actions stay available.
 
 Detection is separate from applying updates:
 
@@ -99,6 +99,7 @@ Auto-update is opt-in per stack. A stack participates in unattended updates only
 
 - **Per-stack schedule.** Create a **Auto-update Stack** task targeting that stack alone. Only this stack is updated when the cron fires.
 - **Fleet-wide schedule.** Create a **Auto-update All Stacks on Node** task targeting a node. Every stack on that node is checked when the cron fires, and stacks with same-tag digest drift are pulled and recreated. If you do not want every stack covered, create per-stack schedules instead.
+- **Label schedule.** Create an **Auto-update stacks by label** task, pick a Stack Label, and choose Entire fleet or one node. At each run Sencho resolves the stacks that currently carry that label and updates those with newer images. Assigning or removing the label changes the next run without editing the schedule.
 - **Stack list dot.** Image-update *detection* runs on the configured interval (every 2 hours by default) regardless of whether any schedule is configured. The sidebar dot and the readiness board still show available updates so you can decide what to do with them.
 - **Manual updates are always available.** The lifecycle **Update** action pulls and recreates the tags currently written in Compose, independent of any scheduled task. It does not rewrite a higher-tag advisory into the Compose file.
 

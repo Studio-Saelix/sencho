@@ -24,7 +24,9 @@ permissionsRouter.get('/me', authMiddleware, (req: Request, res: Response): void
     const scopedPermissions: Record<string, PermissionAction[]> = {};
     if (effectiveTier(req) === 'paid') {
       for (const a of db.getAllRoleAssignments(req.user.userId)) {
-        const key = `${a.resource_type}:${a.resource_id}`;
+        const key = a.resource_type === 'stack'
+          ? `stack:${a.node_id}:${a.resource_id}`
+          : `node:${a.resource_id}`;
         const perms = ROLE_PERMISSIONS[a.role] || [];
         const existing = scopedPermissions[key] || [];
         scopedPermissions[key] = [...new Set([...existing, ...perms])];

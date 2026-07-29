@@ -19,7 +19,7 @@ export type BackendAction = ScheduledTask['action'];
  * UI action ids. `update-fleet` is a frontend-only alias for `update` with
  * `target_type: 'fleet'`; it never reaches the backend.
  */
-export type ScheduledActionId = BackendAction | 'update-fleet' | 'container-restart' | 'container-stop' | 'container-start';
+export type ScheduledActionId = BackendAction | 'update-fleet' | 'update-by-label' | 'container-restart' | 'container-stop' | 'container-start';
 
 export type ScheduledActionCategory = 'lifecycle' | 'updates' | 'security' | 'maintenance' | 'backups';
 export type ScheduledActionTone = 'success' | 'warning' | 'destructive' | 'brand';
@@ -105,6 +105,7 @@ export const SCHEDULED_ACTIONS: ScheduledActionDefinition[] = [
   // Updates
   { id: 'update', backendAction: 'update', label: 'Auto-update Stack', shortLabel: 'update', category: 'updates', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Checks this stack\'s images and recreates the stack only when newer images are available.', riskLevel: 'runtime-change' },
   { id: 'update-fleet', backendAction: 'update', label: 'Auto-update All Stacks on Node', shortLabel: 'update node', category: 'updates', targetType: 'fleet', tone: 'success', requiresNode: true, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, helperText: 'Checks every stack on the selected node and updates stacks with newer images.', riskLevel: 'runtime-change' },
+  { id: 'update-by-label', backendAction: 'update', label: 'Auto-update stacks by label', shortLabel: 'update label', category: 'updates', targetType: 'fleet', tone: 'success', requiresNode: false, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, helperText: 'Resolves stacks that currently carry a Stack Label at each run, across the entire fleet or one node, and updates those with newer images.', riskLevel: 'runtime-change' },
   // Security
   { id: 'scan', backendAction: 'scan', label: 'Scan Node Images', shortLabel: 'scan', category: 'security', targetType: 'system', tone: 'success', requiresNode: true, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Runs Trivy against images on the selected local node and records the findings.', riskLevel: 'read-only' },
   // Maintenance
@@ -121,12 +122,15 @@ export function getActionById(id: string): ScheduledActionDefinition | undefined
 
 /**
  * Resolve a stored task to its action definition. A stored `update` task with a
- * `fleet` target maps to the `update-fleet` UI entry; everything else maps by
- * its backend action id.
+ * stack-label selector maps to `update-by-label`; a plain fleet update maps to
+ * `update-fleet`; everything else maps by its backend action id.
  */
 export function resolveTaskAction(
-  task: Pick<ScheduledTask, 'action' | 'target_type'>,
+  task: Pick<ScheduledTask, 'action' | 'target_type'> & { selector_type?: string | null },
 ): ScheduledActionDefinition | undefined {
+  if (task.action === 'update' && task.target_type === 'fleet' && task.selector_type === 'stack-label') {
+    return getActionById('update-by-label');
+  }
   if (task.action === 'update' && task.target_type === 'fleet') {
     return getActionById('update-fleet');
   }
@@ -147,12 +151,23 @@ export function stripComposeExt(name: string): string {
  * Category-aware label for what a scheduled run acts on, used by the Timeline
  * pills and the mobile schedule list. Stack actions show the stack, fleet
  * snapshots show the whole fleet, fleet updates and node-scoped actions
- * (prune / scan) show the selected node when its name is known.
+ * (prune / scan) show the selected node when its name is known. Label-targeted
+ * updates show the label name and fleet or node scope.
  */
 export function scheduleTargetDescriptor(
-  task: Pick<ScheduledTask, 'action' | 'target_type' | 'target_id' | 'name'>,
+  task: Pick<ScheduledTask, 'action' | 'target_type' | 'target_id' | 'name'> & {
+    selector_type?: string | null;
+    selector_value?: string | null;
+    node_id?: number | null;
+  },
   nodeName?: string,
 ): string {
+  if (task.selector_type === 'stack-label' && task.selector_value) {
+    if (task.node_id != null) {
+      return `Label: ${task.selector_value} · ${nodeName ?? `node ${task.node_id}`}`;
+    }
+    return `Label: ${task.selector_value} · Entire fleet`;
+  }
   switch (task.target_type) {
     case 'stack':
       return stripComposeExt(task.target_id ?? task.name);

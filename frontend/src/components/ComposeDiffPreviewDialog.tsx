@@ -3,6 +3,7 @@ import { DiffEditor } from '@/lib/monacoLoader';
 import { Loader2 } from 'lucide-react';
 import { Modal, ModalHeader, ModalFooter } from '@/components/ui/modal';
 import { Button } from '@/components/ui/button';
+import type { ComposeDiffActionLabel } from '@/components/resolveComposeDiffActionLabel';
 
 export interface ComposeDiffPreviewDialogProps {
   open: boolean;
@@ -12,7 +13,7 @@ export interface ComposeDiffPreviewDialogProps {
   language: 'yaml' | 'ini';
   original: string;
   modified: string;
-  actionLabel: 'Save' | 'Save & deploy';
+  actionLabel: ComposeDiffActionLabel;
   confirming: boolean;
   isDarkMode: boolean;
   onConfirm: () => void | Promise<void>;

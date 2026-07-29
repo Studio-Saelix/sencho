@@ -8,17 +8,19 @@ interface UpdateStatusBadgeProps {
     error?: string | null;
     onRetry?: () => void;
     onDismiss?: () => void;
+    operationKind?: NodeUpdateStatus['operationKind'];
 }
 
-export function UpdateStatusBadge({ status, error, onRetry, onDismiss }: UpdateStatusBadgeProps) {
+export function UpdateStatusBadge({ status, error, onRetry, onDismiss, operationKind }: UpdateStatusBadgeProps) {
+    const isReapply = operationKind === 'reapply_configuration';
     if (status === 'updating') return (
         <Badge className="text-[10px] px-1.5 py-0 h-4 bg-brand/15 text-brand border-brand/30 shrink-0">
-            <Loader2 className="w-2.5 h-2.5 mr-0.5 animate-spin" /> Updating
+            <Loader2 className="w-2.5 h-2.5 mr-0.5 animate-spin" /> {isReapply ? 'Reapplying' : 'Updating'}
         </Badge>
     );
     if (status === 'completed') return (
         <Badge className="text-[10px] px-1.5 py-0 h-4 bg-success-muted text-success border-success/30 shrink-0">
-            <Check className="w-2.5 h-2.5 mr-0.5" /> Updated
+            <Check className="w-2.5 h-2.5 mr-0.5" /> {isReapply ? 'Reapplied' : 'Updated'}
         </Badge>
     );
     if (status === 'timeout' || status === 'failed') {
@@ -31,8 +33,8 @@ export function UpdateStatusBadge({ status, error, onRetry, onDismiss }: UpdateS
                         <button
                             onClick={(e) => { e.stopPropagation(); onRetry(); }}
                             className="h-5 w-5 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
-                            title="Retry update"
-                            aria-label="Retry update"
+                            title={isReapply ? 'Retry reapply' : 'Retry update'}
+                            aria-label={isReapply ? 'Retry reapply' : 'Retry update'}
                         >
                             <RotateCcw className="w-3 h-3" strokeWidth={1.5} />
                         </button>

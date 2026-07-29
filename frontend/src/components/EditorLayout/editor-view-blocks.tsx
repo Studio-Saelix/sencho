@@ -203,8 +203,8 @@ export function StackIdentityHeader({
                 backend permissions so a delete-only or deploy-only persona sees
                 exactly what they can act on. */}
             {(() => {
-                const canDeploy = can('stack:deploy', 'stack', stackName);
-                const canDelete = can('stack:delete', 'stack', stackName);
+                const canDeploy = can('stack:deploy', 'stack', stackName, activeNode?.id);
+                const canDelete = can('stack:delete', 'stack', stackName, activeNode?.id);
                 const canRollback = canDeploy && backupInfo.exists;
                 const canScan = trivy.available && isAdmin;
                 const canMute = stackMuteActions?.canMute ?? false;
@@ -334,6 +334,13 @@ export interface ContainersHealthProps {
     containersLoadStatus?: 'idle' | 'loading' | 'success' | 'error';
     containersLoadError?: string | null;
     onRetryContainersLoad?: () => void;
+    /**
+     * Soft live-refresh failures exhausted. Shown only when container cards are
+     * visible (containersLoadStatus === 'success'). When status is 'error', the
+     * existing error card Retry is sufficient and this chip is suppressed.
+     */
+    syncStale?: boolean;
+    onRetrySync?: () => void;
 }
 
 // Per-container health strip: status badge, uptime, ports, and CPU/Mem/Net
@@ -357,6 +364,8 @@ export function ContainersHealth({
     containersLoadStatus = 'success',
     containersLoadError = null,
     onRetryContainersLoad,
+    syncStale = false,
+    onRetrySync,
 }: ContainersHealthProps) {
     // Multi-service only: a single-service stack keeps the existing flat layout
     // untouched, including its per-container Start/Stop/Restart kebab.
@@ -721,6 +730,17 @@ export function ContainersHealth({
                         <TooltipContent>{containerStatsError}</TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
+                </div>
+            )}
+            {syncStale && onRetrySync && (
+                <div className="mb-3 flex items-center justify-between gap-2 rounded-md border border-warning/30 bg-warning/10 px-2 py-1.5">
+                    <span className="text-[10px] uppercase tracking-wider font-mono text-warning-foreground">
+                        Container state may be stale
+                    </span>
+                    <Button type="button" variant="outline" size="sm" className="h-7" onClick={onRetrySync}>
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Retry
+                    </Button>
                 </div>
             )}
             {densityToolbar}
