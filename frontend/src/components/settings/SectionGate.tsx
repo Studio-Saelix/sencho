@@ -18,7 +18,7 @@ interface SectionGateProps {
  * guards remain the authoritative enforcement.
  */
 export function SectionGate({ sectionId, children }: SectionGateProps) {
-    const { isAdmin } = useAuth();
+    const { isAdmin, permissionsStatus } = useAuth();
     const { isPaid } = useLicense();
     const { activeNode } = useNodes();
 
@@ -31,6 +31,10 @@ export function SectionGate({ sectionId, children }: SectionGateProps) {
     };
 
     const item = getSettingsItem(sectionId);
+
+    if (permissionsStatus === 'loading') {
+        return <div className="h-48 animate-pulse rounded-lg bg-card" aria-busy="true" />;
+    }
 
     if (!item || !isItemVisible(item, visibility)) return null;
     if (isItemLocked(item, visibility)) return null;
