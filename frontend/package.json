@@ -85,7 +85,7 @@
     "jsdom": "^30.0.1",
     "rollup-plugin-visualizer": "^7.0.1",
     "tailwindcss": "^4.2.2",
-    "typescript": "^7.0.2",
+    "typescript": "^6.0.2",
     "typescript-eslint": "^8.65.0",
     "vite": "^8.1.5",
     "vitest": "^4.1.10"
