@@ -304,6 +304,10 @@ usersRouter.post('/:id/roles', authMiddleware, async (req: Request, res: Respons
         return;
       }
       const parsedNodeId = parseInt(resource_id, 10);
+      if (String(parsedNodeId) !== resource_id) {
+        res.status(400).json({ error: 'resource_id must be a canonical node id' });
+        return;
+      }
       if (!db.getNode(parsedNodeId)) {
         res.status(400).json({ error: 'Node not found' });
         return;

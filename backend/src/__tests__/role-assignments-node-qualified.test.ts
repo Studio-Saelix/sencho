@@ -92,6 +92,34 @@ function seedLegacyRoleAssignments(
   }
 }
 
+function removeRoleAssignmentsCheck(raw: Database.Database): void {
+  raw.exec(`
+    CREATE TABLE role_assignments_without_check (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      resource_type TEXT NOT NULL,
+      resource_id TEXT NOT NULL,
+      node_id INTEGER,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY(node_id) REFERENCES nodes(id) ON DELETE CASCADE
+    );
+    INSERT INTO role_assignments_without_check
+      SELECT * FROM role_assignments;
+    DROP TABLE role_assignments;
+    ALTER TABLE role_assignments_without_check RENAME TO role_assignments;
+    CREATE INDEX idx_role_assignments_user ON role_assignments(user_id);
+    CREATE INDEX idx_role_assignments_resource ON role_assignments(resource_type, resource_id);
+    CREATE UNIQUE INDEX idx_role_assignments_stack_unique
+      ON role_assignments(user_id, role, resource_type, resource_id, node_id)
+      WHERE resource_type = 'stack';
+    CREATE UNIQUE INDEX idx_role_assignments_node_unique
+      ON role_assignments(user_id, role, resource_type, resource_id)
+      WHERE resource_type = 'node';
+  `);
+}
+
 function expectFinalSchema(raw: Database.Database): void {
   const tableSql = roleAssignmentsTableSql(raw);
   expect(tableSql).toContain("resource_type = 'stack' AND node_id IS NOT NULL");
@@ -258,6 +286,81 @@ describe('migrateRoleAssignmentsNodeQualified', () => {
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'role_assignments_new'",
     ).get();
     expect(stale).toBeUndefined();
+  });
+
+  it('preserves node-qualified stack rows when repairing a missing index', async () => {
+    const db = DatabaseService.getInstance();
+    const defaultNodeId = db.getDefaultNode()!.id!;
+    const remoteNodeId = db.addNode({
+      name: 'mig-repair-remote',
+      type: 'remote',
+      api_url: 'http://192.168.1.54:1852',
+      api_token: '',
+      compose_dir: '/tmp',
+      is_default: false,
+    });
+    const hash = await bcrypt.hash('password123', 1);
+    const userId = db.addUser({ username: 'mig-repair', password_hash: hash, role: 'viewer' });
+
+    db.addRoleAssignment({
+      user_id: userId, role: 'deployer', resource_type: 'stack',
+      resource_id: 'shared-stack', node_id: defaultNodeId,
+    });
+    db.addRoleAssignment({
+      user_id: userId, role: 'deployer', resource_type: 'stack',
+      resource_id: 'shared-stack', node_id: remoteNodeId,
+    });
+    db.addRoleAssignment({
+      user_id: userId, role: 'node-admin', resource_type: 'node',
+      resource_id: String(remoteNodeId),
+    });
+    const before = db.getAllRoleAssignments(userId);
+    db.getDb().exec('DROP INDEX idx_role_assignments_stack_unique');
+
+    resetDatabaseSingleton();
+    process.env.DATA_DIR = tmpDir;
+    const repaired = DatabaseService.getInstance();
+    expectFinalSchema(repaired.getDb());
+
+    const rows = repaired.getAllRoleAssignments(userId);
+    expect(rows).toEqual(before);
+  });
+
+  it('preserves node-qualified rows without a default node when repairing the table check', async () => {
+    const db = DatabaseService.getInstance();
+    const defaultNodeId = db.getDefaultNode()!.id!;
+    const remoteNodeId = db.addNode({
+      name: 'mig-repair-no-default',
+      type: 'remote',
+      api_url: 'http://192.168.1.55:1852',
+      api_token: '',
+      compose_dir: '/tmp',
+      is_default: false,
+    });
+    const hash = await bcrypt.hash('password123', 1);
+    const userId = db.addUser({ username: 'mig-repair-check', password_hash: hash, role: 'viewer' });
+
+    db.addRoleAssignment({
+      user_id: userId, role: 'deployer', resource_type: 'stack',
+      resource_id: 'local-stack', node_id: defaultNodeId,
+    });
+    db.addRoleAssignment({
+      user_id: userId, role: 'admin', resource_type: 'stack',
+      resource_id: 'remote-stack', node_id: remoteNodeId,
+    });
+    db.addRoleAssignment({
+      user_id: userId, role: 'viewer', resource_type: 'node',
+      resource_id: String(remoteNodeId),
+    });
+    const before = db.getAllRoleAssignments(userId);
+    db.getDb().prepare('UPDATE nodes SET is_default = 0').run();
+    removeRoleAssignmentsCheck(db.getDb());
+
+    resetDatabaseSingleton();
+    process.env.DATA_DIR = tmpDir;
+    const repaired = DatabaseService.getInstance();
+    expectFinalSchema(repaired.getDb());
+    expect(repaired.getAllRoleAssignments(userId)).toEqual(before);
   });
 
   it('unique indexes use exact column sets including role', () => {

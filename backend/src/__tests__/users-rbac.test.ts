@@ -473,6 +473,19 @@ describe('Scoped Role Assignments', () => {
     expect(res.body.node_id).toBeNull();
   });
 
+  it('POST /api/users/:id/roles rejects a noncanonical node resource_id (400)', async () => {
+    const res = await request(app)
+      .post(`/api/users/${targetUserId}/roles`)
+      .set('Authorization', `Bearer ${adminToken()}`)
+      .send({
+        role: 'deployer',
+        resource_type: 'node',
+        resource_id: `0${defaultNodeId()}`,
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/canonical/i);
+  });
+
   it('POST /api/users/:id/roles rejects duplicate (409)', async () => {
     const res = await request(app)
       .post(`/api/users/${targetUserId}/roles`)

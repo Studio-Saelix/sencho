@@ -2261,6 +2261,9 @@ export class DatabaseService {
         const indexRows = this.db.prepare(
             "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'role_assignments'"
         ).all() as Array<{ name: string; sql: string | null }>;
+        const hasNodeIdColumn = (this.db.prepare(
+            'PRAGMA table_info(role_assignments)'
+        ).all() as Array<{ name: string }>).some((column) => column.name === 'node_id');
         const indexSqlByName = new Map(indexRows.map((r) => [r.name, r.sql ?? '']));
         const checkOk =
             tableSql.includes("resource_type = 'stack' AND node_id IS NOT NULL") &&
@@ -2317,7 +2320,14 @@ export class DatabaseService {
                 WHERE resource_type = 'node';
             `);
 
-            if (defaultNodeId !== null) {
+            if (hasNodeIdColumn) {
+                this.db.exec(`
+                    INSERT INTO role_assignments_new (id, user_id, role, resource_type, resource_id, node_id, created_at)
+                    SELECT id, user_id, role, resource_type, resource_id, node_id, created_at
+                    FROM role_assignments
+                    WHERE resource_type = 'stack' AND node_id IS NOT NULL
+                `);
+            } else if (defaultNodeId !== null) {
                 this.db.prepare(`
                     INSERT INTO role_assignments_new (id, user_id, role, resource_type, resource_id, node_id, created_at)
                     SELECT id, user_id, role, resource_type, resource_id, ?, created_at
