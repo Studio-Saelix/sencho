@@ -203,6 +203,32 @@ describe('DockerController.buildPrunePlan', () => {
     expect(plan.items.every((entry) => entry.managed && entry.stackName === 'my-stack')).toBe(true);
   });
 
+  it.each(['__proto__', 'constructor', 'toString', 'prototype'])(
+    'does not attribute inherited project key %s to a managed stack',
+    async (project) => {
+      const labels = { 'com.docker.compose.project': project };
+      mockDocker.listVolumes.mockResolvedValue({ Volumes: [{ Name: `${project}_data`, Labels: labels }] });
+      mockDocker.df.mockResolvedValue({
+        Volumes: [{ Name: `${project}_data`, UsageData: { RefCount: 0, Size: 42 } }],
+        Images: [],
+        LayersSize: 0,
+      });
+
+      const managedPlan = await DockerController.getInstance(1).buildPrunePlan(
+        ['volumes'], 'managed', ['my-stack'], 1,
+      );
+      const allPlan = await DockerController.getInstance(1).buildPrunePlan(
+        ['volumes'], 'all', ['my-stack'], 1,
+      );
+
+      expect(managedPlan.items).toEqual([]);
+      expect(allPlan.items).toEqual([
+        expect.objectContaining({ id: `${project}_data`, managed: false }),
+      ]);
+      expect(allPlan.items[0].stackName).toBeUndefined();
+    },
+  );
+
   it('does not plan an image referenced by a container when Docker reports Containers as unknown', async () => {
     mockDocker.listContainers.mockResolvedValue([{ Id: 'container', ImageID: 'sha256:in-use' }]);
     mockDocker.listImages.mockResolvedValue([{

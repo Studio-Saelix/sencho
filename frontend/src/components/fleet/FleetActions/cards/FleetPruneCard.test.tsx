@@ -224,6 +224,7 @@ it('uses the exact stale-plan toast and clears authorization', async () => {
     'The prune plan changed on “central” after the dry run. Run the dry run again before pruning.',
   ));
   expect(screen.getByRole('button', { name: 'Prune fleet' })).toBeDisabled();
+  expect(screen.queryByText('example/app:latest')).not.toBeInTheDocument();
 });
 
 it('reports an execution-time stale race from a partial result', async () => {

@@ -1290,7 +1290,7 @@ class DockerController {
     item: PrunePlanItem,
     scope: PruneScope,
     knownSet: Set<string>,
-    projectToStack: Record<string, string>,
+    projectToStack: Map<string, string>,
     absDirToStack: Map<string, string>,
     resolvedBase: string,
     selfIdentity: SelfIdentityService,
@@ -1345,7 +1345,7 @@ class DockerController {
     item: PrunePlanItem,
     scope: PruneScope,
     knownSet: Set<string>,
-    projectToStack: Record<string, string>,
+    projectToStack: Map<string, string>,
     absDirToStack: Map<string, string>,
     resolvedBase: string,
     selfIdentity: SelfIdentityService,
@@ -1382,7 +1382,7 @@ class DockerController {
     item: PrunePlanItem,
     scope: PruneScope,
     knownSet: Set<string>,
-    projectToStack: Record<string, string>,
+    projectToStack: Map<string, string>,
     absDirToStack: Map<string, string>,
     resolvedBase: string,
     selfIdentity: SelfIdentityService,
@@ -1955,12 +1955,11 @@ class DockerController {
   private static resolveProjectLabel(
     project: string | undefined,
     knownSet: Set<string>,
-    projectToStack: Record<string, string>,
+    projectToStack: Map<string, string>,
   ): string | null {
     if (!project) return null;
     if (knownSet.has(project)) return project;
-    if (projectToStack[project]) return projectToStack[project];
-    return null;
+    return projectToStack.get(project) ?? null;
   }
 
   /** Builds a map from absolute stack directory paths to stack names. */
@@ -1980,7 +1979,7 @@ class DockerController {
    */
   private static resolveContainerStack(
     containerLabels: Record<string, string> | undefined,
-    projectToStack: Record<string, string>,
+    projectToStack: Map<string, string>,
     knownStackSet: Set<string>,
     absDirToStack: Map<string, string>,
     resolvedBase: string,
@@ -1989,7 +1988,10 @@ class DockerController {
 
     // Primary: match by project name (handles name: overrides and standard directory-based names)
     const project = containerLabels['com.docker.compose.project'];
-    if (project && projectToStack[project]) return projectToStack[project];
+    if (project) {
+      const stack = projectToStack.get(project);
+      if (stack) return stack;
+    }
 
     // Fallback 1: match by working_dir
     const workingDir = containerLabels['com.docker.compose.project.working_dir'];
@@ -2021,15 +2023,15 @@ class DockerController {
    * Builds (or returns cached) mapping from Docker project name to Sencho stack directory name.
    * Compose files with a top-level `name:` field override the default project name.
    */
-  private static async resolveProjectNameMap(stackNames: string[]): Promise<Record<string, string>> {
+  private static async resolveProjectNameMap(stackNames: string[]): Promise<Map<string, string>> {
     return CacheService.getInstance().getOrFetch(
       PROJECT_NAME_CACHE_KEY,
       PROJECT_NAME_CACHE_TTL_MS,
       async () => {
-        const map: Record<string, string> = {};
+        const map = new Map<string, string>();
 
         await Promise.all(stackNames.map(async (stackDir) => {
-          map[stackDir] = stackDir;
+          map.set(stackDir, stackDir);
 
           for (const fileName of COMPOSE_FILE_NAMES) {
             const filePath = path.join(COMPOSE_DIR, stackDir, fileName);
@@ -2037,7 +2039,7 @@ class DockerController {
               const content = await fs.readFile(filePath, 'utf-8');
               const parsed = yaml.parse(content);
               if (parsed?.name && typeof parsed.name === 'string') {
-                map[parsed.name] = stackDir;
+                map.set(parsed.name, stackDir);
               }
               break;
             } catch (err: unknown) {

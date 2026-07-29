@@ -243,6 +243,8 @@ export function FleetPruneCard({ nodes }: Props) {
       } | null;
       if (!response.ok) {
         if (data?.code === 'PRUNE_PLAN_STALE') {
+          setPlanResults([]);
+          setDisplayKey('');
           const nodeName = reviewedSnapshot.results.find((result) => result.nodeId === data.nodeId)?.nodeName
             ?? data.error?.match(/on (.+) after/)?.[1]
             ?? 'a node';
