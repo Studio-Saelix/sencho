@@ -120,7 +120,10 @@ function samplePrunePlan(overrides: Record<string, unknown> = {}) {
   return {
     scope: 'managed',
     targets: ['images'],
-    items: [{ target: 'images', id: 'img1', name: 'old:v1', sizeBytes: 1000 }],
+    items: [{
+      target: 'images', id: 'img1', name: 'old:v1', sizeBytes: 1000,
+      managed: true, reason: 'Image is not used by any container', image: { references: ['old:v1'] },
+    }],
     reclaimableBytes: 1000,
     fingerprint: 'fp-test',
     createdAt: Date.now(),
@@ -134,8 +137,14 @@ function reclaimPlan() {
     scope: 'all',
     targets: ['volumes', 'containers', 'images'],
     items: [
-      { target: 'volumes', id: 'v1', name: 'v1', sizeBytes: 500 },
-      { target: 'images', id: 'img1', name: 'old:v1', sizeBytes: 1000 },
+      {
+        target: 'volumes', id: 'v1', name: 'v1', sizeBytes: 500,
+        managed: true, reason: 'Volume is not referenced by any container', volume: {},
+      },
+      {
+        target: 'images', id: 'img1', name: 'old:v1', sizeBytes: 1000,
+        managed: true, reason: 'Image is not used by any container', image: { references: ['old:v1'] },
+      },
     ],
     reclaimableBytes: 1500,
     fingerprint: 'fp-reclaim',

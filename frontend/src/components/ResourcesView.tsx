@@ -33,6 +33,7 @@ import { VolumeBrowserSheet } from './resources/VolumeBrowserSheet';
 import { VolumeNameLabel } from './resources/VolumeNameLabel';
 import { useTableSort } from '@/hooks/useTableSort';
 import { SortableTableHead } from '@/components/ui/sortable-table';
+import { isPrunePlan, type PrunePlan, type PruneScope, type PruneTarget } from '@/lib/prunePlan';
 
 // ── Interfaces ─────────────────────────────────────────────────────────────────
 
@@ -90,25 +91,6 @@ interface UnmanagedContainer {
 }
 
 type ResourceFilter = 'all' | 'managed' | 'unmanaged';
-type PruneTarget = 'containers' | 'images' | 'networks' | 'volumes';
-type PruneScope = 'managed' | 'all';
-
-interface PrunePlanItem {
-    target: PruneTarget;
-    id: string;
-    name: string;
-    sizeBytes?: number;
-}
-
-interface PrunePlan {
-    scope: PruneScope;
-    targets: PruneTarget[];
-    items: PrunePlanItem[];
-    reclaimableBytes: number;
-    fingerprint: string;
-    createdAt: number;
-    nodeId: number;
-}
 
 const PLAN_PREVIEW_CAP = 30;
 
@@ -530,8 +512,9 @@ export default function ResourcesView({ headerActions }: ResourcesViewProps = {}
             if (!res.ok) {
                 throw new Error(data?.error || 'Failed to build prune plan');
             }
-            setPrunePlan(data as PrunePlan);
-            return data as PrunePlan;
+            if (!isPrunePlan(data)) throw new Error('The node returned a malformed prune plan');
+            setPrunePlan(data);
+            return data;
         } catch (error) {
             if (planFetchGenRef.current !== generation) return null;
             const err = error as { message?: string };

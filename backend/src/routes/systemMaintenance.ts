@@ -12,6 +12,7 @@ import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryS
 import SelfIdentityService from '../services/SelfIdentityService';
 import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
+import { activeBulkActions } from '../helpers/bulkActionLocks';
 import { isValidDockerResourceId, isValidCidr, isValidIPv4 } from '../utils/validation';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
@@ -155,6 +156,7 @@ systemMaintenanceRouter.post('/prune/plan', async (req: Request, res: Response) 
 
 systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response) => {
   if (!requireAdmin(req, res)) return;
+  let pruneLockHeld = false;
   try {
     const body = req.body as {
       target?: unknown;
@@ -200,8 +202,17 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
       return;
     }
 
-    // Resources path: fingerprint-bound execute. Fleet still calls without a
-    // fingerprint and keeps the legacy pruneManagedOnly / pruneSystem path.
+    const pruneLockKey = `bulk-prune:${req.nodeId}`;
+    if (activeBulkActions.has(pruneLockKey)) {
+      return res.status(409).json({
+        error: 'A prune is already running on this node',
+        code: 'PRUNE_ALREADY_RUNNING',
+      });
+    }
+    activeBulkActions.add(pruneLockKey);
+    pruneLockHeld = true;
+
+    // Fingerprint-bound execute used by Resources and Fleet.
     if (planFingerprint) {
       const built = await withTimeout(
         dockerController.buildPrunePlan(targets, pruneScope, knownStacks, req.nodeId, isImageHeld),
@@ -231,7 +242,7 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
           success: result.success,
         });
       }
-      if (built.targets.includes('containers')) {
+      if (result.outcomes.some((outcome) => outcome.status === 'removed')) {
         invalidateNodeCaches(req.nodeId);
       }
       res.json({
@@ -288,6 +299,8 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
     }
     console.error('System prune error:', error);
     res.status(500).json({ error: 'System prune failed' });
+  } finally {
+    if (pruneLockHeld) activeBulkActions.delete(`bulk-prune:${req.nodeId}`);
   }
 });
 
