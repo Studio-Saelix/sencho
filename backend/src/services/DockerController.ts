@@ -1291,7 +1291,7 @@ class DockerController {
     scope: PruneScope,
     knownSet: Set<string>,
     projectToStack: Record<string, string>,
-    absDirToStack: Record<string, string>,
+    absDirToStack: Map<string, string>,
     resolvedBase: string,
     selfIdentity: SelfIdentityService,
   ): Promise<
@@ -1346,7 +1346,7 @@ class DockerController {
     scope: PruneScope,
     knownSet: Set<string>,
     projectToStack: Record<string, string>,
-    absDirToStack: Record<string, string>,
+    absDirToStack: Map<string, string>,
     resolvedBase: string,
     selfIdentity: SelfIdentityService,
   ): Promise<PruneItemOutcome> {
@@ -1383,7 +1383,7 @@ class DockerController {
     scope: PruneScope,
     knownSet: Set<string>,
     projectToStack: Record<string, string>,
-    absDirToStack: Record<string, string>,
+    absDirToStack: Map<string, string>,
     resolvedBase: string,
     selfIdentity: SelfIdentityService,
   ): Promise<PruneItemOutcome> {
@@ -1964,12 +1964,12 @@ class DockerController {
   }
 
   /** Builds a map from absolute stack directory paths to stack names. */
-  private static buildAbsDirMap(stackNames: string[]): Record<string, string> {
-    const map: Record<string, string> = {};
+  private static buildAbsDirMap(stackNames: string[]): Map<string, string> {
+    const map = new Map<string, string>();
     for (const stackDir of stackNames) {
       const stackPath = path.join(COMPOSE_DIR, stackDir);
-      map[stackPath] = stackDir;
-      map[path.resolve(stackPath)] = stackDir;
+      map.set(stackPath, stackDir);
+      map.set(path.resolve(stackPath), stackDir);
     }
     return map;
   }
@@ -1982,7 +1982,7 @@ class DockerController {
     containerLabels: Record<string, string> | undefined,
     projectToStack: Record<string, string>,
     knownStackSet: Set<string>,
-    absDirToStack: Record<string, string>,
+    absDirToStack: Map<string, string>,
     resolvedBase: string,
   ): string | null {
     if (!containerLabels) return null;
@@ -1994,7 +1994,7 @@ class DockerController {
     // Fallback 1: match by working_dir
     const workingDir = containerLabels['com.docker.compose.project.working_dir'];
     if (workingDir) {
-      const match = absDirToStack[workingDir] ?? absDirToStack[path.resolve(workingDir)];
+      const match = absDirToStack.get(workingDir) ?? absDirToStack.get(path.resolve(workingDir));
       if (match) return match;
     }
 
