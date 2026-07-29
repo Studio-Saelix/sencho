@@ -1,8 +1,7 @@
 /**
- * F-6 regression: fleet routes that call estimateSystemReclaim on local
- * nodes must also bound the slow `docker system df` call (8s) and surface
- * a recognizable timeout message to the operator, matching the
- * /api/system/prune/estimate behavior.
+ * F-6 regression: Fleet itemized plan enumeration and byte estimation both
+ * bound the slow `docker system df` call (8s) and surface a recognizable
+ * timeout message to the operator.
  *
  * Covers:
  *  - POST /api/fleet/labels/fleet-prune  with dryRun: true
@@ -42,17 +41,27 @@ afterEach(() => {
   activeBulkActions.clear();
 });
 
-function stubLocalEstimate(impl: () => Promise<{ reclaimableBytes: number }>) {
+function stubLocalEstimate(
+  estimateImpl: () => Promise<{ reclaimableBytes: number }>,
+  planImpl: () => Promise<unknown> = async () => ({
+    nodeId: 1, scope: 'all', targets: ['volumes'], items: [], reclaimableBytes: 0,
+    fingerprint: 'empty', createdAt: 1,
+  }),
+) {
   vi.spyOn(DockerController, 'getInstance').mockReturnValue({
-    estimateSystemReclaim: vi.fn().mockImplementation(impl),
+    estimateSystemReclaim: vi.fn().mockImplementation(estimateImpl),
     estimateManagedReclaim: vi.fn().mockResolvedValue({ reclaimableBytes: 0 }),
+    buildPrunePlan: vi.fn().mockImplementation(planImpl),
   } as unknown as ReturnType<typeof DockerController.getInstance>);
   vi.spyOn(FileSystemService.prototype, 'getStacks').mockResolvedValue([]);
 }
 
 describe('Fleet prune routes bound docker df at 8s on local nodes (F-6)', () => {
   it('POST /api/fleet/labels/fleet-prune dry-run surfaces a busy-daemon error on local timeout', async () => {
-    stubLocalEstimate(() => new Promise(() => { /* never resolves */ }));
+    stubLocalEstimate(
+      () => Promise.resolve({ reclaimableBytes: 0 }),
+      () => new Promise(() => { /* never resolves */ }),
+    );
 
     const t0 = Date.now();
     const res = await request(app)
@@ -86,7 +95,21 @@ describe('Fleet prune routes bound docker df at 8s on local nodes (F-6)', () => 
   }, 20_000);
 
   it('fleet-prune dry-run succeeds normally when estimateSystemReclaim resolves quickly', async () => {
-    stubLocalEstimate(() => Promise.resolve({ reclaimableBytes: 256 }));
+    stubLocalEstimate(
+      () => Promise.resolve({ reclaimableBytes: 256 }),
+      async () => ({
+        nodeId: 1,
+        scope: 'all',
+        targets: ['volumes'],
+        items: [{
+          target: 'volumes', id: 'volume-a', name: 'volume-a', sizeBytes: 256,
+          managed: false, reason: 'Volume is not referenced by any container',
+        }],
+        reclaimableBytes: 256,
+        fingerprint: 'volume-plan',
+        createdAt: 1,
+      }),
+    );
 
     const res = await request(app)
       .post('/api/fleet/labels/fleet-prune')
