@@ -8,6 +8,14 @@ import { isDebugEnabled } from '../utils/debug';
 import { rejectUpgrade as reject } from './reject';
 
 /**
+ * Scoped JWTs allowed on the generic `/ws` upgrade after the upgrade handler's
+ * earlier gates. Deny-by-default: anything else (mfa_pending, pilot_*, unknown)
+ * must not skip the admin check below. Opaque full-admin API tokens are the
+ * only intentional scoped principal for container exec / streamStats.
+ */
+const GENERIC_WS_ALLOWED_SCOPES = new Set(['api_token']);
+
+/**
  * Header the deploy/update/down routes carry the per-deploy correlation id on,
  * mirroring the `sessionId` the frontend sends in `{action:'connectTerminal'}`.
  * Must stay in sync with `DEPLOY_SESSION_HEADER` in `frontend/src/lib/api.ts`.
@@ -54,11 +62,16 @@ export function handleGenericWs(
   if (isProxyToken) return reject(socket, 403, 'Forbidden');
 
   // Admin enforcement: container exec requires admin role.
-  // console_session tokens are already admin-gated at creation time and
-  // path/jti-gated in upgradeHandler. API tokens reaching this point have
-  // full-admin scope (read-only / deploy-only are blocked by the upgrade
-  // handler's scope gate).
-  if (!decoded.scope) {
+  // Scoped JWTs are deny-by-default. Only opaque API tokens (already reduced to
+  // full-admin by the upgrade handler's scope gate) may proceed with a scope.
+  // Partial-auth (mfa_pending), machine (pilot_enroll / pilot_tunnel),
+  // console_session, and any future scope must not skip the DB admin check.
+  if (decoded.scope) {
+    if (!GENERIC_WS_ALLOWED_SCOPES.has(decoded.scope)) {
+      console.warn('[Exec] Rejected scoped token on /ws:', decoded.scope);
+      return reject(socket, 403, 'Forbidden');
+    }
+  } else {
     const execUser = decoded.username ? DatabaseService.getInstance().getUserByUsername(decoded.username) : undefined;
     if (!execUser) {
       console.warn('[Exec] User account not found:', decoded.username);

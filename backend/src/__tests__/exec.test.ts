@@ -355,6 +355,56 @@ describe('WebSocket upgrade - exec auth enforcement', () => {
     expect(code).toBe(403);
   });
 
+  it('rejects WebSocket upgrade with mfa_pending token (403)', async () => {
+    // Partial-auth must not skip the admin gate on /ws (password-only MFA user
+    // previously unlocked execContainer before completing TOTP).
+    const token = jwt.sign(
+      { scope: 'mfa_pending', user_id: 1, username: 'viewer' },
+      TEST_JWT_SECRET,
+      { expiresIn: '5m' },
+    );
+    const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const code = await new Promise<number>((resolve) => {
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+      ws.on('error', () => resolve(0));
+    });
+    expect(code).toBe(403);
+  });
+
+  it('rejects WebSocket upgrade with pilot_enroll token (403)', async () => {
+    const token = jwt.sign(
+      { scope: 'pilot_enroll', nodeId: 1, enrollNonce: 'test-nonce' },
+      TEST_JWT_SECRET,
+      { expiresIn: '15m' },
+    );
+    const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const code = await new Promise<number>((resolve) => {
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+      ws.on('error', () => resolve(0));
+    });
+    expect(code).toBe(403);
+  });
+
+  it('rejects WebSocket upgrade with pilot_tunnel token (403)', async () => {
+    const token = jwt.sign({ scope: 'pilot_tunnel', nodeId: 1 }, TEST_JWT_SECRET, { expiresIn: '1h' });
+    const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const code = await new Promise<number>((resolve) => {
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+      ws.on('error', () => resolve(0));
+    });
+    expect(code).toBe(403);
+  });
+
+  it('rejects WebSocket upgrade with an unknown scoped JWT (403)', async () => {
+    const token = jwt.sign({ scope: 'future_machine_scope' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
+    const code = await new Promise<number>((resolve) => {
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+      ws.on('error', () => resolve(0));
+    });
+    expect(code).toBe(403);
+  });
+
   it('accepts WebSocket upgrade with admin token', async () => {
     const token = jwt.sign(
       { username: TEST_USERNAME, role: 'admin' },

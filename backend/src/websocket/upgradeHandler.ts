@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import { DatabaseService, type UserRole } from '../services/DatabaseService';
 import { LicenseService } from '../services/LicenseService';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { COOKIE_NAME } from '../helpers/constants';
+import { COOKIE_NAME, MFA_PENDING_SCOPE } from '../helpers/constants';
 import { handlePilotTunnel } from './pilotTunnel';
 import { handleMeshProxyTunnel } from './meshProxyTunnel';
 import { handleNotificationsWs } from './notifications';
@@ -187,6 +187,19 @@ export function attachUpgrade(
         const jwtSecret = settings.auth_jwt_secret;
         if (!jwtSecret) throw new Error('No JWT secret');
         decoded = jwt.verify(token, jwtSecret) as typeof decoded;
+      }
+
+      // Partial-auth and pilot machine JWTs must never reach interactive WS
+      // handlers. HTTP already rejects mfa_pending outside MFA routes; pilot_*
+      // belong only on /api/pilot/tunnel (handled above) or loopback HTTP.
+      // Without this gate, handleGenericWs historically treated any set scope
+      // as "already gated" and skipped the admin check — unlocking exec.
+      if (
+        decoded.scope === MFA_PENDING_SCOPE
+        || decoded.scope === 'pilot_enroll'
+        || decoded.scope === 'pilot_tunnel'
+      ) {
+        return reject(socket, 403, 'Forbidden');
       }
 
       // Node proxy tokens are machine-to-machine credentials and must never be
