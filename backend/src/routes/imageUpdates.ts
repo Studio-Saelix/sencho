@@ -404,11 +404,6 @@ function requireExactStacks(
 
 autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   try {
-    // Honor the node-scoped image-update detection opt-out before any work.
-    if (!ImageUpdateService.isChecksEnabled()) {
-      res.json({ result: 'Image update detection is disabled for this node; skipped.' });
-      return;
-    }
     const { target, targets } = req.body as { target?: string; targets?: unknown };
 
     let stackNames: string[];
@@ -462,8 +457,18 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
 
     // Pre-check every resolved target before any work starts: a denied stack
     // anywhere in the set (including a "*" expansion) fails the whole request
-    // rather than running some stacks and skipping others.
+    // rather than running some stacks and skipping others. Permission is
+    // evaluated unconditionally, before the node's checks-enabled setting is
+    // even consulted, so a disabled node never gives an unauthorized caller
+    // a free pass.
     if (!requireExactStacks(req, res, 'stack:deploy', stackNames, req.nodeId)) return;
+
+    // Honor the node-scoped image-update detection opt-out, now that every
+    // resolved target has cleared the permission gate above.
+    if (!ImageUpdateService.isChecksEnabled()) {
+      res.json({ result: 'Image update detection is disabled for this node; skipped.' });
+      return;
+    }
 
     const docker = DockerController.getInstance(req.nodeId);
     const imageUpdateService = ImageUpdateService.getInstance();

@@ -7,6 +7,8 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import fs from 'fs';
+import path from 'path';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -20,6 +22,17 @@ function userToken(username: string): string {
   const user = DatabaseService.getInstance().getUserByUsername(username);
   if (!user) throw new Error(`missing test user ${username}`);
   return jwt.sign({ username, role: user.role, tv: user.token_version }, TEST_JWT_SECRET, { expiresIn: '5m' });
+}
+
+/** Write a minimal on-disk stack so FileSystemService.getStacks() resolves it. */
+function makeOnDiskStack(name: string): void {
+  const composeDir = process.env.COMPOSE_DIR as string;
+  fs.mkdirSync(path.join(composeDir, name), { recursive: true });
+  fs.writeFileSync(path.join(composeDir, name, 'docker-compose.yml'), 'services: {}\n');
+}
+
+function removeOnDiskStack(name: string): void {
+  fs.rmSync(path.join(process.env.COMPOSE_DIR as string, name), { recursive: true, force: true });
 }
 
 beforeAll(async () => {
@@ -531,6 +544,51 @@ describe('POST /api/auto-update/execute', () => {
       containersSpy.mockRestore();
       db.deleteRoleAssignmentsByUser(scopedUserId);
       db.deleteUser(scopedUserId);
+    }
+  });
+
+  it('rejects a role without stack:deploy with 403 even when checks are disabled node-wide', async () => {
+    // Permission must be evaluated before the checks-enabled setting is
+    // consulted: a disabled node must not let an unauthorized caller through
+    // to the "disabled; skipped" 200 that a legitimate caller would see.
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '0');
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Cookie', viewerCookie)
+        .send({ target: 'checks-disabled-authz-stack' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PERMISSION_DENIED');
+    } finally {
+      DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '1');
+    }
+  });
+
+  it('denies target="*" for a scoped-only user even when their grant covers every stack on the node', async () => {
+    // A user with ONLY a scoped stack:deploy role_assignment (no global
+    // stack:deploy role) is denied the wildcard outright, even though the
+    // same grant would pass requireExactStacks if the caller enumerated the
+    // stack explicitly via targets instead of relying on "*" to expand it.
+    // This is the brief-sanctioned "deny without global deploy" tradeoff for
+    // the wildcard case.
+    makeOnDiskStack('wildcard-scoped-stack');
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    const hash = await bcrypt.hash('scopedpass', 1);
+    const scopedUserId = db.addUser({ username: 'iu-wildcard-scoped', password_hash: hash, role: 'viewer' });
+    db.addRoleAssignment({ user_id: scopedUserId, role: 'deployer', resource_type: 'stack', resource_id: 'wildcard-scoped-stack', node_id: nodeId });
+
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Authorization', `Bearer ${userToken('iu-wildcard-scoped')}`)
+        .send({ target: '*' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PERMISSION_DENIED');
+    } finally {
+      db.deleteRoleAssignmentsByUser(scopedUserId);
+      db.deleteUser(scopedUserId);
+      removeOnDiskStack('wildcard-scoped-stack');
     }
   });
 
