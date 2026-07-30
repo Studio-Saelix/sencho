@@ -20,6 +20,7 @@ import type { useViewNavigationState } from './useViewNavigationState';
 import type { Node } from '@/context/NodeContext';
 import { useNodes } from '@/context/NodeContext';
 import type { PermissionAction } from '@/context/AuthContext';
+import { canManageNode } from '@/lib/canManageNode';
 
 type StackListState = ReturnType<typeof useStackListState>;
 type NavState = ReturnType<typeof useViewNavigationState>;
@@ -74,6 +75,7 @@ export function useSidebarContextMenu({
       menuVisibility: stackActions.getStackMenuVisibility(file),
       openAlertSheet: () => overlayState.openAlertSheet(file),
       openAutoHeal: () => overlayState.openAutoHeal(file),
+      canCheckUpdates: canManageNode(can, nodeId),
       checkUpdates: () => stackActions.checkUpdatesForStack(),
       openStackApp: () => stackActions.openStackApp(file),
       deploy: () => stackActions.executeStackActionByFile(file, 'deploy', 'deploy'),
@@ -179,7 +181,7 @@ export function useSidebarContextMenu({
     // deps would force a rebuild on every parent render and defeat the memo.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    stackListState.stackStatuses, stackListState.stackPorts, stackListState.stackSelfFlags, isAdmin,
+    stackListState.stackStatuses, stackListState.stackPorts, stackListState.stackSelfFlags, isAdmin, can,
     stackListState.isPinned, stackListState.labels, stackListState.stackLabelMap,
     stackListState.pin, stackListState.unpin, activeNode?.type, activeNode?.api_url, activeNode?.id,
     hasCapability, navState.openMuteRulesWithPrefill,

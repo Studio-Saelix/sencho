@@ -95,4 +95,37 @@ describe('reachability', () => {
     const off = ctx({ experimental: false, experimentalReady: true, isAdmin: true });
     expect(isSettingsSectionHidden('fleet-mesh', off)).toBe(false);
   });
+
+  it('defers settings permission hides until authz is ready', () => {
+    const loading = ctx({
+      permissionsStatus: 'loading',
+      isAdmin: false,
+      can: () => false,
+    });
+    expect(isSettingsSectionHidden('webhooks', loading)).toBe(false);
+    expect(isSettingsSectionHidden('license', loading)).toBe(false);
+  });
+
+  it('hides requiredPermission sections when the operator lacks the permission', () => {
+    const nodeAdmin = ctx({
+      isAdmin: false,
+      can: (a) => a === 'node:read' || a === 'node:manage',
+    });
+    expect(isSettingsSectionHidden('webhooks', nodeAdmin)).toBe(true);
+    expect(isSettingsSectionHidden('license', nodeAdmin)).toBe(true);
+    expect(isSettingsSectionHidden('users', nodeAdmin)).toBe(true);
+    expect(isSettingsSectionHidden('api-tokens', nodeAdmin)).toBe(true);
+    expect(isSettingsSectionHidden('registries', nodeAdmin)).toBe(true);
+    expect(isSettingsSectionHidden('nodes', nodeAdmin)).toBe(false);
+    expect(isSettingsSectionHidden('host-alerts', nodeAdmin)).toBe(false);
+    expect(isSettingsSectionHidden('developer', nodeAdmin)).toBe(true);
+    expect(isSettingsSectionHidden('data-retention', nodeAdmin)).toBe(true);
+    expect(isSettingsSectionHidden('image-updates', nodeAdmin)).toBe(true);
+  });
+
+  it('hides adminOnly settings sections for non-admins', () => {
+    const nodeAdmin = ctx({ isAdmin: false, can: () => true });
+    expect(isSettingsSectionHidden('sso', nodeAdmin)).toBe(true);
+    expect(isSettingsSectionHidden('recovery', nodeAdmin)).toBe(true);
+  });
 });

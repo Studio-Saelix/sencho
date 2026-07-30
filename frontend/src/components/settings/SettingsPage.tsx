@@ -12,7 +12,6 @@ import {
 } from '@/components/ui/command';
 import { PageMasthead, type MastheadMetadataItem } from '@/components/ui/PageMasthead';
 import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
 import {
     SETTINGS_ITEMS,
@@ -23,11 +22,12 @@ import {
     isItemLocked,
     scopeLabel,
 } from './index';
-import type { SectionId, SettingsItemMeta, VisibilityContext } from './index';
+import type { SectionId, SettingsItemMeta } from './index';
 import type { MuteRuleDraft } from '@/lib/muteRules';
 import { SettingsSidebar } from './SettingsSidebar';
 import { SettingsSectionContent } from './SettingsSectionContent';
 import { MastheadStatsProvider, useMastheadStatsValue } from './MastheadStatsContext';
+import { useSettingsVisibility } from './useSettingsVisibility';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 
 interface SettingsPageProps {
@@ -55,10 +55,9 @@ function SettingsPageInner({
     onOpenMuteRulesWithPrefill,
     quickLinkCandidates,
 }: SettingsPageProps) {
-    const { isAdmin } = useAuth();
-    const { isPaid } = useLicense();
     const { activeNode } = useNodes();
-    const isRemote = activeNode?.type === 'remote';
+    const visibility = useSettingsVisibility();
+    const { permissionsStatus } = useAuth();
 
     // Mobile master/detail: below md the nav rail and the section content cannot
     // sit side by side, so the rail is a full-screen list and choosing a section
@@ -72,22 +71,21 @@ function SettingsPageInner({
     // Desktop shows both panes; mobile shows exactly one (the rail or the section).
     const showSidebar = !isMobile || !mobileSectionOpen;
     const showSection = !isMobile || mobileSectionOpen;
-    const visibility: VisibilityContext = useMemo(
-        () => ({ isRemote, isAdmin, isPaid }),
-        [isRemote, isAdmin, isPaid],
-    );
 
     // Resolve the rendered section: must be a registry id and must be visible to the
     // current operator. If the current selection points to a hidden section (e.g.,
     // node-scoped item on a remote, or admin-only item for a non-admin), fall back to
-    // the first visible item.
+    // the first visible item. Defer until permission metadata is ready so deep links
+    // to requiredPermission sections (e.g. license) are not rewritten while can() is
+    // still fail-closed during cold load.
     const safeSection: SectionId = useMemo(() => {
+        if (permissionsStatus !== 'ready') return currentSection;
         const reachable = (i: SettingsItemMeta) => isItemVisible(i, visibility) && !isItemLocked(i, visibility);
         const direct = SETTINGS_ITEMS.find(i => i.id === currentSection);
         if (direct && reachable(direct)) return direct.id;
         const fallback = SETTINGS_ITEMS.find(reachable);
         return fallback?.id ?? 'appearance';
-    }, [currentSection, visibility]);
+    }, [currentSection, visibility, permissionsStatus]);
     useEffect(() => {
         if (safeSection !== currentSection) onSectionChange(safeSection);
     }, [safeSection, currentSection, onSectionChange]);

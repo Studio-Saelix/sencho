@@ -60,6 +60,7 @@ export function useStackKeyboardShortcuts(
         e.preventDefault();
         ctx.openAutoHeal();
       } else if (key === 'u') {
+        if (!ctx.canCheckUpdates) return;
         e.preventDefault();
         ctx.checkUpdates();
       } else if (key === 'p') {

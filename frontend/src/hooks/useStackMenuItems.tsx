@@ -21,7 +21,7 @@ import type { MenuGroup, MenuItem, StackMenuCtx } from '@/components/sidebar/sid
 export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[] {
   const {
     stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canDeploy, canEditLabels, isPinned, labels,
-    openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
+    openAlertSheet, openAutoHeal, canCheckUpdates, checkUpdates, openStackApp,
     deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel,
     menuVisibility, openScheduleTask,
     canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
@@ -35,7 +35,9 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
       { id: 'alerts', label: 'Alerts', icon: BellRing, shortcut: 'A', onSelect: openAlertSheet },
       { id: 'auto-heal', label: 'Auto-Heal', icon: Activity, shortcut: 'H', onSelect: openAutoHeal },
     ];
-    inspect.push({ id: 'check-updates', label: 'Check updates', icon: RefreshCw, shortcut: 'U', onSelect: checkUpdates });
+    if (canCheckUpdates) {
+      inspect.push({ id: 'check-updates', label: 'Check updates', icon: RefreshCw, shortcut: 'U', onSelect: checkUpdates });
+    }
     if (stackStatus === 'running' && canOpenApp) {
       inspect.push({ id: 'open-app', label: 'Open App', icon: ArrowUpRight, shortcut: '↗', onSelect: openStackApp });
     }
@@ -108,7 +110,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
   }, [
     stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canDeploy, canEditLabels, isPinned, labels,
     showDeploy, showStop, showRestart, showUpdate, showTakeDown,
-    openAlertSheet, openAutoHeal, checkUpdates, openStackApp,
+    openAlertSheet, openAutoHeal, canCheckUpdates, checkUpdates, openStackApp,
     deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel, openScheduleTask,
     canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
   ]);

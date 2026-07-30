@@ -17,6 +17,7 @@ import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
 import { NumberChip } from './SystemControls';
 import { classifyAppriseEndpoint, isKeyedAppriseEndpoint, isStatelessAppriseEndpoint } from '@/lib/appriseEndpoint';
+import { canManageNode } from '@/lib/canManageNode';
 import { parseNotificationDispatchRetries } from '@/lib/notificationDispatchRetries';
 
 type ChannelType = 'discord' | 'slack' | 'webhook' | 'apprise';
@@ -53,9 +54,12 @@ interface NotificationsSectionProps {
 }
 
 export function NotificationsSection({ onDirtyChange }: NotificationsSectionProps) {
+    // This section configures outbound notification *channels* (/api/agents), which
+    // require node:manage. Alert routing and mute rules live in separate Settings
+    // sections and stay Admin-only via notifications.ts / adminOnly registry flags.
     const { activeNode } = useNodes();
-    const { isAdmin } = useAuth();
-    const readOnly = !isAdmin;
+    const { can } = useAuth();
+    const readOnly = !canManageNode(can, activeNode?.id);
     const activeNodeIdRef = useRef(activeNode?.id);
     useEffect(() => { activeNodeIdRef.current = activeNode?.id; }, [activeNode?.id]);
 

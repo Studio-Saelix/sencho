@@ -118,7 +118,7 @@ describe('POST /api/users', () => {
       .set('Authorization', `Bearer ${viewerToken}`)
       .send({ username: 'test999', password: 'password123', role: 'viewer' });
     expect(res.status).toBe(403);
-    expect(res.body.code).toBe('ADMIN_REQUIRED');
+    expect(res.body.code).toBe('PERMISSION_DENIED');
   });
 
   it('blocks API tokens (403 SCOPE_DENIED)', async () => {
@@ -890,6 +890,6 @@ describe('ROLE_PERMISSIONS enforcement via API', () => {
       .get('/api/users')
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(403);
-    expect(res.body.code).toBe('ADMIN_REQUIRED');
+    expect(res.body.code).toBe('PERMISSION_DENIED');
   });
 });

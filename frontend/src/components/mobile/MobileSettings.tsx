@@ -1,7 +1,5 @@
 import type { ReactNode } from 'react';
 import { ChevronRight } from 'lucide-react';
-import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
 import {
   SETTINGS_GROUPS,
@@ -13,6 +11,7 @@ import {
 } from '@/components/settings';
 import type { SectionId } from '@/components/settings';
 import { SettingsSectionContent } from '@/components/settings/SettingsSectionContent';
+import { useSettingsVisibility } from '@/components/settings/useSettingsVisibility';
 import { BackChip, Kicker, Masthead } from './mobile-ui';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 
@@ -31,12 +30,9 @@ export function MobileSettings({
   onSelectedSectionChange,
   quickLinkCandidates,
 }: MobileSettingsProps) {
-  const { isAdmin } = useAuth();
-  const { isPaid } = useLicense();
   const { activeNode } = useNodes();
-  const isRemote = activeNode?.type === 'remote';
   const nodeName = activeNode?.name ?? 'local';
-  const visibility = { isRemote, isAdmin, isPaid };
+  const visibility = useSettingsVisibility();
 
   const visibleItems = SETTINGS_ITEMS.filter(
     item => isItemVisible(item, visibility) && !isItemLocked(item, visibility),

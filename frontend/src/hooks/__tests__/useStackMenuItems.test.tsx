@@ -22,6 +22,7 @@ function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
     openAlertSheet: vi.fn(),
     openAutoHeal: vi.fn(),
     checkUpdates: vi.fn(),
+    canCheckUpdates: true,
     openStackApp: vi.fn(),
     deploy: vi.fn(),
     stop: vi.fn(),
@@ -82,6 +83,18 @@ describe('useStackMenuItems', () => {
     const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ canOpenApp: false })));
     const inspect = result.current.find(g => g.id === 'inspect')!;
     expect(inspect.items.find(i => i.id === 'open-app')).toBeUndefined();
+  });
+
+  it('shows Check updates when canCheckUpdates', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ canCheckUpdates: true })));
+    const inspect = result.current.find(g => g.id === 'inspect')!;
+    expect(inspect.items.find(i => i.id === 'check-updates')).toBeDefined();
+  });
+
+  it('hides Check updates when !canCheckUpdates', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ canCheckUpdates: false })));
+    const inspect = result.current.find(g => g.id === 'inspect')!;
+    expect(inspect.items.find(i => i.id === 'check-updates')).toBeUndefined();
   });
 
   it('toggles Pin / Unpin label based on isPinned', () => {

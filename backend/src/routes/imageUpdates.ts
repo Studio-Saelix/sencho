@@ -20,6 +20,7 @@ import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { HealthGateService } from '../services/HealthGateService';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
 import { FLEET_UPDATE_CACHE_KEY, invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -75,7 +76,7 @@ imageUpdatesRouter.get('/detail', authMiddleware, (req: Request, res: Response):
 });
 
 imageUpdatesRouter.post('/refresh', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'node:manage', 'node', String(req.nodeId ?? 0))) return;
   try {
     if (!ImageUpdateService.isChecksEnabled()) {
       res.status(409).json({
@@ -146,7 +147,7 @@ const IntervalPatchSchema = z.object({
 });
 
 imageUpdatesRouter.put('/interval', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:settings')) return;
   const parsed = IntervalPatchSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'minutes must be an integer between 15 and 1440' });
@@ -193,7 +194,7 @@ const EnabledPatchSchema = z.object({
 });
 
 imageUpdatesRouter.put('/enabled', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:settings')) return;
   const parsed = EnabledPatchSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: 'enabled must be a boolean' });

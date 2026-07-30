@@ -1,6 +1,6 @@
 import type { FleetTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
-import { getSettingsItem } from '@/components/settings/registry';
+import { getSettingsItem, isItemVisible, isItemLocked } from '@/components/settings/registry';
 import type { ActiveView } from '@/lib/router/routeTypes';
 import { HUB_ONLY_VIEWS } from '@/lib/router/routeTypes';
 
@@ -75,9 +75,14 @@ export function isSettingsSectionHidden(section: SectionId, ctx: ReachabilityCon
   if (!authzReady(ctx)) return false;
   const item = getSettingsItem(section);
   if (!item) return true;
-  if (ctx.isRemote && item.hiddenOnRemote) return true;
-  if (item.adminOnly && !ctx.isAdmin) return true;
-  if (item.tier === 'paid' && !ctx.isPaid) return true;
+  const visibility = {
+    isRemote: ctx.isRemote,
+    isAdmin: ctx.isAdmin,
+    isPaid: ctx.isPaid,
+    can: ctx.can,
+  };
+  if (!isItemVisible(item, visibility)) return true;
+  if (isItemLocked(item, visibility)) return true;
   // fleet-mesh stays reachable: snapshot_documentation lives there even when
   // Mesh discovery is off.
   return false;

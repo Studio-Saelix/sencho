@@ -7,6 +7,7 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
+import { canManageNode } from '@/lib/canManageNode';
 import { useDeployFeedbackEnabled } from '@/hooks/use-deploy-feedback-enabled';
 import { useDeployFeedbackStyle, type DeployFeedbackStyle } from '@/hooks/use-deploy-feedback-style';
 import { useComposeDiffPreviewEnabled } from '@/hooks/use-compose-diff-preview-enabled';
@@ -58,8 +59,8 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
 
     // Node-scoped deploy guardrails
     const { activeNode } = useNodes();
-    const { isAdmin } = useAuth();
-    const readOnly = !isAdmin;
+    const { can } = useAuth();
+    const readOnly = !canManageNode(can, activeNode?.id);
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<GuardrailFields>({ ...DEFAULT_GUARDRAILS });
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);
@@ -238,7 +239,7 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
                         </SettingsField>
                     </SettingsSection>
 
-                    <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
+                    <SettingsActions hint={readOnly ? 'Read-only · permission required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
                         {!readOnly && (
                             <SettingsPrimaryButton onClick={saveGuardrails} disabled={isSaving || !hasChanges || !isCurrentNodeLoaded}>
                                 {isSaving ? (

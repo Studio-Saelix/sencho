@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { isDebugEnabled } from '../utils/debug';
 import { sanitizeForLog } from '../utils/safeLog';
 import {
@@ -27,7 +27,8 @@ agentsRouter.get('/', authMiddleware, async (req: Request, res: Response): Promi
 });
 
 agentsRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  const nodeId = req.nodeId ?? 0;
+  if (!requirePermission(req, res, 'node:manage', 'node', String(nodeId))) return;
   try {
     const { type, url, enabled, config } = req.body;
     if (!type || !(NOTIFICATION_CHANNEL_TYPES as readonly string[]).includes(type)) {
@@ -38,7 +39,6 @@ agentsRouter.post('/', authMiddleware, async (req: Request, res: Response): Prom
       res.status(400).json({ error: 'enabled must be a boolean' });
       return;
     }
-    const nodeId = req.nodeId ?? 0;
     const existing = DatabaseService.getInstance().getAgents(nodeId).find(agent => agent.type === type);
     const effectiveUrl = url === undefined ? existing?.url : url;
 
