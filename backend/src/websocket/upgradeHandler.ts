@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import { DatabaseService, type UserRole } from '../services/DatabaseService';
 import { LicenseService } from '../services/LicenseService';
 import { NodeRegistry } from '../services/NodeRegistry';
-import { COOKIE_NAME } from '../helpers/constants';
+import { COOKIE_NAME, MFA_PENDING_SCOPE } from '../helpers/constants';
 import { handlePilotTunnel } from './pilotTunnel';
 import { handleMeshProxyTunnel } from './meshProxyTunnel';
 import { handleNotificationsWs } from './notifications';
@@ -210,6 +210,22 @@ export function attachUpgrade(
           role: dbUser.role as UserRole,
           token_version: dbUser.token_version,
         };
+      }
+
+      // Partial-auth (mfa_pending) and enroll-only (pilot_enroll) JWTs must not
+      // continue past shared cookie/Bearer auth. HTTP already rejects mfa_pending
+      // outside MFA routes; pilot_enroll is only valid on /api/pilot/tunnel
+      // (handled above). Reject here for every remaining WS path so handlers that
+      // do not re-check scope (logs, notifications, host console, etc.) cannot
+      // accept them. handleGenericWs used to treat any set scope as "already
+      // gated" and skip admin; that path is now deny-by-default too.
+      // pilot_tunnel is intentionally allowed: agent loopback injects it on every
+      // forwarded WS, including /ws container exec.
+      if (
+        decoded.scope === MFA_PENDING_SCOPE
+        || decoded.scope === 'pilot_enroll'
+      ) {
+        return reject(socket, 403, 'Forbidden');
       }
 
       const parsedUrl = new URL(req.url || '', `http://${req.headers.host || 'localhost'}`);
