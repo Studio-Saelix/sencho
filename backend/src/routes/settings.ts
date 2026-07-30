@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
 import { requirePaid } from '../middleware/tierGates';
-import { requirePermission, type PermissionAction } from '../middleware/permissions';
+import { requirePermission, checkPermission, type PermissionAction } from '../middleware/permissions';
 import { parseNotificationDispatchRetries } from '../helpers/notificationDispatchRetries';
 
 // Allowlist of keys readable/writable via the generic settings API, each
@@ -41,8 +41,31 @@ const SETTING_WRITE_PERMISSIONS: Record<string, PermissionAction> = {
 
 const ALLOWED_SETTING_KEYS = new Set(Object.keys(SETTING_WRITE_PERMISSIONS));
 
+/** Resolve node:manage against the active node so scoped Node Admin grants apply. */
+function checkNodeManage(req: Request): boolean {
+  const nodeId = req.nodeId;
+  if (typeof nodeId === 'number') {
+    return checkPermission(req, 'node:manage', 'node', String(nodeId));
+  }
+  return checkPermission(req, 'node:manage');
+}
+
+function requireNodeManage(req: Request, res: Response): boolean {
+  const nodeId = req.nodeId;
+  if (typeof nodeId === 'number') {
+    return requirePermission(req, res, 'node:manage', 'node', String(nodeId));
+  }
+  return requirePermission(req, res, 'node:manage');
+}
+
 /** Fail closed if any key lacks its required permission. */
 function requireSettingsWritePermission(req: Request, res: Response, keys: string[]): boolean {
+  // Empty no-op still requires write capability (prior requireAdmin behavior).
+  if (keys.length === 0) {
+    if (checkNodeManage(req) || checkPermission(req, 'system:settings')) return true;
+    res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+    return false;
+  }
   const needed = new Set<PermissionAction>();
   for (const key of keys) {
     const action = SETTING_WRITE_PERMISSIONS[key];
@@ -53,7 +76,10 @@ function requireSettingsWritePermission(req: Request, res: Response, keys: strin
     needed.add(action);
   }
   for (const action of needed) {
-    if (!requirePermission(req, res, action)) return false;
+    const ok = action === 'node:manage'
+      ? requireNodeManage(req, res)
+      : requirePermission(req, res, action);
+    if (!ok) return false;
   }
   return true;
 }

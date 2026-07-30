@@ -95,6 +95,119 @@ describe('PATCH /api/settings permission buckets', () => {
       .send({ developer_mode: '0' });
     expect(res.status).toBe(200);
   });
+
+  it('lets admin empty PATCH as a no-op', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', adminCookie)
+      .send({});
+    expect(res.status).toBe(200);
+  });
+
+  it('lets node-admin empty PATCH as a no-op', async () => {
+    const res = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', roleCookie['node-admin']!)
+      .send({});
+    expect(res.status).toBe(200);
+  });
+
+  it.each(['deployer', 'viewer', 'auditor'] as const)(
+    'rejects empty PATCH from %s',
+    async (role) => {
+      const res = await request(app)
+        .patch('/api/settings')
+        .set('Cookie', roleCookie[role]!)
+        .send({});
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PERMISSION_DENIED');
+    },
+  );
+
+  it('lets node-admin POST a single node:manage key', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', roleCookie['node-admin']!)
+      .send({ key: 'host_cpu_limit', value: 75 });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects node-admin POST of a system:settings key', async () => {
+    const res = await request(app)
+      .post('/api/settings')
+      .set('Cookie', roleCookie['node-admin']!)
+      .send({ key: 'developer_mode', value: '1' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+  });
+
+  it('honors node-scoped node-admin grants for node:manage writes', async () => {
+    const db = DatabaseService.getInstance();
+    const defaultNodeId = db.getDefaultNode()!.id!;
+    const remoteId = db.addNode({
+      name: 'settings-scoped-remote',
+      type: 'remote',
+      api_url: 'http://192.168.1.50:1852',
+      api_token: 'test-token',
+      compose_dir: '/tmp',
+      is_default: false,
+    });
+
+    const allowedPassword = 'settings-scoped-allow-pass';
+    const allowedUserId = db.addUser({
+      username: 'settings-scoped-allow',
+      password_hash: await bcrypt.hash(allowedPassword, 1),
+      role: 'viewer',
+    });
+    db.addRoleAssignment({
+      user_id: allowedUserId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: String(defaultNodeId),
+    });
+    const allowedLogin = await request(app).post('/api/auth/login').send({
+      username: 'settings-scoped-allow',
+      password: allowedPassword,
+    });
+    const allowedCookies = allowedLogin.headers['set-cookie'] as string | string[];
+    const allowedCookie = Array.isArray(allowedCookies) ? allowedCookies[0] : allowedCookies;
+
+    const allowed = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', allowedCookie)
+      .set('x-node-id', String(defaultNodeId))
+      .send({ host_cpu_limit: 81 });
+    expect(allowed.status).toBe(200);
+
+    // Grant only on a remote node; local default writes must still 403 (and stay
+    // on the local settings route, not the remote proxy).
+    const deniedPassword = 'settings-scoped-deny-pass';
+    const deniedUserId = db.addUser({
+      username: 'settings-scoped-deny',
+      password_hash: await bcrypt.hash(deniedPassword, 1),
+      role: 'viewer',
+    });
+    db.addRoleAssignment({
+      user_id: deniedUserId,
+      role: 'node-admin',
+      resource_type: 'node',
+      resource_id: String(remoteId),
+    });
+    const deniedLogin = await request(app).post('/api/auth/login').send({
+      username: 'settings-scoped-deny',
+      password: deniedPassword,
+    });
+    const deniedCookies = deniedLogin.headers['set-cookie'] as string | string[];
+    const deniedCookie = Array.isArray(deniedCookies) ? deniedCookies[0] : deniedCookies;
+
+    const denied = await request(app)
+      .patch('/api/settings')
+      .set('Cookie', deniedCookie)
+      .set('x-node-id', String(defaultNodeId))
+      .send({ host_cpu_limit: 82 });
+    expect(denied.status).toBe(403);
+    expect(denied.body.code).toBe('PERMISSION_DENIED');
+  });
 });
 
 describe('Settings feature routes permission matrix', () => {

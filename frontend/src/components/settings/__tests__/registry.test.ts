@@ -153,6 +153,9 @@ describe('requiredPermission registry mapping', () => {
         expect(byId.get('api-tokens')?.adminOnly).toBeUndefined();
         expect(byId.get('webhooks')?.requiredPermission).toBe('system:webhooks');
         expect(byId.get('nodes')?.requiredPermission).toBe('node:read');
+        expect(byId.get('developer')?.requiredPermission).toBe('system:settings');
+        expect(byId.get('data-retention')?.requiredPermission).toBe('system:settings');
+        expect(byId.get('image-updates')?.requiredPermission).toBe('system:settings');
     });
 
     it('keeps adminOnly on identity, credentials, and emergency surfaces', () => {

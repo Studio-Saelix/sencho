@@ -54,6 +54,16 @@ describe('settings section visibility by role', () => {
     }
   });
 
+  it('hides system:settings sections from roles without that permission', () => {
+    for (const sectionId of ['developer', 'data-retention', 'image-updates'] as const) {
+      const item = SETTINGS_ITEMS.find(i => i.id === sectionId)!;
+      expect(isItemVisible(item, visibilityFor('admin'))).toBe(true);
+      for (const role of ['node-admin', 'deployer', 'viewer', 'auditor'] as const) {
+        expect(isItemVisible(item, visibilityFor(role)), `${sectionId} for ${role}`).toBe(false);
+      }
+    }
+  });
+
   it('hides adminOnly sections from every non-admin role', () => {
     const adminOnly = SETTINGS_ITEMS.filter(i => i.adminOnly);
     expect(adminOnly.length).toBeGreaterThan(0);

@@ -245,6 +245,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['image', 'update', 'registry', 'check', 'interval', 'cadence', 'poll', 'auto-update', 'detection', 'recheck', 'sidebar', 'badge', 'dot', 'indicator', 'status'],
         tier: null,
         scope: 'node',
+        requiredPermission: 'system:settings',
     },
     {
         id: 'webhooks',
@@ -276,6 +277,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['retention', 'metrics', 'logs', 'scans', 'audit', 'history', 'prune', 'window'],
         tier: null,
         scope: 'node',
+        requiredPermission: 'system:settings',
     },
     {
         id: 'developer',
@@ -285,6 +287,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['developer', 'debug', 'diagnostics', 'metrics', 'verbose'],
         tier: null,
         scope: 'node',
+        requiredPermission: 'system:settings',
     },
     {
         id: 'recovery',

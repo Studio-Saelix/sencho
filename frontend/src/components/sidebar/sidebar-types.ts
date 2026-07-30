@@ -38,6 +38,8 @@ export interface StackMenuCtx {
   menuVisibility: { showDeploy: boolean; showStop: boolean; showRestart: boolean; showUpdate: boolean; showTakeDown: boolean };
   openAlertSheet: () => void;
   openAutoHeal: () => void;
+  /** True when the caller may trigger a stack image-update check (node:manage). */
+  canCheckUpdates: boolean;
   checkUpdates: () => void;
   openStackApp: () => void;
   deploy: () => void;

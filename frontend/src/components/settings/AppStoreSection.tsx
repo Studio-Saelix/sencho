@@ -6,6 +6,7 @@ import { toast } from '@/components/ui/toast-store';
 import { apiFetch } from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
+import { canManageNode } from '@/lib/canManageNode';
 import { RefreshCw } from 'lucide-react';
 import { SettingsSection } from './SettingsSection';
 import { SettingsField } from './SettingsField';
@@ -23,9 +24,9 @@ function SectionSkeleton() {
 }
 
 export function AppStoreSection() {
-    const { can, permissionsReady } = useAuth();
+    const { can } = useAuth();
     const { activeNode } = useNodes();
-    const readOnly = !permissionsReady || !can('node:manage');
+    const readOnly = !canManageNode(can, activeNode?.id);
     const [templateRegistryUrl, setTemplateRegistryUrl] = useState('');
     const serverUrl = useRef('');
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);

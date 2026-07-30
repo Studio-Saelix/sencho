@@ -118,6 +118,9 @@ describe('reachability', () => {
     expect(isSettingsSectionHidden('registries', nodeAdmin)).toBe(true);
     expect(isSettingsSectionHidden('nodes', nodeAdmin)).toBe(false);
     expect(isSettingsSectionHidden('host-alerts', nodeAdmin)).toBe(false);
+    expect(isSettingsSectionHidden('developer', nodeAdmin)).toBe(true);
+    expect(isSettingsSectionHidden('data-retention', nodeAdmin)).toBe(true);
+    expect(isSettingsSectionHidden('image-updates', nodeAdmin)).toBe(true);
   });
 
   it('hides adminOnly settings sections for non-admins', () => {

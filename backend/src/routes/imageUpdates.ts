@@ -76,7 +76,7 @@ imageUpdatesRouter.get('/detail', authMiddleware, (req: Request, res: Response):
 });
 
 imageUpdatesRouter.post('/refresh', authMiddleware, (req: Request, res: Response): void => {
-  if (!requirePermission(req, res, 'node:manage')) return;
+  if (!requirePermission(req, res, 'node:manage', 'node', String(req.nodeId ?? 0))) return;
   try {
     if (!ImageUpdateService.isChecksEnabled()) {
       res.status(409).json({

@@ -5,6 +5,7 @@ import { apiFetch } from '@/lib/api';
 import { toast } from '@/components/ui/toast-store';
 import { useNodes } from '@/context/NodeContext';
 import { useAuth } from '@/context/AuthContext';
+import { canManageNode } from '@/lib/canManageNode';
 import { DEFAULT_SETTINGS } from './types';
 import type { PatchableSettings } from './types';
 import { SettingsSection } from './SettingsSection';
@@ -44,8 +45,8 @@ const DEFAULT_HOST_ALERTS: HostAlertFields = {
 
 export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
     const { activeNode } = useNodes();
-    const { can, permissionsReady } = useAuth();
-    const readOnly = !permissionsReady || !can('node:manage');
+    const { can } = useAuth();
+    const readOnly = !canManageNode(can, activeNode?.id);
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<HostAlertFields>({ ...DEFAULT_HOST_ALERTS });
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);

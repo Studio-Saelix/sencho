@@ -17,6 +17,7 @@ import { SettingsActions, SettingsPrimaryButton } from './SettingsActions';
 import { useMastheadStats } from './MastheadStatsContext';
 import { NumberChip } from './SystemControls';
 import { classifyAppriseEndpoint, isKeyedAppriseEndpoint, isStatelessAppriseEndpoint } from '@/lib/appriseEndpoint';
+import { canManageNode } from '@/lib/canManageNode';
 import { parseNotificationDispatchRetries } from '@/lib/notificationDispatchRetries';
 
 type ChannelType = 'discord' | 'slack' | 'webhook' | 'apprise';
@@ -54,8 +55,8 @@ interface NotificationsSectionProps {
 
 export function NotificationsSection({ onDirtyChange }: NotificationsSectionProps) {
     const { activeNode } = useNodes();
-    const { can, permissionsReady } = useAuth();
-    const readOnly = !permissionsReady || !can('node:manage');
+    const { can } = useAuth();
+    const readOnly = !canManageNode(can, activeNode?.id);
     const activeNodeIdRef = useRef(activeNode?.id);
     useEffect(() => { activeNodeIdRef.current = activeNode?.id; }, [activeNode?.id]);
 
