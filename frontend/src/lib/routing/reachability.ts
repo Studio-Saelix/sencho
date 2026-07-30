@@ -26,31 +26,19 @@ export function authzReady(ctx: ReachabilityContext): boolean {
   return ctx.permissionsStatus === 'ready' && ctx.licenseStatus === 'ready';
 }
 
-/**
- * Experimental discovery gates apply only after /meta settles. Before that,
- * treat surfaces as not-yet-hidden so URL sync does not rewrite enabled
- * deep links during cold load.
- */
-export function experimentalDiscoveryReady(ctx: ReachabilityContext): boolean {
-  return ctx.experimentalReady;
-}
-
 /** Role/tier hidden views normalize away only when permission and license metadata are ready. */
 export function isViewHidden(view: ActiveView, ctx: ReachabilityContext): boolean {
   if (!authzReady(ctx)) return false;
   if (ctx.isRemote && HUB_ONLY_VIEWS.has(view)) return true;
-  if (!ctx.isAdmin && view === 'global-observability') return true;
-  if (!ctx.isAdmin && (view === 'auto-updates' || view === 'scheduled-ops')) return true;
-  if (!ctx.can('node:read') && view === 'fleet') return true;
-  if (!ctx.can('node:read') && view === 'networking') return true;
-  if (view === 'host-console') {
-    return !ctx.can('system:console');
+  if (
+    !ctx.isAdmin &&
+    (view === 'global-observability' || view === 'auto-updates' || view === 'scheduled-ops')
+  ) {
+    return true;
   }
-  if (!ctx.isPaid) {
-    if (view === 'audit-log') return true;
-  } else {
-    if (view === 'audit-log' && !ctx.can('system:audit')) return true;
-  }
+  if (!ctx.can('node:read') && (view === 'fleet' || view === 'networking')) return true;
+  if (view === 'host-console') return !ctx.can('system:console');
+  if (view === 'audit-log') return !ctx.can('system:audit');
   return false;
 }
 
@@ -64,8 +52,8 @@ export function isViewCapabilityLocked(view: ActiveView, ctx: ReachabilityContex
 export function isFleetTabHidden(tab: FleetTab, ctx: ReachabilityContext): boolean {
   if (!authzReady(ctx)) return false;
   if (tab === 'container-labels' && !ctx.containerLabelsEnabled) return true;
-  // Defer experimental hide until ready so deep links survive cold load.
-  if ((tab === 'routing' || tab === 'secrets') && experimentalDiscoveryReady(ctx) && !ctx.experimental) {
+  // Defer experimental hide until /meta settles so deep links survive cold load.
+  if ((tab === 'routing' || tab === 'secrets') && ctx.experimentalReady && !ctx.experimental) {
     return true;
   }
   return false;
@@ -81,11 +69,9 @@ export function isSettingsSectionHidden(section: SectionId, ctx: ReachabilityCon
     isPaid: ctx.isPaid,
     can: ctx.can,
   };
-  if (!isItemVisible(item, visibility)) return true;
-  if (isItemLocked(item, visibility)) return true;
   // fleet-mesh stays reachable: snapshot_documentation lives there even when
-  // Mesh discovery is off.
-  return false;
+  // Mesh discovery is off (registry does not experimental-gate it).
+  return !isItemVisible(item, visibility) || isItemLocked(item, visibility);
 }
 
 /** Normalize a hidden view to dashboard on the active node. */

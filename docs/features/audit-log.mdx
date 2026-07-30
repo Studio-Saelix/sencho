@@ -1,10 +1,10 @@
 ---
 title: Audit Log
-description: Track every mutating action on your Sencho instance with a searchable, exportable trail for team accountability.
+description: Track every mutating action on your Sencho instance with a searchable trail for team accountability; export and extended retention on Admiral.
 ---
 
 <Note>
-  Community keeps a rolling 14-day recent-activity audit API window, but has no **Audit** tab in navigation to browse it. The Audit navigation view, CSV and JSON export, anomaly detection, and configurable retention beyond the recent window all require a Sencho **Admiral** license.
+  Audit requires the `system:audit` permission (Admin, or Auditor on Admiral). Community shows the rolling 14-day recent-activity window. Admiral adds the 24h signal rail, CSV/JSON export, anomaly detection, and configurable retention beyond that window.
 </Note>
 
 <Note>
@@ -66,21 +66,25 @@ Expanding a row in the Table view reveals additional detail:
 
 ## Viewing the audit log
 
-The **Audit** view in navigation is an Admiral governance surface: the tab itself only appears on an Admiral license, and Community accounts have no navigation entry point to Audit at all, though the underlying recent-activity API stays reachable directly. On Admiral, the tab is further limited to users whose role grants the `system:audit` permission, which by default means **Admin** or **Auditor**.
+The **Audit** tab appears for any signed-in user whose role grants the `system:audit` permission (by default **Admin**, and **Auditor** when that role is available). Community shows the last 14 days of activity. Admiral shows the full retained history; retention defaults to 90 days and is configurable up to 365.
 
-Navigate to the **Audit** tab in the top navigation when it is available for your role and plan. The feed then shows your full retained history rather than any fixed lookback window; retention defaults to 90 days and is configurable up to 365.
+Navigate to the **Audit** tab in the top navigation when it is available for your role.
 
 The page has two views, toggled from the segmented control in the card header: **Stream** (default) and **Table**. The card subtitle reports the total number of entries that match the current filters.
 
 ### Stream view
 
-Stream gives you an at-a-glance read on activity. A signal rail at the top summarizes the last 24 hours across four tiles, and the feed below groups entries by day with severity dots, relative times, and inline anomaly callouts.
+Stream gives you an at-a-glance read on activity. The feed groups entries by day with severity dots and relative times.
+
+<Note>
+  The 24h signal rail and inline anomaly callouts require a Sencho **Admiral** license.
+</Note>
 
 <Frame>
   <img src="/images/audit-log/audit-stream.png" alt="Audit Log Stream view with the four-tile signal rail (Events 53 +218% vs 7d avg, Actors 2, Failure rate 0%, Peak hour 21:00) above a day-banded chronological feed of admin POST and DELETE entries, including a first seen anomaly flag on one entry." />
 </Frame>
 
-**Signal rail tiles:**
+**Signal rail tiles (Admiral):**
 
 | Tile | What it shows |
 |------|---------------|
@@ -105,7 +109,7 @@ Table keeps the full-featured detail grid for power users: exact timestamps, met
   <img src="/images/audit-log/audit-log-expanded.png" alt="Audit Log Table view with the second row expanded to reveal Request Path /api/webhooks/4, IP Address ::ffff:203.0.113.10, Node ID 1, and Entry ID #2472 in a four-cell detail strip." />
 </Frame>
 
-Both views share the **Refresh** button and the **Export** dropdown in the card header, and both paginate at 50 entries per page with chevron controls at the bottom of the feed or table.
+Both views share the **Refresh** button in the card header and paginate at 50 entries per page with chevron controls at the bottom of the feed or table. On Admiral, both views also share the **Export** dropdown.
 
 ## Anomaly detection
 
@@ -190,7 +194,7 @@ Sensitive database values (such as remote node API tokens) are encrypted at rest
 
 <AccordionGroup>
   <Accordion title="The Audit tab is missing from the navigation">
-    The Audit tab is an Admiral governance view: it only appears on an Admiral license, and on Community it is not shown at all, regardless of role. On Admiral, the tab is further limited to users whose role grants the `system:audit` permission, by default **Admin** or **Auditor**. If you are on Admiral but signed in as a Deployer or Viewer, ask an admin to assign you the Auditor role from **Settings · Users**. The recent-activity API stays reachable on Community even without a navigation entry point to it.
+    The Audit tab appears only for users with the `system:audit` permission (by default **Admin**, or **Auditor** when that role is available). If you are signed in as a Viewer, Deployer, or Node Admin, ask an admin to grant you a role that includes audit access. On Community, Admin is the role that can open Audit; the Auditor role requires Admiral to assign.
   </Accordion>
   <Accordion title="Stream view shows everything but I want to filter to a specific user, action, or date">
     Filters live in **Table view only**. Toggle the segmented control in the card header from **Stream** to **Table** and the search box, method dropdown, and From / To date pickers will appear above the grid. Switching back to Stream clears the filter strip but does not remember the last filter.
@@ -202,6 +206,6 @@ Sensitive database values (such as remote node API tokens) are encrypted at rest
     Each export is capped at 10,000 entries. If your filter selects more than that, narrow the date range using the **From** and **To** pickers and download in chunks. The cap protects the API from generating very large CSVs in a single response; for full archives, schedule periodic exports from your own tooling.
   </Accordion>
   <Accordion title="Old entries vanished even though I never deleted anything">
-    Cleanup runs automatically against the **Audit log** retention value in **Settings · Operations · Data Retention** (default 90 days). Entries older than the configured window are pruned on the next maintenance tick. Increase the value (up to 365 days) before the next cleanup runs to retain a longer history; the change applies forward only and cannot bring back already-pruned entries.
+    On Community, the list shows only the last 14 days of activity, so older rows are not returned even when they still exist in the database. On Admiral, cleanup also runs against the **Audit log** retention value in **Settings · Operations · Data Retention** (default 90 days). Entries older than the configured window are pruned on the next maintenance tick. Increase the value (up to 365 days) before the next cleanup runs to retain a longer history; the change applies forward only and cannot bring back already-pruned entries.
   </Accordion>
 </AccordionGroup>
