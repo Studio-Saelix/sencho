@@ -451,6 +451,7 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
                                         className="h-7 w-7 text-muted-foreground hover:text-destructive shrink-0"
                                         onClick={() => alert.id && setConfirmDeleteId(alert.id)}
                                         disabled={isLoading}
+                                        aria-label="Delete alert"
                                     >
                                         <Trash2 className="h-4 w-4" strokeWidth={1.5} />
                                     </Button>
