@@ -60,6 +60,8 @@ function mockPaidAdmin() {
   mockLicense(true);
 }
 
+// Synthetic gate-isolation helper: omits system:audit so tests can assert the
+// Audit hide path. Real Admin always includes system:audit in the permission matrix.
 function mockCommunityAdmin() {
   mockAuth(true, (p) => p === 'system:console' || p === 'node:read');
   mockLicense(false);
