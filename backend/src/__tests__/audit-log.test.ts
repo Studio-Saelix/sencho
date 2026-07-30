@@ -33,7 +33,7 @@ beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
 
-  // Mock LicenseService to return the paid tier for audit log access
+  // Default suite tier is paid so stats/export/anomaly tests pass; Community cases override.
   const { LicenseService } = await import('../services/LicenseService');
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
 
@@ -419,10 +419,14 @@ describe('DatabaseService audit methods', () => {
 
 // ---- API endpoint tests ----
 
+async function mockCommunityTier(): Promise<void> {
+  const { LicenseService } = await import('../services/LicenseService');
+  vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+}
+
 describe('GET /api/audit-log', () => {
   it('returns 200 for a Community admin (recent-activity window, no tier gate)', async () => {
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    await mockCommunityTier();
 
     const res = await request(app)
       .get('/api/audit-log')
@@ -431,16 +435,31 @@ describe('GET /api/audit-log', () => {
     expect(Array.isArray(res.body.entries)).toBe(true);
   });
 
-  it('returns 403 for viewer role (no system:audit permission)', async () => {
+  it('returns 200 for a Community auditor (system:audit without paid tier)', async () => {
+    await mockCommunityTier();
+
     const db = DatabaseService.getInstance();
-    db.addUser({ username: 'vieweraudit', password_hash: 'hash', role: 'viewer' });
-    const viewerToken = authToken('vieweraudit', 'viewer');
+    db.addUser({ username: 'communityauditor', password_hash: 'hash', role: 'auditor' });
 
     const res = await request(app)
       .get('/api/audit-log')
-      .set('Authorization', `Bearer ${viewerToken}`);
-    expect(res.status).toBe(403);
+      .set('Authorization', `Bearer ${authToken('communityauditor', 'auditor')}`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.entries)).toBe(true);
   });
+
+  it.each(['viewer', 'deployer', 'node-admin'] as const)(
+    'returns 403 for %s role (no system:audit permission)',
+    async (role) => {
+      const username = `${role.replace(/-/g, '')}audit`;
+      DatabaseService.getInstance().addUser({ username, password_hash: 'hash', role });
+
+      const res = await request(app)
+        .get('/api/audit-log')
+        .set('Authorization', `Bearer ${authToken(username, role)}`);
+      expect(res.status).toBe(403);
+    },
+  );
 
   it('returns paginated results for admin with correct structure', async () => {
     const res = await request(app)
@@ -575,6 +594,15 @@ describe('GET /api/audit-log', () => {
 describe('GET /api/audit-log (Community recent-activity window)', () => {
   const windowUser = 'communitywindowuser';
 
+  async function communityWindowSearch(queryExtra = ''): Promise<string[]> {
+    await mockCommunityTier();
+    const res = await request(app)
+      .get(`/api/audit-log?search=${windowUser}&limit=100${queryExtra}`)
+      .set('Authorization', `Bearer ${adminToken()}`);
+    expect(res.status).toBe(200);
+    return res.body.entries.map((e: { summary: string }) => e.summary);
+  }
+
   it('clamps Community results to the last 14 days', async () => {
     const db = DatabaseService.getInstance();
     const now = Date.now();
@@ -589,47 +617,26 @@ describe('GET /api/audit-log (Community recent-activity window)', () => {
       status_code: 200, node_id: null, ip_address: '127.0.0.1', summary: 'recent windowed entry',
     });
 
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
-    const res = await request(app)
-      .get(`/api/audit-log?search=${windowUser}&limit=100`)
-      .set('Authorization', `Bearer ${adminToken()}`);
-
-    expect(res.status).toBe(200);
-    const summaries = res.body.entries.map((e: { summary: string }) => e.summary);
+    const summaries = await communityWindowSearch();
     expect(summaries).toContain('recent windowed entry');
     expect(summaries).not.toContain('old windowed entry');
   });
 
   it('clamps even when a Community caller passes an explicit from older than the window', async () => {
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
     const explicitOldFrom = Date.now() - 30 * 24 * 60 * 60 * 1000;
-    const res = await request(app)
-      .get(`/api/audit-log?search=${windowUser}&from=${explicitOldFrom}&limit=100`)
-      .set('Authorization', `Bearer ${adminToken()}`);
-
-    expect(res.status).toBe(200);
-    const summaries = res.body.entries.map((e: { summary: string }) => e.summary);
+    const summaries = await communityWindowSearch(`&from=${explicitOldFrom}`);
     expect(summaries).toContain('recent windowed entry');
     expect(summaries).not.toContain('old windowed entry');
   });
 
   it('does not let a non-numeric from lift the Community window clamp', async () => {
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
-    const res = await request(app)
-      .get(`/api/audit-log?search=${windowUser}&from=abc&limit=100`)
-      .set('Authorization', `Bearer ${adminToken()}`);
-
-    expect(res.status).toBe(200);
-    const summaries = res.body.entries.map((e: { summary: string }) => e.summary);
+    const summaries = await communityWindowSearch('&from=abc');
     expect(summaries).toContain('recent windowed entry');
     expect(summaries).not.toContain('old windowed entry');
   });
 
   it('paid tier still sees entries older than the Community window', async () => {
-    // The suite default mock is the paid tier (no clamp).
+    // Suite default mock is paid (no clamp).
     const res = await request(app)
       .get(`/api/audit-log?search=${windowUser}&limit=100`)
       .set('Authorization', `Bearer ${adminToken()}`);
@@ -640,8 +647,7 @@ describe('GET /api/audit-log (Community recent-activity window)', () => {
   });
 
   it('does not annotate anomalies for Community even when with_anomalies=1', async () => {
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    await mockCommunityTier();
     const res = await request(app)
       .get('/api/audit-log?with_anomalies=1&limit=5')
       .set('Authorization', `Bearer ${adminToken()}`);
@@ -654,13 +660,37 @@ describe('GET /api/audit-log (Community recent-activity window)', () => {
 });
 
 describe('GET /api/audit-log/stats', () => {
+  it('returns 200 for an Admiral auditor (system:audit + paid)', async () => {
+    DatabaseService.getInstance().addUser({
+      username: 'admiralauditorstats', password_hash: 'hash', role: 'auditor',
+    });
+
+    const res = await request(app)
+      .get('/api/audit-log/stats')
+      .set('Authorization', `Bearer ${authToken('admiralauditorstats', 'auditor')}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('events_24h');
+  });
+
   it('returns 403 without a paid license', async () => {
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    await mockCommunityTier();
 
     const res = await request(app)
       .get('/api/audit-log/stats')
       .set('Authorization', `Bearer ${adminToken()}`);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
+
+  it('returns 403 for a Community auditor (permission without paid)', async () => {
+    await mockCommunityTier();
+    DatabaseService.getInstance().addUser({
+      username: 'communityauditorstats', password_hash: 'hash', role: 'auditor',
+    });
+
+    const res = await request(app)
+      .get('/api/audit-log/stats')
+      .set('Authorization', `Bearer ${authToken('communityauditorstats', 'auditor')}`);
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('PAID_REQUIRED');
   });
@@ -682,13 +712,37 @@ describe('GET /api/audit-log/stats', () => {
 });
 
 describe('GET /api/audit-log/export', () => {
+  it('returns 200 for an Admiral auditor (system:audit + paid)', async () => {
+    DatabaseService.getInstance().addUser({
+      username: 'admiralauditorexport', password_hash: 'hash', role: 'auditor',
+    });
+
+    const res = await request(app)
+      .get('/api/audit-log/export?format=json')
+      .set('Authorization', `Bearer ${authToken('admiralauditorexport', 'auditor')}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/json/);
+  });
+
   it('returns 403 without a paid license', async () => {
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValueOnce('community');
+    await mockCommunityTier();
 
     const res = await request(app)
       .get('/api/audit-log/export?format=json')
       .set('Authorization', `Bearer ${adminToken()}`);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PAID_REQUIRED');
+  });
+
+  it('returns 403 for a Community auditor (permission without paid)', async () => {
+    await mockCommunityTier();
+    DatabaseService.getInstance().addUser({
+      username: 'communityauditorexport', password_hash: 'hash', role: 'auditor',
+    });
+
+    const res = await request(app)
+      .get('/api/audit-log/export?format=json')
+      .set('Authorization', `Bearer ${authToken('communityauditorexport', 'auditor')}`);
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('PAID_REQUIRED');
   });

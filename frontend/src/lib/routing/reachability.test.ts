@@ -25,13 +25,15 @@ function ctx(over: Partial<ReachabilityContext> = {}): ReachabilityContext {
 }
 
 describe('reachability', () => {
-  it('does not hide views while authz is loading', () => {
-    const loading = ctx({ permissionsStatus: 'loading' });
+  it('does not hide views while authz is loading or failed', () => {
+    const loading = ctx({
+      permissionsStatus: 'loading',
+      can: () => false,
+      isPaid: false,
+    });
     expect(authzReady(loading)).toBe(false);
     expect(isViewHidden('audit-log', loading)).toBe(false);
-  });
 
-  it('keeps deep links stable when permission metadata fails', () => {
     const failed = ctx({ permissionsStatus: 'error', can: () => false, isAdmin: false });
     expect(authzReady(failed)).toBe(false);
     expect(isViewHidden('fleet', failed)).toBe(false);
@@ -51,24 +53,20 @@ describe('reachability', () => {
     expect(isViewHidden('scheduled-ops', viewer)).toBe(true);
   });
 
-  it('hides fleet without node:read when ready', () => {
-    const noFleet = ctx({ can: () => false });
-    expect(isViewHidden('fleet', noFleet)).toBe(true);
-    expect(isViewHidden('networking', noFleet)).toBe(true);
+  it('hides fleet and networking without node:read when ready', () => {
+    const noNodeRead = ctx({ can: () => false });
+    expect(isViewHidden('fleet', noNodeRead)).toBe(true);
+    expect(isViewHidden('networking', noNodeRead)).toBe(true);
   });
 
-  it('preserves host-console when authz is not ready', () => {
+  it('gates host-console on system:console only (any tier, any experimental state)', () => {
     const licenseError = ctx({ licenseStatus: 'error', can: (a) => a === 'system:console' });
     expect(isViewHidden('host-console', licenseError)).toBe(false);
-  });
 
-  it('hides host-console without system:console when ready', () => {
     const noConsole = ctx({ can: () => false, isPaid: false, experimental: false });
     expect(isViewHidden('host-console', noConsole)).toBe(true);
     expect(normalizeHiddenView('host-console', noConsole)).toBe('dashboard');
-  });
 
-  it('keeps host-console for system:console regardless of tier or experimental', () => {
     const community = ctx({
       isPaid: false,
       experimental: false,
@@ -76,6 +74,18 @@ describe('reachability', () => {
       can: (a) => a === 'system:console',
     });
     expect(isViewHidden('host-console', community)).toBe(false);
+  });
+
+  it('gates audit-log on system:audit only (Community and paid)', () => {
+    expect(
+      isViewHidden('audit-log', ctx({ isPaid: false, can: (a) => a === 'system:audit' })),
+    ).toBe(false);
+
+    const noAuditCommunity = ctx({ isPaid: false, can: () => false });
+    expect(isViewHidden('audit-log', noAuditCommunity)).toBe(true);
+    expect(normalizeHiddenView('audit-log', noAuditCommunity)).toBe('dashboard');
+
+    expect(isViewHidden('audit-log', ctx({ isPaid: true, can: () => false }))).toBe(true);
   });
 
   it('hides routing and secrets fleet tabs only after experimentalReady when off', () => {

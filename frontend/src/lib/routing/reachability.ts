@@ -39,18 +39,16 @@ export function experimentalDiscoveryReady(ctx: ReachabilityContext): boolean {
 export function isViewHidden(view: ActiveView, ctx: ReachabilityContext): boolean {
   if (!authzReady(ctx)) return false;
   if (ctx.isRemote && HUB_ONLY_VIEWS.has(view)) return true;
-  if (!ctx.isAdmin && view === 'global-observability') return true;
-  if (!ctx.isAdmin && (view === 'auto-updates' || view === 'scheduled-ops')) return true;
-  if (!ctx.can('node:read') && view === 'fleet') return true;
-  if (!ctx.can('node:read') && view === 'networking') return true;
-  if (view === 'host-console') {
-    return !ctx.can('system:console');
+  if (
+    !ctx.isAdmin &&
+    (view === 'global-observability' || view === 'auto-updates' || view === 'scheduled-ops')
+  ) {
+    return true;
   }
-  if (!ctx.isPaid) {
-    if (view === 'audit-log') return true;
-  } else {
-    if (view === 'audit-log' && !ctx.can('system:audit')) return true;
-  }
+  if (!ctx.can('node:read') && (view === 'fleet' || view === 'networking')) return true;
+  if (view === 'host-console') return !ctx.can('system:console');
+  // Permission-driven on Community and Admiral (14-day window vs paid depth is in-view).
+  if (view === 'audit-log') return !ctx.can('system:audit');
   return false;
 }
 
