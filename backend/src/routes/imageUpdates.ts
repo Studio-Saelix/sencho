@@ -19,8 +19,7 @@ import { NotificationService } from '../services/NotificationService';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { HealthGateService } from '../services/HealthGateService';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin } from '../middleware/tierGates';
-import { requirePermission } from '../middleware/permissions';
+import { checkPermission, requirePermission, type PermissionAction } from '../middleware/permissions';
 import { buildPolicyGateOptions } from '../helpers/policyGate';
 import { FLEET_UPDATE_CACHE_KEY, invalidateFleetUpdateCache } from '../helpers/fleetUpdateCache';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -95,6 +94,31 @@ imageUpdatesRouter.post('/refresh', authMiddleware, (req: Request, res: Response
   } catch (error) {
     console.error('Failed to trigger image update refresh:', error);
     res.status(500).json({ error: 'Failed to trigger refresh' });
+  }
+});
+
+// Per-stack manual recheck, distinct from the node-wide /refresh above. Reuses
+// the same registry probe ImageUpdateService runs after an applied update.
+imageUpdatesRouter.post('/refresh/:stackName', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  const stackName = req.params.stackName as string;
+  if (!isValidStackName(stackName)) {
+    res.status(400).json({ error: 'Invalid stack name' });
+    return;
+  }
+  if (!requirePermission(req, res, 'stack:deploy', 'stack', stackName)) return;
+  try {
+    if (!ImageUpdateService.isChecksEnabled()) {
+      res.status(409).json({
+        enabled: false,
+        error: 'Image update detection is disabled for this node.',
+      });
+      return;
+    }
+    const result = await ImageUpdateService.getInstance().recheckStack(req.nodeId, stackName);
+    res.json(result);
+  } catch (error) {
+    console.error('Failed to recheck stack for image updates:', error);
+    res.status(500).json({ error: 'Failed to recheck stack for image updates' });
   }
 });
 
@@ -210,7 +234,6 @@ imageUpdatesRouter.put('/enabled', authMiddleware, (req: Request, res: Response)
 });
 
 imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   try {
     const result = await CacheService.getInstance().getOrFetch<Record<number, Record<string, boolean>>>(
       FLEET_UPDATE_CACHE_KEY,
@@ -274,7 +297,7 @@ imageUpdatesRouter.get('/fleet', authMiddleware, async (req: Request, res: Respo
 });
 
 imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(_req, res)) return;
+  if (!requirePermission(_req, res, 'node:manage')) return;
 
   const db = DatabaseService.getInstance();
   const nodes = db.getNodes();
@@ -357,8 +380,29 @@ imageUpdatesRouter.post('/fleet/refresh', authMiddleware, async (_req: Request, 
  */
 export const autoUpdateRouter = Router();
 
+/**
+ * Deny the whole request on the first stack that fails `action`, writing the
+ * 403 itself. Used to pre-check every resolved target before any auto-update
+ * work starts, so a denied stack in a bulk request never leaves partial work
+ * behind.
+ */
+function requireExactStacks(
+  req: Request,
+  res: Response,
+  action: PermissionAction,
+  stackNames: Iterable<string>,
+  nodeId: number,
+): boolean {
+  for (const stackName of stackNames) {
+    if (!checkPermission(req, action, 'stack', stackName, nodeId)) {
+      res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+      return false;
+    }
+  }
+  return true;
+}
+
 autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   try {
     // Honor the node-scoped image-update detection opt-out before any work.
     if (!ImageUpdateService.isChecksEnabled()) {
@@ -393,6 +437,12 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
     } else if (typeof target === 'string' && target.length > 0) {
       console.log(`[AutoUpdate] Execute requested: target="${sanitizeForLog(target)}"`);
       if (target === '*') {
+        // The wildcard expands to every stack on the node, including a set
+        // this handler cannot enumerate permission against ahead of time
+        // when it turns out to be empty. Require global stack:deploy rather
+        // than a scoped grant, so an unauthorized caller cannot reach the
+        // "no stacks found" no-op without ever being permission-checked.
+        if (!requirePermission(req, res, 'stack:deploy')) return;
         stackNames = await FileSystemService.getInstance(req.nodeId).getStacks();
         if (stackNames.length === 0) {
           res.json({ result: 'No stacks found on node; skipped.' });
@@ -409,6 +459,11 @@ autoUpdateRouter.post('/execute', authMiddleware, async (req: Request, res: Resp
       res.status(400).json({ error: 'Missing "target" (stack name or "*") or "targets" (stack name array)' });
       return;
     }
+
+    // Pre-check every resolved target before any work starts: a denied stack
+    // anywhere in the set (including a "*" expansion) fails the whole request
+    // rather than running some stacks and skipping others.
+    if (!requireExactStacks(req, res, 'stack:deploy', stackNames, req.nodeId)) return;
 
     const docker = DockerController.getInstance(req.nodeId);
     const imageUpdateService = ImageUpdateService.getInstance();

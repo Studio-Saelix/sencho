@@ -6,13 +6,21 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcrypt';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import jwt from 'jsonwebtoken';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
 
 let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let adminCookie: string;
 let viewerCookie: string;
+
+/** Sign a JWT for an already-seeded user, using their live token_version. */
+function userToken(username: string): string {
+  const user = DatabaseService.getInstance().getUserByUsername(username);
+  if (!user) throw new Error(`missing test user ${username}`);
+  return jwt.sign({ username, role: user.role, tv: user.token_version }, TEST_JWT_SECRET, { expiresIn: '5m' });
+}
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
@@ -29,6 +37,12 @@ beforeAll(async () => {
   const viewerRes = await request(app).post('/api/auth/login').send({ username: 'iu-viewer', password: 'viewerpass' });
   const cookies = viewerRes.headers['set-cookie'] as string | string[];
   viewerCookie = Array.isArray(cookies) ? cookies[0] : cookies;
+
+  const deployerHash = await bcrypt.hash('deployerpass', 1);
+  DatabaseService.getInstance().addUser({ username: 'iu-deployer', password_hash: deployerHash, role: 'deployer' });
+
+  const nodeAdminHash = await bcrypt.hash('nodeadminpass', 1);
+  DatabaseService.getInstance().addUser({ username: 'iu-node-admin', password_hash: nodeAdminHash, role: 'node-admin' });
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -95,6 +109,57 @@ describe('POST /api/image-updates/refresh', () => {
     // or 429 are acceptable; 4xx/5xx would indicate a regression.
     const res = await request(app).post('/api/image-updates/refresh').set('Cookie', adminCookie);
     expect([200, 429]).toContain(res.status);
+  });
+});
+
+describe('POST /api/image-updates/refresh/:stackName', () => {
+  it('rejects unauthenticated requests with 401', async () => {
+    const res = await request(app).post('/api/image-updates/refresh/some-stack');
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects an invalid stack name with 400', async () => {
+    const res = await request(app)
+      .post(`/api/image-updates/refresh/${encodeURIComponent('bad name')}`)
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid stack name/);
+  });
+
+  it('rejects a role without stack:deploy with 403 PERMISSION_DENIED', async () => {
+    const res = await request(app)
+      .post('/api/image-updates/refresh/per-stack-refresh')
+      .set('Cookie', viewerCookie);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+  });
+
+  it('allows a Deployer to trigger a per-stack recheck', async () => {
+    const { ImageUpdateService } = await import('../services/ImageUpdateService');
+    const nodeId = DatabaseService.getInstance().getDefaultNode()!.id!;
+    const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack')
+      .mockResolvedValue({ outcome: 'cleared', warning: null });
+    try {
+      const res = await request(app)
+        .post('/api/image-updates/refresh/per-stack-refresh')
+        .set('Authorization', `Bearer ${userToken('iu-deployer')}`);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ outcome: 'cleared', warning: null });
+      expect(recheckSpy).toHaveBeenCalledWith(nodeId, 'per-stack-refresh');
+    } finally {
+      recheckSpy.mockRestore();
+    }
+  });
+
+  it('returns 409 with enabled false when checks are disabled', async () => {
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '0');
+    const res = await request(app)
+      .post('/api/image-updates/refresh/per-stack-refresh')
+      .set('Cookie', adminCookie);
+    expect(res.status).toBe(409);
+    expect(res.body.enabled).toBe(false);
+    expect(res.body.error).toMatch(/disabled/i);
+    DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '1');
   });
 });
 
@@ -309,11 +374,12 @@ describe('GET /api/image-updates/fleet', () => {
     expect(res.status).toBe(401);
   });
 
-  it('rejects non-admin users with 403', async () => {
-    // The cross-node aggregation is part of the admin-only readiness surface;
-    // the single-node GET / endpoint stays open for the sidebar update dot.
+  it('allows a non-admin authenticated user (auth-only, matching GET / and /detail)', async () => {
+    // The cross-node aggregation used to be admin-only; it now matches the
+    // auth-only read model shared with GET /, /detail, and /status.
     const res = await request(app).get('/api/image-updates/fleet').set('Cookie', viewerCookie);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
+    expect(res.body).toBeInstanceOf(Object);
   });
 
   it('returns the fleet-wide aggregation map', async () => {
@@ -332,6 +398,22 @@ describe('POST /api/image-updates/fleet/refresh', () => {
   it('rejects non-admin users with 403', async () => {
     const res = await request(app).post('/api/image-updates/fleet/refresh').set('Cookie', viewerCookie);
     expect(res.status).toBe(403);
+  });
+
+  it('rejects a Deployer with 403 PERMISSION_DENIED (requires node:manage)', async () => {
+    const res = await request(app)
+      .post('/api/image-updates/fleet/refresh')
+      .set('Authorization', `Bearer ${userToken('iu-deployer')}`);
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+  });
+
+  it('allows a Node Admin (holds node:manage)', async () => {
+    const res = await request(app)
+      .post('/api/image-updates/fleet/refresh')
+      .set('Authorization', `Bearer ${userToken('iu-node-admin')}`);
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.triggered)).toBe(true);
   });
 
   it('returns triggered/rateLimited/failed arrays for admin caller', async () => {
@@ -376,12 +458,80 @@ describe('POST /api/auto-update/execute', () => {
     expect(res.status).toBe(401);
   });
 
-  it('rejects non-admin users with 403', async () => {
+  it('rejects a role without stack:deploy with 403 PERMISSION_DENIED', async () => {
+    const res = await request(app)
+      .post('/api/auto-update/execute')
+      .set('Cookie', viewerCookie)
+      .send({ target: 'execute-authz-stack' });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+  });
+
+  it('rejects a role without stack:deploy on target="*" even when the node has no stacks', async () => {
+    // On a fresh test instance the "*" expansion resolves to zero stacks, which
+    // would otherwise short-circuit into a "no stacks found" 200 before any
+    // per-stack permission check has anything to iterate over. The wildcard
+    // case requires global stack:deploy up front specifically to close that gap.
     const res = await request(app)
       .post('/api/auto-update/execute')
       .set('Cookie', viewerCookie)
       .send({ target: '*' });
     expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+  });
+
+  it('allows a Deployer to execute a single-stack target', async () => {
+    const res = await request(app)
+      .post('/api/auto-update/execute')
+      .set('Authorization', `Bearer ${userToken('iu-deployer')}`)
+      .send({ target: 'deployer-exec-stack' });
+    expect(res.status).toBe(200);
+    expect(typeof res.body.result).toBe('string');
+  });
+
+  it('denies a Deployer stripped of stack:deploy with 403 PERMISSION_DENIED', async () => {
+    const { ROLE_PERMISSIONS } = await import('../middleware/permissions');
+    const original = ROLE_PERMISSIONS.deployer;
+    ROLE_PERMISSIONS.deployer = original.filter((p) => p !== 'stack:deploy');
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Authorization', `Bearer ${userToken('iu-deployer')}`)
+        .send({ target: 'deployer-exec-stack' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PERMISSION_DENIED');
+    } finally {
+      ROLE_PERMISSIONS.deployer = original;
+    }
+  });
+
+  it('denies the whole bulk request when one target is unauthorized, with no partial execution', async () => {
+    // Scoped user: global viewer role (no stack:deploy anywhere) plus a
+    // deployer role assignment scoped to "bulk-allowed" only. Requesting
+    // ["bulk-allowed", "bulk-denied"] must deny the entire call on the second
+    // stack and never touch either stack's containers.
+    const db = DatabaseService.getInstance();
+    const nodeId = db.getDefaultNode()!.id!;
+    const hash = await bcrypt.hash('scopedpass', 1);
+    const scopedUserId = db.addUser({ username: 'iu-bulk-scoped', password_hash: hash, role: 'viewer' });
+    db.addRoleAssignment({ user_id: scopedUserId, role: 'deployer', resource_type: 'stack', resource_id: 'bulk-allowed', node_id: nodeId });
+
+    const DockerController = (await import('../services/DockerController')).default;
+    const containersSpy = vi.spyOn(DockerController.prototype, 'getContainersByStack');
+
+    try {
+      const res = await request(app)
+        .post('/api/auto-update/execute')
+        .set('Authorization', `Bearer ${userToken('iu-bulk-scoped')}`)
+        .send({ targets: ['bulk-allowed', 'bulk-denied'] });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PERMISSION_DENIED');
+      expect(containersSpy).not.toHaveBeenCalled();
+    } finally {
+      containersSpy.mockRestore();
+      db.deleteRoleAssignmentsByUser(scopedUserId);
+      db.deleteUser(scopedUserId);
+    }
   });
 
   it('serves a community-licensed admin (no paid gate)', async () => {
