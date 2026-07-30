@@ -11,6 +11,7 @@ import { cn } from '@/lib/utils';
 import type { FleetNode } from '@/components/FleetView/types';
 import { type Label, type LabelColor, LABEL_COLORS } from '@/components/label-types';
 import { ResultsList, type ResultRow } from '../ResultsList';
+import { useAuth } from '@/context/AuthContext';
 
 interface NodeStackResult { stackName: string; success: boolean; error?: string }
 interface AssignNodeResult {
@@ -50,6 +51,7 @@ type PreviewNode = { nodeId: number; nodeName: string; willCreate: boolean; stac
 const KICKER = 'font-mono text-[10px] uppercase tracking-[0.18em]';
 
 export function BulkLabelAssignCard({ nodes }: Props) {
+  const { can } = useAuth();
   const [nodeData, setNodeData] = useState<NodeData[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<LabelTemplate | null>(null);
@@ -144,6 +146,10 @@ export function BulkLabelAssignCard({ nodes }: Props) {
     () => Array.from(selected.values()).filter(s => s.size > 0).length,
     [selected],
   );
+  const canApplySelection = useMemo(() =>
+    [...selected].every(([nodeId, stackNames]) =>
+      [...stackNames].every(stackName => can('stack:edit', 'stack', stackName, nodeId))),
+  [selected, can]);
 
   function toggleStack(nodeId: number, stackName: string) {
     setSelected(prev => {
@@ -180,7 +186,7 @@ export function BulkLabelAssignCard({ nodes }: Props) {
   }
 
   async function run() {
-    if (!selectedTemplate || totalSelected === 0) return;
+    if (!selectedTemplate || totalSelected === 0 || !canApplySelection) return;
     const targets = Array.from(selected.entries())
       .filter(([, set]) => set.size > 0)
       .map(([nodeId, set]) => ({ nodeId, stackNames: Array.from(set) }));
@@ -282,7 +288,7 @@ export function BulkLabelAssignCard({ nodes }: Props) {
           label: 'Apply',
           onClick: () => setConfirmOpen(true),
           variant: 'primary',
-          disabled: running || !selectedTemplate || totalSelected === 0,
+          disabled: running || !selectedTemplate || totalSelected === 0 || !canApplySelection,
         }}
         footerContext="Reversible · yes · reassign anytime"
       >

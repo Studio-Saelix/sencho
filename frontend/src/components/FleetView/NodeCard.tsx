@@ -79,10 +79,11 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
     const { nodes: registryNodes } = useNodes();
     const registryNode = registryNodes.find(n => n.id === node.id);
     const isLastLocal = registryNode?.type === 'local' && registryNodes.filter(n => n.type === 'local').length <= 1;
-    const canEdit = Boolean(isAdmin && onEdit && registryNode);
-    const canDelete = Boolean(isAdmin && onDelete && registryNode && !registryNode.is_default && !isLastLocal);
+    const canManageNode = can('node:manage', 'node', String(node.id));
+    const canEdit = Boolean(canManageNode && onEdit && registryNode);
+    const canDelete = Boolean(canManageNode && onDelete && registryNode && !registryNode.is_default && !isLastLocal);
     // Cordon is permission-gated only (node:manage), matching the backend route guard.
-    const canCordon = can('node:manage', 'node', String(node.id));
+    const canCordon = canManageNode;
     const nodeMuteActions = useNodeMuteActions(
         node.id,
         node.name,

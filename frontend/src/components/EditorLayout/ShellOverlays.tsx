@@ -222,7 +222,7 @@ export function ShellOverlays({
       <VulnerabilityScanSheet
         scanId={stackMisconfigScanId}
         onClose={() => setStackMisconfigScanId(null)}
-        canManageSuppressions={isAdmin}
+        canManageSuppressions={can('stack:edit')}
       />
 
       {/* Compose diff preview */}

@@ -141,6 +141,24 @@ describe('checkPermission with node-scoped stack grants', () => {
     );
     for (const a of assignments) db.deleteRoleAssignment(a.id!);
   });
+
+  it('uses an explicit target node for hub-orchestrated stack checks', () => {
+    const db = DatabaseService.getInstance();
+    db.addRoleAssignment({
+      user_id: viewerId,
+      role: 'deployer',
+      resource_type: 'stack',
+      resource_id: 'remote-stack',
+      node_id: otherNodeId,
+    });
+
+    const hubRequest = mockReq({ userId: viewerId, role: 'viewer', nodeId: defaultNodeId });
+    expect(checkPermission(hubRequest, 'stack:deploy', 'stack', 'remote-stack')).toBe(false);
+    expect(checkPermission(hubRequest, 'stack:deploy', 'stack', 'remote-stack', otherNodeId)).toBe(true);
+    expect(checkPermission(hubRequest, 'stack:edit', 'stack', 'remote-stack', otherNodeId)).toBe(false);
+
+    db.deleteRoleAssignmentsByStack(otherNodeId, 'remote-stack');
+  });
 });
 
 describe('scopedActionsForStack with node-scoped grants', () => {

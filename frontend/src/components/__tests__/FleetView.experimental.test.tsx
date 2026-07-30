@@ -11,7 +11,7 @@ vi.mock('@/context/LicenseContext', () => ({
   useLicense: () => ({ isPaid: true }),
 }));
 vi.mock('@/context/AuthContext', () => ({
-  useAuth: () => ({ isAdmin: true }),
+  useAuth: () => ({ isAdmin: true, can: () => true }),
 }));
 vi.mock('@/context/NodeContext', () => ({
   useNodes: () => ({ hasCapability: () => false }),

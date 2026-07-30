@@ -1,5 +1,5 @@
 /**
- * Both scan-export endpoints are available on every tier (admin only, no tier gate):
+ * Both scan-export endpoints are available on every tier with stack:read:
  *   POST /api/security/sbom            -> per-image SBOM artifact
  *   GET  /api/security/scans/:id/sarif -> SARIF for CI / code-scanning ingestion
  */
@@ -55,13 +55,16 @@ describe('POST /api/security/sbom (Community)', () => {
     expect(res.headers['content-disposition']).toContain('nginx_latest.cdx.json');
   });
 
-  it('denies a non-admin (viewer) with 403 (admin gate is the sole guard now)', async () => {
+  it('lets a Community viewer generate an SBOM with stack:read', async () => {
     mockTier('community');
+    const svc = TrivyService.getInstance();
+    vi.spyOn(svc, 'isTrivyAvailable').mockReturnValue(true);
+    vi.spyOn(svc, 'generateSBOM').mockResolvedValue('{"bomFormat":"CycloneDX"}');
     const res = await request(app)
       .post('/api/security/sbom')
       .set('Cookie', viewerCookie)
       .send({ imageRef: 'nginx:latest', format: 'cyclonedx' });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
   });
 });
 
@@ -77,11 +80,11 @@ describe('GET /api/security/scans/:scanId/sarif (Community)', () => {
     expect(res.status).toBe(404);
   });
 
-  it('denies a non-admin (viewer) with 403 (admin gate is the sole guard now)', async () => {
+  it('lets a Community viewer reach SARIF export with stack:read', async () => {
     mockTier('community');
     const res = await request(app)
       .get('/api/security/scans/999999/sarif')
       .set('Cookie', viewerCookie);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
   });
 });

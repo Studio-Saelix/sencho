@@ -127,7 +127,6 @@ export interface StackIdentityHeaderProps {
     safeContainers: ContainerInfo[];
     isRunning: boolean;
     can: ReturnType<typeof useAuth>['can'];
-    isAdmin: boolean;
     trivy: { available: boolean };
     backupInfo: { exists: boolean; timestamp: number | null };
     loadingAction: StackAction | null;
@@ -156,7 +155,6 @@ export function StackIdentityHeader({
     safeContainers,
     isRunning,
     can,
-    isAdmin,
     trivy,
     backupInfo,
     loadingAction,
@@ -206,7 +204,7 @@ export function StackIdentityHeader({
                 const canDeploy = can('stack:deploy', 'stack', stackName, activeNode?.id);
                 const canDelete = can('stack:delete', 'stack', stackName, activeNode?.id);
                 const canRollback = canDeploy && backupInfo.exists;
-                const canScan = trivy.available && isAdmin;
+                const canScan = trivy.available && canDeploy;
                 const canMute = stackMuteActions?.canMute ?? false;
                 const hasOverflowExtras = canRollback || canScan;
                 const hasOverflow = hasOverflowExtras || canDelete || canMute || onOpenMonitor;

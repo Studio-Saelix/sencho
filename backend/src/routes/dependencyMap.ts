@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
+import { requirePermission } from '../middleware/permissions';
 import { DatabaseService } from '../services/DatabaseService';
 import { buildLocalGraph } from '../services/DependencyGraphService';
 
@@ -11,6 +12,7 @@ export const dependencyMapRouter = Router();
  * remotes. Served against the local Docker of whichever node handles it.
  */
 dependencyMapRouter.get('/node-graph', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const nodeId = req.nodeId;
     const name = DatabaseService.getInstance().getNodes().find((n) => n.id === nodeId)?.name ?? 'This node';

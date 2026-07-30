@@ -118,6 +118,7 @@ function mintPilotEnrollment(nodeId: number, req: Request): { token: string; exp
 export const nodesRouter = Router();
 
 nodesRouter.get('/', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'node:read')) return;
   const startedAt = Date.now();
   let outcome: 'ok' | 'error' = 'ok';
   let count = 0;
@@ -140,7 +141,8 @@ nodesRouter.get('/', async (req: Request, res: Response) => {
   }
 });
 
-nodesRouter.get('/scheduling-summary', authMiddleware, (_req: Request, res: Response) => {
+nodesRouter.get('/scheduling-summary', authMiddleware, (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const db = DatabaseService.getInstance();
     const scheduleSummary = db.getNodeSchedulingSummary();
@@ -182,6 +184,7 @@ nodesRouter.get('/scheduling-summary', authMiddleware, (_req: Request, res: Resp
 });
 
 nodesRouter.get('/:id', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'node:read', 'node', req.params.id as string)) return;
   try {
     const id = parseInt(req.params.id as string);
     const node = DatabaseService.getInstance().getNode(id);
@@ -600,6 +603,7 @@ nodesRouter.post('/:id/test', async (req: Request, res: Response) => {
 });
 
 nodesRouter.get('/:id/meta', authMiddleware, async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'node:read', 'node', req.params.id as string)) return;
   const startedAt = Date.now();
   let outcome: 'ok' | 'error' = 'ok';
   let id = NaN;

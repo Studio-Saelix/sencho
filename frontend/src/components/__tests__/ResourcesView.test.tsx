@@ -28,7 +28,7 @@ vi.mock('@/components/ui/toast-store', () => ({
 
 const licenseState = { isPaid: true };
 vi.mock('@/context/LicenseContext', () => ({ useLicense: () => licenseState }));
-vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ isAdmin: true }) }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ isAdmin: true, can: () => true }) }));
 
 const nodesState: { activeNode: { id: number } | null } = { activeNode: { id: 1 } };
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => nodesState }));

@@ -6,8 +6,8 @@ import { StackOpLockService, stackOpSkipMessage } from '../services/StackOpLockS
 import DockerController from '../services/DockerController';
 import { enforcePolicyPreDeploy } from '../services/PolicyEnforcement';
 import { authMiddleware } from '../middleware/auth';
-import { requirePermission } from '../middleware/permissions';
-import { requireAdmin, requireBody } from '../middleware/tierGates';
+import { checkPermission, requirePermission } from '../middleware/permissions';
+import { requireBody } from '../middleware/tierGates';
 import { buildPolicyGateOptions, describePolicyBlock } from '../helpers/policyGate';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import { VALID_LABEL_COLORS, MAX_LABELS_PER_NODE } from '../helpers/constants';
@@ -25,6 +25,7 @@ export { activeBulkActions };
 export const labelsRouter = Router();
 
 labelsRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const nodeId = req.nodeId ?? 0;
     const labels = DatabaseService.getInstance().getLabels(nodeId);
@@ -77,6 +78,7 @@ labelsRouter.post('/', authMiddleware, async (req: Request, res: Response): Prom
 });
 
 labelsRouter.get('/assignments', authMiddleware, async (req: Request, res: Response): Promise<void> => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const nodeId = req.nodeId ?? 0;
     const db = DatabaseService.getInstance();
@@ -166,7 +168,6 @@ labelsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response):
 });
 
 labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   if (!requireBody(req, res)) return;
   try {
     const id = parseIntParam(req, res, 'id', 'label ID');
@@ -187,6 +188,17 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
       return;
     }
 
+    const stackNames = DatabaseService.getInstance().getStacksForLabel(id, nodeId);
+    const fsStacks = await FileSystemService.getInstance(nodeId).getStacks();
+    const fsStackNames = new Set(fsStacks);
+    const validStacks = stackNames.filter(name => fsStackNames.has(name));
+    const deniedStack = validStacks.find(stackName =>
+      !checkPermission(req, 'stack:deploy', 'stack', stackName, nodeId));
+    if (deniedStack) {
+      res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+      return;
+    }
+
     const lockKey = `bulk:${nodeId}`;
     if (activeBulkActions.has(lockKey)) {
       res.status(429).json({ error: 'A bulk action is already running for this node. Please wait.' });
@@ -195,11 +207,6 @@ labelsRouter.post('/:id/action', authMiddleware, async (req: Request, res: Respo
     activeBulkActions.add(lockKey);
 
     try {
-      const stackNames = DatabaseService.getInstance().getStacksForLabel(id, nodeId);
-      const fsStacks = await FileSystemService.getInstance(nodeId).getStacks();
-      const fsStackNames = new Set(fsStacks);
-      const validStacks = stackNames.filter(name => fsStackNames.has(name));
-
       if (isDebugEnabled()) console.debug('[Labels:debug] Bulk action start:', { id, action, nodeId, totalLabeled: stackNames.length, validStacks: validStacks.length, dryRun: isDryRun });
 
       const results: { stackName: string; success: boolean; error?: string; dryRun?: boolean }[] = [];

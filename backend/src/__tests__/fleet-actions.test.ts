@@ -10,22 +10,41 @@ import fs from 'fs';
 import path from 'path';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcrypt';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 
 let tmpDir: string;
 let app: import('express').Express;
 let authHeader: string;
+let scopedAuthHeader: string;
 let LicenseService: typeof import('../services/LicenseService').LicenseService;
+let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
+let scopedUserId: number;
+let defaultNodeId: number;
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ app } = await import('../index'));
   ({ LicenseService } = await import('../services/LicenseService'));
+  ({ DatabaseService } = await import('../services/DatabaseService'));
   const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
   authHeader = `Bearer ${token}`;
+  const db = DatabaseService.getInstance();
+  defaultNodeId = db.getDefaultNode()?.id ?? 1;
+  const hash = await bcrypt.hash('password123', 1);
+  scopedUserId = db.addUser({ username: 'fleet-scoped-operator', password_hash: hash, role: 'viewer' });
+  db.addRoleAssignment({ user_id: scopedUserId, role: 'node-admin', resource_type: 'stack', resource_id: 'allowed-edit', node_id: defaultNodeId });
+  db.addRoleAssignment({ user_id: scopedUserId, role: 'deployer', resource_type: 'stack', resource_id: 'allowed-deploy', node_id: defaultNodeId });
+  const scopedUser = db.getUserByUsername('fleet-scoped-operator')!;
+  scopedAuthHeader = `Bearer ${jwt.sign({ username: scopedUser.username, role: scopedUser.role, tv: scopedUser.token_version }, TEST_JWT_SECRET, { expiresIn: '1m' })}`;
 });
 
-afterAll(() => cleanupTestDb(tmpDir));
+afterAll(() => {
+  const db = DatabaseService.getInstance();
+  db.deleteRoleAssignmentsByUser(scopedUserId);
+  db.deleteUser(scopedUserId);
+  cleanupTestDb(tmpDir);
+});
 
 function mockTier(tier: 'paid' | 'community') {
   vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue(tier);
@@ -234,6 +253,60 @@ describe('Fleet Actions orchestration shape', () => {
       { stackName: 'a', success: false, error: 'Unknown node' },
       { stackName: 'b', success: false, error: 'Unknown node' },
     ]);
+  });
+});
+
+describe('Fleet Actions authorize every target before mutation', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('rejects fleet stop when any confirmed stack lacks stack:deploy', async () => {
+    mockTier('paid');
+    const res = await request(app)
+      .post('/api/fleet/labels/fleet-stop')
+      .set('Authorization', scopedAuthHeader)
+      .send({
+        labelName: 'prod',
+        targets: [{ nodeId: defaultNodeId, stackNames: ['allowed-deploy', 'denied-deploy'] }],
+      });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+  });
+
+  it('does not create a label when bulk assign contains a denied stack', async () => {
+    mockTier('paid');
+    const labelName = 'atomic-bulk-denied';
+    const res = await request(app)
+      .post('/api/fleet/labels/bulk-assign')
+      .set('Authorization', scopedAuthHeader)
+      .send({
+        label: { name: labelName, color: 'teal' },
+        targets: [{ nodeId: defaultNodeId, stackNames: ['allowed-edit', 'denied-edit'] }],
+      });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+    expect(DatabaseService.getInstance().getLabels(defaultNodeId).some(label => label.name === labelName)).toBe(false);
+  });
+
+  it('does not create a label when a local receiver target is denied', async () => {
+    mockTier('paid');
+    const labelName = 'atomic-local-denied';
+    const res = await request(app)
+      .post('/api/fleet-actions/labels/local-assign')
+      .set('Authorization', scopedAuthHeader)
+      .send({ label: { name: labelName, color: 'teal' }, stackNames: ['allowed-edit', 'denied-edit'] });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+    expect(DatabaseService.getInstance().getLabels(defaultNodeId).some(label => label.name === labelName)).toBe(false);
+  });
+
+  it('rejects local stop before work when any confirmed stack is denied', async () => {
+    mockTier('paid');
+    const res = await request(app)
+      .post('/api/fleet-actions/labels/local-stop')
+      .set('Authorization', scopedAuthHeader)
+      .send({ labelName: 'prod', stackNames: ['allowed-deploy', 'denied-deploy'] });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
   });
 });
 

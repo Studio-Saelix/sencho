@@ -2,8 +2,8 @@ import { Router, type Request, type Response } from 'express';
 import DockerController from '../services/DockerController';
 import { FileSystemService } from '../services/FileSystemService';
 import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
-import { requireAdmin } from '../middleware/tierGates';
 import { requirePermission } from '../middleware/permissions';
+import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 
 export const containersRouter = Router();

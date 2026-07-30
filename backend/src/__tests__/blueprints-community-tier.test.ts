@@ -126,13 +126,13 @@ describe('Blueprints on Community tier', () => {
         expect(res.body.code).not.toBe('PAID_REQUIRED');
     });
 
-    it('rejects blueprint mutations for a viewer with ADMIN_REQUIRED', async () => {
+    it('rejects blueprint mutations for a viewer without stack:create', async () => {
         const res = await request(app)
             .post('/api/blueprints')
             .set('Authorization', viewerAuthHeader)
             .send({});
         expect(res.status).toBe(403);
-        expect(res.body.code).toBe('ADMIN_REQUIRED');
+        expect(res.body.code).toBe('PERMISSION_DENIED');
     });
 
     it('lets a Community viewer list blueprints', async () => {

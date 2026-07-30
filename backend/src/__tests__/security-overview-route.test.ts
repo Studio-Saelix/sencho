@@ -459,9 +459,9 @@ describe('GET /api/security/vex/export (Community)', () => {
     expect(res.status).toBe(200);
   });
 
-  it('denies a non-admin (viewer) with 403 (admin gate is the sole guard now)', async () => {
+  it('lets a viewer with stack:read export VEX', async () => {
     const res = await request(app).get('/api/security/vex/export').set('Cookie', viewerCookie);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
   });
 
   it('exports an OpenVEX document from triage decisions', async () => {

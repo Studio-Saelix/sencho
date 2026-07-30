@@ -1,7 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { VolumeBrowserService, isValidVolumeName, PathTraversalError, VolumeNotFoundError, HelperImageError, ExecError } from '../services/VolumeBrowserService';
 import { DatabaseService } from '../services/DatabaseService';
-import { requireAdmin } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { sanitizeForLog } from '../utils/safeLog';
 import { isDebugEnabled } from '../utils/debug';
 
@@ -23,7 +23,7 @@ function mapServiceError(error: unknown, res: Response, fallback: string): Respo
 }
 
 volumesRouter.get('/:name/list', async (req: Request, res: Response) => {
-  if (!requireAdmin(req, res)) return;
+    if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const name = req.params.name as string;
     if (!isValidVolumeName(name)) return res.status(400).json({ error: 'Invalid volume name' });
@@ -42,7 +42,7 @@ volumesRouter.get('/:name/list', async (req: Request, res: Response) => {
 });
 
 volumesRouter.get('/:name/stat', async (req: Request, res: Response) => {
-  if (!requireAdmin(req, res)) return;
+    if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const name = req.params.name as string;
     if (!isValidVolumeName(name)) return res.status(400).json({ error: 'Invalid volume name' });
@@ -55,7 +55,7 @@ volumesRouter.get('/:name/stat', async (req: Request, res: Response) => {
 });
 
 volumesRouter.get('/:name/read', async (req: Request, res: Response) => {
-  if (!requireAdmin(req, res)) return;
+    if (!requirePermission(req, res, 'stack:read')) return;
   const name = req.params.name as string;
   const requestPath = readPathParam(req);
   let outcome: 'success' | 'error' = 'error';

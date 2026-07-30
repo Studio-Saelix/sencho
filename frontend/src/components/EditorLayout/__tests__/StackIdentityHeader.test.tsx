@@ -39,7 +39,6 @@ function renderHeader(over: Partial<ComponentProps<typeof StackIdentityHeader>> 
       safeContainers={CONTAINERS}
       isRunning
       can={() => true}
-      isAdmin
       trivy={{ available: false }}
       backupInfo={{ exists: false, timestamp: null }}
       loadingAction={null}
@@ -113,5 +112,16 @@ describe('StackIdentityHeader', () => {
     await user.click(screen.getByRole('menuitem', { name: 'Monitor' }));
 
     expect(onOpenMonitor).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows stack config scanning to a deployer without requiring Admin', async () => {
+    const user = userEvent.setup();
+    renderHeader({
+      trivy: { available: true },
+      can: (action) => action === 'stack:deploy',
+    });
+
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    expect(screen.getByRole('menuitem', { name: 'Scan config' })).toBeInTheDocument();
   });
 });

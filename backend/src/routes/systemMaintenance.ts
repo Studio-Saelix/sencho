@@ -59,6 +59,7 @@ function rejectIfSelf(kind: 'image' | 'volume' | 'network', id: string, res: Res
 }
 
 systemMaintenanceRouter.get('/orphans', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const dockerController = DockerController.getInstance(req.nodeId);
@@ -350,6 +351,7 @@ systemMaintenanceRouter.post('/prune/estimate', async (req: Request, res: Respon
 });
 
 systemMaintenanceRouter.get('/docker-df', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const df = await DockerController.getInstance(req.nodeId).getDiskUsageClassified(knownStacks);
@@ -374,6 +376,7 @@ systemMaintenanceRouter.get('/container-labels', async (req: Request, res: Respo
 });
 
 systemMaintenanceRouter.get('/resources', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const result = await DockerController.getInstance(req.nodeId).getClassifiedResources(knownStacks);
@@ -385,6 +388,7 @@ systemMaintenanceRouter.get('/resources', async (req: Request, res: Response) =>
 });
 
 systemMaintenanceRouter.get('/images', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const { images } = await DockerController.getInstance(req.nodeId).getClassifiedResources(knownStacks);
@@ -396,6 +400,7 @@ systemMaintenanceRouter.get('/images', async (req: Request, res: Response) => {
 });
 
 systemMaintenanceRouter.get('/volumes', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const { volumes } = await DockerController.getInstance(req.nodeId).getClassifiedResources(knownStacks);
@@ -407,6 +412,7 @@ systemMaintenanceRouter.get('/volumes', async (req: Request, res: Response) => {
 });
 
 systemMaintenanceRouter.get('/networks', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
     const { networks } = await DockerController.getInstance(req.nodeId).getClassifiedResources(knownStacks);
@@ -418,6 +424,7 @@ systemMaintenanceRouter.get('/networks', async (req: Request, res: Response) => 
 });
 
 systemMaintenanceRouter.get('/images/:id', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
   try {
     const rawId = req.params.id as string;
     if (!rawId) return res.status(400).json({ error: 'Invalid image ID format' });
@@ -516,6 +523,7 @@ systemMaintenanceRouter.post('/networks/delete', async (req: Request, res: Respo
 });
 
 systemMaintenanceRouter.get('/networks/topology', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const includeSystem = req.query.includeSystem === 'true';
     const knownStacks = await FileSystemService.getInstance(req.nodeId).getStacks();
@@ -531,6 +539,7 @@ systemMaintenanceRouter.get('/networks/topology', async (req: Request, res: Resp
 });
 
 systemMaintenanceRouter.get('/networks/:id', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'node:read')) return;
   try {
     const id = req.params.id as string;
     if (!id) return res.status(400).json({ error: 'Network ID is required' });
