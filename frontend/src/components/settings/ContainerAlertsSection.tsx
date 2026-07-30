@@ -35,9 +35,9 @@ const DEFAULT_CONTAINER_ALERTS: ContainerAlertFields = {
 };
 
 export function ContainerAlertsSection({ onDirtyChange }: ContainerAlertsSectionProps) {
-    const { isAdmin } = useAuth();
+    const { can, permissionsReady } = useAuth();
     const { activeNode } = useNodes();
-    const readOnly = !isAdmin;
+    const readOnly = !permissionsReady || !can('node:manage');
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<ContainerAlertFields>({ ...DEFAULT_CONTAINER_ALERTS });
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);

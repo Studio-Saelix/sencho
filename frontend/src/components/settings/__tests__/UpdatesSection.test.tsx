@@ -12,7 +12,12 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({
     toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
-const authState = { isAdmin: true };
+const authState = {
+    isAdmin: true,
+    permissionsReady: true,
+    permissionsStatus: 'ready' as const,
+    can: (action: string) => authState.isAdmin || action === 'never',
+};
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => authState }));
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 'local' } }) }));
 vi.mock('../MastheadStatsContext', () => ({ useMastheadStats: () => {} }));

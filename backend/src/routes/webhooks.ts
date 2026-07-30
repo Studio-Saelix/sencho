@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { DatabaseService, type WebhookAction } from '../services/DatabaseService';
 import { WebhookService } from '../services/WebhookService';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { webhookTriggerLimiter } from '../middleware/rateLimiters';
 
 const VALID_WEBHOOK_ACTIONS: readonly WebhookAction[] = ['deploy', 'restart', 'stop', 'start', 'pull', 'git-pull'];
@@ -26,7 +26,7 @@ webhooksRouter.get('/', authMiddleware, async (req: Request, res: Response): Pro
 });
 
 webhooksRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:webhooks')) return;
   try {
     const { name, stack_name, action, enabled, node_id } = req.body;
     if (!name || !stack_name || !action) {
@@ -71,7 +71,7 @@ webhooksRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
 });
 
 webhooksRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:webhooks')) return;
   try {
     const id = parseInt(req.params.id as string, 10);
     const webhook = DatabaseService.getInstance().getWebhook(id);
@@ -114,7 +114,7 @@ webhooksRouter.put('/:id', authMiddleware, async (req: Request, res: Response): 
 });
 
 webhooksRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:webhooks')) return;
   try {
     const id = parseInt(req.params.id as string, 10);
     DatabaseService.getInstance().deleteWebhook(id);

@@ -44,8 +44,8 @@ const DEFAULT_HOST_ALERTS: HostAlertFields = {
 
 export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
     const { activeNode } = useNodes();
-    const { isAdmin } = useAuth();
-    const readOnly = !isAdmin;
+    const { can, permissionsReady } = useAuth();
+    const readOnly = !permissionsReady || !can('node:manage');
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<HostAlertFields>({ ...DEFAULT_HOST_ALERTS });
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);
@@ -188,7 +188,7 @@ export function HostAlertsSection({ onDirtyChange }: HostAlertsSectionProps) {
                 </SettingsField>
             </SettingsSection>
 
-            <SettingsActions hint={readOnly ? 'Read-only · admin access required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
+            <SettingsActions hint={readOnly ? 'Read-only · permission required to edit' : (hasChanges ? `${dirtyCount} unsaved` : undefined)}>
                 {!readOnly && (
                     <SettingsPrimaryButton onClick={saveSettings} disabled={isSaving || !hasChanges || !isCurrentNodeLoaded}>
                         {isSaving ? (

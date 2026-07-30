@@ -11,8 +11,6 @@ import {
     CommandList,
 } from '@/components/ui/command';
 import { PageMasthead, type MastheadMetadataItem } from '@/components/ui/PageMasthead';
-import { useAuth } from '@/context/AuthContext';
-import { useLicense } from '@/context/LicenseContext';
 import { useNodes } from '@/context/NodeContext';
 import {
     SETTINGS_ITEMS,
@@ -23,11 +21,12 @@ import {
     isItemLocked,
     scopeLabel,
 } from './index';
-import type { SectionId, SettingsItemMeta, VisibilityContext } from './index';
+import type { SectionId, SettingsItemMeta } from './index';
 import type { MuteRuleDraft } from '@/lib/muteRules';
 import { SettingsSidebar } from './SettingsSidebar';
 import { SettingsSectionContent } from './SettingsSectionContent';
 import { MastheadStatsProvider, useMastheadStatsValue } from './MastheadStatsContext';
+import { useSettingsVisibility } from './useSettingsVisibility';
 import type { NavDestination } from '@/lib/navigation/appNavRegistry';
 
 interface SettingsPageProps {
@@ -55,10 +54,8 @@ function SettingsPageInner({
     onOpenMuteRulesWithPrefill,
     quickLinkCandidates,
 }: SettingsPageProps) {
-    const { isAdmin } = useAuth();
-    const { isPaid } = useLicense();
     const { activeNode } = useNodes();
-    const isRemote = activeNode?.type === 'remote';
+    const visibility = useSettingsVisibility();
 
     // Mobile master/detail: below md the nav rail and the section content cannot
     // sit side by side, so the rail is a full-screen list and choosing a section
@@ -72,10 +69,6 @@ function SettingsPageInner({
     // Desktop shows both panes; mobile shows exactly one (the rail or the section).
     const showSidebar = !isMobile || !mobileSectionOpen;
     const showSection = !isMobile || mobileSectionOpen;
-    const visibility: VisibilityContext = useMemo(
-        () => ({ isRemote, isAdmin, isPaid }),
-        [isRemote, isAdmin, isPaid],
-    );
 
     // Resolve the rendered section: must be a registry id and must be visible to the
     // current operator. If the current selection points to a hidden section (e.g.,

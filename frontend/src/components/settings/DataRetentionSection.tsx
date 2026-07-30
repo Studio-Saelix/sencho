@@ -45,10 +45,10 @@ const DEFAULT_DATA_RETENTION: DataRetentionFields = {
 };
 
 export function DataRetentionSection({ onDirtyChange }: DataRetentionSectionProps) {
-    const { isAdmin } = useAuth();
+    const { can, permissionsReady } = useAuth();
     const { isPaid } = useLicense();
     const { activeNode } = useNodes();
-    const readOnly = !isAdmin;
+    const readOnly = !permissionsReady || !can('system:settings');
     const { settings, setSettings, dirtyCount, hasChanges, reset, markSaved } = useSettingsDirty<DataRetentionFields>({ ...DEFAULT_DATA_RETENTION });
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);

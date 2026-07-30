@@ -2,7 +2,8 @@ import { Router, type Request, type Response } from 'express';
 import bcrypt from 'bcrypt';
 import { DatabaseService, type UserRole, type ResourceType } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin } from '../middleware/tierGates';
+import { requirePaid } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { rejectApiTokenScope } from '../middleware/apiTokenScope';
 import { BCRYPT_SALT_ROUNDS, MIN_PASSWORD_LENGTH } from '../helpers/constants';
 import { isDebugEnabled } from '../utils/debug';
@@ -29,7 +30,7 @@ export const usersRouter = Router();
 
 usersRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:users')) return;
   try {
     const db = DatabaseService.getInstance();
     const users = db.getUsers();
@@ -47,7 +48,7 @@ usersRouter.get('/', authMiddleware, async (req: Request, res: Response): Promis
 
 usersRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:users')) return;
   try {
     const { username, password, role } = req.body;
 
@@ -91,7 +92,7 @@ usersRouter.post('/', authMiddleware, async (req: Request, res: Response): Promi
 // to manage existing users even if their license lapses.
 usersRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:users')) return;
   try {
     const id = parseInt(req.params.id as string, 10);
     const db = DatabaseService.getInstance();
@@ -166,7 +167,7 @@ usersRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Pro
 
 usersRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:users')) return;
   try {
     const id = parseInt(req.params.id as string, 10);
     const db = DatabaseService.getInstance();
@@ -202,7 +203,7 @@ usersRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): 
  */
 usersRouter.post('/:id/mfa/reset', authMiddleware, (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:users')) return;
   try {
     const id = parseIntParam(req, res, 'id', 'user id');
     if (id === null) return;
@@ -232,7 +233,7 @@ usersRouter.post('/:id/mfa/reset', authMiddleware, (req: Request, res: Response)
 
 usersRouter.get('/:id/roles', authMiddleware, (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:users')) return;
   if (!requirePaid(req, res)) return;
   try {
     const userId = parseInt(req.params.id as string, 10);
@@ -251,7 +252,7 @@ usersRouter.get('/:id/roles', authMiddleware, (req: Request, res: Response): voi
 
 usersRouter.post('/:id/roles', authMiddleware, async (req: Request, res: Response): Promise<void> => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:users')) return;
   if (!requirePaid(req, res)) return;
   try {
     const userId = parseInt(req.params.id as string, 10);
@@ -357,7 +358,7 @@ usersRouter.post('/:id/roles', authMiddleware, async (req: Request, res: Respons
 
 usersRouter.delete('/:id/roles/:assignId', authMiddleware, (req: Request, res: Response): void => {
   if (rejectApiTokenScope(req, res, USERS_SCOPE_MESSAGE)) return;
-  if (!requireAdmin(req, res)) return;
+  if (!requirePermission(req, res, 'system:users')) return;
   if (!requirePaid(req, res)) return;
   try {
     const userId = parseInt(req.params.id as string, 10);

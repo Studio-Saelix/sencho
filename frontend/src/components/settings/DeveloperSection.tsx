@@ -37,9 +37,9 @@ const DEFAULT_DEVELOPER: DeveloperFields = {
 };
 
 export function DeveloperSection({ onDirtyChange }: DeveloperSectionProps) {
-    const { isAdmin } = useAuth();
+    const { can, permissionsReady } = useAuth();
     const { activeNode } = useNodes();
-    const readOnly = !isAdmin;
+    const readOnly = !permissionsReady || !can('system:settings');
     const { settings, setSettings, hasChanges, reset, markSaved } = useSettingsDirty<DeveloperFields>({ ...DEFAULT_DEVELOPER });
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);
     const [isSaving, setIsSaving] = useState(false);

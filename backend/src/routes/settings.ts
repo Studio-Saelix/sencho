@@ -2,7 +2,8 @@ import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin, requirePaid } from '../middleware/tierGates';
+import { requirePaid } from '../middleware/tierGates';
+import { requirePermission, type PermissionAction } from '../middleware/permissions';
 import { parseNotificationDispatchRetries } from '../helpers/notificationDispatchRetries';
 
 // Strict allowlist of keys readable and writable via the generic settings
@@ -39,9 +40,61 @@ const ALLOWED_SETTING_KEYS = new Set([
   'session_sliding_refresh',
 ]);
 
-// Keys whose write requires a paid license, not just an admin role.
+/** Node-scoped operational keys editable by holders of node:manage. */
+const NODE_MANAGE_SETTING_KEYS = new Set([
+  'host_cpu_limit',
+  'host_ram_limit',
+  'host_disk_limit',
+  'host_alerts_enabled',
+  'host_alert_suppression_mins',
+  'docker_janitor_gb',
+  'global_crash',
+  'template_registry_url',
+  'prune_on_update',
+  'reclaim_hero',
+  'health_gate_enabled',
+  'health_gate_window_seconds',
+  'env_block_deploy_on_missing_required',
+  'auto_create_missing_external_networks',
+  'notification_dispatch_retries',
+]);
+
+/** System cadence / retention / diagnostics / session policy; require system:settings. */
+const SYSTEM_SETTINGS_KEYS = new Set([
+  'developer_mode',
+  'metrics_retention_hours',
+  'log_retention_days',
+  'audit_retention_days',
+  'mesh_auto_recreate',
+  'scan_history_per_image_limit',
+  'prune_orphaned_scans',
+  'snapshot_documentation',
+  'image_update_sidebar_indicators',
+  'session_sliding_refresh',
+]);
+
+function permissionForSettingKey(key: string): PermissionAction | null {
+  if (NODE_MANAGE_SETTING_KEYS.has(key)) return 'node:manage';
+  if (SYSTEM_SETTINGS_KEYS.has(key)) return 'system:settings';
+  return null;
+}
+
+/** Fail closed if any key lacks its required permission. */
+function requireSettingsWritePermission(req: Request, res: Response, keys: string[]): boolean {
+  for (const key of keys) {
+    const action = permissionForSettingKey(key);
+    if (!action) {
+      res.status(400).json({ error: `Invalid or disallowed setting key: ${key}` });
+      return false;
+    }
+    if (!requirePermission(req, res, action)) return false;
+  }
+  return true;
+}
+
+// Keys whose write requires a paid license, not just a permission.
 // audit_retention_days configures the paid audit log, so a Community admin
-// must not be able to set it.
+// must not be able to set it. Checked after the permission bucket.
 const PAID_ONLY_SETTING_KEYS = new Set(['audit_retention_days']);
 
 // Bulk PATCH schema. All keys optional; present keys are fully validated.
@@ -102,13 +155,13 @@ settingsRouter.get('/', authMiddleware, async (_req: Request, res: Response): Pr
 });
 
 settingsRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   try {
     const { key, value } = req.body;
     if (!key || typeof key !== 'string' || !ALLOWED_SETTING_KEYS.has(key)) {
       res.status(400).json({ error: `Invalid or disallowed setting key: ${key}` });
       return;
     }
+    if (!requireSettingsWritePermission(req, res, [key])) return;
     if (PAID_ONLY_SETTING_KEYS.has(key) && !requirePaid(req, res)) return;
     if (value === undefined || value === null) {
       res.status(400).json({ error: 'Setting value is required' });
@@ -146,7 +199,6 @@ settingsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pr
 });
 
 settingsRouter.patch('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
-  if (!requireAdmin(req, res)) return;
   try {
     // Reject unknown/disallowed keys outright rather than letting Zod silently
     // strip them. This keeps the bulk path fail-closed and consistent with the
@@ -165,7 +217,9 @@ settingsRouter.patch('/', authMiddleware, async (req: Request, res: Response): P
       res.status(400).json({ error: 'Validation failed', details: parsed.error.flatten().fieldErrors });
       return;
     }
-    if (Object.keys(parsed.data).some(k => PAID_ONLY_SETTING_KEYS.has(k)) && !requirePaid(req, res)) return;
+    const keys = Object.keys(parsed.data);
+    if (!requireSettingsWritePermission(req, res, keys)) return;
+    if (keys.some(k => PAID_ONLY_SETTING_KEYS.has(k)) && !requirePaid(req, res)) return;
     const db = DatabaseService.getInstance();
     const updateMany = db.getDb().transaction((entries: [string, string][]) => {
       for (const [k, v] of entries) {

@@ -23,9 +23,9 @@ function SectionSkeleton() {
 }
 
 export function AppStoreSection() {
-    const { isAdmin } = useAuth();
+    const { can, permissionsReady } = useAuth();
     const { activeNode } = useNodes();
-    const readOnly = !isAdmin;
+    const readOnly = !permissionsReady || !can('node:manage');
     const [templateRegistryUrl, setTemplateRegistryUrl] = useState('');
     const serverUrl = useRef('');
     const { phase, isCurrentNodeLoaded, load, isSaveOwner, captureSaveGuard } = useNodeSettingsLoad(activeNode?.id);

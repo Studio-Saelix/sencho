@@ -54,8 +54,8 @@ interface NotificationsSectionProps {
 
 export function NotificationsSection({ onDirtyChange }: NotificationsSectionProps) {
     const { activeNode } = useNodes();
-    const { isAdmin } = useAuth();
-    const readOnly = !isAdmin;
+    const { can, permissionsReady } = useAuth();
+    const readOnly = !permissionsReady || !can('node:manage');
     const activeNodeIdRef = useRef(activeNode?.id);
     useEffect(() => { activeNodeIdRef.current = activeNode?.id; }, [activeNode?.id]);
 

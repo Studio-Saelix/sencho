@@ -20,7 +20,18 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({
     toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
-const useAuthMock = vi.fn(() => ({ isAdmin: true }));
+type AuthMock = {
+    isAdmin: boolean;
+    permissionsReady: boolean;
+    permissionsStatus: 'ready';
+    can: (action?: string) => boolean;
+};
+const useAuthMock = vi.fn((): AuthMock => ({
+    isAdmin: true,
+    permissionsReady: true,
+    permissionsStatus: 'ready',
+    can: () => true,
+}));
 vi.mock('@/context/AuthContext', () => ({ useAuth: () => useAuthMock() }));
 vi.mock('@/context/NodeContext', () => ({ useNodes: () => ({ activeNode: { id: 'local' } }) }));
 vi.mock('@/context/LicenseContext', () => ({ useLicense: vi.fn(() => ({ isPaid: true })) }));
@@ -40,7 +51,12 @@ beforeEach(() => {
     window.localStorage.clear();
     mockedFetch.mockReset();
     mockedFetch.mockResolvedValue({ ok: true, json: async () => ({ ...FULL_SETTINGS }) });
-    useAuthMock.mockReturnValue({ isAdmin: true });
+    useAuthMock.mockReturnValue({
+        isAdmin: true,
+        permissionsReady: true,
+        permissionsStatus: 'ready',
+        can: () => true,
+    });
 });
 
 afterEach(() => {
@@ -109,8 +125,13 @@ describe('StacksSection', () => {
         expect(screen.getByText('Save settings')).toBeInTheDocument();
     });
 
-    it('disables guardrails for non-admin while Workflow controls remain enabled', async () => {
-        useAuthMock.mockReturnValue({ isAdmin: false });
+    it('disables guardrails without node:manage while Workflow controls remain enabled', async () => {
+        useAuthMock.mockReturnValue({
+            isAdmin: false,
+            permissionsReady: true,
+            permissionsStatus: 'ready',
+            can: () => false,
+        });
         render(<StacksSection />);
         await waitFor(() => expect(screen.getByText('Deploy Guardrails')).toBeInTheDocument());
 
