@@ -1,7 +1,6 @@
 import type { FleetTab } from '@/lib/events';
 import type { SectionId } from '@/components/settings/types';
 import { getSettingsItem, isItemVisible, isItemLocked } from '@/components/settings/registry';
-import type { PermissionAction } from '@/context/AuthContext';
 import type { ActiveView } from '@/lib/router/routeTypes';
 import { HUB_ONLY_VIEWS } from '@/lib/router/routeTypes';
 
@@ -80,8 +79,7 @@ export function isSettingsSectionHidden(section: SectionId, ctx: ReachabilityCon
     isRemote: ctx.isRemote,
     isAdmin: ctx.isAdmin,
     isPaid: ctx.isPaid,
-    can: (action: PermissionAction) => ctx.can(action),
-    permissionsReady: true,
+    can: ctx.can,
   };
   if (!isItemVisible(item, visibility)) return true;
   if (isItemLocked(item, visibility)) return true;

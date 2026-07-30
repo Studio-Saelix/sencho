@@ -6,87 +6,53 @@ import { requirePaid } from '../middleware/tierGates';
 import { requirePermission, type PermissionAction } from '../middleware/permissions';
 import { parseNotificationDispatchRetries } from '../helpers/notificationDispatchRetries';
 
-// Strict allowlist of keys readable and writable via the generic settings
-// API. This is the single source of truth for what the endpoint exposes:
-// reads project only these keys, so secrets written to global_settings by
-// other subsystems (the cloud_backup_* credentials stored by the cloud-backup
-// route, the auth_* login secrets) are never returned here; writes are
-// rejected for anything outside the list.
-const ALLOWED_SETTING_KEYS = new Set([
-  'host_cpu_limit',
-  'host_ram_limit',
-  'host_disk_limit',
-  'host_alerts_enabled',
-  'host_alert_suppression_mins',
-  'docker_janitor_gb',
-  'global_crash',
-  'developer_mode',
-  'template_registry_url',
-  'metrics_retention_hours',
-  'log_retention_days',
-  'audit_retention_days',
-  'mesh_auto_recreate',
-  'scan_history_per_image_limit',
-  'prune_orphaned_scans',
-  'prune_on_update',
-  'reclaim_hero',
-  'snapshot_documentation',
-  'health_gate_enabled',
-  'health_gate_window_seconds',
-  'env_block_deploy_on_missing_required',
-  'auto_create_missing_external_networks',
-  'image_update_sidebar_indicators',
-  'notification_dispatch_retries',
-  'session_sliding_refresh',
-]);
+// Allowlist of keys readable/writable via the generic settings API, each
+// mapped to the permission required to write it. Reads project only these
+// keys so secrets written to global_settings by other subsystems (cloud
+// backup credentials, auth_* login secrets) are never returned; writes
+// outside the map are rejected.
+const SETTING_WRITE_PERMISSIONS: Record<string, PermissionAction> = {
+  host_cpu_limit: 'node:manage',
+  host_ram_limit: 'node:manage',
+  host_disk_limit: 'node:manage',
+  host_alerts_enabled: 'node:manage',
+  host_alert_suppression_mins: 'node:manage',
+  docker_janitor_gb: 'node:manage',
+  global_crash: 'node:manage',
+  template_registry_url: 'node:manage',
+  prune_on_update: 'node:manage',
+  reclaim_hero: 'node:manage',
+  health_gate_enabled: 'node:manage',
+  health_gate_window_seconds: 'node:manage',
+  env_block_deploy_on_missing_required: 'node:manage',
+  auto_create_missing_external_networks: 'node:manage',
+  notification_dispatch_retries: 'node:manage',
+  developer_mode: 'system:settings',
+  metrics_retention_hours: 'system:settings',
+  log_retention_days: 'system:settings',
+  audit_retention_days: 'system:settings',
+  mesh_auto_recreate: 'system:settings',
+  scan_history_per_image_limit: 'system:settings',
+  prune_orphaned_scans: 'system:settings',
+  snapshot_documentation: 'system:settings',
+  image_update_sidebar_indicators: 'system:settings',
+  session_sliding_refresh: 'system:settings',
+};
 
-/** Node-scoped operational keys editable by holders of node:manage. */
-const NODE_MANAGE_SETTING_KEYS = new Set([
-  'host_cpu_limit',
-  'host_ram_limit',
-  'host_disk_limit',
-  'host_alerts_enabled',
-  'host_alert_suppression_mins',
-  'docker_janitor_gb',
-  'global_crash',
-  'template_registry_url',
-  'prune_on_update',
-  'reclaim_hero',
-  'health_gate_enabled',
-  'health_gate_window_seconds',
-  'env_block_deploy_on_missing_required',
-  'auto_create_missing_external_networks',
-  'notification_dispatch_retries',
-]);
-
-/** System cadence / retention / diagnostics / session policy; require system:settings. */
-const SYSTEM_SETTINGS_KEYS = new Set([
-  'developer_mode',
-  'metrics_retention_hours',
-  'log_retention_days',
-  'audit_retention_days',
-  'mesh_auto_recreate',
-  'scan_history_per_image_limit',
-  'prune_orphaned_scans',
-  'snapshot_documentation',
-  'image_update_sidebar_indicators',
-  'session_sliding_refresh',
-]);
-
-function permissionForSettingKey(key: string): PermissionAction | null {
-  if (NODE_MANAGE_SETTING_KEYS.has(key)) return 'node:manage';
-  if (SYSTEM_SETTINGS_KEYS.has(key)) return 'system:settings';
-  return null;
-}
+const ALLOWED_SETTING_KEYS = new Set(Object.keys(SETTING_WRITE_PERMISSIONS));
 
 /** Fail closed if any key lacks its required permission. */
 function requireSettingsWritePermission(req: Request, res: Response, keys: string[]): boolean {
+  const needed = new Set<PermissionAction>();
   for (const key of keys) {
-    const action = permissionForSettingKey(key);
+    const action = SETTING_WRITE_PERMISSIONS[key];
     if (!action) {
       res.status(400).json({ error: `Invalid or disallowed setting key: ${key}` });
       return false;
     }
+    needed.add(action);
+  }
+  for (const action of needed) {
     if (!requirePermission(req, res, action)) return false;
   }
   return true;

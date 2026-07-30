@@ -12,7 +12,6 @@ function visibilityFor(role: keyof typeof ROLE_PERMISSIONS, over: Partial<Visibi
     isRemote: false,
     isAdmin: role === 'admin',
     isPaid: true,
-    permissionsReady: true,
     can: (action: PermissionAction) => role === 'admin' || perms.has(action),
     ...over,
   };

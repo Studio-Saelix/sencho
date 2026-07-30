@@ -66,12 +66,14 @@ describe('PATCH /api/settings permission buckets', () => {
   });
 
   it('rejects mixed node-manage + system-settings PATCH from node-admin', async () => {
+    const before = DatabaseService.getInstance().getGlobalSettings().host_cpu_limit;
     const res = await request(app)
       .patch('/api/settings')
       .set('Cookie', roleCookie['node-admin']!)
       .send({ host_cpu_limit: 80, developer_mode: '1' });
     expect(res.status).toBe(403);
     expect(res.body.code).toBe('PERMISSION_DENIED');
+    expect(DatabaseService.getInstance().getGlobalSettings().host_cpu_limit).toBe(before);
   });
 
   it.each(['deployer', 'viewer', 'auditor'] as const)(
@@ -149,11 +151,28 @@ describe('image-updates Settings-scoped routes', () => {
     expect(res.body.code).toBe('PERMISSION_DENIED');
   });
 
+  it('rejects node-admin PUT /enabled (system:settings)', async () => {
+    const res = await request(app)
+      .put('/api/image-updates/enabled')
+      .set('Cookie', roleCookie['node-admin']!)
+      .send({ enabled: false });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PERMISSION_DENIED');
+  });
+
   it('lets admin PUT /interval', async () => {
     const res = await request(app)
       .put('/api/image-updates/interval')
       .set('Cookie', adminCookie)
       .send({ minutes: 60 });
+    expect(res.status).toBe(200);
+  });
+
+  it('lets admin PUT /enabled', async () => {
+    const res = await request(app)
+      .put('/api/image-updates/enabled')
+      .set('Cookie', adminCookie)
+      .send({ enabled: true });
     expect(res.status).toBe(200);
   });
 

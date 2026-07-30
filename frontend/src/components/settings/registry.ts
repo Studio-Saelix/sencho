@@ -332,8 +332,6 @@ export interface VisibilityContext {
     isPaid: boolean;
     /** Required so construction sites cannot omit permission checks. */
     can: (action: PermissionAction) => boolean;
-    /** Required; deep-link callers still defer via authzReady before calling isItemVisible. */
-    permissionsReady: boolean;
 }
 
 export function isItemVisible(item: SettingsItemMeta, ctx: VisibilityContext): boolean {

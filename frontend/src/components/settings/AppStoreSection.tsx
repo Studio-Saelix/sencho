@@ -115,7 +115,7 @@ export function AppStoreSection() {
                     />
                 </SettingsField>
 
-                <SettingsActions align="between" hint={readOnly ? 'Read-only · admin access required to edit' : (templateRegistryUrl ? 'using custom registry' : 'using default')}>
+                <SettingsActions align="between" hint={readOnly ? 'Read-only · permission required to edit' : (templateRegistryUrl ? 'using custom registry' : 'using default')}>
                     {!readOnly && (
                         <div className="flex items-center gap-2">
                             <Button
