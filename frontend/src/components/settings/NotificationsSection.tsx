@@ -54,6 +54,9 @@ interface NotificationsSectionProps {
 }
 
 export function NotificationsSection({ onDirtyChange }: NotificationsSectionProps) {
+    // This section configures outbound notification *channels* (/api/agents), which
+    // require node:manage. Alert routing and mute rules live in separate Settings
+    // sections and stay Admin-only via notifications.ts / adminOnly registry flags.
     const { activeNode } = useNodes();
     const { can } = useAuth();
     const readOnly = !canManageNode(can, activeNode?.id);
