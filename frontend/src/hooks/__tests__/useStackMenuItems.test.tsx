@@ -21,6 +21,7 @@ function makeCtx(overrides: Partial<StackMenuCtx> = {}): StackMenuCtx {
     menuVisibility: { showDeploy: false, showStop: true, showRestart: true, showUpdate: false, showTakeDown: true },
     openAlertSheet: vi.fn(),
     openAutoHeal: vi.fn(),
+    canViewMonitor: true,
     checkUpdates: vi.fn(),
     canCheckUpdates: true,
     openStackApp: vi.fn(),
@@ -55,16 +56,23 @@ describe('useStackMenuItems', () => {
     expect(result.current.map(g => g.id)).toEqual(['inspect', 'organize', 'lifecycle', 'destructive']);
   });
 
-  it('always includes Alerts in Inspect', () => {
-    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx()));
+  it('includes Alerts in Inspect when canViewMonitor', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ canViewMonitor: true })));
     const inspect = result.current.find(g => g.id === 'inspect')!;
     expect(inspect.items.some(i => i.icon === BellRing)).toBe(true);
   });
 
-  it('always includes Auto-Heal in Inspect', () => {
-    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx()));
+  it('includes Auto-Heal in Inspect when canViewMonitor', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ canViewMonitor: true })));
     const inspect = result.current.find(g => g.id === 'inspect')!;
     expect(inspect.items.find(i => i.id === 'auto-heal')).toBeDefined();
+  });
+
+  it('hides Alerts and Auto-Heal in Inspect when !canViewMonitor', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ canViewMonitor: false })));
+    const inspect = result.current.find(g => g.id === 'inspect')!;
+    expect(inspect.items.find(i => i.id === 'alerts')).toBeUndefined();
+    expect(inspect.items.find(i => i.id === 'auto-heal')).toBeUndefined();
   });
 
   it('shows Open App when running and canOpenApp', () => {

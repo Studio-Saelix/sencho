@@ -416,7 +416,6 @@ export function useStackActions(options: UseStackActionsOptions) {
 
   const pendingStackLoadRef = useRef<string | null>(null);
   const pendingLogsRef = useRef<{ stackName: string; containerName: string } | null>(null);
-  const checkUpdatesIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // True from a deploy click through the async pre-deploy advisory phase until
   // the deploy starts or is cancelled, so a double-click cannot start two deploys.
   const deployPendingRef = useRef(false);
@@ -471,9 +470,6 @@ export function useStackActions(options: UseStackActionsOptions) {
 
   useEffect(() => {
     return () => {
-      if (checkUpdatesIntervalRef.current !== null) {
-        clearInterval(checkUpdatesIntervalRef.current);
-      }
       loadFileAbortRef.current?.abort();
       containersFetchGenRef.current += 1;
     };
@@ -2244,32 +2240,12 @@ export function useStackActions(options: UseStackActionsOptions) {
     }
   };
 
-  const checkUpdatesForStack = async () => {
+  const checkUpdatesForStack = async (stackName: string) => {
     try {
-      const res = await apiFetch('/image-updates/refresh', { method: 'POST' });
+      const res = await apiFetch(`/image-updates/refresh/${encodeURIComponent(stackName)}`, { method: 'POST' });
       if (res.ok) {
-        toast.success('Checking for image updates...');
-        let elapsed = 0;
-        const poll = setInterval(async () => {
-          elapsed += 2000;
-          try {
-            const statusRes = await apiFetch('/image-updates/status');
-            if (statusRes.ok) {
-              const { checking } = await statusRes.json();
-              if (!checking || elapsed >= 60000) {
-                clearInterval(poll);
-                checkUpdatesIntervalRef.current = null;
-                await stackListState.fetchImageUpdates();
-                if (!checking) toast.success('Image update check complete.');
-              }
-            }
-          } catch {
-            clearInterval(poll);
-            checkUpdatesIntervalRef.current = null;
-            await stackListState.fetchImageUpdates();
-          }
-        }, 2000);
-        checkUpdatesIntervalRef.current = poll;
+        await stackListState.fetchImageUpdates();
+        toast.success('Image update check complete.');
       } else {
         const data = await res.json().catch(() => ({}));
         toast.error(data.error || 'Failed to check for updates');

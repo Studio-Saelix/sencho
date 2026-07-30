@@ -16,6 +16,7 @@ vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn(), loading: vi.fn(), dismiss: vi.fn() },
 }));
 vi.mock('@/hooks/use-is-mobile', () => ({ useIsMobile: () => false }));
+vi.mock('@/context/AuthContext', () => ({ useAuth: () => ({ can: () => true }) }));
 vi.mock('@/context/DeployFeedbackContext', () => ({
   useDeployFeedback: () => ({
     runWithLog: async (_params: unknown, fn: (started: Promise<void>, ds: string) => Promise<unknown>) =>
