@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { DatabaseService } from '../services/DatabaseService';
 import { authMiddleware } from '../middleware/auth';
-import { requireAdmin } from '../middleware/tierGates';
+import { requirePermission } from '../middleware/permissions';
 import { getErrorMessage } from '../utils/errors';
 import { parseIntParam } from '../utils/parseIntParam';
 
@@ -31,6 +31,11 @@ function proxyEntitlementUntil(req: Request): number {
 
 autoHealRouter.get('/policies', authMiddleware, (req: Request, res: Response): void => {
   const stackName = typeof req.query.stackName === 'string' ? req.query.stackName : undefined;
+  if (stackName) {
+    if (!requirePermission(req, res, 'stack:read', 'stack', stackName)) return;
+  } else {
+    if (!requirePermission(req, res, 'stack:read')) return;
+  }
   try {
     const db = DatabaseService.getInstance();
     const policies = db.getAutoHealPolicies(stackName, req.nodeId);
@@ -50,12 +55,12 @@ autoHealRouter.get('/policies', authMiddleware, (req: Request, res: Response): v
 });
 
 autoHealRouter.post('/policies', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
   const parsed = AutoHealPolicyCreateSchema.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.issues[0]?.message ?? 'Invalid input' });
     return;
   }
+  if (!requirePermission(req, res, 'stack:edit', 'stack', parsed.data.stack_name)) return;
   const { stack_name, service_name, unhealthy_duration_mins, cooldown_mins, max_restarts_per_hour, auto_disable_after_failures } = parsed.data;
   const now = Date.now();
   try {
@@ -82,7 +87,6 @@ autoHealRouter.post('/policies', authMiddleware, (req: Request, res: Response): 
 });
 
 autoHealRouter.patch('/policies/:id', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
   const id = parseIntParam(req, res, 'id');
   if (id === null) return;
   const parsed = AutoHealPolicyUpdateSchema.safeParse(req.body);
@@ -94,6 +98,7 @@ autoHealRouter.patch('/policies/:id', authMiddleware, (req: Request, res: Respon
     const db = DatabaseService.getInstance();
     const policy = db.getAutoHealPolicy(id);
     if (!policy || policy.node_id !== req.nodeId) { res.status(404).json({ error: 'Policy not found' }); return; }
+    if (!requirePermission(req, res, 'stack:edit', 'stack', policy.stack_name)) return;
     db.updateAutoHealPolicy(id, { ...parsed.data, proxy_entitled_until: Math.max(policy.proxy_entitled_until, proxyEntitlementUntil(req)) });
     res.json(db.getAutoHealPolicy(id));
   } catch (err) {
@@ -103,13 +108,13 @@ autoHealRouter.patch('/policies/:id', authMiddleware, (req: Request, res: Respon
 });
 
 autoHealRouter.delete('/policies/:id', authMiddleware, (req: Request, res: Response): void => {
-  if (!requireAdmin(req, res)) return;
   const id = parseIntParam(req, res, 'id');
   if (id === null) return;
   try {
     const db = DatabaseService.getInstance();
     const policy = db.getAutoHealPolicy(id);
     if (!policy || policy.node_id !== req.nodeId) { res.status(404).json({ error: 'Policy not found' }); return; }
+    if (!requirePermission(req, res, 'stack:edit', 'stack', policy.stack_name)) return;
     db.deleteAutoHealPolicy(id);
     res.json({ success: true });
   } catch (err) {
@@ -126,6 +131,7 @@ autoHealRouter.get('/policies/:id/history', authMiddleware, (req: Request, res: 
     const db = DatabaseService.getInstance();
     const policy = db.getAutoHealPolicy(id);
     if (!policy || policy.node_id !== req.nodeId) { res.status(404).json({ error: 'Policy not found' }); return; }
+    if (!requirePermission(req, res, 'stack:read', 'stack', policy.stack_name)) return;
     res.json(db.getAutoHealHistory(id, limit));
   } catch (err) {
     console.error('[AutoHeal] Failed to fetch history:', getErrorMessage(err, 'unknown'));
