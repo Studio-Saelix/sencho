@@ -11,6 +11,7 @@ import {
     CommandList,
 } from '@/components/ui/command';
 import { PageMasthead, type MastheadMetadataItem } from '@/components/ui/PageMasthead';
+import { useAuth } from '@/context/AuthContext';
 import { useNodes } from '@/context/NodeContext';
 import {
     SETTINGS_ITEMS,
@@ -56,6 +57,7 @@ function SettingsPageInner({
 }: SettingsPageProps) {
     const { activeNode } = useNodes();
     const visibility = useSettingsVisibility();
+    const { permissionsStatus } = useAuth();
 
     // Mobile master/detail: below md the nav rail and the section content cannot
     // sit side by side, so the rail is a full-screen list and choosing a section
@@ -73,14 +75,17 @@ function SettingsPageInner({
     // Resolve the rendered section: must be a registry id and must be visible to the
     // current operator. If the current selection points to a hidden section (e.g.,
     // node-scoped item on a remote, or admin-only item for a non-admin), fall back to
-    // the first visible item.
+    // the first visible item. Defer until permission metadata is ready so deep links
+    // to requiredPermission sections (e.g. license) are not rewritten while can() is
+    // still fail-closed during cold load.
     const safeSection: SectionId = useMemo(() => {
+        if (permissionsStatus !== 'ready') return currentSection;
         const reachable = (i: SettingsItemMeta) => isItemVisible(i, visibility) && !isItemLocked(i, visibility);
         const direct = SETTINGS_ITEMS.find(i => i.id === currentSection);
         if (direct && reachable(direct)) return direct.id;
         const fallback = SETTINGS_ITEMS.find(reachable);
         return fallback?.id ?? 'appearance';
-    }, [currentSection, visibility]);
+    }, [currentSection, visibility, permissionsStatus]);
     useEffect(() => {
         if (safeSection !== currentSection) onSectionChange(safeSection);
     }, [safeSection, currentSection, onSectionChange]);
