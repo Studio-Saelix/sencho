@@ -14,7 +14,7 @@ function makeCtx(overrides: Partial<ReachabilityContext> = {}): ReachabilityCont
     licenseStatus: 'ready',
     experimental: true,
     experimentalReady: true,
-    scheduledOpsAccessible: false,
+    scheduledOpsAccessible: true,
     ...overrides,
   };
 }

@@ -55,7 +55,7 @@ function mockDeployer() {
 function mockPaidAdmin() {
   mockAuth(
     true,
-    (p) => p === 'system:audit' || p === 'system:console' || p === 'node:read',
+    (p) => p === 'system:audit' || p === 'system:console' || p === 'node:read' || p === 'stack:deploy' || p === 'node:manage',
   );
   mockLicense(true);
 }
@@ -63,14 +63,14 @@ function mockPaidAdmin() {
 // Synthetic gate-isolation helper: omits system:audit so tests can assert the
 // Audit hide path. Real Admin always includes system:audit in the permission matrix.
 function mockCommunityAdmin() {
-  mockAuth(true, (p) => p === 'system:console' || p === 'node:read');
+  mockAuth(true, (p) => p === 'system:console' || p === 'node:read' || p === 'stack:deploy');
   mockLicense(false);
 }
 
 function mockCommunityAdminWithAudit() {
   mockAuth(
     true,
-    (p) => p === 'system:audit' || p === 'system:console' || p === 'node:read',
+    (p) => p === 'system:audit' || p === 'system:console' || p === 'node:read' || p === 'stack:deploy',
   );
   mockLicense(false);
 }
