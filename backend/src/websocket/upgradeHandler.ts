@@ -201,7 +201,9 @@ export function attachUpgrade(
       if (!decoded.scope && decoded.username) {
         const dbUser = DatabaseService.getInstance().getUserByUsername(decoded.username);
         if (!dbUser) return reject(socket, 401, 'Unauthorized');
-        if (decoded.tv !== undefined && dbUser.token_version !== decoded.tv) {
+        // Missing `tv` is a pre-migration legacy token at version 1, same default
+        // as `authMiddleware`; a bumped account version must reject it.
+        if (dbUser.token_version !== (decoded.tv ?? 1)) {
           console.log('[Auth] WS session rejected: token version mismatch for:', decoded.username);
           return reject(socket, 401, 'Unauthorized');
         }
