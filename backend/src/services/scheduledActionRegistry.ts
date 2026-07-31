@@ -112,7 +112,7 @@ export function resolveTaskPermissionScope(
   targetType: TargetType,
   targetId: string | null,
   nodeId: number | null,
-  selectorType?: string | null,
+  _selectorType?: string | null,
 ): ScheduledActionPermissionScope {
   const def = ACTION_BY_ID.get(action);
   const basePermission = def?.permission ?? 'stack:deploy';
