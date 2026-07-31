@@ -366,9 +366,8 @@ describe('PATCH /:id/toggle and POST /:id/run (RBAC)', () => {
 
 describe('Scheduler revalidation', () => {
   it('rejects a task whose creator was deleted', async () => {
-    // We can't easily delete the user in this test without complex setup.
-    // Instead verify the SchedulerService.TaskAuthorizationError is thrown:
-    const { SchedulerService, TaskAuthorizationError } = await import('../services/SchedulerService');
+    // Verify that executeTask auto-disables the task when the creator no longer exists:
+    const { SchedulerService } = await import('../services/SchedulerService');
     const db = DatabaseService.getInstance();
 
     // Create a task with a non-existent creator_user_id
