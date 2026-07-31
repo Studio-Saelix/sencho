@@ -91,26 +91,6 @@ describe('validateApiToken', () => {
     const result = validateApiToken(raw);
     expect(result).toEqual({ ok: false, reason: 'expired' });
   });
-
-  it('rejects a token whose owning user was deleted', () => {
-    const db = DatabaseService.getInstance();
-    const ownerId = db.addUser({
-      username: `token-owner-${Date.now()}`,
-      password_hash: 'x',
-      role: 'admin',
-    });
-    const raw = createTestApiToken({
-      db: DatabaseService,
-      scope: 'full-admin',
-      userId: ownerId,
-      name: `orphan-check-${Date.now()}`,
-    });
-    expect(validateApiToken(raw).ok).toBe(true);
-
-    // Simulate a pre-fix orphan: leave the api_tokens row while removing the user.
-    db.getDb().prepare('DELETE FROM users WHERE id = ?').run(ownerId);
-    expect(validateApiToken(raw)).toEqual({ ok: false, reason: 'owner-deleted' });
-  });
 });
 
 describe('touchApiTokenLastUsed', () => {

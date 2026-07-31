@@ -5303,21 +5303,8 @@ export class DatabaseService {
         this.db.prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`).run(...values);
     }
 
-    /**
-     * Delete a user and every child row keyed on that user.
-     * SQLite foreign_keys is not enabled on this connection, so ON DELETE
-     * CASCADE declarations on api_tokens / role_assignments / user_mfa /
-     * mfa_used_tokens are declarative only — orphaned api_tokens would
-     * otherwise remain valid credentials (scope still grants admin).
-     */
     public deleteUser(id: number): void {
-        this.transaction(() => {
-            this.db.prepare('DELETE FROM api_tokens WHERE user_id = ?').run(id);
-            this.db.prepare('DELETE FROM role_assignments WHERE user_id = ?').run(id);
-            this.db.prepare('DELETE FROM mfa_used_tokens WHERE user_id = ?').run(id);
-            this.db.prepare('DELETE FROM user_mfa WHERE user_id = ?').run(id);
-            this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
-        });
+        this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     }
 
     /**

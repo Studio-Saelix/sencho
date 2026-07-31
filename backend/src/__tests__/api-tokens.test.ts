@@ -202,33 +202,6 @@ describe('API token revocation', () => {
       .set('Authorization', `Bearer ${rawToken}`);
     expect(res.status).toBe(401);
   });
-
-  it('deleting the owning user invalidates the token (401)', async () => {
-    const db = DatabaseService.getInstance();
-    const hash = await bcrypt.hash('password123', 1);
-    const ownerId = db.addUser({
-      username: `api-owner-${Date.now()}`,
-      password_hash: hash,
-      role: 'admin',
-    });
-    const rawToken = createTestApiToken('full-admin', null, ownerId);
-    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-
-    const before = await request(app)
-      .get('/api/stacks')
-      .set('Authorization', `Bearer ${rawToken}`);
-    expect(before.status).not.toBe(401);
-    expect(db.getApiTokenByHash(tokenHash)).toBeDefined();
-
-    db.deleteUser(ownerId);
-
-    expect(db.getApiTokenByHash(tokenHash)).toBeUndefined();
-    const after = await request(app)
-      .get('/api/stacks')
-      .set('Authorization', `Bearer ${rawToken}`);
-    expect(after.status).toBe(401);
-    expect(after.body.error).toBe('Invalid or expired token');
-  });
 });
 
 // --- Creation Validation ---

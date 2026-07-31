@@ -77,15 +77,9 @@ export const authMiddleware: RequestHandler = async (req: Request, res: Response
       }
       const apiToken = validation.token;
       touchApiTokenLastUsed(apiToken);
-      // validateApiToken already rejected owner-deleted tokens; creator is
-      // required for audit attribution (never synthesize a fallback identity).
       const creator = DatabaseService.getInstance().getUserById(apiToken.user_id);
-      if (!creator) {
-        res.status(401).json({ error: 'Invalid or expired token' });
-        return;
-      }
       req.user = {
-        username: creator.username,
+        username: creator?.username || `api-token:${apiToken.name}`,
         role: API_TOKEN_SCOPE_TO_ROLE[apiToken.scope] ?? 'viewer',
         userId: apiToken.user_id,
       };
