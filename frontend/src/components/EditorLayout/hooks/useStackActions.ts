@@ -79,6 +79,16 @@ const NODE_UNREACHABLE_FAILURE: FailureClassification = {
 
 const UNREACHABLE_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
 
+// Mirrors ImageUpdateService's UPDATE_STILL_PRESENT_WARNING / UPDATE_VERIFICATION_INCOMPLETE_WARNING:
+// that service's warning copy assumes an update was just applied, but
+// checkUpdatesForStack runs before any update, so these two generic messages
+// are replaced with accurate pre-update copy. A stack-specific reason (e.g. a
+// compose render failure) is still forwarded as-is.
+const GENERIC_POST_UPDATE_WARNINGS: ReadonlySet<string> = new Set([
+  'The update command completed, but Sencho still detects an available image update.',
+  'The update command completed, but Sencho could not fully verify whether an image update remains.',
+]);
+
 const SELF_STACK_PROTECTED_CODE = 'self_stack_protected';
 
 const isSelfStackProtectedResponse = (rawBody: string, status?: number): boolean => {
@@ -2241,17 +2251,31 @@ export function useStackActions(options: UseStackActionsOptions) {
   };
 
   const checkUpdatesForStack = async (stackName: string) => {
+    const loadingId = toast.loading(`Checking ${stackName} for image updates...`);
     try {
       const res = await apiFetch(`/image-updates/refresh/${encodeURIComponent(stackName)}`, { method: 'POST' });
       if (res.ok) {
+        const data = await res.json().catch(() => ({})) as { outcome?: unknown; warning?: unknown };
         await stackListState.fetchImageUpdates();
-        toast.success('Image update check complete.');
+        const warning = typeof data.warning === 'string' ? data.warning : undefined;
+        if (data.outcome === 'still_present') {
+          toast.info(`${stackName} still has an update available.`);
+        } else if (warning && GENERIC_POST_UPDATE_WARNINGS.has(warning)) {
+          toast.info(`Could not fully verify update status for ${stackName}.`);
+        } else if (warning) {
+          toast.info(warning);
+        } else {
+          toast.success('Image update check complete.');
+        }
       } else {
         const data = await res.json().catch(() => ({}));
         toast.error(data.error || 'Failed to check for updates');
       }
-    } catch {
+    } catch (error) {
+      console.error(`Failed to check updates for stack ${stackName}:`, error);
       toast.error('Failed to check for updates');
+    } finally {
+      toast.dismiss(loadingId);
     }
   };
 

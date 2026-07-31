@@ -20,7 +20,7 @@ Sencho ships with five built-in roles that map to the permissions most operators
 |------|----------------|------|
 | **Admin** | Full operator access: deploy, edit compose, manage users, configure nodes, view audit log, every system setting | Community |
 | **Viewer** | Read-only access to stacks, logs, stats, file contents, and node listings | Community |
-| **Deployer** | Deploy, restart, stop, and start stacks. Cannot edit compose files, create or delete stacks, or view nodes | Admiral |
+| **Deployer** | Deploy, restart, stop, and start stacks, and check individual stacks for image updates. Cannot edit compose files, create or delete stacks, view nodes, or manage alert and auto-heal rules | Admiral |
 | **Node Admin** | Full stack and node management across the fleet, including node-scoped operational Settings. No access to users, licensing, credentials, or system-only Settings | Admiral |
 | **Auditor** | Read-only access to stacks, nodes, and the audit log. No write access anywhere | Admiral |
 
@@ -31,8 +31,8 @@ Each row is one of the permission keys the backend checks. The matrix below is t
 | Permission | Admin | Node Admin | Deployer | Auditor | Viewer |
 |------------|:-----:|:----------:|:--------:|:-------:|:------:|
 | View stacks, logs, stats (`stack:read`) | Yes | Yes | Yes | Yes | Yes |
-| Deploy, restart, stop, start, take down (`stack:deploy`) | Yes | Yes | Yes | No | No |
-| Edit compose and `.env` files (`stack:edit`) | Yes | Yes | No | No | No |
+| Deploy, restart, stop, start, take down, check a stack for image updates (`stack:deploy`) | Yes | Yes | Yes | No | No |
+| Edit compose and `.env` files, manage alert rules and auto-heal policies (`stack:edit`) | Yes | Yes | No | No | No |
 | Create stacks (`stack:create`) | Yes | Yes | No | No | No |
 | Delete stacks (`stack:delete`) | Yes | Yes | No | No | No |
 | View nodes (`node:read`) | Yes | Yes | No | Yes | Yes |
