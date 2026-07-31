@@ -47,9 +47,11 @@ describe('GET /api/scheduled-tasks', () => {
     expect(res.status).toBe(401);
   });
 
-  it('rejects non-admin users with 403', async () => {
+  it('returns a permission-filtered list for non-admin users (empty for viewers)', async () => {
     const res = await request(app).get('/api/scheduled-tasks').set('Cookie', viewerCookie);
-    expect(res.status).toBe(403);
+    // Viewers have no scheduled-action permission; they see an empty list, not a 403.
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
   });
 
   it('returns an empty array when no tasks exist', async () => {

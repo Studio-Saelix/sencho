@@ -28,6 +28,7 @@ function makeReachCtx(over: Partial<ReachabilityContext> = {}): ReachabilityCont
     licenseStatus: 'ready',
     experimental: true,
     experimentalReady: true,
+    scheduledOpsAccessible: false,
     ...over,
   };
 }

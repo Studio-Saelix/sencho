@@ -2,6 +2,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { DatabaseService } from './DatabaseService';
 import type { ScheduledTask } from './DatabaseService';
 import { LicenseService } from './LicenseService';
+import type { LicenseTier } from './license-types';
 import { PROXY_TIER_HEADER, deployProvenanceHeaders } from './license-headers';
 import DockerController from './DockerController';
 import { ComposeService } from './ComposeService';
@@ -35,12 +36,22 @@ import { filterContainersByComposeService } from '../helpers/composeServiceMatch
 import { excludeSelfContainers } from '../helpers/excludeSelfContainers';
 import { enforcePolicyPreDeploy } from './PolicyEnforcement';
 import { summarizeBlockReasons } from '../utils/policy-risk';
+import { resolveTaskPermissionScope, type BackendScheduledAction, type TargetType } from './scheduledActionRegistry';
+import { checkPermissionForSubject } from '../middleware/permissions';
 
 const TRIVY_UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const TRIVY_UPDATE_CHECK_STARTUP_DELAY_MS = 5 * 60 * 1000;
 
 const TRIVY_REDETECT_INTERVAL_MS = 10 * 60 * 1000;
 const STALE_SCAN_THRESHOLD_MS = 15 * 60 * 1000;
+
+/** Thrown when a scheduled task's creator no longer has permission for the target action. */
+export class TaskAuthorizationError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'TaskAuthorizationError';
+    }
+}
 
 export class SchedulerService {
     private static instance: SchedulerService;
@@ -318,6 +329,34 @@ export class SchedulerService {
                 }
             }
 
+            // Permission revalidation: for automatic runs, verify the creator still holds
+            // the required permission. Manual runs skip this — the route's acting-user
+            // check is the gate. Legacy tasks (creator_user_id NULL) execute as before.
+            if (triggeredBy === 'scheduler' && task.creator_user_id != null) {
+                const creator = db.getUserById(task.creator_user_id);
+                if (!creator) {
+                    throw new TaskAuthorizationError('Scheduled task no longer authorized: creator account no longer exists.');
+                }
+                const scope = resolveTaskPermissionScope(
+                    task.action as BackendScheduledAction,
+                    task.target_type as TargetType,
+                    task.target_id,
+                    task.node_id,
+                    task.selector_type,
+                );
+                const tier: LicenseTier = LicenseService.getInstance().getTier();
+                if (!checkPermissionForSubject(
+                    { username: creator.username, role: creator.role, userId: creator.id },
+                    tier,
+                    scope.action,
+                    scope.resourceType,
+                    scope.resourceId,
+                    scope.resourceNodeId,
+                )) {
+                    throw new TaskAuthorizationError('Scheduled task no longer authorized: creator permission was revoked.');
+                }
+            }
+
             if (isDebugEnabled()) console.log(`[SchedulerService:debug] Task ${task.id} pre-checks passed, executing ${task.action}`);
             const actionStart = Date.now();
             let output = '';
@@ -425,6 +464,10 @@ export class SchedulerService {
             if (cronInvalid) {
                 updates.enabled = 0;
                 console.warn(`[SchedulerService] Task "${task.name}" (id=${task.id}) auto-disabled: cron expression invalid`);
+            }
+            if (error instanceof TaskAuthorizationError) {
+                updates.enabled = 0;
+                console.warn(`[SchedulerService] Task "${task.name}" (id=${task.id}) auto-disabled: creator authorization revoked`);
             }
             db.updateScheduledTask(task.id, updates);
             db.updateScheduledTaskRun(runId, {

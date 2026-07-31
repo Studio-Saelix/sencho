@@ -1867,6 +1867,7 @@ function makeLifecycleTask(action: ScheduledTask['action'], overrides: Partial<S
     cron_expression: '0 2 * * *',
     enabled: 1,
     created_by: 'admin',
+    creator_user_id: null,
     created_at: 0,
     updated_at: 0,
     last_run_at: null,

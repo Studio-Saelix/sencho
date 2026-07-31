@@ -20,7 +20,7 @@ import type { MenuGroup, MenuItem, StackMenuCtx } from '@/components/sidebar/sid
 
 export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[] {
   const {
-    stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canDeploy, canEditLabels, isPinned, labels,
+    stackStatus, isSelfStack, canOpenApp, isBusy, canDelete, canDeploy, canEditLabels, isPinned, labels,
     openAlertSheet, openAutoHeal, canCheckUpdates, checkUpdates, openStackApp,
     deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel,
     menuVisibility, openScheduleTask,
@@ -88,7 +88,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
       if (showUpdate) lifecycle.push({ id: 'update', label: 'Update', icon: Download, shortcut: '⌘↑', onSelect: update, disabled: isBusy });
       if (showTakeDown) lifecycle.push({ id: 'take-down', label: 'Take down', icon: ArrowDownToLine, shortcut: '⌘↓', onSelect: takeDown, disabled: isBusy || isSelfStack });
     }
-    if (isAdmin) lifecycle.push({ id: 'schedule', label: 'Schedule task', icon: CalendarClock, onSelect: openScheduleTask });
+    if (canDeploy) lifecycle.push({ id: 'schedule', label: 'Schedule task', icon: CalendarClock, onSelect: openScheduleTask });
     if (lifecycle.length > 0) groups.push({ id: 'lifecycle', items: lifecycle });
 
     if (canDelete) {
@@ -108,7 +108,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
 
     return groups;
   }, [
-    stackStatus, isSelfStack, canOpenApp, isBusy, isAdmin, canDelete, canDeploy, canEditLabels, isPinned, labels,
+    stackStatus, isSelfStack, canOpenApp, isBusy, canDelete, canDeploy, canEditLabels, isPinned, labels,
     showDeploy, showStop, showRestart, showUpdate, showTakeDown,
     openAlertSheet, openAutoHeal, canCheckUpdates, checkUpdates, openStackApp,
     deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel, openScheduleTask,

@@ -19,6 +19,8 @@ export interface ReachabilityContext {
   experimental: boolean;
   /** True once /meta experimental has settled (success or fail-closed). */
   experimentalReady: boolean;
+  /** Whether the user can reach the Scheduled Operations view (global or scoped grants). */
+  scheduledOpsAccessible: boolean;
 }
 
 /** RBAC/tier gates apply only when permission and license metadata are ready. */
@@ -41,10 +43,11 @@ export function isViewHidden(view: ActiveView, ctx: ReachabilityContext): boolea
   if (ctx.isRemote && HUB_ONLY_VIEWS.has(view)) return true;
   if (
     !ctx.isAdmin &&
-    (view === 'global-observability' || view === 'auto-updates' || view === 'scheduled-ops')
+    (view === 'global-observability' || view === 'auto-updates')
   ) {
     return true;
   }
+  if (view === 'scheduled-ops' && !ctx.scheduledOpsAccessible) return true;
   if (!ctx.can('node:read') && (view === 'fleet' || view === 'networking')) return true;
   if (view === 'host-console') return !ctx.can('system:console');
   // Permission-driven on Community and Admiral (14-day window vs paid depth is in-view).
