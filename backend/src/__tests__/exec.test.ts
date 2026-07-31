@@ -345,6 +345,35 @@ describe('WebSocket upgrade - exec auth enforcement', () => {
     expect(code).toBe(403);
   });
 
+  it('rejects legacy no-tv admin JWT after token_version bump (401)', async () => {
+    // #1711 tightened HTTP to treat missing tv as 1; WS must match so a
+    // password reset / clear-sessions cannot leave container-exec open.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const bcrypt = await import('bcrypt');
+    const db = DatabaseService.getInstance();
+    const username = `legacy-tv-admin-${Date.now()}`;
+    const id = db.addUser({
+      username,
+      password_hash: await bcrypt.hash('password123', 1),
+      role: 'admin',
+    });
+    expect(db.getUserById(id)!.token_version).toBe(1);
+    db.bumpTokenVersion(id);
+    expect(db.getUserById(id)!.token_version).toBe(2);
+
+    const legacyNoTv = jwt.sign(
+      { username, role: 'admin' },
+      TEST_JWT_SECRET,
+      { expiresIn: '1m' },
+    );
+    const ws = new WebSocket(getWsUrl(), { headers: { Cookie: `sencho_token=${legacyNoTv}` } });
+    const code = await new Promise<number>((resolve) => {
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+      ws.on('error', () => resolve(0));
+    });
+    expect(code).toBe(401);
+  });
+
   it('rejects WebSocket upgrade with node_proxy token (403)', async () => {
     const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
     const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });

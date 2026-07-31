@@ -85,7 +85,10 @@ export function handleGenericWs(
       console.warn('[Exec] User account not found:', decoded.username);
       return reject(socket, 401, 'Unauthorized');
     }
-    if (decoded.tv !== undefined && execUser.token_version !== decoded.tv) {
+    // Match authMiddleware / upgradeHandler: missing tv ⇒ legacy token at
+    // version 1. Without this default, a bumped token_version left no-tv
+    // cookies able to open container exec after session invalidation.
+    if (execUser.token_version !== (decoded.tv ?? 1)) {
       console.warn('[Exec] Session invalidated (token version mismatch):', decoded.username);
       return reject(socket, 401, 'Unauthorized');
     }
