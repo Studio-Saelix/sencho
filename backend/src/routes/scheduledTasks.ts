@@ -290,6 +290,22 @@ function requireTaskPermission(
   return requirePermission(req, res, scope.action, scope.resourceType, scope.resourceId, scope.resourceNodeId);
 }
 
+/**
+ * Require permission to access an existing task. Returns 404 (not 403) when
+ * denied, so an unauthorized caller cannot distinguish "task does not exist"
+ * from "task exists but you are not authorized." Used on by-ID endpoints
+ * where the task's existence has already been confirmed.
+ */
+function requireTaskExistsPermission(
+  req: Request,
+  res: Response,
+  task: Pick<ScheduledTask, 'action' | 'target_type' | 'target_id' | 'node_id' | 'selector_type'>,
+): boolean {
+  if (checkTaskPermission(req, task)) return true;
+  res.status(404).json({ error: 'Scheduled task not found' });
+  return false;
+}
+
 export const scheduledTasksRouter = Router();
 
 scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
@@ -436,7 +452,7 @@ scheduledTasksRouter.get('/:id', (req: Request, res: Response): void => {
     if (id === null) return;
     const task = DatabaseService.getInstance().getScheduledTask(id);
     if (!task) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireTaskPermission(req, res, task)) return;
+    if (!requireTaskExistsPermission(req, res, task)) return;
     res.json(task);
   } catch (error) {
     console.error('[ScheduledTasks] Get error:', error);
@@ -611,7 +627,7 @@ scheduledTasksRouter.delete('/:id', (req: Request, res: Response): void => {
     const db = DatabaseService.getInstance();
     const existing = db.getScheduledTask(id);
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireTaskPermission(req, res, existing)) return;
+    if (!requireTaskExistsPermission(req, res, existing)) return;
 
     db.deleteScheduledTask(id);
     console.log(`[ScheduledTasks] Deleted task id=${id}`);
@@ -631,7 +647,7 @@ scheduledTasksRouter.patch('/:id/toggle', (req: Request, res: Response): void =>
     const db = DatabaseService.getInstance();
     const existing = db.getScheduledTask(id);
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireTaskPermission(req, res, existing)) return;
+    if (!requireTaskExistsPermission(req, res, existing)) return;
 
     const newEnabled = existing.enabled ? 0 : 1;
     // On enable, a one-shot's persisted run_at restores the exact pinned instant
@@ -666,7 +682,7 @@ scheduledTasksRouter.post('/:id/run', (req: Request, res: Response): void => {
     const db = DatabaseService.getInstance();
     const existing = db.getScheduledTask(id);
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireTaskPermission(req, res, existing)) return;
+    if (!requireTaskExistsPermission(req, res, existing)) return;
 
     const scheduler = SchedulerService.getInstance();
     if (scheduler.isTaskRunning(id)) {
@@ -695,7 +711,7 @@ scheduledTasksRouter.get('/:id/runs/export', (req: Request, res: Response): void
     const db = DatabaseService.getInstance();
     const task = db.getScheduledTask(id);
     if (!task) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireTaskPermission(req, res, task)) return;
+    if (!requireTaskExistsPermission(req, res, task)) return;
 
     const runs = db.getAllScheduledTaskRuns(id);
 
@@ -729,7 +745,7 @@ scheduledTasksRouter.get('/:id/runs', (req: Request, res: Response): void => {
     const db = DatabaseService.getInstance();
     const existing = db.getScheduledTask(id);
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
-    if (!requireTaskPermission(req, res, existing)) return;
+    if (!requireTaskExistsPermission(req, res, existing)) return;
 
     const limit = Math.min(parseInt(req.query.limit as string, 10) || 20, 100);
     const offset = Math.max(parseInt(req.query.offset as string, 10) || 0, 0);

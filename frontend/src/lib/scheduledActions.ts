@@ -275,3 +275,22 @@ export function canScheduleAny(
   }
   return false;
 }
+
+/**
+ * True when the user can schedule this action on at least one possible target
+ * (global role or any scoped grant). Used to filter the action picker so
+ * actions the user can NEVER schedule are not shown.
+ */
+export function canScheduleActionAnywhere(
+  can: (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean,
+  def: ScheduledActionDefinition,
+  permissions?: { scopedPermissions?: Record<string, PermissionAction[]> } | null,
+): boolean {
+  if (can(def.permission)) return true;
+  if (permissions?.scopedPermissions) {
+    for (const actions of Object.values(permissions.scopedPermissions)) {
+      if ((actions as readonly string[]).includes(def.permission)) return true;
+    }
+  }
+  return false;
+}

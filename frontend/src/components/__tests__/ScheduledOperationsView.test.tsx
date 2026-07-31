@@ -14,6 +14,19 @@ vi.mock('@/lib/api', () => ({ apiFetch: vi.fn(), fetchForNode: vi.fn() }));
 vi.mock('@/components/ui/toast-store', () => ({
   toast: { error: vi.fn(), success: vi.fn(), warning: vi.fn(), info: vi.fn() },
 }));
+vi.mock('@/context/AuthContext', () => ({
+  useAuth: () => ({
+    can: () => true,
+    permissions: {
+      globalRole: 'admin' as const,
+      globalPermissions: ['stack:deploy', 'node:manage', 'system:settings'] as string[],
+      scopedPermissions: {},
+    },
+    isAdmin: true,
+    permissionsStatus: 'ready' as const,
+    permissionsReady: true,
+  }),
+}));
 
 import { apiFetch, fetchForNode } from '@/lib/api';
 import { SCHEDULED_ACTIONS } from '@/lib/scheduledActions';

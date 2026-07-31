@@ -275,7 +275,7 @@ describe('GET /:id, /:id/runs, /:id/runs/export (RBAC)', () => {
     expect(res.status).toBe(200);
   });
 
-  it('scoped deployer gets 403 for a different stack task', async () => {
+  it('scoped deployer gets 404 for a different stack task', async () => {
     // Create a task they don't own
     const db = DatabaseService.getInstance();
     const other = db.getDb().prepare(`
@@ -283,7 +283,7 @@ describe('GET /:id, /:id/runs, /:id/runs/export (RBAC)', () => {
       VALUES ('api-task', 'stack', 'api', 1, 'restart', '0 4 * * *', 1, 'admin', 1, 0, 0)
     `).run();
     const res = await request(app).get(`/api/scheduled-tasks/${other.lastInsertRowid}`).set('Cookie', scopedDeployerCookie);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
   });
 });
 
@@ -351,14 +351,14 @@ describe('PATCH /:id/toggle and POST /:id/run (RBAC)', () => {
     expect(res.status).not.toBe(403);
   });
 
-  it('second deployer gets 403 on toggle of other stack task', async () => {
+  it('scoped deployer gets 404 on toggle of other stack task', async () => {
     const res = await request(app).patch(`/api/scheduled-tasks/${taskId}/toggle`).set('Cookie', secondStackDeployerCookie);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
   });
 
-  it('viewer gets 403 on toggle', async () => {
+  it('viewer gets 404 on toggle', async () => {
     const res = await request(app).patch(`/api/scheduled-tasks/${taskId}/toggle`).set('Cookie', viewerCookie);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
   });
 });
 
@@ -379,17 +379,12 @@ describe('Scheduler revalidation', () => {
     const task = db.getScheduledTask(res.lastInsertRowid as number);
     expect(task).toBeDefined();
 
-    // Direct execution should throw TaskAuthorizationError
-    try {
-      // Access private method for test coverage
-      await (SchedulerService.getInstance() as any).executeTask(task!, 'scheduler');
-    } catch (e: unknown) {
-      if (e instanceof TaskAuthorizationError) {
-        expect(e.message).toContain('creator account no longer exists');
-      } else {
-        // Other errors are also acceptable since the test can't fully set up the runtime
-      }
-    }
+    // executeTask catches TaskAuthorizationError internally (auto-disables the
+    // task and records the error), then returns normally rather than re-throwing.
+    await (SchedulerService.getInstance() as any).executeTask(task!, 'scheduler');
+    const updated = db.getScheduledTask(task!.id);
+    expect(updated!.enabled).toBe(0);
+    expect(updated!.last_error).toContain('creator account no longer exists');
   });
 
   it('legacy task with NULL creator_user_id executes without revalidation', async () => {
