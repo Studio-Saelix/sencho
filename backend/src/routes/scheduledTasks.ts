@@ -470,12 +470,12 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     if (!existing) { res.status(404).json({ error: 'Scheduled task not found' }); return; }
 
     // Two-phase check: (1) the caller must be authorized for the existing task
-    // (prevents task take-over), and (2) the merged target must also be
-    // authorized (prevents retargeting escalation, like flipping restart→prune).
-    if (!checkTaskPermission(req, existing)) {
-      res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
-      return;
-    }
+    // (prevents task take-over; returns 404 so task ID existence is not
+    // disclosed), and (2) the merged target must also be authorized (prevents
+    // retargeting escalation, like flipping restart→prune; returns 403 since
+    // this is a permission denial on the requested change, not an ownership
+    // check).
+    if (!requireTaskExistsPermission(req, res, existing)) return;
 
     const {
       name, target_type, target_id, node_id, action, cron_expression, enabled,

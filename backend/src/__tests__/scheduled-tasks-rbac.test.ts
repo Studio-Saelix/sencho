@@ -319,9 +319,9 @@ describe('PUT /:id (RBAC two-phase)', () => {
     expect(res.status).toBe(403);
   });
 
-  it('second deployer gets 403 editing a task they do not own', async () => {
+  it('second deployer gets 404 editing a task they do not own', async () => {
     const res = await request(app).put(`/api/scheduled-tasks/${taskId}`).set('Cookie', secondStackDeployerCookie).send({ name: 'stolen' });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(404);
   });
 });
 
