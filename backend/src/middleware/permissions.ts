@@ -83,9 +83,11 @@ export function scopedActionsForStack(
 }
 
 /**
- * Core permission resolver without a Request dependency. Admin bypasses all
- * checks; scoped assignments only apply on the paid tier. Used by in-process
- * callers (e.g. the scheduler) that have a subject + tier but no HTTP context.
+ * Core permission resolver without a Request dependency. Admin bypasses
+ * all checks; scoped assignments only apply on the paid tier. Used by
+ * in-process callers (e.g. the scheduler) that have a subject + tier but
+ * no HTTP context. Does NOT handle scopedStackEvidence (machine-auth hop
+ * elevation) — that path requires a Request.
  */
 export function checkPermissionForSubject(
   subject: PermissionSubject,
@@ -105,7 +107,7 @@ export function checkPermissionForSubject(
   if (tier !== 'paid') return false;
 
   const db = DatabaseService.getInstance();
-  const nodeId = resourceType === 'stack' ? resourceNodeId ?? undefined : null;
+  const nodeId = resourceType === 'stack' ? (resourceNodeId ?? undefined) : null;
   const assignments = db.getRoleAssignments(
     subject.userId,
     resourceType,
@@ -143,35 +145,60 @@ export function checkPermission(
 ): boolean {
   if (!req.user) return false;
 
+  const globalRole = req.user.role;
+
+  if (isDebugEnabled()) console.log('[RBAC:diag] checkPermission:', sanitizeForLog(action), 'user:', sanitizeForLog(req.user.username), 'globalRole:', globalRole, 'resource:', sanitizeForLog(resourceType), sanitizeForLog(resourceId));
+
+  if (globalRole === 'admin') return true;
+  if (ROLE_PERMISSIONS[globalRole]?.includes(action)) return true;
+
+  if (!resourceType || !resourceId) return false;
+
   // Bound machine evidence from the hub (node_proxy / pilot_tunnel only).
   // Authorizes exact stack + action members of the evidenced set without a
-  // local role_assignments row (remote userId is 0). Resolve before the
-  // subject-core call so the evidence short-circuit takes priority.
-  if (resourceType && resourceId) {
-    const evidence = req.scopedStackEvidence;
-    if (
-      evidence
-      && resourceType === 'stack'
-      && resourceId === evidence.stackName
-      && action.startsWith('stack:')
-      && evidence.actions.has(action)
-    ) {
-      return true;
+  // local role_assignments row (remote userId is 0).
+  const evidence = req.scopedStackEvidence;
+  if (
+    evidence
+    && resourceType === 'stack'
+    && resourceId === evidence.stackName
+    && action.startsWith('stack:')
+    && evidence.actions.has(action)
+  ) {
+    return true;
+  }
+
+  if (effectiveTier(req) !== 'paid') return false;
+
+  const db = DatabaseService.getInstance();
+  const nodeId = resourceType === 'stack'
+    ? (resourceNodeId === undefined ? req.nodeId : resourceNodeId)
+    : null;
+  const assignments = db.getRoleAssignments(
+    req.user.userId,
+    resourceType,
+    resourceId,
+    nodeId,
+  );
+  if (isDebugEnabled()) console.log('[RBAC:diag] Scoped assignments found:', assignments.length, 'for user:', req.user.userId);
+  for (const assignment of assignments) {
+    if (ROLE_PERMISSIONS[assignment.role]?.includes(action)) return true;
+  }
+
+  // Node-scoped grants are node-wide: a Node Admin / Deployer / Admin on
+  // node N authorizes that role's stack actions for every stack on N.
+  if (resourceType === 'stack' && nodeId != null) {
+    const nodeAssignments = db.getRoleAssignments(
+      req.user.userId,
+      'node',
+      String(nodeId),
+    );
+    for (const assignment of nodeAssignments) {
+      if (ROLE_PERMISSIONS[assignment.role]?.includes(action)) return true;
     }
   }
 
-  const resolvedNodeId = resourceType === 'stack'
-    ? (resourceNodeId === undefined ? req.nodeId : resourceNodeId)
-    : resourceNodeId;
-
-  return checkPermissionForSubject(
-    { username: req.user.username, role: req.user.role, userId: req.user.userId },
-    effectiveTier(req),
-    action,
-    resourceType,
-    resourceId,
-    resolvedNodeId,
-  );
+  return false;
 }
 
 /** Generic permission guard: sends 403 if denied. */
