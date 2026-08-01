@@ -33,6 +33,9 @@ import {
   ROLE_PERMISSIONS,
   scopedActionsForStack,
 } from '../middleware/permissions';
+import type { PermissionAction } from '../middleware/permissions';
+import type { UserRole } from '../services/DatabaseService';
+import { SETTING_WRITE_PERMISSIONS } from '../routes/settings';
 
 /**
  * Per-request hop timing for the critical hydration GETs, kept off the Request
@@ -140,7 +143,9 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         // re-set from the authenticated session (authGate runs before this proxy,
         // so req.user is always resolved here).
         proxyReq.removeHeader(PROXY_ROLE_HEADER);
-        if (req.user?.role) {
+        if (req.proxyElevatedRole) {
+          proxyReq.setHeader(PROXY_ROLE_HEADER, req.proxyElevatedRole);
+        } else if (req.user?.role) {
           proxyReq.setHeader(PROXY_ROLE_HEADER, req.user.role);
         }
         // Deploy provenance: always strip client-supplied values, then set
@@ -417,6 +422,59 @@ export function createRemoteProxyMiddleware(): RequestHandler {
         }
       }
 
+      // Settings-write pre-auth gate: when a non-admin, non-global-node-admin
+      // user writes settings on a remote node, the remote only sees the global
+      // role header and cannot verify scoped assignments. Check hub-side first
+      // and elevate PROXY_ROLE_HEADER to node-admin when the scoped check passes.
+      if (isSettingsWrite(req) && req.user?.role !== 'admin' && req.user?.role !== 'node-admin') {
+        if (hasNonIdentityContentEncoding(req)) {
+          await drainRequestBody(req);
+          res.status(415).json({
+            error: 'Compressed request bodies are not supported for remote settings writes',
+            code: 'encoding_unsupported',
+          });
+          return;
+        }
+        try {
+          req.rawBody = await bufferRequestBody(req, SETTINGS_PROXY_BODY_LIMIT);
+        } catch (err) {
+          const status = Number((err as { status?: number }).status);
+          if (status === 413) {
+            res.status(413).json({ error: 'Settings payload too large', code: 'entity_too_large' });
+            return;
+          }
+          if (status === 400) {
+            res.status(400).json({ error: 'Incomplete request body' });
+            return;
+          }
+          throw err;
+        }
+        const needed = settingsBodyPermissions(req.rawBody);
+        // Fail-closed on empty/unparseable body: require hub-side node:manage on
+        // the target node (mirrors requireSettingsWritePermission's empty-keys
+        // branch in routes/settings.ts:62-68). A user with no scoped grant is
+        // denied; a user with a scoped grant passes through elevated.
+        let preAuthOk = true;
+        if (needed.length === 0) {
+          preAuthOk = checkNodeManageOnHub(req);
+        } else {
+          for (const action of needed) {
+            const ok = action === 'node:manage'
+              ? checkNodeManageOnHub(req)
+              : checkPermission(req, action);
+            if (!ok) {
+              preAuthOk = false;
+              break;
+            }
+          }
+        }
+        if (!preAuthOk) {
+          res.status(403).json({ error: 'Permission denied.', code: 'PERMISSION_DENIED' });
+          return;
+        }
+        req.proxyElevatedRole = 'node-admin';
+      }
+
       req.proxyTarget = target;
       beginProxyTiming(req, res);
       proxy(req, res, next);
@@ -424,6 +482,50 @@ export function createRemoteProxyMiddleware(): RequestHandler {
 
     runGatedProxy().catch(next);
   };
+}
+
+/** Max request body size for buffered settings writes (same as ALERT_PROXY_BODY_LIMIT). */
+const SETTINGS_PROXY_BODY_LIMIT = 100 * 1024;
+
+/** True when the request is a settings write destined for a remote node (path is post-/api strip). */
+function isSettingsWrite(req: Request): boolean {
+  if (req.method !== 'POST' && req.method !== 'PATCH') return false;
+  return /^\/settings\/?$/.test(req.path);
+}
+
+/**
+ * Hub-side `node:manage` resolve against the active node so scoped Node Admin
+ * grants on the target remote node are detected before the hop.
+ */
+function checkNodeManageOnHub(req: Request): boolean {
+  if (typeof req.nodeId === 'number') {
+    return checkPermission(req, 'node:manage', 'node', String(req.nodeId));
+  }
+  return checkPermission(req, 'node:manage');
+}
+
+/**
+ * Extract the set of required PermissionAction values from a buffered settings
+ * body. Returns the distinct actions for a valid body, or an empty array when
+ * the body is empty or JSON.parse fails (caller must then fall back to requiring
+ * checkNodeManageOnHub, fail-closed).
+ */
+function settingsBodyPermissions(rawBody: Buffer): PermissionAction[] {
+  if (rawBody.length === 0) return [];
+  try {
+    const parsed = JSON.parse(rawBody.toString('utf-8')) as Record<string, unknown>;
+    // POST /api/settings sends { key, value }; PATCH sends a flat key/value map.
+    const keys = typeof parsed.key === 'string' ? [parsed.key] : Object.keys(parsed);
+    if (keys.length === 0) return [];
+    const needed = new Set<PermissionAction>();
+    for (const key of keys) {
+      const action = SETTING_WRITE_PERMISSIONS[key];
+      if (action) needed.add(action);
+    }
+    return [...needed];
+  } catch {
+    return [];
+  }
 }
 
 /** POST /stacks/:stackName/down with ?removeVolumes=true (path is post-/api strip). */

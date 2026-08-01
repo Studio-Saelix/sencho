@@ -11,7 +11,7 @@ import { parseNotificationDispatchRetries } from '../helpers/notificationDispatc
 // keys so secrets written to global_settings by other subsystems (cloud
 // backup credentials, auth_* login secrets) are never returned; writes
 // outside the map are rejected.
-const SETTING_WRITE_PERMISSIONS: Record<string, PermissionAction> = {
+export const SETTING_WRITE_PERMISSIONS: Record<string, PermissionAction> = {
   host_cpu_limit: 'node:manage',
   host_ram_limit: 'node:manage',
   host_disk_limit: 'node:manage',

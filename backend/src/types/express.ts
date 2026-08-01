@@ -44,6 +44,12 @@ declare global {
        * re-classifying req.path there would miss DELETE cleanup.
        */
       proxyNamedStackRoute?: { stackName: string; action: PermissionAction };
+      /**
+       * Elevated role for a single proxied request. Set by the settings
+       * pre-authorization gate when the hub-side scoped permission check
+       * passes for a non-admin user. Resets to undefined after the hop.
+       */
+      proxyElevatedRole?: UserRole;
     }
   }
 }
