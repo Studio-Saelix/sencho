@@ -3,34 +3,31 @@ import { ROLE_PERMISSIONS, type PermissionAction } from '../middleware/permissio
 import { classifyStackApiPath } from '../helpers/stackRouteAuth';
 
 describe('operational role matrix', () => {
-  const expectations: Record<string, { allow: PermissionAction[]; deny: PermissionAction[] }> = {
-    admin: {
-      allow: ['stack:read', 'stack:edit', 'stack:deploy', 'stack:create', 'stack:delete', 'node:read', 'node:manage', 'system:settings'],
-      deny: [],
-    },
-    'node-admin': {
-      allow: ['stack:read', 'stack:edit', 'stack:deploy', 'stack:create', 'stack:delete', 'node:read', 'node:manage'],
-      deny: ['system:settings', 'system:users', 'system:license', 'system:registries'],
-    },
-    deployer: {
-      allow: ['stack:read', 'stack:deploy'],
-      deny: ['stack:edit', 'stack:create', 'stack:delete', 'node:read', 'node:manage', 'system:settings'],
-    },
-    viewer: {
-      allow: ['stack:read', 'node:read'],
-      deny: ['stack:edit', 'stack:deploy', 'stack:create', 'stack:delete', 'node:manage', 'system:audit'],
-    },
-    auditor: {
-      allow: ['stack:read', 'node:read', 'system:audit'],
-      deny: ['stack:edit', 'stack:deploy', 'stack:create', 'stack:delete', 'node:manage', 'system:settings'],
-    },
+  /**
+   * Lockstep guard: every role's full permission set must match exactly.
+   * Any addition or removal to ROLE_PERMISSIONS must update this table;
+   * the full-set equality catches drift that a subset check would miss.
+   */
+  const expectedRoleActions: Record<string, PermissionAction[]> = {
+    admin: [
+      'stack:read', 'stack:edit', 'stack:deploy', 'stack:create', 'stack:delete',
+      'node:read', 'node:manage',
+      'system:settings', 'system:users', 'system:license', 'system:webhooks',
+      'system:tokens', 'system:console', 'system:audit', 'system:registries',
+    ],
+    'node-admin': [
+      'stack:read', 'stack:edit', 'stack:deploy', 'stack:create', 'stack:delete',
+      'node:read', 'node:manage',
+    ],
+    deployer: ['stack:read', 'stack:deploy'],
+    viewer: ['stack:read', 'node:read'],
+    auditor: ['stack:read', 'node:read', 'system:audit'],
   };
 
-  for (const [role, expected] of Object.entries(expectations)) {
-    it(`${role} exposes only its intended operational actions`, () => {
-      const actions = ROLE_PERMISSIONS[role as keyof typeof ROLE_PERMISSIONS];
-      for (const action of expected.allow) expect(actions).toContain(action);
-      for (const action of expected.deny) expect(actions).not.toContain(action);
+  for (const [role, expected] of Object.entries(expectedRoleActions)) {
+    it(`${role} has exactly the expected permission set`, () => {
+      const actual = [...(ROLE_PERMISSIONS[role as keyof typeof ROLE_PERMISSIONS] ?? [])].sort();
+      expect(actual).toEqual([...expected].sort());
     });
   }
 });
