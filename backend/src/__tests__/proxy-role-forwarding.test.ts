@@ -24,22 +24,38 @@ import { PROXY_ROLE_HEADER, PROXY_DEPLOY_SOURCE_HEADER, PROXY_DEPLOY_ACTOR_HEADE
 let tmpDir: string;
 let app: import('express').Express;
 let viewerBearer: string;
+let nodeAdminBearer: string;
+let auditorBearer: string;
+let deployerBearer: string;
 
 const VIEWER_USER = 'proxy-role-viewer';
+const NODE_ADMIN_USER = 'proxy-role-node-admin';
+const AUDITOR_USER = 'proxy-role-auditor';
+const DEPLOYER_USER = 'proxy-role-deployer';
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ app } = await import('../index'));
   const { DatabaseService } = await import('../services/DatabaseService');
   const db = DatabaseService.getInstance();
-  const hash = await bcrypt.hash('password123', 1);
-  db.addUser({ username: VIEWER_USER, password_hash: hash, role: 'viewer' });
-  const viewer = db.getUserByUsername(VIEWER_USER)!;
-  viewerBearer = jwt.sign(
-    { username: VIEWER_USER, role: 'viewer', tv: viewer.token_version },
-    TEST_JWT_SECRET,
-    { expiresIn: '1m' },
-  );
+
+  // Seed bearer tokens for each non-admin role, matching the original
+  // viewer pattern exactly to avoid drift.
+  const seed = (username: string, role: string): string => {
+    const hash = bcrypt.hashSync('password123', 1);
+    db.addUser({ username, password_hash: hash, role: role as any });
+    const user = db.getUserByUsername(username)!;
+    return jwt.sign(
+      { username, role, tv: user.token_version },
+      TEST_JWT_SECRET,
+      { expiresIn: '1m' },
+    );
+  };
+
+  viewerBearer = seed(VIEWER_USER, 'viewer');
+  deployerBearer = seed(DEPLOYER_USER, 'deployer');
+  nodeAdminBearer = seed(NODE_ADMIN_USER, 'node-admin');
+  auditorBearer = seed(AUDITOR_USER, 'auditor');
 });
 
 afterAll(() => {
@@ -127,9 +143,65 @@ describe('authMiddleware - forwarded actor role (node_proxy)', () => {
       .set(PROXY_ROLE_HEADER, 'superadmin');
     expect(res.status).toBe(200);
   });
+
+  // All five built-in roles: denied on admin-only, allowed on read-only.
+  const NON_ADMIN_ROLES = [
+    { role: 'viewer', desc: 'viewer' },
+    { role: 'deployer', desc: 'deployer' },
+    { role: 'node-admin', desc: 'node-admin' },
+    { role: 'auditor', desc: 'auditor' },
+  ];
+
+  for (const { role, desc } of NON_ADMIN_ROLES) {
+    it(`denies admin-only route for forwarded ${desc}`, async () => {
+      const token = signToken({ scope: 'node_proxy' });
+      const res = await request(app)
+        .get(ADMIN_ONLY)
+        .set('Authorization', `Bearer ${token}`)
+        .set(PROXY_ROLE_HEADER, role);
+      expect(res.status).toBe(403);
+    });
+
+    it(`grants read access for forwarded ${desc}`, async () => {
+      const token = signToken({ scope: 'node_proxy' });
+      const res = await request(app)
+        .get(READ_ONLY)
+        .set('Authorization', `Bearer ${token}`)
+        .set(PROXY_ROLE_HEADER, role);
+      expect(res.status).toBe(200);
+    });
+
+    it(`applies same trust to pilot_tunnel for forwarded ${desc}`, async () => {
+      const token = signToken({ scope: 'pilot_tunnel' });
+      const res = await request(app)
+        .get(ADMIN_ONLY)
+        .set('Authorization', `Bearer ${token}`)
+        .set(PROXY_ROLE_HEADER, role);
+      expect(res.status).toBe(403);
+    });
+  }
 });
 
 describe('Security - actor-role header cannot be smuggled by a user session', () => {
+  // Verify each non-admin bearer token authenticates locally before testing
+  // proxy paths. Catches token-version drift between seeding and signing.
+  // Bearer variables are set in beforeAll; resolve lazily inside each test.
+  const BEARER_REFS: Array<{ name: string; get: () => string }> = [
+    { name: 'viewer', get: () => viewerBearer },
+    { name: 'deployer', get: () => deployerBearer },
+    { name: 'node-admin', get: () => nodeAdminBearer },
+    { name: 'auditor', get: () => auditorBearer },
+  ];
+
+  for (const { name, get } of BEARER_REFS) {
+    it(`${name} token authenticates on /api/auth/status`, async () => {
+      const res = await request(app)
+        .get('/api/auth/status')
+        .set('Authorization', `Bearer ${get()}`);
+      expect(res.status).toBe(200);
+    });
+  }
+
   it('ignores the role header on a cookie session (uses the DB role)', async () => {
     const cookie = await loginAsTestAdmin(app);
     // A browser session that tries to downgrade itself (or, by the same path,
@@ -235,4 +307,28 @@ describe('remote proxy gateway - actor role header forwarding', () => {
     expect(captured?.[PROXY_DEPLOY_SOURCE_HEADER]).toBe('manual');
     expect(captured?.[PROXY_DEPLOY_ACTOR_HEADER]).toBe(VIEWER_USER);
   });
+
+  // Anti-smuggling extended to the remaining non-admin roles: each persona's
+  // real role must be forwarded even when an attacker sets the admin header.
+  // The bearer variables are set in beforeAll; resolve them lazily inside each
+  // test so we never capture undefined at describe-registration time.
+  const SMUGGLE_PERSONAS: Array<{ name: string; bearerRef: () => string; role: string }> = [
+    { name: 'deployer', bearerRef: () => deployerBearer, role: 'deployer' },
+    { name: 'node-admin', bearerRef: () => nodeAdminBearer, role: 'node-admin' },
+    { name: 'auditor', bearerRef: () => auditorBearer, role: 'auditor' },
+  ];
+
+  for (const { name, bearerRef, role } of SMUGGLE_PERSONAS) {
+    it(`overwrites smuggled admin header with ${name} session role`, async () => {
+      captured = null;
+      const res = await request(app)
+        .get(READ_ONLY)
+        .set('Authorization', `Bearer ${bearerRef()}`)
+        .set('x-node-id', String(remoteNodeId))
+        .set(PROXY_ROLE_HEADER, 'admin');
+      expect(res.status).toBe(200);
+      expect(captured?.[PROXY_ROLE_HEADER]).toBe(role);
+    });
+  }
 });
+
