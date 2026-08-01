@@ -29,7 +29,7 @@ import { PinnedUpdateBadge } from './PinnedUpdateBadge';
 import { StackSection } from './NodeCardStackList';
 import type { Label as StackLabel } from '../label-types';
 import type { FleetNode, NodeUpdateStatus } from './types';
-import { getNodeCpu, getNodeMem, getNodeDisk, isCritical } from './nodeUtils';
+import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from './nodeUtils';
 
 // --- Types ---
 
@@ -97,8 +97,8 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
     const formattedLatest = formatVersion(updateStatus?.latestVersion);
     const cpuPercent = getNodeCpu(node);
     const memPercent = getNodeMem(node);
-    const memUsed = node.systemStats?.memory.effectiveUsed ?? node.systemStats?.memory.used ?? 0;
-    const memTotal = node.systemStats?.memory.effectiveTotal ?? node.systemStats?.memory.total ?? 0;
+    const memUsed = getNodeMemUsed(node);
+    const memTotal = getNodeMemTotal(node);
     const diskPercent = getNodeDisk(node);
 
     const openCordonModal = () => {

@@ -10,6 +10,16 @@ export function getNodeMem(node: FleetNode): number {
     return parseFloat(eff ?? node.systemStats.memory.usagePercent);
 }
 
+export function getNodeMemUsed(node: FleetNode): number {
+    const mem = node.systemStats?.memory;
+    return mem?.effectiveUsed ?? mem?.used ?? 0;
+}
+
+export function getNodeMemTotal(node: FleetNode): number {
+    const mem = node.systemStats?.memory;
+    return mem?.effectiveTotal ?? mem?.total ?? 0;
+}
+
 export function getNodeDisk(node: FleetNode): number {
     return node.systemStats?.disk ? parseFloat(node.systemStats.disk.usagePercent) : 0;
 }

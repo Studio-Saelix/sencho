@@ -9,7 +9,7 @@ import { PilotTunnelManager } from '../services/PilotTunnelManager';
 import { authMiddleware } from '../middleware/auth';
 import { requireAdmin } from '../middleware/tierGates';
 import { STATS_CACHE_TTL_MS, SYSTEM_STATS_CACHE_TTL_MS } from '../helpers/constants';
-import { getHostMemory } from '../helpers/hostMemory';
+import { getHostMemory, memoryToWire } from '../helpers/hostMemory';
 import { isDebugEnabled } from '../utils/debug';
 import { getErrorMessage } from '../utils/errors';
 import { isManagedByComposeDir } from '../utils/managed-containers';
@@ -310,23 +310,9 @@ metricsRouter.get('/system/stats', authMiddleware, async (req: Request, res: Res
             usage: currentLoad.currentLoad.toFixed(1),
             cores: currentLoad.cpus.length,
           },
-          memory: {
-            total: hostMem.total,
-            // ZFS ARC aware and balloon aware: reclaimable ARC is added back
-            // into available, and ballooned memory is subtracted from used.
-            // See helpers/hostMemory.ts.
-            used: hostMem.used,
-            free: hostMem.free,
-            usagePercent: hostMem.usagePercent.toFixed(1),
-            ...(hostMem.ballooned !== undefined ? {
-              ballooned: hostMem.ballooned,
-              effectiveTotal: hostMem.effectiveTotal,
-              effectiveUsed: hostMem.effectiveUsed,
-              effectiveFree: hostMem.effectiveFree,
-              effectiveUsagePercent: hostMem.effectiveUsagePercent!.toFixed(1),
-              balloonSource: hostMem.balloonSource,
-            } : {}),
-          },
+          // ARC/balloon aware: reclaimable ARC is added back into available,
+          // and ballooned memory is subtracted from used. See helpers/hostMemory.ts.
+          memory: memoryToWire(hostMem),
           disk: mainDisk ? {
             fs: mainDisk.fs,
             mount: mainDisk.mount,

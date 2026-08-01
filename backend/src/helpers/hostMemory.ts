@@ -60,8 +60,8 @@ export const ARCSTATS_FIXED_PATHS = [
   '/proc/spl/kstat/zfs/arcstats',
 ];
 
-/** Bound reads of the operator-supplied override path; arcstats is a few KB. */
-const MAX_ARCSTATS_BYTES = 1024 * 1024;
+/** Bound reads of the operator-supplied override path; both files are a few KB. */
+const MAX_CANDIDATE_BYTES = 1024 * 1024;
 
 /**
  * Candidate /proc/meminfo paths in priority order. The operator override is
@@ -99,11 +99,39 @@ function isExpectedFsError(err: unknown): boolean {
   );
 }
 
-function logUnexpected(context: string, err: unknown): void {
-  const code = (err as NodeJS.ErrnoException)?.code ?? 'UNKNOWN';
-  if (loggedErrorCodes.has(code)) return;
-  loggedErrorCodes.add(code);
-  console.warn(`[HostMemory] Unexpected error reading ARC stats (${context}, ${code}); treating ARC as reclaimable=0`);
+function logSelectedPath(path: string, label: string): void {
+  if (loggedSelectedPaths.has(path)) return;
+  loggedSelectedPaths.add(path);
+  console.debug(`[HostMemory] Using ${label} from ${path}`);
+}
+
+/**
+ * Read a single candidate file, applying the operator-override guard (regular
+ * file, bounded size) and the fail-open error contract. Returns the raw text,
+ * or undefined when the path is unusable so the caller falls through to the
+ * next candidate. Unexpected errors are logged once per code.
+ */
+async function readCandidateFile(path: string, isOverride: boolean): Promise<string | undefined> {
+  try {
+    // The override path is operator-supplied: verify it is a regular file of
+    // bounded size before reading (guards against a named pipe or an
+    // accidentally huge target). The fixed paths are trusted.
+    if (isOverride) {
+      const info = await fs.stat(path);
+      if (!info.isFile() || info.size > MAX_CANDIDATE_BYTES) return undefined;
+    }
+    return await fs.readFile(path, 'utf8');
+  } catch (err) {
+    // Fail open: a missing or unreadable file is the normal non-ZFS/non-VM
+    // case (expected fs errors); an unexpected error is logged once but still
+    // falls through so the adjustment can only lower a false positive.
+    if (isExpectedFsError(err)) return undefined;
+    const code = (err as NodeJS.ErrnoException)?.code ?? 'UNKNOWN';
+    if (loggedErrorCodes.has(code)) return undefined;
+    loggedErrorCodes.add(code);
+    console.warn(`[HostMemory] Unexpected error reading ${path} (${code}); treating as 0`);
+    return undefined;
+  }
 }
 
 /** Parse the kstat table for the `size` and `c_min` rows (`<name> <type> <value>`). */
@@ -147,32 +175,12 @@ async function readBalloonedMemory(): Promise<number> {
   const override = meminfoOverridePath();
   const candidates = override ? [override, ...MEMINFO_FIXED_PATHS] : MEMINFO_FIXED_PATHS;
   for (const candidatePath of candidates) {
-    try {
-      // The override path is operator-supplied: verify it is a regular file
-      // of bounded size before reading (guards against a named pipe or an
-      // accidentally huge target). The fixed meminfo paths are trusted.
-      if (candidatePath === override) {
-        const info = await fs.stat(candidatePath);
-        if (!info.isFile() || info.size > MAX_ARCSTATS_BYTES) continue;
-      }
-      const raw = await fs.readFile(candidatePath, 'utf8');
-      const ballooned = parseMeminfoBalloon(raw);
-      if (ballooned === undefined) continue;
-      if (!loggedSelectedPaths.has(candidatePath)) {
-        loggedSelectedPaths.add(candidatePath);
-        console.debug(`[HostMemory] Using meminfo from ${candidatePath}`);
-      }
-      return ballooned;
-    } catch (err) {
-      // Fail open: a missing or unreadable meminfo is the normal non-VM case
-      // (expected fs errors); an unexpected error is logged once but still
-      // falls through so balloon awareness can only lower a false positive.
-      if (isExpectedFsError(err)) continue;
-      const code = (err as NodeJS.ErrnoException)?.code ?? 'UNKNOWN';
-      if (loggedErrorCodes.has(code)) continue;
-      loggedErrorCodes.add(code);
-      console.warn(`[HostMemory] Unexpected error reading meminfo (${candidatePath}, ${code}); treating ballooned as 0`);
-    }
+    const raw = await readCandidateFile(candidatePath, candidatePath === override);
+    if (raw === undefined) continue;
+    const ballooned = parseMeminfoBalloon(raw);
+    if (ballooned === undefined) continue;
+    logSelectedPath(candidatePath, 'meminfo');
+    return ballooned;
   }
   return 0;
 }
@@ -186,32 +194,15 @@ async function readReclaimableArc(): Promise<number> {
   const override = arcOverridePath();
   const candidates = override ? [override, ...ARCSTATS_FIXED_PATHS] : ARCSTATS_FIXED_PATHS;
   for (const candidatePath of candidates) {
-    try {
-      // The override path is operator-supplied: verify it is a regular file
-      // of bounded size before reading (guards against a named pipe or an
-      // accidentally huge target). The fixed kstat paths are trusted.
-      if (candidatePath === override) {
-        const info = await fs.stat(candidatePath);
-        if (!info.isFile() || info.size > MAX_ARCSTATS_BYTES) continue;
-      }
-      const raw = await fs.readFile(candidatePath, 'utf8');
-      const { size, cMin } = parseArcstats(raw);
-      if (size === undefined || cMin === undefined) continue;
-      if (!Number.isFinite(size) || !Number.isFinite(cMin) || size < 0 || cMin < 0) continue;
-      // A valid record resolves the lookup, even when reclaimable is 0
-      // (size < c_min means ARC is at its floor).
-      if (!loggedSelectedPaths.has(candidatePath)) {
-        loggedSelectedPaths.add(candidatePath);
-        console.debug(`[HostMemory] Using ZFS ARC stats from ${candidatePath}`);
-      }
-      return Math.max(size - cMin, 0);
-    } catch (err) {
-      // Fail open: a missing or unreadable kstat is the normal non-ZFS case
-      // (expected fs errors); an unexpected error is logged once but still
-      // falls through so ARC awareness can only lower a false positive.
-      if (isExpectedFsError(err)) continue;
-      logUnexpected(candidatePath, err);
-    }
+    const raw = await readCandidateFile(candidatePath, candidatePath === override);
+    if (raw === undefined) continue;
+    const { size, cMin } = parseArcstats(raw);
+    if (size === undefined || cMin === undefined) continue;
+    if (!Number.isFinite(size) || !Number.isFinite(cMin) || size < 0 || cMin < 0) continue;
+    // A valid record resolves the lookup, even when reclaimable is 0
+    // (size < c_min means ARC is at its floor).
+    logSelectedPath(candidatePath, 'ZFS ARC stats');
+    return Math.max(size - cMin, 0);
   }
   return 0;
 }
@@ -247,6 +238,44 @@ export function adjustForBalloon(hostMem: HostMemory, ballooned: number): HostMe
     effectiveFree,
     effectiveUsagePercent,
     balloonSource: 'linux_proc_meminfo' as const,
+  };
+}
+
+/** Wire shape of host memory as served by /api/system/stats and fleet overviews. */
+export interface MemoryWire {
+  total: number;
+  used: number;
+  free: number;
+  usagePercent: string;
+  ballooned?: number;
+  effectiveTotal?: number;
+  effectiveUsed?: number;
+  effectiveFree?: number;
+  effectiveUsagePercent?: string;
+  balloonSource?: string;
+}
+
+/**
+ * Map adjusted host memory to the wire shape. Balloon fields are only
+ * included when a balloon reading was present, so the non-VM shape stays
+ * identical to the pre-balloon wire format.
+ */
+export function memoryToWire(hostMem: HostMemory): MemoryWire {
+  return {
+    total: hostMem.total,
+    used: hostMem.used,
+    free: hostMem.free,
+    usagePercent: hostMem.usagePercent.toFixed(1),
+    ...(hostMem.ballooned !== undefined
+      ? {
+          ballooned: hostMem.ballooned,
+          effectiveTotal: hostMem.effectiveTotal,
+          effectiveUsed: hostMem.effectiveUsed,
+          effectiveFree: hostMem.effectiveFree,
+          effectiveUsagePercent: hostMem.effectiveUsagePercent?.toFixed(1),
+          balloonSource: hostMem.balloonSource,
+        }
+      : {}),
   };
 }
 
