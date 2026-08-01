@@ -312,11 +312,20 @@ metricsRouter.get('/system/stats', authMiddleware, async (req: Request, res: Res
           },
           memory: {
             total: hostMem.total,
-            // ZFS ARC aware: reclaimable ARC is added back into available so a
-            // large ARC cache is not reported as hard-used. See helpers/hostMemory.ts.
+            // ZFS ARC aware and balloon aware: reclaimable ARC is added back
+            // into available, and ballooned memory is subtracted from used.
+            // See helpers/hostMemory.ts.
             used: hostMem.used,
             free: hostMem.free,
             usagePercent: hostMem.usagePercent.toFixed(1),
+            ...(hostMem.ballooned !== undefined ? {
+              ballooned: hostMem.ballooned,
+              effectiveTotal: hostMem.effectiveTotal,
+              effectiveUsed: hostMem.effectiveUsed,
+              effectiveFree: hostMem.effectiveFree,
+              effectiveUsagePercent: hostMem.effectiveUsagePercent!.toFixed(1),
+              balloonSource: hostMem.balloonSource,
+            } : {}),
           },
           disk: mainDisk ? {
             fs: mainDisk.fs,

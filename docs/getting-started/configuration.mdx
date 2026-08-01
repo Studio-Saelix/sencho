@@ -53,6 +53,7 @@ These tune optional subsystems. Most deployments never set them; the defaults ar
 | `SENCHO_COMPOSE_COMMAND_TIMEOUT_MS` | `1800000` | Hard timeout for a single Compose command (pull, up, down) during deploy and update, in milliseconds (30 minutes). Sencho kills the command and reports failure if it runs longer than this, regardless of whether it is still producing output. Raise it only for very large images or slow storage. |
 | `SENCHO_COMPOSE_STALL_TIMEOUT_MS` | `600000` | Idle-output backstop for deploy and update Compose steps (pull and recreate), separate from the hard timeout above. If a step produces no output for this long while still running, Sencho stops it so a hung image pull surfaces a clear failure and the in-app recovery actions instead of spinning. Raise it on slow links or for heavy local image builds. |
 | `SENCHO_ZFS_ARCSTATS_PATH` | *(auto)* | Path **inside the container** to the OpenZFS ARC kstat file, for [ZFS ARC-aware host memory](#zfs-arc-aware-host-memory). Sencho checks this path first, then `/host/proc/spl/kstat/zfs/arcstats`, then `/proc/spl/kstat/zfs/arcstats`. Set it only when your ARC stats live at a non-standard path. |
+| `SENCHO_PROC_MEMINFO_PATH` | *(auto)* | Path **inside the container** to `/proc/meminfo`, for [VM memory ballooning](#vm-memory-ballooning). Sencho checks this path first, then `/host/proc/meminfo`, then `/proc/meminfo`. Set it only when you need a custom meminfo path. |
 
 Running a remote host as a pilot agent uses four more variables (`SENCHO_MODE`, `SENCHO_PRIMARY_URL`, `SENCHO_ENROLL_TOKEN`, and `SENCHO_PILOT_CA_FILE`), set only on the remote agent container. Sencho bakes them into the enrollment Compose file it generates, so you rarely write them by hand. See [Pilot Agent](/features/pilot-agent) for the full enrollment walkthrough.
 
@@ -70,6 +71,21 @@ volumes:
 ```
 
 Sencho checks `SENCHO_ZFS_ARCSTATS_PATH`, then `/host/proc/spl/kstat/zfs/arcstats`, then `/proc/spl/kstat/zfs/arcstats`. Set `SENCHO_ZFS_ARCSTATS_PATH` only if your ARC stats live somewhere else inside the container.
+
+## VM memory ballooning
+
+On Linux virtual machines with memory ballooning enabled (TrueNAS/KVM, Proxmox, VMware), the hypervisor can reclaim guest memory through a balloon driver. The reclaimed amount is tracked in `/proc/meminfo` on the `Balloon:` line but standard memory counters do not account for it, so a ballooned VM can appear memory-critical when the guest workload is actually healthy.
+
+Sencho reads the `Balloon:` field from `/proc/meminfo` when it is available and subtracts the ballooned amount from used, so the dashboard memory gauge, Fleet memory sorting, and host RAM alerts reflect the guest's real working set rather than the pre-balloon view. When `/proc/meminfo` is unreadable or the `Balloon:` field is absent, the behavior is unchanged.
+
+`/proc/meminfo` is usually visible inside the container at `/proc/meminfo` with no extra configuration. If your runtime does not expose it, mount it read-only:
+
+```yaml
+volumes:
+  - /proc/meminfo:/host/proc/meminfo:ro
+```
+
+Sencho checks `SENCHO_PROC_MEMINFO_PATH`, then `/host/proc/meminfo`, then `/proc/meminfo`. Set `SENCHO_PROC_MEMINFO_PATH` only if your meminfo lives somewhere else inside the container.
 
 ## Listen port
 

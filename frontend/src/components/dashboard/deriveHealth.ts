@@ -10,7 +10,7 @@ export interface HealthResult {
 // drift apart.
 export function deriveHealth(stats: Stats, systemStats: SystemStats | null, notifications: NotificationItem[]): HealthResult {
   const cpu = parseFloat(systemStats?.cpu.usage || '0');
-  const ram = parseFloat(systemStats?.memory.usagePercent || '0');
+  const ram = parseFloat(systemStats?.memory.effectiveUsagePercent ?? systemStats?.memory.usagePercent ?? '0');
   const disk = parseFloat(systemStats?.disk?.usagePercent || '0');
   const unreadErrors = notifications.filter(n => !n.is_read && n.level === 'error').length;
 

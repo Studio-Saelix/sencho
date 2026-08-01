@@ -232,7 +232,18 @@ interface FleetNodeOverview {
   } | null;
   systemStats: {
     cpu: { usage: string; cores: number };
-    memory: { total: number; used: number; free: number; usagePercent: string };
+    memory: {
+      total: number;
+      used: number;
+      free: number;
+      usagePercent: string;
+      ballooned?: number;
+      effectiveTotal?: number;
+      effectiveUsed?: number;
+      effectiveFree?: number;
+      effectiveUsagePercent?: string;
+      balloonSource?: string;
+    };
     disk: { total: number; used: number; free: number; usagePercent: string } | null;
   } | null;
   stacks: string[] | null;
@@ -303,11 +314,20 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
         cpu: { usage: currentLoad.currentLoad.toFixed(1), cores: currentLoad.cpus.length },
         memory: {
           total: hostMem.total,
-          // ZFS ARC aware: reclaimable ARC is added back into available so a
-          // large ARC cache is not reported as hard-used. See helpers/hostMemory.ts.
+          // ZFS ARC and balloon aware: reclaimable ARC is added back into
+          // available, and ballooned memory is subtracted from used.
+          // See helpers/hostMemory.ts.
           used: hostMem.used,
           free: hostMem.free,
           usagePercent: hostMem.usagePercent.toFixed(1),
+          ...(hostMem.ballooned !== undefined ? {
+            ballooned: hostMem.ballooned,
+            effectiveTotal: hostMem.effectiveTotal,
+            effectiveUsed: hostMem.effectiveUsed,
+            effectiveFree: hostMem.effectiveFree,
+            effectiveUsagePercent: hostMem.effectiveUsagePercent!.toFixed(1),
+            balloonSource: hostMem.balloonSource,
+          } : {}),
         },
         disk: mainDisk ? {
           total: mainDisk.size,
@@ -389,7 +409,18 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
 
     interface RemoteSystemStats {
       cpu: { usage: string; cores: number };
-      memory: { total: number; used: number; free: number; usagePercent: string };
+      memory: {
+        total: number;
+        used: number;
+        free: number;
+        usagePercent: string;
+        ballooned?: number;
+        effectiveTotal?: number;
+        effectiveUsed?: number;
+        effectiveFree?: number;
+        effectiveUsagePercent?: string;
+        balloonSource?: string;
+      };
       disk?: { total: number; used: number; free: number; usagePercent: string } | null;
     }
 

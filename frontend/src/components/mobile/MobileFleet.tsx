@@ -221,7 +221,7 @@ function NodeDetail({
             <ResourceRow
               label="mem"
               pct={getNodeMem(node)}
-              detail={`${formatBytes(node.systemStats.memory.used, 1)} / ${formatBytes(node.systemStats.memory.total, 1)}`}
+              detail={`${formatBytes(node.systemStats.memory.effectiveUsed ?? node.systemStats.memory.used ?? 0, 1)} / ${formatBytes(node.systemStats.memory.effectiveTotal ?? node.systemStats.memory.total ?? 0, 1)}`}
             />
             {node.systemStats.disk ? (
               <ResourceRow
@@ -309,8 +309,8 @@ export function MobileFleet({ headerActions, onInspectNode, onInspectStack }: Mo
   const totalStacks = nodes.reduce((sum, n) => sum + (n.stacks?.length ?? 0), 0);
   const running = nodes.reduce((sum, n) => sum + (n.stats?.active ?? 0), 0);
   const avgCpu = onlineNodes.length > 0 ? onlineNodes.reduce((s, n) => s + getNodeCpu(n), 0) / onlineNodes.length : 0;
-  const memUsed = onlineNodes.reduce((s, n) => s + (n.systemStats?.memory.used ?? 0), 0);
-  const memTotal = onlineNodes.reduce((s, n) => s + (n.systemStats?.memory.total ?? 0), 0);
+  const memUsed = onlineNodes.reduce((s, n) => s + (n.systemStats?.memory.effectiveUsed ?? n.systemStats?.memory.used ?? 0), 0);
+  const memTotal = onlineNodes.reduce((s, n) => s + (n.systemStats?.memory.effectiveTotal ?? n.systemStats?.memory.total ?? 0), 0);
   const memPct = memTotal > 0 ? (memUsed / memTotal) * 100 : 0;
   const syncLabel = lastSyncAt ? `last sync ${formatAgo(now - lastSyncAt)}` : 'connecting…';
 

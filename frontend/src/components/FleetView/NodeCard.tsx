@@ -97,6 +97,8 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
     const formattedLatest = formatVersion(updateStatus?.latestVersion);
     const cpuPercent = getNodeCpu(node);
     const memPercent = getNodeMem(node);
+    const memUsed = node.systemStats?.memory.effectiveUsed ?? node.systemStats?.memory.used ?? 0;
+    const memTotal = node.systemStats?.memory.effectiveTotal ?? node.systemStats?.memory.total ?? 0;
     const diskPercent = getNodeDisk(node);
 
     const openCordonModal = () => {
@@ -308,7 +310,7 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
                                 <span className="flex items-center gap-1 text-muted-foreground">
                                     <MemoryStick className="w-3 h-3" /> RAM
                                 </span>
-                                <span className="font-medium">{formatBytes(node.systemStats.memory.used, 1)} / {formatBytes(node.systemStats.memory.total, 1)}</span>
+                                <span className="font-medium">{formatBytes(memUsed, 1)} / {formatBytes(memTotal, 1)}</span>
                             </div>
                             <UsageBar percent={memPercent} color={memPercent > 80 ? 'bg-destructive/80' : memPercent > 60 ? 'bg-warning' : 'bg-brand/60'} />
                         </div>

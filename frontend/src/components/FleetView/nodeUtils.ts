@@ -5,7 +5,9 @@ export function getNodeCpu(node: FleetNode): number {
 }
 
 export function getNodeMem(node: FleetNode): number {
-    return node.systemStats ? parseFloat(node.systemStats.memory.usagePercent) : 0;
+    if (!node.systemStats) return 0;
+    const eff = node.systemStats.memory.effectiveUsagePercent;
+    return parseFloat(eff ?? node.systemStats.memory.usagePercent);
 }
 
 export function getNodeDisk(node: FleetNode): number {
