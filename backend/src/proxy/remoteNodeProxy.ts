@@ -34,7 +34,6 @@ import {
   scopedActionsForStack,
 } from '../middleware/permissions';
 import type { PermissionAction } from '../middleware/permissions';
-import type { UserRole } from '../services/DatabaseService';
 import { SETTING_WRITE_PERMISSIONS } from '../routes/settings';
 
 /**
