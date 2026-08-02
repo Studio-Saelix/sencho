@@ -267,6 +267,7 @@ export const SETTINGS_ITEMS: readonly SettingsItemMeta[] = [
         keywords: ['labels', 'tags', 'palette', 'organisation'],
         tier: null,
         scope: 'node',
+        requiredPermission: 'stack:read',
     },
     // Operations
     {

@@ -25,6 +25,7 @@ describe('settings section visibility by role', () => {
     'registries',
     'webhooks',
     'nodes',
+    'labels',
   ] as const;
 
   it('shows permission-gated sections only to roles that hold the permission', () => {
