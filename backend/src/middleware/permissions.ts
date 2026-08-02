@@ -113,7 +113,7 @@ export function checkPermission(
 
   const tier = effectiveTier(req);
   if (tier !== 'paid') {
-    console.warn('[RBAC] Scoped assignment check blocked: effective tier is', tier, 'license_status:', DatabaseService.getInstance().getSystemState('license_status'));
+    console.warn('[RBAC] Scoped assignment check blocked: effective tier is', sanitizeForLog(tier), 'license_status:', sanitizeForLog(DatabaseService.getInstance().getSystemState('license_status') ?? ''));
     return false;
   }
 
