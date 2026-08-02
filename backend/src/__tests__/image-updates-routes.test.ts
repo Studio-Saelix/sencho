@@ -3,7 +3,7 @@
  * Locks down auth, admin gating, rate limiting, and input validation
  * before extraction.
  */
-import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
@@ -173,6 +173,84 @@ describe('POST /api/image-updates/refresh/:stackName', () => {
     expect(res.body.enabled).toBe(false);
     expect(res.body.error).toMatch(/disabled/i);
     DatabaseService.getInstance().updateGlobalSetting('image_update_checks_enabled', '1');
+  });
+
+  describe('rate limit', () => {
+    beforeEach(async () => {
+      const { ImageUpdateService } = await import('../services/ImageUpdateService');
+      ImageUpdateService.getInstance().resetStackRecheckCooldowns();
+      vi.useFakeTimers().setSystemTime(Date.now());
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('rejects a second recheck within the cooldown window with 429', async () => {
+      const { ImageUpdateService } = await import('../services/ImageUpdateService');
+      const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack')
+        .mockResolvedValue({ outcome: 'cleared', warning: null });
+      try {
+        const first = await request(app)
+          .post('/api/image-updates/refresh/per-stack-refresh')
+          .set('Cookie', adminCookie);
+        expect(first.status).toBe(200);
+
+        // Within the same cooldown window (2 min), a second call is denied.
+        vi.advanceTimersByTime(1_000);
+        const second = await request(app)
+          .post('/api/image-updates/refresh/per-stack-refresh')
+          .set('Cookie', adminCookie);
+        expect(second.status).toBe(429);
+        expect(second.body.error).toMatch(/too recently/i);
+        expect(recheckSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        recheckSpy.mockRestore();
+      }
+    });
+
+    it('allows a recheck after the cooldown window expires', async () => {
+      const { ImageUpdateService } = await import('../services/ImageUpdateService');
+      const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack')
+        .mockResolvedValue({ outcome: 'cleared', warning: null });
+      try {
+        const first = await request(app)
+          .post('/api/image-updates/refresh/per-stack-refresh')
+          .set('Cookie', adminCookie);
+        expect(first.status).toBe(200);
+
+        // Advance past the 2-minute cooldown.
+        vi.advanceTimersByTime(2 * 60 * 1000 + 1);
+        const second = await request(app)
+          .post('/api/image-updates/refresh/per-stack-refresh')
+          .set('Cookie', adminCookie);
+        expect(second.status).toBe(200);
+        expect(recheckSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        recheckSpy.mockRestore();
+      }
+    });
+
+    it('enforces the rate limit independently per-stack', async () => {
+      const { ImageUpdateService } = await import('../services/ImageUpdateService');
+      const recheckSpy = vi.spyOn(ImageUpdateService.getInstance(), 'recheckStack')
+        .mockResolvedValue({ outcome: 'cleared', warning: null });
+      try {
+        const a1 = await request(app)
+          .post('/api/image-updates/refresh/per-stack-refresh')
+          .set('Cookie', adminCookie);
+        expect(a1.status).toBe(200);
+
+        // A different stack should not be rate-limited by the first.
+        const b1 = await request(app)
+          .post('/api/image-updates/refresh/other-stack')
+          .set('Cookie', adminCookie);
+        expect(b1.status).toBe(200);
+        expect(recheckSpy).toHaveBeenCalledTimes(2);
+      } finally {
+        recheckSpy.mockRestore();
+      }
+    });
   });
 });
 

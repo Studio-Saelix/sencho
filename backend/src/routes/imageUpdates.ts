@@ -114,7 +114,16 @@ imageUpdatesRouter.post('/refresh/:stackName', authMiddleware, async (req: Reque
       });
       return;
     }
-    const result = await ImageUpdateService.getInstance().recheckStack(req.nodeId, stackName);
+    const iu = ImageUpdateService.getInstance();
+    if (!iu.tryMarkStackRecheck(req.nodeId, stackName)) {
+      const remainingMs = iu.getStackRecheckCooldownRemainingMs(req.nodeId, stackName);
+      const remainingSec = Math.ceil(remainingMs / 1000);
+      res.status(429).json({
+        error: `Per-stack check was started too recently. Please wait ${remainingSec} second${remainingSec !== 1 ? 's' : ''}.`,
+      });
+      return;
+    }
+    const result = await iu.recheckStack(req.nodeId, stackName);
     res.json(result);
   } catch (error) {
     console.error('Failed to recheck stack for image updates:', error);
