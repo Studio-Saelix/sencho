@@ -76,7 +76,7 @@ Sencho checks `SENCHO_ZFS_ARCSTATS_PATH`, then `/host/proc/spl/kstat/zfs/arcstat
 
 On Linux virtual machines with memory ballooning enabled (TrueNAS/KVM, Proxmox, VMware), the hypervisor can reclaim guest memory through a balloon driver. The reclaimed amount is tracked in `/proc/meminfo` on the `Balloon:` line but standard memory counters do not account for it, so a ballooned VM can appear memory-critical when the guest workload is actually healthy.
 
-Sencho reads the `Balloon:` field from `/proc/meminfo` when it is available and subtracts the ballooned amount from used, so the dashboard memory gauge, Fleet memory sorting, and host RAM alerts reflect the guest's real working set rather than the pre-balloon view. When `/proc/meminfo` is unreadable or the `Balloon:` field is absent, the behavior is unchanged.
+Sencho reads the `Balloon:` field from `/proc/meminfo` when it is available and shows the ballooned amount on the dashboard memory tile alongside an effective-usage percentage. The memory gauge, health verdict, and host RAM alerts continue to use the standard working-set percentage: unlike ZFS ARC, ballooned memory is reclaimed by the hypervisor and the guest cannot get it back on demand, so balloon data is informational context rather than a factor in alerting or health decisions. When `/proc/meminfo` is unreadable or the `Balloon:` field is absent, the behavior is unchanged.
 
 `/proc/meminfo` is usually visible inside the container at `/proc/meminfo` with no extra configuration. If your runtime does not expose it, mount it read-only:
 

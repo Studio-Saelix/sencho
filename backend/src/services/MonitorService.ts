@@ -330,10 +330,13 @@ export class MonitorService {
                     this.clearHostMetricSuppression('cpu');
                 }
 
-                // ZFS ARC and balloon aware: reclaimable ARC is added back into
-                // available, and ballooned memory is subtracted from used, so
-                // neither fires spurious host-memory alerts. See helpers/hostMemory.ts.
-                const ramUsage = hostMem.effectiveUsagePercent ?? hostMem.usagePercent;
+                // ZFS ARC aware: reclaimable ARC is added back into available so a
+                // large ARC cache does not fire spurious host-memory alerts.
+                // Ballooned memory is deliberately NOT subtracted here: unlike
+                // ARC, ballooned pages are reclaimed by the hypervisor and the
+                // guest cannot get them back on demand. A ballooned VM with real
+                // memory pressure must still alert. See helpers/hostMemory.ts.
+                const ramUsage = hostMem.usagePercent;
                 const ramLimit = parseFloat(settings['host_ram_limit']);
                 if (!isNaN(ramLimit) && ramLimit > 0 && ramUsage > ramLimit) {
                     await this.dispatchHostMetricAlert('ram', 'warning', suppressionMs,
