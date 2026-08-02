@@ -45,10 +45,9 @@ declare global {
        */
       proxyNamedStackRoute?: { stackName: string; action: PermissionAction };
       /**
-       * Hub-side role override for the outbound proxy hop. When set, the
-       * PROXY_ROLE_HEADER is elevated to node-admin instead of the caller's
-       * global role, so scoped node-level grants can be forwarded.
-       * Request-scoped; consumed only by remoteNodeProxy.ts.
+       * Elevated role for a single proxied request. Set by the settings
+       * pre-authorization gate when the hub-side scoped permission check
+       * passes for a non-admin user. Resets to undefined after the hop.
        */
       proxyElevatedRole?: 'node-admin';
     }
