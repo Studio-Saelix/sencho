@@ -8,6 +8,7 @@ import { toast } from '@/components/ui/toast-store';
 import { ConfirmModal } from '@/components/ui/modal';
 import { formatBytes } from '@/lib/utils';
 import { getNodeCpu, getNodeMem, getNodeDisk, isCritical } from '@/components/FleetView/nodeUtils';
+import { NodeDetailsSheet } from '@/components/FleetView/NodeDetailsSheet';
 import type { FleetNode } from '@/components/FleetView/types';
 import { Bar, BackChip, Kicker, Masthead, MBtn, SectionHead, StateDot, StatePill } from './mobile-ui';
 import type { Tone as UiTone } from './mobile-ui';
@@ -159,9 +160,12 @@ function NodeDetail({
   onCordonChange: () => void;
 }) {
   const { can } = useAuth();
+  const { nodes: registryNodes } = useNodes();
+  const registryNode = registryNodes.find(n => n.id === node.id) ?? null;
   const canCordon = can('node:manage', 'node', String(node.id));
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
   const tone = nodeTone(node);
   const online = node.status === 'online';
@@ -207,6 +211,7 @@ function NodeDetail({
       <div className="flex-1 min-h-0 overflow-y-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden p-[14px]">
         <div className="flex gap-2">
           <MBtn kind="primary" full onClick={() => onInspectNode(node.id)}>Inspect</MBtn>
+          <MBtn kind="outline" full onClick={() => setDetailsOpen(true)}>Details</MBtn>
           {canCordon ? (
             <MBtn kind="outline" full onClick={() => setConfirmOpen(true)}>
               {node.cordoned ? 'Uncordon' : 'Drain'}
@@ -270,6 +275,14 @@ function NodeDetail({
         confirmLabel={node.cordoned ? 'Uncordon node' : 'Cordon node'}
         confirming={submitting}
         onConfirm={handleCordon}
+      />
+
+      <NodeDetailsSheet
+        open={detailsOpen}
+        onOpenChange={setDetailsOpen}
+        node={node}
+        registryNode={registryNode}
+        canManageNode={canCordon}
       />
     </div>
   );

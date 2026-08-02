@@ -8,6 +8,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { FleetMasthead } from './fleet/FleetMasthead';
 import { ReconnectingOverlay } from './FleetView/ReconnectingOverlay';
 import { NodeUpdatesSheet } from './FleetView/NodeUpdatesSheet';
+import { NodeDetailsSheet } from './FleetView/NodeDetailsSheet';
 import { LocalUpdateConfirmDialog } from './FleetView/LocalUpdateConfirmDialog';
 import { OverviewTab } from './FleetView/OverviewTab';
 import { useFleetPreferences } from './FleetView/hooks/useFleetPreferences';
@@ -66,7 +67,7 @@ export function FleetView({
     const { isAdmin, can } = useAuth();
     const canManageFleet = can('node:manage');
     const canExportDossier = can('node:read') && can('stack:read');
-    const { hasCapability } = useNodes();
+    const { hasCapability, nodes: registryNodes } = useNodes();
     const { experimental, experimentalReady } = useExperimental();
     const containerLabelsEnabled = hasCapability('container-label-inventory');
     // Visual fail-closed while /meta loads; paid/admin gates still apply when on.
@@ -94,6 +95,7 @@ export function FleetView({
     });
 
     const [initialUpdatesTab, setInitialUpdatesTab] = useState<'nodes' | 'changelog'>('nodes');
+    const [detailsNodeId, setDetailsNodeId] = useState<number | null>(null);
 
     const [internalTab, setInternalTab] = useState<FleetTab>('overview');
     const activeTab = controlledTab ?? internalTab;
@@ -294,6 +296,7 @@ export function FleetView({
                         onEditNode={openEdit}
                         onDeleteNode={openDelete}
                         onOpenMuteRulesWithPrefill={onOpenMuteRulesWithPrefill}
+                        onOpenNodeDetails={setDetailsNodeId}
                         onAddNode={isAdmin && onOpenSettingsSection ? () => onOpenSettingsSection('nodes') : undefined}
                         onCheckUpdates={updateStatus.checkUpdates}
                         checkingUpdates={updateStatus.checkingUpdates}
@@ -372,6 +375,18 @@ export function FleetView({
                 retryNodeUpdate={updateStatus.retryNodeUpdate}
                 dismissNodeUpdate={updateStatus.dismissNodeUpdate}
                 triggerUpdateAll={updateStatus.triggerUpdateAll}
+            />
+
+            <NodeDetailsSheet
+                open={detailsNodeId !== null}
+                onOpenChange={(open) => { if (!open) setDetailsNodeId(null); }}
+                node={detailsNodeId !== null ? (overview.allNodes.find(n => n.id === detailsNodeId) ?? null) : null}
+                registryNode={detailsNodeId !== null ? (registryNodes.find(n => n.id === detailsNodeId) ?? null) : null}
+                updateStatus={detailsNodeId !== null ? overview.updateStatusMap.get(detailsNodeId) : undefined}
+                networkingSignal={detailsNodeId !== null ? overview.networkingByNode.get(detailsNodeId) : undefined}
+                canManageNode={detailsNodeId !== null && can('node:manage', 'node', String(detailsNodeId))}
+                onOpenNetworking={onOpenNodeNetworking}
+                onEdit={openEdit}
             />
 
             <LocalUpdateConfirmDialog
