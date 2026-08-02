@@ -634,6 +634,14 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     ))
     || (!!formName && !canSaveWithCurrentTarget);
 
+  const saveDisabledReason = useMemo((): string | null => {
+    if (saving || !currentAction || !formName || scheduleInvalid) return null;
+    if (!!formName && !canSaveWithCurrentTarget) {
+      return 'You do not have permission to schedule this action on the selected target.';
+    }
+    return null;
+  }, [saving, currentAction, formName, scheduleInvalid, canSaveWithCurrentTarget]);
+
   const windowEnd = now + TIMELINE_WINDOW_MS;
   const timelinePills = filteredTasks
     .filter(t => t.enabled === 1 && t.next_runs && t.next_runs.length > 0)
@@ -1298,6 +1306,9 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
             </Button>
           }
         />
+        {saveDisabledReason && (
+          <p className="px-6 pb-4 text-xs text-muted-foreground">{saveDisabledReason}</p>
+        )}
       </Modal>
 
       {/* Delete Confirmation */}

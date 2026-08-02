@@ -314,24 +314,13 @@ export class SchedulerService {
         });
 
         try {
-            // Pre-check: ensure target node exists and is reachable
-            if (task.node_id != null && task.action !== 'snapshot') {
-                const node = db.getNode(task.node_id);
-                if (!node) throw new Error(`Target node (id=${task.node_id}) no longer exists`);
-                if (node.status === 'offline') {
-                    // Local seed name ("Local") must not reach fleet-aggregated alerts;
-                    // remote roster names stay for diagnosis.
-                    throw new Error(
-                        node.type === 'local'
-                            ? 'Target node is offline'
-                            : `Target node "${node.name}" is offline`,
-                    );
-                }
-            }
-
             // Permission revalidation: for automatic runs, verify the creator still holds
-            // the required permission. Manual runs skip this — the route's acting-user
-            // check is the gate. Legacy tasks (creator_user_id NULL) execute as before.
+            // the required permission. Runs before the node-reachability check so that
+            // a revoked authorization is surfaced even when the target node is offline
+            // — a misleading "target node is offline" error must not hide the real
+            // reason the task cannot execute. Manual runs skip this; the route's
+            // acting-user check is the gate. Legacy tasks (creator_user_id NULL)
+            // execute as before.
             if (triggeredBy === 'scheduler' && task.creator_user_id != null) {
                 const creator = db.getUserById(task.creator_user_id);
                 if (!creator) {
@@ -354,6 +343,21 @@ export class SchedulerService {
                     scope.resourceNodeId,
                 )) {
                     throw new TaskAuthorizationError('Scheduled task no longer authorized: creator permission was revoked.');
+                }
+            }
+
+            // Pre-check: ensure target node exists and is reachable
+            if (task.node_id != null && task.action !== 'snapshot') {
+                const node = db.getNode(task.node_id);
+                if (!node) throw new Error(`Target node (id=${task.node_id}) no longer exists`);
+                if (node.status === 'offline') {
+                    // Local seed name ("Local") must not reach fleet-aggregated alerts;
+                    // remote roster names stay for diagnosis.
+                    throw new Error(
+                        node.type === 'local'
+                            ? 'Target node is offline'
+                            : `Target node "${node.name}" is offline`,
+                    );
                 }
             }
 
