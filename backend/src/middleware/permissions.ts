@@ -111,7 +111,11 @@ export function checkPermission(
     return true;
   }
 
-  if (effectiveTier(req) !== 'paid') return false;
+  const tier = effectiveTier(req);
+  if (tier !== 'paid') {
+    console.warn('[RBAC] Scoped assignment check blocked: effective tier is', sanitizeForLog(tier), 'license_status:', sanitizeForLog(DatabaseService.getInstance().getSystemState('license_status') ?? ''));
+    return false;
+  }
 
   const db = DatabaseService.getInstance();
   const nodeId = resourceType === 'stack'
@@ -123,7 +127,6 @@ export function checkPermission(
     resourceId,
     nodeId,
   );
-  if (isDebugEnabled()) console.log('[RBAC:diag] Scoped assignments found:', assignments.length, 'for user:', req.user.userId);
   for (const assignment of assignments) {
     if (ROLE_PERMISSIONS[assignment.role]?.includes(action)) return true;
   }
