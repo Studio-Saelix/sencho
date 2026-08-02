@@ -632,11 +632,11 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
       !formSelectorValue.trim()
       || (formLabelScope === 'node' && !formNodeId)
     ))
-    || (!!formName && !canSaveWithCurrentTarget);
+    || !canSaveWithCurrentTarget;
 
   const saveDisabledReason = useMemo((): string | null => {
     if (saving || !currentAction || !formName || scheduleInvalid) return null;
-    if (!!formName && !canSaveWithCurrentTarget) {
+    if (!canSaveWithCurrentTarget) {
       return 'You do not have permission to schedule this action on the selected target.';
     }
     return null;
