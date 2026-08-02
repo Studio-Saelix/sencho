@@ -34,8 +34,9 @@ vi.mock('@/context/NodeContext', () => ({
     hasCapability: (cap: string) => nodeState.activeNodeMeta?.capabilities.includes(cap) === true,
   }),
 }));
+const useAuthMock = vi.fn();
 vi.mock('@/context/AuthContext', () => ({
-  useAuth: () => ({ isAdmin: true }),
+  useAuth: () => useAuthMock(),
 }));
 
 import { apiFetch } from '@/lib/api';
@@ -62,6 +63,8 @@ beforeEach(() => {
   mockedFetch.mockReset();
   vi.mocked(toast.success).mockReset();
   vi.mocked(toast.error).mockReset();
+  useAuthMock.mockReset();
+  useAuthMock.mockReturnValue({ isAdmin: true, can: () => true });
 });
 
 function mockHappyPath(services: string[] = ['api', 'database'], alerts: unknown[] = []) {
@@ -304,5 +307,74 @@ describe('StackAlertSheet Alerts tab', () => {
       expect(screen.getByText('Add Policy')).toBeInTheDocument();
       expect(screen.getAllByRole('combobox')[0]).toHaveTextContent('api');
     });
+  });
+});
+
+describe('StackAlertSheet permission gating (stack:edit deny path)', () => {
+  it('AlertsTab hides Add new rule and the delete-alert control when the caller lacks stack:edit', async () => {
+    useAuthMock.mockReturnValue({
+      isAdmin: false,
+      can: (action: string) => action !== 'stack:edit',
+    });
+    mockHappyPath(['api'], [{
+      id: 1,
+      stack_name: 'my-stack',
+      service_name: 'api',
+      metric: 'cpu_percent',
+      operator: '>',
+      threshold: 80,
+      duration_mins: 5,
+      cooldown_mins: 60,
+    }]);
+
+    render(<StackAlertSheet open onOpenChange={() => {}} stackName="my-stack" />);
+
+    // Reads stay visible: the rule itself still renders for a stack:read-only caller.
+    await waitFor(() => expect(screen.getByText('api')).toBeInTheDocument());
+    expect(screen.queryByText('Add Rule')).toBeNull();
+    expect(screen.queryByText('Add new rule')).toBeNull();
+    expect(screen.queryByLabelText('Delete alert')).toBeNull();
+  });
+
+  it('AutoHealTab hides Add new policy and PolicyRow edit affordances when the caller lacks stack:edit', async () => {
+    useAuthMock.mockReturnValue({
+      isAdmin: false,
+      can: (action: string) => action !== 'stack:edit',
+    });
+    mockedFetch.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/auto-heal/policies')) {
+        return jsonRes([{
+          id: 1,
+          stack_name: 'my-stack',
+          service_name: null,
+          unhealthy_duration_mins: 5,
+          cooldown_mins: 5,
+          max_restarts_per_hour: 3,
+          auto_disable_after_failures: 5,
+          enabled: 1,
+          consecutive_failures: 0,
+        }]);
+      }
+      if (url.includes('/services')) return jsonRes(['api', 'database']);
+      return jsonRes(null, false);
+    });
+
+    render(
+      <StackAlertSheet
+        open
+        onOpenChange={() => {}}
+        stackName="my-stack"
+        initialTab="auto-heal"
+      />,
+    );
+
+    // Reads stay visible: the policy row itself still renders.
+    await waitFor(() => expect(screen.getByText('All services')).toBeInTheDocument());
+    expect(screen.queryByText('Add Policy')).toBeNull();
+    expect(screen.queryByLabelText(/toggle policy for/i)).toBeNull();
+    expect(screen.queryByLabelText('Delete policy')).toBeNull();
+    // History is not edit-gated and should remain available either way.
+    expect(screen.getByLabelText('Toggle history')).toBeInTheDocument();
   });
 });

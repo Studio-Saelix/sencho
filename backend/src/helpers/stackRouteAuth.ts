@@ -134,15 +134,16 @@ function decodeStackSegment(raw: string): string | null {
 
 /**
  * Classify a post-/api path for hub stack RBAC gating and evidence.
- * Paths outside `/stacks` (and static `/stacks` collection routes) are
- * `static`. Known named-stack families return the primary pre-check action.
- * An unrecognized `/stacks/<name>/...` path fails closed as `unknown-named`.
+ * Paths outside `/stacks` and `/image-updates/refresh/` (and static
+ * `/stacks` collection routes) are `static`. Known named-stack families
+ * return the primary pre-check action. An unrecognized
+ * `/stacks/<name>/...` path fails closed as `unknown-named`.
  */
 export function classifyStackApiPath(method: string, pathAfterApiStrip: string): StackRouteClassify {
   const methodUpper = method.toUpperCase();
   const path = normalizePath(pathAfterApiStrip);
 
-  if (!path.startsWith('/stacks')) {
+  if (!path.startsWith('/stacks') && !path.startsWith('/image-updates/refresh/')) {
     return { kind: 'static' };
   }
 
@@ -159,6 +160,20 @@ export function classifyStackApiPath(method: string, pathAfterApiStrip: string):
     || path === '/stacks/from-git'
   ) {
     return { kind: 'static' };
+  }
+
+  // /image-updates/refresh/:stackName → per-stack image check (stack:deploy).
+  // This branch runs before the /stacks/-only regex, which would never match.
+  // Unknown sub-paths under this prefix fail closed (unknown-named), matching
+  // the fail-closed behavior for unknown /stacks/<name>/... paths.
+  if (path.startsWith('/image-updates/refresh/')) {
+    const imageRefreshMatch = /^\/image-updates\/refresh\/([^/]+)$/.exec(path);
+    if (imageRefreshMatch) {
+      const stackName = decodeStackSegment(imageRefreshMatch[1]);
+      if (!stackName) return { kind: 'unknown-named' };
+      return { kind: 'named-stack', stackName, action: 'stack:deploy' };
+    }
+    return { kind: 'unknown-named' };
   }
 
   const match = /^\/stacks\/([^/]+)(.*)$/.exec(path);

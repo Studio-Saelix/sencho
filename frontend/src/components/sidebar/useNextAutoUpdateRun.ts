@@ -25,8 +25,10 @@ export function useNextAutoUpdateRun(): number | null {
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    // The list endpoint is admin-only; non-admins would 403 on every poll.
-    // Skip all fetching/polling/listeners for them and report no scheduled run.
+    // This indicator is shown fleet-wide in the sidebar regardless of the active
+    // view; gating to admin avoids showing a partial "next auto-update run" to a
+    // role with only scoped permissions. Revisit when scoped roles are extended
+    // to this indicator.
     if (!isAdmin) {
       setNextRunAt(null); // eslint-disable-line react-hooks/set-state-in-effect
       return;

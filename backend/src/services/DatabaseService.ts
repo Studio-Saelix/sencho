@@ -707,6 +707,8 @@ export interface ScheduledTask {
     cron_expression: string;
     enabled: number;
     created_by: string;
+    /** The user ID who created this schedule. Null for legacy rows (pre-RBAC) where username resolution failed at migration time. */
+    creator_user_id: number | null;
     created_at: number;
     updated_at: number;
     last_run_at: number | null;
@@ -1946,6 +1948,18 @@ export class DatabaseService {
         maybeAddCol('scheduled_tasks', 'selector_value', 'TEXT DEFAULT NULL');
         maybeAddCol('scheduled_tasks', 'delete_after_run', 'INTEGER DEFAULT 0');
         maybeAddCol('scheduled_tasks', 'run_at', 'INTEGER DEFAULT NULL');
+        maybeAddCol('scheduled_tasks', 'creator_user_id', 'INTEGER DEFAULT NULL');
+
+        // Backfill creator_user_id from the created_by username column.
+        // Rows whose username no longer matches a user stay NULL (legacy,
+        // unrevalidated path — they were created under the old requireAdmin gate).
+        this.db.exec(`
+          UPDATE scheduled_tasks
+          SET creator_user_id = (
+            SELECT id FROM users WHERE username = scheduled_tasks.created_by
+          )
+          WHERE creator_user_id IS NULL
+        `);
 
         // Recreate stack_update_status with composite PK (node_id, stack_name).
         // Original table had stack_name as sole PK which breaks when multiple nodes share stack names.
@@ -3504,6 +3518,10 @@ export class DatabaseService {
             return this.db.prepare('SELECT * FROM stack_alerts WHERE stack_name = ?').all(stackName) as StackAlert[];
         }
         return this.db.prepare('SELECT * FROM stack_alerts').all() as StackAlert[];
+    }
+
+    public getStackAlert(id: number): StackAlert | undefined {
+        return this.db.prepare('SELECT * FROM stack_alerts WHERE id = ?').get(id) as StackAlert | undefined;
     }
 
     public addStackAlert(alert: StackAlert): StackAlert {
@@ -6181,12 +6199,13 @@ export class DatabaseService {
         return this.db.prepare('SELECT * FROM scheduled_tasks WHERE id = ?').get(id) as ScheduledTask | undefined;
     }
 
-    public createScheduledTask(task: Omit<ScheduledTask, 'id'>): number {
+    public createScheduledTask(task: Omit<ScheduledTask, 'id' | 'creator_user_id'> & { creator_user_id?: number | null }): number {
         const result = this.db.prepare(
-            'INSERT INTO scheduled_tasks (name, target_type, target_id, node_id, action, cron_expression, enabled, created_by, created_at, updated_at, last_run_at, next_run_at, last_status, last_error, prune_targets, target_services, prune_label_filter, selector_type, selector_value, delete_after_run, run_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO scheduled_tasks (name, target_type, target_id, node_id, action, cron_expression, enabled, created_by, creator_user_id, created_at, updated_at, last_run_at, next_run_at, last_status, last_error, prune_targets, target_services, prune_label_filter, selector_type, selector_value, delete_after_run, run_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         ).run(
             task.name, task.target_type, task.target_id, task.node_id,
             task.action, task.cron_expression, task.enabled, task.created_by,
+            task.creator_user_id ?? null,
             task.created_at, task.updated_at, task.last_run_at, task.next_run_at,
             task.last_status, task.last_error, task.prune_targets, task.target_services,
             task.prune_label_filter, task.selector_type ?? null, task.selector_value ?? null,

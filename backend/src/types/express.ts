@@ -49,7 +49,7 @@ declare global {
        * pre-authorization gate when the hub-side scoped permission check
        * passes for a non-admin user. Resets to undefined after the hop.
        */
-      proxyElevatedRole?: UserRole;
+      proxyElevatedRole?: 'node-admin';
     }
   }
 }
