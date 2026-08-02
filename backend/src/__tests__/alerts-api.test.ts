@@ -4,18 +4,35 @@
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import request from 'supertest';
+import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
-import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
+import { setupTestDb, cleanupTestDb, loginAsTestAdmin, TEST_JWT_SECRET } from './helpers/setupTestDb';
 
 let tmpDir: string;
 let app: import('express').Express;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
+let ROLE_PERMISSIONS: typeof import('../middleware/permissions').ROLE_PERMISSIONS;
 let authCookie: string;
 let viewerCookie: string;
+
+type SeedRole = 'admin' | 'node-admin' | 'deployer' | 'viewer' | 'auditor';
+
+/** Seed a user with the given role and return a signed bearer token for it. */
+async function seedRoleToken(username: string, role: SeedRole): Promise<string> {
+  const db = DatabaseService.getInstance();
+  let user = db.getUserByUsername(username);
+  if (!user) {
+    const hash = await bcrypt.hash('password123', 1);
+    db.addUser({ username, password_hash: hash, role });
+    user = db.getUserByUsername(username);
+  }
+  return jwt.sign({ username, role, tv: user!.token_version }, TEST_JWT_SECRET, { expiresIn: '5m' });
+}
 
 beforeAll(async () => {
   tmpDir = await setupTestDb();
   ({ DatabaseService } = await import('../services/DatabaseService'));
+  ({ ROLE_PERMISSIONS } = await import('../middleware/permissions'));
 
   // Mock LicenseService so paid-gated routes are accessible
   const { LicenseService } = await import('../services/LicenseService');
@@ -67,6 +84,23 @@ describe('GET /api/alerts', () => {
     expect(res.body.length).toBe(1);
     expect(res.body[0].stack_name).toBe('web');
   });
+
+  it('denies a role without stack:read with 403 PERMISSION_DENIED', async () => {
+    // Every shipped role carries stack:read, so the denial path is exercised
+    // by temporarily removing it from viewer at runtime, proving the added
+    // gate actually runs rather than being a no-op.
+    const original = ROLE_PERMISSIONS.viewer;
+    ROLE_PERMISSIONS.viewer = original.filter((p) => p !== 'stack:read');
+    try {
+      const res = await request(app)
+        .get('/api/alerts')
+        .set('Cookie', viewerCookie);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PERMISSION_DENIED');
+    } finally {
+      ROLE_PERMISSIONS.viewer = original;
+    }
+  });
 });
 
 // --- POST /api/alerts ---
@@ -79,13 +113,30 @@ describe('POST /api/alerts', () => {
     expect(res.status).toBe(401);
   });
 
-  it('rejects non-admin users with 403', async () => {
-    const res = await request(app)
-      .post('/api/alerts')
-      .set('Cookie', viewerCookie)
-      .send({ stack_name: 'test', metric: 'cpu_percent', operator: '>', threshold: 80, duration_mins: 5, cooldown_mins: 60 });
-    expect(res.status).toBe(403);
-  });
+  it.each(['viewer', 'deployer', 'auditor'] as const)(
+    'rejects %s with 403 PERMISSION_DENIED (lacks stack:edit)',
+    async (role) => {
+      const token = await seedRoleToken(`alerts-post-${role}`, role);
+      const res = await request(app)
+        .post('/api/alerts')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ stack_name: 'perm-gate-post', metric: 'cpu_percent', operator: '>', threshold: 80, duration_mins: 5, cooldown_mins: 60 });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PERMISSION_DENIED');
+    },
+  );
+
+  it.each(['admin', 'node-admin'] as const)(
+    'lets %s pass the permission gate',
+    async (role) => {
+      const token = await seedRoleToken(`alerts-post-${role}`, role);
+      const res = await request(app)
+        .post('/api/alerts')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ stack_name: `perm-gate-post-${role}`, metric: 'cpu_percent', operator: '>', threshold: 80, duration_mins: 5, cooldown_mins: 60 });
+      expect(res.status).toBe(201);
+    },
+  );
 
   it('creates alert and returns 201 with created resource', async () => {
     const payload = {
@@ -282,11 +333,107 @@ describe('DELETE /api/alerts/:id', () => {
     expect(res.status).toBe(401);
   });
 
-  it('rejects non-admin users with 403', async () => {
+  it.each(['viewer', 'deployer', 'auditor'] as const)(
+    'rejects %s with 403 PERMISSION_DENIED (lacks stack:edit)',
+    async (role) => {
+      const alert = DatabaseService.getInstance().addStackAlert({
+        stack_name: `delete-gate-deny-${role}`,
+        service_name: null,
+        metric: 'cpu_percent',
+        operator: '>',
+        threshold: 90,
+        duration_mins: 0,
+        cooldown_mins: 0,
+      });
+      const token = await seedRoleToken(`alerts-delete-${role}`, role);
+      const res = await request(app)
+        .delete(`/api/alerts/${alert.id}`)
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PERMISSION_DENIED');
+    },
+  );
+
+  it.each(['admin', 'node-admin'] as const)(
+    'lets %s delete',
+    async (role) => {
+      const alert = DatabaseService.getInstance().addStackAlert({
+        stack_name: `delete-gate-allow-${role}`,
+        service_name: null,
+        metric: 'cpu_percent',
+        operator: '>',
+        threshold: 90,
+        duration_mins: 0,
+        cooldown_mins: 0,
+      });
+      const token = await seedRoleToken(`alerts-delete-${role}`, role);
+      const res = await request(app)
+        .delete(`/api/alerts/${alert.id}`)
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+    },
+  );
+
+  it('returns 404 for a nonexistent alert id', async () => {
     const res = await request(app)
-      .delete('/api/alerts/1')
-      .set('Cookie', viewerCookie);
-    expect(res.status).toBe(403);
+      .delete('/api/alerts/99999')
+      .set('Cookie', authCookie);
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'Alert not found' });
+  });
+
+  it("authorizes against the alert's own stack, not a caller's scoped grant on a different stack", async () => {
+    const db = DatabaseService.getInstance();
+    const defaultNodeId = db.getDefaultNode()!.id!;
+    const hash = await bcrypt.hash('password123', 1);
+    const userId = db.addUser({ username: 'alerts-scoped-editor', password_hash: hash, role: 'viewer' });
+    db.addRoleAssignment({
+      user_id: userId,
+      role: 'node-admin',
+      resource_type: 'stack',
+      resource_id: 'scoped-allowed-stack',
+      node_id: defaultNodeId,
+    });
+    const user = db.getUserByUsername('alerts-scoped-editor')!;
+    const token = jwt.sign({ username: user.username, role: user.role, tv: user.token_version }, TEST_JWT_SECRET, { expiresIn: '5m' });
+
+    try {
+      // The scoped grant only covers 'scoped-allowed-stack', so an alert
+      // belonging to a different stack must still be denied.
+      const deniedAlert = db.addStackAlert({
+        stack_name: 'scoped-other-stack',
+        service_name: null,
+        metric: 'cpu_percent',
+        operator: '>',
+        threshold: 90,
+        duration_mins: 0,
+        cooldown_mins: 0,
+      });
+      const deniedRes = await request(app)
+        .delete(`/api/alerts/${deniedAlert.id}`)
+        .set('Authorization', `Bearer ${token}`);
+      expect(deniedRes.status).toBe(403);
+      expect(deniedRes.body.code).toBe('PERMISSION_DENIED');
+
+      const allowedAlert = db.addStackAlert({
+        stack_name: 'scoped-allowed-stack',
+        service_name: null,
+        metric: 'cpu_percent',
+        operator: '>',
+        threshold: 90,
+        duration_mins: 0,
+        cooldown_mins: 0,
+      });
+      const allowedRes = await request(app)
+        .delete(`/api/alerts/${allowedAlert.id}`)
+        .set('Authorization', `Bearer ${token}`);
+      expect(allowedRes.status).toBe(200);
+      expect(allowedRes.body.success).toBe(true);
+    } finally {
+      db.deleteRoleAssignmentsByUser(userId);
+      db.deleteUser(userId);
+    }
   });
 
   it('deletes existing alert rule', async () => {

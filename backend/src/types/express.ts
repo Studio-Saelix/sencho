@@ -44,6 +44,13 @@ declare global {
        * re-classifying req.path there would miss DELETE cleanup.
        */
       proxyNamedStackRoute?: { stackName: string; action: PermissionAction };
+      /**
+       * Hub-side role override for the outbound proxy hop. When set, the
+       * PROXY_ROLE_HEADER is elevated to node-admin instead of the caller's
+       * global role, so scoped node-level grants can be forwarded.
+       * Request-scoped; consumed only by remoteNodeProxy.ts.
+       */
+      proxyElevatedRole?: 'node-admin';
     }
   }
 }

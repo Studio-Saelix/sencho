@@ -10,10 +10,13 @@ vi.mock('@/context/NodeContext', () => ({
 // buildMenuCtx derives canOpenApp from the active node plus the stack's
 // published port; only the fields it reads need to be real, the handler
 // closures are never invoked here.
+type CanFn = (action: string, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean;
+
 function makeOptions(
   activeNode: Node | null,
   stackPorts: Record<string, number | undefined>,
   stackStatuses: Record<string, string> = { 'web.yml': 'running' },
+  can: CanFn = () => true,
 ) {
   const stackListState = {
     stackStatuses,
@@ -42,8 +45,14 @@ function makeOptions(
     stackActions,
     activeNode,
     isAdmin: true,
-    can: () => true,
+    can,
   } as unknown as Parameters<typeof useSidebarContextMenu>[0];
+}
+
+// Reach past the `unknown` cast makeOptions returns to assert on the inner
+// stackActions mocks it built.
+function stackActionsOf(options: Parameters<typeof useSidebarContextMenu>[0]) {
+  return (options as unknown as { stackActions: { checkUpdatesForStack: ReturnType<typeof vi.fn> } }).stackActions;
 }
 
 describe('useSidebarContextMenu canOpenApp', () => {
@@ -87,5 +96,38 @@ describe('useSidebarContextMenu stackStatus', () => {
     const missing = renderHook(() =>
       useSidebarContextMenu(makeOptions({ id: 1, type: 'local' } as Node, {}, {})));
     expect(missing.result.current('web.yml').stackStatus).toBe('unknown');
+  });
+});
+
+describe('useSidebarContextMenu checkUpdates', () => {
+  it('calls checkUpdatesForStack with the stack name (not the .yml file)', () => {
+    const options = makeOptions({ id: 1, type: 'local' } as Node, { 'web.yml': 8989 });
+    const { result } = renderHook(() => useSidebarContextMenu(options));
+    result.current('web.yml').checkUpdates();
+    expect(stackActionsOf(options).checkUpdatesForStack).toHaveBeenCalledWith('web');
+  });
+});
+
+describe('useSidebarContextMenu canViewMonitor / canCheckUpdates wiring', () => {
+  it('derives canViewMonitor from stack:read and canCheckUpdates from stack:deploy, both scoped to the stack and active node', () => {
+    const can = vi.fn<CanFn>((action) => action === 'stack:read');
+    const options = makeOptions({ id: 7, type: 'local' } as Node, { 'web.yml': 8989 }, undefined, can);
+    const { result } = renderHook(() => useSidebarContextMenu(options));
+    const ctx = result.current('web.yml');
+
+    expect(ctx.canViewMonitor).toBe(true);
+    expect(ctx.canCheckUpdates).toBe(false);
+    expect(can).toHaveBeenCalledWith('stack:read', 'stack', 'web', 7);
+    expect(can).toHaveBeenCalledWith('stack:deploy', 'stack', 'web', 7);
+  });
+
+  it('denies both when the permission check fails closed', () => {
+    const can = vi.fn<CanFn>(() => false);
+    const options = makeOptions({ id: 7, type: 'local' } as Node, { 'web.yml': 8989 }, undefined, can);
+    const { result } = renderHook(() => useSidebarContextMenu(options));
+    const ctx = result.current('web.yml');
+
+    expect(ctx.canViewMonitor).toBe(false);
+    expect(ctx.canCheckUpdates).toBe(false);
   });
 });

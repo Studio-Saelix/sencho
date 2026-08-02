@@ -321,29 +321,35 @@ describe('WebSocket upgrade - exec auth enforcement', () => {
     expect(code).toBe(401);
   });
 
-  it('rejects WebSocket upgrade with non-admin token (403)', async () => {
-    // Add a non-admin user
-    const { DatabaseService } = await import('../services/DatabaseService');
-    const bcrypt = await import('bcrypt');
-    const hash = await bcrypt.hash('viewerpass', 1);
-    try {
-      DatabaseService.getInstance().addUser({ username: 'viewer', password_hash: hash, role: 'viewer' });
-    } catch {
-      // User may already exist
-    }
+  // All five built-in roles: container exec requires admin. Every non-admin
+  // role must be rejected at upgrade time by generic.ts's role === 'admin' gate.
+  const NON_ADMIN_EXEC_ROLES = ['viewer', 'deployer', 'node-admin', 'auditor'] as const;
 
-    const token = jwt.sign(
-      { username: 'viewer', role: 'viewer' },
-      TEST_JWT_SECRET,
-      { expiresIn: '1m' },
-    );
-    const ws = new WebSocket(getWsUrl(), { headers: { Cookie: `sencho_token=${token}` } });
-    const code = await new Promise<number>((resolve) => {
-      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
-      ws.on('error', () => resolve(0));
+  for (const role of NON_ADMIN_EXEC_ROLES) {
+    it(`rejects /ws upgrade with ${role} token (403)`, async () => {
+      const { DatabaseService } = await import('../services/DatabaseService');
+      const bcrypt = await import('bcrypt');
+      const username = `exec_${role.replace('-', '_')}`;
+      const hash = bcrypt.hashSync('password123', 1);
+      try {
+        DatabaseService.getInstance().addUser({ username, password_hash: hash, role });
+      } catch {
+        // User may already exist from a prior run in the same worker
+      }
+
+      const token = jwt.sign(
+        { username, role },
+        TEST_JWT_SECRET,
+        { expiresIn: '1m' },
+      );
+      const ws = new WebSocket(getWsUrl(), { headers: { Cookie: `sencho_token=${token}` } });
+      const code = await new Promise<number>((resolve) => {
+        ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+        ws.on('error', () => resolve(0));
+      });
+      expect(code).toBe(403);
     });
-    expect(code).toBe(403);
-  });
+  }
 
   it('rejects WebSocket upgrade with node_proxy token (403)', async () => {
     const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });

@@ -21,7 +21,7 @@ import type { MenuGroup, MenuItem, StackMenuCtx } from '@/components/sidebar/sid
 export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[] {
   const {
     stackStatus, isSelfStack, canOpenApp, isBusy, canDelete, canDeploy, canEditLabels, isPinned, labels,
-    openAlertSheet, openAutoHeal, canCheckUpdates, checkUpdates, openStackApp,
+    openAlertSheet, openAutoHeal, canViewMonitor, canCheckUpdates, checkUpdates, openStackApp,
     deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel,
     menuVisibility, openScheduleTask,
     canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
@@ -31,10 +31,11 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
   return useMemo(() => {
     const groups: MenuGroup[] = [];
 
-    const inspect: MenuItem[] = [
-      { id: 'alerts', label: 'Alerts', icon: BellRing, shortcut: 'A', onSelect: openAlertSheet },
-      { id: 'auto-heal', label: 'Auto-Heal', icon: Activity, shortcut: 'H', onSelect: openAutoHeal },
-    ];
+    const inspect: MenuItem[] = [];
+    if (canViewMonitor) {
+      inspect.push({ id: 'alerts', label: 'Alerts', icon: BellRing, shortcut: 'A', onSelect: openAlertSheet });
+      inspect.push({ id: 'auto-heal', label: 'Auto-Heal', icon: Activity, shortcut: 'H', onSelect: openAutoHeal });
+    }
     if (canCheckUpdates) {
       inspect.push({ id: 'check-updates', label: 'Check updates', icon: RefreshCw, shortcut: 'U', onSelect: checkUpdates });
     }
@@ -110,7 +111,7 @@ export function useStackMenuItems(_file: string, ctx: StackMenuCtx): MenuGroup[]
   }, [
     stackStatus, isSelfStack, canOpenApp, isBusy, canDelete, canDeploy, canEditLabels, isPinned, labels,
     showDeploy, showStop, showRestart, showUpdate, showTakeDown,
-    openAlertSheet, openAutoHeal, canCheckUpdates, checkUpdates, openStackApp,
+    openAlertSheet, openAutoHeal, canViewMonitor, canCheckUpdates, checkUpdates, openStackApp,
     deploy, stop, restart, update, takeDown, remove, pin, unpin, toggleLabel, openScheduleTask,
     canMuteNotifications, muteStackAll, muteStackDeploySuccess, muteStackMonitor, openStackMuteRules,
   ]);

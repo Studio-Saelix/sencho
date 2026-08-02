@@ -3520,6 +3520,10 @@ export class DatabaseService {
         return this.db.prepare('SELECT * FROM stack_alerts').all() as StackAlert[];
     }
 
+    public getStackAlert(id: number): StackAlert | undefined {
+        return this.db.prepare('SELECT * FROM stack_alerts WHERE id = ?').get(id) as StackAlert | undefined;
+    }
+
     public addStackAlert(alert: StackAlert): StackAlert {
         const stmt = this.db.prepare(
             'INSERT INTO stack_alerts (stack_name, service_name, metric, operator, threshold, duration_mins, cooldown_mins, last_fired_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'

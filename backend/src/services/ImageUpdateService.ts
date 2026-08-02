@@ -430,6 +430,12 @@ export class ImageUpdateService {
     private isRunning = false;
     private checkStartedAt = 0;
     private lastManualRefreshAt = 0;
+    // Per-stack recheck cooldown (key: `${nodeId}:${stackName}`). Enforces the
+    // same MANUAL_COOLDOWN_MS as the node-wide triggerManualRefresh, and also
+    // acts as an in-flight gate: the mark writes before the first await, so a
+    // second synchronous check-and-mark on the same event-loop tick sees the
+    // first entry and is denied.
+    private perStackRecheckAt = new Map<string, number>();
     private lastCheckedAt: number | null = null;   // when the last scan body started
     private nextCheckAt: number | null = null;
     // Initialized at declaration so getStatus() never reports NaN before start()
@@ -691,6 +697,41 @@ export class ImageUpdateService {
     /** Milliseconds left on the manual-refresh cooldown; 0 when a refresh is allowed. */
     public getManualCooldownRemainingMs(): number {
         return Math.max(0, this.lastManualRefreshAt + ImageUpdateService.MANUAL_COOLDOWN_MS - Date.now());
+    }
+
+    /**
+     * Per-stack rate gate for explicit rechecks (idiomatic API calls and the
+     * sidebar "Check updates" action). Reuses the same MANUAL_COOLDOWN_MS as the
+     * node-wide manual trigger so both surfaces share one cooldown policy without
+     * a new knob.
+     *
+     * Returns true when the recheck is allowed and atomically marks in-flight;
+     * returns false when a recheck for this (nodeId, stackName) was started
+     * within the cooldown window (including one that is still in-flight, whose
+     * mark was written synchronously on the previous event-loop tick before the
+     * first await).
+     */
+    public tryMarkStackRecheck(nodeId: number, stackName: string): boolean {
+        const key = `${nodeId}:${stackName}`;
+        const now = Date.now();
+        const lastAt = this.perStackRecheckAt.get(key) ?? 0;
+        if (now - lastAt < ImageUpdateService.MANUAL_COOLDOWN_MS) {
+            return false;
+        }
+        this.perStackRecheckAt.set(key, now);
+        return true;
+    }
+
+    /** Milliseconds left on the per-stack recheck cooldown; 0 when allowed. */
+    public getStackRecheckCooldownRemainingMs(nodeId: number, stackName: string): number {
+        const key = `${nodeId}:${stackName}`;
+        const lastAt = this.perStackRecheckAt.get(key) ?? 0;
+        return Math.max(0, lastAt + ImageUpdateService.MANUAL_COOLDOWN_MS - Date.now());
+    }
+
+    /** Clear every per-stack recheck cooldown (test-only). */
+    public resetStackRecheckCooldowns(): void {
+        this.perStackRecheckAt.clear();
     }
 
     public getStatus(): ImageUpdateStatus {

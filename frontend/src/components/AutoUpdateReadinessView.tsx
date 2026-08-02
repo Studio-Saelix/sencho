@@ -20,6 +20,7 @@ import {
   isVerificationOnlyPreview,
 } from '@/lib/updatePreviewActionability';
 import { useNodes } from '@/context/NodeContext';
+import { useAuth } from '@/context/AuthContext';
 import { useIsMobile } from '@/hooks/use-is-mobile';
 import { Masthead, Kicker } from '@/components/mobile/mobile-ui';
 import { ImageSourceMenu } from './ImageSourceMenu';
@@ -469,6 +470,7 @@ function ReadinessHero({
   nodeCount,
   refreshing,
   onRefresh,
+  canRefresh,
   unresolvedChecks = false,
   detectionDisabled = false,
 }: {
@@ -477,6 +479,7 @@ function ReadinessHero({
   nodeCount: number;
   refreshing: boolean;
   onRefresh: () => void;
+  canRefresh: boolean;
   unresolvedChecks?: boolean;
   detectionDisabled?: boolean;
 }) {
@@ -523,21 +526,23 @@ function ReadinessHero({
               </div>
             </div>
           )}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={onRefresh}
-            disabled={refreshing}
-            aria-label="Recheck registries"
-            className="gap-2"
-          >
-            <RefreshCw
-              className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`}
-              strokeWidth={1.5}
-              aria-hidden="true"
-            />
-            Recheck
-          </Button>
+          {canRefresh && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onRefresh}
+              disabled={refreshing}
+              aria-label="Recheck registries"
+              className="gap-2"
+            >
+              <RefreshCw
+                className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`}
+                strokeWidth={1.5}
+                aria-hidden="true"
+              />
+              Recheck
+            </Button>
+          )}
         </div>
       </div>
     </div>
@@ -791,6 +796,8 @@ interface AutoUpdateReadinessProps {
 function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps) {
   const isMobile = useIsMobile();
   const { runWithLog } = useDeployFeedback();
+  const { can } = useAuth();
+  const canRefreshFleet = can('node:manage');
   const { nodes, nodeMeta, refreshNodeMeta } = useNodes();
   const [groups, setGroups] = useState<NodeGroup[]>([]);
   const [reachableNodeCount, setReachableNodeCount] = useState<number | null>(null);
@@ -1296,10 +1303,12 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         />
         <div className="flex-1 min-h-0 overflow-y-auto p-4 [&>*+*]:mt-4">
           <div className="flex justify-end">
-            <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing || cadence?.enabled === false} aria-label="Recheck registries" className="gap-1.5">
-              <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={1.5} aria-hidden="true" />
-              Recheck
-            </Button>
+            {canRefreshFleet && (
+              <Button variant="outline" size="sm" onClick={handleRefresh} disabled={refreshing || cadence?.enabled === false} aria-label="Recheck registries" className="gap-1.5">
+                <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} strokeWidth={1.5} aria-hidden="true" />
+                Recheck
+              </Button>
+            )}
           </div>
           <CadenceStrip cadence={cadence} />
 
@@ -1351,6 +1360,7 @@ function AutoUpdateReadinessContent({ headerActions }: AutoUpdateReadinessProps)
         nodeCount={groups.length}
         refreshing={refreshing}
         onRefresh={handleRefresh}
+        canRefresh={canRefreshFleet}
         unresolvedChecks={checkFailures.length > 0}
         detectionDisabled={cadence?.enabled === false}
       />

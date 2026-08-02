@@ -20,7 +20,6 @@ import type { useViewNavigationState } from './useViewNavigationState';
 import type { Node } from '@/context/NodeContext';
 import { useNodes } from '@/context/NodeContext';
 import type { PermissionAction } from '@/context/AuthContext';
-import { canManageNode } from '@/lib/canManageNode';
 
 type StackListState = ReturnType<typeof useStackListState>;
 type NavState = ReturnType<typeof useViewNavigationState>;
@@ -65,6 +64,7 @@ export function useSidebarContextMenu({
       canDelete: can('stack:delete', 'stack', sName, nodeId),
       canDeploy: can('stack:deploy', 'stack', sName, nodeId),
       canEditLabels: can('stack:edit', 'stack', sName, nodeId),
+      canViewMonitor: can('stack:read', 'stack', sName, nodeId),
       // POST /api/labels (the inline "New label" entry) is guarded by the
       // unscoped requirePermission('stack:edit'); a user with only per-stack
       // scoped edit can toggle existing labels but cannot create new ones.
@@ -75,8 +75,8 @@ export function useSidebarContextMenu({
       menuVisibility: stackActions.getStackMenuVisibility(file),
       openAlertSheet: () => overlayState.openAlertSheet(file),
       openAutoHeal: () => overlayState.openAutoHeal(file),
-      canCheckUpdates: canManageNode(can, nodeId),
-      checkUpdates: () => stackActions.checkUpdatesForStack(),
+      canCheckUpdates: can('stack:deploy', 'stack', sName, nodeId),
+      checkUpdates: () => stackActions.checkUpdatesForStack(sName),
       openStackApp: () => stackActions.openStackApp(file),
       deploy: () => stackActions.executeStackActionByFile(file, 'deploy', 'deploy'),
       stop: () => stackActions.executeStackActionByFile(file, 'stop', 'stop'),
