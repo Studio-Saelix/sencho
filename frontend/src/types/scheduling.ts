@@ -8,6 +8,8 @@ export interface ScheduledTask {
   cron_expression: string;
   enabled: number;
   created_by: string;
+  /** The user ID who created this schedule. Null for legacy rows (pre-RBAC). */
+  creator_user_id?: number | null;
   created_at: number;
   updated_at: number;
   last_run_at: number | null;

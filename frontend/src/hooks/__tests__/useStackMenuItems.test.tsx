@@ -138,10 +138,16 @@ describe('useStackMenuItems', () => {
     expect(lifecycle.items.some(i => i.id === 'schedule')).toBe(true);
   });
 
-  it('hides Schedule task when not admin', () => {
-    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isAdmin: false })));
+  it('hides Schedule task when canDeploy is false', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ canDeploy: false })));
     const lifecycle = result.current.find(g => g.id === 'lifecycle');
     expect(lifecycle?.items.some(i => i.id === 'schedule')).toBeFalsy();
+  });
+
+  it('shows Schedule task when canDeploy is true even when not admin', () => {
+    const { result } = renderHook(() => useStackMenuItems('web.yml', makeCtx({ isAdmin: false, canDeploy: true })));
+    const lifecycle = result.current.find(g => g.id === 'lifecycle');
+    expect(lifecycle?.items.some(i => i.id === 'schedule')).toBeTruthy();
   });
 
   it('includes Mute submenu in Inspect when canMuteNotifications', () => {
@@ -211,11 +217,8 @@ describe('useStackMenuItems', () => {
       canDeploy: false,
       menuVisibility: { showDeploy: true, showStop: true, showRestart: true, showUpdate: true, showTakeDown: true },
     })));
-    const lifecycle = result.current.find(g => g.id === 'lifecycle')!;
-    const ids = lifecycle.items.map(i => i.id);
-    expect(ids).not.toContain('deploy');
-    expect(ids).not.toContain('take-down');
-    expect(ids).toEqual(['schedule']);
+    // With canDeploy false, the entire lifecycle group is empty and omitted.
+    expect(result.current.find(g => g.id === 'lifecycle')).toBeUndefined();
   });
 
   it('disables take down for the self stack', () => {

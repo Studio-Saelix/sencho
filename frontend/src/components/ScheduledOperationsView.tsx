@@ -40,7 +40,10 @@ import {
   RISK_BADGE_CLASSES,
   RISK_DOT_CLASSES,
   RISK_LABEL,
+  canScheduleAction,
+  canScheduleActionAnywhere,
 } from '@/lib/scheduledActions';
+import { useAuth } from '@/context/AuthContext';
 import { LabelNameAutocomplete, type LabelNameSuggestion } from '@/components/labels/LabelNameAutocomplete';
 
 const DEFAULT_PRUNE_TARGETS = ['containers', 'images', 'networks', 'volumes'];
@@ -127,6 +130,7 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const [simpleSchedule, setSimpleSchedule] = useState<SimpleSchedule>(DEFAULT_SIMPLE_SCHEDULE);
   const [simpleReplacedCron, setSimpleReplacedCron] = useState(false);
   const [formEnabled, setFormEnabled] = useState(true);
+  const { can, permissions } = useAuth();
   const [formDeleteAfterRun, setFormDeleteAfterRun] = useState(false);
   const [formPruneTargets, setFormPruneTargets] = useState<string[]>(DEFAULT_PRUNE_TARGETS);
   const [formTargetServices, setFormTargetServices] = useState<string[]>([]);
@@ -574,12 +578,14 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const nodeNameById = useMemo(() => new Map(nodes.map(n => [n.id, n.name])), [nodes]);
   const actionOptions = useMemo(
     () =>
-      SCHEDULED_ACTIONS.map(o => ({
-        value: o.id,
-        label: o.label,
-        group: SCHEDULED_ACTION_CATEGORIES.find(c => c.key === o.category)?.label,
-      })),
-    [],
+      SCHEDULED_ACTIONS
+        .filter(o => canScheduleActionAnywhere(can, o, permissions))
+        .map(o => ({
+          value: o.id,
+          label: o.label,
+          group: SCHEDULED_ACTION_CATEGORIES.find(c => c.key === o.category)?.label,
+        })),
+    [can, permissions],
   );
   // Scan and prune run on the hub-local Docker daemon only; remote nodes are excluded from their pickers.
   const localNodeOptions = useMemo(
@@ -607,6 +613,15 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
   const scheduleInvalid = scheduleMode === 'simple'
     ? !!simpleCronError
     : (!formCron || !!cronFieldError);
+  const canSaveWithCurrentTarget = useMemo(() => {
+    if (!currentAction) return false;
+    return canScheduleAction(can, currentAction, {
+      nodeId: formNodeId ? Number(formNodeId) : null,
+      stackName: formTargetId || null,
+      labelScope: formLabelScope === 'node' ? 'node' : 'fleet',
+    });
+  }, [can, currentAction, formNodeId, formTargetId, formLabelScope]);
+
   const isSaveDisabled =
     saving || !currentAction || !formName || scheduleInvalid
     || (!!currentAction?.requiresStack && (!formTargetId || !formNodeId))
@@ -616,7 +631,16 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
     || (formAction === 'update-by-label' && (
       !formSelectorValue.trim()
       || (formLabelScope === 'node' && !formNodeId)
-    ));
+    ))
+    || !canSaveWithCurrentTarget;
+
+  const saveDisabledReason = useMemo((): string | null => {
+    if (saving || !currentAction || !formName || scheduleInvalid) return null;
+    if (!canSaveWithCurrentTarget) {
+      return 'You do not have permission to schedule this action on the selected target.';
+    }
+    return null;
+  }, [saving, currentAction, formName, scheduleInvalid, canSaveWithCurrentTarget]);
 
   const windowEnd = now + TIMELINE_WINDOW_MS;
   const timelinePills = filteredTasks
@@ -1282,6 +1306,9 @@ export default function ScheduledOperationsView({ filterNodeId, onClearFilter, p
             </Button>
           }
         />
+        {saveDisabledReason && (
+          <p className="px-6 pb-4 text-xs text-muted-foreground">{saveDisabledReason}</p>
+        )}
       </Modal>
 
       {/* Delete Confirmation */}

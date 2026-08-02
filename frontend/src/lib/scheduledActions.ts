@@ -1,4 +1,5 @@
 import type { ScheduledTask } from '@/types/scheduling';
+import type { PermissionAction } from '@/context/AuthContext';
 
 /**
  * Single source of truth for scheduled-operation action metadata on the
@@ -86,6 +87,8 @@ export interface ScheduledActionDefinition {
   helperText: string;
   /** Risk level shown as a coloured chip next to the helper text. */
   riskLevel: ScheduledActionRiskLevel;
+  /** Permission required to schedule this action (mirrors backend registry). */
+  permission: PermissionAction;
 }
 
 /** Action pre-selected when the create modal opens. Decoupled from picker order. */
@@ -94,24 +97,24 @@ export const DEFAULT_SCHEDULED_ACTION_ID: ScheduledActionId = 'restart';
 /** Ordered for the create-flow action picker, grouped by category. */
 export const SCHEDULED_ACTIONS: ScheduledActionDefinition[] = [
   // Lifecycle
-  { id: 'auto_backup', backendAction: 'auto_backup', label: 'Backup Stack Compose Files', shortLabel: 'backup', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Backs up compose and env files only. This does not back up application volumes.', riskLevel: 'safe' },
-  { id: 'auto_start', backendAction: 'auto_start', label: 'Start / Bring Up Stack', shortLabel: 'start', category: 'lifecycle', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Creates containers if they do not exist, or starts existing stopped containers.', riskLevel: 'runtime-change' },
-  { id: 'restart', backendAction: 'restart', label: 'Restart Stack', shortLabel: 'restart', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: true, helperText: 'Restarts containers in place. Running services are stopped and started again on the same configuration.', riskLevel: 'interruptive' },
-  { id: 'auto_stop', backendAction: 'auto_stop', label: 'Stop Stack', shortLabel: 'stop', category: 'lifecycle', targetType: 'stack', tone: 'warning', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Stops containers but keeps them in place for a faster start later.', riskLevel: 'interruptive' },
-  { id: 'auto_down', backendAction: 'auto_down', label: 'Take Stack Down', shortLabel: 'down', category: 'lifecycle', targetType: 'stack', tone: 'destructive', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Runs compose down. Containers are removed, but compose files remain on disk.', riskLevel: 'removes-containers' },
-  { id: 'container-restart', backendAction: 'restart', label: 'Restart Container', shortLabel: 'restart ctr', category: 'lifecycle', targetType: 'container', tone: 'brand', requiresNode: true, requiresStack: false, requiresContainer: true, supportsServiceSelection: false, helperText: 'Restarts a single container by name on the selected node. Targets the container directly, not through compose.', riskLevel: 'interruptive' },
-  { id: 'container-stop', backendAction: 'auto_stop', label: 'Stop Container', shortLabel: 'stop ctr', category: 'lifecycle', targetType: 'container', tone: 'warning', requiresNode: true, requiresStack: false, requiresContainer: true, supportsServiceSelection: false, helperText: 'Stops a single container by name. The container remains on disk for a faster start later.', riskLevel: 'interruptive' },
-  { id: 'container-start', backendAction: 'auto_start', label: 'Start Container', shortLabel: 'start ctr', category: 'lifecycle', targetType: 'container', tone: 'success', requiresNode: true, requiresStack: false, requiresContainer: true, supportsServiceSelection: false, helperText: 'Starts a stopped container by name on the selected node.', riskLevel: 'runtime-change' },
+  { id: 'auto_backup', backendAction: 'auto_backup', label: 'Backup Stack Compose Files', shortLabel: 'backup', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Backs up compose and env files only. This does not back up application volumes.', riskLevel: 'safe', permission: 'stack:deploy' },
+  { id: 'auto_start', backendAction: 'auto_start', label: 'Start / Bring Up Stack', shortLabel: 'start', category: 'lifecycle', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Creates containers if they do not exist, or starts existing stopped containers.', riskLevel: 'runtime-change', permission: 'stack:deploy' },
+  { id: 'restart', backendAction: 'restart', label: 'Restart Stack', shortLabel: 'restart', category: 'lifecycle', targetType: 'stack', tone: 'brand', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: true, helperText: 'Restarts containers in place. Running services are stopped and started again on the same configuration.', riskLevel: 'interruptive', permission: 'stack:deploy' },
+  { id: 'auto_stop', backendAction: 'auto_stop', label: 'Stop Stack', shortLabel: 'stop', category: 'lifecycle', targetType: 'stack', tone: 'warning', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Stops containers but keeps them in place for a faster start later.', riskLevel: 'interruptive', permission: 'stack:deploy' },
+  { id: 'auto_down', backendAction: 'auto_down', label: 'Take Stack Down', shortLabel: 'down', category: 'lifecycle', targetType: 'stack', tone: 'destructive', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Runs compose down. Containers are removed, but compose files remain on disk.', riskLevel: 'removes-containers', permission: 'stack:deploy' },
+  { id: 'container-restart', backendAction: 'restart', label: 'Restart Container', shortLabel: 'restart ctr', category: 'lifecycle', targetType: 'container', tone: 'brand', requiresNode: true, requiresStack: false, requiresContainer: true, supportsServiceSelection: false, helperText: 'Restarts a single container by name on the selected node. Targets the container directly, not through compose.', riskLevel: 'interruptive', permission: 'node:manage' },
+  { id: 'container-stop', backendAction: 'auto_stop', label: 'Stop Container', shortLabel: 'stop ctr', category: 'lifecycle', targetType: 'container', tone: 'warning', requiresNode: true, requiresStack: false, requiresContainer: true, supportsServiceSelection: false, helperText: 'Stops a single container by name. The container remains on disk for a faster start later.', riskLevel: 'interruptive', permission: 'node:manage' },
+  { id: 'container-start', backendAction: 'auto_start', label: 'Start Container', shortLabel: 'start ctr', category: 'lifecycle', targetType: 'container', tone: 'success', requiresNode: true, requiresStack: false, requiresContainer: true, supportsServiceSelection: false, helperText: 'Starts a stopped container by name on the selected node.', riskLevel: 'runtime-change', permission: 'node:manage' },
   // Updates
-  { id: 'update', backendAction: 'update', label: 'Auto-update Stack', shortLabel: 'update', category: 'updates', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Checks this stack\'s images and recreates the stack only when newer images are available.', riskLevel: 'runtime-change' },
-  { id: 'update-fleet', backendAction: 'update', label: 'Auto-update All Stacks on Node', shortLabel: 'update node', category: 'updates', targetType: 'fleet', tone: 'success', requiresNode: true, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, helperText: 'Checks every stack on the selected node and updates stacks with newer images.', riskLevel: 'runtime-change' },
-  { id: 'update-by-label', backendAction: 'update', label: 'Auto-update stacks by label', shortLabel: 'update label', category: 'updates', targetType: 'fleet', tone: 'success', requiresNode: false, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, helperText: 'Resolves stacks that currently carry a Stack Label at each run, across the entire fleet or one node, and updates those with newer images.', riskLevel: 'runtime-change' },
+  { id: 'update', backendAction: 'update', label: 'Auto-update Stack', shortLabel: 'update', category: 'updates', targetType: 'stack', tone: 'success', requiresNode: true, requiresStack: true, requiresContainer: false, supportsServiceSelection: false, helperText: 'Checks this stack\'s images and recreates the stack only when newer images are available.', riskLevel: 'runtime-change', permission: 'stack:deploy' },
+  { id: 'update-fleet', backendAction: 'update', label: 'Auto-update All Stacks on Node', shortLabel: 'update node', category: 'updates', targetType: 'fleet', tone: 'success', requiresNode: true, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, helperText: 'Checks every stack on the selected node and updates stacks with newer images.', riskLevel: 'runtime-change', permission: 'node:manage' },
+  { id: 'update-by-label', backendAction: 'update', label: 'Auto-update stacks by label', shortLabel: 'update label', category: 'updates', targetType: 'fleet', tone: 'success', requiresNode: false, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, helperText: 'Resolves stacks that currently carry a Stack Label at each run, across the entire fleet or one node, and updates those with newer images.', riskLevel: 'runtime-change', permission: 'node:manage' },
   // Security
-  { id: 'scan', backendAction: 'scan', label: 'Scan Node Images', shortLabel: 'scan', category: 'security', targetType: 'system', tone: 'success', requiresNode: true, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Runs Trivy against images on the selected local node and records the findings.', riskLevel: 'read-only' },
+  { id: 'scan', backendAction: 'scan', label: 'Scan Node Images', shortLabel: 'scan', category: 'security', targetType: 'system', tone: 'success', requiresNode: true, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Runs Trivy against images on the selected local node and records the findings.', riskLevel: 'read-only', permission: 'node:manage' },
   // Maintenance
-  { id: 'prune', backendAction: 'prune', label: 'Prune Node Resources', shortLabel: 'prune', category: 'maintenance', targetType: 'system', tone: 'warning', requiresNode: true, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Removes unused Docker resources on the selected node. Be careful when pruning volumes.', riskLevel: 'destructive' },
+  { id: 'prune', backendAction: 'prune', label: 'Prune Node Resources', shortLabel: 'prune', category: 'maintenance', targetType: 'system', tone: 'warning', requiresNode: true, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, nodeScope: 'local', helperText: 'Removes unused Docker resources on the selected node. Be careful when pruning volumes.', riskLevel: 'destructive', permission: 'system:settings' },
   // Backups
-  { id: 'snapshot', backendAction: 'snapshot', label: 'Create Fleet Snapshot', shortLabel: 'snapshot', category: 'backups', targetType: 'fleet', tone: 'warning', requiresNode: false, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, helperText: 'Creates a versioned snapshot of compose and env files across the fleet.', riskLevel: 'safe' },
+  { id: 'snapshot', backendAction: 'snapshot', label: 'Create Fleet Snapshot', shortLabel: 'snapshot', category: 'backups', targetType: 'fleet', tone: 'warning', requiresNode: false, requiresStack: false, requiresContainer: false, supportsServiceSelection: false, helperText: 'Creates a versioned snapshot of compose and env files across the fleet.', riskLevel: 'safe', permission: 'node:manage' },
 ];
 
 const ACTION_BY_ID = new Map<string, ScheduledActionDefinition>(SCHEDULED_ACTIONS.map(a => [a.id, a]));
@@ -201,3 +204,93 @@ export const SCHEDULED_ACTION_CATEGORIES: ScheduledActionCategoryLane[] = [
   { key: 'maintenance', label: 'Upkeep', color: 'var(--warning)', bg: 'oklch(from var(--warning) l c h / 0.18)' },
   { key: 'backups', label: 'Backups', color: 'var(--brand)', bg: 'oklch(from var(--brand) l c h / 0.18)' },
 ];
+
+// ── Permission helpers ──────────────────────────────────────────────────────
+
+/** Permission actions that authorize any scheduleable action. */
+const SCHEDULABLE_ACTIONS: readonly PermissionAction[] = ['stack:deploy', 'node:manage', 'system:settings'];
+
+export interface ScheduleActionTarget {
+  nodeId?: number | null;
+  stackName?: string | null;
+  labelScope?: 'fleet' | 'node';
+}
+
+/**
+ * Check whether the user can schedule the given action on the given target.
+ * Scope resolution mirrors the backend `resolveTaskPermissionScope`: per-action,
+ * not per target-type bucket.
+ */
+export function canScheduleAction(
+  can: (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean,
+  def: ScheduledActionDefinition,
+  target: ScheduleActionTarget,
+): boolean {
+  // Stack lifecycle: scoped to (nodeId, stackName)
+  if (def.targetType === 'stack') {
+    return can(def.permission, 'stack', target.stackName ?? undefined, target.nodeId);
+  }
+  // Prune: always unscoped (admin-only via system:settings in the role matrix)
+  if (def.id === 'prune') {
+    return can(def.permission);
+  }
+  // Snapshot: unscoped (spans all nodes)
+  if (def.id === 'snapshot') {
+    return can(def.permission);
+  }
+  // Container targets + scan: node-scoped
+  if (def.targetType === 'container' || def.id === 'scan') {
+    return can(def.permission, 'node', target.nodeId != null ? String(target.nodeId) : undefined, target.nodeId);
+  }
+  // Fleet update with specific node (non-label): node-scoped
+  if (def.id === 'update-fleet') {
+    return can(def.permission, 'node', target.nodeId != null ? String(target.nodeId) : undefined, target.nodeId);
+  }
+  // Fleet-wide label update: unscoped when no node; node-scoped when node
+  if (def.id === 'update-by-label') {
+    if (target.labelScope === 'node' && target.nodeId != null) {
+      return can(def.permission, 'node', String(target.nodeId), target.nodeId);
+    }
+    return can(def.permission);
+  }
+  return can(def.permission);
+}
+
+/**
+ * True when the user can schedule at least one action. Used to determine whether
+ * the Scheduled Operations view and its "New scheduled task" button should be
+ * reachable.
+ */
+export function canScheduleAny(
+  can: (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean,
+  permissions?: { scopedPermissions?: Record<string, PermissionAction[]> } | null,
+): boolean {
+  // Global role check
+  if (can('stack:deploy') || can('node:manage') || can('system:settings')) return true;
+  // Scoped permissions check: any scoped grant covering a scheduleable action
+  if (permissions?.scopedPermissions) {
+    for (const actions of Object.values(permissions.scopedPermissions)) {
+      if (actions.some(a => (SCHEDULABLE_ACTIONS as readonly string[]).includes(a))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when the user can schedule this action on at least one possible target
+ * (global role or any scoped grant). Used to filter the action picker so
+ * actions the user can NEVER schedule are not shown.
+ */
+export function canScheduleActionAnywhere(
+  can: (action: PermissionAction, resourceType?: string, resourceId?: string, nodeId?: number | null) => boolean,
+  def: ScheduledActionDefinition,
+  permissions?: { scopedPermissions?: Record<string, PermissionAction[]> } | null,
+): boolean {
+  if (can(def.permission)) return true;
+  if (permissions?.scopedPermissions) {
+    for (const actions of Object.values(permissions.scopedPermissions)) {
+      if ((actions as readonly string[]).includes(def.permission)) return true;
+    }
+  }
+  return false;
+}

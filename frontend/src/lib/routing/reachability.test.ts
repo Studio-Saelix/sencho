@@ -20,6 +20,7 @@ function ctx(over: Partial<ReachabilityContext> = {}): ReachabilityContext {
     licenseStatus: 'ready',
     experimental: false,
     experimentalReady: true,
+    scheduledOpsAccessible: false,
     ...over,
   };
 }
@@ -71,6 +72,7 @@ describe('reachability', () => {
       isPaid: false,
       experimental: false,
       experimentalReady: true,
+    scheduledOpsAccessible: false,
       can: (a) => a === 'system:console',
     });
     expect(isViewHidden('host-console', community)).toBe(false);
@@ -102,7 +104,8 @@ describe('reachability', () => {
   });
 
   it('does not hide fleet-mesh settings for experimental off', () => {
-    const off = ctx({ experimental: false, experimentalReady: true, isAdmin: true });
+    const off = ctx({ experimental: false, experimentalReady: true,
+    scheduledOpsAccessible: false, isAdmin: true });
     expect(isSettingsSectionHidden('fleet-mesh', off)).toBe(false);
   });
 
