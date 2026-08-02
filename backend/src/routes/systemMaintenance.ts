@@ -9,6 +9,9 @@ import DockerController, {
 import { isPruneTarget } from '../services/prunePlan';
 import { FileSystemService } from '../services/FileSystemService';
 import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
+import { StackUpdateRecoveryService, shortGenerationId } from '../services/StackUpdateRecoveryService';
+import { buildUnifiedHeldImagePredicate } from '../services/recoveryHeldImages';
+import { DatabaseService } from '../services/DatabaseService';
 import SelfIdentityService from '../services/SelfIdentityService';
 import { requireAdmin } from '../middleware/tierGates';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
@@ -459,14 +462,101 @@ systemMaintenanceRouter.post('/images/delete', async (req: Request, res: Respons
       return res.status(400).json({ error: 'Invalid image ID format' });
     }
     if (rejectIfSelf('image', id, res)) return;
-    console.log(`[Resources] Delete image: ${hexId.substring(0, 12)}`);
     const dockerController = DockerController.getInstance(req.nodeId);
-    await dockerController.removeImage(id);
+    // Resolve to the canonical full image ID before the held-image check: the
+    // submitted id can be a short/truncated form (isValidDockerResourceId
+    // accepts 12-64 hex chars), which a full-64-char held-set lookup would miss.
+    const canonicalId = await dockerController.resolveImageId(id);
+    if (!canonicalId) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+    const isImageHeld = buildUnifiedHeldImagePredicate(req.nodeId);
+    if (isImageHeld(canonicalId)) {
+      return res.status(409).json({
+        error: 'Image is held for a pending update rollback and cannot be deleted manually. It is removed automatically once the rollback window expires, or can be released from Resources → Rollback.',
+        code: 'IMAGE_HELD_FOR_ROLLBACK',
+      });
+    }
+    console.log(`[Resources] Delete image: ${hexId.substring(0, 12)}`);
+    await dockerController.removeImage(canonicalId);
     invalidateNodeCaches(req.nodeId);
     res.json({ success: true, message: 'Image deleted' });
   } catch (error: unknown) {
     console.error('Failed to delete image:', error);
     res.status(500).json({ error: 'Failed to delete image' });
+  }
+});
+
+// Full-stack rollback generations (the sencho-rb/<id>/<service>:hold images).
+// Global read under stack:read, matching the rest of the Docker resource
+// inventory on this page (/system/resources, /system/images); release is
+// requireAdmin, matching every other host-destructive Docker action here.
+systemMaintenanceRouter.get('/rollback/generations', async (req: Request, res: Response) => {
+  if (!requirePermission(req, res, 'stack:read')) return;
+  try {
+    const service = StackUpdateRecoveryService.getInstance();
+    const rows = DatabaseService.getInstance()
+      .listStackUpdateRecoveryGenerationsForNode(req.nodeId)
+      .filter((row) => row.artifacts_retired === 0
+        && (row.status === 'active' || row.status === 'restored_current'
+          || row.status === 'superseded' || row.status === 'recovery_required'));
+    res.json(rows.map((row) => ({
+      id: row.id,
+      shortId: shortGenerationId(row.id),
+      stackName: row.stack_name,
+      status: row.status,
+      isCurrent: row.is_current === 1,
+      phase: row.phase,
+      createdAt: row.created_at,
+      artifactExpiresAt: row.artifact_expires_at,
+      releasable: service.isReleaseEligible(row),
+    })));
+  } catch (error) {
+    console.error('Failed to fetch rollback generations:', error);
+    res.status(500).json({ error: 'Failed to fetch rollback generations' });
+  }
+});
+
+systemMaintenanceRouter.post('/rollback/generations/:id/release', async (req: Request, res: Response) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const id = req.params.id as string;
+    const service = StackUpdateRecoveryService.getInstance();
+    const row = service.get(id);
+    if (!row || row.node_id !== req.nodeId) {
+      return res.status(404).json({ error: 'Rollback generation not found' });
+    }
+    const result = await service.releaseGeneration(id, req.user?.username ?? null);
+    if (!result.ok) {
+      switch (result.reason) {
+        case 'not_found':
+          return res.status(404).json({ error: 'Rollback generation not found' });
+        case 'already_released':
+          return res.status(409).json({
+            error: 'Rollback protection was already released for this generation.',
+            code: 'ALREADY_RELEASED',
+          });
+        case 'not_eligible':
+          return res.status(409).json({
+            error: 'This rollback generation cannot be released right now (it may be observing a health gate, mid-recovery, or already in progress).',
+            code: 'NOT_ELIGIBLE',
+          });
+        default: {
+          const _exhaustive: never = result.reason;
+          throw new Error(`Unhandled release reason: ${_exhaustive}`);
+        }
+      }
+    }
+    console.log(`[Resources] Released rollback generation ${shortGenerationId(id)} for ${sanitizeForLog(result.row.stack_name)}`);
+    invalidateNodeCaches(req.nodeId);
+    res.json({
+      success: true,
+      message: result.artifactsCleaned ? 'Rollback protection released' : 'Rollback protection released; cleanup will finish shortly',
+      artifactsCleaned: result.artifactsCleaned,
+    });
+  } catch (error) {
+    console.error('Failed to release rollback generation:', error);
+    res.status(500).json({ error: 'Failed to release rollback generation' });
   }
 });
 

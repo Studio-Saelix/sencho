@@ -60,6 +60,8 @@ vi.mock('util', () => ({
 
 import DockerController, { selectMainWebPort, parseExitCode, isContainerFailed } from '../services/DockerController';
 import { CacheService } from '../services/CacheService';
+import { StackUpdateRecoveryService } from '../services/StackUpdateRecoveryService';
+import { ServiceUpdateRecoveryService } from '../services/ServiceUpdateRecoveryService';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -529,6 +531,9 @@ describe('DockerController - getClassifiedResources', () => {
   beforeEach(() => {
     CacheService.getInstance().invalidate('project-name-map');
   });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
   it('classifies managed and unmanaged images', async () => {
     mockDocker.listImages.mockResolvedValue([
@@ -615,6 +620,94 @@ describe('DockerController - getClassifiedResources', () => {
 
     expect(result.volumes.find(v => v.Name === 'my-stack_data')!.managedStatus).toBe('managed');
     expect(result.volumes.find(v => v.Name === 'random_vol')!.managedStatus).toBe('unmanaged');
+  });
+
+  it('excludes an image whose only tag is a synthetic sencho-rb rollback hold', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-hold-only', RepoTags: ['sencho-rb/abc123456789/web:hold'], Size: 50, Containers: 0 },
+      { Id: 'img-normal', RepoTags: ['nginx:latest'], Size: 100, Containers: 0 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+    mockDocker.listNetworks.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getClassifiedResources(['my-stack']);
+
+    expect(result.images.find(i => i.Id === 'img-hold-only')).toBeUndefined();
+    expect(result.images.find(i => i.Id === 'img-normal')).toBeDefined();
+  });
+
+  it('keeps an image visible when it carries both a normal tag and a sencho-rb hold tag', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-multi-tag', RepoTags: ['myregistry/app:1.4', 'sencho-rb/abc123456789/app:hold'], Size: 100, Containers: 0 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+    mockDocker.listNetworks.mockResolvedValue([]);
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getClassifiedResources(['my-stack']);
+
+    const img = result.images.find(i => i.Id === 'img-multi-tag');
+    expect(img).toBeDefined();
+    expect(img!.RepoTags).toEqual(['myregistry/app:1.4', 'sencho-rb/abc123456789/app:hold']);
+  });
+
+  it('marks an image rollbackProtected with kind "stack" when StackUpdateRecoveryService holds it', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-stack-held', RepoTags: ['myregistry/app:1.4', 'sencho-rb/abc123456789/app:hold'], Size: 100, Containers: 0 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+    mockDocker.listNetworks.mockResolvedValue([]);
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set(['img-stack-held']));
+    vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getClassifiedResources(['my-stack']);
+
+    const img = result.images.find(i => i.Id === 'img-stack-held');
+    expect(img?.rollbackProtected).toBe(true);
+    expect(img?.rollbackProtectionKind).toBe('stack');
+  });
+
+  it('marks an image rollbackProtected with kind "service" when only ServiceUpdateRecoveryService holds it', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-service-held', RepoTags: ['myregistry/app:1.4'], Size: 100, Containers: 0 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+    mockDocker.listNetworks.mockResolvedValue([]);
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
+    vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set(['img-service-held']));
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getClassifiedResources(['my-stack']);
+
+    const img = result.images.find(i => i.Id === 'img-service-held');
+    expect(img?.rollbackProtected).toBe(true);
+    expect(img?.rollbackProtectionKind).toBe('service');
+  });
+
+  it('fails closed (marks every image rollbackProtected) when a held-image lookup fails', async () => {
+    mockDocker.listImages.mockResolvedValue([
+      { Id: 'img-unrelated', RepoTags: ['myregistry/app:1.4'], Size: 100, Containers: 0 },
+    ]);
+    mockDocker.listContainers.mockResolvedValue([]);
+    mockDocker.listVolumes.mockResolvedValue({ Volumes: [] });
+    mockDocker.listNetworks.mockResolvedValue([]);
+    // getHeldImageIds returns null when its own DB lookup fails (already logs
+    // internally); the badge must fail the same direction as the delete guard
+    // (recoveryHeldImages.ts), not the opposite.
+    vi.spyOn(StackUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(null);
+    vi.spyOn(ServiceUpdateRecoveryService.getInstance(), 'getHeldImageIds').mockReturnValue(new Set());
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.getClassifiedResources(['my-stack']);
+
+    const img = result.images.find(i => i.Id === 'img-unrelated');
+    expect(img?.rollbackProtected).toBe(true);
   });
 });
 
@@ -1099,6 +1192,40 @@ describe('DockerController - inspectImage', () => {
 
     expect(result.history).toEqual([]);
     expect(result.inspect.Id).toBe('sha256:empty');
+  });
+});
+
+// --- resolveImageId --------------------------------------------------------------
+
+describe('DockerController - resolveImageId', () => {
+  it('returns the canonical full Id from docker.getImage(id).inspect()', async () => {
+    mockDocker.getImage.mockReturnValue({
+      inspect: vi.fn().mockResolvedValue({ Id: 'sha256:' + 'a'.repeat(64) }),
+    });
+
+    const dc = DockerController.getInstance(1);
+    const result = await dc.resolveImageId('a'.repeat(12));
+
+    expect(result).toBe('sha256:' + 'a'.repeat(64));
+    expect(mockDocker.getImage).toHaveBeenCalledWith('a'.repeat(12));
+  });
+
+  it('returns null on a 404 from Docker', async () => {
+    mockDocker.getImage.mockReturnValue({
+      inspect: vi.fn().mockRejectedValue(Object.assign(new Error('No such image'), { statusCode: 404 })),
+    });
+
+    const dc = DockerController.getInstance(1);
+    expect(await dc.resolveImageId('missing')).toBeNull();
+  });
+
+  it('rethrows a non-404 Docker error', async () => {
+    mockDocker.getImage.mockReturnValue({
+      inspect: vi.fn().mockRejectedValue(Object.assign(new Error('docker daemon unreachable'), { statusCode: 500 })),
+    });
+
+    const dc = DockerController.getInstance(1);
+    await expect(dc.resolveImageId('sha256:abc')).rejects.toThrow('docker daemon unreachable');
   });
 });
 

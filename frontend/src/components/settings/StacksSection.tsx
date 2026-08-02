@@ -32,11 +32,13 @@ interface StacksSectionProps {
     onDirtyChange?: (dirty: boolean) => void;
 }
 
-type GuardrailFields = Pick<PatchableSettings, 'health_gate_enabled' | 'health_gate_window_seconds' | 'env_block_deploy_on_missing_required' | 'auto_create_missing_external_networks'>;
+type GuardrailFields = Pick<PatchableSettings, 'health_gate_enabled' | 'health_gate_window_seconds' | 'recovery_retention_days' | 'recovery_max_generations' | 'env_block_deploy_on_missing_required' | 'auto_create_missing_external_networks'>;
 
 const DEFAULT_GUARDRAILS: GuardrailFields = {
     health_gate_enabled: DEFAULT_SETTINGS.health_gate_enabled,
     health_gate_window_seconds: DEFAULT_SETTINGS.health_gate_window_seconds,
+    recovery_retention_days: DEFAULT_SETTINGS.recovery_retention_days,
+    recovery_max_generations: DEFAULT_SETTINGS.recovery_max_generations,
     env_block_deploy_on_missing_required: DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
     auto_create_missing_external_networks: DEFAULT_SETTINGS.auto_create_missing_external_networks,
 };
@@ -92,6 +94,8 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
             const safe: GuardrailFields = {
                 health_gate_enabled: (nodeData.health_gate_enabled as '0' | '1') ?? DEFAULT_SETTINGS.health_gate_enabled,
                 health_gate_window_seconds: nodeData.health_gate_window_seconds ?? DEFAULT_SETTINGS.health_gate_window_seconds,
+                recovery_retention_days: nodeData.recovery_retention_days ?? DEFAULT_SETTINGS.recovery_retention_days,
+                recovery_max_generations: nodeData.recovery_max_generations ?? DEFAULT_SETTINGS.recovery_max_generations,
                 env_block_deploy_on_missing_required: (nodeData.env_block_deploy_on_missing_required as '0' | '1') ?? DEFAULT_SETTINGS.env_block_deploy_on_missing_required,
                 auto_create_missing_external_networks: (nodeData.auto_create_missing_external_networks as '0' | '1') ?? DEFAULT_SETTINGS.auto_create_missing_external_networks,
             };
@@ -217,6 +221,30 @@ export function StacksSection({ onDirtyChange }: StacksSectionProps) {
                                 suffix="s"
                                 min={15}
                                 max={600}
+                            />
+                        </SettingsField>
+                        <SettingsField
+                            label="Superseded rollback retention"
+                            helper="Days an older rollback generation is retained after a newer update supersedes it, before its held image is cleaned up automatically. The current generation stays protected until it is superseded or manually released from Resources → Rollback. Default 7 days."
+                        >
+                            <NumberChip
+                                value={settings.recovery_retention_days || '7'}
+                                onChange={(v) => onGuardrailChange('recovery_retention_days', v)}
+                                suffix="d"
+                                min={1}
+                                max={90}
+                            />
+                        </SettingsField>
+                        <SettingsField
+                            label="Maximum retained rollback generations per stack"
+                            helper="Caps how many rollback generations a stack keeps at once, current generation included (so 1 keeps only the current, 2 keeps the current plus one superseded). The oldest superseded generations beyond the cap are cleaned up early, ahead of the retention window above. 0 = unlimited (retention window only)."
+                        >
+                            <NumberChip
+                                value={settings.recovery_max_generations || '0'}
+                                onChange={(v) => onGuardrailChange('recovery_max_generations', v)}
+                                suffix="generations"
+                                min={0}
+                                max={50}
                             />
                         </SettingsField>
                         <SettingsField

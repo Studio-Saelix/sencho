@@ -122,6 +122,8 @@ describe('split section save payloads', () => {
             'env_block_deploy_on_missing_required',
             'health_gate_enabled',
             'health_gate_window_seconds',
+            'recovery_max_generations',
+            'recovery_retention_days',
         ]);
     });
 

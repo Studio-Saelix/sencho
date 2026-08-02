@@ -101,6 +101,21 @@ The Stack Dossier carries a **Rollback readiness** section that answers one ques
   <img src="/images/health-gated-updates/dossier-rollback-readiness.png" alt="Rollback readiness section in the Stack Dossier showing the overall state chip and the six rows: Previous compose file, Previous env file, Previous image tag, Last successful deploy, Healthchecks, and the Application data row marked not covered" />
 </Frame>
 
+## Automatic rollback images
+
+Before a full-stack update runs, Sencho captures the running image of every service as an opaque, uniquely named copy so it can automatically restore the prior state if the update or its health gate fails. These copies exist in Docker as `sencho-rb/<generation>/<service>:hold`, but they are Sencho-internal recovery state, not part of your image inventory: they are kept out of **Resources → Images** and listed instead in **Resources → Rollback**. If a captured image still carries its original registry tag alongside the hold tag (a compose file pinned to an immutable tag, for example), it stays visible in the Images tab too, badged **Rollback protected** instead of the usual unused label, since it is held on purpose rather than left behind by accident.
+
+Each capture is one **rollback generation**. The generation currently backing a stack's live deployment is retained for as long as it is current; once a newer update supersedes it, it is retained for a configurable window before Sencho cleans it up automatically. A stack updated repeatedly in a short span can have more than one superseded generation in that window at once.
+
+**Resources → Rollback** lists every generation on the node: the stack it belongs to, a short generation id, whether it is the current protection or a superseded one awaiting cleanup, and roughly when it clears. An admin can release a generation's protection early from that list, including the current one, which immediately frees its image but means Sencho cannot automatically roll that stack back until its next successful full-stack update; the confirmation dialog says so before you proceed. A generation that is mid-recovery or still being observed by a health gate cannot be released until that finishes.
+
+Because these images are deliberately held, deleting one directly (by id, including through the API) is refused. Release the generation from **Resources → Rollback** instead, or leave it to clear on its own.
+
+Two settings under **Settings > Infrastructure > Stacks > Deploy Guardrails** control the automatic cleanup:
+
+- **Superseded rollback retention** sets how many days a superseded generation is kept before its image is cleaned up. The current generation is unaffected by this window; it stays protected until it is superseded or manually released. Default 7 days.
+- **Maximum retained rollback generations per stack** caps how many generations a stack keeps at once, current generation included, so the oldest superseded generations beyond the cap are cleaned up ahead of the retention window. 0 (default) leaves the count unlimited and relies on the retention window alone.
+
 ## Classified failures
 
 When a deploy or update fails, Sencho classifies the failure from the compose output and shows the cause with a suggested next step in the recovery panel: an image pull failure, a missing environment variable, a host port conflict, a missing bind-mount path, a permission problem, a crashed container, a failed healthcheck, an unavailable dependency, an unreachable node or Docker daemon, or an invalid compose file. The classification also lands in **Copy details**, so a bug report carries the cause, not just the raw output.
@@ -125,5 +140,11 @@ When a deploy or update fails, Sencho classifies the failure from the compose ou
   </Accordion>
   <Accordion title="Updates from the sidebar menu now show a dialog first">
     The sidebar's per-stack **Update** action runs the same path as the editor toolbar, so it shows the same readiness dialog and deploy progress. One click on **Update now** proceeds. On nodes that do not advertise the capability, updates run directly without the dialog.
+  </Accordion>
+  <Accordion title="Why do I see sencho-rb/... images in docker images on the host">
+    Those are automatic rollback images: an opaque copy of a service's prior image, held so Sencho can restore it if a full-stack update fails. They are not leftovers. Sencho keeps them out of **Resources → Images** on purpose (they are recovery state, not image inventory) and lists them in **Resources → Rollback** instead, showing which stack and generation each one belongs to and how soon it clears on its own. If one still carries a normal registry tag too, it also stays visible in the Images tab with a **Rollback protected** badge.
+  </Accordion>
+  <Accordion title="Deleting a rollback-protected image fails">
+    That failure is intentional: the image is protected by an active or recently superseded rollback generation. Open **Resources → Rollback**, find the matching generation, and use **Release** there if you are sure you do not need it. Releasing the current generation means Sencho cannot automatically roll that stack back until its next successful full-stack update.
   </Accordion>
 </AccordionGroup>

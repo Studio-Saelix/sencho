@@ -30,6 +30,7 @@ import {
   MissingExternalNetworksError,
   type DeployInvocationContext,
 } from './network/missingExternalNetworksError';
+import { buildUnifiedHeldImagePredicate } from './recoveryHeldImages';
 import { invalidateNodeCaches } from '../helpers/cacheInvalidation';
 import type { NotificationCategory } from './NotificationService';
 
@@ -1019,7 +1020,7 @@ export class ComposeService {
       try {
         const pruneOnUpdate = DatabaseService.getInstance().getGlobalSettings()['prune_on_update'] === '1';
         if (pruneOnUpdate) {
-          const isImageHeld = recoverySvc.buildUnifiedHeldImagePredicate(this.nodeId);
+          const isImageHeld = buildUnifiedHeldImagePredicate(this.nodeId);
           const result = await DockerController.getInstance(this.nodeId).pruneDanglingImages(isImageHeld);
           const reclaimed = result.reclaimedBytes > 0
             ? ` · reclaimed ${(result.reclaimedBytes / (1024 * 1024)).toFixed(1)} MB`
