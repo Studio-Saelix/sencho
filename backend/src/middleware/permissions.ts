@@ -111,7 +111,11 @@ export function checkPermission(
     return true;
   }
 
-  if (effectiveTier(req) !== 'paid') return false;
+  const tier = effectiveTier(req);
+  if (tier !== 'paid') {
+    if (isDebugEnabled()) console.log('[RBAC:diag] Scoped check blocked: effective tier is', tier);
+    return false;
+  }
 
   const db = DatabaseService.getInstance();
   const nodeId = resourceType === 'stack'
@@ -123,7 +127,7 @@ export function checkPermission(
     resourceId,
     nodeId,
   );
-  if (isDebugEnabled()) console.log('[RBAC:diag] Scoped assignments found:', assignments.length, 'for user:', req.user.userId);
+  if (isDebugEnabled()) console.log('[RBAC:diag] Scoped assignments found:', assignments.length, 'resource:', sanitizeForLog(resourceType ?? ''), sanitizeForLog(resourceId ?? ''), 'nodeId:', nodeId);
   for (const assignment of assignments) {
     if (ROLE_PERMISSIONS[assignment.role]?.includes(action)) return true;
   }
@@ -136,11 +140,13 @@ export function checkPermission(
       'node',
       String(nodeId),
     );
+    if (isDebugEnabled() && nodeAssignments.length > 0) console.log('[RBAC:diag] Node-scoped assignments found:', nodeAssignments.length, 'nodeId:', nodeId);
     for (const assignment of nodeAssignments) {
       if (ROLE_PERMISSIONS[assignment.role]?.includes(action)) return true;
     }
   }
 
+  if (isDebugEnabled()) console.log('[RBAC:diag] Scoped permission denied for action:', sanitizeForLog(action));
   return false;
 }
 
