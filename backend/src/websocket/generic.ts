@@ -85,7 +85,9 @@ export function handleGenericWs(
       console.warn('[Exec] User account not found:', decoded.username);
       return reject(socket, 401, 'Unauthorized');
     }
-    if (decoded.tv !== undefined && execUser.token_version !== decoded.tv) {
+    // Missing `tv` is a pre-migration legacy token at version 1, same default
+    // as `authMiddleware`; a bumped account version must reject it.
+    if (execUser.token_version !== (decoded.tv ?? 1)) {
       console.warn('[Exec] Session invalidated (token version mismatch):', decoded.username);
       return reject(socket, 401, 'Unauthorized');
     }
