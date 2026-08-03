@@ -29,7 +29,7 @@ import { PinnedUpdateBadge } from './PinnedUpdateBadge';
 import { StackSection } from './NodeCardStackList';
 import type { Label as StackLabel } from '../label-types';
 import type { FleetNode, NodeUpdateStatus } from './types';
-import { getNodeCpu, getNodeMem, getNodeDisk, isCritical } from './nodeUtils';
+import { getNodeCpu, getNodeMem, getNodeMemUsed, getNodeMemTotal, getNodeDisk, isCritical } from './nodeUtils';
 
 // --- Types ---
 
@@ -97,6 +97,8 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
     const formattedLatest = formatVersion(updateStatus?.latestVersion);
     const cpuPercent = getNodeCpu(node);
     const memPercent = getNodeMem(node);
+    const memUsed = getNodeMemUsed(node);
+    const memTotal = getNodeMemTotal(node);
     const diskPercent = getNodeDisk(node);
 
     const openCordonModal = () => {
@@ -308,7 +310,7 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
                                 <span className="flex items-center gap-1 text-muted-foreground">
                                     <MemoryStick className="w-3 h-3" /> RAM
                                 </span>
-                                <span className="font-medium">{formatBytes(node.systemStats.memory.used, 1)} / {formatBytes(node.systemStats.memory.total, 1)}</span>
+                                <span className="font-medium">{formatBytes(memUsed, 1)} / {formatBytes(memTotal, 1)}</span>
                             </div>
                             <UsageBar percent={memPercent} color={memPercent > 80 ? 'bg-destructive/80' : memPercent > 60 ? 'bg-warning' : 'bg-brand/60'} />
                         </div>

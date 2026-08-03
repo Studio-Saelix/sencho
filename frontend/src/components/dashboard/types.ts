@@ -16,6 +16,12 @@ export interface SystemStats {
     used: number;
     free: number;
     usagePercent: string;
+    ballooned?: number;
+    effectiveTotal?: number;
+    effectiveUsed?: number;
+    effectiveFree?: number;
+    effectiveUsagePercent?: string;
+    balloonSource?: string;
   };
   disk: {
     fs: string;

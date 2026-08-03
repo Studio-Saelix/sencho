@@ -49,7 +49,13 @@ function GaugeBar({ value, warn = 80, crit = 90 }: { value: number; warn?: numbe
 
 export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEndAt }: ResourceGaugesProps) {
   const cpuVal = parseFloat(systemStats?.cpu.usage || '0');
+  // Primary gauge driven by raw ARC-adjusted percent only. Ballooned memory
+  // is host-reclaimed (not guest-reclaimable like ARC), so it must not mask
+  // real memory pressure in the gauge color or percent hero.
   const ramVal = parseFloat(systemStats?.memory.usagePercent || '0');
+  const ramEffectivePercent = systemStats?.memory.effectiveUsagePercent ?? null;
+  const ramUsed = systemStats?.memory.effectiveUsed ?? systemStats?.memory.used ?? 0;
+  const ramTotal = systemStats?.memory.effectiveTotal ?? systemStats?.memory.total ?? 0;
   const diskVal = parseFloat(systemStats?.disk?.usagePercent || '0');
 
   const cpuPeak = cpuHistory.length > 0 ? Math.max(...cpuHistory) : 0;
@@ -102,8 +108,14 @@ export function ResourceGauges({ systemStats, cpuHistory, netHistory, historyEnd
           {systemStats ? `${ramVal.toFixed(0)}%` : '--'}
         </div>
         <div className="mt-1.5 font-mono text-[11px] text-stat-subtitle">
-          {systemStats ? `${formatBytes(systemStats.memory.used)} / ${formatBytes(systemStats.memory.total)}` : '\u00A0'}
+          {systemStats ? `${formatBytes(ramUsed)} / ${formatBytes(ramTotal)}` : '\u00A0'}
         </div>
+        {systemStats?.memory.ballooned && systemStats.memory.ballooned > 0 ? (
+          <div className="mt-1 font-mono text-[10px] text-stat-subtitle/70">
+            Ballooned to host: {formatBytes(systemStats.memory.ballooned)}
+            {ramEffectivePercent !== null ? ` (effective ${parseFloat(ramEffectivePercent).toFixed(0)}%)` : ''}
+          </div>
+        ) : null}
         {systemStats ? <GaugeBar value={ramVal} /> : null}
       </div>
 

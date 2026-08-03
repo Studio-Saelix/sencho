@@ -95,7 +95,7 @@ export function MobileDashboard({ notifications, headerActions, onNavigateToStac
   );
 
   const cpuVal = parseFloat(data.systemStats?.cpu.usage || '0');
-  const ramVal = parseFloat(data.systemStats?.memory.usagePercent || '0');
+  const ramVal = parseFloat(data.systemStats?.memory.effectiveUsagePercent ?? data.systemStats?.memory.usagePercent ?? '0');
   const diskVal = parseFloat(data.systemStats?.disk?.usagePercent || '0');
   const netPerSec = (data.systemStats?.network?.rxSec ?? 0) + (data.systemStats?.network?.txSec ?? 0);
 
