@@ -72,7 +72,6 @@ export function FleetView({
     const containerLabelsEnabled = hasCapability('container-label-inventory');
     // Visual fail-closed while /meta loads; paid/admin gates still apply when on.
     const canDiscoverRouting = experimentalReady && experimental && isPaid;
-    const canDiscoverSecrets = isAdmin;
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
@@ -119,7 +118,7 @@ export function FleetView({
         }
     // setActiveTab closes over onFleetActiveTabChange; listing deps explicitly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [experimentalReady, experimental, licenseStatus, isPaid, isAdmin, activeTab]);
+    }, [experimentalReady, experimental, licenseStatus, isPaid, activeTab]);
 
     useEffect(() => {
         if (fleetUpdatesIntent) {
@@ -208,7 +207,7 @@ export function FleetView({
                                     <Wrench className="w-4 h-4 mr-1.5" />Actions
                                 </TabsTrigger>
                             </TabsHighlightItem>
-                            {canDiscoverSecrets && (
+                            {isAdmin && (
                                 <TabsHighlightItem value="secrets">
                                     <TabsTrigger value="secrets">
                                         <KeyRound className="w-4 h-4 mr-1.5" />Secrets
@@ -338,7 +337,7 @@ export function FleetView({
                         unfiltered node list rather than the overview-filtered view. */}
                     <FleetActionsTab nodes={overview.nodes} />
                 </TabsContent>
-                {canDiscoverSecrets && (
+                {isAdmin && (
                     <TabsContent value="secrets">
                         <SecretsTab />
                     </TabsContent>

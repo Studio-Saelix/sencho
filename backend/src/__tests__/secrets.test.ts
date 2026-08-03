@@ -74,9 +74,6 @@ beforeAll(async () => {
     ({ SecretsService } = await import('../services/SecretsService'));
     ({ CryptoService } = await import('../services/CryptoService'));
 
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
-
     ({ app } = await import('../index'));
 });
 
@@ -387,7 +384,7 @@ describe('getAuditSummary for secrets routes', () => {
 
 // ---- Route guards via supertest ----
 
-describe('Routes /api/secrets tier gating', () => {
+describe('Routes /api/secrets basic guards', () => {
     it('rejects unauthenticated requests', async () => {
         const res = await request(app).get('/api/secrets');
         expect(res.status).toBe(401);
@@ -406,21 +403,14 @@ describe('Routes /api/secrets tier gating', () => {
 
 describe('Routes /api/secrets Community Admin access', () => {
     it('lets a Community admin list bundles', async () => {
-        const { LicenseService } = await import('../services/LicenseService');
-        const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier');
-        tierSpy.mockReturnValueOnce('community');
         const res = await request(app)
             .get('/api/secrets')
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
         expect(Array.isArray(res.body)).toBe(true);
-        tierSpy.mockRestore();
     });
 
     it('lets a Community admin create, read, update, and delete a bundle', async () => {
-        const { LicenseService } = await import('../services/LicenseService');
-        const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier');
-        tierSpy.mockReturnValue('community');
         // Create
         const create = await request(app)
             .post('/api/secrets')
@@ -445,13 +435,9 @@ describe('Routes /api/secrets Community Admin access', () => {
             .delete(`/api/secrets/${id}`)
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(del.status).toBe(200);
-        tierSpy.mockRestore();
     });
 
     it('lets a Community admin list versions', async () => {
-        const { LicenseService } = await import('../services/LicenseService');
-        const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier');
-        tierSpy.mockReturnValue('community');
         const svc = SecretsService.getInstance();
         const { id } = svc.create({ name: 'versions-community', kv: { X: '1' }, user: TEST_USERNAME });
         const res = await request(app)
@@ -459,7 +445,6 @@ describe('Routes /api/secrets Community Admin access', () => {
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
         expect(res.body).toHaveLength(1);
-        tierSpy.mockRestore();
     });
 });
 
@@ -492,15 +477,11 @@ describe('Routes /api/secrets admin-role gating', () => {
     });
 
     it('403s a Community viewer on all endpoints', async () => {
-        const { LicenseService } = await import('../services/LicenseService');
-        const tierSpy = vi.spyOn(LicenseService.getInstance(), 'getTier');
-        tierSpy.mockReturnValue('community');
         for (const [method, p] of SECRET_ENDPOINTS) {
             const res = await callWithToken(method, p, viewerToken());
             expect(res.status).toBe(403);
             expect(res.body.code).toBe('ADMIN_REQUIRED');
         }
-        tierSpy.mockRestore();
     });
 });
 

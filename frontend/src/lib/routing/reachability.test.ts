@@ -90,7 +90,7 @@ describe('reachability', () => {
     expect(isViewHidden('audit-log', ctx({ isPaid: true, can: () => false }))).toBe(true);
   });
 
-  it('hides routing fleet tab only after experimentalReady when off; secrets always visible', () => {
+  it('hides routing fleet tab only after experimentalReady when off; secrets always visible for admin', () => {
     const loading = ctx({ experimental: false, experimentalReady: false });
     expect(isFleetTabHidden('routing', loading)).toBe(false);
     expect(isFleetTabHidden('secrets', loading)).toBe(false);
@@ -101,6 +101,16 @@ describe('reachability', () => {
     expect(isFleetTabHidden('deployments', off)).toBe(false);
     expect(isFleetTabHidden('federation', off)).toBe(false);
     expect(isFleetTabHidden('actions', off)).toBe(false);
+  });
+
+  it('hides secrets fleet tab for non-admin after authz ready', () => {
+    // Cold load: permissions not ready, don't hide yet (deep link survives)
+    const loading = ctx({ isAdmin: false, permissionsStatus: 'loading' });
+    expect(isFleetTabHidden('secrets', loading)).toBe(false);
+
+    // Permissions settled: non-admin deep link normalizes to overview
+    const ready = ctx({ isAdmin: false, permissionsStatus: 'ready' });
+    expect(isFleetTabHidden('secrets', ready)).toBe(true);
   });
 
   it('does not hide fleet-mesh settings for experimental off', () => {

@@ -174,19 +174,8 @@ describe('FleetView tab discovery and deep-link fallback', () => {
     expect(onTab).toHaveBeenCalledTimes(1);
   });
 
-  // ---- Secrets graduation: Admin always sees Secrets regardless of experimental/license ----
-
-  it('Secrets tab visible even when experimental is off and tier is Community', () => {
+  it('does not rewrite a Secrets deep link for Admin when experimental is off', () => {
     useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
-    render(<FleetView onNavigateToNode={vi.fn()} onOpenNodeNetworking={vi.fn()} />);
-    // Secrets is always visible for Admin after graduation
-    expect(screen.getByRole('tab', { name: /secrets/i })).toBeTruthy();
-    // Routing is still hidden without experimental
-    expect(screen.queryByRole('tab', { name: /routing/i })).toBeNull();
-  });
-
-  it('Secrets deep-link preserved for Admin on cold load', async () => {
-    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: false });
     const onTab = vi.fn();
     render(
       <FleetView
