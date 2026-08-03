@@ -90,14 +90,14 @@ describe('reachability', () => {
     expect(isViewHidden('audit-log', ctx({ isPaid: true, can: () => false }))).toBe(true);
   });
 
-  it('hides routing and secrets fleet tabs only after experimentalReady when off', () => {
+  it('hides routing fleet tab only after experimentalReady when off; secrets always visible', () => {
     const loading = ctx({ experimental: false, experimentalReady: false });
     expect(isFleetTabHidden('routing', loading)).toBe(false);
     expect(isFleetTabHidden('secrets', loading)).toBe(false);
 
     const off = ctx({ experimental: false, experimentalReady: true });
     expect(isFleetTabHidden('routing', off)).toBe(true);
-    expect(isFleetTabHidden('secrets', off)).toBe(true);
+    expect(isFleetTabHidden('secrets', off)).toBe(false);
     expect(isFleetTabHidden('deployments', off)).toBe(false);
     expect(isFleetTabHidden('federation', off)).toBe(false);
     expect(isFleetTabHidden('actions', off)).toBe(false);
