@@ -594,9 +594,9 @@ export class NotificationService {
         };
         if (tags) headers['Tags'] = tags;
 
-        // Derive Authorization from URL userinfo if present. validateNtfyUrl
-        // rejects userinfo on the write path, but the dispatch layer does not
-        // assume the URL came through that validator; handle defensively.
+        // Normalize the URL: strip userinfo (defensive; validateNtfyUrl rejects it
+        // on the write path) and strip a trailing slash so that URLs like
+        // https://ntfy.sh/mytopic/ reach the correct topic path.
         let effectiveUrl = url;
         try {
             const parsed = new URL(url);
@@ -605,8 +605,9 @@ export class NotificationService {
                 headers['Authorization'] = `Basic ${encoded}`;
                 parsed.username = '';
                 parsed.password = '';
-                effectiveUrl = parsed.toString();
             }
+            parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+            effectiveUrl = parsed.toString();
         } catch { /* use the raw url on parse failure */ }
 
         try {

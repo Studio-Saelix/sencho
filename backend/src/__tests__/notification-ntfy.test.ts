@@ -219,4 +219,26 @@ describe('NotificationService - ntfy delivery', () => {
       }),
     );
   });
+
+  it('strips trailing slash from the topic path before dispatch', async () => {
+    const trailingUrl = 'https://ntfy.sh/mytopic/';
+    mockGetEnabledNotificationRoutes.mockReturnValue([makeNtfyRoute({ channel_url: trailingUrl })]);
+    mockFetch.mockResolvedValue({ ok: true, status: 200 });
+    await svc.dispatchAlert('info', 'deploy_success', 'ok', { stackName: 'my-app' });
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://ntfy.sh/mytopic', // trailing slash stripped
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+
+  it('strips multiple trailing slashes from the topic path', async () => {
+    const trailingUrl = 'https://ntfy.sh/mytopic//';
+    mockGetEnabledNotificationRoutes.mockReturnValue([makeNtfyRoute({ channel_url: trailingUrl })]);
+    mockFetch.mockResolvedValue({ ok: true, status: 200 });
+    await svc.dispatchAlert('info', 'deploy_success', 'ok', { stackName: 'my-app' });
+    expect(mockFetch).toHaveBeenCalledWith(
+      'https://ntfy.sh/mytopic',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
 });
