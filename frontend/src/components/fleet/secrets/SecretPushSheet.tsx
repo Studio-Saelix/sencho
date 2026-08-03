@@ -167,14 +167,12 @@ export function SecretPushSheet({ open, onOpenChange, secret }: Props) {
     async function handlePush() {
         if (!secret) return;
         setPushLoading(true);
-        const version = inputVersionRef.current;
         try {
             const result = await executePush(secret.id, {
                 selector: buildSelector(),
                 stackName: stackName.trim(),
                 envFileBasename: envFile,
             });
-            if (inputVersionRef.current !== version) return;
             setResults(result.results);
             setStage('results');
             const okCount = result.results.filter(r => r.status === 'ok').length;
