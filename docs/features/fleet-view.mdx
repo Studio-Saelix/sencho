@@ -105,18 +105,19 @@ Every node renders as a card. The local node is pinned at the top of the grid wi
 
 Offline nodes render dimmed, with no stats grid, no usage bars, and no update affordance.
 
-### Node actions menu (admin)
+### Node actions menu
 
-Every card carries a three-dot **Node actions** kebab in the top-right corner. The menu surfaces the same lifecycle actions you would find in **Settings · Infrastructure · Nodes**:
+Every card carries a three-dot **Node actions** kebab in the top-right corner:
 
 | Action | Notes |
 |--------|-------|
+| **Node details** | Opens an info sheet with the node's connectivity, live capacity, Compose workload, version and update compatibility, and governance info (labels, cordon reason and date, default-node status, Compose directory, registration date). Available to anyone who can see the card; the label picker inside the sheet stays editable only for whoever holds `node:manage` on that node. |
 | **Edit node** | Opens the Edit dialog prefilled with the node's connection details. For proxy-mode remotes, saving with a changed API URL or token re-runs the connection test automatically. |
 | **Delete node** | Opens a destructive confirmation. The local (default) node has no Delete option. Deleting a remote only removes it from this console; the remote instance and its containers are untouched. |
 | **Cordon node** / **Uncordon node** | Marks the node unschedulable so new blueprint deployments skip it. Existing deployments keep running. Requires the `node:manage` permission (admin, or node-admin when scoped to that node). |
 | **Mute** submenu | Mute node notifications, mute update notifications, mute monitor alerts for this node, or open the full mute-rule manager. Shown to whoever can manage mute rules for the node. See [Alerts & Notifications](/features/alerts-notifications). |
 
-Edit and delete remain admin-only. Users without `node:manage`, without mute permission, and without edit/delete affordances see no kebab on the card.
+Edit, delete, cordon, and mute stay gated on `node:manage` or mute permission as before. Every card shows the kebab with at least **Node details**, even for a viewer with no manage permissions.
 
 ### Topology view
 

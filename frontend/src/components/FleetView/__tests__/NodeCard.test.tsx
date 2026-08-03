@@ -28,7 +28,7 @@ function offlineNode(): FleetNode {
 }
 
 function baseProps(node: FleetNode) {
-  return { node, onNavigate: vi.fn() };
+  return { node, onNavigate: vi.fn(), onOpenDetails: vi.fn() };
 }
 
 beforeEach(() => {
@@ -76,10 +76,37 @@ describe('NodeCard', () => {
     expect(screen.getByText('Delete node')).toBeInTheDocument();
   });
 
-  it('hides the cordon control from a user lacking node:manage', () => {
+  it('shows only Node details to a user lacking node:manage', async () => {
     useAuthMock.mockReturnValue({ isAdmin: false, can: vi.fn(() => false) });
     render(<NodeCard {...baseProps(onlineNode())} />);
-    expect(screen.queryByRole('button', { name: 'Node actions' })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Node actions' }));
+    expect(await screen.findByText('Node details')).toBeInTheDocument();
+    expect(screen.queryByText('Cordon node')).not.toBeInTheDocument();
+    expect(screen.queryByText('Edit node')).not.toBeInTheDocument();
+    expect(screen.queryByText('Delete node')).not.toBeInTheDocument();
+  });
+
+  it('calls onOpenDetails with the node id when Node details is clicked', async () => {
+    const onOpenDetails = vi.fn();
+    useAuthMock.mockReturnValue({ isAdmin: false, can: vi.fn(() => false) });
+    render(<NodeCard {...baseProps(onlineNode())} onOpenDetails={onOpenDetails} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Node actions' }));
+    await userEvent.click(await screen.findByText('Node details'));
+    expect(onOpenDetails).toHaveBeenCalledWith(2);
+  });
+
+  it('shows Node details ahead of the manage items for a node:manage user', async () => {
+    const can = vi.fn((action: string) => action === 'node:manage');
+    useAuthMock.mockReturnValue({ isAdmin: false, can });
+    render(<NodeCard {...baseProps(onlineNode())} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Node actions' }));
+    const menuItems = await screen.findAllByRole('menuitem');
+    const labels = menuItems.map(item => item.textContent);
+    expect(labels[0]).toBe('Node details');
+    expect(labels).toContain('Cordon node');
   });
 
   it('shows Uncordon when the node is already cordoned', async () => {

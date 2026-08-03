@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
     Server, Cpu, MemoryStick, HardDrive, ChevronDown, ChevronRight,
     Layers, Wifi, WifiOff, AlertTriangle, Download, Loader2,
-    MoreVertical, Ban, Pencil, Trash2,
+    MoreVertical, Ban, Pencil, Trash2, Info,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -12,6 +12,7 @@ import {
     DropdownMenu,
     DropdownMenuContent,
     DropdownMenuItem,
+    DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { NodeMuteSubmenu } from '@/components/mute/MuteMenuItems';
@@ -50,6 +51,8 @@ export interface NodeCardProps {
     onEdit?: (node: Node) => void;
     onDelete?: (node: Node) => void;
     onOpenMuteRulesWithPrefill?: (draft: MuteRuleDraft) => void;
+    /** Opens the read-only Node details sheet. Available to any role that can see the card. */
+    onOpenDetails?: (nodeId: number) => void;
 }
 
 // --- Sub-Components ---
@@ -67,7 +70,7 @@ function UsageBar({ percent, color }: { percent: number; color: string }) {
 
 // --- Main Export ---
 
-export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill }: NodeCardProps) {
+export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal, labelMap, updateStatus, onUpdate, updatingNodeId, onRetryUpdate, onDismissUpdate, onCordonChange, onEdit, onDelete, onOpenMuteRulesWithPrefill, onOpenDetails }: NodeCardProps) {
     const [expanded, setExpanded] = useState(false);
     const [stacks, setStacks] = useState<string[] | null>(node.stacks);
     const [loadingStacks, setLoadingStacks] = useState(false);
@@ -89,7 +92,11 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
         node.name,
         onOpenMuteRulesWithPrefill ?? (() => {}),
     );
-    const showMenu = canEdit || canDelete || canCordon || (nodeMuteActions.canMute && Boolean(onOpenMuteRulesWithPrefill));
+    // "Node details" is always available to anyone who can see the card (same
+    // node:read gate that already governs Fleet card visibility), so the kebab
+    // itself is no longer conditional. This flag now only decides whether the
+    // manage items (which stay node:manage-gated) render below the separator.
+    const hasManageMenuItems = canEdit || canDelete || canCordon || (nodeMuteActions.canMute && Boolean(onOpenMuteRulesWithPrefill));
 
     const isOnline = node.status === 'online';
     const isLocal = node.type === 'local';
@@ -158,49 +165,54 @@ export function NodeCard({ node, onNavigate, onOpenNetworking, networkingSignal,
             {/* Card Header */}
             <div className="relative p-4 pb-3">
                 {isLocal && (
-                    <span className={`absolute top-3 font-mono text-[9px] uppercase tracking-[0.22em] text-brand ${showMenu ? 'right-9' : 'right-3'}`}>
+                    <span className="absolute top-3 right-9 font-mono text-[9px] uppercase tracking-[0.22em] text-brand">
                         ★ Local
                     </span>
                 )}
-                {showMenu && (
-                    <div className="absolute top-2 right-2">
-                        <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                                <button
-                                    type="button"
-                                    aria-label="Node actions"
-                                    className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                <div className="absolute top-2 right-2">
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <button
+                                type="button"
+                                aria-label="Node actions"
+                                className="inline-flex items-center justify-center w-6 h-6 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                            >
+                                <MoreVertical className="w-4 h-4" />
+                            </button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end" className="w-48">
+                            {onOpenDetails && (
+                                <DropdownMenuItem onSelect={() => onOpenDetails(node.id)}>
+                                    <Info className="w-3.5 h-3.5 mr-2" />
+                                    Node details
+                                </DropdownMenuItem>
+                            )}
+                            {onOpenDetails && hasManageMenuItems && <DropdownMenuSeparator />}
+                            {canEdit && registryNode && (
+                                <DropdownMenuItem onSelect={() => onEdit!(registryNode)}>
+                                    <Pencil className="w-3.5 h-3.5 mr-2" />
+                                    Edit node
+                                </DropdownMenuItem>
+                            )}
+                            {canDelete && registryNode && (
+                                <DropdownMenuItem
+                                    onSelect={() => onDelete!(registryNode)}
+                                    className="text-destructive focus:text-destructive"
                                 >
-                                    <MoreVertical className="w-4 h-4" />
-                                </button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end" className="w-48">
-                                {canEdit && registryNode && (
-                                    <DropdownMenuItem onSelect={() => onEdit!(registryNode)}>
-                                        <Pencil className="w-3.5 h-3.5 mr-2" />
-                                        Edit node
-                                    </DropdownMenuItem>
-                                )}
-                                {canDelete && registryNode && (
-                                    <DropdownMenuItem
-                                        onSelect={() => onDelete!(registryNode)}
-                                        className="text-destructive focus:text-destructive"
-                                    >
-                                        <Trash2 className="w-3.5 h-3.5 mr-2" />
-                                        Delete node
-                                    </DropdownMenuItem>
-                                )}
-                                {canCordon && (
-                                    <DropdownMenuItem onSelect={openCordonModal}>
-                                        <Ban className="w-3.5 h-3.5 mr-2" />
-                                        {node.cordoned ? 'Uncordon node' : 'Cordon node'}
-                                    </DropdownMenuItem>
-                                )}
-                                {onOpenMuteRulesWithPrefill && <NodeMuteSubmenu actions={nodeMuteActions} />}
-                            </DropdownMenuContent>
-                        </DropdownMenu>
-                    </div>
-                )}
+                                    <Trash2 className="w-3.5 h-3.5 mr-2" />
+                                    Delete node
+                                </DropdownMenuItem>
+                            )}
+                            {canCordon && (
+                                <DropdownMenuItem onSelect={openCordonModal}>
+                                    <Ban className="w-3.5 h-3.5 mr-2" />
+                                    {node.cordoned ? 'Uncordon node' : 'Cordon node'}
+                                </DropdownMenuItem>
+                            )}
+                            {onOpenMuteRulesWithPrefill && <NodeMuteSubmenu actions={nodeMuteActions} />}
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+                </div>
                 <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2.5 min-w-0">
                         <div className={`flex items-center justify-center w-8 h-8 rounded-lg ${isOnline ? 'bg-success-muted' : 'bg-muted'}`}>

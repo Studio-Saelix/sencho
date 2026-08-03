@@ -22,10 +22,19 @@ export interface Node {
   pilot_agent_version?: string | null;
 }
 
+export type ImagePinKind = 'floating' | 'semver' | 'digest' | 'unknown';
+
 export interface NodeMeta {
   version: string | null;
   capabilities: string[];
   fetchedAt: number;
+  /** Remote-only fields below; absent (undefined) for local nodes' /meta response. */
+  startedAt?: number | null;
+  updateError?: string | null;
+  online?: boolean;
+  imagePinKind?: ImagePinKind | null;
+  updateBlocked?: boolean;
+  imageChannel?: 'community' | 'hardened' | 'unknown' | null;
 }
 
 interface NodeContextType {
@@ -95,6 +104,12 @@ export function NodeProvider({ children }: { children: React.ReactNode }) {
           version: data.version ?? null,
           capabilities: Array.isArray(data.capabilities) ? data.capabilities : [],
           fetchedAt: Date.now(),
+          startedAt: data.startedAt ?? null,
+          updateError: data.updateError ?? null,
+          online: data.online,
+          imagePinKind: data.imagePinKind ?? null,
+          updateBlocked: data.updateBlocked,
+          imageChannel: data.imageChannel ?? null,
         });
       } else {
         // A non-OK response (proxy error, auth, 5xx) is a resolved failure: record an
