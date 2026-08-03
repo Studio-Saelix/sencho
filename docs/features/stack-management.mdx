@@ -227,13 +227,13 @@ Each row includes:
 
 ### Multi-service stacks
 
-When a stack declares more than one Compose service, each service with a single matching container renders as one flat container card. That card carries **Update** or **Rebuild** (when eligible) immediately left of the image source links control, the update badge when a registry update is confirmed, and the **Service actions** kebab for Start / Stop / Restart.
+When a stack declares more than one Compose service, each service with a single matching container renders as one flat container card. When a registry image update is confirmed for that service, the card shows **Update** immediately left of the image source links control (with an update badge). Build-backed services without a confirmed registry update show **Rebuild** in the same place. The **Service actions** kebab for Start / Stop / Restart stays on the card.
 
-Services with multiple replicas keep a shared header above their nested container cards. That header owns **Update** or **Rebuild**, the update badge, and **Start / Stop / Restart** for every replica. Nested cards keep logs, shell, ports, and metrics only.
+Services with multiple replicas keep a shared header above their nested container cards. That header owns the same **Update** / **Rebuild** rules, the update badge, and **Start / Stop / Restart** for every replica. Nested cards keep logs, shell, ports, and metrics only.
 
-A declared service with no running containers shows a compact row with the service name, Update/Rebuild when eligible, and the Service actions kebab (so you can still Start the service).
+A declared service with no running containers shows a compact row with the service name, Update/Rebuild under the same rules, and the Service actions kebab (so you can still Start the service).
 
-Build-backed services without a registry update show **Rebuild** wording and no update badge. The editor toolbar **Update** action still updates the entire stack.
+After a service update succeeds and the image check clears, the **Update** button disappears. The editor toolbar **Update** action still updates the entire stack at any time.
 
 Single-service stacks keep the existing flat container layout; service headers do not appear.
 

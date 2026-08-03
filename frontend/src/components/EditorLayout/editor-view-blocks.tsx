@@ -809,7 +809,12 @@ export function ContainersHealth({
                         const busy = serviceUpdateInProgress?.service === spec.name;
                         const hasUpdate = status ? isConfirmedServiceUpdate(status) : false;
                         const mode: 'update' | 'rebuild' = !hasUpdate && spec.hasBuild ? 'rebuild' : 'update';
-                        const showUpdateAction = spec.declaredImage !== null || spec.hasBuild;
+                        // Registry Update only when a check confirmed a pending
+                        // image update (clears after a successful recheck). Rebuild
+                        // stays available for build-backed services without one.
+                        // Stack-level Update in the identity header remains the
+                        // always-on full-stack pull path.
+                        const showUpdateAction = hasUpdate || spec.hasBuild;
                         const isServiceActive = group.some(c => c.State === 'running' || c.State === 'paused');
                         const runningCount = group.filter(c => c.State === 'running').length;
                         const replicaWord = spec.expectedReplicas === 1 ? 'replica' : 'replicas';

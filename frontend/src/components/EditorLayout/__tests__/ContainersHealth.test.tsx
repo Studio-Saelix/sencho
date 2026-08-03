@@ -325,6 +325,33 @@ describe('declared-service headers (multi-service only)', () => {
     // Flattened rows restore the per-container Service actions kebab.
     expect(screen.getAllByLabelText('Service actions')).toHaveLength(2);
     expect(screen.getAllByLabelText('Open bash shell')).toHaveLength(2);
+    // Registry services without a confirmed update hide the Update button.
+    expect(screen.queryByRole('button', { name: /^Update$/ })).toBeNull();
+  });
+
+  it('hides Update for registry services without a confirmed pending update', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Names: ['/web'], Service: 'web' }),
+          makeContainer({ Id: 'd1', Names: ['/db'], Service: 'db' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db', declaredImage: 'postgres:16' })]}
+        serviceUpdateStatuses={[
+          status({ service: 'web', hasUpdate: false }),
+          status({ service: 'db', hasUpdate: false }),
+        ]}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /^Update$/ })).toBeNull();
+    expect(screen.queryByText('Update', { selector: 'span' })).toBeNull();
   });
 
   it('shows the Update badge and button on the flattened container card', () => {
