@@ -395,8 +395,6 @@ scheduledTasksRouter.post('/', async (req: Request, res: Response): Promise<void
     const targetErr = validateActionTarget(action, target_type);
     if (targetErr) { res.status(400).json({ error: targetErr }); return; }
 
-    const nodeErr = validateActionNode(action, target_type, node_id, selector_type);
-    if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
     const stackTargetErr = validateStackTarget(target_type, target_id, node_id);
     if (stackTargetErr) { res.status(400).json({ error: stackTargetErr }); return; }
     const containerTargetErr = validateContainerTarget(target_type, target_id, node_id);
@@ -434,6 +432,12 @@ scheduledTasksRouter.post('/', async (req: Request, res: Response): Promise<void
       node_id: normalizedNodeId,
       selector_type: labelSelector ? STACK_LABEL_SELECTOR : null,
     })) return;
+
+    // Node existence validation for fleet and system actions. Runs after
+    // permission so unauthorized callers cannot probe node IDs via the error
+    // code difference (400 "node doesn't exist" vs 403 "permission denied").
+    const nodeErr = validateActionNode(action, target_type, node_id, selector_type);
+    if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
 
     // Validate target existence for stack and container targets on local nodes.
     const targetExistErr = await validateTargetExists(target_type, normalizedTargetId, normalizedNodeId);
@@ -542,9 +546,6 @@ scheduledTasksRouter.put('/:id', async (req: Request, res: Response): Promise<vo
     const targetErr = validateActionTarget(finalAction, finalTargetType);
     if (targetErr) { res.status(400).json({ error: targetErr }); return; }
 
-    const nodeErr = validateActionNode(finalAction, finalTargetType, finalNodeId, finalSelectorType);
-    if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
-
     const stackTargetErr = validateStackTarget(finalTargetType, finalTargetId, finalNodeId);
     if (stackTargetErr) { res.status(400).json({ error: stackTargetErr }); return; }
 
@@ -644,6 +645,11 @@ scheduledTasksRouter.put('/:id', async (req: Request, res: Response): Promise<vo
       node_id: parsedFinalNodeId,
       selector_type: finalSelectorType,
     })) return;
+
+    // Node existence validation for fleet and system actions. Runs after
+    // both permission phases so unauthorized callers cannot probe node IDs.
+    const nodeErr = validateActionNode(finalAction, finalTargetType, finalNodeId, finalSelectorType);
+    if (nodeErr) { res.status(400).json({ error: nodeErr }); return; }
 
     // Validate target existence for stack and container targets on local nodes.
     // Runs after both permission phases so unauthorized callers cannot probe

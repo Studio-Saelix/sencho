@@ -239,6 +239,36 @@ describe('POST /api/scheduled-tasks', () => {
     expect(res.body.error).toMatch(/require an existing node/);
   });
 
+  it('returns 403 (not 400) for unauthorized caller probing nonexistent node via fleet update', async () => {
+    // A viewer must never learn whether a node ID exists through the error
+    // code difference (400 "node doesn't exist" vs 403 "permission denied").
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', viewerCookie).send({
+      name: 'probe-node',
+      action: 'update',
+      target_type: 'fleet',
+      node_id: 999999,
+      cron_expression: '0 0 * * *',
+      enabled: true,
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it('returns same 403 for unauthorized caller regardless of node existence', async () => {
+    const resNonexistent = await request(app).post('/api/scheduled-tasks')
+      .set('Cookie', viewerCookie).send({
+        name: 'probe-nonexistent', action: 'update', target_type: 'fleet',
+        node_id: 999999, cron_expression: '0 0 * * *', enabled: true,
+      });
+    const resExisting = await request(app).post('/api/scheduled-tasks')
+      .set('Cookie', viewerCookie).send({
+        name: 'probe-existing', action: 'update', target_type: 'fleet',
+        node_id: 1, cron_expression: '0 0 * * *', enabled: true,
+      });
+    expect(resNonexistent.status).toBe(403);
+    expect(resExisting.status).toBe(403);
+    expect(resNonexistent.body.error).toBe(resExisting.body.error);
+  });
+
   it('rejects a nonexistent stack target with 400', async () => {
     const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
       ...basePayload, target_id: 'nonexistent-stack',
