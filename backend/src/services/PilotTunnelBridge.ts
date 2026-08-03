@@ -918,23 +918,33 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
             if (sendClose) this.sendJson({ t: 'tcp_close', s });
         };
 
-        // Pre-connect failure: ack-fail and drop. The handler is removed in
-        // 'connect' below so post-connect errors fall through to the
-        // mid-stream teardown path instead of double-firing.
-        const onPreConnectError = (err?: Error) => {
-            if (!this.streams.has(s)) return;
-            this.streams.delete(s);
-            meshSvc.logActivity({
-                source: 'mesh', level: 'error', type: 'route.resolve.fail',
-                nodeId: this.nodeId,
-                message: `reverse dial failed pre-connect: ${err?.message ?? 'socket error'}`,
-                details: { ...baseDetails, reason: 'connect_error' },
-            });
-            this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'unreachable' });
-        };
-        socket.once('error', onPreConnectError);
+        // One persistent 'error' listener attached at socket creation,
+        // branching on `connected`, instead of swapping a pre-connect handler
+        // for a post-connect one inside the 'connect' callback. A swap leaves
+        // a window (real under some schedulers, e.g. CI runners) where the
+        // socket briefly has zero 'error' listeners between removing the old
+        // one and attaching the new one; a Node EventEmitter 'error' with no
+        // listener throws instead of being swallowed. Keeping a single
+        // listener for the socket's whole lifetime removes that window
+        // entirely rather than narrowing it.
+        let connected = false;
+        socket.on('error', (err?: Error) => {
+            if (!connected) {
+                if (!this.streams.has(s)) return;
+                this.streams.delete(s);
+                meshSvc.logActivity({
+                    source: 'mesh', level: 'error', type: 'route.resolve.fail',
+                    nodeId: this.nodeId,
+                    message: `reverse dial failed pre-connect: ${err?.message ?? 'socket error'}`,
+                    details: { ...baseDetails, reason: 'connect_error' },
+                });
+                this.sendJson({ t: 'tcp_open_ack', s, ok: false, err: 'unreachable' });
+                return;
+            }
+            teardown(true);
+        });
         socket.once('connect', () => {
-            socket.off('error', onPreConnectError);
+            connected = true;
             meshSvc.logActivity({
                 source: 'mesh', level: 'info', type: 'route.resolve.ok',
                 nodeId: this.nodeId,
@@ -960,7 +970,6 @@ export class PilotTunnelBridge extends EventEmitter implements MeshTunnelHandle 
                 this.refreshIdleTimer(s, cur);
             });
             socket.on('close', () => teardown(true));
-            socket.on('error', () => teardown(true));
         });
     }
 

@@ -85,6 +85,21 @@ describe('WebSocket upgrade - host console auth enforcement', () => {
     });
   }
 
+  it('rejects a legacy no-tv admin JWT after token_version bump (401)', async () => {
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const db = DatabaseService.getInstance();
+    const username = `hc-legacy-tv-${Date.now()}`;
+    const id = db.addUser({
+      username,
+      password_hash: await bcrypt.hash('password123', 1),
+      role: 'admin',
+    });
+    db.bumpTokenVersion(id);
+    const legacyNoTv = jwt.sign({ username, role: 'admin' }, TEST_JWT_SECRET, { expiresIn: '1m' });
+    const ws = new WebSocket(wsUrl(), { headers: { Cookie: `sencho_token=${legacyNoTv}` } });
+    expect(await expectRejected(ws)).toBe(401);
+  });
+
   it('accepts a Community-tier admin', async () => {
     getTierSpy.mockReturnValueOnce('community');
     const ws = new WebSocket(wsUrl(), { headers: { Cookie: `sencho_token=${adminToken()}` } });

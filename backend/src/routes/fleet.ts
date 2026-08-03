@@ -10,7 +10,7 @@ import { FleetUpdateTrackerService, type UpdateTracker, type TerminalStatus, UPD
 import { NodeRegistry } from '../services/NodeRegistry';
 import { computeNodeNetworkingSummary, type NodeNetworkingSummary } from '../services/network/networkingSummary';
 import DockerController from '../services/DockerController';
-import { getHostMemory } from '../helpers/hostMemory';
+import { getHostMemory, memoryToWire, type MemoryWire } from '../helpers/hostMemory';
 import { FileSystemService } from '../services/FileSystemService';
 import { ComposeService } from '../services/ComposeService';
 import { StackOpLockService } from '../services/StackOpLockService';
@@ -232,7 +232,7 @@ interface FleetNodeOverview {
   } | null;
   systemStats: {
     cpu: { usage: string; cores: number };
-    memory: { total: number; used: number; free: number; usagePercent: string };
+    memory: MemoryWire;
     disk: { total: number; used: number; free: number; usagePercent: string } | null;
   } | null;
   stacks: string[] | null;
@@ -301,14 +301,9 @@ async function fetchLocalNodeOverview(node: Node): Promise<FleetNodeOverview> {
       stats: { active, managed, unmanaged, exited, total },
       systemStats: {
         cpu: { usage: currentLoad.currentLoad.toFixed(1), cores: currentLoad.cpus.length },
-        memory: {
-          total: hostMem.total,
-          // ZFS ARC aware: reclaimable ARC is added back into available so a
-          // large ARC cache is not reported as hard-used. See helpers/hostMemory.ts.
-          used: hostMem.used,
-          free: hostMem.free,
-          usagePercent: hostMem.usagePercent.toFixed(1),
-        },
+        // ARC/balloon aware: reclaimable ARC is added back into available,
+        // and ballooned memory is subtracted from used. See helpers/hostMemory.ts.
+        memory: memoryToWire(hostMem),
         disk: mainDisk ? {
           total: mainDisk.size,
           used: mainDisk.used,
@@ -389,7 +384,7 @@ async function fetchRemoteNodeOverview(node: Node, db: DatabaseService): Promise
 
     interface RemoteSystemStats {
       cpu: { usage: string; cores: number };
-      memory: { total: number; used: number; free: number; usagePercent: string };
+      memory: MemoryWire;
       disk?: { total: number; used: number; free: number; usagePercent: string } | null;
     }
 

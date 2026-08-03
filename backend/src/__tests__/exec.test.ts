@@ -351,6 +351,35 @@ describe('WebSocket upgrade - exec auth enforcement', () => {
     });
   }
 
+  it('rejects legacy no-tv admin JWT after token_version bump (401)', async () => {
+    // A legacy token without a tv claim is treated as version 1; once the
+    // account version is bumped it must be rejected on /ws like on HTTP.
+    const { DatabaseService } = await import('../services/DatabaseService');
+    const bcrypt = await import('bcrypt');
+    const db = DatabaseService.getInstance();
+    const username = `legacy-tv-admin-${Date.now()}`;
+    const id = db.addUser({
+      username,
+      password_hash: await bcrypt.hash('password123', 1),
+      role: 'admin',
+    });
+    db.bumpTokenVersion(id);
+
+    const legacyNoTv = jwt.sign(
+      { username, role: 'admin' },
+      TEST_JWT_SECRET,
+      { expiresIn: '1m' },
+    );
+    const ws = new WebSocket(getWsUrl(), { headers: { Cookie: `sencho_token=${legacyNoTv}` } });
+    const code = await new Promise<number>((resolve) => {
+      ws.on('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0));
+      // A regression (upgrade accepted) must fail fast with 200, not hang.
+      ws.on('open', () => { ws.close(); resolve(200); });
+      ws.on('error', () => resolve(0));
+    });
+    expect(code).toBe(401);
+  });
+
   it('rejects WebSocket upgrade with node_proxy token (403)', async () => {
     const token = jwt.sign({ scope: 'node_proxy' }, TEST_JWT_SECRET, { expiresIn: '1m' });
     const ws = new WebSocket(getWsUrl(), { headers: { Authorization: `Bearer ${token}` } });
