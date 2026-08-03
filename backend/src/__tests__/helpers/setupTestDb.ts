@@ -121,3 +121,24 @@ export async function seedMfaUser(
 
   return { userId, secret, backupCodes };
 }
+
+/**
+ * Seed a user with MFA enrolled and return a session JWT signed with the
+ * user's current token_version so tests can verify that an operation that
+ * bumps it (MFA reset, password change) invalidates pre-existing sessions.
+ */
+export async function seedMfaUserWithToken(
+  username: string,
+  password: string,
+): Promise<{ userId: number; secret: string; backupCodes: string[]; token: string }> {
+  const { userId, secret, backupCodes } = await seedMfaUser(username, password);
+  const { DatabaseService } = await import('../../services/DatabaseService');
+  const jwtLib = (await import('jsonwebtoken')).default;
+  const user = DatabaseService.getInstance().getUser(userId)!;
+  const token = jwtLib.sign(
+    { username, role: user.role, tv: user.token_version },
+    TEST_JWT_SECRET,
+    { expiresIn: '1m' },
+  );
+  return { userId, secret, backupCodes, token };
+}
