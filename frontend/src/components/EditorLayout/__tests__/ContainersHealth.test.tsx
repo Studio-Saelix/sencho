@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 vi.mock('@/lib/clipboard', () => ({ copyToClipboard: vi.fn().mockResolvedValue(undefined) }));
 vi.mock('../../Terminal', () => ({ default: () => null }));
 vi.mock('../../StructuredLogViewer', () => ({ default: () => null }));
-vi.mock('../../ImageSourceMenu', () => ({ ImageSourceMenu: () => null }));
+vi.mock('../../ImageSourceMenu', () => ({ ImageSourceMenu: () => <button type="button" aria-label="Image source links" /> }));
 
 import { ContainersHealth, type ContainersHealthProps } from '../editor-view-blocks';
 import { copyToClipboard } from '@/lib/clipboard';
@@ -302,12 +302,12 @@ describe('declared-service headers (multi-service only)', () => {
     expect(screen.getByRole('button', { name: 'View logs' })).toBeInTheDocument();
   });
 
-  it('renders one header per declared service and groups containers under it', () => {
+  it('flattens single-container multi-service rows without a declared-service header', () => {
     render(
       <ContainersHealth
         safeContainers={[
-          makeContainer({ Id: 'w1', Service: 'web', State: 'running' }),
-          makeContainer({ Id: 'd1', Service: 'db', State: 'running' }),
+          makeContainer({ Id: 'w1', Names: ['/web'], Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'd1', Names: ['/db'], Service: 'db', State: 'running' }),
         ]}
         containerStats={{}}
         containerStatsError={null}
@@ -319,19 +319,47 @@ describe('declared-service headers (multi-service only)', () => {
         effectiveServices={[spec({ name: 'web' }), spec({ name: 'db', declaredImage: 'postgres:16' })]}
       />,
     );
+    expect(screen.queryByText(/running$/)).toBeNull();
     expect(screen.getByText('web')).toBeInTheDocument();
     expect(screen.getByText('db')).toBeInTheDocument();
+    // Flattened rows restore the per-container Service actions kebab.
     expect(screen.getAllByLabelText('Service actions')).toHaveLength(2);
-    // Per-container service menu is hidden inside a multi-service header group.
     expect(screen.getAllByLabelText('Open bash shell')).toHaveLength(2);
+    // Registry services without a confirmed update hide the Update button.
+    expect(screen.queryByRole('button', { name: /^Update$/ })).toBeNull();
   });
 
-  it('shows the Update badge only for the service with a confirmed update', () => {
+  it('hides Update for registry services without a confirmed pending update', () => {
     render(
       <ContainersHealth
         safeContainers={[
-          makeContainer({ Id: 'w1', Service: 'web' }),
-          makeContainer({ Id: 'd1', Service: 'db' }),
+          makeContainer({ Id: 'w1', Names: ['/web'], Service: 'web' }),
+          makeContainer({ Id: 'd1', Names: ['/db'], Service: 'db' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db', declaredImage: 'postgres:16' })]}
+        serviceUpdateStatuses={[
+          status({ service: 'web', hasUpdate: false }),
+          status({ service: 'db', hasUpdate: false }),
+        ]}
+      />,
+    );
+    expect(screen.queryByRole('button', { name: /^Update$/ })).toBeNull();
+    expect(screen.queryByText('Update', { selector: 'span' })).toBeNull();
+  });
+
+  it('shows the Update badge and button on the flattened container card', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Names: ['/web'], Service: 'web' }),
+          makeContainer({ Id: 'd1', Names: ['/db'], Service: 'db' }),
         ]}
         containerStats={{}}
         containerStatsError={null}
@@ -347,7 +375,13 @@ describe('declared-service headers (multi-service only)', () => {
       />,
     );
     expect(screen.getByText('Update', { selector: 'span' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Update$/ })).toBeInTheDocument();
+    const updateBtn = screen.getByRole('button', { name: /^Update$/ });
+    expect(updateBtn).toBeInTheDocument();
+    const imageSource = screen.getAllByLabelText('Image source links')[0];
+    // Update sits left of ImageSourceMenu in the action row.
+    expect(
+      updateBtn.compareDocumentPosition(imageSource) & globalThis.Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it('uses Rebuild wording with no badge for a build-backed service without a detected update', () => {
@@ -355,8 +389,8 @@ describe('declared-service headers (multi-service only)', () => {
     render(
       <ContainersHealth
         safeContainers={[
-          makeContainer({ Id: 'w1', Service: 'web' }),
-          makeContainer({ Id: 'd1', Service: 'db' }),
+          makeContainer({ Id: 'w1', Names: ['/web'], Service: 'web' }),
+          makeContainer({ Id: 'd1', Names: ['/db'], Service: 'db' }),
         ]}
         containerStats={{}}
         containerStatsError={null}
@@ -376,14 +410,15 @@ describe('declared-service headers (multi-service only)', () => {
     expect(onRequestServiceUpdate).toHaveBeenCalledWith('web', 'rebuild');
   });
 
-  it('moves Start/Stop/Restart to the declared-service header menu', async () => {
+  it('keeps Start/Stop/Restart on the multi-replica service header menu', async () => {
     const user = userEvent.setup();
     const serviceAction = vi.fn();
     render(
       <ContainersHealth
         safeContainers={[
-          makeContainer({ Id: 'w1', Service: 'web', State: 'running' }),
-          makeContainer({ Id: 'd1', Service: 'db', State: 'running' }),
+          makeContainer({ Id: 'w1', Names: ['/web-1'], Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'w2', Names: ['/web-2'], Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'd1', Names: ['/db'], Service: 'db', State: 'running' }),
         ]}
         containerStats={{}}
         containerStatsError={null}
@@ -392,12 +427,78 @@ describe('declared-service headers (multi-service only)', () => {
         openLogViewer={vi.fn()}
         openBashModal={vi.fn()}
         serviceAction={serviceAction}
-        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db' })]}
+        effectiveServices={[
+          spec({ name: 'web', expectedReplicas: 2 }),
+          spec({ name: 'db' }),
+        ]}
       />,
     );
+    // web keeps a header (2 containers); db is flattened (1 container).
+    expect(screen.getByText(/2\/2 running/i)).toBeInTheDocument();
+    // Only the web header kebab + the flattened db card kebab.
+    expect(screen.getAllByLabelText('Service actions')).toHaveLength(2);
     await user.click(screen.getAllByLabelText('Service actions')[0]);
     await user.click(await screen.findByRole('menuitem', { name: 'Restart service' }));
     expect(serviceAction).toHaveBeenCalledWith('restart', 'web');
+  });
+
+  it('retains multi-replica header Update without leaking onto nested children', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'w1', Names: ['/web-1'], Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'w2', Names: ['/web-2'], Service: 'web', State: 'running' }),
+          makeContainer({ Id: 'd1', Names: ['/db'], Service: 'db', State: 'running' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        effectiveServices={[
+          spec({ name: 'web', expectedReplicas: 2 }),
+          spec({ name: 'db', declaredImage: null }),
+        ]}
+        serviceUpdateStatuses={[status({ service: 'web', hasUpdate: true })]}
+      />,
+    );
+    expect(screen.getByText(/2\/2 running/i)).toBeInTheDocument();
+    // One Update badge + one Update button on the web header only (db ineligible).
+    expect(screen.getAllByText('Update', { selector: 'span' })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: /^Update$/ })).toHaveLength(1);
+    // Nested web children hide the Service actions kebab (header owns it).
+    // web header kebab + db flattened kebab = 2.
+    expect(screen.getAllByLabelText('Service actions')).toHaveLength(2);
+    expect(screen.getAllByLabelText('Open bash shell')).toHaveLength(3);
+  });
+
+  it('renders a compact Update row for a declared service with zero containers', () => {
+    render(
+      <ContainersHealth
+        safeContainers={[
+          makeContainer({ Id: 'd1', Names: ['/db'], Service: 'db', State: 'running' }),
+        ]}
+        containerStats={{}}
+        containerStatsError={null}
+        isAdmin
+        activeNode={LOCAL_NODE}
+        openLogViewer={vi.fn()}
+        openBashModal={vi.fn()}
+        serviceAction={vi.fn()}
+        // db is flattened but not update-eligible so only the empty web row
+        // owns the Update button under test.
+        effectiveServices={[spec({ name: 'web' }), spec({ name: 'db', declaredImage: null })]}
+        serviceUpdateStatuses={[status({ service: 'web', hasUpdate: true })]}
+      />,
+    );
+    expect(screen.queryByText(/No containers running for this service/i)).toBeNull();
+    expect(screen.queryByText(/running$/)).toBeNull();
+    expect(screen.getByText('web')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Update$/ })).toBeInTheDocument();
+    // Compact empty row + flattened db card each have a Service actions kebab.
+    expect(screen.getAllByLabelText('Service actions')).toHaveLength(2);
   });
 
   it('still surfaces summary strip and density toggle on multi-service stacks', () => {
