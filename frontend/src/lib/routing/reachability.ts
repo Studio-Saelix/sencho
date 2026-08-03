@@ -66,7 +66,7 @@ export function isFleetTabHidden(tab: FleetTab, ctx: ReachabilityContext): boole
   if (!authzReady(ctx)) return false;
   if (tab === 'container-labels' && !ctx.containerLabelsEnabled) return true;
   // Defer experimental hide until ready so deep links survive cold load.
-  if ((tab === 'routing' || tab === 'secrets') && experimentalDiscoveryReady(ctx) && !ctx.experimental) {
+  if (tab === 'routing' && experimentalDiscoveryReady(ctx) && !ctx.experimental) {
     return true;
   }
   return false;

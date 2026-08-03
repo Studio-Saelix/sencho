@@ -72,7 +72,7 @@ export function FleetView({
     const containerLabelsEnabled = hasCapability('container-label-inventory');
     // Visual fail-closed while /meta loads; paid/admin gates still apply when on.
     const canDiscoverRouting = experimentalReady && experimental && isPaid;
-    const canDiscoverSecrets = experimentalReady && experimental && isPaid && isAdmin;
+    const canDiscoverSecrets = isAdmin;
 
     const { prefs, updatePrefs } = useFleetPreferences();
     const updateStatus = useFleetUpdateStatus();
@@ -104,9 +104,9 @@ export function FleetView({
         if (controlledTab === undefined) setInternalTab(tab);
     };
 
-    // Fall back only after experimental readiness settles. When experimental is
-    // on, also wait for license (and admin for secrets) so a paid deep link is
-    // not rewritten to Overview while isPaid is still the cold-load false.
+    // Fall back Routing deep links when experimental/license gates resolve false.
+    // Wait for license during cold load so a paid deep link is not rewritten to
+    // Overview while isPaid is still the cold-load false.
     useEffect(() => {
         if (!experimentalReady) return;
         if (activeTab === 'routing') {
@@ -116,15 +116,6 @@ export function FleetView({
             }
             if (licenseStatus !== 'ready') return;
             if (!isPaid) setActiveTab('overview');
-            return;
-        }
-        if (activeTab === 'secrets') {
-            if (!experimental) {
-                setActiveTab('overview');
-                return;
-            }
-            if (licenseStatus !== 'ready') return;
-            if (!isPaid || !isAdmin) setActiveTab('overview');
         }
     // setActiveTab closes over onFleetActiveTabChange; listing deps explicitly.
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -8,7 +8,7 @@ vi.mock('@/hooks/useExperimental', () => ({
 }));
 
 vi.mock('@/context/LicenseContext', () => ({
-  useLicense: () => ({ isPaid: true }),
+  useLicense: () => ({ isPaid: true, licenseStatus: 'ready' as const }),
 }));
 vi.mock('@/context/AuthContext', () => ({
   useAuth: () => ({ isAdmin: true, can: () => true }),
@@ -100,22 +100,22 @@ vi.mock('../fleet/DependencyMapTab', () => ({ DependencyMapTab: () => null }));
 vi.mock('../fleet/ContainerLabelsTab', () => ({ ContainerLabelsTab: () => null }));
 vi.mock('../PaidGate', () => ({ PaidGate: ({ children }: { children: React.ReactNode }) => <>{children}</> }));
 
-describe('FleetView experimental discovery', () => {
+describe('FleetView tab discovery and deep-link fallback', () => {
   beforeEach(() => {
     useExperimentalMock.mockReturnValue({ experimental: true, experimentalReady: true });
   });
 
-  it('shows Routing and Secrets when experimental discovery is on for paid admin', () => {
+  it('shows Routing when experimental is on; Secrets always visible for Admin', () => {
     render(<FleetView onNavigateToNode={vi.fn()} onOpenNodeNetworking={vi.fn()} />);
     expect(screen.getByRole('tab', { name: /routing/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /secrets/i })).toBeTruthy();
   });
 
-  it('hides Routing and Secrets when experimental discovery is off', () => {
+  it('hides Routing when experimental off; Secrets stays visible for Admin', () => {
     useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
     render(<FleetView onNavigateToNode={vi.fn()} onOpenNodeNetworking={vi.fn()} />);
     expect(screen.queryByRole('tab', { name: /routing/i })).toBeNull();
-    expect(screen.queryByRole('tab', { name: /secrets/i })).toBeNull();
+    expect(screen.getByRole('tab', { name: /secrets/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /deployments/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /federation/i })).toBeTruthy();
     expect(screen.getByRole('tab', { name: /actions/i })).toBeTruthy();
@@ -172,5 +172,31 @@ describe('FleetView experimental discovery', () => {
     );
     await waitFor(() => expect(onTab).toHaveBeenCalledWith('overview'));
     expect(onTab).toHaveBeenCalledTimes(1);
+  });
+
+  // ---- Secrets graduation: Admin always sees Secrets regardless of experimental/license ----
+
+  it('Secrets tab visible even when experimental is off and tier is Community', () => {
+    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: true });
+    render(<FleetView onNavigateToNode={vi.fn()} onOpenNodeNetworking={vi.fn()} />);
+    // Secrets is always visible for Admin after graduation
+    expect(screen.getByRole('tab', { name: /secrets/i })).toBeTruthy();
+    // Routing is still hidden without experimental
+    expect(screen.queryByRole('tab', { name: /routing/i })).toBeNull();
+  });
+
+  it('Secrets deep-link preserved for Admin on cold load', async () => {
+    useExperimentalMock.mockReturnValue({ experimental: false, experimentalReady: false });
+    const onTab = vi.fn();
+    render(
+      <FleetView
+        onNavigateToNode={vi.fn()}
+        onOpenNodeNetworking={vi.fn()}
+        fleetActiveTab="secrets"
+        onFleetActiveTabChange={onTab}
+      />,
+    );
+    // No fallback rewrite; Secrets is always available to Admin
+    expect(onTab).not.toHaveBeenCalled();
   });
 });
