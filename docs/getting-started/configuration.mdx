@@ -61,7 +61,7 @@ Running a remote host as a pilot agent uses four more variables (`SENCHO_MODE`, 
 
 On OpenZFS hosts (TrueNAS SCALE, Proxmox, ZFS on Ubuntu or Debian) the ZFS ARC cache can hold a large share of RAM. ARC is reclaimable on demand, but the Linux kernel reports it as unavailable, so a naive reading counts ARC as used memory and can raise false host-memory alerts.
 
-Sencho reads the ARC kstat when it is available and adds the reclaimable portion back into available memory, so the dashboard memory gauge and host RAM alerts reflect real memory pressure. When no ARC stats are readable the behavior is unchanged.
+Sencho reads the ARC kstat when it is available and adds the reclaimable portion back into available memory, so the dashboard memory gauge and host RAM alerts reflect real memory pressure. The reclaimable amount is also shown on the dashboard memory tile as a context line. When no ARC stats are readable the behavior is unchanged.
 
 The ARC kstat is usually visible inside the container at `/proc/spl/kstat/zfs/arcstats` with no extra configuration. If your runtime does not expose it, mount it read-only:
 

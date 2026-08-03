@@ -23,7 +23,7 @@ vi.mock('systeminformation', () => ({
   default: { mem: (...args: unknown[]) => mockMem(...args) },
 }));
 
-import { getHostMemory, adjustForArc, adjustForBalloon } from '../helpers/hostMemory';
+import { getHostMemory, adjustForArc, adjustForBalloon, memoryToWire } from '../helpers/hostMemory';
 
 // mem.active === total - available on Linux, so used/free below mirror the
 // real systeminformation shape the helper consumes.
@@ -53,16 +53,17 @@ describe('adjustForArc', () => {
   it('reproduces active/total when reclaimable ARC is 0', () => {
     const result = adjustForArc(memSample(1000, 600), 0);
     expect(result).toEqual({ total: 1000, used: 400, free: 600, usagePercent: 40 });
+    expect('arcReclaimable' in result).toBe(false);
   });
 
   it('adds reclaimable ARC back into available, lowering usage', () => {
     const result = adjustForArc(memSample(1000, 600), 200);
-    expect(result).toEqual({ total: 1000, used: 200, free: 800, usagePercent: 20 });
+    expect(result).toEqual({ total: 1000, used: 200, free: 800, usagePercent: 20, arcReclaimable: 200 });
   });
 
   it('clamps effective available to total when ARC exceeds the gap', () => {
     const result = adjustForArc(memSample(1000, 600), 5000);
-    expect(result).toEqual({ total: 1000, used: 0, free: 1000, usagePercent: 0 });
+    expect(result).toEqual({ total: 1000, used: 0, free: 1000, usagePercent: 0, arcReclaimable: 5000 });
   });
 
   it('guards against a zero total', () => {
@@ -82,7 +83,7 @@ describe('getHostMemory ARC discovery', () => {
     mockMem.mockResolvedValue(memSample(1000, 600));
     arcFs.setRead(DEFAULT_ARC_PATH, arcstatsBody(300, 100)); // reclaimable 200
     const result = await getHostMemory();
-    expect(result).toEqual({ total: 1000, used: 200, free: 800, usagePercent: 20 });
+    expect(result).toEqual({ total: 1000, used: 200, free: 800, usagePercent: 20, arcReclaimable: 200 });
   });
 
   it('prefers the operator override path over the fixed candidates', async () => {
@@ -295,6 +296,7 @@ describe('getHostMemory balloon discovery', () => {
     const result = await getHostMemory();
     // ARC-adjusted: used = 16000 - (2000 + 4000) = 10000
     expect(result.used).toBe(10000);
+    expect(result.arcReclaimable).toBe(4000);
     // Balloon-adjusted: effectiveUsed = 10000 - 2GiB
     expect(result.effectiveUsed).toBeDefined();
     expect(result.effectiveUsed!).toBeLessThan(result.used);
@@ -385,6 +387,54 @@ describe('getHostMemory balloon discovery', () => {
     const unexpectedLogs = warn.mock.calls.filter(([msg]) => String(msg).includes('EBADF'));
     expect(unexpectedLogs).toHaveLength(1);
     warn.mockRestore();
+  });
+});
+
+describe('memoryToWire', () => {
+  it('includes arcReclaimable when present on the HostMemory object', () => {
+    const wire = memoryToWire({ total: 1000, used: 400, free: 600, usagePercent: 40, arcReclaimable: 300 });
+    expect(wire.arcReclaimable).toBe(300);
+    expect(wire.total).toBe(1000);
+  });
+
+  it('omits arcReclaimable when absent from the HostMemory object', () => {
+    const wire = memoryToWire({ total: 1000, used: 400, free: 600, usagePercent: 40 });
+    expect('arcReclaimable' in wire).toBe(false);
+  });
+
+  it('includes both arcReclaimable and balloon fields when both are present', () => {
+    const hostMem = adjustForBalloon(
+      { total: 16000, used: 10000, free: 6000, usagePercent: 62.5, arcReclaimable: 4000 },
+      2_147_483_648, // 2 GiB
+    );
+    const wire = memoryToWire(hostMem);
+    expect(wire.arcReclaimable).toBe(4000);
+    expect(wire.ballooned).toBe(2_147_483_648);
+    expect(wire.effectiveUsed).toBeDefined();
+    expect(wire.effectiveUsagePercent).toBeDefined();
+  });
+});
+
+describe('getHostMemory ARC surfacing end-to-end', () => {
+  it('surfaces arcReclaimable through memoryToWire with mocked arcstats', async () => {
+    mockMem.mockResolvedValue(memSample(1000, 600));
+    arcFs.setRead(DEFAULT_ARC_PATH, arcstatsBody(300, 100)); // reclaimable 200
+    const result = await getHostMemory();
+    expect(result.arcReclaimable).toBe(200);
+    const wire = memoryToWire(result);
+    expect(wire.arcReclaimable).toBe(200);
+  });
+
+  it('surfaces both arcReclaimable and balloon fields through memoryToWire', async () => {
+    mockMem.mockResolvedValue(memSample(16000, 2000));
+    arcFs.setRead(DEFAULT_ARC_PATH, arcstatsBody(5000, 1000)); // reclaimable 4000
+    arcFs.setRead(DEFAULT_MEMINFO_PATH, meminfoBody(2_097_152)); // 2 GiB balloon
+    const result = await getHostMemory();
+    expect(result.arcReclaimable).toBe(4000);
+    const wire = memoryToWire(result);
+    expect(wire.arcReclaimable).toBe(4000);
+    expect(wire.ballooned).toBeGreaterThan(0);
+    expect(wire.effectiveUsed).toBeDefined();
   });
 });
 
