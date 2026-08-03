@@ -223,11 +223,15 @@ Each row includes:
 - **Meta line.** Uptime (`up 12 hours`), the Docker health status when defined (`healthy`, `unhealthy`, or `starting`), and the primary port mapping (`8989 → 8989/tcp`).
 - **Open link.** When the container publishes a port, the mapping itself is a link (`8989 → 8989/tcp ↗`) that opens the service in a new tab, with a **Copy URL** button beside it. The address uses the active node's host and switches to `https` for port 443. Recognised multi-port apps open their web path automatically (for example, Plex opens `/web`).
 - **Live stat tiles.** Three tiles show CPU, memory, and network I/O with a rolling sparkline. The sparkline uses the cyan data color and refreshes roughly every 1.5 seconds.
-- **Action icons.** The image source links button (see above), plus shortcuts to **View logs**, open a bash shell, and (on single-service stacks) the per-container Start / Stop / Restart kebab.
+- **Action icons.** The image source links button (see above), plus shortcuts to **View logs**, open a bash shell, and the **Service actions** kebab on single-service stacks and single-container multi-service rows (multi-replica services keep the kebab on the shared header; see below).
 
 ### Multi-service stacks
 
-When a stack declares more than one Compose service, each service gets its own header above its container cards. That header owns **Update service** or **Rebuild service** (when eligible), the update badge when a registry update is confirmed for that service, and **Start / Stop / Restart** for every replica of the service. Child container cards keep logs, shell, ports, and metrics only.
+When a stack declares more than one Compose service, each service with a single matching container renders as one flat container card. That card carries **Update** or **Rebuild** (when eligible) immediately left of the image source links control, the update badge when a registry update is confirmed, and the **Service actions** kebab for Start / Stop / Restart.
+
+Services with multiple replicas keep a shared header above their nested container cards. That header owns **Update** or **Rebuild**, the update badge, and **Start / Stop / Restart** for every replica. Nested cards keep logs, shell, ports, and metrics only.
+
+A declared service with no running containers shows a compact row with the service name, Update/Rebuild when eligible, and the Service actions kebab (so you can still Start the service).
 
 Build-backed services without a registry update show **Rebuild** wording and no update badge. The editor toolbar **Update** action still updates the entire stack.
 
@@ -425,7 +429,7 @@ Press `B` again or toggle the bulk mode button to leave bulk mode.
 
 ## Controlling a single service
 
-Inside the stack detail view, each container card has quick actions (View logs, Monitor, Open bash when available) and a **Service actions** kebab on the right side. Use them to act on that service without touching the rest of the stack.
+Inside the stack detail view, container cards expose quick actions (View logs, Monitor, Open bash when available). On single-service stacks, single-container multi-service rows, and empty declared-service rows, a **Service actions** kebab sits on that row. On multi-replica services the kebab lives on the shared service header only, not on each replica card. Use these actions to act on that service without touching the rest of the stack.
 
 - **Monitor**: opens the stack **Monitor** sheet with that Compose service preferred in the add forms. Shown only when the container reports a Compose service name.
 - **Restart service**: stops and starts all containers for that service.
