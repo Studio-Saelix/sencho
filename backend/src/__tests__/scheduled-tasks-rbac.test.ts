@@ -7,6 +7,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcrypt';
+import fs from 'fs';
+import path from 'path';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -65,6 +67,13 @@ beforeAll(async () => {
     if (role === 'deployer') deployerCookie = c;
     else if (role === 'viewer') viewerCookie = c;
     else auditorCookie = c;
+  }
+
+  // Seed real stack directories so existence validators pass.
+  const composeDir = path.join(tmpDir, 'compose');
+  for (const name of ['web', 'api']) {
+    fs.mkdirSync(path.join(composeDir, name), { recursive: true });
+    fs.writeFileSync(path.join(composeDir, name, 'compose.yaml'), 'version: "3"\n');
   }
 
   // Insert a local node for stack-target fixtures
