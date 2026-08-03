@@ -116,12 +116,13 @@ export function ConfigurationStatus({ onOpenSection }: ConfigurationStatusProps 
   const { notifications, automation, security, thresholds, backup } = status;
 
   const agentSummary = (() => {
-    const { discord, slack, webhook, apprise } = normalizeConfigurationAgents(notifications.agents);
+    const { discord, slack, webhook, apprise, ntfy } = normalizeConfigurationAgents(notifications.agents);
     const active = [
       discord.enabled ? 'Discord' : null,
       slack.enabled ? 'Slack' : null,
       webhook.enabled ? 'Webhook' : null,
       apprise.enabled ? 'Apprise' : null,
+      ntfy.enabled ? 'ntfy' : null,
     ].filter(Boolean);
     return active.length === 0 ? 'None' : active.join(', ');
   })();

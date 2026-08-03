@@ -170,7 +170,7 @@ describe('POST /api/agents - validation', () => {
       .set('Cookie', authCookie)
       .send({ type: 'telegram', url: 'https://example.com/hook', enabled: true });
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('discord, slack, webhook, apprise');
+    expect(res.body.error).toContain('discord, slack, webhook, apprise, ntfy');
   });
 
   it('rejects non-HTTPS url', async () => {
@@ -346,7 +346,7 @@ describe('POST /api/notification-routes - validation', () => {
       .set('Cookie', authCookie)
       .send({ name: 'test', stack_patterns: ['app'], channel_type: 'telegram', channel_url: 'https://example.com' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('discord, slack, webhook, apprise');
+    expect(res.body.error).toContain('discord, slack, webhook, apprise, ntfy');
   });
 
   it('rejects non-HTTPS channel_url', async () => {

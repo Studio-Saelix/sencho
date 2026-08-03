@@ -261,10 +261,11 @@ describe('notification dispatch retries', () => {
   });
 
   describe('channel retry classification matrix', () => {
-    const channels: Array<{ type: 'discord' | 'slack' | 'webhook'; url: string }> = [
+    const channels: Array<{ type: 'discord' | 'slack' | 'webhook' | 'ntfy'; url: string }> = [
       { type: 'discord', url: DISCORD },
       { type: 'slack', url: 'https://hooks.slack.com/services/T/B/X' },
       { type: 'webhook', url: 'https://example.com/hooks/sencho' },
+      { type: 'ntfy', url: 'https://ntfy.sh/test' },
     ];
 
     for (const channel of channels) {

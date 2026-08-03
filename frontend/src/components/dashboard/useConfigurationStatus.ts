@@ -11,7 +11,7 @@ const INVALIDATE_DEBOUNCE_MS = 250;
 export interface ConfigurationStatus {
   tier: 'community' | 'paid';
   notifications: {
-    agents: { discord: AgentStatus; slack: AgentStatus; webhook: AgentStatus; apprise: AgentStatus };
+    agents: { discord: AgentStatus; slack: AgentStatus; webhook: AgentStatus; apprise: AgentStatus; ntfy: AgentStatus };
     alertRules: number;
     routingRules: { count: number; enabledCount: number; locked: boolean };
     suppressionRules: { total: number; enabledCount: number };
@@ -52,6 +52,7 @@ type WireConfigurationStatus = Omit<ConfigurationStatus, 'notifications'> & {
       slack: AgentStatus;
       webhook: AgentStatus;
       apprise?: AgentStatus;
+      ntfy?: AgentStatus;
     };
   };
 };

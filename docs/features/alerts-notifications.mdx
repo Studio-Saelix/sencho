@@ -1,25 +1,25 @@
 ---
 title: Alerts & Notifications
 sidebarTitle: Alerts and notifications
-description: Threshold and event alerts for your fleet, dispatched to Discord, Slack, Apprise, or any webhook, with stack and service rules and channel routing.
+description: Threshold and event alerts for your fleet, dispatched to Discord, Slack, Apprise, ntfy, or any webhook, with stack and service rules and channel routing.
 ---
 
 Sencho watches each node it manages for container crashes, host pressure, scheduled-task results, and update availability, then surfaces every signal in two places: the in-app notification bell at the top of the shell and an external channel you configure. This page covers everything from configuring channels to writing stack and service threshold rules, routing alerts to dedicated channels with routing rules, and tuning retention.
 
 <Frame>
-  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel with NODE Local in the header, Discord Slack Webhook and Apprise tabs with Apprise selected, Enabled off, an empty Apprise endpoint placeholder, Test beside Save, and a Delivery retries section below showing Extra attempts 0 and a Save retries button." />
+  <img src="/images/alerts-notifications/notifications-settings.png" alt="Settings · Notifications · Channels panel with NODE Local in the header, Discord Slack Webhook Apprise and ntfy tabs with Apprise selected, Enabled off, an empty Apprise endpoint placeholder, Test beside Save, and a Delivery retries section below showing Extra attempts 0 and a Save retries button." />
 </Frame>
 
 ## Notification channels
 
-Open **Settings · Notifications · Channels** to configure Discord, Slack, custom webhook, and Apprise channels. Each channel is per-node, so switching the active node via the node picker reloads the panel against that node's stored settings. The masthead carries a `CHANNELS` stat showing how many of the four slots are enabled.
+Open **Settings · Notifications · Channels** to configure Discord, Slack, custom webhook, Apprise, and ntfy channels. Each channel is per-node, so switching the active node via the node picker reloads the panel against that node's stored settings. The masthead carries a `CHANNELS` stat showing how many of the slots are enabled.
 
 Below the channel tabs, **Delivery retries** sets how many extra in-process attempts (0 to 3) Sencho makes after a transient delivery failure on that node. The default is `0` (single-shot). Extra attempts wait a fixed one second between tries. Admin role is required to change the value.
 
-Each Discord, Slack, and Webhook tab carries an **Enabled** toggle, a **Webhook URL** input (HTTPS only), and **Test** / **Save**. The Apprise tab uses an **Apprise endpoint** instead: keyed `/notify/{key}` shows optional **Tags**; stateless `/notify` shows **Destination URLs**. The kicker on each tab toggles between `enabled` and `off` so you can see at a glance which slots are wired up.
+Each Discord, Slack, and Webhook tab carries an **Enabled** toggle, a **Webhook URL** input (HTTPS only), and **Test** / **Save**. The Apprise tab uses an **Apprise endpoint**: keyed `/notify/{key}` shows optional **Tags**; stateless `/notify` shows **Destination URLs**. The ntfy tab accepts an ntfy server and topic URL with an **Enabled** toggle and **Test** / **Save**. The kicker on each tab toggles between `enabled` and `off` so you can see at a glance which slots are wired up.
 
 <Note>
-  Discord, Slack, and webhook URLs must use HTTPS. Apprise endpoints may use HTTP or HTTPS. Every endpoint must parse as a URL.
+  Discord, Slack, and webhook URLs must use HTTPS. Apprise and ntfy endpoints may use HTTP or HTTPS. Every endpoint must parse as a URL.
 </Note>
 
 ### Discord
@@ -85,7 +85,7 @@ Open **Settings · Notifications · Notification Routing** and click **+ Add Rou
 | **Labels** *(optional)* | A combobox of stack labels on the active node. Empty matches any label. |
 | **Categories** *(optional)* | A combobox of notification categories. The helper line reads `Leave blank to match all categories. All non-empty filters must match (AND).` |
 | **Severity** *(optional)* | One or more of info, warning, or error. Empty matches any severity. |
-| **Channel** | Tabs for Discord, Slack, Webhook, and Apprise. Discord, Slack, and Webhook require HTTPS. Apprise accepts HTTP or HTTPS. |
+| **Channel** | Tabs for Discord, Slack, Webhook, Apprise, and ntfy. Discord, Slack, and Webhook require HTTPS. Apprise and ntfy accept HTTP or HTTPS. |
 | **Priority** | A number used to sort the rule list. Lower numbers appear higher up. Priority does not gate dispatch: when multiple rules match the same alert, every matching rule fires concurrently. |
 | **Enabled** | Toggle the rule on or off without deleting it. |
 
@@ -447,7 +447,7 @@ Switching the active node tears down per-stack rule editors and reloads channel 
 
 <AccordionGroup>
   <Accordion title="Notifications never arrive">
-    Check three things in order. First, the channel toggle in **Settings · Notifications · Channels** must be on; the kicker on each tab reads `enabled` or `off`. Second, Discord, Slack, and webhook URLs must use HTTPS (the form rejects plain `http://` for those channels); Apprise endpoints may use HTTP or HTTPS. Third, a routing rule with unconstrained Node plus empty Stacks, Labels, Categories, and Severity matchers will intercept every alert and skip the global channels. Use the per-channel **Test** button to issue a one-shot dispatch and watch your endpoint for the literal message `🔌 Test Notification from Sencho!` Sencho records the failure reason in `notification_history.dispatch_error` when delivery throws, so a row that appears in the bell with no follow-up at the endpoint usually means a 4xx or timeout at the receiver.
+    Check three things in order. First, the channel toggle in **Settings · Notifications · Channels** must be on; the kicker on each tab reads `enabled` or `off`. Second, Discord, Slack, and webhook URLs must use HTTPS (the form rejects plain `http://` for those channels); Apprise and ntfy endpoints may use HTTP or HTTPS. Third, a routing rule with unconstrained Node plus empty Stacks, Labels, Categories, and Severity matchers will intercept every alert and skip the global channels. Use the per-channel **Test** button to issue a one-shot dispatch and watch your endpoint for the literal message `🔌 Test Notification from Sencho!` Sencho records the failure reason in `notification_history.dispatch_error` when delivery throws, so a row that appears in the bell with no follow-up at the endpoint usually means a 4xx or timeout at the receiver.
   </Accordion>
   <Accordion title="An alert rule never fires even when the threshold is breached">
     Three causes account for almost every case. First, the rule's **Duration** has not elapsed yet: that container's breach must persist for the full duration before the rule fires (a healthy sibling service does not clear another container's timer). Second, the same Compose service is still in cooldown after a previous fire. Third, the panel's banner is not green: a remote-node banner means the rule was saved on a remote whose channels you may not have configured, and an amber `No notification channels configured` banner means the rule evaluates fine but Sencho has nowhere to send the alert. The evaluator runs on a 30-second tick, so expect up to 30 seconds of latency between the breach starting and the timer engaging.

@@ -84,7 +84,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** Valid notification channel types for defense-in-depth validation. */
-const ALLOWED_CHANNEL_TYPES = new Set<NotificationChannelType>(['discord', 'slack', 'webhook', 'apprise']);
+const ALLOWED_CHANNEL_TYPES = new Set<NotificationChannelType>(['discord', 'slack', 'webhook', 'apprise', 'ntfy']);
 
 export class NotificationDeliveryError extends Error {
     public constructor(message: string, public readonly status: number | null, public readonly retryable: boolean) {
@@ -410,6 +410,8 @@ export class NotificationService {
             await this.sendSlackWebhook(url, level, message);
         } else if (type === 'webhook') {
             await this.sendCustomWebhook(url, level, message);
+        } else if (type === 'ntfy') {
+            await this.sendNtfy(url, level, message);
         } else if (type === 'apprise') {
             const parsed = parseStoredAppriseConfig(url, config);
             if (!parsed.ok) {
@@ -570,6 +572,63 @@ export class NotificationService {
             const aborted = error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
             throw new NotificationDeliveryError(
                 aborted ? 'Custom webhook request timed out' : 'Custom webhook request failed',
+                null,
+                true,
+            );
+        }
+    }
+
+    private async sendNtfy(url: string, level: 'info' | 'warning' | 'error', message: string) {
+        const priorityMap = {
+            info: 'default',
+            warning: 'high',
+            error: 'urgent',
+        };
+        const priority = priorityMap[level];
+        const tags = level === 'error' ? 'warning,rotating_light' : (level === 'warning' ? 'warning' : '');
+
+        const headers: Record<string, string> = {
+            'Content-Type': 'text/plain',
+            'Title': `Sencho Alert [${level.toUpperCase()}]`,
+            'Priority': priority,
+        };
+        if (tags) headers['Tags'] = tags;
+
+        // Normalize the URL: strip userinfo (defensive; validateNtfyUrl rejects it
+        // on the write path) and strip a trailing slash so that URLs like
+        // https://ntfy.sh/mytopic/ reach the correct topic path.
+        let effectiveUrl = url;
+        try {
+            const parsed = new URL(url);
+            if (parsed.username || parsed.password) {
+                const encoded = btoa(`${decodeURIComponent(parsed.username)}:${decodeURIComponent(parsed.password)}`);
+                headers['Authorization'] = `Basic ${encoded}`;
+                parsed.username = '';
+                parsed.password = '';
+            }
+            parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+            effectiveUrl = parsed.toString();
+        } catch { /* use the raw url on parse failure */ }
+
+        try {
+            const response = await fetch(effectiveUrl, {
+                method: 'POST',
+                headers,
+                body: message,
+                signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+            });
+
+            if (response.status >= 400 && response.status < 500) {
+                throw new NotificationDeliveryError(`ntfy responded with HTTP ${response.status}`, response.status, false);
+            }
+            if (!response.ok) {
+                throw new NotificationDeliveryError(`ntfy responded with HTTP ${response.status}`, response.status, true);
+            }
+        } catch (error) {
+            if (error instanceof NotificationDeliveryError) throw error;
+            const aborted = error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError');
+            throw new NotificationDeliveryError(
+                aborted ? 'ntfy request timed out' : 'ntfy request failed',
                 null,
                 true,
             );

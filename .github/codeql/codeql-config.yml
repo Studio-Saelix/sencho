@@ -42,3 +42,29 @@ query-filters:
       id: js/request-forgery
       paths:
         - backend/src/services/registry-api.ts
+
+  # NotificationService dispatches alerts to admin-configured channel
+  # endpoints (Discord, Slack, Webhook, Apprise, ntfy). CodeQL traces the
+  # admin-provided URL and the notification body (which may embed stack or
+  # path data) into the outbound fetch() and flags it as a request-forgery
+  # risk. Sencho is single-tenant and self-hosted: the admin who configures
+  # the channel URLs owns the server, and posting notifications to those
+  # endpoints is the intended behavior. The write path is gated by
+  # requireAdmin (routes) or requirePermission(node:manage) (agents), and
+  # every dispatch runs with a 10s AbortSignal.timeout. Excluding the
+  # notification channel dispatch methods so the query still catches real
+  # SSRF from untrusted multi-tenant or external input elsewhere.
+  - exclude:
+      id: js/request-forgery
+      paths:
+        - backend/src/services/NotificationService.ts
+
+  # Same NotificationService trust-model exclusion for file data reaching
+  # the outbound fetch() (js/file-access-to-http). Notification messages
+  # may embed stack names, paths, or compose-derived content. The admin
+  # owns the server and the configured endpoints; the 10s timeout and
+  # admin-only write gates are the same compensating controls as above.
+  - exclude:
+      id: js/file-access-to-http
+      paths:
+        - backend/src/services/NotificationService.ts

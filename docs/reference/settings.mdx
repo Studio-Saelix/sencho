@@ -401,7 +401,7 @@ Quick reference:
 
 **Scope:** Per-node (each node has its own notification agents; remote nodes dispatch alerts through their own channels)
 
-Configure external destinations for alert notifications. Four agent types are available on separate tabs: **Discord**, **Slack**, **Webhook**, and **Apprise**. The masthead publishes a **CHANNELS** pill showing how many agents are enabled (for example, `2/4`).
+Configure external destinations for alert notifications. Five agent types are available on separate tabs: **Discord**, **Slack**, **Webhook**, **Apprise**, and **ntfy**. The masthead publishes a **CHANNELS** pill showing how many agents are enabled (for example, `2/5`).
 
 Below the channel tabs, **Delivery retries** (admin-only) sets how many extra in-process attempts (0 to 3, default 0) this node makes after a transient channel failure, with a fixed one-second delay between attempts. There is no durable queue; ambiguous network failures can produce duplicate notifications.
 
@@ -437,7 +437,7 @@ Create routing rules that direct specific alert types to specific notification c
 | **Labels** | Apply this rule to stacks that carry any of the selected labels. |
 | **Categories** | Event categories that trigger the rule (crash, deploy, vulnerability, etc.). |
 | **Severity** | Info, warning, and/or error levels. Empty matches any severity. |
-| **Channel type** | `discord`, `slack`, `webhook`, or `apprise`. |
+| **Channel type** | `discord`, `slack`, `webhook`, `apprise`, or `ntfy`. |
 | **Channel URL** | The destination endpoint for this rule. |
 | **Priority** | Sort order among matching rules. Every matching route fires; priority does not stop later matches. |
 | **Enabled** toggle | Mute a rule without deleting it. |

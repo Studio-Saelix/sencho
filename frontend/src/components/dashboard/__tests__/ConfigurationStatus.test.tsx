@@ -18,6 +18,7 @@ function makePayload(overrides: Partial<ConfigurationStatusPayload> = {}): Confi
         slack: { configured: false, enabled: false },
         webhook: { configured: false, enabled: false },
         apprise: { configured: false, enabled: false },
+        ntfy: { configured: false, enabled: false },
       },
       alertRules: 0,
       routingRules: { count: 0, enabledCount: 0, locked: true },
@@ -90,6 +91,7 @@ describe('ConfigurationStatus row visibility', () => {
             slack: { configured: false, enabled: false },
             webhook: { configured: false, enabled: false },
             apprise: { configured: false, enabled: false },
+            ntfy: { configured: false, enabled: false },
           },
           alertRules: 2,
           routingRules: { count: 1, enabledCount: 1, locked: false },
@@ -197,5 +199,14 @@ describe('ConfigurationStatus legacy remote agents', () => {
     useConfigurationStatusMock.mockReturnValue({ status: legacy, loading: false });
     render(<ConfigurationStatus />);
     expect(screen.getByText('Discord')).toBeDefined();
+  });
+
+  it('renders a payload that omits ntfy without throwing', () => {
+    const legacy = makePayload();
+    delete (legacy.notifications.agents as { ntfy?: unknown }).ntfy;
+    useConfigurationStatusMock.mockReturnValue({ status: legacy, loading: false });
+    expect(() => render(<ConfigurationStatus />)).not.toThrow();
+    const channelsRow = screen.getByText('Channels').closest('button');
+    expect(channelsRow?.textContent).toContain('None');
   });
 });
