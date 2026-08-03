@@ -59,7 +59,7 @@ vi.mock('../services/StackActivityMetricsService', () => ({
   },
 }));
 
-import { NotificationService, NotificationDeliveryError } from '../services/NotificationService';
+import { NotificationService } from '../services/NotificationService';
 
 const NTFY_URL = 'https://ntfy.sh/test-topic';
 

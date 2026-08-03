@@ -350,7 +350,7 @@ describe('NotificationsSection', () => {
 
         nodeState.activeNode = { id: 2 };
         rerender(<NotificationsSection />);
-        await waitFor(() => expect(masthead.last?.[0]?.value).toBe('0/4'));
+        await waitFor(() => expect(masthead.last?.[0]?.value).toBe('0/5'));
         await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
         await waitFor(() => expect(screen.getByLabelText(/Apprise endpoint/i)).toHaveValue(''));
     });
@@ -386,14 +386,14 @@ describe('NotificationsSection', () => {
 
         nodeState.activeNode = { id: 2 };
         rerender(<NotificationsSection />);
-        await waitFor(() => expect(masthead.last?.[0]?.value).toBe('0/4'));
+        await waitFor(() => expect(masthead.last?.[0]?.value).toBe('0/5'));
         await waitFor(() =>
             expect(mockedFetch.mock.calls.some((call) => (call[1] as { nodeId?: number } | undefined)?.nodeId === 2)).toBe(true),
         );
 
         releaseNode1Body?.();
         await new Promise((r) => setTimeout(r, 40));
-        expect(masthead.last?.[0]?.value).toBe('0/4');
+        expect(masthead.last?.[0]?.value).toBe('0/5');
         await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
         expect(screen.getByLabelText(/Apprise endpoint/i)).toHaveValue('');
     });
