@@ -13,6 +13,8 @@ import {
 } from '../services/scheduledActionRegistry';
 import { SchedulerService } from '../services/SchedulerService';
 import { NotificationService } from '../services/NotificationService';
+import DockerController from '../services/DockerController';
+import { FileSystemService } from '../services/FileSystemService';
 import { checkPermission, requirePermission } from '../middleware/permissions';
 import { escapeCsvField } from '../utils/csv';
 import { getErrorMessage } from '../utils/errors';
@@ -109,6 +111,29 @@ function validateContainerTarget(targetType: TargetType, targetId: unknown, node
 }
 
 /**
+ * Validate that a stack or container target actually exists on the target
+ * node. Skipped for remote nodes (would require a proxy call).
+ */
+async function validateTargetExists(
+  targetType: TargetType,
+  targetId: string | null,
+  nodeId: number | null,
+): Promise<string | null> {
+  const isStack = targetType === 'stack';
+  if ((!isStack && targetType !== 'container') || !targetId || nodeId == null) return null;
+  const node = DatabaseService.getInstance().getNode(nodeId);
+  if (!node) return `${isStack ? 'Stack' : 'Container'} operations require an existing node.`;
+  if (node.type === 'remote') return null; // Skip existence check (would need proxy).
+  const exists = isStack
+    ? (await FileSystemService.getInstance(nodeId).getStacks()).includes(targetId)
+    : (await DockerController.getInstance(nodeId).findContainerByName(targetId)) != null;
+  if (!exists) {
+    return `${isStack ? 'Stack' : 'Container'} "${targetId}" not found on the target node.`;
+  }
+  return null;
+}
+
+/**
  * Shared guard for non-stack actions that require a node. Stack actions use
  * validateStackTarget because they also require target_id. Label-targeted
  * fleet updates may omit node_id (entire fleet); pass selectorType so that
@@ -121,6 +146,7 @@ function validateActionNode(
   selectorType?: unknown,
 ): string | null {
   if (targetType === 'stack' || targetType === 'container') return null;
+
   const def = getScheduledActionDefinition(action);
   if (!def?.requiresNode) return null;
 
@@ -137,11 +163,14 @@ function validateActionNode(
 
   const parsedNodeId = parsePositiveNodeId(nodeId);
   if (parsedNodeId === null) return `${labelSingular} action requires a valid node_id.`;
-  if (def.nodeScope !== 'local') return null;
 
+  // Validate node existence for every action, not only local-scoped ones.
   const node = DatabaseService.getInstance().getNode(parsedNodeId);
-  if (!node) return `${labelPlural} require an existing local node.`;
-  if (node.type === 'remote') return `${labelPlural} currently require a local node.`;
+  if (!node) return `${labelSingular} action requires an existing node.`;
+
+  if (def.nodeScope === 'local' && node.type === 'remote') {
+    return `${labelPlural} currently require a local node.`;
+  }
   return null;
 }
 
@@ -345,7 +374,7 @@ scheduledTasksRouter.get('/', (req: Request, res: Response): void => {
   }
 });
 
-scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
+scheduledTasksRouter.post('/', async (req: Request, res: Response): Promise<void> => {
   try {
     const {
       name, target_type, target_id, node_id, action, cron_expression, enabled,
@@ -384,6 +413,7 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
     const runAtErr = validateRunAt(run_at);
     if (runAtErr) { res.status(400).json({ error: runAtErr }); return; }
 
+    // Compute normalized IDs early so existence validators can use them.
     const labelSelector = usesStackLabelSelector(action, target_type, selector_type);
     const normalizedNodeId = labelSelector
       ? (node_id == null || node_id === '' ? null : parsePositiveNodeId(node_id))
@@ -394,7 +424,9 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
     const normalizedTargetId =
       target_type === 'stack' || target_type === 'container' ? target_id : null;
 
-    // Permission check on the resolved action+target scope.
+    // Permission check on the resolved action+target scope. Runs before
+    // existence validators so unauthorized callers cannot probe whether a
+    // stack or container exists on a node they should not reach.
     if (!requireTaskPermission(req, res, {
       action,
       target_type,
@@ -402,6 +434,10 @@ scheduledTasksRouter.post('/', (req: Request, res: Response): void => {
       node_id: normalizedNodeId,
       selector_type: labelSelector ? STACK_LABEL_SELECTOR : null,
     })) return;
+
+    // Validate target existence for stack and container targets on local nodes.
+    const targetExistErr = await validateTargetExists(target_type, normalizedTargetId, normalizedNodeId);
+    if (targetExistErr) { res.status(400).json({ error: targetExistErr }); return; }
 
     const scheduler = SchedulerService.getInstance();
     const now = Date.now();
@@ -460,7 +496,7 @@ scheduledTasksRouter.get('/:id', (req: Request, res: Response): void => {
   }
 });
 
-scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
+scheduledTasksRouter.put('/:id', async (req: Request, res: Response): Promise<void> => {
   try {
     const id = parseIntParam(req, res, 'id', 'task ID');
     if (id === null) return;
@@ -600,13 +636,20 @@ scheduledTasksRouter.put('/:id', (req: Request, res: Response): void => {
     }
 
     // Second phase: the caller must have permission for the merged scope.
+    const parsedFinalNodeId = finalNodeId != null ? parsePositiveNodeId(finalNodeId) : null;
     if (!requireTaskPermission(req, res, {
       action: finalAction,
       target_type: finalTargetType,
       target_id: finalTargetId,
-      node_id: finalNodeId != null ? parsePositiveNodeId(finalNodeId) : null,
+      node_id: parsedFinalNodeId,
       selector_type: finalSelectorType,
     })) return;
+
+    // Validate target existence for stack and container targets on local nodes.
+    // Runs after both permission phases so unauthorized callers cannot probe
+    // whether a stack or container exists on a target they cannot access.
+    const targetExistErr = await validateTargetExists(finalTargetType, finalTargetId, parsedFinalNodeId);
+    if (targetExistErr) { res.status(400).json({ error: targetExistErr }); return; }
 
     db.updateScheduledTask(id, updates);
     console.log(`[ScheduledTasks] Updated task id=${id}`);

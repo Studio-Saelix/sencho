@@ -6,6 +6,8 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import bcrypt from 'bcrypt';
+import fs from 'fs';
+import path from 'path';
 import { setupTestDb, cleanupTestDb, loginAsTestAdmin } from './helpers/setupTestDb';
 
 let tmpDir: string;
@@ -30,6 +32,24 @@ beforeAll(async () => {
   const viewerRes = await request(app).post('/api/auth/login').send({ username: 'sched-viewer', password: 'viewerpass' });
   const cookies = viewerRes.headers['set-cookie'] as string | string[];
   viewerCookie = Array.isArray(cookies) ? cookies[0] : cookies;
+
+  // Seed real stack directories so existence validators pass.
+  const composeDir = path.join(tmpDir, 'compose');
+  for (const name of ['my-stack', 's']) {
+    fs.mkdirSync(path.join(composeDir, name), { recursive: true });
+    fs.writeFileSync(path.join(composeDir, name, 'compose.yaml'), 'version: "3"\n');
+  }
+
+  // Mock DockerController.findContainerByName so container existence checks pass
+  // in tests (no real Docker daemon available). Only resolve for names used by
+  // the test fixtures; everything else returns null to exercise the 400 path.
+  const { default: DockerController } = await import('../services/DockerController');
+  const containerFixture = { id: 'abc123test', name: 'test-container', state: 'running', image: 'test:latest', stackProject: null };
+  vi.spyOn(DockerController.prototype, 'findContainerByName')
+    .mockImplementation(async (name: string) => {
+      if (name === 'watchtower' || name === 'sidecar') return { ...containerFixture, name };
+      return null;
+    });
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -178,6 +198,15 @@ describe('POST /api/scheduled-tasks', () => {
     expect(res.status).toBe(403);
   });
 
+  it('returns 403 (not 400) for unauthorized caller on nonexistent target', async () => {
+    // Permissions check runs first; an unauthorized caller must not learn
+    // whether a stack exists through the error code difference.
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', viewerCookie).send({
+      ...basePayload, target_id: 'nonexistent-stack',
+    });
+    expect(res.status).toBe(403);
+  });
+
   it('creates a task and returns the new record', async () => {
     const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send(basePayload);
     expect(res.status).toBe(201);
@@ -200,6 +229,22 @@ describe('POST /api/scheduled-tasks', () => {
     });
     expect(res.status).toBe(400);
     expect(res.body.error).toMatch(/5 fields/);
+  });
+
+  it('rejects a nonexistent node_id with 400', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, node_id: 9999,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/require an existing node/);
+  });
+
+  it('rejects a nonexistent stack target with 400', async () => {
+    const res = await request(app).post('/api/scheduled-tasks').set('Cookie', adminCookie).send({
+      ...basePayload, target_id: 'nonexistent-stack',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/not found on the target node/);
   });
 
   it('rejects a missing cron expression with a clear message', async () => {
@@ -614,6 +659,23 @@ describe('POST /api/scheduled-tasks - container lifecycle', () => {
     expect(res.body.target_type).toBe('container');
     expect(res.body.target_id).toBe('watchtower');
     expect(res.body.action).toBe('restart');
+  });
+
+  it('rejects a nonexistent container target with 400', async () => {
+    const res = await request(app)
+      .post('/api/scheduled-tasks')
+      .set('Cookie', adminCookie)
+      .send({
+        name: 'missing-ctr',
+        target_type: 'container',
+        target_id: 'nonexistent-container',
+        node_id: 1,
+        action: 'restart',
+        cron_expression: '0 3 * * *',
+        enabled: true,
+      });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/not found on the target node/);
   });
 
   it('rejects invalid container names', async () => {
