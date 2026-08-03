@@ -112,6 +112,7 @@ const agentTypeLabels: Record<string, string> = {
     slack: 'Slack',
     webhook: 'Webhook',
     apprise: 'Apprise',
+    ntfy: 'ntfy',
 };
 
 const clampNonNegative = (setter: (v: string) => void) => (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -400,7 +401,7 @@ function AlertsTab({ stackName, initialService }: { stackName: string; initialSe
                     <div>
                         <p className="font-medium text-warning">No notification channels configured</p>
                         <p className="text-muted-foreground mt-0.5">
-                            Alert rules will be saved and evaluated, but no notifications will be dispatched. Configure Discord, Slack, Apprise, or a webhook in{' '}
+                            Alert rules will be saved and evaluated, but no notifications will be dispatched. Configure Discord, Slack, Apprise, ntfy, or a webhook in{' '}
                             <span className="font-medium">Settings &rarr; Notifications</span>.
                         </p>
                     </div>

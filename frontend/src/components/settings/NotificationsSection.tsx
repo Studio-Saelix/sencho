@@ -20,7 +20,7 @@ import { classifyAppriseEndpoint, isKeyedAppriseEndpoint, isStatelessAppriseEndp
 import { canManageNode } from '@/lib/canManageNode';
 import { parseNotificationDispatchRetries } from '@/lib/notificationDispatchRetries';
 
-type ChannelType = 'discord' | 'slack' | 'webhook' | 'apprise';
+type ChannelType = 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
 
 function emptyAgents(): Record<ChannelType, Agent> {
     return {
@@ -28,6 +28,7 @@ function emptyAgents(): Record<ChannelType, Agent> {
         slack: { type: 'slack', url: '', enabled: false },
         webhook: { type: 'webhook', url: '', enabled: false },
         apprise: { type: 'apprise', url: '', enabled: false, config: null },
+        ntfy: { type: 'ntfy', url: '', enabled: false },
     };
 }
 
@@ -207,7 +208,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
     useMastheadStats([
         {
             label: 'CHANNELS',
-            value: `${enabledCount}/4`,
+            value: `${enabledCount}/5`,
             tone: enabledCount > 0 ? 'value' : 'subtitle',
         },
         ...(retriesDirty
@@ -462,7 +463,7 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
     return (
         <div className="flex flex-col gap-6">
             <Tabs value={notifTab} onValueChange={(v) => setNotifTab(v as ChannelType)} className="w-full">
-                <TabsList className="w-full mb-4 grid grid-cols-4">
+                <TabsList className="w-full mb-4 grid grid-cols-5">
                     <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                         <TabsHighlightItem value="discord">
                             <TabsTrigger value="discord">Discord</TabsTrigger>
@@ -476,12 +477,16 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
                         <TabsHighlightItem value="apprise">
                             <TabsTrigger value="apprise">Apprise</TabsTrigger>
                         </TabsHighlightItem>
+                        <TabsHighlightItem value="ntfy">
+                            <TabsTrigger value="ntfy">ntfy</TabsTrigger>
+                        </TabsHighlightItem>
                     </TabsHighlight>
                 </TabsList>
                 <TabsContent value="discord">{renderAgentTab('discord', 'Discord')}</TabsContent>
                 <TabsContent value="slack">{renderAgentTab('slack', 'Slack')}</TabsContent>
                 <TabsContent value="webhook">{renderAgentTab('webhook', 'Custom Webhook')}</TabsContent>
                 <TabsContent value="apprise">{renderAgentTab('apprise', 'Apprise')}</TabsContent>
+                <TabsContent value="ntfy">{renderAgentTab('ntfy', 'ntfy')}</TabsContent>
             </Tabs>
             <fieldset disabled={readOnly} className="min-w-0 border-0 p-0 m-0">
                 <SettingsSection title="Delivery retries" kicker={retriesKicker}>

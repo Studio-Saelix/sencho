@@ -198,4 +198,13 @@ describe('ConfigurationStatus legacy remote agents', () => {
     render(<ConfigurationStatus />);
     expect(screen.getByText('Discord')).toBeDefined();
   });
+
+  it('renders a payload that omits ntfy without throwing', () => {
+    const legacy = makePayload();
+    delete (legacy.notifications.agents as { ntfy?: unknown }).ntfy;
+    useConfigurationStatusMock.mockReturnValue({ status: legacy, loading: false });
+    expect(() => render(<ConfigurationStatus />)).not.toThrow();
+    const channelsRow = screen.getByText('Channels').closest('button');
+    expect(channelsRow?.textContent).toContain('None');
+  });
 });

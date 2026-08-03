@@ -36,7 +36,7 @@ interface NotificationRoute {
     label_ids: number[] | null;
     categories: NotificationCategory[] | null;
     levels: NotificationLevel[] | null;
-    channel_type: 'discord' | 'slack' | 'webhook' | 'apprise';
+    channel_type: 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
     channel_url: string;
     config: { mode: 'keyed' | 'stateless'; tags?: string; has_urls: boolean; providers?: string[]; url_count?: number } | null;
     priority: number;
@@ -56,6 +56,7 @@ const CHANNEL_LABELS: Record<string, string> = {
     slack: 'Slack',
     webhook: 'Webhook',
     apprise: 'Apprise',
+    ntfy: 'ntfy',
 };
 
 const CHANNEL_PLACEHOLDERS: Record<string, string> = {
@@ -63,6 +64,7 @@ const CHANNEL_PLACEHOLDERS: Record<string, string> = {
     slack: 'https://hooks.slack.com/services/...',
     webhook: 'https://example.com/webhook',
     apprise: 'http://apprise.local/notify',
+    ntfy: 'https://ntfy.sh/mytopic',
 };
 
 export function NotificationRoutingSection() {
@@ -85,7 +87,7 @@ export function NotificationRoutingSection() {
     const [formLabelIds, setFormLabelIds] = useState<number[]>([]);
     const [formCategories, setFormCategories] = useState<NotificationCategory[]>([]);
     const [formLevels, setFormLevels] = useState<NotificationLevel[]>([]);
-    const [formChannelType, setFormChannelType] = useState<'discord' | 'slack' | 'webhook' | 'apprise'>('discord');
+    const [formChannelType, setFormChannelType] = useState<'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy'>('discord');
     const patternChipsRef = useRef<PatternChipsHandle>(null);
     const [formChannelUrl, setFormChannelUrl] = useState('');
     const [formAppriseUrls, setFormAppriseUrls] = useState('');
@@ -94,7 +96,7 @@ export function NotificationRoutingSection() {
     const [appriseConfigDirty, setAppriseConfigDirty] = useState(false);
     /** Original Apprise mode when editing; drives preserve hints and forces a config write on mode switch. */
     const [editAppriseOriginalMode, setEditAppriseOriginalMode] = useState<'keyed' | 'stateless' | null>(null);
-    const [editOriginalChannelType, setEditOriginalChannelType] = useState<'discord' | 'slack' | 'webhook' | 'apprise' | null>(null);
+    const [editOriginalChannelType, setEditOriginalChannelType] = useState<'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy' | null>(null);
     const [formPriority, setFormPriority] = useState(0);
     const [formEnabled, setFormEnabled] = useState(true);
 
@@ -189,7 +191,7 @@ export function NotificationRoutingSection() {
             toast.error('Fix invalid stack patterns before saving.');
             return;
         }
-        if (!formChannelUrl.trim() || (formChannelType !== 'apprise' && !formChannelUrl.startsWith('https://'))) {
+        if (!formChannelUrl.trim() || (formChannelType !== 'apprise' && formChannelType !== 'ntfy' && !formChannelUrl.startsWith('https://'))) {
             toast.error(formChannelType === 'apprise' ? 'Enter a valid Apprise endpoint.' : 'Channel URL must be a valid HTTPS URL.');
             return;
         }
@@ -543,7 +545,7 @@ export function NotificationRoutingSection() {
                                 <Tabs
                                     value={formChannelType}
                                     onValueChange={(v) => {
-                                        const next = v as 'discord' | 'slack' | 'webhook' | 'apprise';
+                                        const next = v as 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
                                         if (next !== formChannelType) {
                                             // Type change replaces credentials; never carry a redacted prior URL across types.
                                             setFormChannelUrl('');
@@ -555,7 +557,7 @@ export function NotificationRoutingSection() {
                                         setFormChannelType(next);
                                     }}
                                 >
-                                    <TabsList className="w-full grid grid-cols-4">
+                                    <TabsList className="w-full grid grid-cols-5">
                                         <TabsHighlight className="rounded-md bg-brand/20" transition={springs.snappy}>
                                             <TabsHighlightItem value="discord">
                                                 <TabsTrigger value="discord">Discord</TabsTrigger>
@@ -568,6 +570,9 @@ export function NotificationRoutingSection() {
                                             </TabsHighlightItem>
                                             <TabsHighlightItem value="apprise">
                                                 <TabsTrigger value="apprise">Apprise</TabsTrigger>
+                                            </TabsHighlightItem>
+                                            <TabsHighlightItem value="ntfy">
+                                                <TabsTrigger value="ntfy">ntfy</TabsTrigger>
                                             </TabsHighlightItem>
                                         </TabsHighlight>
                                     </TabsList>

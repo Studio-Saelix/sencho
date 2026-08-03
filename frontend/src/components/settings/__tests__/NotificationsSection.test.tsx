@@ -99,7 +99,7 @@ describe('NotificationsSection', () => {
 
     it('reports CHANNELS as n/4 in the masthead', async () => {
         render(<NotificationsSection />);
-        await waitFor(() => expect(masthead.last?.[0]?.value).toBe('1/4'));
+        await waitFor(() => expect(masthead.last?.[0]?.value).toBe('1/5'));
         expect(masthead.last?.[0]?.label).toBe('CHANNELS');
     });
 
@@ -346,7 +346,7 @@ describe('NotificationsSection', () => {
         const { rerender } = render(<NotificationsSection />);
         await userEvent.click(await screen.findByRole('tab', { name: 'Apprise' }));
         await waitFor(() => expect(screen.getByLabelText(/Apprise endpoint/i)).toHaveValue('http://apprise.local/notify/<redacted>'));
-        expect(masthead.last?.[0]?.value).toBe('1/4');
+        expect(masthead.last?.[0]?.value).toBe('1/5');
 
         nodeState.activeNode = { id: 2 };
         rerender(<NotificationsSection />);
@@ -400,7 +400,7 @@ describe('NotificationsSection', () => {
 
     it('preserves CHANNELS masthead and loads retries with explicit nodeId', async () => {
         render(<NotificationsSection />);
-        await waitFor(() => expect(masthead.last?.[0]).toMatchObject({ label: 'CHANNELS', value: '1/4' }));
+        await waitFor(() => expect(masthead.last?.[0]).toMatchObject({ label: 'CHANNELS', value: '1/5' }));
         await waitFor(() =>
             expect(mockedFetch.mock.calls.some(
                 ([url, opts]) => url === '/settings' && (opts as { nodeId?: number })?.nodeId === 1,

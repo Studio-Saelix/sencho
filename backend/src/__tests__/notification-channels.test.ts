@@ -11,6 +11,7 @@ import {
   serializePublicAgent,
   serializePublicNotificationRoute,
   validateNotificationChannel,
+  validateNtfyUrl,
 } from '../helpers/notificationChannels';
 
 describe('maskWebhookUrl', () => {
@@ -223,5 +224,81 @@ describe('Apprise channel helpers', () => {
     expect(parseStoredAppriseConfig('http://apprise.local/notify/key', null)).toEqual({ ok: true, mode: 'keyed' });
     expect(parseStoredAppriseConfig('http://apprise.local/notify/key', '{}')).toEqual({ ok: true, mode: 'keyed' });
     expect(parseStoredAppriseConfig('http://apprise.local/notify', null).ok).toBe(false);
+  });
+});
+
+describe('validateNtfyUrl', () => {
+  it('accepts a valid HTTPS topic URL', () => {
+    expect(validateNtfyUrl('https://ntfy.sh/mytopic')).toBeNull();
+  });
+
+  it('accepts a valid HTTP topic URL', () => {
+    expect(validateNtfyUrl('http://ntfy.local/topic')).toBeNull();
+  });
+
+  it('accepts a trailing-slash topic', () => {
+    expect(validateNtfyUrl('https://ntfy.sh/my-topic/')).toBeNull();
+  });
+
+  it('accepts a URL with query string', () => {
+    expect(validateNtfyUrl('https://ntfy.example.com/topic?auth=abc123')).toBeNull();
+  });
+
+  it('accepts a URL with token query param', () => {
+    expect(validateNtfyUrl('https://ntfy.sh/mytopic?token=tk_abc')).toBeNull();
+  });
+
+  it('rejects a non-string value', () => {
+    expect(validateNtfyUrl(12345)).toBe('must be a valid ntfy URL');
+  });
+
+  it('rejects an empty string', () => {
+    expect(validateNtfyUrl('')).toBe('must be a valid ntfy URL');
+  });
+
+  it('rejects an unparseable URL', () => {
+    expect(validateNtfyUrl('not a url')).toBe('is not a valid URL');
+  });
+
+  it('rejects an ftp:// scheme', () => {
+    expect(validateNtfyUrl('ftp://server/topic')).toBe('must use HTTP or HTTPS');
+  });
+
+  it('rejects a URL with no host', () => {
+    expect(validateNtfyUrl('http:///topic')).toBe('must include a host');
+  });
+
+  it('rejects a root path', () => {
+    expect(validateNtfyUrl('https://ntfy.sh/')).toBe('must include a topic path (e.g. /mytopic)');
+  });
+
+  it('rejects a root path without trailing slash', () => {
+    expect(validateNtfyUrl('https://ntfy.sh')).toBe('must include a topic path (e.g. /mytopic)');
+  });
+
+  it('rejects a URL with username', () => {
+    expect(validateNtfyUrl('https://user@ntfy.sh/topic')).toBe('must not include credentials in the URL');
+  });
+
+  it('rejects a URL with username and password', () => {
+    expect(validateNtfyUrl('https://user:pass@ntfy.sh/topic')).toBe('must not include credentials in the URL');
+  });
+
+  it('rejects a URL with a fragment', () => {
+    expect(validateNtfyUrl('https://ntfy.sh/topic#section')).toBe('must not include a fragment');
+  });
+});
+
+describe('validateNotificationChannel HTTP regression', () => {
+  it('still rejects http:// for webhook channel', () => {
+    expect(validateNotificationChannel('webhook', 'http://example.com/hook')).toBe('must be a valid HTTPS URL');
+  });
+
+  it('still rejects http:// for discord channel', () => {
+    expect(validateNotificationChannel('discord', 'http://discord.com/webhook')).toBe('must be a valid HTTPS URL');
+  });
+
+  it('still rejects http:// for slack channel', () => {
+    expect(validateNotificationChannel('slack', 'http://hooks.slack.com/a')).toBe('must be a valid HTTPS URL');
   });
 });

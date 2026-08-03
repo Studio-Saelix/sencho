@@ -533,7 +533,7 @@ describe('POST /api/notifications/test', () => {
       .set('Cookie', authCookie)
       .send({ type: 'telegram', url: 'https://example.com' });
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('discord, slack, webhook, apprise');
+    expect(res.body.error).toContain('discord, slack, webhook, apprise, ntfy');
   });
 
   it('rejects missing type with 400', async () => {

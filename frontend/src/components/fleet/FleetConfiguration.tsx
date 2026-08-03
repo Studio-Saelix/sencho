@@ -122,6 +122,7 @@ function NodeCard({ node, policySyncState }: {
     agents.discord.enabled,
     agents.slack.enabled,
     agents.webhook.enabled,
+    agents.ntfy.enabled,
     agents.apprise.enabled,
   ].filter(Boolean).length;
 

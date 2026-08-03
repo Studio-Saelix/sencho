@@ -63,6 +63,7 @@ describe('GET /api/dashboard/configuration', () => {
           slack: { configured: expect.any(Boolean) },
           webhook: { configured: expect.any(Boolean) },
           apprise: { configured: expect.any(Boolean) },
+          ntfy: { configured: expect.any(Boolean) },
         },
         alertRules: expect.any(Number),
         routingRules: { count: expect.any(Number), enabledCount: expect.any(Number), locked: expect.any(Boolean) },

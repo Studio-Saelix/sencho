@@ -2,7 +2,7 @@ import type { Agent, NotificationRoute } from '../services/DatabaseService';
 
 export { cleanStackPatterns } from './stackPattern';
 
-export const NOTIFICATION_CHANNEL_TYPES = ['discord', 'slack', 'webhook', 'apprise'] as const;
+export const NOTIFICATION_CHANNEL_TYPES = ['discord', 'slack', 'webhook', 'apprise', 'ntfy'] as const;
 export type NotificationChannelType = typeof NOTIFICATION_CHANNEL_TYPES[number];
 
 /** Write payload for Apprise agents/routes (never public DTO fields). */
@@ -113,10 +113,25 @@ function asRecord(config: unknown): Record<string, unknown> | null {
   return config as Record<string, unknown>;
 }
 
+/** Validates an ntfy server + topic URL. Allows http/https, rejects userinfo, fragments, and root paths. */
+export function validateNtfyUrl(value: unknown): string | null {
+  if (!value || typeof value !== 'string') return 'must be a valid ntfy URL';
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { return 'is not a valid URL'; }
+  if (!['http:', 'https:'].includes(parsed.protocol)) return 'must use HTTP or HTTPS';
+  if (!parsed.host) return 'must include a host';
+  if (parsed.username || parsed.password) return 'must not include credentials in the URL';
+  if (parsed.hash) return 'must not include a fragment';
+  const path = parsed.pathname.replace(/\/$/, '');
+  if (!path || path === '/') return 'must include a topic path (e.g. /mytopic)';
+  return null;
+}
+
 export function validateNotificationChannel(type: unknown, url: unknown, config?: unknown): string | null {
   if (typeof type !== 'string' || !(NOTIFICATION_CHANNEL_TYPES as readonly string[]).includes(type)) {
     return `type must be ${NOTIFICATION_CHANNEL_TYPES.join(', ')}`;
   }
+  if (type === 'ntfy') return validateNtfyUrl(url);
   if (type !== 'apprise') return validateHttpsUrl(url);
   if (typeof url !== 'string') return 'must be a valid Apprise URL';
   let parsed: URL;

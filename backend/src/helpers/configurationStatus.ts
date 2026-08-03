@@ -9,23 +9,26 @@ export type ConfigurationAgents = {
   slack: AgentStatus;
   webhook: AgentStatus;
   apprise: AgentStatus;
+  ntfy: AgentStatus;
 };
 
 /**
- * Older remotes omit `apprise`. Default the slot so mixed-version hubs do not
- * treat the response as malformed or crash UI consumers.
+ * Older remotes omit `apprise` or `ntfy`. Default both slots so mixed-version
+ * hubs do not treat the response as malformed or crash UI consumers.
  */
 export function normalizeConfigurationAgents(agents: {
   discord: AgentStatus;
   slack: AgentStatus;
   webhook: AgentStatus;
   apprise?: AgentStatus;
+  ntfy?: AgentStatus;
 }): ConfigurationAgents {
   return {
     discord: agents.discord,
     slack: agents.slack,
     webhook: agents.webhook,
     apprise: agents.apprise ?? { configured: false, enabled: false },
+    ntfy: agents.ntfy ?? { configured: false, enabled: false },
   };
 }
 

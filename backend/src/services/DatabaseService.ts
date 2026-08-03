@@ -25,7 +25,7 @@ function isPilotMode(): boolean {
 
 export interface Agent {
     id?: number;
-    type: 'discord' | 'slack' | 'webhook' | 'apprise';
+    type: 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
     url: string;
     enabled: boolean;
     config?: string | null;
@@ -768,7 +768,7 @@ export interface NotificationRoute {
     label_ids: number[] | null;
     categories: string[] | null;
     levels: ('info' | 'warning' | 'error')[] | null;
-    channel_type: 'discord' | 'slack' | 'webhook' | 'apprise';
+    channel_type: 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
     channel_url: string;
     config?: string | null;
     priority: number;
@@ -2990,7 +2990,7 @@ export class DatabaseService {
     // --- Notification Routes ---
 
     private parseNotificationRoute(row: Record<string, unknown>): NotificationRoute {
-        const channel_type = row.channel_type as 'discord' | 'slack' | 'webhook' | 'apprise';
+        const channel_type = row.channel_type as 'discord' | 'slack' | 'webhook' | 'apprise' | 'ntfy';
         const fields = this.loadAppriseFields(
             channel_type === 'apprise',
             row.channel_url as string,
