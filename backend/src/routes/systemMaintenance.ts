@@ -265,7 +265,7 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
       });
     }
     const target = targets[0];
-    console.log(`[Resources] System prune: ${target} (scope: ${pruneScope})`);
+    console.log(`[Resources] System prune: ${sanitizeForLog(target)} (scope: ${pruneScope})`);
     const pruneStartedAt = Date.now();
     let result: { success: boolean; reclaimedBytes: number };
     if (pruneScope === 'managed' && target !== 'containers') {
@@ -283,7 +283,7 @@ systemMaintenanceRouter.post('/prune/system', async (req: Request, res: Response
       result = await dockerController.pruneSystem(target, undefined, isImageHeld);
     }
 
-    console.log(`[Resources] System prune completed: ${target}, reclaimed ${result.reclaimedBytes} bytes`);
+    console.log(`[Resources] System prune completed: ${sanitizeForLog(target)}, reclaimed ${result.reclaimedBytes} bytes`);
     if (isDebugEnabled()) {
       console.debug('[Resources:debug] System prune', {
         target, scope: pruneScope, ms: Date.now() - pruneStartedAt, reclaimedBytes: result.reclaimedBytes,
@@ -547,7 +547,7 @@ systemMaintenanceRouter.post('/rollback/generations/:id/release', async (req: Re
         }
       }
     }
-    console.log(`[Resources] Released rollback generation ${shortGenerationId(id)} for ${sanitizeForLog(result.row.stack_name)}`);
+    console.log(`[Resources] Released rollback generation ${sanitizeForLog(shortGenerationId(id))} for ${sanitizeForLog(result.row.stack_name)}`);
     invalidateNodeCaches(req.nodeId);
     res.json({
       success: true,

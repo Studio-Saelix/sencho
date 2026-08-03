@@ -9,6 +9,7 @@
 import { describe, it, expect, beforeAll, afterAll, afterEach, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcrypt';
 import { randomUUID } from 'crypto';
 import { setupTestDb, cleanupTestDb, TEST_USERNAME, TEST_JWT_SECRET } from './helpers/setupTestDb';
 import type { StackUpdateRecoveryGenerationRow, HealthGateRunRow } from '../services/DatabaseService';
@@ -16,6 +17,8 @@ import type { StackUpdateRecoveryGenerationRow, HealthGateRunRow } from '../serv
 let tmpDir: string;
 let app: import('express').Express;
 let authHeader: string;
+let viewerCookie: string;
+let deployerCookie: string;
 let DatabaseService: typeof import('../services/DatabaseService').DatabaseService;
 let StackUpdateRecoveryService: typeof import('../services/StackUpdateRecoveryService').StackUpdateRecoveryService;
 let DockerController: typeof import('../services/DockerController').default;
@@ -33,6 +36,19 @@ beforeAll(async () => {
   ({ default: DockerController } = await import('../services/DockerController'));
   const token = jwt.sign({ username: TEST_USERNAME }, TEST_JWT_SECRET, { expiresIn: '1m' });
   authHeader = `Bearer ${token}`;
+
+  // Non-admin personas for the RBAC block below. Release is requireAdmin
+  // (a host-destructive Docker operation); the list endpoint is stack:read.
+  const db = DatabaseService.getInstance();
+  for (const [role, pw] of [['viewer', 'vwpass'], ['deployer', 'dppass']] as const) {
+    const hash = await bcrypt.hash(pw, 1);
+    db.addUser({ username: `rb-${role}`, password_hash: hash, role });
+    const res = await request(app).post('/api/auth/login').send({ username: `rb-${role}`, password: pw });
+    const cookies = res.headers['set-cookie'] as string | string[];
+    const c = Array.isArray(cookies) ? cookies[0] : cookies;
+    if (role === 'viewer') viewerCookie = c;
+    else deployerCookie = c;
+  }
 });
 
 afterAll(() => cleanupTestDb(tmpDir));
@@ -254,6 +270,29 @@ describe('StackUpdateRecoveryService.releaseGeneration', () => {
     expect(after.released_at).not.toBeNull();
   });
 
+  it('after releasing the current generation, no rollback point is claimed for the stack (D05)', async () => {
+    const row = insertRow({ status: 'active', is_current: 1 });
+    const svc = StackUpdateRecoveryService.getInstance();
+
+    expect(svc.getCurrent(NODE, row.stack_name)).toBeDefined();
+
+    const result = await svc.releaseGeneration(row.id, 'tester');
+    expect(result.ok).toBe(true);
+
+    // Both consumers of the current-generation lookup filter on is_current = 1,
+    // which release clears, so a released row can never be offered as a live
+    // rollback target by a later failed update.
+    expect(svc.getCurrent(NODE, row.stack_name)).toBeUndefined();
+    expect(svc.isRestoredCurrentPinActive(NODE, row.stack_name)).toBe(false);
+
+    // It is also gone from the list endpoint's supported-status projection.
+    const res = await request(app)
+      .get('/api/system/rollback/generations')
+      .set('Authorization', authHeader);
+    expect(res.status).toBe(200);
+    expect(res.body.some((g: { id: string }) => g.id === row.id)).toBe(false);
+  });
+
   it('release on a restored_current generation clears the service-update pin', async () => {
     const row = insertRow({ status: 'restored_current', is_current: 1 });
     const svc = StackUpdateRecoveryService.getInstance();
@@ -375,5 +414,42 @@ describe('GET/POST /api/system/rollback/generations', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('NOT_ELIGIBLE');
+  });
+});
+
+describe('RBAC on the rollback-generation routes', () => {
+  it('refuses a viewer POST to the release endpoint and leaves the generation intact', async () => {
+    const row = insertRow({ status: 'superseded', is_current: 0 });
+    const res = await request(app)
+      .post(`/api/system/rollback/generations/${row.id}/release`)
+      .set('Cookie', viewerCookie);
+
+    expect(res.status).toBe(403);
+    const after = DatabaseService.getInstance().getStackUpdateRecoveryGeneration(row.id)!;
+    expect(after.released_at).toBeNull();
+    expect(after.artifacts_retired).toBe(0);
+    expect(mockRemove).not.toHaveBeenCalled();
+  });
+
+  it('refuses a deployer POST to the release endpoint (release is Admin-only)', async () => {
+    const row = insertRow({ status: 'superseded', is_current: 0 });
+    const res = await request(app)
+      .post(`/api/system/rollback/generations/${row.id}/release`)
+      .set('Cookie', deployerCookie);
+
+    expect(res.status).toBe(403);
+    const after = DatabaseService.getInstance().getStackUpdateRecoveryGeneration(row.id)!;
+    expect(after.released_at).toBeNull();
+    expect(mockRemove).not.toHaveBeenCalled();
+  });
+
+  it('allows a viewer to read the generations list (stack:read, matching sibling Resources routes)', async () => {
+    const row = insertRow({ status: 'superseded', is_current: 0 });
+    const res = await request(app)
+      .get('/api/system/rollback/generations')
+      .set('Cookie', viewerCookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.some((g: { id: string }) => g.id === row.id)).toBe(true);
   });
 });
