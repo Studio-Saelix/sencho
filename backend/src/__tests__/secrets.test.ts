@@ -446,6 +446,65 @@ describe('Routes /api/secrets Community Admin access', () => {
         expect(res.status).toBe(200);
         expect(res.body).toHaveLength(1);
     });
+
+    it('lets a Community admin import from a stack over HTTP', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'importstack');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, '.env'), 'IMPORT_KEY=hello\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+
+        const db = DatabaseService.getInstance();
+        const localNode = db.getNodes().find(n => n.type === 'local')!;
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name: 'import-http', kv: { X: '1' }, user: TEST_USERNAME });
+
+        const res = await request(app)
+            .post(`/api/secrets/${id}/import-from-stack`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: localNode.id, stackName: 'importstack', envFileBasename: '.env' });
+        expect(res.status).toBe(200);
+        expect(res.body.kv).toEqual({ IMPORT_KEY: 'hello' });
+    });
+
+    it('lets a Community admin preview and execute a push over HTTP', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'pushstack');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, '.env'), 'EXISTING=keep\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+
+        const db = DatabaseService.getInstance();
+        const localNode = db.getNodes().find(n => n.type === 'local')!;
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name: 'push-http', kv: { EXISTING: 'updated', NEWKEY: 'added' }, user: TEST_USERNAME });
+
+        // Preview
+        const preview = await request(app)
+            .post(`/api/secrets/${id}/push/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ selector: { type: 'nodes', ids: [localNode.id] }, stackName: 'pushstack', envFileBasename: '.env' });
+        expect(preview.status).toBe(200);
+        expect(Array.isArray(preview.body)).toBe(true);
+        expect(preview.body.length).toBeGreaterThanOrEqual(1);
+        expect(preview.body[0].reachable).toBe(true);
+
+        // Execute push
+        const push = await request(app)
+            .post(`/api/secrets/${id}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ selector: { type: 'nodes', ids: [localNode.id] }, stackName: 'pushstack', envFileBasename: '.env' });
+        expect(push.status).toBe(200);
+        expect(push.body.pushId).toBeTruthy();
+        expect(push.body.results).toHaveLength(1);
+        expect(push.body.results[0].status).toBe('ok');
+
+        // Verify the .env was actually written
+        const envText = fs.readFileSync(path.join(composeDir, 'pushstack', '.env'), 'utf-8');
+        const kv = parseEnv(envText);
+        expect(kv.EXISTING).toBe('updated');
+        expect(kv.NEWKEY).toBe('added');
+    });
 });
 
 // ---- Admin-role gating: secrets reveal decrypted values, so every route is admin-only ----
