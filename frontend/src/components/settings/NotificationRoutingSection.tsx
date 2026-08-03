@@ -192,7 +192,7 @@ export function NotificationRoutingSection() {
             return;
         }
         if (!formChannelUrl.trim() || (formChannelType !== 'apprise' && formChannelType !== 'ntfy' && !formChannelUrl.startsWith('https://'))) {
-            toast.error(formChannelType === 'apprise' ? 'Enter a valid Apprise endpoint.' : 'Channel URL must be a valid HTTPS URL.');
+            toast.error(formChannelType === 'apprise' ? 'Enter a valid Apprise endpoint.' : formChannelType === 'ntfy' ? 'Enter a valid ntfy server and topic URL.' : 'Channel URL must be a valid HTTPS URL.');
             return;
         }
 

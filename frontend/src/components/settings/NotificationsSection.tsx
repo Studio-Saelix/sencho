@@ -381,13 +381,13 @@ export function NotificationsSection({ onDirtyChange }: NotificationsSectionProp
                 />
             </SettingsField>
             <SettingsField
-                label={type === 'apprise' ? 'Apprise endpoint' : 'Webhook URL'}
-                helper={type === 'apprise' ? 'Use /notify/{key} for keyed delivery or /notify with destination URLs below.' : 'Sencho posts JSON payloads here. Use a private channel.'}
+                label={type === 'apprise' ? 'Apprise endpoint' : type === 'ntfy' ? 'ntfy server and topic URL' : 'Webhook URL'}
+                helper={type === 'apprise' ? 'Use /notify/{key} for keyed delivery or /notify with destination URLs below.' : type === 'ntfy' ? 'Sencho posts a plain-text message. The URL must include the topic path.' : 'Sencho posts JSON payloads here. Use a private channel.'}
                 htmlFor={`${type}-url`}
             >
                 <Input
                     id={`${type}-url`}
-                    placeholder={type === 'apprise' ? 'http://apprise.local/notify' : 'https://...'}
+                    placeholder={type === 'apprise' ? 'http://apprise.local/notify' : type === 'ntfy' ? 'https://ntfy.sh/mytopic' : 'https://...'}
                     value={agents[type].url}
                     onChange={(e) => {
                         if (type === 'apprise') setAppriseUrlDirty(true);
