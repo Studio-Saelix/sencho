@@ -37,7 +37,7 @@ A single rail summarises the state of every registered node so you can read the 
 
 ### Tabs
 
-The Fleet view is a tab strip. Every tier sees Overview, Status, Map, Docker Labels, Deployments, Federation, and Actions. Snapshots appears for admins. Routing and Secrets are limited-availability fleet surfaces and are not part of the default tab strip. A vertical separator after **Docker Labels** (or after **Map** when Docker Labels is not present) divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
+The Fleet view is a tab strip. Every tier sees Overview, Status, Map, Docker Labels, Deployments, Federation, and Actions. Snapshots appears for admins. Secrets appears for admins. Routing is a limited-availability fleet surface and is not part of the default tab strip. A vertical separator after **Docker Labels** (or after **Map** when Docker Labels is not present) divides the per-node monitoring tabs from the fleet-wide orchestration tabs.
 
 | Tab | Tier | What it does |
 |-----|------|--------------|
@@ -50,7 +50,7 @@ The Fleet view is a tab strip. Every tier sees Overview, Status, Map, Docker Lab
 | **Routing** | Limited availability | Cross-node service routing via Sencho Mesh when that surface is enabled on the instance. See [Sencho Mesh](/features/sencho-mesh). |
 | **Federation** | Community | Cordon nodes and pin blueprints to specific hosts. See [Fleet Federation](/features/fleet-federation). |
 | **Actions** | Community (admin role) | Fleet-wide bulk operations: stop stacks by label, bulk-assign labels, prune Docker resources. See [Fleet Actions](/features/fleet-actions). |
-| **Secrets** | Limited availability | Encrypted env-var bundles you push to labeled nodes when that surface is enabled on the instance. See [Fleet Secrets](/features/fleet-secrets). |
+| **Secrets** | Community (admin role) | Encrypted env-var bundles you push to labeled nodes across the fleet. See [Fleet Secrets](/features/fleet-secrets). |
 
 ### Action buttons
 

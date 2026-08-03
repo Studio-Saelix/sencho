@@ -5,7 +5,7 @@
  *  - encrypt round-trip via CryptoService
  *  - DatabaseService secret + version + push CRUD
  *  - SecretsService versioning, importFromStack, executePush aggregation
- *  - Route guards (requirePaid 403, requireAdmin 403, requireUserSession 403, push lock 409)
+ *  - Route guards (requireAdmin 403, requireUserSession 403, push lock 409)
  *  - Hub-only enforcement is covered in hub-only-guard.test.ts
  *  - developer_mode diagnostics gating (and that diagnostics never log the secret value)
  *  - getAuditSummary patterns for /secrets routes
@@ -73,9 +73,6 @@ beforeAll(async () => {
     ({ DatabaseService } = await import('../services/DatabaseService'));
     ({ SecretsService } = await import('../services/SecretsService'));
     ({ CryptoService } = await import('../services/CryptoService'));
-
-    const { LicenseService } = await import('../services/LicenseService');
-    vi.spyOn(LicenseService.getInstance(), 'getTier').mockReturnValue('paid');
 
     ({ app } = await import('../index'));
 });
@@ -387,32 +384,10 @@ describe('getAuditSummary for secrets routes', () => {
 
 // ---- Route guards via supertest ----
 
-describe('Routes /api/secrets tier gating and lock', () => {
-    it('returns 403 when license is community', async () => {
-        const { LicenseService } = await import('../services/LicenseService');
-        // Use mockReturnValueOnce so the outer beforeAll spy keeps returning 'paid' for sibling tests.
-        // requirePaid only consults getTier once per request via effectiveTier(req).
-        const inst = LicenseService.getInstance();
-        const tierSpy = vi.spyOn(inst, 'getTier');
-        tierSpy.mockReturnValueOnce('community');
-        const res = await request(app)
-            .get('/api/secrets')
-            .set('Authorization', `Bearer ${adminToken()}`);
-        expect(res.status).toBe(403);
-        expect(res.body.code).toBe('PAID_REQUIRED');
-    });
-
+describe('Routes /api/secrets basic guards', () => {
     it('rejects unauthenticated requests', async () => {
         const res = await request(app).get('/api/secrets');
         expect(res.status).toBe(401);
-    });
-
-    it('returns 200 when paid', async () => {
-        const res = await request(app)
-            .get('/api/secrets')
-            .set('Authorization', `Bearer ${adminToken()}`);
-        expect(res.status).toBe(200);
-        expect(Array.isArray(res.body)).toBe(true);
     });
 
     it('rejects malformed body on POST /secrets', async () => {
@@ -421,6 +396,114 @@ describe('Routes /api/secrets tier gating and lock', () => {
             .set('Authorization', `Bearer ${adminToken()}`)
             .send({ name: 'x', kv: 'not-an-object' });
         expect(res.status).toBe(400);
+    });
+});
+
+// ---- Community Admin happy path: Fleet Secrets is available without a paid license ----
+
+describe('Routes /api/secrets Community Admin access', () => {
+    it('lets a Community admin list bundles', async () => {
+        const res = await request(app)
+            .get('/api/secrets')
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(Array.isArray(res.body)).toBe(true);
+    });
+
+    it('lets a Community admin create, read, update, and delete a bundle', async () => {
+        // Create
+        const create = await request(app)
+            .post('/api/secrets')
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ name: 'community-test-bundle', kv: { KEY: 'val' } });
+        expect(create.status).toBe(201);
+        const id: number = create.body.id;
+        // Read
+        const get = await request(app)
+            .get(`/api/secrets/${id}`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(get.status).toBe(200);
+        expect(get.body.kv).toEqual({ KEY: 'val' });
+        // Update
+        const upd = await request(app)
+            .put(`/api/secrets/${id}`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ kv: { KEY: 'updated' } });
+        expect(upd.status).toBe(200);
+        // Delete
+        const del = await request(app)
+            .delete(`/api/secrets/${id}`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(del.status).toBe(200);
+    });
+
+    it('lets a Community admin list versions', async () => {
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name: 'versions-community', kv: { X: '1' }, user: TEST_USERNAME });
+        const res = await request(app)
+            .get(`/api/secrets/${id}/versions`)
+            .set('Authorization', `Bearer ${adminToken()}`);
+        expect(res.status).toBe(200);
+        expect(res.body).toHaveLength(1);
+    });
+
+    it('lets a Community admin import from a stack over HTTP', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'importstack');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, '.env'), 'IMPORT_KEY=hello\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+
+        const db = DatabaseService.getInstance();
+        const localNode = db.getNodes().find(n => n.type === 'local')!;
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name: 'import-http', kv: { X: '1' }, user: TEST_USERNAME });
+
+        const res = await request(app)
+            .post(`/api/secrets/${id}/import-from-stack`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ nodeId: localNode.id, stackName: 'importstack', envFileBasename: '.env' });
+        expect(res.status).toBe(200);
+        expect(res.body.kv).toEqual({ IMPORT_KEY: 'hello' });
+    });
+
+    it('lets a Community admin preview and execute a push over HTTP', async () => {
+        const composeDir = process.env.COMPOSE_DIR!;
+        const stackDir = path.join(composeDir, 'pushstack');
+        fs.mkdirSync(stackDir, { recursive: true });
+        fs.writeFileSync(path.join(stackDir, '.env'), 'EXISTING=keep\n');
+        fs.writeFileSync(path.join(stackDir, 'compose.yaml'), 'services:\n  app:\n    image: nginx\n');
+
+        const db = DatabaseService.getInstance();
+        const localNode = db.getNodes().find(n => n.type === 'local')!;
+        const svc = SecretsService.getInstance();
+        const { id } = svc.create({ name: 'push-http', kv: { EXISTING: 'updated', NEWKEY: 'added' }, user: TEST_USERNAME });
+
+        // Preview
+        const preview = await request(app)
+            .post(`/api/secrets/${id}/push/preview`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ selector: { type: 'nodes', ids: [localNode.id] }, stackName: 'pushstack', envFileBasename: '.env' });
+        expect(preview.status).toBe(200);
+        expect(Array.isArray(preview.body)).toBe(true);
+        expect(preview.body.length).toBeGreaterThanOrEqual(1);
+        expect(preview.body[0].reachable).toBe(true);
+
+        // Execute push
+        const push = await request(app)
+            .post(`/api/secrets/${id}/push`)
+            .set('Authorization', `Bearer ${adminToken()}`)
+            .send({ selector: { type: 'nodes', ids: [localNode.id] }, stackName: 'pushstack', envFileBasename: '.env' });
+        expect(push.status).toBe(200);
+        expect(push.body.pushId).toBeTruthy();
+        expect(push.body.results).toHaveLength(1);
+        expect(push.body.results[0].status).toBe('ok');
+
+        // Verify the .env was actually written
+        const envText = fs.readFileSync(path.join(composeDir, 'pushstack', '.env'), 'utf-8');
+        const kv = parseEnv(envText);
+        expect(kv.EXISTING).toBe('updated');
+        expect(kv.NEWKEY).toBe('added');
     });
 });
 
@@ -439,17 +522,25 @@ describe('Routes /api/secrets admin-role gating', () => {
         return authToken('sec-viewer', 'viewer', user.token_version);
     }
 
-    it.each(SECRET_ENDPOINTS)('403s a non-admin paid user on %s %s', async (method, p) => {
+    it.each(SECRET_ENDPOINTS)('403s a non-admin user on %s %s', async (method, p) => {
         const res = await callWithToken(method, p, viewerToken());
         expect(res.status).toBe(403);
         expect(res.body.code).toBe('ADMIN_REQUIRED');
     });
 
-    it('lets an admin paid user list (200)', async () => {
+    it('lets an admin user list (200)', async () => {
         const res = await request(app)
             .get('/api/secrets')
             .set('Authorization', `Bearer ${adminToken()}`);
         expect(res.status).toBe(200);
+    });
+
+    it('403s a Community viewer on all endpoints', async () => {
+        for (const [method, p] of SECRET_ENDPOINTS) {
+            const res = await callWithToken(method, p, viewerToken());
+            expect(res.status).toBe(403);
+            expect(res.body.code).toBe('ADMIN_REQUIRED');
+        }
     });
 });
 

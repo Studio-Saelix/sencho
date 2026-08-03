@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { authMiddleware } from '../middleware/auth';
-import { requirePaid, requireAdmin, requireUserSession, requireBody } from '../middleware/tierGates';
+import { requireAdmin, requireUserSession, requireBody } from '../middleware/tierGates';
 import { SecretsService, PushBusyError, type SecretKv } from '../services/SecretsService';
 import { DatabaseService, type BlueprintSelector } from '../services/DatabaseService';
 import { isValidStackName } from '../utils/validation';
@@ -66,7 +66,6 @@ function parsePushBody(body: unknown): PushBody | { error: string } {
 
 secretsRouter.get('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     try {
         const items = SecretsService.getInstance().list();
@@ -79,7 +78,6 @@ secretsRouter.get('/', authMiddleware, async (req: Request, res: Response): Prom
 
 secretsRouter.post('/', authMiddleware, async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     try {
@@ -121,7 +119,6 @@ secretsRouter.post('/', authMiddleware, async (req: Request, res: Response): Pro
 
 secretsRouter.get('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
@@ -141,7 +138,6 @@ secretsRouter.get('/:id', authMiddleware, async (req: Request, res: Response): P
 
 secretsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     try {
@@ -181,7 +177,6 @@ secretsRouter.put('/:id', authMiddleware, async (req: Request, res: Response): P
 
 secretsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
@@ -201,7 +196,6 @@ secretsRouter.delete('/:id', authMiddleware, async (req: Request, res: Response)
 
 secretsRouter.get('/:id/versions', authMiddleware, async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     try {
         const id = parseIntParam(req, res, 'id', 'secret ID');
@@ -219,7 +213,6 @@ secretsRouter.get('/:id/versions', authMiddleware, async (req: Request, res: Res
 
 secretsRouter.post('/:id/import-from-stack', authMiddleware, async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     try {
@@ -249,7 +242,6 @@ secretsRouter.post('/:id/import-from-stack', authMiddleware, async (req: Request
 
 secretsRouter.post('/:id/push/preview', authMiddleware, async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     try {
@@ -274,7 +266,6 @@ secretsRouter.post('/:id/push/preview', authMiddleware, async (req: Request, res
 
 secretsRouter.post('/:id/push', authMiddleware, async (req: Request, res: Response): Promise<void> => {
     if (!requireUserSession(req, res)) return;
-    if (!requirePaid(req, res)) return;
     if (!requireAdmin(req, res)) return;
     if (!requireBody(req, res)) return;
     try {
