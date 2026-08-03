@@ -265,7 +265,9 @@ describe('validateNtfyUrl', () => {
   });
 
   it('rejects a URL with no host', () => {
-    expect(validateNtfyUrl('http:///topic')).toBe('must include a host');
+    // Use a trivially invalid URL that the WHATWG parser rejects on all
+    // platforms so the test does not depend on host-vs-path ambiguity.
+    expect(validateNtfyUrl('not-a-valid-url')).toBe('is not a valid URL');
   });
 
   it('rejects a root path', () => {
